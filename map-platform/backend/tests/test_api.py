@@ -1665,7 +1665,10 @@ class MapJobRunAPITests(unittest.TestCase):
         installation = self.issue_installation(self.client)
         installation_id = installation["clientInstallationId"]
         installation_token = installation["clientInstallationToken"]
-        installation_headers = {"X-Installation-Token": installation_token}
+        installation_headers = {
+            "X-Installation-Token": installation_token,
+            "X-Map-Stream-Reader-Contract": "1",
+        }
         response = self.app_attest.post_map_job(
             self.client,
             credential=installation,
@@ -1741,11 +1744,8 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(signed.status_code, 200)
         self.assertEqual(signed.json()["signedManifestReceipt"], receipt)
         self.assertEqual(signed.json()["sha256"], sha256)
-        self.assertEqual(signed.json()["requiredIosBuild"], "100")
-        self.assertEqual(signed.json()["requiredIosGitSha"], self.ios_git_sha)
-        self.assertEqual(
-            signed.json()["requiredIosBuildSha256"], self.ios_build_sha256
-        )
+        for field in ("requiredIosBuild", "requiredIosGitSha", "requiredIosBuildSha256"):
+            self.assertNotIn(field, signed.json())
         self.assertEqual(signed.json()["requiredFirmwareVersion"], "0.3.0")
         self.assertEqual(signed.json()["requiredFirmwareBuild"], 42)
         self.assertEqual(signed.json()["requiredFirmwareGitSha"], "7" * 40)
@@ -1805,10 +1805,29 @@ class MapJobRunAPITests(unittest.TestCase):
             headers=installation_headers,
         )
         self.assertEqual(wrong_identity.status_code, 404)
-        self.assertEqual(wrong_app_build.status_code, 404)
-        self.assertEqual(wrong_app_binary.status_code, 404)
+        self.assertEqual(wrong_app_build.status_code, 200)
+        self.assertEqual(wrong_app_binary.status_code, 200)
+        for refreshed in (wrong_app_build, wrong_app_binary):
+            self.assertEqual(refreshed.json()["sha256"], sha256)
+            self.assertEqual(self.client.get(refreshed.json()["url"]).content, source.read_bytes())
+            self.assertNotIn("requiredIosBuild", refreshed.json())
         self.assertEqual(other_installation.status_code, 401)
         self.assertEqual(missing_identity.status_code, 400)
+        legacy = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={"clientInstallationId": installation_id, "jobId": job_id,
+                    "signedManifestReceipt": receipt},
+            headers={"X-Installation-Token": installation_token},
+        )
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(legacy.json()["requiredIosBuild"], "100")
+        unsupported_reader = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={"clientInstallationId": installation_id, "jobId": job_id,
+                    "signedManifestReceipt": receipt},
+            headers={**installation_headers, "X-Map-Stream-Reader-Contract": "2"},
+        )
+        self.assertEqual(unsupported_reader.status_code, 422)
 
     def test_stream_artifacts_are_hidden_outside_the_rollout_cohort(self):
         allowed = self.issue_installation(self.client)

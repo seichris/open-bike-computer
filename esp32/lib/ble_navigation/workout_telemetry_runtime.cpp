@@ -1,11 +1,15 @@
 #include "workout_telemetry_runtime.hpp"
+#include "../utils/src/startup_constructed.hpp"
 
 #include <Arduino.h>
 
 namespace {
 
 portMUX_TYPE workoutTelemetryMux = portMUX_INITIALIZER_UNLOCKED;
-workout_telemetry::AuthenticatedResynchronizer workoutTelemetryReducer;
+StartupConstructed<workout_telemetry::AuthenticatedResynchronizer>
+    workoutTelemetryReducerStorage;
+workout_telemetry::AuthenticatedResynchronizer &workoutTelemetryReducer =
+    workoutTelemetryReducerStorage.value;
 
 } // namespace
 

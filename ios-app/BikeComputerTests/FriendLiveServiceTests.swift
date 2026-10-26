@@ -124,6 +124,35 @@ struct FriendLiveServiceTests {
                    horizontalAccuracy: 5, verticalAccuracy: 5, course: 20, speed: 6,
                    timestamp: Date().addingTimeInterval(offset))
     }
+    static func privacyRegressions() async throws -> [String] {
+        var failures: [String] = []
+        let network = FriendNetwork()
+        let service = FriendLiveService(client: network)
+        network.riders = [["profile": ["id": "bob", "displayName": "Bob"],
+            "latitude": 1.0, "longitude": 2.0, "capturedAt": 1000.0, "receivedAt": 1000.0,
+            "horizontalAccuracy": 5.0, "sequence": 1, "age": 0.0]]
+        await service.tick()
+        network.holdSnapshot = true
+        let oldPoll = Task { await service.tick() }
+        try await wait { network.held != nil }
+        network.riders = []
+        service.forget("bob")
+        network.held?.resume(); network.held = nil
+        await oldPoll.value
+        if !service.riders.isEmpty { failures.append("ASP-002: a pre-removal snapshot restored Bob's position") }
+        service.reset()
+
+        for failure in [SocialFailure.server("authentication_required"), .server("account_deleted"), .identityMissing] {
+            let (network, store, service) = try await seed()
+            network.snapshotFailure = failure
+            await service.tick()
+            if service.isSharing || !service.sharingIDs.isEmpty || !store.values.isEmpty {
+                failures.append("ASP-005: friend sharing survived confirmed identity loss: \(failure)")
+            }
+            service.reset()
+        }
+        return failures
+    }
     static func run() async throws {
         let idleNetwork = FriendNetwork()
         var delays: [UInt64] = []

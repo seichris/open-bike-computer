@@ -213,30 +213,44 @@ refuses to start if the worker reference is mutable or differs from the approved
 digest, the approval or requirements hash differs, approved key
 material is no longer trusted, the cohort secret is short, or rollout variables
 conflict. In percentage/global mode it hides any artifact whose signed producer
-identity, image digest, signing key, or requesting app build/git/component
-differs from the approval. The
+identity, image digest or signing key differs from the approval. Requester app
+build/source/component fields remain audit context and do not gate map reuse. The
 artifact tells iOS the exact approved firmware identity, and iOS rejects
 installation when the connected device differs. A rotation or later untested binary therefore
 cannot silently reuse an older hardware result.
 
 ### Coexisting App Store client builds
 
-An app upgrade must retain the existing approved client. Record a separate
-approval for the new archive's exact build, Git source and component digest.
-Compatible app approvals must match all eight rollout bindings: candidate source,
-producer digest, worker image digest, firmware version/build/source, requirements
-hash, and the complete approved signing-key set. The selected promotion remains
-the hardware and cohort anchor. Each artifact response carries the exact identity
-of its approved requester; unknown or mixed app identities are rejected.
+Signed map compatibility is independent of the requesting app build. Both app
+variants derive the reader schema, renderer format and features from the
+verified signed manifest on every download/install, including cached downloads
+from older versions. Current app identities are not compared with legacy
+`requiredIos*` sidecar fields. The producer, signing-key, rollout cohort,
+installation authorization and exact firmware qualification gates remain in
+force; this does not qualify a different worker or device binary.
 
-For Bicino 1.9, builds 24 and 25 coexist under
-`msr-20261001-worldwide-build101`. Build 25 is bound to the clean signed archive
-from merged PR #570, source `1c2c36d85d89489a259d4ccc9f8e2aedd4d4b95c`, with its
-own public report digest. The new report retains the maintainer's recorded
-remaining physical risks and contains no measured matrix runs. Publish the
-isolated controller compatibility profile and verify `approvedIosBuilds` reports
-`24,25` before submitting build 25 for automatic App Store release. This does not
-qualify a new firmware or worker image.
+Updated apps send `X-Map-Stream-Reader-Contract: 1` on map service requests.
+Responses to those clients omit `requiredIosBuild`, `requiredIosGitSha` and
+`requiredIosBuildSha256`; the signed manifest supplies the reader contract.
+Clients that predate this negotiation continue to receive the legacy requester
+fields, so a service rollout does not break their existing decoder. Updated apps
+also accept older service metadata and ignore changes to requester audit fields
+during immutable URL refresh. Unknown reader-contract header versions are
+rejected rather than silently negotiated.
+
+Promotion reports retain the exact iOS test-client identities as qualification
+evidence. The legacy health-summary `requiredIos*` and `approvedIosBuilds` fields
+describe those recorded clients, not artifact install requirements or an app
+version allowlist. Do not infer that later app builds are hardware-qualified
+merely because they can read an existing format. App release validation remains
+a separate requirement.
+
+Deploy this change through the existing image/promotion PR flow. Do not edit live
+worker/image-selection settings. A backend rollback may restore legacy requester
+fields; the updated app continues to read compatible signed maps. An app rollback
+to a version without reader-contract migration restores that version's old
+cached-map limitations. Neither rollback changes signed map bytes or waives the
+firmware/producer qualification gate.
 
 Recommended sequence:
 

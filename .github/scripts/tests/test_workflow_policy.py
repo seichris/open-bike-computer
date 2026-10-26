@@ -430,7 +430,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "true",
-            "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false", "IOS_SIMULATOR_CHANGED": "false", "ZONE_RESULT": "success",
+            "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false", "IOS_SIMULATOR_CHANGED": "false", "ZONE_CHANGED": "true", "ZONE_RESULT": "success",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "success", "HOST_RESULT": "success",
             **{name: "skipped" for name in ("IOS_FAST_RESULT", "IOS_RESULT", "IOS_PLATFORM_RESULT", "MAP_RESULT")},
@@ -447,12 +447,61 @@ class WorkflowPolicyTests(unittest.TestCase):
                         completed.stdout + completed.stderr,
                     )
 
+    def test_every_registered_firmware_host_check_is_reachable_in_ci(self):
+        host = mapping_block(workflow_source("ci.yml"), "esp32-host", indent=2)
+        registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())["checks"]
+        expected = {c["id"] for c in registry if c["component"] == "firmware_host"}
+        invoked = set(re.findall(r"--check ([a-z0-9-]+)", host))
+        self.assertEqual(expected - invoked, set(), "Registered firmware checks omitted by CI")
+        for step in sequence_mapping_blocks(host, 'steps', indent=4):
+            match = re.search(r'--check ([a-z0-9-]+)', step)
+            if match:
+                self.assertIn("if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), '" + match[1] + "')", step)
+
+    def test_host_scope_validation_rejects_empty_unknown_or_malformed_selection(self):
+        host = mapping_block(workflow_source('ci.yml'), 'esp32-host', indent=2)
+        step = next(s for s in sequence_mapping_blocks(host, 'steps', indent=4)
+                    if s.startswith('name: Validate selected host checks\n'))
+        script = textwrap.dedent(step.split('run: |\n', 1)[1])
+        for value, expected in ((['esp32-host-usb-recovery-status'], 0), ([], 1),
+                                (['unknown'], 1), (['esp32-host-usb-recovery-status'] * 2, 1),
+                                ('esp32-host-usb-recovery-status', 1), ([None], 1)):
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', script], cwd=REPO_ROOT,
+                env={**os.environ, 'FIRMWARE_HOST_CHECKS': json.dumps(value)}, capture_output=True)
+            self.assertEqual(result.returncode == 0, expected == 0, result.stderr)
+
+    def test_all_selected_gate_inputs_reject_missing_failed_cancelled_or_skipped_results(self):
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
+        script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+        selections = ("FIRMWARE_BUILD_CHANGED", "FIRMWARE_HOST_CHANGED", "HEAVY_CI", "IOS_CHANGED",
+                      "IOS_NATIVE_CHANGED", "IOS_SIMULATOR_CHANGED", "MAP_BACKEND_CHANGED", "OSM_CHANGED", "ZONE_CHANGED")
+        results = ("CHANGES_RESULT", "ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT",
+                   "IOS_PLATFORM_RESULT", "MAP_RESULT", "ZONE_RESULT")
+        environment = {**os.environ, **dict.fromkeys(selections, "true"), **dict.fromkeys(results, "success")}
+        def run(overrides):
+            return subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                  env={**environment, **overrides}, capture_output=True).returncode
+        self.assertEqual(run({}), 0)
+        for key in results:
+            for value in ("", "failure", "cancelled", "skipped"):
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(run({key: value}), 0)
+        for key in selections:
+            with self.subTest(selection=key):
+                self.assertNotEqual(run({key: ""}), 0)
+        # A release-tool-only host selection does not require the wire/display
+        # contracts, but the gate still requires that unselected job to skip.
+        host_only = {**dict.fromkeys(selections, 'false'), 'FIRMWARE_HOST_CHANGED': 'true', 'HEAVY_CI': 'true',
+                     **dict.fromkeys(results, 'skipped'), 'CHANGES_RESULT': 'success', 'HOST_RESULT': 'success'}
+        self.assertEqual(run(host_only), 0)
+        self.assertNotEqual(run({**host_only, 'ZONE_RESULT': 'success'}), 0)
+
     def test_each_ios_job_failure_blocks_the_gate(self):
         gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
         self.assertIn("- ios-platform", gate)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
-            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true", "IOS_SIMULATOR_CHANGED": "true", "ZONE_RESULT": "success",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true", "IOS_SIMULATOR_CHANGED": "true", "ZONE_CHANGED": "true", "ZONE_RESULT": "success",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
             "MAP_RESULT": "skipped", "IOS_FAST_RESULT": "success", "IOS_RESULT": "success", "IOS_PLATFORM_RESULT": "success"}
@@ -1146,6 +1195,75 @@ jobs:
             "version comment",
             workflow_policy.validate_workflow_use(use),
         )
+
+
+class FirmwareCoreWarmPolicyTests(unittest.TestCase):
+    def test_main_pushes_warm_cores_through_the_partial_firmware_scope(self) -> None:
+        warm = workflow_source("firmware-core-warm.yml")
+        trigger = mapping_block(warm, "on", indent=0)
+        self.assertEqual(["  push:", "  schedule:", "  workflow_dispatch:"], re.findall(r"(?m)^  [a-z_]+:$", trigger))
+        push = mapping_block(warm, "push", indent=2)
+        self.assertIn("      - main\n", push)
+        self.assertIn('      - "esp32/**"\n', push)
+        self.assertIn('      - ".github/actions/firmware-build-cache/**"\n', push)
+        self.assertIn("uses: ./.github/workflows/ci.yml", warm)
+        self.assertIn("scope: firmware\n", warm)
+        self.assertIn("firmware_hardware: ${{ inputs.firmware_hardware || '175' }}", warm)
+        permissions = mapping_block(warm, "permissions", indent=0)
+        self.assertIn("  actions: read", permissions)
+        self.assertIn("  contents: read", permissions)
+        self.assertNotIn("write", permissions)
+        self.assertNotIn("secrets.", warm)
+        self.assertIn("cancel-in-progress: true", warm)
+        # The general workflow itself still never runs on push; only the caller
+        # selects the firmware scope, so iOS and map lanes stay pull-request only.
+        self.assertNotRegex(workflow_source("ci.yml"), r"(?m)^  push:")
+        import changed_components
+        selected = changed_components.classify_paths([".github/workflows/firmware-core-warm.yml"])
+        self.assertEqual(["firmware_host"], [key for key, value in selected.items() if value])
+        selected = changed_components.classify_paths([".github/scripts/firmware_core_artifact.py"])
+        self.assertEqual(["firmware_build", "firmware_host"], [key for key, value in selected.items() if value])
+
+    def test_partial_called_scopes_do_not_publish_the_protected_gate(self) -> None:
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
+        self.assertIn("(!inputs.scope || inputs.scope == 'all' ||", gate)
+        self.assertIn("format('Manual CI Gate ({0})', inputs.scope)", gate)
+        self.assertIn("format('Partial CI Gate ({0})', inputs.scope)", gate)
+        promotion = (WORKFLOW_SCRIPTS_ROOT / "dispatch_promotion_ci.py").read_text(encoding="utf-8")
+        self.assertIn("run.get('event') in ('pull_request', 'workflow_dispatch')", promotion)
+
+    def test_core_entries_publish_only_from_main_and_restore_read_only(self) -> None:
+        esp32 = mapping_block(workflow_source("ci.yml"), "esp32", indent=2)
+        self.assertIn("    permissions:\n      actions: read\n      contents: read\n", esp32)
+        steps = sequence_mapping_blocks(esp32, "steps", indent=4)
+        restore = [step for step in steps if "uses: ./.github/actions/firmware-build-cache" in step]
+        self.assertEqual(1, len(restore))
+        self.assertIn("id: cache", restore[0])
+        self.assertIn("github-token: ${{ github.token }}", restore[0])
+        publish = [step for step in steps if "name: ${{ steps.cache.outputs.core-artifact-name }}" in step]
+        self.assertEqual(1, len(publish))
+        main_only = "if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'"
+        self.assertIn(main_only, publish[0])
+        self.assertIn("compression-level: 0", publish[0])
+        self.assertIn("retention-days: 14", publish[0])
+        pack = [step for step in steps if "firmware_core_artifact.py pack" in step]
+        self.assertEqual(1, len(pack))
+        self.assertIn(main_only, pack[0])
+        self.assertIn("firmware_core_artifact.py identity", "\n".join(steps))
+        action = (REPO_ROOT / ".github/actions/firmware-build-cache/action.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2", action)
+        self.assertIn("run-id: ${{ steps.lookup.outputs.run-id }}", action)
+        self.assertIn('--branch "$PUBLICATION_BRANCH"', action)
+        self.assertIn("firmware_core_artifact.py install", action)
+        self.assertIn("if: inputs.github-token != '' &&", action)
+        self.assertEqual(2, action.count("continue-on-error: true"))
+        self.assertIn("steps.download.outcome == 'success'", action)
+        core_step = action.split("- id: core\n", 1)[1].split("- id: lookup", 1)[0]
+        self.assertNotIn("restore-keys", core_step)
+        self.assertNotIn("github.sha", core_step)
+        for workflow in ("firmware-diagnostics.yml", "speaker-firmware.yml"):
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("github-token", workflow_source(workflow))
 
 
 if __name__ == "__main__":

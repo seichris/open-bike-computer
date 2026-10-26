@@ -41,30 +41,6 @@ nonisolated struct MapStreamAppBuildIdentity: Codable, Equatable {
     }
 }
 
-nonisolated enum MapStreamAppArtifactCompatibilityPolicy {
-    // Stream artifacts are normally pinned to the exact app build that requested
-    // them. Keep exceptions exact and reviewed so an app update can resume a
-    // previously started transfer without accepting arbitrary older artifacts.
-    static let resumablePredecessorIdentities = [
-        MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: "202607132210",
-            gitSha: "4ee3aa43dd3026917ceca52c4779438867ee0e7a",
-            componentSha256: "271c2d9d17d4430548a46d5ea9ae677862ecf08c57b8e62f5a48c22ae8656002"
-        ),
-        // Street-label artifacts generated before the BLE/Wi-Fi transport
-        // repairs remain byte-for-byte valid and signed by the same reviewed
-        // production map key. Keep this exception bound to the exact app
-        // component that requested those artifacts.
-        MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: "7",
-            gitSha: "c0ccb990dde3205fc35cd5e8f6fb6894b087e577",
-            componentSha256: "e74587bd57299d5748e2e630bdbed7737395b8a56ddbf428bc9ceb14f9dbb446"
-        )
-    ]
-}
-
 struct OfflineMapBounds: Codable, Equatable {
     let minLon: Double
     let minLat: Double
@@ -102,6 +78,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         let rendererFormatVersion: Int
         let firmwareVersion: String?
         var terrainProfileVersion: Int? = nil
+        var requestedFeatures: [String]? = nil
     }
 
     struct LabelProfile: Encodable, Equatable {
@@ -184,6 +161,25 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
+    func withMapPois(_ enabled: Bool) -> OfflineMapJobRequest {
+        guard enabled else { return self }
+        return OfflineMapJobRequest(
+            mode: mode, bbox: bbox, geometry: geometry, route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId, installOnDevice: installOnDevice,
+            target: RendererTarget(
+                renderer: "esp32-fmb", rendererFormatVersion: 5,
+                firmwareVersion: target?.firmwareVersion,
+                // Terrain experiments have a separate target-4 contract.
+                // Target 5 supports the independent contour layer, not FME.
+                terrainProfileVersion: nil,
+                requestedFeatures: (["3d-buildings", "map-pois", "street-labels"] +
+                    (target?.rendererFormatVersion == 4 ? ["contours"] : [])).sorted()
+            ), labels: labels ?? Self.defaultLabelProfile
+        )
+    }
+
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
             mode: "custom_bbox",
@@ -262,7 +258,8 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                 renderer: "esp32-fmb",
                 rendererFormatVersion: target?.rendererFormatVersion ?? 3,
                 firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion,
-                terrainProfileVersion: target?.terrainProfileVersion
+                terrainProfileVersion: target?.terrainProfileVersion,
+                requestedFeatures: target?.requestedFeatures
             ),
             labels: labels ?? Self.defaultLabelProfile
         )
@@ -1168,6 +1165,7 @@ struct OfflineMapGenerationProfile: Decodable, Equatable {
     let id: String
     let rendererFormatVersion: Int
     let features: [String]
+    let optionalFeatures: [String]?
 }
 
 struct OfflineMapGenerationCapabilities: Decodable, Equatable {
@@ -1177,6 +1175,25 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
     let generationProfiles: [OfflineMapGenerationProfile]
 
     func require(rendererFormatVersion: Int) throws {
+        try validate()
+        let supported = generationProfiles.map(\.rendererFormatVersion)
+        guard supported.contains(rendererFormatVersion) else {
+            throw OfflineMapPlatformError.unsupportedRendererTarget(
+                requestedRendererFormatVersion: rendererFormatVersion,
+                supportedRendererFormatVersions: supported,
+                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+            )
+        }
+    }
+
+    /// The installation-scoped target-5 profile, after validating the whole
+    /// response. Its optional features are this installation's authorization.
+    func mapPoiProfile() throws -> OfflineMapGenerationProfile? {
+        try validate()
+        return generationProfiles.first { $0.rendererFormatVersion == 5 }
+    }
+
+    func validate() throws {
         let supported = generationProfiles.map(\.rendererFormatVersion)
         let profileIDs = generationProfiles.map(\.id)
         let profileContracts: [Int: (id: String, features: Set<String>)] = [
@@ -1186,6 +1203,10 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
             4: (
                 "topographic-contours-v1",
                 ["3d-buildings", "contours", "street-labels"]
+            ),
+            5: (
+                "map-pois-v1",
+                ["3d-buildings", "map-pois", "street-labels"]
             ),
         ]
         guard schemaVersion == 1,
@@ -1200,17 +1221,86 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
                   let features = Set($0.features)
                   return $0.id == contract.id &&
                       contract.features.isSubset(of: features) &&
-                      features.count == $0.features.count
+                      features.count == $0.features.count &&
+                      ($0.rendererFormatVersion == 5
+                        ? Set($0.optionalFeatures ?? []).isSubset(of: ["contours"]) &&
+                          Set($0.optionalFeatures ?? []).count ==
+                            ($0.optionalFeatures ?? []).count
+                        : $0.optionalFeatures == nil)
               }) else {
             throw OfflineMapPlatformError.invalidResponse
         }
-        guard supported.contains(rendererFormatVersion) else {
+    }
+}
+
+// Default (MainActor in the app) isolation, matching the request and
+// capability models these policies read; callers are UI/manager code.
+enum OfflineMapRegenerationPurpose: Equatable {
+    /// Street-label refresh: add POIs only when available, but never drop the
+    /// POI layer of an active target-5 map.
+    case streetLabels
+    /// The Points of Interest action: POIs are the reason for the request.
+    case pointsOfInterest
+}
+
+/// Chooses the renderer target before submission. Target 5 is selected only
+/// when the device and this installation's validated service capabilities
+/// support every requested layer. The create endpoint stays authoritative and
+/// a submitted request is never retried as another target.
+enum OfflineMapPoiRequestPolicy {
+    enum Requirement: Equatable {
+        /// Otherwise keep the existing target-3/4 request unchanged.
+        case opportunistic
+        /// Fail closed before submission instead of dropping POIs or contours.
+        case required
+    }
+
+    static func regenerationRequirement(
+        purpose: OfflineMapRegenerationPurpose,
+        activeRendererFormatVersion: Int?
+    ) -> Requirement {
+        purpose == .pointsOfInterest || activeRendererFormatVersion == 5
+            ? .required : .opportunistic
+    }
+
+    static func request(
+        _ base: OfflineMapJobRequest,
+        deviceSupportsMapPois: Bool,
+        capabilities: OfflineMapGenerationCapabilities?,
+        requirement: Requirement
+    ) throws -> OfflineMapJobRequest {
+        // A malformed response is never evidence for any target.
+        let profile = try capabilities?.mapPoiProfile()
+        let baseFormat = base.target?.rendererFormatVersion
+        let unavailable: String?
+        if !deviceSupportsMapPois {
+            unavailable = "Update the Bike Computer firmware to add points of interest."
+        } else if baseFormat != 3 && baseFormat != 4 {
+            unavailable = "Points of interest require a street-label and 3D-building map."
+        } else if base.target?.terrainProfileVersion != nil {
+            // Target 5 carries the independent contour layer, not the target-4
+            // terrain experiment; never drop a requested layer silently.
+            unavailable = "Points of interest cannot be combined with terrain experiments."
+        } else if capabilities == nil {
+            unavailable = "This map service does not report point-of-interest map support."
+        } else if let profile {
+            unavailable = baseFormat == 4 &&
+                !(profile.optionalFeatures ?? []).contains("contours")
+                ? "This map service cannot add points of interest while keeping this map's contours."
+                : nil
+        } else {
+            unavailable = "Points of interest are not available from this map service for this app installation."
+        }
+        guard let unavailable else { return base.withMapPois(true) }
+        guard requirement == .opportunistic else {
             throw OfflineMapPlatformError.unsupportedRendererTarget(
-                requestedRendererFormatVersion: rendererFormatVersion,
-                supportedRendererFormatVersions: supported,
-                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+                requestedRendererFormatVersion: 5,
+                supportedRendererFormatVersions:
+                    capabilities?.generationProfiles.map(\.rendererFormatVersion) ?? [],
+                message: unavailable
             )
         }
+        return base
     }
 }
 
@@ -1267,7 +1357,16 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .firmwareMapStreamUnsupported:
             return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
         case .mapStreamCompatibilityRejected(let rejection):
-            return "This saved map cannot be installed securely (\(rejection.rawValue)). Regenerate it with this app or use compatible device firmware."
+            switch rejection {
+            case .readerRequirementsUnsupported:
+                return "This map uses a format this app does not support. Update Bicino and try again."
+            case .deviceProtocolUnsupported, .firmwareIdentityIncomplete, .firmwareIdentityMismatch:
+                return "This map needs compatible Bike Computer firmware. Update the device firmware and try again."
+            case .signingKeyNotTrusted:
+                return "The Bike Computer does not trust this map's signing key. Update its firmware and try again."
+            case .notSignedStream, .missingSignatureCapability:
+                return "This map could not be verified. Download it again and try again."
+            }
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
@@ -1494,6 +1593,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     struct Target: Decodable, Equatable {
         let renderer: String?
         let formatVersion: Int?
+        var requestedFeatures: [String]? = nil
     }
 
     let mapId: String?
@@ -1504,6 +1604,9 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     let files: [File]?
     let bounds: [Double]?
     let boundsE7: [Int]?
+    /// A manifest carries `topography` exactly when it declares contours,
+    /// independent of renderer version.
+    let declaresContours: Bool
 
     var previewBounds: OfflineMapPreviewBounds? {
         if let bounds, let decoded = OfflineMapPreviewBounds(coordinates: bounds) {
@@ -1524,6 +1627,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case files
         case bounds
         case boundsE7
+        case topography
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -1536,6 +1640,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         files = try container.decodeIfPresent([File].self, forKey: .files)
         bounds = try? container.decode([Double].self, forKey: .bounds)
         boundsE7 = try? container.decode([Int].self, forKey: .boundsE7)
+        declaresContours = container.contains(.topography)
     }
 }
 
@@ -1737,6 +1842,15 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     var activeManifestReceipt: String? = nil
     var activeMapDisplayName: String? = nil
     var activeMapBoundsE7: [Int]? = nil
+    var activeRendererFormat: Int? = nil
+    var labelProfileVersion: Int? = nil
+    var labelLanguages: [String]? = nil
+    var fontAssetHealthy: Bool? = nil
+    var poiProfileVersion: Int? = nil
+    var poiIndexProfileVersion: Int? = nil
+    var poiDataHealthy: Bool? = nil
+    var poiIndexHealthy: Bool? = nil
+    var contourLayerIncluded: Bool? = nil
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?
@@ -1757,7 +1871,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
 
 extension MapTransferDeviceStatus {
-    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
+    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activeRendererFormat, labelProfileVersion, labelLanguages, fontAssetHealthy, poiProfileVersion, poiIndexProfileVersion, poiDataHealthy, poiIndexHealthy, contourLayerIncluded, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
@@ -1771,6 +1885,17 @@ extension MapTransferDeviceStatus {
         activeManifestReceipt = try container.decodeIfPresent(String.self, forKey: .activeManifestReceipt)
         activeMapDisplayName = try container.decodeIfPresent(String.self, forKey: .activeMapDisplayName)
         activeMapBoundsE7 = try container.decodeIfPresent([Int].self, forKey: .activeMapBoundsE7)
+        // Renderer-layer fields are advisory: an unexpected shape from older
+        // firmware must not reject an otherwise valid authenticated status.
+        activeRendererFormat = try? container.decodeIfPresent(Int.self, forKey: .activeRendererFormat)
+        labelProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .labelProfileVersion)
+        labelLanguages = try? container.decodeIfPresent([String].self, forKey: .labelLanguages)
+        fontAssetHealthy = try? container.decodeIfPresent(Bool.self, forKey: .fontAssetHealthy)
+        poiProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiProfileVersion)
+        poiIndexProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiIndexProfileVersion)
+        poiDataHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiDataHealthy)
+        poiIndexHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiIndexHealthy)
+        contourLayerIncluded = try? container.decodeIfPresent(Bool.self, forKey: .contourLayerIncluded)
         activation = try container.decodeIfPresent(Activation.self, forKey: .activation)
         protocols = try container.decodeIfPresent([Int].self, forKey: .protocols)
         streamFormatVersions = try container.decodeIfPresent([Int].self, forKey: .streamFormatVersions)
@@ -1798,8 +1923,6 @@ nonisolated enum MapInstallProtocolRejection: String, Equatable {
     case deviceProtocolUnsupported = "device_protocol_unsupported"
     case signingKeyNotTrusted = "signing_key_not_trusted"
     case readerRequirementsUnsupported = "reader_requirements_unsupported"
-    case appIdentityIncomplete = "app_identity_incomplete"
-    case appIdentityMismatch = "app_identity_mismatch"
     case firmwareIdentityIncomplete = "firmware_identity_incomplete"
     case firmwareIdentityMismatch = "firmware_identity_mismatch"
 }
@@ -1821,13 +1944,6 @@ nonisolated enum MapInstallProtocolSelector {
     static func select(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
-        requiredIosBuild: String? = nil,
-        requiredIosGitSha: String? = nil,
-        requiredIosBuildSha256: String? = nil,
-        currentIosBuild: String? = nil,
-        currentIosGitSha: String? = nil,
-        currentIosBuildSha256: String? = nil,
-        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
         readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
@@ -1837,13 +1953,6 @@ nonisolated enum MapInstallProtocolSelector {
         evaluate(
             isBikeMapStream: isBikeMapStream,
             signatureTrustCapability: signatureTrustCapability,
-            requiredIosBuild: requiredIosBuild,
-            requiredIosGitSha: requiredIosGitSha,
-            requiredIosBuildSha256: requiredIosBuildSha256,
-            currentIosBuild: currentIosBuild,
-            currentIosGitSha: currentIosGitSha,
-            currentIosBuildSha256: currentIosBuildSha256,
-            compatibleArtifactAppIdentities: compatibleArtifactAppIdentities,
             readerRequirements: readerRequirements,
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
@@ -1855,13 +1964,6 @@ nonisolated enum MapInstallProtocolSelector {
     static func evaluate(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
-        requiredIosBuild: String? = nil,
-        requiredIosGitSha: String? = nil,
-        requiredIosBuildSha256: String? = nil,
-        currentIosBuild: String? = nil,
-        currentIosGitSha: String? = nil,
-        currentIosBuildSha256: String? = nil,
-        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
         readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
@@ -1880,48 +1982,10 @@ nonisolated enum MapInstallProtocolSelector {
         guard deviceStatus.streamTrust?.contains(signatureTrustCapability) == true else {
             return .rejected(.signingKeyNotTrusted)
         }
-        let appRequirements = (
-            requiredIosBuild,
-            requiredIosGitSha,
-            requiredIosBuildSha256
-        )
-        if let readerRequirements {
-            guard readerRequirements.streamFormat ==
-                    OfflineMapArtifact.bikeMapStreamFormat,
-                  OfflineMapReaderCompatibilityPolicy.supports(
-                    readerRequirements
-                  ) else {
-                return .rejected(.readerRequirementsUnsupported)
-            }
-        } else {
-            guard let requiredAppBuild = appRequirements.0,
-                  let requiredAppGitSHA = appRequirements.1,
-                  let requiredAppBuildSHA256 = appRequirements.2,
-                  let currentAppBuild = currentIosBuild,
-                  let currentAppGitSHA = currentIosGitSha,
-                  let currentAppBuildSHA256 = currentIosBuildSha256 else {
-                return .rejected(.appIdentityIncomplete)
-            }
-            let requiredAppIdentity = MapStreamAppBuildIdentity(
-                schemaVersion: 1,
-                build: requiredAppBuild,
-                gitSha: requiredAppGitSHA,
-                componentSha256: requiredAppBuildSHA256
-            )
-            let currentAppIdentity = MapStreamAppBuildIdentity(
-                schemaVersion: 1,
-                build: currentAppBuild,
-                gitSha: currentAppGitSHA,
-                componentSha256: currentAppBuildSHA256
-            )
-            guard requiredAppIdentity.isReleaseGrade,
-                  currentAppIdentity.isReleaseGrade,
-                  requiredAppIdentity == currentAppIdentity ||
-                    compatibleArtifactAppIdentities.contains(
-                        requiredAppIdentity
-                    ) else {
-                return .rejected(.appIdentityMismatch)
-            }
+        guard let readerRequirements,
+              readerRequirements.streamFormat == OfflineMapArtifact.bikeMapStreamFormat,
+              OfflineMapReaderCompatibilityPolicy.supports(readerRequirements) else {
+            return .rejected(.readerRequirementsUnsupported)
         }
         let deviceRequirements = (
             requiredFirmwareVersion,
@@ -4081,9 +4145,6 @@ struct OfflineMapPlatformClient {
               response.signatureKeySha256 == artifact.signatureKeySha256,
               response.producerBuildSha256 == artifact.producerBuildSha256,
               response.producerImageDigest == artifact.producerImageDigest,
-              response.requiredIosBuild == artifact.requiredIosBuild,
-              response.requiredIosGitSha == artifact.requiredIosGitSha,
-              response.requiredIosBuildSha256 == artifact.requiredIosBuildSha256,
               response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
               response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
               response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha,
@@ -4253,6 +4314,7 @@ struct OfflineMapPlatformClient {
     ]
 
     private func authorizeInstallation(_ request: inout URLRequest) {
+        request.setValue("1", forHTTPHeaderField: "X-Map-Stream-Reader-Contract")
         if let legacyBearerToken {
             request.setValue(
                 "Bearer \(legacyBearerToken)",

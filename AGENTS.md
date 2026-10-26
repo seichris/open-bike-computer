@@ -1,5 +1,11 @@
 # Agent Notes (open-bike-computer)
 
+## Review policy
+
+Read [REVIEW.md](REVIEW.md) before reviewing or publishing a change. It defines
+the three-pass review limit, delta re-review, finding ledger, and risk/evidence
+handoff. Preserve the round count across sessions and stop early when clean.
+
 ## Repository map
 
 - `esp32/`: PlatformIO/Arduino firmware for the Waveshare 1.75-inch and

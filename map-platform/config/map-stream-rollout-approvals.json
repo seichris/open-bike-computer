@@ -364,6 +364,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261026-worker-social-ios30",
+      "candidateGitSha": "aecd91e635e5001fe82f17959c3792b941344619",
+      "producerBuildSha256": "a461d9d475a680747e18ae6f6042de73a3d160fb1663c63c66ec7e5dd3d4940c",
+      "workerImageDigest": "sha256:afe2d5cadeb7566c59d8ee6169b3fe6a7e8601f662872dd4a6f18f46b3726928",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 104,
+      "firmwareGitSha": "483ac42937fa3d982410d82b591f2c2ec13a39f0",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "fb4ef5959a9fe27ddeba09295808aae150ee0da67bf28b903b56c03935aa2d32",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-26T03:56:54Z",
+      "approvedBy": "Codex (software release review under Chris app-publication request, 2026-10-26)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }

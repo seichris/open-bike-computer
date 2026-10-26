@@ -771,6 +771,16 @@ struct MapViewContainer: UIViewRepresentable {
                     ?? MapViewControlState.defaultPitchedAngle
             ), animated: false)
             hasSetInitialRegion = true
+            if !isSimulationMode, isUserLocationAuthorized {
+                // Initial camera changes can stop MapKit follow. Restore it once,
+                // after the first GPS fix; later updates still preserve manual pan.
+                updateUserTrackingMode(
+                    mapView: mapView,
+                    isNavigating: isNavigating,
+                    isOfflineMapSelectionActive: false,
+                    animated: false
+                )
+            }
         }
 
         func finishNavigationTracking(

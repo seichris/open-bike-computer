@@ -175,7 +175,10 @@ def require_production_topography_approval(
     deployment_channel: str,
 ) -> None:
     if deployment_channel == "production" and any(
-        profile.renderer_format_version == 4
+        profile.renderer_format_version == 4 or (
+            profile.renderer_format_version == 5
+            and "contours" in generation_policy.available_optional_features("production")
+        )
         for profile in generation_policy.available_profiles("production")
     ) and not all(source.production_approved for source in source_policy.sources):
         raise ValueError("production topography sources have not been approved")

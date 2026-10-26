@@ -200,6 +200,14 @@ struct RemoteDebugLANCredentialStore {
 }
 
 enum DeviceDiagnosticsRejectionPolicy {
+    static func isSessionEntryFailure(code: String) -> Bool {
+        // Markers share DSTS.lastError with transfer control, but recorder
+        // admission failure is not authority over a diagnostics enter request.
+        // Retain the error for its consumers; do not clear shared status or
+        // weaken secure-session validation or any genuine entry rejection.
+        !code.isEmpty && code != "marker_rejected"
+    }
+
     static func message(code: String, fallback: String?) -> String {
         let explanation: String
         switch code {
@@ -403,13 +411,40 @@ enum DeviceTransferHandshakePolicy {
         attempt > 0 && attempt % 4 == 0
     }
 
-    static func diagnosticsAttemptCount(lanFirst: Bool) -> Int {
-        // Diagnostics uses the same station-association worker as remote
-        // debug. Give LAN-first startup enough time to reach either the LAN
-        // listener or the protected-hotspot fallback.
-        lanFirst ? remoteDebugAttemptCount : attemptCount
-    }
+}
 
+enum MapTransferStartupPolicy {
+    // Map entry includes a storage checkpoint/remount, Wi-Fi startup and a
+    // chunked authenticated status response. Mode alone is not readiness.
+    // One monotonic deadline covers all of that work; progress never renews it.
+    static let timeout: TimeInterval = 30
+    static let statusPollInterval: TimeInterval = 2
+    static let observationInterval: TimeInterval = 0.25
+
+    @MainActor
+    static func waitForSession<Session>(
+        clock: () -> TimeInterval,
+        sleep: (UInt64) async throws -> Void,
+        session: () throws -> Session?,
+        requestStatus: () -> Void
+    ) async throws -> Session? {
+        let started = clock()
+        let deadline = started + timeout
+        var nextStatusPoll = started + statusPollInterval
+        while true {
+            try Task.checkCancellation()
+            guard clock() <= deadline else { return nil }
+            if let ready = try session() { return ready }
+            let remaining = deadline - clock()
+            guard remaining > 0 else { return nil }
+            if clock() >= nextStatusPoll {
+                requestStatus()
+                // Do not burst delayed polls or restart chunked responses.
+                nextStatusPoll = clock() + statusPollInterval
+            }
+            try await sleep(UInt64(min(observationInterval, remaining) * 1_000_000_000))
+        }
+    }
 }
 
 enum DeviceTransferServerProbePolicy {
@@ -836,6 +871,17 @@ final class DeviceTransferManager {
     private var joinedAccessPointSSID: String?
     private var operationLease: DeviceOperationCoordinator.Lease?
     private var cleanupTask: Task<Bool, Never>?
+    // Shared by every manager because they share one coordinator: two
+    // recover() calls side by side would each read the other's clear as busy.
+    // Explicit operations wait for a passive confirmation in flight, and a
+    // passive one never starts while any explicit operation is beginning.
+    private static var passiveCleanupTask: Task<Bool, Never>?
+    private static var explicitOperationsStarting = 0
+    private var mapCleanupObserver: AnyCancellable?
+    private var passiveCleanupAttempts: (epoch: UInt64, count: Int) = (0, 0)
+    /// Called with the recorded device ID once a stranded map transport is
+    /// confirmed idle, so the journal owner can mark its cleanup complete.
+    var onMapTransportCleanupResolved: (@MainActor (String) -> Void)?
     private var remoteAcceptancePossible = false
     private var firmwareMaintenancePrepared = false
     private var authorizationToken: String?
@@ -864,6 +910,11 @@ final class DeviceTransferManager {
     }
 
     private func beginOperation(mode: DeviceTransferSession.Mode, bleManager: BLEManager) async throws {
+        Self.explicitOperationsStarting += 1
+        defer { Self.explicitOperationsStarting -= 1 }
+        // Let a passive cleanup confirmation finish first: a second recover()
+        // beside it would see its clear as busy. Its outcome is in the coordinator.
+        if let passiveCleanupTask = Self.passiveCleanupTask { _ = await passiveCleanupTask.value }
         guard operationLease == nil, cleanupTask == nil, let deviceID = bleManager.connectedDeviceID,
               bleManager.isNavigationReady else {
             throw DeviceOperationCoordinator.Failure.busy
@@ -877,17 +928,7 @@ final class DeviceTransferManager {
             let recovered = try await coordinator.recover(
                 deviceID: deviceID,
                 connectionEpoch: bleManager.transferConnectionEpoch,
-                status: {
-                    .init(deviceID: bleManager.connectedDeviceID,
-                          connectionEpoch: bleManager.transferConnectionEpoch,
-                          ready: bleManager.isNavigationReady,
-                          revision: bleManager.deviceTransferStatusRevision,
-                          mode: bleManager.deviceTransferMode,
-                          tokenDigest: bleManager.deviceTransferSessionToken.flatMap {
-                              $0.isEmpty ? nil : Self.authorizationDigest($0)
-                          },
-                          transferGeneration: bleManager.deviceTransferGeneration)
-                },
+                status: { Self.recoveryStatus(bleManager) },
                 requestStatus: { bleManager.requestDeviceTransferStatus() }
             )
             if let recovered {
@@ -912,6 +953,18 @@ final class DeviceTransferManager {
 
     private static func authorizationDigest(_ token: String) -> String {
         SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func recoveryStatus(_ bleManager: BLEManager) -> DeviceOperationCoordinator.RecoveryStatus {
+        .init(deviceID: bleManager.connectedDeviceID,
+              connectionEpoch: bleManager.transferConnectionEpoch,
+              ready: bleManager.isNavigationReady,
+              revision: bleManager.deviceTransferStatusRevision,
+              mode: bleManager.deviceTransferMode,
+              tokenDigest: bleManager.deviceTransferSessionToken.flatMap {
+                  $0.isEmpty ? nil : Self.authorizationDigest($0)
+              },
+              transferGeneration: bleManager.deviceTransferGeneration)
     }
 
     private func ownsConnection(_ bleManager: BLEManager) -> Bool {
@@ -982,17 +1035,7 @@ final class DeviceTransferManager {
                     let recovered = try await self.coordinator.recover(
                         deviceID: lease.deviceID,
                         connectionEpoch: lease.connectionEpoch,
-                        status: {
-                            .init(deviceID: bleManager.connectedDeviceID,
-                                  connectionEpoch: bleManager.transferConnectionEpoch,
-                                  ready: bleManager.isNavigationReady,
-                                  revision: bleManager.deviceTransferStatusRevision,
-                                  mode: bleManager.deviceTransferMode,
-                                  tokenDigest: bleManager.deviceTransferSessionToken.flatMap {
-                                      $0.isEmpty ? nil : Self.authorizationDigest($0)
-                                  },
-                                  transferGeneration: bleManager.deviceTransferGeneration)
-                        },
+                        status: { Self.recoveryStatus(bleManager) },
                         requestStatus: { bleManager.requestDeviceTransferStatus() }
                     )
                     if let recovered {
@@ -1008,6 +1051,12 @@ final class DeviceTransferManager {
                 } catch { /* Keep unresolved ownership quarantined. */ }
             }
             if self.operationLease == nil { self.stopDebugStatusObservation() }
+            // Firmware refuses a map exit while it finalizes an install, then
+            // leaves transfer mode by itself; confirm that later, passively.
+            if !clear, lease.mode == DeviceTransferSession.Mode.map.rawValue,
+               self.coordinator.lease == nil, self.coordinator.unresolved == lease {
+                self.observeUnresolvedMapCleanup(bleManager: bleManager)
+            }
             return clear && self.coordinator.isCleanupComplete
         }
         cleanupTask = cleanup
@@ -1119,6 +1168,10 @@ final class DeviceTransferManager {
         recoveryConnectionEpoch: UInt64? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
+        // As in beginOperation, a passive cleanup confirmation finishes first.
+        Self.explicitOperationsStarting += 1
+        defer { Self.explicitOperationsStarting -= 1 }
+        if let passiveCleanupTask = Self.passiveCleanupTask { _ = await passiveCleanupTask.value }
         guard cleanupTask == nil, bleManager.isNavigationReady,
               let deviceID = bleManager.connectedDeviceID else {
             throw DeviceOperationCoordinator.Failure.busy
@@ -1226,6 +1279,9 @@ final class DeviceTransferManager {
             bleManager.deviceTransferStatusRevision
         let initialDeviceTransferErrorSequence =
             bleManager.deviceTransferLastErrorSequence
+        // Each link starts without a status, so its first one may carry the
+        // device's retained error and must not be read as a fresh rejection.
+        let knowsRetainedError = initialDeviceTransferStatusRevision != 0
 
         // DTRN enter is the authoritative handshake: current firmware applies
         // map mode and publishes the token-bearing DSTS response from this one
@@ -1237,52 +1293,62 @@ final class DeviceTransferManager {
         }
 
         remoteAcceptancePossible = true
-        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
-            if operationLease != nil && !ownsConnection(bleManager) {
-                throw DeviceOperationCoordinator.Failure.staleOwner
-            }
-            let hasFreshDeviceStatus =
-                bleManager.deviceTransferStatusRevision !=
-                initialDeviceTransferStatusRevision
-            if hasFreshDeviceStatus,
-               let session = try secureSession(
-                mode: .map,
-                bleManager: bleManager
-               ) {
-                do {
-                    try await joinDeviceNetworkIfNeeded(
-                        session: session,
-                        statusPath: "map-transfer/status",
-                        status: status
-                    )
-                } catch {
-                    let freshDeviceError = await freshMapTransferRejection(
-                        after: initialDeviceTransferErrorSequence,
-                        networkError: error,
-                        bleManager: bleManager
-                    )
-                    throw freshDeviceError ?? error
+        let readySession: DeviceTransferSession? = try await MapTransferStartupPolicy.waitForSession(
+            clock: { ProcessInfo.processInfo.systemUptime },
+            sleep: { try await Task.sleep(nanoseconds: $0) },
+            session: {
+                if self.operationLease != nil && !self.ownsConnection(bleManager) {
+                    throw DeviceOperationCoordinator.Failure.staleOwner
                 }
-                record(
-                    mode: .map,
-                    event: "transfer_ready",
-                    fields: [
-                        "networkTransport": session.networkTransport ?? "unknown",
-                        "fallback": String(session.hotspotFallback),
-                    ]
+                guard bleManager.deviceTransferStatusRevision != initialDeviceTransferStatusRevision else {
+                    return nil
+                }
+                if let session = try self.secureSession(mode: .map, bleManager: bleManager) {
+                    return session
+                }
+                // Outside an active mode, firmware records a new transfer error
+                // only when an entry fails. A new one before map mode starts is
+                // final; surface it now instead of after the 30 s window.
+                if knowsRetainedError,
+                   bleManager.deviceTransferMode != "map",
+                   let rejection = self.currentMapTransferRejection(
+                       after: initialDeviceTransferErrorSequence, bleManager: bleManager
+                   ) {
+                    self.recordMapTransferStatusProbe(
+                        result: "startup_rejected", includeCurrentError: true, bleManager: bleManager
+                    )
+                    throw rejection
+                }
+                return nil
+            },
+            requestStatus: { _ = bleManager.requestDeviceTransferStatus() }
+        )
+        if let session = readySession {
+            do {
+                try await joinDeviceNetworkIfNeeded(
+                    session: session, statusPath: "map-transfer/status", status: status
                 )
-                return session
+            } catch {
+                let freshDeviceError = await freshMapTransferRejection(
+                    after: initialDeviceTransferErrorSequence,
+                    networkError: error, bleManager: bleManager
+                )
+                throw freshDeviceError ?? error
             }
-            if DeviceTransferHandshakePolicy.shouldRequestStatus(
-                attempt: attempt
-            ) {
-                _ = bleManager.requestDeviceTransferStatus()
-            }
-            try await Task.sleep(
-                nanoseconds:
-                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
-            )
+            record(mode: .map, event: "transfer_ready", fields: [
+                "networkTransport": session.networkTransport ?? "unknown",
+                "fallback": String(session.hotspotFallback),
+            ])
+            return session
         }
+        recordMapTransferStatusProbe(
+            result: bleManager.deviceTransferStatusRevision == initialDeviceTransferStatusRevision
+                ? "startup_no_fresh_status"
+                : bleManager.deviceTransferMode != "map" ? "startup_mode_missing"
+                : bleManager.deviceTransferBaseURL == nil ? "startup_endpoint_missing"
+                : "startup_token_missing",
+            bleManager: bleManager
+        )
         // The device retains its last transfer error for diagnostics, so only
         // surface it after the full readiness window. A successful session
         // always wins over a stale error from an earlier transfer.
@@ -1411,6 +1477,68 @@ final class DeviceTransferManager {
     @discardableResult
     func exitMapTransfer(bleManager: BLEManager) async -> Bool {
         await cleanupOperation(bleManager: bleManager)
+    }
+
+    /// Confirms, without sending an exit, that a map transport stranded by an
+    /// expired exit window has ended: the recorded device on a ready link must
+    /// answer a new request with a fresh authenticated idle status. An active
+    /// session, recorded or unrelated, is never adopted or exited; the next
+    /// explicit operation's bound exit handles it.
+    func reconcileUnresolvedMapCleanup(bleManager: BLEManager) async -> Bool {
+        if let passiveCleanupTask = Self.passiveCleanupTask { return await passiveCleanupTask.value }
+        guard Self.explicitOperationsStarting == 0, operationLease == nil, cleanupTask == nil,
+              coordinator.lease == nil else { return false }
+        guard let stored = coordinator.unresolved else { return coordinator.isCleanupComplete }
+        guard stored.mode == DeviceTransferSession.Mode.map.rawValue,
+              bleManager.isNavigationReady,
+              let deviceID = bleManager.connectedDeviceID, deviceID == stored.deviceID,
+              bleManager.deviceTransferMode.isEmpty,
+              bleManager.deviceTransferSessionToken?.isEmpty != false else { return false }
+        // Bounded per link so repeated idle snapshots cannot flood BLE.
+        let epoch = bleManager.transferConnectionEpoch
+        let attempts = passiveCleanupAttempts.epoch == epoch ? passiveCleanupAttempts.count : 0
+        guard attempts < 3 else { return false }
+        passiveCleanupAttempts = (epoch, attempts + 1)
+        coordinator.removeConfiguration = { Self.removeAccessoryNetworkConfiguration(ssid: $0) }
+        let task = Task { @MainActor () -> Bool in
+            do {
+                _ = try await self.coordinator.recover(
+                    deviceID: deviceID,
+                    connectionEpoch: epoch,
+                    status: { Self.recoveryStatus(bleManager) },
+                    requestStatus: { bleManager.requestDeviceTransferStatus() },
+                    adoptActive: false
+                )
+                return self.coordinator.isCleanupComplete
+            } catch {
+                return false
+            }
+        }
+        Self.passiveCleanupTask = task
+        let result = await task.value
+        Self.passiveCleanupTask = nil
+        if result {
+            mapCleanupObserver = nil
+            onMapTransportCleanupResolved?(deviceID)
+        }
+        return result
+    }
+
+    /// Model-owned like observeDebugStatus, but without polling: the firmware's
+    /// automatic exit and every reconnect publish fresh status by themselves.
+    private func observeUnresolvedMapCleanup(bleManager: BLEManager) {
+        mapCleanupObserver = bleManager.$deviceTransferStatusRevision
+            .combineLatest(bleManager.$isNavigationReady)
+            .sink { [weak self, weak bleManager] _ in
+                Task { @MainActor [weak self, weak bleManager] in
+                    guard let self, let bleManager else { return }
+                    guard self.coordinator.unresolved?.mode == DeviceTransferSession.Mode.map.rawValue else {
+                        self.mapCleanupObserver = nil
+                        return
+                    }
+                    _ = await self.reconcileUnresolvedMapCleanup(bleManager: bleManager)
+                }
+            }
     }
 
     func enterFirmwareTransfer(
@@ -1607,11 +1735,28 @@ final class DeviceTransferManager {
 
     func prepareFirmwareMaintenance(
         bleManager: BLEManager,
+        expectedDeviceID: String,
+        expectedConnectionEpoch: UInt64,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> UInt32 {
+        func requireRequestedConnection() throws {
+            guard bleManager.isNavigationReady,
+                  bleManager.connectedDeviceID == expectedDeviceID,
+                  bleManager.transferConnectionEpoch == expectedConnectionEpoch else {
+                throw FirmwareUpdateError.deviceNotReady
+            }
+        }
+        try requireRequestedConnection()
         try await beginOperation(mode: .firmware, bleManager: bleManager)
         do {
-            let result = try await performPrepareFirmwareMaintenance(bleManager: bleManager, status: status)
+            // Cleanup recovery can await. Revalidate the original intent before
+            // the first command; only the correlated reboot may change epochs.
+            try requireRequestedConnection()
+            guard ownsConnection(bleManager) else {
+                throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+            let result = try await performPrepareFirmwareMaintenance(
+                bleManager: bleManager, expectedDeviceID: expectedDeviceID, status: status)
             guard let lease = operationLease, bleManager.connectedDeviceID == lease.deviceID else {
                 throw DeviceOperationCoordinator.Failure.staleOwner
             }
@@ -1628,12 +1773,12 @@ final class DeviceTransferManager {
 
     private func performPrepareFirmwareMaintenance(
         bleManager: BLEManager,
+        expectedDeviceID: String,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> UInt32 {
         guard bleManager.isNavigationReady else {
             throw FirmwareUpdateError.deviceNotReady
         }
-        let expectedDeviceID = bleManager.connectedDeviceID
         let initialRevision = bleManager.deviceTransferStatusRevision
         let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
         status("requesting firmware maintenance")
@@ -1686,8 +1831,7 @@ final class DeviceTransferManager {
                     bleManager.reconnectToLastDevice()
                 }
             } else if sawDisconnect,
-                      expectedDeviceID == nil ||
-                        bleManager.connectedDeviceID == expectedDeviceID {
+                      bleManager.connectedDeviceID == expectedDeviceID {
                 _ = bleManager.requestDeviceTransferStatus(
                     forMaintenanceReconnect: true
                 )
@@ -1741,6 +1885,7 @@ final class DeviceTransferManager {
         let lanCredentials = RemoteDebugLANCredentialStore().load()
         do {
             let initialRevision = bleManager.deviceTransferStatusRevision
+            let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
             guard bleManager.requestDeviceTransferMode(
                 .diagnostics,
                 remoteDebugLANCredentials: lanCredentials
@@ -1749,12 +1894,10 @@ final class DeviceTransferManager {
             }
             enterWasQueued = true
             remoteAcceptancePossible = true
-            let attemptCount = DeviceTransferHandshakePolicy
-                .diagnosticsAttemptCount(lanFirst: lanCredentials != nil)
             var session = try await waitForDiagnosticsSession(
                 bleManager: bleManager,
                 afterRevision: initialRevision,
-                attemptCount: attemptCount
+                afterErrorSequence: initialErrorSequence
             )
             if session.networkTransport == "lan" {
                 status("checking local Wi-Fi")
@@ -1824,6 +1967,7 @@ final class DeviceTransferManager {
         for attempt in 0..<DeviceDiagnosticsHotspotFallbackPolicy
             .maximumAttemptCount {
             let fallbackRevision = bleManager.deviceTransferStatusRevision
+            let fallbackErrorSequence = bleManager.deviceTransferLastErrorSequence
             guard bleManager.requestDeviceTransferMode(
                 .diagnostics,
                 remoteDebugHotspotFallbackReason: .endpointUnreachable
@@ -1834,7 +1978,7 @@ final class DeviceTransferManager {
                 return try await waitForDiagnosticsSession(
                     bleManager: bleManager,
                     afterRevision: fallbackRevision,
-                    attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                    afterErrorSequence: fallbackErrorSequence
                 )
             } catch {
                 let hasRetry = attempt + 1 <
@@ -1864,45 +2008,55 @@ final class DeviceTransferManager {
     private func waitForDiagnosticsSession(
         bleManager: BLEManager,
         afterRevision initialRevision: UInt64,
-        attemptCount: Int
+        afterErrorSequence initialErrorSequence: UInt64?,
+        clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
     ) async throws -> DeviceTransferSession {
-        for attempt in 0..<attemptCount {
-            if operationLease != nil && !ownsConnection(bleManager) {
-                throw DeviceOperationCoordinator.Failure.staleOwner
-            }
-            if bleManager.deviceTransferStatusRevision != initialRevision,
-               let session = try secureSession(
-                mode: .diagnostics,
-                bleManager: bleManager
-               ) {
-                return session
-            }
-            // A fresh firmware rejection is authoritative. Do not spend the
-            // remainder of the LAN/hotspot readiness window polling after the
-            // device has already classified storage or seal preparation.
-            if bleManager.deviceTransferStatusRevision != initialRevision,
-               let code = bleManager.deviceTransferLastErrorCode,
-               !code.isEmpty {
-                let fallback = bleManager.deviceTransferLastErrorMessage
-                    .flatMap { $0.isEmpty ? nil : $0 }
-                throw RemoteDeviceDebugError.rejected(
-                    code: code,
-                    message: DeviceDiagnosticsRejectionPolicy.message(
-                        code: code,
-                        fallback: fallback
+        // Each link starts without a status, so its first one may carry the
+        // device's retained error and must not be read as a fresh rejection.
+        let knowsRetainedError = initialRevision != 0
+        // Firmware prepares storage and seals the active chunk before it starts
+        // LAN association or its hotspot. That takes as long as map entry, so
+        // diagnostics shares map startup's absolute readiness window.
+        let readySession: DeviceTransferSession? = try await MapTransferStartupPolicy.waitForSession(
+            clock: clock,
+            sleep: sleep,
+            session: {
+                if self.operationLease != nil && !self.ownsConnection(bleManager) {
+                    throw DeviceOperationCoordinator.Failure.staleOwner
+                }
+                guard bleManager.deviceTransferStatusRevision != initialRevision else {
+                    return nil
+                }
+                if let session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                    return session
+                }
+                // A fresh entry rejection is authoritative. Do not spend the
+                // remainder of the readiness window polling after the device
+                // has already classified storage or seal preparation.
+                if knowsRetainedError,
+                   let failure = DeviceTransferFreshFailurePolicy.failure(
+                       after: initialErrorSequence,
+                       currentSequence: bleManager.deviceTransferLastErrorSequence,
+                       code: bleManager.deviceTransferLastErrorCode,
+                       message: bleManager.deviceTransferLastErrorMessage
+                   ), DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: failure.code) {
+                    throw RemoteDeviceDebugError.rejected(
+                        code: failure.code,
+                        message: DeviceDiagnosticsRejectionPolicy.message(
+                            code: failure.code,
+                            fallback: failure.message
+                        )
                     )
-                )
-            }
-            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
-                _ = bleManager.requestDeviceTransferStatus()
-            }
-            try await Task.sleep(
-                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
-            )
-        }
+                }
+                return nil
+            },
+            requestStatus: { _ = bleManager.requestDeviceTransferStatus() }
+        )
+        if let readySession { return readySession }
         if bleManager.deviceTransferStatusRevision != initialRevision,
            let code = bleManager.deviceTransferLastErrorCode,
-           !code.isEmpty {
+           DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: code) {
             let fallback = bleManager.deviceTransferLastErrorMessage
                 .flatMap { $0.isEmpty ? nil : $0 }
             throw RemoteDeviceDebugError.rejected(
@@ -1920,12 +2074,16 @@ final class DeviceTransferManager {
     func waitForDiagnosticsSessionForTesting(
         bleManager: BLEManager,
         afterRevision initialRevision: UInt64,
-        attemptCount: Int
+        afterErrorSequence initialErrorSequence: UInt64?,
+        clock: () -> TimeInterval,
+        sleep: (UInt64) async throws -> Void
     ) async throws -> DeviceTransferSession {
         try await waitForDiagnosticsSession(
             bleManager: bleManager,
             afterRevision: initialRevision,
-            attemptCount: attemptCount
+            afterErrorSequence: initialErrorSequence,
+            clock: clock,
+            sleep: sleep
         )
     }
 #endif

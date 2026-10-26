@@ -71,6 +71,19 @@ def function_body(source: str, signature: str) -> str:
 class MapGuidanceIntegrationTests(unittest.TestCase):
     """Supplemental wiring guards; behavioral contracts live in C++ tests."""
 
+    def test_pois_share_the_stable_camera_visible_crop_with_labels(self):
+        raster = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap(")
+        self.assertIn("poiGutter = context.labelGutter", raster)
+        self.assertIn("poiSurface.width = context.labelViewportWidth", raster)
+        self.assertIn("poiSurface.height = context.labelViewportHeight", raster)
+        self.assertIn("projected.x - poiGutter", raster)
+        self.assertIn("projected.y - poiGutter", raster)
+        self.assertIn("projectedMarker.x - poiGutter", raster)
+        self.assertIn("projectedMarker.y - poiGutter", raster)
+        self.assertIn("map_poi_icon::draw(poiSurface", raster)
+        labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels(")
+        self.assertIn("poiReservedRegions", labels)
+
     def test_ui_submission_path_contains_no_storage_or_raster_work(self):
         generate = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"
@@ -431,6 +444,25 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             request.index("!request.context.navigationSessionActive"),
             request.index("Course-up frame deferred"),
         )
+
+    def test_render_semantics_key_on_the_zoom_actually_rendered(self):
+        # A screen profile may store zoom 0 while the renderer clamps to 1.
+        # Keying the per-tick projection check on the raw value but the request
+        # on the clamped one flipped the signature every tick, cancelling each
+        # render so the screen never published a frame.
+        clamp = "requestedZoom = map_transform::clampRuntimeZoom(requestedZoom)"
+        semantics = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::invalidateRenderSemanticsForScreen"
+        )
+        request = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn(clamp, semantics)
+        self.assertLess(semantics.index(clamp),
+                        semantics.index("projectionSignature("))
+        self.assertIn(clamp, request)
+        self.assertLess(request.index(clamp),
+                        request.index("request.zoom = requestedZoom"))
 
     def test_position_only_requests_do_not_cancel_active_render(self):
         job = (ESP32_ROOT / "lib" / "maps" / "src" / "mapRenderJob.hpp").read_text(

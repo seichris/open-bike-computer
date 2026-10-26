@@ -1,0 +1,49 @@
+name: Firmware core warm
+
+# Pull requests can only restore Actions caches that their base branch created,
+# and main never ran CI after a merge. This run builds the regular profiles of
+# the requested family through the normal firmware scope, so main publishes
+# the verified core entries that every later pull request restores.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "esp32/**"
+      - ".github/actions/firmware-build-cache/**"
+      - ".github/scripts/firmware_core_artifact.py"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/firmware-core-warm.yml"
+  schedule:
+    # Refresh published entries before their 14-day retention lapses on a quiet main.
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      firmware_hardware:
+        description: Firmware hardware families to warm
+        required: true
+        default: "175"
+        type: choice
+        options:
+          - "175"
+          - "206"
+          - all
+
+# Read-only. Nested ci.yml jobs declare these even when the firmware scope skips them.
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: firmware-core-warm-${{ github.ref }}-${{ inputs.firmware_hardware || '175' }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Warm verified cores
+    uses: ./.github/workflows/ci.yml
+    with:
+      scope: firmware
+      firmware_hardware: ${{ inputs.firmware_hardware || '175' }}

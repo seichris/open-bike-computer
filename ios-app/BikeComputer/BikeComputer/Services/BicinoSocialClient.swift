@@ -7,6 +7,17 @@ enum SocialFailure: LocalizedError, Equatable {
     case identityMissing
     case server(String)
 
+    /// These are definitive account failures after the HTTP client's bounded
+    /// refresh retry. Provider/network outages deliberately do not end a session.
+    var endsAccountSession: Bool {
+        switch self {
+        case .signedOut, .accountChanged, .identityMissing: true
+        case .server(let code):
+            ["authentication_required", "account_unavailable", "account_deleting", "account_deleted"].contains(code)
+        default: false
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .unavailable: "Social riding is not configured for this build."
