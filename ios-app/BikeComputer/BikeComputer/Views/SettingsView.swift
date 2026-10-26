@@ -1850,14 +1850,14 @@ private struct SavedMapRow: View {
                     .font(.caption).foregroundColor(.secondary)
             }
 
-            if let packURL, manager.isPreBaselineSavedMap(packURL) {
+            if let packURL, manager.savedMapLacksDurableContract(packURL) {
                 Label(
-                    "Saved before durable maps. To keep it working after updates, download this area again.",
+                    "Not a durable map, so an update may stop it working. Download this area again with current firmware to replace it.",
                     systemImage: "clock.arrow.circlepath"
                 )
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .accessibilityLabel("\(displayName): saved before durable maps")
+                .accessibilityLabel("\(displayName): not a durable map")
             }
 
             if let packURL,

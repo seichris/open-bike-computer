@@ -156,7 +156,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let requiredFirmwareGitSHA: String?
     let readerRequirements: OfflineMapReaderRequirements?
     /// Durable compatibility contract declared by the signed manifest; nil
-    /// marks a pre-baseline map. Delivery metadata never sets it.
+    /// marks a map outside the contract. Delivery metadata never sets it.
     let compatibilityContract: Int?
     let fileCount: Int
     let payloadBytes: Int64
@@ -703,8 +703,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let blocks: [[Int]]
         }
 
-        /// Durable map contract marker (`{"contract": N}`). Readers keep
-        /// later keys for forward compatibility; the number is what binds.
+        /// Durable map contract marker (`{"contract": N}`). Readers ignore
+        /// unknown keys in it; the validated number is what binds.
         struct Compatibility: Decodable {
             let contract: Int
         }

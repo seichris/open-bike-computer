@@ -10,9 +10,12 @@ built here with the real producer code:
   as the production backend re-signs a promoted map. A rotated production key
   and a changed worker identity repeat that promotion for one map.
 
-Only the FMB/FMA block inputs, the DEM sample and its notice come from small
-test helpers, as in ``contour_companion_fixture.py``. The fixture signers use
-public test scalars that the trust tooling refuses for production.
+Block inputs come from two sources. The ``*-osm-*`` maps package FMB/FMA
+blocks that the production worker extracted from checked-in OSM fixtures
+(``fixtures/map-compatibility-extraction-v1``). The others use small test-helper
+blocks that exercise every profile. The DEM sample and its notice are test
+helpers, as in ``contour_companion_fixture.py``. The fixture signers use public
+test scalars that the trust tooling refuses for production.
 
 The committed corpus is frozen: readers must keep reading those exact bytes.
 ``python -m tests.map_compatibility_fixture --output <new directory>`` writes a
@@ -21,6 +24,7 @@ new corpus for a later contract revision and refuses to overwrite one.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -28,7 +32,7 @@ import shutil
 import sys
 import tempfile
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -47,11 +51,13 @@ from map_platform.artifacts import (
 from map_platform.catalog import publication_payload
 from map_platform.catalog_promotion import promote_catalog_map
 from map_platform.map_compatibility import (
+    TERRAIN_EXPERIMENT_LAYER,
     MapCompatibilityContract,
     load_map_compatibility_contract,
 )
 from map_platform.map_signing import P256MapArtifactSigner
 from map_platform.models import (
+    COMPATIBILITY_CONTRACT_METRIC,
     Bounds,
     GeometryMode,
     JobStatus,
@@ -60,10 +66,12 @@ from map_platform.models import (
     SourceRegion,
 )
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
+from map_platform.terrain import ALGORITHM as TERRAIN_ALGORITHM, encode_grid
 from tests.map_label_fixtures import fmb6_with_pois, one_building_fmb4, one_label_fma1
 
 
 CORPUS = Path(__file__).parent / "fixtures" / "map-compatibility-v1"
+EXTRACTION = Path(__file__).parent / "fixtures" / "map-compatibility-extraction-v1"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE_NOTICE = b"Durable map compatibility fixture elevation notice\n"
 # Block (0, 0) spans Web Mercator metres [0, 4096): one block, one Nearby
@@ -88,17 +96,58 @@ PRODUCTION_VARIANTS = {
         UPDATED_PRODUCTION_PRODUCER,
     ),
 }
-# Profile -> (map ID, production variants). Every production-eligible profile
-# gets a production promotion; the plain 3D map also covers key rotation and a
-# worker update.
-PROFILES = {
-    "buildings-3d-v1": (
-        "compat-v1-buildings",
+
+@dataclass(frozen=True)
+class CorpusMap:
+    profile: str
+    map_id: str
+    optional_layers: tuple[str, ...]
+    production_variants: tuple[str, ...]
+    # Worker extraction output under EXTRACTION, with the bounds it was
+    # extracted for; None packages the test-helper blocks.
+    extraction: str | None = None
+    bounds: Bounds = BOUNDS
+    area_km2: float = 10
+
+
+# Every production-eligible profile gets a production promotion; the plain 3D
+# map also covers key rotation and a worker update, and the contour profile is
+# frozen with and without its optional terrain layer. The OSM maps carry real
+# extracted buildings (Singapore) and street labels (Golden Gate).
+MAPS = {
+    "buildings-3d-v1": CorpusMap(
+        "buildings-3d-v1", "compat-v1-buildings", (),
         ("production", "production-rotated-key", "production-updated-worker"),
     ),
-    "topographic-contours-v1": ("compat-v1-contours", ("production",)),
-    "map-pois-v1": ("compat-v1-pois", ()),
-    "map-pois-contours-v1": ("compat-v1-pois-contours", ()),
+    "topographic-contours-v1": CorpusMap(
+        "topographic-contours-v1", "compat-v1-contours", (), ("production",),
+    ),
+    "topographic-contours-v1-terrain": CorpusMap(
+        "topographic-contours-v1", "compat-v1-contours-terrain",
+        (TERRAIN_EXPERIMENT_LAYER,), ("production",),
+    ),
+    "map-pois-v1": CorpusMap("map-pois-v1", "compat-v1-pois", (), ()),
+    "map-pois-contours-v1": CorpusMap(
+        "map-pois-contours-v1", "compat-v1-pois-contours", (), (),
+    ),
+    "buildings-3d-v1-osm-singapore": CorpusMap(
+        "buildings-3d-v1", "compat-v1-osm-buildings", (), ("production",),
+        extraction="singapore-buildings-t3",
+        bounds=Bounds(103.8644, 1.3093, 103.8655, 1.31),
+        area_km2=0.009539457043042815,
+    ),
+    "buildings-3d-v1-osm-golden-gate": CorpusMap(
+        "buildings-3d-v1", "compat-v1-osm-labels", (), ("production",),
+        extraction="golden-gate-labels-t3",
+        bounds=Bounds(-122.48, 37.808, -122.476, 37.829),
+        area_km2=0.8222978843374357,
+    ),
+    "map-pois-v1-osm-singapore": CorpusMap(
+        "map-pois-v1", "compat-v1-osm-pois", (), (),
+        extraction="singapore-buildings-t5",
+        bounds=Bounds(103.8644, 1.3093, 103.8655, 1.31),
+        area_km2=0.009539457043042815,
+    ),
 }
 
 
@@ -115,24 +164,8 @@ def public_key_x963(signer: P256MapArtifactSigner) -> bytes:
     )
 
 
-def fixture_contract() -> MapCompatibilityContract:
-    """The checked-in contract with the fixture signers registered."""
-    return replace(
-        load_map_compatibility_contract(),
-        signers=frozenset(
-            (
-                "development" if key_id.startswith("map-compat-fixture-dev")
-                else "production",
-                key_id,
-                fixture_signer(key_id).public_key_sha256,
-            )
-            for key_id in SIGNER_SCALARS
-        ),
-    )
-
-
-def contour_sample() -> dict[str, Any]:
-    return {
+def contour_sample(*, terrain: bool = False) -> dict[str, Any]:
+    sample = {
         "kind": "bicino-contour-evidence-v1", "workingCrs": "EPSG:3857",
         "verticalDatum": "EPSG:3855", "minorIntervalM": 20, "indexIntervalM": 100,
         "boundsE7": [10000, 10000, 300000, 300000], "noDataMillionths": 0,
@@ -152,9 +185,22 @@ def contour_sample() -> dict[str, Any]:
             "pointsMm": [[1_000_000, 2_000_000], [1_120_000, 2_000_000]],
         }],
     }
+    if terrain:
+        sample["terrainAlgorithm"] = TERRAIN_ALGORITHM
+        sample["terrainGrids"] = [
+            base64.b64encode(encode_grid(0, 0, [(100, 180, 0)] * 1089)).decode("ascii")
+        ]
+    return sample
 
 
-def profile_job(map_id: str, format_version: int, features: tuple[str, ...]) -> MapJob:
+def corpus_job(
+    map_id: str,
+    format_version: int,
+    features: tuple[str, ...],
+    optional_layers: tuple[str, ...] = (),
+    bounds: Bounds = BOUNDS,
+    area_km2: float = 10,
+) -> MapJob:
     target: dict[str, Any] = {
         "renderer": "esp32-fmb",
         "rendererFormatVersion": format_version,
@@ -162,6 +208,8 @@ def profile_job(map_id: str, format_version: int, features: tuple[str, ...]) -> 
     }
     if format_version == 5:
         target["requestedFeatures"] = list(features)
+    if TERRAIN_EXPERIMENT_LAYER in optional_layers:
+        target["terrainProfileVersion"] = 1
     job = MapJob(
         job_id=f"fixture-{map_id}",
         status=JobStatus.QUEUED,
@@ -171,8 +219,8 @@ def profile_job(map_id: str, format_version: int, features: tuple[str, ...]) -> 
                        "internationalFallback": "en"},
         },
         geometry=NormalizedGeometry(
-            mode=GeometryMode.CUSTOM_BBOX, bounds=BOUNDS,
-            area_km2=10, vertex_count=4,
+            mode=GeometryMode.CUSTOM_BBOX, bounds=bounds,
+            area_km2=area_km2, vertex_count=4,
         ),
         source_region=SourceRegion(
             id="fixture", provider="test", name="Compatibility fixture",
@@ -214,7 +262,7 @@ class PromotionCatalog:
 
 @dataclass(frozen=True)
 class BuiltProfile:
-    profile: str
+    entry_id: str
     job: MapJob
     publication: dict[str, Any]
     artifact_root: Path
@@ -232,19 +280,24 @@ class BuiltProfile:
 
 def build_development_map(
     root: Path,
-    profile_id: str,
+    entry_id: str,
     contract: MapCompatibilityContract,
 ) -> tuple[MapJob, Path]:
-    map_id = PROFILES[profile_id][0]
-    profile = next(value for value in contract.profiles if value.profile_id == profile_id)
+    entry = MAPS[entry_id]
+    map_id = entry.map_id
+    profile = next(value for value in contract.profiles if value.profile_id == entry.profile)
     format_version = profile.renderer_format_version
     pack = root / "pack"
-    block = pack / f"VECTMAP/{map_id}/+000+000/0_0.fmb"
-    block.parent.mkdir(parents=True)
-    block.write_bytes(fmb6_with_pois() if format_version == 5 else one_building_fmb4())
-    font = pack / f"VECTMAP/{map_id}/assets/street-labels.fma"
-    font.parent.mkdir()
-    font.write_bytes(one_label_fma1())
+    if entry.extraction is not None:
+        # Extracted block bytes do not depend on the map ID directory.
+        shutil.copytree(EXTRACTION / entry.extraction, pack / "VECTMAP" / map_id)
+    else:
+        block = pack / f"VECTMAP/{map_id}/+000+000/0_0.fmb"
+        block.parent.mkdir(parents=True)
+        block.write_bytes(fmb6_with_pois() if format_version == 5 else one_building_fmb4())
+        font = pack / f"VECTMAP/{map_id}/assets/street-labels.fma"
+        font.parent.mkdir()
+        font.write_bytes(one_label_fma1())
     artifact_root = root / "artifacts"
     pipeline = MapBuildPipeline(
         PipelinePaths(REPO_ROOT, root / "work", root / "packs"),
@@ -255,18 +308,27 @@ def build_development_map(
         deployment_channel="development",
         compatibility_contract=contract,
     )
-    job = profile_job(map_id, format_version, profile.features)
-    with patch("map_platform.pipeline.contour_sample", return_value=contour_sample()), \
+    job = corpus_job(
+        map_id, format_version, profile.features, entry.optional_layers,
+        entry.bounds, entry.area_km2,
+    )
+    sample = contour_sample(terrain=TERRAIN_EXPERIMENT_LAYER in entry.optional_layers)
+    with patch("map_platform.pipeline.contour_sample", return_value=sample), \
             patch.object(MapBuildPipeline, "_topography_attribution", return_value=SOURCE_NOTICE):
         packaged = pipeline._package_map(
             job, pack, root / f"{map_id}.zip", validate_final_artifact=True,
         )
-    if packaged.compatibility_contract != contract.contract:
-        raise AssertionError(f"{profile_id} was not packaged as a durable map")
     job.status = JobStatus.READY
     job.artifacts = list(packaged.artifacts)
-    job.compatibility_contract = packaged.compatibility_contract
+    # Only the durable classification is part of the delivery contract; the
+    # remaining build timings vary between runs.
+    job.artifact_metrics = {
+        COMPATIBILITY_CONTRACT_METRIC:
+            (packaged.artifact_metrics or {})[COMPATIBILITY_CONTRACT_METRIC]
+    }
     job.finished_at = CREATED_AT
+    if job.compatibility_contract != contract.contract:
+        raise AssertionError(f"{entry_id} was not packaged as a durable map")
     return job, artifact_root
 
 
@@ -336,15 +398,15 @@ def promote(
     return result, catalog.finalized[0]
 
 
-def build_profile(root: Path, profile_id: str, contract: MapCompatibilityContract) -> BuiltProfile:
-    job, artifact_root = build_development_map(root, profile_id, contract)
+def build_entry(root: Path, entry_id: str, contract: MapCompatibilityContract) -> BuiltProfile:
+    job, artifact_root = build_development_map(root, entry_id, contract)
     publication = publication_payload(job, "development")
     productions = {
         variant: promote(job, publication, artifact_root, root / variant, variant, contract)
-        for variant in PROFILES[profile_id][1]
+        for variant in MAPS[entry_id].production_variants
     }
     return BuiltProfile(
-        profile=profile_id,
+        entry_id=entry_id,
         job=job,
         publication=publication,
         artifact_root=artifact_root,
@@ -355,11 +417,11 @@ def build_profile(root: Path, profile_id: str, contract: MapCompatibilityContrac
 def write_corpus(output: Path, built: dict[str, BuiltProfile]) -> None:
     files: dict[str, bytes] = {}
     maps = []
-    for profile_id, value in built.items():
+    for entry_id, value in built.items():
         stream = value.artifact(BIKE_MAP_STREAM_FORMAT)
         development = {
             "deliveryTier": "development",
-            "file": f"{profile_id}.development.bmap",
+            "file": f"{entry_id}.development.bmap",
             "artifacts": [artifact.to_dict() for artifact in value.job.artifacts],
             "publication": value.publication,
         }
@@ -367,11 +429,11 @@ def write_corpus(output: Path, built: dict[str, BuiltProfile]) -> None:
         companion_file = None
         if any(item.format == TOPOGRAPHY_COMPANION_FORMAT for item in value.job.artifacts):
             companion = value.artifact(TOPOGRAPHY_COMPANION_FORMAT)
-            companion_file = f"{profile_id}.btopo"
+            companion_file = f"{entry_id}.btopo"
             files[companion_file] = value.object_bytes(companion.object_key)
         productions = []
         for variant, (result, publication) in value.productions.items():
-            production_file = f"{profile_id}.{variant}.bmap"
+            production_file = f"{entry_id}.{variant}.bmap"
             files[production_file] = value.object_bytes(result["objectKey"])
             published_companion = [
                 item for item in publication["artifacts"]
@@ -390,9 +452,15 @@ def write_corpus(output: Path, built: dict[str, BuiltProfile]) -> None:
                 "publication": publication,
             })
         maps.append({
-            "profile": profile_id,
+            "id": entry_id,
+            "profile": MAPS[entry_id].profile,
+            "optionalLayers": list(MAPS[entry_id].optional_layers),
+            "extraction": MAPS[entry_id].extraction,
             "mapId": value.job.map_id,
             "jobId": value.job.job_id,
+            # The READY job record exactly as the backend persists it, so
+            # later publishers and delivery code can be replayed against it.
+            "job": value.job.to_dict(include_internal=True),
             "compatibilityContract": value.job.compatibility_contract,
             "contentReceipt": value.publication["contentReceipt"],
             "mapEntryId": value.publication["mapEntryId"],
@@ -464,20 +532,20 @@ def corpus_index(corpus: dict[str, Any], files: dict[str, bytes]) -> str:
 
 
 def build_corpus(root: Path) -> dict[str, BuiltProfile]:
-    contract = fixture_contract()
-    registered = {profile.profile_id for profile in contract.profiles}
-    if registered != set(PROFILES):
-        raise AssertionError(
-            "every contract v1 profile needs a frozen corpus map: "
-            f"{sorted(registered ^ set(PROFILES))}"
-        )
+    contract = load_map_compatibility_contract()
     for profile in contract.profiles:
-        production_eligible = "production" in profile.channels
-        if production_eligible != bool(PROFILES[profile.profile_id][1]):
-            raise AssertionError(f"{profile.profile_id} production coverage is wrong")
+        entries = [value for value in MAPS.values() if value.profile == profile.profile_id]
+        layers = {layer for value in entries for layer in value.optional_layers}
+        production = any(value.production_variants for value in entries)
+        if (
+            not entries
+            or layers != set(profile.optional_layers)
+            or production != ("production" in profile.channels)
+        ):
+            raise AssertionError(f"{profile.profile_id} needs complete frozen corpus coverage")
     return {
-        profile_id: build_profile(root / profile_id, profile_id, contract)
-        for profile_id in PROFILES
+        entry_id: build_entry(root / entry_id, entry_id, contract)
+        for entry_id in MAPS
     }
 
 

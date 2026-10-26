@@ -46,7 +46,6 @@ from map_platform.models import (
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths
 from map_platform.topography_pipeline import canonical_bytes
 from tests.map_label_fixtures import fmb6_with_pois, one_label_fma1
-from tests.map_compatibility_support import contract_with_signers
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "map_contour_companion_v1.txt"
@@ -160,14 +159,12 @@ def build_target5_map(root: Path, variant: str) -> BuiltMap:
     font.parent.mkdir()
     font.write_bytes(one_label_fma1())
     artifact_root = root / "artifacts"
-    map_signer = signer()
     pipeline = MapBuildPipeline(
         PipelinePaths(Path(__file__).resolve().parents[3], root / "work", root / "packs"),
         artifact_store=FileSystemArtifactStore(artifact_root),
-        map_signer=map_signer,
+        map_signer=signer(),
         producer_build_sha256=PRODUCER_BUILD_SHA256,
         producer_image_digest=PRODUCER_IMAGE_DIGEST,
-        compatibility_contract=contract_with_signers(("development", map_signer)),
     )
     job = target5_job(map_id, contours)
     sample = contour_sample()

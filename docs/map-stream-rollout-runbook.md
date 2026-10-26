@@ -212,13 +212,14 @@ key-specific artifact identity. The API
 refuses to start if the worker reference is mutable or differs from the approved
 digest, the approval or requirements hash differs, approved key
 material is no longer trusted, the cohort secret is short, or rollout variables
-conflict. In percentage/global mode, a pre-baseline artifact is visible only
-when its signed producer identity, image digest and signing key match the
-selected approval, and the response names that approval's exact firmware
-identity for iOS to enforce. A [durable map](map-compatibility-contract.md)
-stays visible while **any** recorded approval covers its producer, image digest
-and a still-trusted signer, and carries no firmware identity: iOS installs it
-wherever the device's reported reader capabilities and trust cover it. A new
+conflict. In percentage/global mode, an artifact outside the durable contract
+is visible only when its signed producer identity, image digest and signing key
+match the selected approval, and the response names that approval's exact
+firmware identity for iOS to enforce. A [durable map](map-compatibility-contract.md)
+stays visible to the rollout cohort while **any** recorded approval covers its
+producer, image digest and a still-trusted signer, and carries no firmware
+identity: iOS installs it wherever the device's reported reader capabilities
+and trust cover it. A new
 approval therefore never strands earlier durable maps, while a later untested
 worker still cannot publish under an older hardware result. Remove an approval
 record in a reviewed change to revoke its producer's durable maps. Requester
@@ -289,15 +290,17 @@ required.
 ## Key rotation
 
 Rotation is additive and must preserve resumable artifact identity. Durable
-maps add one rule: a key listed in the
-[compatibility contract](map-compatibility-contract.md) `signers` stays
-`trusted` until it is revoked for a compromise, because removing it would strand
-every durable map it signed. The worker refuses to sign a durable map with an
-unregistered key, so register a new key in the contract with the trust registry.
+maps add one rule: a key listed in
+[`map-compatibility-signers-v1.json`](../map-platform/config/map-compatibility-signers-v1.json)
+stays `trusted` until it is revoked for a compromise, because removing it would
+strand every durable map it signed (see
+[durable map compatibility](map-compatibility-contract.md)). CI enforces this.
+The worker does not read that registry, so registering a key needs no worker
+image, but register it before any worker signs with it.
 
 1. Generate a new dedicated key and add its public key to the trust registry as
-   `trusted` while the old key remains trusted. Add it to the contract's
-   `signers` for its channel.
+   `trusted` while the old key remains trusted. Add it to
+   `map-compatibility-signers-v1.json` for its channel.
 2. Ship and measure app and firmware adoption before changing the worker's
    active signing key. Confirm their reported exact trust capabilities, not
    only a version label.
@@ -306,10 +309,11 @@ unregistered key, so register a new key in the contract with the trust registry.
 4. Keep the old public key trusted for at least the larger of the artifact
    retention window, signed-URL lifetime, supported app/firmware update window,
    and paused-transfer recovery window.
-5. For pre-baseline artifacts only: stop serving those signed by the old key,
-   confirm no retained job or resumable transfer references it, then mark it
-   `retired` and regenerate both clients. A contract signer is never retired
-   this way; it stops signing and keeps verifying.
+5. Only for a key that never signed a durable map: stop serving artifacts
+   signed by it, confirm no retained job or resumable transfer references it,
+   then mark it `retired` and regenerate both clients. A registered durable
+   signer is never retired this way; after its `retireAfter` date it stops
+   signing and keeps verifying.
 
 Never remove a public key merely because the worker has begun signing with its
 replacement. A client that loses the old verifier cannot transfer or resume a
@@ -339,7 +343,7 @@ For a suspected signing-key compromise:
 4. Add and ship a replacement public key before resuming generation.
 5. Remove the compromised public key only after affected immutable artifacts
    are quarantined and paused device sessions are explicitly invalidated. Move a
-   compromised contract signer to `revokedSigners` with reason `compromised`;
+   compromised durable signer to `revokedSigners` with reason `compromised`;
    that deliberately revokes the durable maps it signed.
 6. Create a new exact-identity approval record; repeat any relevant optional
    manual checks before resuming.

@@ -68,7 +68,6 @@ from .map_compatibility import (
     MapCompatibilityContract,
     load_map_compatibility_contract,
     request_profile,
-    require_contract_signer,
 )
 from .topography_artifacts import (
     TOPOGRAPHY_PROFILE_VERSION,
@@ -141,7 +140,7 @@ from .building_identity import (
     selected_building_block_cache_identity,
     selected_building_identity,
 )
-from .models import JobStatus, MapJob, SourceRegion
+from .models import COMPATIBILITY_CONTRACT_METRIC, JobStatus, MapJob, SourceRegion
 from .monitoring import MapMonitoringStore
 from .preview import render_boundary_preview
 from .reuse import (
@@ -185,7 +184,6 @@ class MapBuildResult:
     build_cache_aliases: list[str] | None = None
     build_identity_derivation: dict[str, Any] | None = None
     build_compatibility_key: str | None = None
-    compatibility_contract: int | None = None
 
     def __iter__(self):
         yield self.map_id
@@ -5956,6 +5954,9 @@ class MapBuildPipeline:
         packaging_started = time.perf_counter()
         self._resolve_source_preview_geometry(job)
         metrics: dict[str, Any] = dict(build_metrics or {})
+        # Subset builds start from their parent's metrics; this map records
+        # only the contract its own manifest declares.
+        metrics.pop(COMPATIBILITY_CONTRACT_METRIC, None)
         topography_receipt: dict[str, Any] | None = None
         companion_path: Path | None = None
         if request_has_contours(job.request):
@@ -6013,11 +6014,15 @@ class MapBuildPipeline:
         building_preprocessing_summary = self._building_preprocessing_summary(
             metrics.get("buildingPreprocessing")
         )
+        # A profile this channel may not publish stays an uncovered map. CI
+        # keeps the generation policies inside the contract's channels.
         durable_profile = request_profile(job.request, self.compatibility_contract)
+        if durable_profile is not None and not self.compatibility_contract.publishes(
+            durable_profile, self.deployment_channel
+        ):
+            durable_profile = None
         if durable_profile is not None:
-            self.compatibility_contract.require_publishable(
-                durable_profile, self.deployment_channel
-            )
+            metrics[COMPATIBILITY_CONTRACT_METRIC] = self.compatibility_contract.contract
         manifest = build_manifest(
             job,
             pack_root,
@@ -6168,13 +6173,6 @@ class MapBuildPipeline:
                 "buildSha256": self.producer_build_sha256,
                 "imageDigest": self.producer_image_digest,
             }
-            require_contract_signer(
-                stream_manifest,
-                self.deployment_channel,
-                self.map_signer.key_id,
-                self.map_signer.public_key_sha256,
-                self.compatibility_contract,
-            )
             stream_build = write_map_stream_artifact(
                 pack_root,
                 stream_manifest,
@@ -6260,11 +6258,6 @@ class MapBuildPipeline:
             build_cache_aliases=list(job.build_cache_aliases),
             build_identity_derivation=job.build_identity_derivation,
             build_compatibility_key=job.build_compatibility_key,
-            compatibility_contract=(
-                self.compatibility_contract.contract
-                if durable_profile is not None
-                else None
-            ),
         )
 
     @staticmethod

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -149,6 +150,16 @@ class ArtifactPipeline:
             artifacts=[artifact],
             artifact_metrics={"streamPayloadBytes": 42},
         )
+
+
+class DurableArtifactPipeline(ArtifactPipeline):
+    """A build whose signed manifest declared durable contract 1."""
+
+    def build(self, job, on_status=None, on_progress=None):
+        result = super().build(job, on_status, on_progress)
+        return replace(result, artifact_metrics={
+            **(result.artifact_metrics or {}), "compatibilityContract": 1,
+        })
 
 
 class IdentityObservingPipeline(MapBuildPipeline):
@@ -989,6 +1000,27 @@ class WorkerTests(unittest.TestCase):
             persisted = store.get(job.job_id)
             self.assertEqual(persisted.build_cache_key, "a" * 64)
             self.assertEqual(persisted.build_compatibility_key, "b" * 64)
+
+    def test_every_completion_path_keeps_the_signed_compatibility_contract(self):
+        # The worker loop and the direct run_job runner both record READY maps;
+        # neither may drop a durable map out of the contract. Exact reuse
+        # copies the same artifact metrics from its source.
+        for runner in ("worker", "run_job"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
+                store = JobStore(tmp)
+                service = MapJobService(SourceIndex([self.source]), store)
+                job = service.create_job(
+                    {"mode": "custom_bbox", "bbox": [103.75, 1.24, 103.93, 1.37]}
+                )
+                if runner == "worker":
+                    MapWorker(
+                        store, DurableArtifactPipeline(), worker_id="worker-durable",
+                    ).run_next()
+                else:
+                    run_job(store, DurableArtifactPipeline(), job.job_id)
+                loaded = store.get(job.job_id)
+                self.assertEqual(loaded.status, JobStatus.READY)
+                self.assertEqual(loaded.compatibility_contract, 1)
 
     def test_worker_persists_immutable_artifact_metadata_and_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:

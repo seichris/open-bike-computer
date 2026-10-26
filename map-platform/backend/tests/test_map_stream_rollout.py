@@ -127,7 +127,7 @@ class MapStreamRolloutPolicyTests(unittest.TestCase):
 
         self.assertTrue(allowed(earlier, 1))
         self.assertTrue(allowed(current, 1))
-        # Pre-baseline artifacts keep the original single-approval rule.
+        # Artifacts outside the contract keep the single-approval rule.
         self.assertFalse(allowed(earlier, None))
         self.assertTrue(allowed(current, None))
         self.assertFalse(allowed(untrusted, 1))

@@ -1882,7 +1882,9 @@ class MapJobRunAPITests(unittest.TestCase):
             with self.subTest(compatibility_contract=contract):
                 self.update_job(
                     job_id, status="ready", mapId="map-durable", artifacts=[stream],
-                    compatibilityContract=contract,
+                    artifactMetrics=(
+                        {"compatibilityContract": contract} if contract is not None else None
+                    ),
                 )
                 listed = self.client.get(
                     f"/v1/map-jobs/{job_id}",

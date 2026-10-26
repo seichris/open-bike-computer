@@ -49,8 +49,8 @@ const productionSigners = corpus.signers
   .map((item) => signer(item.keyId));
 const developmentAppSigners = corpus.signers.map((item) => signer(item.keyId));
 
-function profile(name: string) {
-  return corpus.maps.find((item) => item.profile === name)!;
+function corpusMap(id: string) {
+  return corpus.maps.find((item) => item.id === id)!;
 }
 
 async function publish(publication: CorpusPublication): Promise<void> {
@@ -65,8 +65,8 @@ async function publish(publication: CorpusPublication): Promise<void> {
   );
 }
 
-async function libraryWith(name: string): Promise<string> {
-  const entry = profile(name);
+async function libraryWith(id: string): Promise<string> {
+  const entry = corpusMap(id);
   await publish(entry.development.publication as CorpusPublication);
   for (const production of entry.production) {
     await publish(production.publication as CorpusPublication);
@@ -109,7 +109,7 @@ describe("durable map contract v1", () => {
   });
 
   it("gives Bicino the production map across key rotation and worker updates", async () => {
-    const entry = profile("buildings-3d-v1");
+    const entry = corpusMap("buildings-3d-v1");
     const libraryID = await libraryWith("buildings-3d-v1");
     const production = Object.fromEntries(
       entry.production.map((item) => [item.variant, stream(item.publication)]),
@@ -164,7 +164,7 @@ describe("durable map contract v1", () => {
   });
 
   it("gives Bicino Dev development artifacts first, then production", async () => {
-    const entry = profile("topographic-contours-v1");
+    const entry = corpusMap("topographic-contours-v1");
     const libraryID = await libraryWith("topographic-contours-v1");
     const development = await createLibraryDownloadGrant(
       env,
@@ -198,10 +198,35 @@ describe("durable map contract v1", () => {
     );
   });
 
+  it("serves the optional terrain layer as the same contour profile", async () => {
+    const entry = corpusMap("topographic-contours-v1-terrain");
+    expect(entry.profile).toBe("topographic-contours-v1");
+    const libraryID = await libraryWith(entry.id);
+    for (const [channel, signers, tier] of [
+      ["production", productionSigners, "production"],
+      ["development", developmentAppSigners, "development"],
+    ] as const) {
+      const grant = await createLibraryDownloadGrant(
+        env,
+        libraryID,
+        entry.mapEntryId,
+        channel,
+        signers,
+        appIdentity,
+        appReader,
+      );
+      expect(grant.artifact.deliveryTier).toBe(tier);
+      expect(grant.artifact.readerRequirements?.requiredFeatures).toEqual(
+        entry.features,
+      );
+      expect(grant.companion?.artifact.deliveryTier).toBe(tier);
+    }
+  });
+
   it("keeps development-only POI maps away from Bicino", async () => {
-    for (const name of ["map-pois-v1", "map-pois-contours-v1"]) {
-      const entry = profile(name);
-      const libraryID = await libraryWith(name);
+    for (const id of ["map-pois-v1", "map-pois-contours-v1"]) {
+      const entry = corpusMap(id);
+      const libraryID = await libraryWith(id);
       await expect(
         createLibraryDownloadGrant(
           env,
@@ -230,7 +255,7 @@ describe("durable map contract v1", () => {
   });
 
   it("does not grant a durable map to a reader without its features", async () => {
-    const entry = profile("map-pois-contours-v1");
+    const entry = corpusMap("map-pois-contours-v1");
     const libraryID = await libraryWith("map-pois-contours-v1");
     await expect(
       createLibraryDownloadGrant(

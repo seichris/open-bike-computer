@@ -1367,8 +1367,9 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             case .deviceProtocolUnsupported:
                 return "This map needs compatible Bike Computer firmware. Update the device firmware and try again."
             case .firmwareIdentityIncomplete, .firmwareIdentityMismatch:
-                // Only pre-baseline maps carry an exact firmware identity.
-                return "This map was saved before durable maps and only installs on the firmware it was approved for. Download the area again to get a copy that keeps working after updates."
+                // Only maps outside the durable contract carry an exact
+                // firmware identity.
+                return "This isn't a durable map, so it only installs on the firmware it was approved for. Download the area again with current firmware to get a copy that keeps working after updates."
             case .signingKeyNotTrusted:
                 return "The Bike Computer does not trust this map's signing key. Update its firmware and try again."
             case .notSignedStream, .missingSignatureCapability:
@@ -1663,10 +1664,11 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
 }
 
 nonisolated enum SavedMapCompatibilityPolicy {
-    /// Whether a saved file predates the durable map contract: archives always
-    /// do, and a signed stream does when its manifest has no contract marker.
+    /// Whether a saved file is outside the durable map contract: archives
+    /// always are, and a signed stream is when its manifest has no contract
+    /// marker (it predates the baseline or uses an uncovered profile).
     /// Unreadable files are reported by their own validation errors instead.
-    static func isPreBaseline(packURL: URL) -> Bool {
+    static func lacksDurableContract(packURL: URL) -> Bool {
         switch packURL.pathExtension.lowercased() {
         case "zip":
             return true
@@ -2016,7 +2018,7 @@ nonisolated enum MapInstallProtocolSelector {
     /// `deviceReaderCapabilities` from the pinned transfer status (or the
     /// legacy feature bits). A durable map installs wherever those and the
     /// device trust cover it; firmware identities from delivery metadata are
-    /// ignored. Pre-baseline maps keep their original exact-firmware rule.
+    /// ignored. Maps outside the contract keep their exact-firmware rule.
     static func evaluate(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
@@ -2098,7 +2100,9 @@ nonisolated enum DeviceMapReaderCapabilityPolicy {
         reported: OfflineMapReaderCapabilities?,
         legacyFeatures: LegacyDeviceRendererFeatures?
     ) -> OfflineMapReaderCapabilities? {
-        if let reported { return reported }
+        // A later report schema is not this app's to interpret, but the
+        // renderer feature bits still describe what that firmware reads.
+        if let reported, reported.schemaVersion == 1 { return reported }
         return legacyFeatures.map(legacy)
     }
 
@@ -4269,7 +4273,7 @@ struct OfflineMapPlatformClient {
               response.producerImageDigest == artifact.producerImageDigest,
               // Firmware requirements are delivery metadata, not the immutable
               // identity being refreshed: a durable map ignores them and a
-              // pre-baseline map keeps the values it was listed with. A new
+              // map outside the contract keeps the values it was listed with. A new
               // approval or backend version must not break a re-download.
               response.mapContentReceipt == artifact.mapContentReceipt,
               response.intermediateSha256 == artifact.intermediateSha256,

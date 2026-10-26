@@ -225,7 +225,7 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
     content_receipt = catalog_content_receipt(job)
     entry_id = map_entry_id(job)
     # A durable map's signed manifest is its reader contract. Configured
-    # catalog firmware gates apply only to pre-baseline maps.
+    # catalog firmware gates apply only to maps outside the contract.
     delivery_requirements = (
         catalog_delivery_requirements(channel)
         if job.compatibility_contract is None

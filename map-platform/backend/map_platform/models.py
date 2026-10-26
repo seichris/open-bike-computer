@@ -149,6 +149,10 @@ class MapDownloadReceipt:
         )
 
 
+# Artifact-metrics key for the durable map contract the producer signed.
+COMPATIBILITY_CONTRACT_METRIC = "compatibilityContract"
+
+
 @dataclass
 class MapJob:
     job_id: str
@@ -167,9 +171,6 @@ class MapJob:
     pack_path: str | None = None
     pack_bytes: int | None = None
     artifacts: list[ArtifactRecord] = field(default_factory=list)
-    # Durable compatibility contract declared by the signed manifest of these
-    # artifacts; None marks a pre-baseline map. See map_compatibility.py.
-    compatibility_contract: int | None = None
     artifact_metrics: dict[str, Any] | None = None
     user_label: str | None = None
     catalog_publication_id: str | None = None
@@ -210,6 +211,19 @@ class MapJob:
     progress_total_units: int | None = None
     progress_indeterminate: bool | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def compatibility_contract(self) -> int | None:
+        """Durable contract the producer signed into these artifacts, or None.
+
+        The producer records it in the artifact metrics. Every control-plane
+        version saves those verbatim and exact reuse copies them, so an older
+        backend that rewrites this job cannot turn a durable map into a
+        map outside the contract. See map_compatibility.py.
+        """
+        metrics = self.artifact_metrics if isinstance(self.artifact_metrics, dict) else {}
+        value = metrics.get(COMPATIBILITY_CONTRACT_METRIC)
+        return value if type(value) is int and 1 <= value <= 255 else None
 
     @property
     def artifact_display_name(self) -> str:
@@ -285,7 +299,6 @@ class MapJob:
             ]
             result["pendingArtifactKeys"] = self.pending_artifact_keys
             result["artifactGcKeys"] = self.artifact_gc_keys
-            result["compatibilityContract"] = self.compatibility_contract
             result["schedulerYielded"] = self.scheduler_yielded
             result["catalogPublicationError"] = self.catalog_publication_error
             result["catalogPublicationAttempts"] = self.catalog_publication_attempts
@@ -334,9 +347,6 @@ class MapJob:
             pack_path=data.get("packPath"),
             pack_bytes=data.get("packBytes"),
             artifacts=[ArtifactRecord.from_dict(value) for value in data.get("artifacts", [])],
-            compatibility_contract=_compatibility_contract(
-                data.get("compatibilityContract")
-            ),
             artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
             user_label=data.get("userLabel"),
             catalog_publication_id=data.get("catalogPublicationId"),
@@ -670,14 +680,6 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
     if start is None or finish is None:
         return None
     return max((finish - start).total_seconds(), 0)
-
-
-def _compatibility_contract(value: Any) -> int | None:
-    if value is None:
-        return None
-    if type(value) is not int or not 1 <= value <= 255:
-        raise ValueError("map compatibility contract is invalid")
-    return value
 
 
 def _catalog_publication_state(value: Any) -> str | None:

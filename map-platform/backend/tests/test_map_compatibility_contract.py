@@ -4,7 +4,7 @@ The corpus under ``fixtures/map-compatibility-v1`` was produced once by the
 real packaging, promotion and signing code (``map_compatibility_fixture.py``).
 These tests pin its exact bytes, then check that the current backend still
 reads every frozen map and gives direct-job and catalog delivery the same
-compatibility meaning. Never regenerate the corpus to make a test pass.
+compatibility meaning. Never regenerate a corpus to make a test pass.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -20,21 +21,18 @@ from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from map_platform.artifacts import (
-    BIKE_MAP_STREAM_FORMAT,
-    TOPOGRAPHY_COMPANION_FORMAT,
-    ArtifactRecord,
-)
+from map_platform.artifacts import BIKE_MAP_STREAM_FORMAT, TOPOGRAPHY_COMPANION_FORMAT
 from map_platform.catalog import publication_payload
 from map_platform.map_compatibility import (
+    TERRAIN_EXPERIMENT_LAYER,
     MapCompatibilityError,
     load_map_compatibility_contract,
+    load_map_compatibility_signers,
     manifest_contract,
     parse_map_compatibility_contract,
+    parse_map_compatibility_signers,
     request_profile,
-    require_contract_signer,
 )
-from map_platform.map_signing import P256MapArtifactSigner
 from map_platform.map_stream import (
     FIXED_HEADER_BYTES,
     MapStreamHeader,
@@ -48,34 +46,74 @@ from map_platform.map_stream_trust_registry import (
     FORBIDDEN_FIXTURE_PUBLIC_KEYS,
     load_trust_registry,
 )
-from map_platform.models import JobStatus, MapJob
+from map_platform.models import COMPATIBILITY_CONTRACT_METRIC, MapJob
 from map_platform.topography_companion import validate_companion
 
 
 TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parents[2]
-CORPUS = TESTS / "fixtures" / "map-compatibility-v1"
-CONTRACT = REPO / "map-platform" / "config" / "map-compatibility-contract-v1.json"
-# Pinned once when the corpus was frozen. A changed index means old fixtures
-# were rewritten; add a new corpus directory for a later contract instead.
-CORPUS_JSON_SHA256 = "9755ab855441cb0f91bde414e43e84f59756aa34d6c8a2f377f450797c37c35e"
-CORPUS_INDEX_SHA256 = "d4a04b11b671bf453cb260167f09ee1cc8333235cde1c3461e8fbccf7379fd0f"
-# Contract v1 as first published. Profiles and channels may be appended in a
-# reviewed contract change; none of these may be removed or narrowed.
+FIXTURES = TESTS / "fixtures"
+EXTRACTION = FIXTURES / "map-compatibility-extraction-v1"
+CONFIG = REPO / "map-platform" / "config"
+# Pinned once when each corpus was frozen. A changed index means old fixtures
+# were rewritten; add a new corpus directory for a later revision instead.
+FROZEN_CORPORA = {
+    "map-compatibility-v1": (
+        "98db28f8e16803b524efa2fe19da0cf4bae17c2d8998dc6b3449aa33481f8065",
+        "d18579a71628bba351d5a45011f01f9337a6b178f8f2d73fd00c4f655f02b462",
+    ),
+}
+# Contract v1 as first published. Profiles, channels and optional layers may
+# be appended in a reviewed contract change; none of these may be removed.
 V1_PROFILES = {
-    "buildings-3d-v1": (3, ("3d-buildings", "street-labels"), {"development", "production"}),
+    "buildings-3d-v1": (
+        3, ("3d-buildings", "street-labels"), {"development", "production"}, (),
+    ),
     "topographic-contours-v1": (
-        4, ("3d-buildings", "contours", "street-labels"), {"development", "production"},
+        4, ("3d-buildings", "contours", "street-labels"),
+        {"development", "production"}, (TERRAIN_EXPERIMENT_LAYER,),
     ),
-    "map-pois-v1": (5, ("3d-buildings", "map-pois", "street-labels"), {"development"}),
+    "map-pois-v1": (5, ("3d-buildings", "map-pois", "street-labels"), {"development"}, ()),
     "map-pois-contours-v1": (
-        5, ("3d-buildings", "contours", "map-pois", "street-labels"), {"development"},
+        5, ("3d-buildings", "contours", "map-pois", "street-labels"), {"development"}, (),
     ),
+}
+# Keys that sign durable maps. Each stays registered and client-trusted until
+# it is moved to revokedSigners after a compromise.
+V1_SIGNERS = {
+    ("development", "map-dev-2026-08",
+     "c8d0e9e85da681ec048c9abbbb96c87072b9f672b16c7fb40250df1ec60baa0e"),
+    ("production", "map-prod-2026-08",
+     "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"),
 }
 
 
-def load_corpus() -> dict:
-    return json.loads((CORPUS / "corpus.json").read_text(encoding="utf-8"))
+def corpus_directories() -> list[Path]:
+    return sorted(FIXTURES.glob("map-compatibility-v*"))
+
+
+def load_corpus(directory: Path) -> dict:
+    return json.loads((directory / "corpus.json").read_text(encoding="utf-8"))
+
+
+def all_entries() -> list[tuple[Path, dict, dict]]:
+    """Every frozen map as (corpus directory, corpus, entry)."""
+    result = []
+    for directory in corpus_directories():
+        corpus = load_corpus(directory)
+        result.extend((directory, corpus, entry) for entry in corpus["maps"])
+    return result
+
+
+def variants(entry: dict) -> list[dict]:
+    return [entry["development"], *entry["production"]]
+
+
+def stream_artifact(variant: dict) -> dict:
+    return next(
+        value for value in variant["publication"]["artifacts"]
+        if value["format"] == BIKE_MAP_STREAM_FORMAT
+    )
 
 
 def stream_parts(data: bytes) -> tuple[MapStreamHeader, bytes, bytes, dict]:
@@ -117,16 +155,19 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
             dict(contract.stream_formats), {"bike-map-stream-v1": frozenset({1})}
         )
         profiles = {profile.profile_id: profile for profile in contract.profiles}
-        for profile_id, (format_version, features, channels) in V1_PROFILES.items():
+        for profile_id, (format_version, features, channels, layers) in V1_PROFILES.items():
             with self.subTest(profile=profile_id):
                 profile = profiles[profile_id]
                 self.assertEqual(profile.renderer, "esp32-fmb")
                 self.assertEqual(profile.renderer_format_version, format_version)
                 self.assertEqual(profile.features, features)
                 self.assertTrue(channels <= profile.channels)
+                self.assertTrue(set(layers) <= set(profile.optional_layers))
 
     def test_parser_rejects_ambiguous_or_weakened_contracts(self):
-        document = json.loads(CONTRACT.read_text(encoding="utf-8"))
+        document = json.loads(
+            (CONFIG / "map-compatibility-contract-v1.json").read_text(encoding="utf-8")
+        )
         changes = {
             "unknown field": lambda value: value.update(extra=True),
             "marker mismatch": lambda value: value.update(
@@ -141,18 +182,11 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
             "contours without companion": lambda value: value["profiles"][1].update(
                 companions=[]
             ),
-            "revocation without compromise": lambda value: value.update(
-                revokedSigners=[{
-                    "keyId": "map-prod-2026-07", "publicKeySha256": "a" * 64,
-                    "reason": "rotated",
-                }]
+            "unknown optional layer": lambda value: value["profiles"][0].update(
+                optionalLayers=["shaded-relief"]
             ),
-            "revoked signer still registered": lambda value: value.update(
-                revokedSigners=[{
-                    "keyId": value["signers"][1]["keyId"],
-                    "publicKeySha256": value["signers"][1]["publicKeySha256"],
-                    "reason": "compromised",
-                }]
+            "layer on another target": lambda value: value["profiles"][0].update(
+                optionalLayers=[TERRAIN_EXPERIMENT_LAYER]
             ),
         }
         for name, change in changes.items():
@@ -162,11 +196,18 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
                 with self.assertRaises(MapCompatibilityError):
                     parse_map_compatibility_contract(candidate)
 
-    def test_registered_signers_stay_in_client_trust(self):
-        contract = load_map_compatibility_contract()
+    def test_durable_signers_stay_registered_and_client_trusted(self):
+        registry = load_map_compatibility_signers()
+        self.assertEqual(registry.contract, 1)
+        revoked = registry.revoked_signers
+        for signer in V1_SIGNERS:
+            with self.subTest(signer=signer[1]):
+                # Removing a durable signer strands every map it signed. Only a
+                # compromise revocation may take it out of the registry.
+                self.assertTrue(signer in registry.signers or signer[1:] in revoked)
         trusted = {
             (key.key_id, hashlib.sha256(bytes.fromhex(key.public_key_x963_hex)).hexdigest())
-            for key in load_trust_registry(REPO / "map-platform" / "config" / "map-stream-trust.json")
+            for key in load_trust_registry(CONFIG / "map-stream-trust.json")
             if key.state == "trusted"
         }
         settings = dict(
@@ -176,25 +217,65 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
             ).read_text(encoding="utf-8").splitlines()
             if " = " in line
         )
+        # Bicino Dev and development firmware trust exactly one development
+        # key, so it cannot be replaced until both readers accept several.
         development = (
             settings["BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"].strip(),
             hashlib.sha256(bytes.fromhex(
                 settings["BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX"].strip()
             )).hexdigest(),
         )
-        for channel, key_id, key_sha256 in contract.signers:
-            with self.subTest(signer=key_id):
-                # Removing a durable signer from clients strands every map it
-                # signed. Only a compromise revocation may do that.
+        firmware = re.findall(
+            r'"([^"]+)"',
+            (
+                REPO / "esp32" / "lib" / "map_transfer"
+                / "map_stream_development_compiled_key.generated.inc"
+            ).read_text(encoding="utf-8").split("{", 1)[1],
+        )
+        self.assertEqual((firmware[0], firmware[2]), development)
+        for channel, key_id, key_sha256 in registry.signers:
+            with self.subTest(registered=key_id):
                 if channel == "production":
                     self.assertIn((key_id, key_sha256), trusted)
                 else:
                     self.assertEqual((key_id, key_sha256), development)
-        self.assertFalse(contract.revoked_signers & trusted)
+        self.assertFalse(revoked & trusted)
+        self.assertNotIn(development, revoked)
+
+    def test_signer_registry_parser_is_strict(self):
+        document = json.loads(
+            (CONFIG / "map-compatibility-signers-v1.json").read_text(encoding="utf-8")
+        )
+        changes = {
+            "unknown field": lambda value: value.update(extra=True),
+            "retirement without compromise": lambda value: value.update(
+                revokedSigners=[{
+                    "keyId": "map-prod-2026-07", "publicKeySha256": "a" * 64,
+                    "reason": "rotated",
+                }]
+            ),
+            "revoked but still registered": lambda value: value.update(
+                revokedSigners=[{
+                    "keyId": value["signers"][1]["keyId"],
+                    "publicKeySha256": value["signers"][1]["publicKeySha256"],
+                    "reason": "compromised",
+                }]
+            ),
+            "unknown channel": lambda value: value["signers"][0].update(channel="lab"),
+            "duplicate key ID": lambda value: value["signers"].append(
+                dict(value["signers"][0], channel="production")
+            ),
+        }
+        for name, change in changes.items():
+            with self.subTest(change=name):
+                candidate = json.loads(json.dumps(document))
+                change(candidate)
+                with self.assertRaises(MapCompatibilityError):
+                    parse_map_compatibility_signers(candidate)
 
     def test_generation_policies_never_publish_an_unregistered_durable_channel(self):
         contract = load_map_compatibility_contract()
-        for path in sorted((REPO / "map-platform" / "config").glob("generation-profile-policy-v*.json")):
+        for path in sorted(CONFIG.glob("generation-profile-policy-v*.json")):
             policy = json.loads(path.read_text(encoding="utf-8"))
             profiles = {value["id"]: value for value in policy["profiles"]}
             for channel, settings in policy["channels"].items():
@@ -215,7 +296,7 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
                             if durable is not None:
                                 self.assertIn(channel, durable.channels)
 
-    def test_only_contract_profiles_without_experiments_are_marked(self):
+    def test_marked_profiles_include_optional_terrain_but_never_unknown_targets(self):
         contract = load_map_compatibility_contract()
 
         def request(format_version, **target):
@@ -226,128 +307,152 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
         self.assertIsNone(request_profile(request(1), contract))
         self.assertIsNone(request_profile(request(2), contract))
         self.assertEqual(request_profile(request(3), contract).profile_id, "buildings-3d-v1")
-        self.assertEqual(
-            request_profile(request(4), contract).profile_id, "topographic-contours-v1"
-        )
-        self.assertIsNone(request_profile(request(4, terrainProfileVersion=1), contract))
+        # The terrain experiment is an optional layer, so the connected bike's
+        # diagnostics support never decides whether a contour map is durable.
+        for target in ({}, {"terrainProfileVersion": 1}):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    request_profile(request(4, **target), contract).profile_id,
+                    "topographic-contours-v1",
+                )
         self.assertEqual(
             request_profile(request(5, requestedFeatures=[
                 "3d-buildings", "map-pois", "street-labels",
             ]), contract).profile_id,
             "map-pois-v1",
         )
+        self.assertIsNone(request_profile(request(9), contract))
         self.assertIsNone(request_profile({"target": None}, contract))
+        poi = contract.profile_for("esp32-fmb", 5, ("3d-buildings", "map-pois", "street-labels"))
+        self.assertTrue(contract.publishes(poi, "development"))
+        # The producer leaves it unmarked instead; CI keeps policies in sync.
+        self.assertFalse(contract.publishes(poi, "production"))
+        with self.assertRaisesRegex(MapCompatibilityError, "not published to the production"):
+            contract.require_publishable(poi, "production")
 
-    def test_durable_manifest_requires_a_registered_signer_for_its_channel(self):
-        contract = load_map_compatibility_contract()
-        manifest = {"compatibility": {"contract": 1}}
-        production = next(entry for entry in contract.signers if entry[0] == "production")
-        self.assertEqual(
-            require_contract_signer(manifest, "production", production[1], production[2], contract),
-            1,
-        )
-        with self.assertRaisesRegex(MapCompatibilityError, "not a registered development"):
-            require_contract_signer(manifest, "development", production[1], production[2], contract)
-        with self.assertRaisesRegex(MapCompatibilityError, "not a registered production"):
-            require_contract_signer(manifest, "production", production[1], "0" * 64, contract)
-        with self.assertRaisesRegex(MapCompatibilityError, "unknown compatibility contract"):
-            require_contract_signer(
-                {"compatibility": {"contract": 2}}, "production",
-                production[1], production[2], contract,
-            )
-        self.assertIsNone(require_contract_signer({}, "production", "any", "0" * 64, contract))
-        for marker in ({"contract": 0}, {"contract": "1"}, {"contract": 1, "extra": 1}, [1]):
+    def test_manifest_marker_is_strict(self):
+        self.assertEqual(manifest_contract({"compatibility": {"contract": 1}}), 1)
+        self.assertIsNone(manifest_contract({}))
+        for marker in ({"contract": 0}, {"contract": "1"}, {"contract": 1, "extra": 1},
+                       {"contract": 256}, [1]):
             with self.subTest(marker=marker), self.assertRaises(MapCompatibilityError):
                 manifest_contract({"compatibility": marker})
 
-    def test_job_classification_survives_persistence_and_old_records(self):
-        corpus = load_corpus()
-        entry = corpus["maps"][0]
-        job = MapJob.from_dict(self.job_document(entry))
+    def test_classification_survives_an_older_control_plane_rewrite(self):
+        _directory, _corpus, entry = all_entries()[0]
+        document = json.loads(json.dumps(entry["job"]))
+        job = MapJob.from_dict(document)
         self.assertEqual(job.compatibility_contract, 1)
         persisted = job.to_dict(include_internal=True)
-        self.assertEqual(persisted["compatibilityContract"], 1)
-        self.assertNotIn("compatibilityContract", job.to_dict())
-        legacy = self.job_document(entry)
-        legacy.pop("compatibilityContract")
-        self.assertIsNone(MapJob.from_dict(legacy).compatibility_contract)
-        for invalid in (0, "1", True, 256):
-            with self.subTest(value=invalid), self.assertRaises(ValueError):
-                MapJob.from_dict(dict(legacy, compatibilityContract=invalid))
-
-    @staticmethod
-    def job_document(entry: dict) -> dict:
-        return {
-            "jobId": entry["jobId"],
-            "status": "ready",
-            "request": {"target": {
-                "renderer": "esp32-fmb",
-                "rendererFormatVersion": entry["rendererFormatVersion"],
-            }},
-            "geometry": {"mode": "custom_bbox", "bounds": [0.001, 0.001, 0.03, 0.03],
-                         "areaKm2": 10, "vertexCount": 4},
-            "sourceRegion": {"id": "fixture", "provider": "test", "name": "Fixture",
-                             "url": "https://example.invalid/fixture.osm.pbf",
-                             "bounds": [-1, -1, 1, 1]},
-            "createdAt": "2026-10-26T00:00:00Z",
-            "updatedAt": "2026-10-26T00:00:00Z",
-            "mapId": entry["mapId"],
-            "artifacts": entry["development"]["artifacts"],
-            "compatibilityContract": entry["compatibilityContract"],
-        }
+        # Older models drop unknown top-level fields when they rewrite a job,
+        # but keep artifact metrics verbatim. The classification must live
+        # there and nowhere else.
+        self.assertNotIn("compatibilityContract", persisted)
+        self.assertEqual(persisted["artifactMetrics"][COMPATIBILITY_CONTRACT_METRIC], 1)
+        rewritten = MapJob.from_dict(json.loads(json.dumps(persisted)))
+        self.assertEqual(rewritten.compatibility_contract, 1)
+        for metrics in (None, {}, {COMPATIBILITY_CONTRACT_METRIC: 0},
+                        {COMPATIBILITY_CONTRACT_METRIC: "1"},
+                        {COMPATIBILITY_CONTRACT_METRIC: True}):
+            with self.subTest(metrics=metrics):
+                self.assertIsNone(
+                    MapJob.from_dict({**document, "artifactMetrics": metrics})
+                    .compatibility_contract
+                )
 
 
 class FrozenCorpusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.corpus = load_corpus()
-        cls.signers = {value["keyId"]: value for value in cls.corpus["signers"]}
+        cls.entries = all_entries()
 
     def test_corpus_bytes_are_frozen(self):
-        self.assertEqual(
-            hashlib.sha256((CORPUS / "corpus.json").read_bytes()).hexdigest(),
-            CORPUS_JSON_SHA256,
-        )
-        self.assertEqual(
-            hashlib.sha256((CORPUS / "corpus.txt").read_bytes()).hexdigest(),
-            CORPUS_INDEX_SHA256,
-        )
-        expected = self.corpus["files"]
-        present = {
-            path.name for path in CORPUS.iterdir()
-            if path.name not in {"corpus.json", "corpus.txt", "README.md"}
-        }
-        self.assertEqual(present, set(expected))
-        for name, sha256 in expected.items():
-            with self.subTest(file=name):
-                self.assertEqual(hashlib.sha256((CORPUS / name).read_bytes()).hexdigest(), sha256)
+        directories = {path.name: path for path in corpus_directories()}
+        self.assertEqual(set(directories), set(FROZEN_CORPORA))
+        for name, (json_sha256, index_sha256) in FROZEN_CORPORA.items():
+            directory = directories[name]
+            corpus = load_corpus(directory)
+            with self.subTest(corpus=name):
+                self.assertEqual(
+                    hashlib.sha256((directory / "corpus.json").read_bytes()).hexdigest(),
+                    json_sha256,
+                )
+                self.assertEqual(
+                    hashlib.sha256((directory / "corpus.txt").read_bytes()).hexdigest(),
+                    index_sha256,
+                )
+                present = {
+                    path.name for path in directory.iterdir()
+                    if path.name not in {"corpus.json", "corpus.txt", "README.md"}
+                }
+                self.assertEqual(present, set(corpus["files"]))
+                for file_name, sha256 in corpus["files"].items():
+                    self.assertEqual(
+                        hashlib.sha256((directory / file_name).read_bytes()).hexdigest(),
+                        sha256,
+                    )
 
-    def test_corpus_covers_every_contract_profile_and_channel(self):
+    def test_corpora_cover_every_contract_profile_channel_and_layer(self):
         contract = load_map_compatibility_contract()
-        maps = {entry["profile"]: entry for entry in self.corpus["maps"]}
         for profile in contract.profiles:
             with self.subTest(profile=profile.profile_id):
-                entry = maps[profile.profile_id]
-                self.assertEqual(entry["rendererFormatVersion"], profile.renderer_format_version)
-                self.assertEqual(tuple(entry["features"]), profile.features)
-                self.assertEqual(bool(entry["production"]), "production" in profile.channels)
-                self.assertEqual(entry["companionFile"] is not None, bool(profile.companions))
-        for key_id, signer in self.signers.items():
-            self.assertIn(key_id, FORBIDDEN_FIXTURE_KEY_IDS)
-            self.assertIn(signer["publicKeyX963Hex"], FORBIDDEN_FIXTURE_PUBLIC_KEYS)
+                entries = [entry for _, _, entry in self.entries
+                           if entry["profile"] == profile.profile_id]
+                self.assertTrue(entries)
+                for entry in entries:
+                    self.assertEqual(entry["rendererFormatVersion"], profile.renderer_format_version)
+                    self.assertEqual(tuple(entry["features"]), profile.features)
+                    self.assertEqual(entry["companionFile"] is not None, bool(profile.companions))
+                    self.assertTrue(set(entry["optionalLayers"]) <= set(profile.optional_layers))
+                self.assertEqual(
+                    any(entry["production"] for entry in entries),
+                    "production" in profile.channels,
+                )
+                self.assertEqual(
+                    {layer for entry in entries for layer in entry["optionalLayers"]},
+                    set(profile.optional_layers),
+                )
+        for _, corpus, _ in self.entries:
+            for signer in corpus["signers"]:
+                self.assertIn(signer["keyId"], FORBIDDEN_FIXTURE_KEY_IDS)
+                self.assertIn(signer["publicKeyX963Hex"], FORBIDDEN_FIXTURE_PUBLIC_KEYS)
+
+    def test_osm_maps_carry_the_frozen_worker_extraction(self):
+        extracted = [entry for _, _, entry in self.entries if entry["extraction"]]
+        # Real extraction output covers the production 3D target and the POI
+        # target; the other maps use test-helper blocks.
+        self.assertEqual(
+            {entry["rendererFormatVersion"] for entry in extracted}, {3, 5}
+        )
+        for directory, _, entry in self.entries:
+            if not entry["extraction"]:
+                continue
+            source = EXTRACTION / entry["extraction"]
+            expected = {
+                f"VECTMAP/{entry['mapId']}/{path.relative_to(source).as_posix()}":
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in source.rglob("*") if path.is_file()
+            }
+            for variant in variants(entry):
+                with self.subTest(file=variant["file"]):
+                    _header, _manifest, _envelope, parsed = stream_parts(
+                        (directory / variant["file"]).read_bytes()
+                    )
+                    files = {file["path"]: file["sha256"] for file in parsed["files"]}
+                    self.assertEqual(
+                        {path: files.get(path) for path in expected}, expected
+                    )
 
     def test_every_frozen_stream_still_verifies_and_declares_its_profile(self):
         contract = load_map_compatibility_contract()
-        for entry in self.corpus["maps"]:
-            for variant in [entry["development"], *entry["production"]]:
+        for directory, corpus, entry in self.entries:
+            signers = {value["keyId"]: value for value in corpus["signers"]}
+            for variant in variants(entry):
                 with self.subTest(file=variant["file"]):
-                    data = (CORPUS / variant["file"]).read_bytes()
+                    data = (directory / variant["file"]).read_bytes()
                     header, manifest, envelope, parsed = stream_parts(data)
-                    stream = next(
-                        value for value in variant["publication"]["artifacts"]
-                        if value["format"] == BIKE_MAP_STREAM_FORMAT
-                    )
-                    signer = self.signers[stream["signatureKeyId"]]
+                    stream = stream_artifact(variant)
+                    signer = signers[stream["signatureKeyId"]]
                     self.assertEqual(signer["channel"], variant["deliveryTier"])
                     self.assertTrue(verify_signature(manifest, envelope, signer["publicKeyX963Hex"]))
                     self.assertEqual(stream["sha256"], hashlib.sha256(data).hexdigest())
@@ -358,13 +463,13 @@ class FrozenCorpusTests(unittest.TestCase):
                         signed_manifest_receipt(manifest, envelope),
                     )
                     self.assertEqual(manifest_contract(parsed), contract.contract)
-                    self.assertEqual(
-                        contract.profile_for(
-                            parsed["target"]["renderer"], parsed["target"]["formatVersion"],
-                            entry["features"],
-                        ).profile_id,
-                        entry["profile"],
+                    profile = contract.profile_for(
+                        parsed["target"]["renderer"], parsed["target"]["formatVersion"],
+                        entry["features"],
                     )
+                    self.assertEqual(profile.profile_id, entry["profile"])
+                    has_terrain = any(file["path"].endswith(".fme") for file in parsed["files"])
+                    self.assertEqual(has_terrain, TERRAIN_EXPERIMENT_LAYER in entry["optionalLayers"])
                     self.assertEqual(
                         stream["readerRequirements"],
                         {
@@ -390,19 +495,21 @@ class FrozenCorpusTests(unittest.TestCase):
                         offset += file["bytes"]
                     self.assertEqual(offset, len(payload))
 
-    def test_corrupt_truncated_and_untrusted_streams_are_rejected(self):
-        entry = self.corpus["maps"][0]
-        data = (CORPUS / entry["development"]["file"]).read_bytes()
+    def test_corrupt_and_untrusted_streams_are_rejected(self):
+        directory, corpus, entry = self.entries[0]
+        signers = {value["keyId"]: value for value in corpus["signers"]}
+        data = (directory / entry["development"]["file"]).read_bytes()
         header, manifest, envelope, _parsed = stream_parts(data)
-        other_key = next(
-            value["publicKeyX963Hex"] for key_id, value in self.signers.items()
-            if value["channel"] == "production"
+        development_key = signers[stream_artifact(entry["development"])["signatureKeyId"]]
+        production_key = next(
+            value for value in corpus["signers"] if value["channel"] == "production"
         )
-        self.assertFalse(verify_signature(manifest, envelope, other_key))
+        self.assertFalse(verify_signature(manifest, envelope, production_key["publicKeyX963Hex"]))
         tampered = bytearray(manifest)
         tampered[-2] ^= 1
-        development_key = self.signers["map-compat-fixture-dev-1"]["publicKeyX963Hex"]
-        self.assertFalse(verify_signature(bytes(tampered), envelope, development_key))
+        self.assertFalse(
+            verify_signature(bytes(tampered), envelope, development_key["publicKeyX963Hex"])
+        )
         payload_start = FIXED_HEADER_BYTES + header.manifest_bytes + header.signature_envelope_bytes
         corrupted = bytearray(data)
         corrupted[payload_start] ^= 1
@@ -417,16 +524,16 @@ class FrozenCorpusTests(unittest.TestCase):
 
     @unittest.skipUnless(importlib.util.find_spec("rasterio"), "topography native dependencies required")
     def test_frozen_companions_match_their_signed_contours(self):
-        for entry in self.corpus["maps"]:
+        for directory, corpus, entry in self.entries:
             if entry["companionFile"] is None:
                 continue
-            with self.subTest(profile=entry["profile"]):
+            with self.subTest(map=entry["id"]):
                 _header, _manifest, _envelope, parsed = stream_parts(
-                    (CORPUS / entry["development"]["file"]).read_bytes()
+                    (directory / entry["development"]["file"]).read_bytes()
                 )
                 with tempfile.TemporaryDirectory() as temporary:
                     path = Path(temporary) / f"{entry['mapId']}.btopo"
-                    path.write_bytes((CORPUS / entry["companionFile"]).read_bytes())
+                    path.write_bytes((directory / entry["companionFile"]).read_bytes())
                     metadata = validate_companion(
                         path, expected_map_id=entry["mapId"],
                         expected_intermediate=parsed["topography"]["intermediateSha256"],
@@ -436,27 +543,22 @@ class FrozenCorpusTests(unittest.TestCase):
                 )
                 companions = [
                     value
-                    for variant in [entry["development"], *entry["production"]]
+                    for variant in variants(entry)
                     for value in variant["publication"]["artifacts"]
                     if value["format"] == TOPOGRAPHY_COMPANION_FORMAT
                 ]
-                self.assertEqual(len(companions), 1 + len(entry["production"]))
+                self.assertEqual(len(companions), len(variants(entry)))
                 self.assertEqual({value["sha256"] for value in companions},
-                                 {self.corpus["files"][entry["companionFile"]]})
+                                 {corpus["files"][entry["companionFile"]]})
 
     def test_promotion_rotation_and_worker_update_keep_one_catalog_map(self):
-        entry = next(value for value in self.corpus["maps"] if value["profile"] == "buildings-3d-v1")
-        publications = [entry["development"]["publication"]] + [
-            variant["publication"] for variant in entry["production"]
-        ]
+        entry = next(entry for _, _, entry in self.entries
+                     if len(entry["production"]) == 3)
+        publications = [variant["publication"] for variant in variants(entry)]
         self.assertEqual({value["mapEntryId"] for value in publications}, {entry["mapEntryId"]})
         self.assertEqual({value["contentReceipt"] for value in publications}, {entry["contentReceipt"]})
         streams = {
-            variant["variant"]: next(
-                value for value in variant["publication"]["artifacts"]
-                if value["format"] == BIKE_MAP_STREAM_FORMAT
-            )
-            for variant in entry["production"]
+            variant["variant"]: stream_artifact(variant) for variant in entry["production"]
         }
         # Key rotation keeps the signed content; a worker update re-signs the
         # same map content under its own producer identity.
@@ -485,43 +587,40 @@ class DeliveryParityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.corpus = load_corpus()
-
-    def frozen_job(self, entry: dict) -> MapJob:
-        return MapJob.from_dict(MapCompatibilityContractFileTests.job_document(entry))
+        cls.entries = all_entries()
 
     def test_current_publisher_reproduces_frozen_catalog_meaning(self):
-        for entry in self.corpus["maps"]:
-            with self.subTest(profile=entry["profile"]):
-                job = self.frozen_job(entry)
-                job.request = self.request_for(entry)
+        for _, _, entry in self.entries:
+            with self.subTest(map=entry["id"]):
+                # The persisted READY job, as a backend update or retry
+                # republishes it.
+                job = MapJob.from_dict(entry["job"])
+                self.assertEqual(job.compatibility_contract, entry["compatibilityContract"])
                 frozen = entry["development"]["publication"]
                 with patch.dict(os.environ, self.FIRMWARE_GATE):
-                    current = publication_payload(self.ready(job, frozen), "development")
+                    current = publication_payload(job, "development")
                 self.assertEqual(
                     {value["artifactId"]: value for value in current["artifacts"]},
                     {value["artifactId"]: value for value in frozen["artifacts"]},
                 )
-                self.assertEqual(current["mapEntryId"], frozen["mapEntryId"])
+                for field in ("mapEntryId", "contentReceipt", "renderer",
+                              "rendererFormatVersion", "features"):
+                    self.assertEqual(current[field], frozen[field])
 
-    def test_pre_baseline_maps_keep_their_configured_firmware_gate(self):
-        entry = self.corpus["maps"][0]
-        job = self.ready(self.frozen_job(entry), entry["development"]["publication"])
-        job.request = self.request_for(entry)
-        job.compatibility_contract = None
+    def test_maps_outside_the_contract_keep_their_configured_firmware_gate(self):
+        _, _, entry = self.entries[0]
+        job = MapJob.from_dict({**entry["job"], "artifactMetrics": None})
+        self.assertIsNone(job.compatibility_contract)
         with patch.dict(os.environ, self.FIRMWARE_GATE):
             payload = publication_payload(job, "development")
-        stream = next(
-            value for value in payload["artifacts"] if value["format"] == BIKE_MAP_STREAM_FORMAT
-        )
-        self.assertEqual(stream["requiredFirmwareBuild"], 104)
+        self.assertEqual(stream_artifact({"publication": payload})["requiredFirmwareBuild"], 104)
 
     def test_rollout_keeps_earlier_approved_durable_maps_after_a_worker_update(self):
-        entry = next(value for value in self.corpus["maps"] if value["profile"] == "buildings-3d-v1")
+        entry = next(entry for _, _, entry in self.entries if len(entry["production"]) == 3)
         production = {variant["variant"]: variant for variant in entry["production"]}
-        original = self.stream(production["production"])
-        updated = self.stream(production["production-updated-worker"])
-        rotated = self.stream(production["production-rotated-key"])
+        original = stream_artifact(production["production"])
+        updated = stream_artifact(production["production-updated-worker"])
+        rotated = stream_artifact(production["production-rotated-key"])
         signers = {
             (value["signatureKeyId"], value["signatureKeySha256"])
             for value in (original, rotated)
@@ -544,8 +643,8 @@ class DeliveryParityTests(unittest.TestCase):
         )
         installation = "inst_v2_" + "0" * 31 + "1"
 
-        def allowed(stream, contract, trust=signers):
-            return policy.allows_artifact(
+        def allowed(stream, contract, trust=signers, rollout=policy):
+            return rollout.allows_artifact(
                 installation, stream["signatureKeyId"], stream["signatureKeySha256"],
                 stream["producerBuildSha256"], stream["producerImageDigest"],
                 frozenset(trust), None, None, None, compatibility_contract=contract,
@@ -555,7 +654,7 @@ class DeliveryParityTests(unittest.TestCase):
             with self.subTest(producer=stream["producerBuildSha256"][:8],
                               key=stream["signatureKeyId"]):
                 self.assertTrue(allowed(stream, 1))
-        # Pre-baseline maps keep the single-approval rule.
+        # Maps outside the contract keep the single-approval rule.
         self.assertFalse(allowed(original, None))
         self.assertTrue(allowed(updated, None))
         # A client that no longer trusts the signer never receives the map.
@@ -567,11 +666,7 @@ class DeliveryParityTests(unittest.TestCase):
             item for item in policy.approved_producers
             if item[0] != original["producerBuildSha256"]
         ))
-        self.assertFalse(revoked.allows_artifact(
-            installation, original["signatureKeyId"], original["signatureKeySha256"],
-            original["producerBuildSha256"], original["producerImageDigest"],
-            frozenset(signers), None, None, None, compatibility_contract=1,
-        ))
+        self.assertFalse(allowed(original, 1, rollout=revoked))
         self.assertEqual(policy.artifact_delivery_requirements(compatibility_contract=1), {})
         self.assertEqual(
             policy.artifact_delivery_requirements(compatibility_contract=None)[
@@ -579,40 +674,6 @@ class DeliveryParityTests(unittest.TestCase):
             ],
             105,
         )
-
-    @staticmethod
-    def stream(variant: dict) -> dict:
-        return next(
-            value for value in variant["publication"]["artifacts"]
-            if value["format"] == BIKE_MAP_STREAM_FORMAT
-        )
-
-    @staticmethod
-    def request_for(entry: dict) -> dict:
-        target = {
-            "renderer": "esp32-fmb",
-            "rendererFormatVersion": entry["rendererFormatVersion"],
-            "firmwareVersion": "0.3.4",
-        }
-        if entry["rendererFormatVersion"] == 5:
-            target["requestedFeatures"] = entry["features"]
-        return {
-            "target": target,
-            "labels": {"profileVersion": 1, "preferredLanguages": ["en"],
-                       "internationalFallback": "en"},
-        }
-
-    @staticmethod
-    def ready(job: MapJob, publication: dict) -> MapJob:
-        job.status = JobStatus.READY
-        job.finished_at = publication["generatedAt"]
-        job.source_region = replace(
-            job.source_region,
-            name=publication["sourceRegionName"],
-            provider=publication["attribution"]["provider"],
-            license=publication["attribution"].get("license"),
-        )
-        return job
 
 
 class PromotionTests(unittest.TestCase):
@@ -625,7 +686,7 @@ class PromotionTests(unittest.TestCase):
         cls.fixture = fixture
         cls.temporary = tempfile.TemporaryDirectory()
         cls.root = Path(cls.temporary.name)
-        cls.contract = fixture.fixture_contract()
+        cls.contract = load_map_compatibility_contract()
         cls.job, cls.artifact_root = fixture.build_development_map(
             cls.root / "map", "buildings-3d-v1", cls.contract,
         )
@@ -641,43 +702,24 @@ class PromotionTests(unittest.TestCase):
                 self.job, self.publication, self.artifact_root,
                 self.root / "gated", "production", self.contract,
             )
-        stream = next(
-            value for value in publication["artifacts"]
-            if value["format"] == BIKE_MAP_STREAM_FORMAT
-        )
+        stream = stream_artifact({"publication": publication})
         self.assertEqual(publication["contentReceipt"], self.publication["contentReceipt"])
         for field in ("requiredFirmwareVersion", "requiredFirmwareBuild", "requiredFirmwareGitSha"):
             self.assertNotIn(field, stream)
 
-    def test_promotion_refuses_an_unregistered_production_signer(self):
+    def test_promotion_refuses_a_profile_production_may_not_publish(self):
         from map_platform.catalog_promotion import CatalogPromotionError
 
-        contract = replace(self.contract, signers=frozenset(
-            value for value in self.contract.signers if value[0] == "development"
+        contract = replace(self.contract, profiles=tuple(
+            replace(profile, channels=frozenset({"development"}))
+            if profile.profile_id == "buildings-3d-v1" else profile
+            for profile in self.contract.profiles
         ))
-        with self.assertRaisesRegex(CatalogPromotionError, "not a registered production"):
+        with self.assertRaisesRegex(CatalogPromotionError, "not published to the production"):
             self.fixture.promote(
                 self.job, self.publication, self.artifact_root,
-                self.root / "rogue", "production", contract,
+                self.root / "unpublished", "production", contract,
             )
-
-
-class ProducerGuardTests(unittest.TestCase):
-    def test_unregistered_key_cannot_sign_a_durable_map(self):
-        contract = load_map_compatibility_contract()
-        rogue = P256MapArtifactSigner("map-prod-rogue", ec.derive_private_key(99, ec.SECP256R1()))
-        with self.assertRaisesRegex(MapCompatibilityError, "not a registered production"):
-            require_contract_signer(
-                {"compatibility": {"contract": 1}}, "production",
-                rogue.key_id, rogue.public_key_sha256, contract,
-            )
-
-    def test_development_only_profile_is_not_published_to_production(self):
-        contract = load_map_compatibility_contract()
-        profile = contract.profile_for("esp32-fmb", 5, ("3d-buildings", "map-pois", "street-labels"))
-        contract.require_publishable(profile, "development")
-        with self.assertRaisesRegex(MapCompatibilityError, "not published to the production"):
-            contract.require_publishable(profile, "production")
 
 
 if __name__ == "__main__":

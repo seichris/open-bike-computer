@@ -118,11 +118,13 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 SHARED_CONTOUR_COMPANION_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
 )
-SHARED_MAP_COMPATIBILITY_PATHS = (
-    "map-platform/backend/tests/fixtures/map-compatibility-v1/",
-    "map-platform/config/map-compatibility-contract-v1.json",
-    "protocol/fixtures/map-reader-capabilities-v1.txt",
+# Durable map contract inputs and their readers. Every map-platform/ path also
+# selects the backend (and so the catalog Worker) below.
+SHARED_MAP_COMPATIBILITY_CORPUS_PREFIX = (
+    "map-platform/backend/tests/fixtures/map-compatibility-v"
 )
+SHARED_MAP_COMPATIBILITY_CONTRACT_PREFIX = "map-platform/config/map-compatibility-contract-v"
+SHARED_MAP_READER_CAPABILITY_FIXTURE_PREFIX = "protocol/fixtures/map-reader-capabilities-v"
 SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
     "tools/generate_route_elevation_fixtures.py",
@@ -310,13 +312,18 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             selected["ios"] = True
             selected["map_backend"] = True
 
-        if path.startswith(SHARED_MAP_COMPATIBILITY_PATHS):
-            # The durable map contract, its frozen producer corpus and the
-            # device reader report are read by the backend, catalog, iPhone and
-            # firmware compatibility tests.
+        if path.startswith(SHARED_MAP_COMPATIBILITY_CORPUS_PREFIX):
+            # The frozen producer corpus is read by the backend, catalog,
+            # iPhone and firmware compatibility tests.
             selected["firmware_host"] = True
             selected["ios"] = True
-            selected["map_backend"] = True
+        if path.startswith(SHARED_MAP_COMPATIBILITY_CONTRACT_PREFIX):
+            # The worker and the iPhone reader test both load the contract.
+            selected["ios"] = True
+        if path.startswith(SHARED_MAP_READER_CAPABILITY_FIXTURE_PREFIX):
+            # Firmware must report these bytes; the iPhone decodes them.
+            selected["firmware_host"] = True
+            selected["ios"] = True
 
         if path.startswith(SHARED_ROUTE_ELEVATION_FIXTURE_PATHS):
             # Backend processing, the Swift codec and the firmware decoder all

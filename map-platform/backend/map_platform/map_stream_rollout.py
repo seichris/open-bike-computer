@@ -348,7 +348,7 @@ class MapStreamRolloutPolicy:
                 producer_image_digest,
                 *artifact_key,
             ) in self.approved_producers
-        # Pre-baseline maps keep their original single-approval behavior.
+        # Maps outside the contract keep the single-approval behavior.
         return bool(
             artifact_key in self.approved_signing_keys
             and producer_build_sha256 == self.producer_build_sha256

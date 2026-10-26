@@ -174,7 +174,7 @@ int main() {
       streams.push_back(stream);
     }
   }
-  assert(streams.size() == 8);
+  assert(streams.size() == 15);
 
   std::ifstream capabilityFixture(kCapabilities);
   assert(capabilityFixture.good());
@@ -266,7 +266,7 @@ int main() {
              result->error == MapStreamParserError::ManifestInvalid);
     }
   }
-  assert(installed == (MAP_POIS_RUNTIME_ENABLED ? 8u : 6u));
+  assert(installed == (MAP_POIS_RUNTIME_ENABLED ? 15u : 12u));
   std::cout << "map compatibility corpus: " << installed
             << " frozen streams installed" << std::endl;
   return 0;

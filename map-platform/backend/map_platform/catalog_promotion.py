@@ -37,7 +37,6 @@ from .map_compatibility import (
     MapCompatibilityError,
     load_map_compatibility_contract,
     manifest_contract,
-    require_contract_signer,
 )
 from .map_stream import (
     canonical_stream_manifest_bytes,
@@ -519,8 +518,9 @@ def promote_catalog_map(
             "imageDigest": producer_image_digest,
         }
         # Promotion re-signs the exact development content, so a durable
-        # development map stays durable and a pre-baseline one stays
-        # pre-baseline. Only registered production signers sign durable maps.
+        # development map stays durable and any other map stays outside the
+        # contract. A durable map is promoted only for a profile that
+        # production may publish.
         try:
             durable_contract = manifest_contract(stream_manifest)
             if durable_contract is not None:
@@ -529,13 +529,10 @@ def promote_catalog_map(
                     if compatibility_contract is not None
                     else load_map_compatibility_contract()
                 )
-                require_contract_signer(
-                    stream_manifest,
-                    "production",
-                    signer.key_id,
-                    signer.public_key_sha256,
-                    contract,
-                )
+                if durable_contract != contract.contract:
+                    raise MapCompatibilityError(
+                        "durable map declares an unknown compatibility contract"
+                    )
                 profile = contract.profile_for(
                     _require_string(map_value.get("renderer"), "renderer"),
                     format_version,

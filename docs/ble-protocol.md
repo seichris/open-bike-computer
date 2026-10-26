@@ -2217,9 +2217,9 @@ Status responses should include:
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
   SHA from a clean source tree; dirty or unidentified builds fail closed and do
-  not advertise protocol v2. Promoted pre-baseline stream artifacts name the
-  approved values and iOS rejects their installation when any field differs.
-  Durable maps never depend on these fields; see `mapReader`.
+  not advertise protocol v2. Promoted stream artifacts outside the durable
+  contract name the approved values and iOS rejects their installation when any
+  field differs. Durable maps never depend on these fields; see `mapReader`.
 - `protocols`: supported map-install protocol versions. Version `2` is present
   only when SD storage is initialized and at least one production stream
   verification key is compiled into firmware. Version `1` is never advertised.
@@ -2235,7 +2235,8 @@ Status responses should include:
   [durable map](map-compatibility-contract.md) when these capabilities and
   `streamTrust` cover it, and falls back to the renderer capability bits for
   firmware without the field. A malformed value is ignored rather than rejecting
-  the status.
+  the status. Schema 1 may gain optional fields; a changed meaning needs a new
+  `schemaVersion`, which older apps ignore in favour of the capability bits.
 - `streamTrust`: exact verification capabilities compiled into the running
   profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
   production firmware advertise only the production registry. Opt-in

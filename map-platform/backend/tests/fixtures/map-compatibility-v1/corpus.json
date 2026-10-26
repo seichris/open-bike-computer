@@ -2,13 +2,21 @@
   "baselineId": "MAP-COMPAT-20261026",
   "contract": 1,
   "files": {
+    "buildings-3d-v1-osm-golden-gate.development.bmap": "f3cbae3b1398cdfa88a78f0552cd68b443b21d1e13f56a45af2fadfff0569774",
+    "buildings-3d-v1-osm-golden-gate.production.bmap": "b7169ce83237a17392263da0cf55718bc621d5d5c88a07beda8a86f6e71cf962",
+    "buildings-3d-v1-osm-singapore.development.bmap": "bb7054e1e338ce0f30f8ca577e54bd3f683e5c19940bb3d40ac4caaa42f04067",
+    "buildings-3d-v1-osm-singapore.production.bmap": "453e24275de96c79eafa96621a71e557abd2a7606dd447bf4bee097e7ebe33a4",
     "buildings-3d-v1.development.bmap": "2431fcd7f5a847d812551fcf6e0242345250394633dca64fd499738aa9828dbd",
     "buildings-3d-v1.production-rotated-key.bmap": "62421601b2a239790752813856a60f0b541563853b21eadfac110e0dc0e121bb",
     "buildings-3d-v1.production-updated-worker.bmap": "5dc6270786a752df9c5a7aed3de6b17ab59a735a02453d85b8b6ec27953db709",
     "buildings-3d-v1.production.bmap": "2cf8d3e831949045fc39d0d4de8ad5dd8ff1d8227cf63f84bc5c06425d43e46d",
     "map-pois-contours-v1.btopo": "8cc338e24b4d29ad18a1a8b34858947a3ec79ad749a38f1a3f1636e606e0111a",
     "map-pois-contours-v1.development.bmap": "a61671fadd1626ea4a1c7a1db43d43ca0487d02b63c14599de8e622aa2b64f2e",
+    "map-pois-v1-osm-singapore.development.bmap": "97eef1e2dce1a380d0ab1f93ac183762abf9729c7a096d3968fc1d505b8aaf0e",
     "map-pois-v1.development.bmap": "06a03d34212c3aae3ba921426bdf579c1006fd9f30bb415baa777acc49135b18",
+    "topographic-contours-v1-terrain.btopo": "fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90",
+    "topographic-contours-v1-terrain.development.bmap": "2a2c7004f12d78dcca744b4269b07c519420b919bda22a03a20267ed0d67f85d",
+    "topographic-contours-v1-terrain.production.bmap": "26d805c2879c0d48a7481f7d92a7a390ceb8c95b791dcf000d1ed2ad4dd8dad5",
     "topographic-contours-v1.btopo": "5c65669bb0afbe98a620a25b89b654a5099068d5efd3211592209cdb441ec06d",
     "topographic-contours-v1.development.bmap": "bf5dcd903b6555f4d5ef5b74b55220dae5367d88c607ac80a334132ee923e795",
     "topographic-contours-v1.production.bmap": "362a28fe4fd5cba1dca67cc368f60ebd5705240a75f472df60ca7215213f7f05"
@@ -117,13 +125,138 @@
           "sourceRegionName": "Compatibility fixture"
         }
       },
+      "extraction": null,
       "features": [
         "3d-buildings",
         "street-labels"
       ],
+      "id": "buildings-3d-v1",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 3141,
+            "filename": "compat-v1-buildings.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "3b991b0b1c0e5d27a01827f80bc2c8863c14384f862ecc1abb964fb50dcb1965",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-buildings/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/d5b3d51464b627ad0f6a2ec4a16a51857221d18f2c3fbade451f4754aca30e17.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "2431fcd7f5a847d812551fcf6e0242345250394633dca64fd499738aa9828dbd",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "d5b3d51464b627ad0f6a2ec4a16a51857221d18f2c3fbade451f4754aca30e17"
+          },
+          {
+            "bytes": 3967,
+            "filename": "compat-v1-buildings.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "3de869cd614f515eb39794b62f10f2994644a698556c8558590d8d9a526e1d5d",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-buildings/zip-stored-v1/894f11dc01dbbb27ca490c510d95838ced93115840014f2e28825f3c5f1cd85c.zip",
+            "sha256": "894f11dc01dbbb27ca490c510d95838ced93115840014f2e28825f3c5f1cd85c"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 10,
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-buildings",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-buildings",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 3
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
       "jobId": "fixture-compat-v1-buildings",
       "mapEntryId": "map_v1_1v_izkc8lNgzvmnA-Cv9sBEgRRGwEhDtNPdbAVL71AY",
       "mapId": "compat-v1-buildings",
+      "optionalLayers": [],
       "production": [
         {
           "deliveryTier": "production",
@@ -455,14 +588,152 @@
           "sourceRegionName": "Compatibility fixture"
         }
       },
+      "extraction": null,
       "features": [
         "3d-buildings",
         "contours",
         "street-labels"
       ],
+      "id": "topographic-contours-v1",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 4022,
+            "filename": "compat-v1-contours.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "460de942764f273b38e72b9802cd0c45f982cb7d46f2768d5bd4e4195150a46b",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-contours/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/3198f6a3ad3b17e533f5161ec93e94bd27b58fda16ad04cfb225d34c3e250562.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "bf5dcd903b6555f4d5ef5b74b55220dae5367d88c607ac80a334132ee923e795",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "3198f6a3ad3b17e533f5161ec93e94bd27b58fda16ad04cfb225d34c3e250562"
+          },
+          {
+            "bytes": 5281,
+            "filename": "compat-v1-contours.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "7d27412b7590a3163fb57a471c6f332f077d67bbcf5a91912d13e987f9253ad0",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-contours/zip-stored-v1/764920eeb9afee761f23e385348bf4474a2fc22ab3985c86f85144b2bfc0b884.zip",
+            "sha256": "764920eeb9afee761f23e385348bf4474a2fc22ab3985c86f85144b2bfc0b884"
+          },
+          {
+            "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+            "bytes": 53248,
+            "filename": "compat-v1-contours.btopo",
+            "format": "topography-ios-v1",
+            "intermediateSha256": "97a35e4ed6d597ef53f60a845d1871ed6bebe636f15bdf94896493e7e484b3a8",
+            "manifestReceipt": "7d27412b7590a3163fb57a471c6f332f077d67bbcf5a91912d13e987f9253ad0",
+            "mapContentReceipt": "7d27412b7590a3163fb57a471c6f332f077d67bbcf5a91912d13e987f9253ad0",
+            "mediaType": "application/vnd.bicino.topography+sqlite3",
+            "objectKey": "maps/compat-v1-contours/topography-ios-v1/7d27412b7590a3163fb57a471c6f332f077d67bbcf5a91912d13e987f9253ad0/5c65669bb0afbe98a620a25b89b654a5099068d5efd3211592209cdb441ec06d.btopo",
+            "sha256": "5c65669bb0afbe98a620a25b89b654a5099068d5efd3211592209cdb441ec06d",
+            "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 10,
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-contours",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-contours",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 4
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
       "jobId": "fixture-compat-v1-contours",
       "mapEntryId": "map_v1_Hmh4oxsipHXzE-14znBWCvgfTKbGNKcTW-_u14oQ8QI",
       "mapId": "compat-v1-contours",
+      "optionalLayers": [],
       "production": [
         {
           "deliveryTier": "production",
@@ -544,6 +815,386 @@
             "mapEntryId": "map_v1_Hmh4oxsipHXzE-14znBWCvgfTKbGNKcTW-_u14oQ8QI",
             "originChannel": "development",
             "publicationId": "promotion:production:362a28fe4fd5cba1dca67cc368f60ebd5705240a75f472df60ca7215213f7f05",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 4,
+            "sourceRegionName": "Compatibility fixture"
+          },
+          "variant": "production"
+        }
+      ],
+      "profile": "topographic-contours-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 4
+    },
+    {
+      "companionFile": "topographic-contours-v1-terrain.btopo",
+      "compatibilityContract": 1,
+      "contentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+      "development": {
+        "artifacts": [
+          {
+            "bytes": 8570,
+            "filename": "compat-v1-contours-terrain.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "5a56d94e59b6222f35894af981a4a56de2b236fb776759abbf0c734ecbb0100a",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-contours-terrain/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "2a2c7004f12d78dcca744b4269b07c519420b919bda22a03a20267ed0d67f85d",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980"
+          },
+          {
+            "bytes": 10073,
+            "filename": "compat-v1-contours-terrain.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-contours-terrain/zip-stored-v1/8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55.zip",
+            "sha256": "8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55"
+          },
+          {
+            "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+            "bytes": 65536,
+            "filename": "compat-v1-contours-terrain.btopo",
+            "format": "topography-ios-v1",
+            "intermediateSha256": "10556ddd00d86eb59533c1ed10333d7a237358d14c8e2632516cd8b2b515ab17",
+            "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mapContentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mediaType": "application/vnd.bicino.topography+sqlite3",
+            "objectKey": "maps/compat-v1-contours-terrain/topography-ios-v1/8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5/fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90.btopo",
+            "sha256": "fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90",
+            "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "deliveryTier": "development",
+        "file": "topographic-contours-v1-terrain.development.bmap",
+        "publication": {
+          "artifacts": [
+            {
+              "artifactId": "artifact_v1_KixwBPEteNzKdEtCabB8UZQguRm9oioDogJn7Q1n-F0",
+              "bucketSlot": "development",
+              "bytes": 8570,
+              "deliveryTier": "development",
+              "filename": "compat-v1-contours-terrain.bmap",
+              "format": "bike-map-stream-v1",
+              "manifestReceipt": "5a56d94e59b6222f35894af981a4a56de2b236fb776759abbf0c734ecbb0100a",
+              "mediaType": "application/vnd.openbikecomputer.map-stream",
+              "objectKey": "maps/compat-v1-contours-terrain/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980.bmap",
+              "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+              "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "readerRequirements": {
+                "manifestSchemaVersion": 1,
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 4,
+                "requiredFeatures": [
+                  "3d-buildings",
+                  "contours",
+                  "street-labels"
+                ],
+                "schemaVersion": 1,
+                "streamFormat": "bike-map-stream-v1"
+              },
+              "sha256": "2a2c7004f12d78dcca744b4269b07c519420b919bda22a03a20267ed0d67f85d",
+              "signatureKeyId": "map-compat-fixture-dev-1",
+              "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+              "signedManifestReceipt": "7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980"
+            },
+            {
+              "artifactId": "artifact_v1__B08qy5dyuUAZanF6sQOZfUHJtx-QX_8NFRfJBGCPZA",
+              "bucketSlot": "development",
+              "bytes": 65536,
+              "companionRequirements": {
+                "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+                "intermediateSha256": "10556ddd00d86eb59533c1ed10333d7a237358d14c8e2632516cd8b2b515ab17",
+                "mapContentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+                "mapId": "compat-v1-contours-terrain",
+                "profileVersion": 1,
+                "role": "topography-ios-v1",
+                "schemaVersion": 1,
+                "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "deliveryTier": "development",
+              "filename": "compat-v1-contours-terrain.btopo",
+              "format": "topography-ios-v1",
+              "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+              "mediaType": "application/vnd.bicino.topography+sqlite3",
+              "objectKey": "maps/compat-v1-contours-terrain/topography-ios-v1/8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5/fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90.btopo",
+              "sha256": "fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90"
+            },
+            {
+              "artifactId": "artifact_v1_iqQDBzJra3b9hYydtMnRIJ2S174E4rX40sWtvgfkS1U",
+              "bucketSlot": "development",
+              "bytes": 10073,
+              "deliveryTier": "development",
+              "filename": "compat-v1-contours-terrain.zip",
+              "format": "zip-stored-v1",
+              "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+              "mediaType": "application/zip",
+              "objectKey": "maps/compat-v1-contours-terrain/zip-stored-v1/8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55.zip",
+              "sha256": "8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55"
+            }
+          ],
+          "attribution": {
+            "license": "ODbL-1.0",
+            "provider": "test"
+          },
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "canonicalName": "Compatibility fixture",
+          "contentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+          "deliveryState": "development",
+          "features": [
+            "3d-buildings",
+            "contours",
+            "street-labels"
+          ],
+          "generatedAt": "2026-10-26T00:00:00Z",
+          "legacyMapId": "compat-v1-contours-terrain",
+          "mapEntryId": "map_v1_6hI3YvTgjyoF3eal-O-9Y0KROswmxof4nxOTO-1NY-g",
+          "originChannel": "development",
+          "publicationId": "publication:development:48b8413800866bf7fda2d8f667dbf9bc2c65c6afaea7eb7e47c35d5ba8dfcc2c",
+          "renderer": "esp32-fmb",
+          "rendererFormatVersion": 4,
+          "sourceRegionName": "Compatibility fixture"
+        }
+      },
+      "extraction": null,
+      "features": [
+        "3d-buildings",
+        "contours",
+        "street-labels"
+      ],
+      "id": "topographic-contours-v1-terrain",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 8570,
+            "filename": "compat-v1-contours-terrain.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "5a56d94e59b6222f35894af981a4a56de2b236fb776759abbf0c734ecbb0100a",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-contours-terrain/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "2a2c7004f12d78dcca744b4269b07c519420b919bda22a03a20267ed0d67f85d",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "7713201ca85c8a90df550b13d708567ccce46d8bd487f6994b33dce16e621980"
+          },
+          {
+            "bytes": 10073,
+            "filename": "compat-v1-contours-terrain.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-contours-terrain/zip-stored-v1/8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55.zip",
+            "sha256": "8aa40307326b6b76fd858c9db4c9d1209d92d7be04e2b5f8d2c5adbe07e44b55"
+          },
+          {
+            "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+            "bytes": 65536,
+            "filename": "compat-v1-contours-terrain.btopo",
+            "format": "topography-ios-v1",
+            "intermediateSha256": "10556ddd00d86eb59533c1ed10333d7a237358d14c8e2632516cd8b2b515ab17",
+            "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mapContentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "mediaType": "application/vnd.bicino.topography+sqlite3",
+            "objectKey": "maps/compat-v1-contours-terrain/topography-ios-v1/8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5/fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90.btopo",
+            "sha256": "fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90",
+            "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 10,
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-contours-terrain",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-contours-terrain",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 4,
+            "terrainProfileVersion": 1
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
+      "jobId": "fixture-compat-v1-contours-terrain",
+      "mapEntryId": "map_v1_6hI3YvTgjyoF3eal-O-9Y0KROswmxof4nxOTO-1NY-g",
+      "mapId": "compat-v1-contours-terrain",
+      "optionalLayers": [
+        "terrain-experiment-v1"
+      ],
+      "production": [
+        {
+          "deliveryTier": "production",
+          "file": "topographic-contours-v1-terrain.production.bmap",
+          "publication": {
+            "artifacts": [
+              {
+                "artifactId": "artifact_v1_JtgFwoecDUinSB99kqejkM64yVt5Hc8ADR7SrU3Y2tU",
+                "bucketSlot": "production",
+                "bytes": 8571,
+                "deliveryTier": "production",
+                "filename": "compat-v1-contours-terrain.bmap",
+                "format": "bike-map-stream-v1",
+                "manifestReceipt": "845e48834c0a8675a0f42d77b71e5fddb21ad0daa9baded7d41865e056796447",
+                "mediaType": "application/vnd.openbikecomputer.map-stream",
+                "objectKey": "maps/compat-v1-contours-terrain/bike-map-stream-v1/map-compat-fixture-prod-1/d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222/22c4b59f5f3baffe68ebb07284308b3101d0e96770c28f9223f777146f96d0fe.bmap",
+                "producerBuildSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                "producerImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "readerRequirements": {
+                  "manifestSchemaVersion": 1,
+                  "renderer": "esp32-fmb",
+                  "rendererFormatVersion": 4,
+                  "requiredFeatures": [
+                    "3d-buildings",
+                    "contours",
+                    "street-labels"
+                  ],
+                  "schemaVersion": 1,
+                  "streamFormat": "bike-map-stream-v1"
+                },
+                "sha256": "26d805c2879c0d48a7481f7d92a7a390ceb8c95b791dcf000d1ed2ad4dd8dad5",
+                "signatureKeyId": "map-compat-fixture-prod-1",
+                "signatureKeySha256": "d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5",
+                "signedManifestReceipt": "22c4b59f5f3baffe68ebb07284308b3101d0e96770c28f9223f777146f96d0fe"
+              },
+              {
+                "artifactId": "artifact_v1_kz7b41uBO9JNT9kNc7uLKntI-x6V0hWYW68SWcgKLNM",
+                "bucketSlot": "production",
+                "bytes": 65536,
+                "companionRequirements": {
+                  "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+                  "intermediateSha256": "10556ddd00d86eb59533c1ed10333d7a237358d14c8e2632516cd8b2b515ab17",
+                  "mapContentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+                  "mapId": "compat-v1-contours-terrain",
+                  "profileVersion": 1,
+                  "role": "topography-ios-v1",
+                  "schemaVersion": 1,
+                  "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "deliveryTier": "production",
+                "filename": "compat-v1-contours-terrain.btopo",
+                "format": "topography-ios-v1",
+                "manifestReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+                "mediaType": "application/vnd.bicino.topography+sqlite3",
+                "objectKey": "maps/compat-v1-contours-terrain/topography-ios-v1/production/8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5/fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90.btopo",
+                "sha256": "fc1d3cab2e5dcae50065a9c5eac40e65f50726dc7e417ffc34545f2411823d90"
+              }
+            ],
+            "attribution": {
+              "license": "ODbL-1.0",
+              "provider": "test"
+            },
+            "bounds": [
+              0.001,
+              0.001,
+              0.03,
+              0.03
+            ],
+            "canonicalName": "Compatibility fixture",
+            "contentReceipt": "8a9bbe5c65f77597c95f29cd9792d4289770814f21721b6223fe72dcde131ae5",
+            "deliveryState": "production",
+            "features": [
+              "3d-buildings",
+              "contours",
+              "street-labels"
+            ],
+            "generatedAt": "2026-10-26T00:00:00Z",
+            "legacyMapId": "compat-v1-contours-terrain",
+            "mapEntryId": "map_v1_6hI3YvTgjyoF3eal-O-9Y0KROswmxof4nxOTO-1NY-g",
+            "originChannel": "development",
+            "publicationId": "promotion:production:26d805c2879c0d48a7481f7d92a7a390ceb8c95b791dcf000d1ed2ad4dd8dad5",
             "renderer": "esp32-fmb",
             "rendererFormatVersion": 4,
             "sourceRegionName": "Compatibility fixture"
@@ -659,14 +1310,144 @@
           "sourceRegionName": "Compatibility fixture"
         }
       },
+      "extraction": null,
       "features": [
         "3d-buildings",
         "map-pois",
         "street-labels"
       ],
+      "id": "map-pois-v1",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 3752,
+            "filename": "compat-v1-pois.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "69c2a032aa111cb4ce3a0be089915b59b5cd43a1e93ca06d4825ad014903ad87",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-pois/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/663ed716bf225ee84fd445206090ca2e652298f272e7c9b80fbb332b81852564.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "06a03d34212c3aae3ba921426bdf579c1006fd9f30bb415baa777acc49135b18",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "663ed716bf225ee84fd445206090ca2e652298f272e7c9b80fbb332b81852564"
+          },
+          {
+            "bytes": 4920,
+            "filename": "compat-v1-pois.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "6c5e89194f3850532d291d1dfa3a4bcc63228e7f48cd18db0537d3c41dd43186",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-pois/zip-stored-v1/ae0244559387c50f4de89db6241f322e52fb132827f889a71f04462c3dbc3856.zip",
+            "sha256": "ae0244559387c50f4de89db6241f322e52fb132827f889a71f04462c3dbc3856"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 10,
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-pois",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-pois",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 5,
+            "requestedFeatures": [
+              "3d-buildings",
+              "map-pois",
+              "street-labels"
+            ]
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
       "jobId": "fixture-compat-v1-pois",
       "mapEntryId": "map_v1_95NN13sgviFr6i5OVYG5qB-Pz2eFcysKhw7MPaE6wGo",
       "mapId": "compat-v1-pois",
+      "optionalLayers": [],
       "production": [],
       "profile": "map-pois-v1",
       "renderer": "esp32-fmb",
@@ -813,17 +1594,1012 @@
           "sourceRegionName": "Compatibility fixture"
         }
       },
+      "extraction": null,
       "features": [
         "3d-buildings",
         "contours",
         "map-pois",
         "street-labels"
       ],
+      "id": "map-pois-contours-v1",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 4651,
+            "filename": "compat-v1-pois-contours.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "9b2514cae8d04bf6fd652a88e21b61761cb448d895c81bda84d3878bfdf06918",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-pois-contours/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/bf6b8022a4c4b7ceb18cadc8a16be10c011052212ffba727e00a9926612097c9.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "a61671fadd1626ea4a1c7a1db43d43ca0487d02b63c14599de8e622aa2b64f2e",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "bf6b8022a4c4b7ceb18cadc8a16be10c011052212ffba727e00a9926612097c9"
+          },
+          {
+            "bytes": 6317,
+            "filename": "compat-v1-pois-contours.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "8c351bd20b4a9ee4cd8dbfd068e17131603aa5c7668897e971c003c9fee5c481",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-pois-contours/zip-stored-v1/e59678d9b747d090bd83fa991a2454566da9f7586f9e324d0656006e97873cc6.zip",
+            "sha256": "e59678d9b747d090bd83fa991a2454566da9f7586f9e324d0656006e97873cc6"
+          },
+          {
+            "attributionSha256": "a8e0f163c9654f299ed52980d52193ae234bb33ee255046a00f20304f4969151",
+            "bytes": 53248,
+            "filename": "compat-v1-pois-contours.btopo",
+            "format": "topography-ios-v1",
+            "intermediateSha256": "97a35e4ed6d597ef53f60a845d1871ed6bebe636f15bdf94896493e7e484b3a8",
+            "manifestReceipt": "8c351bd20b4a9ee4cd8dbfd068e17131603aa5c7668897e971c003c9fee5c481",
+            "mapContentReceipt": "8c351bd20b4a9ee4cd8dbfd068e17131603aa5c7668897e971c003c9fee5c481",
+            "mediaType": "application/vnd.bicino.topography+sqlite3",
+            "objectKey": "maps/compat-v1-pois-contours/topography-ios-v1/8c351bd20b4a9ee4cd8dbfd068e17131603aa5c7668897e971c003c9fee5c481/8cc338e24b4d29ad18a1a8b34858947a3ec79ad749a38f1a3f1636e606e0111a.btopo",
+            "sha256": "8cc338e24b4d29ad18a1a8b34858947a3ec79ad749a38f1a3f1636e606e0111a",
+            "sourcePolicySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 10,
+          "bounds": [
+            0.001,
+            0.001,
+            0.03,
+            0.03
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-pois-contours",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-pois-contours",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 5,
+            "requestedFeatures": [
+              "3d-buildings",
+              "contours",
+              "map-pois",
+              "street-labels"
+            ]
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
       "jobId": "fixture-compat-v1-pois-contours",
       "mapEntryId": "map_v1_v6SPysyadZL6WzOi0-K3Q3NB0t4er2uCJV8F97ViLJI",
       "mapId": "compat-v1-pois-contours",
+      "optionalLayers": [],
       "production": [],
       "profile": "map-pois-contours-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 5
+    },
+    {
+      "companionFile": null,
+      "compatibilityContract": 1,
+      "contentReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+      "development": {
+        "artifacts": [
+          {
+            "bytes": 3298,
+            "filename": "compat-v1-osm-buildings.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "28a8a036a3fadadc95450bb692d7cbbeab74e2b9b5fb1707f7f7b0cbf7af9dd5",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-buildings/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "bb7054e1e338ce0f30f8ca577e54bd3f683e5c19940bb3d40ac4caaa42f04067",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13"
+          },
+          {
+            "bytes": 4137,
+            "filename": "compat-v1-osm-buildings.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-buildings/zip-stored-v1/9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1.zip",
+            "sha256": "9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1"
+          }
+        ],
+        "deliveryTier": "development",
+        "file": "buildings-3d-v1-osm-singapore.development.bmap",
+        "publication": {
+          "artifacts": [
+            {
+              "artifactId": "artifact_v1_u3BU4eM4zg8w-MpXflS9P2g-XBmUC7PUCsTKqkLwQGc",
+              "bucketSlot": "development",
+              "bytes": 3298,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-buildings.bmap",
+              "format": "bike-map-stream-v1",
+              "manifestReceipt": "28a8a036a3fadadc95450bb692d7cbbeab74e2b9b5fb1707f7f7b0cbf7af9dd5",
+              "mediaType": "application/vnd.openbikecomputer.map-stream",
+              "objectKey": "maps/compat-v1-osm-buildings/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13.bmap",
+              "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+              "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "readerRequirements": {
+                "manifestSchemaVersion": 1,
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 3,
+                "requiredFeatures": [
+                  "3d-buildings",
+                  "street-labels"
+                ],
+                "schemaVersion": 1,
+                "streamFormat": "bike-map-stream-v1"
+              },
+              "sha256": "bb7054e1e338ce0f30f8ca577e54bd3f683e5c19940bb3d40ac4caaa42f04067",
+              "signatureKeyId": "map-compat-fixture-dev-1",
+              "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+              "signedManifestReceipt": "dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13"
+            },
+            {
+              "artifactId": "artifact_v1_nIL9gQMY13Rg83w8IZtawp2uBIm4g9gv_TfODBQmi7E",
+              "bucketSlot": "development",
+              "bytes": 4137,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-buildings.zip",
+              "format": "zip-stored-v1",
+              "manifestReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+              "mediaType": "application/zip",
+              "objectKey": "maps/compat-v1-osm-buildings/zip-stored-v1/9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1.zip",
+              "sha256": "9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1"
+            }
+          ],
+          "attribution": {
+            "license": "ODbL-1.0",
+            "provider": "test"
+          },
+          "bounds": [
+            103.8644,
+            1.3093,
+            103.8655,
+            1.31
+          ],
+          "canonicalName": "Compatibility fixture",
+          "contentReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+          "deliveryState": "development",
+          "features": [
+            "3d-buildings",
+            "street-labels"
+          ],
+          "generatedAt": "2026-10-26T00:00:00Z",
+          "legacyMapId": "compat-v1-osm-buildings",
+          "mapEntryId": "map_v1_3Mh0noPuHiH_PVFAmeMMIk8kfIdzLd8p02m4WCh0-sg",
+          "originChannel": "development",
+          "publicationId": "publication:development:8d56b9b6a1d4096f8eee8075666e7686a0e78a14857376c3ee50fdb8f5e7562a",
+          "renderer": "esp32-fmb",
+          "rendererFormatVersion": 3,
+          "sourceRegionName": "Compatibility fixture"
+        }
+      },
+      "extraction": "singapore-buildings-t3",
+      "features": [
+        "3d-buildings",
+        "street-labels"
+      ],
+      "id": "buildings-3d-v1-osm-singapore",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 3298,
+            "filename": "compat-v1-osm-buildings.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "28a8a036a3fadadc95450bb692d7cbbeab74e2b9b5fb1707f7f7b0cbf7af9dd5",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-buildings/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "bb7054e1e338ce0f30f8ca577e54bd3f683e5c19940bb3d40ac4caaa42f04067",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "dac188f0ac87618809ad4abfd32ebf7f6872d5dcf84743ecdc47b0ce4d3eef13"
+          },
+          {
+            "bytes": 4137,
+            "filename": "compat-v1-osm-buildings.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-buildings/zip-stored-v1/9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1.zip",
+            "sha256": "9c82fd810318d77460f37c3c219b5ac29dae0489b883d82ffd37ce0c14268bb1"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 0.009539457043042815,
+          "bounds": [
+            103.8644,
+            1.3093,
+            103.8655,
+            1.31
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-osm-buildings",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-osm-buildings",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 3
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
+      "jobId": "fixture-compat-v1-osm-buildings",
+      "mapEntryId": "map_v1_3Mh0noPuHiH_PVFAmeMMIk8kfIdzLd8p02m4WCh0-sg",
+      "mapId": "compat-v1-osm-buildings",
+      "optionalLayers": [],
+      "production": [
+        {
+          "deliveryTier": "production",
+          "file": "buildings-3d-v1-osm-singapore.production.bmap",
+          "publication": {
+            "artifacts": [
+              {
+                "artifactId": "artifact_v1_RT4kJ13pbHnq-pZiGnHlV6vSp2Bt1Ee_S-4Jfn6-M6Q",
+                "bucketSlot": "production",
+                "bytes": 3299,
+                "deliveryTier": "production",
+                "filename": "compat-v1-osm-buildings.bmap",
+                "format": "bike-map-stream-v1",
+                "manifestReceipt": "37482f0cd09cd063798e936f01285bd7f1c8335cd16130e13c57ac0ed06da69c",
+                "mediaType": "application/vnd.openbikecomputer.map-stream",
+                "objectKey": "maps/compat-v1-osm-buildings/bike-map-stream-v1/map-compat-fixture-prod-1/d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222/82443837ee84e8c585af00bee5a885032dcdc7a0f2b14a05053b0b2db6f61666.bmap",
+                "producerBuildSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                "producerImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "readerRequirements": {
+                  "manifestSchemaVersion": 1,
+                  "renderer": "esp32-fmb",
+                  "rendererFormatVersion": 3,
+                  "requiredFeatures": [
+                    "3d-buildings",
+                    "street-labels"
+                  ],
+                  "schemaVersion": 1,
+                  "streamFormat": "bike-map-stream-v1"
+                },
+                "sha256": "453e24275de96c79eafa96621a71e557abd2a7606dd447bf4bee097e7ebe33a4",
+                "signatureKeyId": "map-compat-fixture-prod-1",
+                "signatureKeySha256": "d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5",
+                "signedManifestReceipt": "82443837ee84e8c585af00bee5a885032dcdc7a0f2b14a05053b0b2db6f61666"
+              }
+            ],
+            "attribution": {
+              "license": "ODbL-1.0",
+              "provider": "test"
+            },
+            "bounds": [
+              103.8644,
+              1.3093,
+              103.8655,
+              1.31
+            ],
+            "canonicalName": "Compatibility fixture",
+            "contentReceipt": "0d797bd2fe05f36356e5a6d50a3f3aa3ca5f88fb688915ca1c99f0c87d1735d4",
+            "deliveryState": "production",
+            "features": [
+              "3d-buildings",
+              "street-labels"
+            ],
+            "generatedAt": "2026-10-26T00:00:00Z",
+            "legacyMapId": "compat-v1-osm-buildings",
+            "mapEntryId": "map_v1_3Mh0noPuHiH_PVFAmeMMIk8kfIdzLd8p02m4WCh0-sg",
+            "originChannel": "development",
+            "publicationId": "promotion:production:453e24275de96c79eafa96621a71e557abd2a7606dd447bf4bee097e7ebe33a4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 3,
+            "sourceRegionName": "Compatibility fixture"
+          },
+          "variant": "production"
+        }
+      ],
+      "profile": "buildings-3d-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 3
+    },
+    {
+      "companionFile": null,
+      "compatibilityContract": 1,
+      "contentReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+      "development": {
+        "artifacts": [
+          {
+            "bytes": 18274,
+            "filename": "compat-v1-osm-labels.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "54c0b4c8d373dff20c2fe2b07399f7a354e3ee464d2fdabd1df08e446548dfb0",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-labels/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "f3cbae3b1398cdfa88a78f0552cd68b443b21d1e13f56a45af2fadfff0569774",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253"
+          },
+          {
+            "bytes": 19311,
+            "filename": "compat-v1-osm-labels.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-labels/zip-stored-v1/dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6.zip",
+            "sha256": "dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6"
+          }
+        ],
+        "deliveryTier": "development",
+        "file": "buildings-3d-v1-osm-golden-gate.development.bmap",
+        "publication": {
+          "artifacts": [
+            {
+              "artifactId": "artifact_v1_88uuOxOYzfqIp48FUs1otEOyHR4T9WpFry-t__BWl3Q",
+              "bucketSlot": "development",
+              "bytes": 18274,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-labels.bmap",
+              "format": "bike-map-stream-v1",
+              "manifestReceipt": "54c0b4c8d373dff20c2fe2b07399f7a354e3ee464d2fdabd1df08e446548dfb0",
+              "mediaType": "application/vnd.openbikecomputer.map-stream",
+              "objectKey": "maps/compat-v1-osm-labels/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253.bmap",
+              "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+              "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "readerRequirements": {
+                "manifestSchemaVersion": 1,
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 3,
+                "requiredFeatures": [
+                  "3d-buildings",
+                  "street-labels"
+                ],
+                "schemaVersion": 1,
+                "streamFormat": "bike-map-stream-v1"
+              },
+              "sha256": "f3cbae3b1398cdfa88a78f0552cd68b443b21d1e13f56a45af2fadfff0569774",
+              "signatureKeyId": "map-compat-fixture-dev-1",
+              "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+              "signedManifestReceipt": "d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253"
+            },
+            {
+              "artifactId": "artifact_v1_3RvC205gMSwuZUMxpJzJlBH2w4JDe5v4tVlu-ufFfcY",
+              "bucketSlot": "development",
+              "bytes": 19311,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-labels.zip",
+              "format": "zip-stored-v1",
+              "manifestReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+              "mediaType": "application/zip",
+              "objectKey": "maps/compat-v1-osm-labels/zip-stored-v1/dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6.zip",
+              "sha256": "dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6"
+            }
+          ],
+          "attribution": {
+            "license": "ODbL-1.0",
+            "provider": "test"
+          },
+          "bounds": [
+            -122.48,
+            37.808,
+            -122.476,
+            37.829
+          ],
+          "canonicalName": "Compatibility fixture",
+          "contentReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+          "deliveryState": "development",
+          "features": [
+            "3d-buildings",
+            "street-labels"
+          ],
+          "generatedAt": "2026-10-26T00:00:00Z",
+          "legacyMapId": "compat-v1-osm-labels",
+          "mapEntryId": "map_v1_aRWx7KijQKqi2O9mN8TfPYHPtDP5wy1wnSMsP6WZq5A",
+          "originChannel": "development",
+          "publicationId": "publication:development:795aabf441e6a2c4dcfd7aa8f19ccb8c6f65e562454e0bd4370083c2a71fb9f8",
+          "renderer": "esp32-fmb",
+          "rendererFormatVersion": 3,
+          "sourceRegionName": "Compatibility fixture"
+        }
+      },
+      "extraction": "golden-gate-labels-t3",
+      "features": [
+        "3d-buildings",
+        "street-labels"
+      ],
+      "id": "buildings-3d-v1-osm-golden-gate",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 18274,
+            "filename": "compat-v1-osm-labels.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "54c0b4c8d373dff20c2fe2b07399f7a354e3ee464d2fdabd1df08e446548dfb0",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-labels/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "f3cbae3b1398cdfa88a78f0552cd68b443b21d1e13f56a45af2fadfff0569774",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "d2813dc987c8fb66fba592e111c1fc4ea68e8f7f4c276a9effb03a35c3f4f253"
+          },
+          {
+            "bytes": 19311,
+            "filename": "compat-v1-osm-labels.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-labels/zip-stored-v1/dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6.zip",
+            "sha256": "dd1bc2db4e60312c2e654331a49cc99411f6c382437b9bf8b5596efae7c57dc6"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 0.8222978843374357,
+          "bounds": [
+            -122.48,
+            37.808,
+            -122.476,
+            37.829
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-osm-labels",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-osm-labels",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 3
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
+      "jobId": "fixture-compat-v1-osm-labels",
+      "mapEntryId": "map_v1_aRWx7KijQKqi2O9mN8TfPYHPtDP5wy1wnSMsP6WZq5A",
+      "mapId": "compat-v1-osm-labels",
+      "optionalLayers": [],
+      "production": [
+        {
+          "deliveryTier": "production",
+          "file": "buildings-3d-v1-osm-golden-gate.production.bmap",
+          "publication": {
+            "artifacts": [
+              {
+                "artifactId": "artifact_v1_txac6DI3oXOSJj2gz1Vxi8Yh1dXIige-2oqG9ucc-WI",
+                "bucketSlot": "production",
+                "bytes": 18275,
+                "deliveryTier": "production",
+                "filename": "compat-v1-osm-labels.bmap",
+                "format": "bike-map-stream-v1",
+                "manifestReceipt": "5c146445ecb5ee36cce4daa61ae149df8e2ad6c61655844cd40b73b7210bf861",
+                "mediaType": "application/vnd.openbikecomputer.map-stream",
+                "objectKey": "maps/compat-v1-osm-labels/bike-map-stream-v1/map-compat-fixture-prod-1/d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5/1111111111111111111111111111111111111111111111111111111111111111/2222222222222222222222222222222222222222222222222222222222222222/e2e0223d6978c3bf92b0d7e0551634f0ed4ed2cb435d5a9a5d34426a999b169f.bmap",
+                "producerBuildSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                "producerImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "readerRequirements": {
+                  "manifestSchemaVersion": 1,
+                  "renderer": "esp32-fmb",
+                  "rendererFormatVersion": 3,
+                  "requiredFeatures": [
+                    "3d-buildings",
+                    "street-labels"
+                  ],
+                  "schemaVersion": 1,
+                  "streamFormat": "bike-map-stream-v1"
+                },
+                "sha256": "b7169ce83237a17392263da0cf55718bc621d5d5c88a07beda8a86f6e71cf962",
+                "signatureKeyId": "map-compat-fixture-prod-1",
+                "signatureKeySha256": "d6c7d7b8e4a649f17def41819c4f2d9ddaf38482de4dda7358c1ac2e81d1f2d5",
+                "signedManifestReceipt": "e2e0223d6978c3bf92b0d7e0551634f0ed4ed2cb435d5a9a5d34426a999b169f"
+              }
+            ],
+            "attribution": {
+              "license": "ODbL-1.0",
+              "provider": "test"
+            },
+            "bounds": [
+              -122.48,
+              37.808,
+              -122.476,
+              37.829
+            ],
+            "canonicalName": "Compatibility fixture",
+            "contentReceipt": "418281b58ee76f5fc888afe4c7dcc77331b18b78a77141b47451f4e44c492b9a",
+            "deliveryState": "production",
+            "features": [
+              "3d-buildings",
+              "street-labels"
+            ],
+            "generatedAt": "2026-10-26T00:00:00Z",
+            "legacyMapId": "compat-v1-osm-labels",
+            "mapEntryId": "map_v1_aRWx7KijQKqi2O9mN8TfPYHPtDP5wy1wnSMsP6WZq5A",
+            "originChannel": "development",
+            "publicationId": "promotion:production:b7169ce83237a17392263da0cf55718bc621d5d5c88a07beda8a86f6e71cf962",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 3,
+            "sourceRegionName": "Compatibility fixture"
+          },
+          "variant": "production"
+        }
+      ],
+      "profile": "buildings-3d-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 3
+    },
+    {
+      "companionFile": null,
+      "compatibilityContract": 1,
+      "contentReceipt": "641139cf86109a0f61a013b4917078d658b45bdaaec82c991fb1cdff06146c50",
+      "development": {
+        "artifacts": [
+          {
+            "bytes": 3869,
+            "filename": "compat-v1-osm-pois.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "8dd2ae34bc7f192024e3800d0667572101facc7e0b68504bddeb021d72d62b0f",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-pois/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "97eef1e2dce1a380d0ab1f93ac183762abf9729c7a096d3968fc1d505b8aaf0e",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947"
+          },
+          {
+            "bytes": 5058,
+            "filename": "compat-v1-osm-pois.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "641139cf86109a0f61a013b4917078d658b45bdaaec82c991fb1cdff06146c50",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-pois/zip-stored-v1/9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3.zip",
+            "sha256": "9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3"
+          }
+        ],
+        "deliveryTier": "development",
+        "file": "map-pois-v1-osm-singapore.development.bmap",
+        "publication": {
+          "artifacts": [
+            {
+              "artifactId": "artifact_v1_l-7x4tzho4DQqx-TrBg3Yqv5cpx6CW05aPwdUFuKrw4",
+              "bucketSlot": "development",
+              "bytes": 3869,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-pois.bmap",
+              "format": "bike-map-stream-v1",
+              "manifestReceipt": "8dd2ae34bc7f192024e3800d0667572101facc7e0b68504bddeb021d72d62b0f",
+              "mediaType": "application/vnd.openbikecomputer.map-stream",
+              "objectKey": "maps/compat-v1-osm-pois/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947.bmap",
+              "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+              "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+              "readerRequirements": {
+                "manifestSchemaVersion": 1,
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 5,
+                "requiredFeatures": [
+                  "3d-buildings",
+                  "map-pois",
+                  "street-labels"
+                ],
+                "schemaVersion": 1,
+                "streamFormat": "bike-map-stream-v1"
+              },
+              "sha256": "97eef1e2dce1a380d0ab1f93ac183762abf9729c7a096d3968fc1d505b8aaf0e",
+              "signatureKeyId": "map-compat-fixture-dev-1",
+              "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+              "signedManifestReceipt": "1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947"
+            },
+            {
+              "artifactId": "artifact_v1_ms6MFdFhmAAaYMu1oyK_R5oJijqGyoTSHPUinlkwHMM",
+              "bucketSlot": "development",
+              "bytes": 5058,
+              "deliveryTier": "development",
+              "filename": "compat-v1-osm-pois.zip",
+              "format": "zip-stored-v1",
+              "manifestReceipt": "641139cf86109a0f61a013b4917078d658b45bdaaec82c991fb1cdff06146c50",
+              "mediaType": "application/zip",
+              "objectKey": "maps/compat-v1-osm-pois/zip-stored-v1/9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3.zip",
+              "sha256": "9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3"
+            }
+          ],
+          "attribution": {
+            "license": "ODbL-1.0",
+            "provider": "test"
+          },
+          "bounds": [
+            103.8644,
+            1.3093,
+            103.8655,
+            1.31
+          ],
+          "canonicalName": "Compatibility fixture",
+          "contentReceipt": "641139cf86109a0f61a013b4917078d658b45bdaaec82c991fb1cdff06146c50",
+          "deliveryState": "development",
+          "features": [
+            "3d-buildings",
+            "map-pois",
+            "street-labels"
+          ],
+          "generatedAt": "2026-10-26T00:00:00Z",
+          "legacyMapId": "compat-v1-osm-pois",
+          "mapEntryId": "map_v1_eubheNe-KWxmjuq4nSAFAjyLaVi-Fcs0Sarluk7Cp58",
+          "originChannel": "development",
+          "publicationId": "publication:development:6efe93d2b97be93192b9084216c40a954127085dac4d340fff3b0b5a227ba25d",
+          "renderer": "esp32-fmb",
+          "rendererFormatVersion": 5,
+          "sourceRegionName": "Compatibility fixture"
+        }
+      },
+      "extraction": "singapore-buildings-t5",
+      "features": [
+        "3d-buildings",
+        "map-pois",
+        "street-labels"
+      ],
+      "id": "map-pois-v1-osm-singapore",
+      "job": {
+        "artifactGcKeys": [],
+        "artifactMetrics": {
+          "compatibilityContract": 1
+        },
+        "artifacts": [
+          {
+            "bytes": 3869,
+            "filename": "compat-v1-osm-pois.bmap",
+            "format": "bike-map-stream-v1",
+            "manifestReceipt": "8dd2ae34bc7f192024e3800d0667572101facc7e0b68504bddeb021d72d62b0f",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "objectKey": "maps/compat-v1-osm-pois/bike-map-stream-v1/map-compat-fixture-dev-1/7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06/4444444444444444444444444444444444444444444444444444444444444444/5555555555555555555555555555555555555555555555555555555555555555/1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947.bmap",
+            "producerBuildSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "producerImageDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "sha256": "97eef1e2dce1a380d0ab1f93ac183762abf9729c7a096d3968fc1d505b8aaf0e",
+            "signatureKeyId": "map-compat-fixture-dev-1",
+            "signatureKeySha256": "7a3774266687e9c6455402a9b09c285e457ec929499ef3fa291d0cda889daa06",
+            "signedManifestReceipt": "1b9b8ccf3328c8b41d252832bf9e4c578da351d0ebd8c1e92a035829d01f2947"
+          },
+          {
+            "bytes": 5058,
+            "filename": "compat-v1-osm-pois.zip",
+            "format": "zip-stored-v1",
+            "manifestReceipt": "641139cf86109a0f61a013b4917078d658b45bdaaec82c991fb1cdff06146c50",
+            "mediaType": "application/zip",
+            "objectKey": "maps/compat-v1-osm-pois/zip-stored-v1/9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3.zip",
+            "sha256": "9ace8c15d16198001a60cbb5a322bf479a098a3a86ca84d21cf5229e59301cc3"
+          }
+        ],
+        "attempts": 0,
+        "buildCacheAliases": [],
+        "buildCacheKey": null,
+        "buildCompatibilityKey": null,
+        "buildIdentityDerivation": null,
+        "buildingPreprocessingInputs": null,
+        "buildingPreprocessingMode": null,
+        "buildingPreprocessingRuntime": null,
+        "catalogMapEntryId": null,
+        "catalogPublicationAttempts": 0,
+        "catalogPublicationError": null,
+        "catalogPublicationId": null,
+        "catalogPublicationState": null,
+        "catalogPublicationUpdatedAt": null,
+        "clientInstallationId": null,
+        "clientRequestId": null,
+        "createdAt": "2026-10-26T00:00:00Z",
+        "downloadCount": 0,
+        "downloadReceipts": [],
+        "error": null,
+        "errorCode": null,
+        "events": [],
+        "finishedAt": "2026-10-26T00:00:00Z",
+        "firstDownloadedAt": null,
+        "geometry": {
+          "areaKm2": 0.009539457043042815,
+          "bounds": [
+            103.8644,
+            1.3093,
+            103.8655,
+            1.31
+          ],
+          "mode": "custom_bbox",
+          "routePointCount": 0,
+          "vertexCount": 4
+        },
+        "installOnDevice": false,
+        "jobId": "fixture-compat-v1-osm-pois",
+        "lastDownloadedAt": null,
+        "mapId": "compat-v1-osm-pois",
+        "maxAttempts": 3,
+        "packBytes": null,
+        "packPath": null,
+        "pendingArtifactKeys": [],
+        "phaseTimings": [],
+        "preparationEstimatorContext": null,
+        "progress": null,
+        "request": {
+          "labels": {
+            "internationalFallback": "en",
+            "preferredLanguages": [
+              "en"
+            ],
+            "profileVersion": 1
+          },
+          "target": {
+            "firmwareVersion": "0.3.4",
+            "renderer": "esp32-fmb",
+            "rendererFormatVersion": 5,
+            "requestedFeatures": [
+              "3d-buildings",
+              "map-pois",
+              "street-labels"
+            ]
+          }
+        },
+        "reuseSourceJobId": null,
+        "reuseStrategy": null,
+        "schedulerYielded": false,
+        "serverTiming": {
+          "attempts": 0,
+          "processingSeconds": null,
+          "queueWaitSeconds": null,
+          "totalSeconds": 0.0
+        },
+        "sourceRegion": {
+          "bounds": [
+            -1,
+            -1,
+            1,
+            1
+          ],
+          "checksum": "3333333333333333333333333333333333333333333333333333333333333333",
+          "id": "fixture",
+          "license": "ODbL-1.0",
+          "localPath": null,
+          "name": "Compatibility fixture",
+          "provider": "test",
+          "publishedAt": null,
+          "url": "https://example.invalid/fixture.osm.pbf"
+        },
+        "startedAt": null,
+        "status": "ready",
+        "updatedAt": "2026-10-26T00:00:00Z",
+        "userLabel": null,
+        "workerId": null
+      },
+      "jobId": "fixture-compat-v1-osm-pois",
+      "mapEntryId": "map_v1_eubheNe-KWxmjuq4nSAFAjyLaVi-Fcs0Sarluk7Cp58",
+      "mapId": "compat-v1-osm-pois",
+      "optionalLayers": [],
+      "production": [],
+      "profile": "map-pois-v1",
       "renderer": "esp32-fmb",
       "rendererFormatVersion": 5
     }

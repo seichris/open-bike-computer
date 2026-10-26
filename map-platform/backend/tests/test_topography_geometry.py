@@ -35,7 +35,6 @@ from map_platform.manifest import PipelineMetadata, build_manifest, write_pack_a
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
 from map_platform.pipeline import MapBuildPipeline, PipelinePaths, validate_final_assembly_artifact
 from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
-from tests.map_compatibility_support import contract_with_signers
 
 
 @unittest.skipUnless(importlib.util.find_spec("rasterio"), "topography native dependencies required")
@@ -220,14 +219,12 @@ class TopographyGeometryTests(unittest.TestCase):
                 bytes=tampered.stat().st_size, sha256=tampered_sha256,
             )])
 
-        map_signer = P256MapArtifactSigner("topography-test", ec.derive_private_key(4, ec.SECP256R1()))
         pipeline = MapBuildPipeline(
             PipelinePaths(Path(__file__).resolve().parents[3], self.root / "work", self.root / "packs"),
             artifact_store=FileSystemArtifactStore(self.root / "artifacts"),
-            map_signer=map_signer,
+            map_signer=P256MapArtifactSigner("topography-test", ec.derive_private_key(4, ec.SECP256R1())),
             producer_build_sha256="a" * 64, producer_image_digest="sha256:" + "b" * 64,
             topography_builder=lambda *_args, **_kwargs: (receipt, output / receipt["companion"]["filename"]),
-            compatibility_contract=contract_with_signers(("development", map_signer)),
         )
         input_body = {
             "schemaVersion": 1, "sourcePolicySha256": receipt["sourcePolicySha256"],

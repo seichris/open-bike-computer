@@ -3,10 +3,13 @@
 ``map-platform/config/map-compatibility-contract-v1.json`` is the single
 source of truth for maps that must stay usable across app, firmware and
 backend releases. A map belongs to the contract exactly when its signed
-manifest carries the contract marker; the marker is stamped only for a
-registered reader profile and signed only by a registered contract signer.
-Delivery metadata (approval, firmware or app identities) never decides
-whether such a map is usable.
+manifest carries the contract marker, which the producer stamps only for a
+registered profile that its channel may publish. Delivery metadata (approval,
+firmware or app identities) never decides whether such a map is usable.
+
+``map-compatibility-signers-v1.json`` records the keys that sign durable maps.
+Only CI reads it: shipped readers trust exactly the trust-registry keys, and
+CI keeps every registered signer trusted until it is revoked for a compromise.
 """
 from __future__ import annotations
 
@@ -18,13 +21,12 @@ from typing import Any, Mapping
 from .strict_json import load_strict_json
 
 
-CONTRACT_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "config"
-    / "map-compatibility-contract-v1.json"
-)
+CONFIG_ROOT = Path(__file__).resolve().parents[2] / "config"
+CONTRACT_PATH = CONFIG_ROOT / "map-compatibility-contract-v1.json"
+SIGNERS_PATH = CONFIG_ROOT / "map-compatibility-signers-v1.json"
 CHANNELS = ("development", "production")
 MANIFEST_FIELD = "compatibility"
+TERRAIN_EXPERIMENT_LAYER = "terrain-experiment-v1"
 _IDENTIFIER = re.compile(r"[a-z0-9._-]{1,64}")
 _KEY_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -43,6 +45,7 @@ class MapCompatibilityProfile:
     features: tuple[str, ...]
     channels: frozenset[str]
     companions: tuple[str, ...]
+    optional_layers: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -51,9 +54,8 @@ class MapCompatibilityContract:
     baseline_id: str
     stream_formats: Mapping[str, frozenset[int]]
     profiles: tuple[MapCompatibilityProfile, ...]
+    optional_layers: Mapping[str, frozenset[int]]
     companions: Mapping[str, tuple[int, int]]
-    signers: frozenset[tuple[str, str, str]]
-    revoked_signers: frozenset[tuple[str, str]]
 
     @property
     def manifest_marker(self) -> dict[str, int]:
@@ -75,32 +77,30 @@ class MapCompatibilityContract:
                 return profile
         return None
 
+    @staticmethod
+    def publishes(profile: MapCompatibilityProfile, channel: str) -> bool:
+        return channel in profile.channels
+
     def require_publishable(
         self,
         profile: MapCompatibilityProfile,
         channel: str,
     ) -> None:
-        if channel not in profile.channels:
+        if not self.publishes(profile, channel):
             raise MapCompatibilityError(
                 f"durable map profile {profile.profile_id} is not published "
                 f"to the {channel} channel"
             )
 
-    def require_signer(
-        self,
-        channel: str,
-        key_id: str,
-        public_key_sha256: str,
-    ) -> None:
-        """Only registered keys may sign maps that readers must keep trusting."""
-        if (channel, key_id, public_key_sha256) not in self.signers:
-            raise MapCompatibilityError(
-                f"signing key {key_id} is not a registered {channel} "
-                "durable map signer"
-            )
+
+@dataclass(frozen=True)
+class MapCompatibilitySigners:
+    contract: int
+    signers: frozenset[tuple[str, str, str]]
+    revoked_signers: frozenset[tuple[str, str]]
 
 
-def _require(condition: bool, message: str) -> None:
+def _require(condition: object, message: str) -> None:
     if not condition:
         raise MapCompatibilityError(f"map compatibility contract {message}")
 
@@ -117,14 +117,22 @@ def _positive(value: Any) -> bool:
     return type(value) is int and 1 <= value <= 255
 
 
+def _versions(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(_positive(item) for item in value)
+        and value == sorted(set(value))
+    )
+
+
 def parse_map_compatibility_contract(document: object) -> MapCompatibilityContract:
     _require(isinstance(document, dict), "must be an object")
     assert isinstance(document, dict)
     _require(
         set(document) == {
             "schemaVersion", "contract", "baselineId", "manifestMarker",
-            "streamFormats", "profiles", "companions", "signers",
-            "revokedSigners",
+            "streamFormats", "profiles", "optionalLayers", "companions",
         },
         "has unexpected fields",
     )
@@ -149,15 +157,24 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
             and isinstance(value["format"], str)
             and _IDENTIFIER.fullmatch(value["format"]) is not None
             and value["format"] not in stream_formats
-            and isinstance(value["manifestSchemaVersions"], list)
-            and value["manifestSchemaVersions"]
-            and all(_positive(item) for item in value["manifestSchemaVersions"])
-            and value["manifestSchemaVersions"]
-            == sorted(set(value["manifestSchemaVersions"])),
+            and _versions(value["manifestSchemaVersions"]),
             "stream format is invalid",
         )
         stream_formats[value["format"]] = frozenset(value["manifestSchemaVersions"])
-    _require(bool(stream_formats), "has no stream format")
+    _require(stream_formats, "has no stream format")
+
+    optional_layers: dict[str, frozenset[int]] = {}
+    for value in document["optionalLayers"]:
+        _require(
+            isinstance(value, dict)
+            and set(value) == {"id", "rendererFormatVersions"}
+            and isinstance(value["id"], str)
+            and _IDENTIFIER.fullmatch(value["id"]) is not None
+            and value["id"] not in optional_layers
+            and _versions(value["rendererFormatVersions"]),
+            "optional layer is invalid",
+        )
+        optional_layers[value["id"]] = frozenset(value["rendererFormatVersions"])
 
     companions: dict[str, tuple[int, int]] = {}
     for value in document["companions"]:
@@ -182,7 +199,7 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
             isinstance(value, dict)
             and set(value) == {
                 "id", "renderer", "rendererFormatVersion", "features",
-                "channels", "companions",
+                "channels", "companions", "optionalLayers",
             }
             and isinstance(value["id"], str)
             and _IDENTIFIER.fullmatch(value["id"]) is not None
@@ -191,10 +208,15 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
             and _positive(value["rendererFormatVersion"])
             and _sorted_unique_strings(value["features"], _IDENTIFIER)
             and _sorted_unique_strings(value["channels"], _IDENTIFIER)
-            and set(value["channels"]) <= set(CHANNELS)
             and value["channels"]
+            and set(value["channels"]) <= set(CHANNELS)
             and _sorted_unique_strings(value["companions"], _IDENTIFIER)
-            and set(value["companions"]) <= set(companions),
+            and set(value["companions"]) <= set(companions)
+            and _sorted_unique_strings(value["optionalLayers"], _IDENTIFIER)
+            and all(
+                value["rendererFormatVersion"] in optional_layers.get(layer, ())
+                for layer in value["optionalLayers"]
+            ),
             "profile is invalid",
         )
         # The signed contours layer alone requires the iPhone companion.
@@ -211,9 +233,10 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
                 features=tuple(value["features"]),
                 channels=frozenset(value["channels"]),
                 companions=tuple(value["companions"]),
+                optional_layers=tuple(value["optionalLayers"]),
             )
         )
-    _require(bool(profiles), "has no profile")
+    _require(profiles, "has no profile")
     _require(
         len({profile.profile_id for profile in profiles}) == len(profiles),
         "profile IDs are duplicated",
@@ -225,56 +248,13 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
         }) == len(profiles),
         "profiles are duplicated",
     )
-
-    def signer_entries(values: object, *, revoked: bool) -> list[tuple[str, ...]]:
-        _require(isinstance(values, list), "signers are invalid")
-        assert isinstance(values, list)
-        entries: list[tuple[str, ...]] = []
-        for value in values:
-            fields = {"keyId", "publicKeySha256"} | (
-                {"reason"} if revoked else {"channel"}
-            )
-            _require(
-                isinstance(value, dict)
-                and set(value) == fields
-                and isinstance(value["keyId"], str)
-                and _KEY_ID.fullmatch(value["keyId"]) is not None
-                and isinstance(value["publicKeySha256"], str)
-                and _SHA256.fullmatch(value["publicKeySha256"]) is not None,
-                "signer is invalid",
-            )
-            if revoked:
-                _require(
-                    value["reason"] == "compromised",
-                    "signers may be revoked only after a compromise",
-                )
-                entries.append((value["keyId"], value["publicKeySha256"]))
-            else:
-                _require(value["channel"] in CHANNELS, "signer channel is invalid")
-                entries.append(
-                    (value["channel"], value["keyId"], value["publicKeySha256"])
-                )
-        return entries
-
-    signers = signer_entries(document["signers"], revoked=False)
-    revoked = signer_entries(document["revokedSigners"], revoked=True)
-    _require(len(set(signers)) == len(signers), "signers are duplicated")
-    _require(
-        len({entry[1] for entry in signers}) == len(signers),
-        "signer key IDs are duplicated",
-    )
-    _require(
-        not {entry[1:] for entry in signers} & set(revoked),
-        "a revoked signer is still registered",
-    )
     return MapCompatibilityContract(
         contract=contract,
         baseline_id=document["baselineId"],
         stream_formats=stream_formats,
         profiles=tuple(profiles),
+        optional_layers=optional_layers,
         companions=companions,
-        signers=frozenset(signers),
-        revoked_signers=frozenset(revoked),
     )
 
 
@@ -286,20 +266,84 @@ def load_map_compatibility_contract(
     )
 
 
+def parse_map_compatibility_signers(document: object) -> MapCompatibilitySigners:
+    _require(
+        isinstance(document, dict)
+        and set(document) == {"schemaVersion", "contract", "signers", "revokedSigners"}
+        and document["schemaVersion"] == 1
+        and _positive(document["contract"])
+        and isinstance(document["signers"], list)
+        and isinstance(document["revokedSigners"], list),
+        "signer registry is invalid",
+    )
+    assert isinstance(document, dict)
+    signers: list[tuple[str, str, str]] = []
+    for value in document["signers"]:
+        _require(
+            isinstance(value, dict)
+            and set(value) == {"channel", "keyId", "publicKeySha256"}
+            and value["channel"] in CHANNELS
+            and isinstance(value["keyId"], str)
+            and _KEY_ID.fullmatch(value["keyId"]) is not None
+            and isinstance(value["publicKeySha256"], str)
+            and _SHA256.fullmatch(value["publicKeySha256"]) is not None,
+            "signer is invalid",
+        )
+        signers.append((value["channel"], value["keyId"], value["publicKeySha256"]))
+    revoked: list[tuple[str, str]] = []
+    for value in document["revokedSigners"]:
+        # A durable signer leaves client trust only after a compromise, which
+        # deliberately revokes every map it signed.
+        _require(
+            isinstance(value, dict)
+            and set(value) == {"keyId", "publicKeySha256", "reason"}
+            and value["reason"] == "compromised"
+            and isinstance(value["keyId"], str)
+            and _KEY_ID.fullmatch(value["keyId"]) is not None
+            and isinstance(value["publicKeySha256"], str)
+            and _SHA256.fullmatch(value["publicKeySha256"]) is not None,
+            "revoked signer is invalid",
+        )
+        revoked.append((value["keyId"], value["publicKeySha256"]))
+    _require(len(set(signers)) == len(signers), "signers are duplicated")
+    _require(
+        len({entry[1] for entry in signers}) == len(signers),
+        "signer key IDs are duplicated",
+    )
+    _require(
+        not {entry[1:] for entry in signers} & set(revoked),
+        "a revoked signer is still registered",
+    )
+    return MapCompatibilitySigners(
+        contract=document["contract"],
+        signers=frozenset(signers),
+        revoked_signers=frozenset(revoked),
+    )
+
+
+def load_map_compatibility_signers(
+    path: Path = SIGNERS_PATH,
+) -> MapCompatibilitySigners:
+    return parse_map_compatibility_signers(
+        load_strict_json(path, description="map compatibility signers")
+    )
+
+
 def request_profile(
     request: dict[str, Any],
     contract: MapCompatibilityContract,
 ) -> MapCompatibilityProfile | None:
     """Return the durable profile a renderer request produces, if any.
 
-    Experimental terrain layers and renderer targets outside the contract stay
-    uncovered: their manifests carry no marker.
+    Renderer targets outside the contract stay uncovered: their manifests carry
+    no marker. A terrain experiment is an optional layer that every reader of
+    its profile must accept and may ignore.
     """
     from .map_labels import renderer_format_version
     from .map_pois import POI_RENDERER_FORMAT_VERSION, requested_poi_features
 
     target = request.get("target")
-    if not isinstance(target, dict) or target.get("terrainProfileVersion") is not None:
+    if not isinstance(target, dict):
         return None
     format_version = renderer_format_version(request)
     features_by_format = {
@@ -314,7 +358,14 @@ def request_profile(
         features = features_by_format[format_version]
     else:
         return None
-    return contract.profile_for("esp32-fmb", format_version, features)
+    profile = contract.profile_for("esp32-fmb", format_version, features)
+    if (
+        profile is not None
+        and target.get("terrainProfileVersion") is not None
+        and TERRAIN_EXPERIMENT_LAYER not in profile.optional_layers
+    ):
+        return None
+    return profile
 
 
 def manifest_contract(manifest: Mapping[str, Any]) -> int | None:
@@ -329,22 +380,3 @@ def manifest_contract(manifest: Mapping[str, Any]) -> int | None:
     ):
         raise MapCompatibilityError("map manifest compatibility marker is invalid")
     return marker["contract"]
-
-
-def require_contract_signer(
-    manifest: Mapping[str, Any],
-    channel: str,
-    key_id: str,
-    public_key_sha256: str,
-    contract: MapCompatibilityContract,
-) -> int | None:
-    """Fail closed before a durable manifest is signed by an unregistered key."""
-    declared = manifest_contract(manifest)
-    if declared is None:
-        return None
-    if declared != contract.contract:
-        raise MapCompatibilityError(
-            f"map manifest declares unknown compatibility contract {declared}"
-        )
-    contract.require_signer(channel, key_id, public_key_sha256)
-    return declared

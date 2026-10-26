@@ -282,20 +282,28 @@ class ChangedComponentsTests(unittest.TestCase):
             selected,
         )
 
-    def test_map_compatibility_contract_selects_every_reader(self) -> None:
-        for path in (
-            "map-platform/backend/tests/fixtures/map-compatibility-v1/corpus.json",
-            "map-platform/backend/tests/fixtures/map-compatibility-v1/map-pois-v1.development.bmap",
-            "map-platform/config/map-compatibility-contract-v1.json",
-            "protocol/fixtures/map-reader-capabilities-v1.txt",
-        ):
+    def test_map_compatibility_inputs_select_their_readers(self) -> None:
+        cases = {
+            # Backend, catalog, iPhone and firmware read the frozen corpus.
+            "map-platform/backend/tests/fixtures/map-compatibility-v1/corpus.json":
+                (True, True, True),
+            "map-platform/backend/tests/fixtures/map-compatibility-v2/new.bmap":
+                (True, True, True),
+            # The worker and the iPhone reader test load the contract.
+            "map-platform/config/map-compatibility-contract-v1.json": (False, True, True),
+            # Only the backend tests read the durable signer registry.
+            "map-platform/config/map-compatibility-signers-v1.json": (False, False, True),
+            # Firmware reports the capability bytes the iPhone decodes.
+            "protocol/fixtures/map-reader-capabilities-v1.txt": (True, True, False),
+        }
+        for path, (firmware_host, ios, map_backend) in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(
                     {
                         "firmware_build": False,
-                        "firmware_host": True,
-                        "ios": True,
-                        "map_backend": True,
+                        "firmware_host": firmware_host,
+                        "ios": ios,
+                        "map_backend": map_backend,
                         "osm": False,
                     },
                     changed_components.classify_paths([path]),

@@ -99,11 +99,12 @@ rotation preserves `manifestReceipt` while changing `signedManifestReceipt`.
 Maps created from the durable baseline also carry the top-level
 `compatibility` object, `{"contract": 1}`, inside the signed manifest. It marks
 the map as covered by [durable map compatibility](map-compatibility-contract.md)
-contract v1; a manifest without it is pre-baseline. The producer stamps it only
-for a registered profile and signs it only with a registered signer. Readers
-accept any positive contract number and keep later keys in the object, so the
-renderer target, features and signer remain the only read gates; existing
-firmware already skips unknown top-level keys.
+contract v1; a manifest without it is outside the contract. The producer stamps
+it only for a registered profile that its channel may publish. The contract
+number is an integer from 1 to 255. The iPhone validates that range, ignores
+unknown keys in the object and treats any valid number as durable, so the
+renderer target, features and signer remain the only read gates. Firmware
+already skips unknown top-level keys.
 `mapId`, the directory below it, and the filename (including extension) are each
 1...64 ASCII bytes. With the literal `VECTMAP` prefix and separators, the exact
 maximum relative path is therefore 202 bytes. Readers must enforce both the

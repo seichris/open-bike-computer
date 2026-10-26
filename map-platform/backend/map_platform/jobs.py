@@ -463,7 +463,6 @@ class JobStore:
         pack_path: str | None = None,
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
-        compatibility_contract: int | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
         build_cache_aliases: list[str] | None = None,
@@ -485,7 +484,6 @@ class JobStore:
                 pack_path=pack_path,
                 pack_bytes=pack_bytes,
                 artifacts=artifacts,
-                compatibility_contract=compatibility_contract,
                 artifact_metrics=artifact_metrics,
                 build_cache_key=build_cache_key,
                 build_cache_aliases=build_cache_aliases,
@@ -509,7 +507,6 @@ class JobStore:
         pack_path: str | None = None,
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
-        compatibility_contract: int | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
         build_cache_aliases: list[str] | None = None,
@@ -536,7 +533,6 @@ class JobStore:
                 pack_path=pack_path,
                 pack_bytes=pack_bytes,
                 artifacts=artifacts,
-                compatibility_contract=compatibility_contract,
                 artifact_metrics=artifact_metrics,
                 build_cache_key=build_cache_key,
                 build_cache_aliases=build_cache_aliases,
@@ -560,7 +556,6 @@ class JobStore:
         pack_path: str | None = None,
         pack_bytes: int | None = None,
         artifacts: list[ArtifactRecord] | None = None,
-        compatibility_contract: int | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
         build_cache_aliases: list[str] | None = None,
@@ -611,7 +606,6 @@ class JobStore:
             job.pack_bytes = pack_bytes
         if artifacts is not None:
             job.artifacts = list(artifacts)
-            job.compatibility_contract = compatibility_contract
         if artifact_metrics is not None:
             job.artifact_metrics = dict(artifact_metrics)
         if build_cache_key is not None:
@@ -1228,7 +1222,6 @@ class JobStore:
                 pack_path=(source.pack_path if source.pack_path and Path(source.pack_path).is_file() else None),
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
-                compatibility_contract=source.compatibility_contract,
                 artifact_metrics=artifact_metrics,
                 build_cache_key=source.build_cache_key,
                 build_cache_aliases=source.build_cache_aliases,
@@ -1251,7 +1244,6 @@ class JobStore:
         built_archive: Path,
         published_archive: Path,
         artifacts: list[ArtifactRecord] | None = None,
-        compatibility_contract: int | None = None,
         artifact_metrics: dict[str, Any] | None = None,
         build_cache_key: str | None = None,
         build_cache_aliases: list[str] | None = None,
@@ -1284,7 +1276,6 @@ class JobStore:
                     pack_path=str(published_archive),
                     pack_bytes=published_archive.stat().st_size,
                     artifacts=artifacts,
-                    compatibility_contract=compatibility_contract,
                     artifact_metrics=artifact_metrics,
                     build_cache_key=build_cache_key,
                     build_cache_aliases=build_cache_aliases,

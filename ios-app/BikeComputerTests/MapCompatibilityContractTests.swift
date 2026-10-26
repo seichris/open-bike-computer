@@ -34,7 +34,9 @@ private struct CorpusVariant {
 }
 
 private struct CorpusMap {
+    let id: String
     let profile: String
+    let optionalLayers: [String]
     let mapID: String
     let rendererFormatVersion: Int
     let features: [String]
@@ -81,7 +83,9 @@ private struct Corpus {
         }
         return Corpus(
             maps: maps.map { entry in
-                guard let profile = entry["profile"] as? String,
+                guard let id = entry["id"] as? String,
+                      let profile = entry["profile"] as? String,
+                      let optionalLayers = entry["optionalLayers"] as? [String],
                       let mapID = entry["mapId"] as? String,
                       let format = entry["rendererFormatVersion"] as? Int,
                       let features = entry["features"] as? [String],
@@ -89,7 +93,9 @@ private struct Corpus {
                     corpusFailure("corpus map decodes")
                 }
                 return CorpusMap(
+                    id: id,
                     profile: profile,
+                    optionalLayers: optionalLayers,
                     mapID: mapID,
                     rendererFormatVersion: format,
                     features: features,
@@ -105,9 +111,9 @@ private struct Corpus {
         )
     }
 
-    func map(_ profile: String) -> CorpusMap {
-        guard let map = maps.first(where: { $0.profile == profile }) else {
-            corpusFailure("corpus has \(profile)")
+    func map(_ id: String) -> CorpusMap {
+        guard let map = maps.first(where: { $0.id == id }) else {
+            corpusFailure("corpus has \(id)")
         }
         return map
     }
@@ -218,7 +224,7 @@ enum MapCompatibilityContractTests {
         testDurableInstallUsesDeviceReaderCapabilities(corpus)
         testCatalogEligibilityForBothApps(corpus)
         testSavedDurableMapReopensAfterAppUpdate(corpus)
-        testPreBaselineMapsAreMarkedWithoutCoercion(corpus)
+        testMapsOutsideTheContractAreMarkedWithoutCoercion(corpus)
         testUnsupportedAndCorruptInputsAreRejected(corpus)
     }
 
@@ -255,6 +261,9 @@ enum MapCompatibilityContractTests {
                             "\(variant.file) signed contours require the companion")
                 assertEqual(direct.requiredFirmwareBuild, nil,
                             "\(variant.file) carries no firmware identity")
+                assertEqual(direct.containsTerrain,
+                            map.optionalLayers.contains("terrain-experiment-v1"),
+                            "\(variant.file) optional terrain layer")
             }
         }
     }
@@ -318,6 +327,26 @@ enum MapCompatibilityContractTests {
                 ) else {
                     corpusFailure("\(variant.file) validates")
                 }
+                // The app's own renderer pre-check on firmware without the
+                // terrain experiment: an optional layer never blocks a durable
+                // map, but still blocks the same bytes outside the contract.
+                func passesPreCheck(contract: Int?) -> Bool {
+                    SavedMapRendererCompatibilityPolicy.isCompatible(
+                        rendererFormatVersion: verified.rendererFormatVersion,
+                        supportsStreetLabels: true,
+                        supports3DBuildings: true,
+                        supportsTopographicContours: true,
+                        containsTerrain: verified.containsTerrain,
+                        supportsTerrainExperiments: false,
+                        supportsMapPois: true,
+                        includesContours: verified.topography != nil,
+                        compatibilityContract: contract
+                    )
+                }
+                assert(passesPreCheck(contract: verified.compatibilityContract),
+                       "\(variant.file) passes the app pre-check")
+                assertEqual(passesPreCheck(contract: nil), !verified.containsTerrain,
+                            "\(variant.file) terrain outside the contract needs the experiment")
                 let capability = "\(verified.signatureKeyID)=\(verified.signatureKeySHA256)"
                 func evaluate(
                     _ status: MapTransferDeviceStatus,
@@ -379,8 +408,9 @@ enum MapCompatibilityContractTests {
                 assertEqual(evaluate(legacyStatus, reader: .some(nil)).rejection,
                             .deviceReaderUnknown,
                             "\(variant.file) needs authenticated reader capabilities")
-                // The same bytes without the signed marker are pre-baseline and
-                // keep the exact firmware rule; nothing coerces them.
+                // The same bytes without the signed marker are outside the
+                // contract and keep the exact firmware rule; nothing coerces
+                // them.
                 assertEqual(evaluate(developmentFirmware, contract: nil).rejection,
                             .firmwareIdentityMismatch,
                             "\(variant.file) without a marker keeps the old firmware pin")
@@ -389,6 +419,23 @@ enum MapCompatibilityContractTests {
         let malformed = deviceStatus(trust: [], mapReader: "{\"schemaVersion\":\"one\"}")
         assertEqual(malformed.mapReader, nil, "malformed reader report falls back")
         assert(malformed.supportsBikeMapStreamV1, "malformed reader report keeps the status")
+        let legacyFeatures = LegacyDeviceRendererFeatures(
+            streetLabels: true, buildings3D: true, contours: true, mapPois: false
+        )
+        let laterSchema = deviceStatus(
+            trust: [],
+            mapReader: productionReader.replacingOccurrences(
+                of: "\"schemaVersion\":1", with: "\"schemaVersion\":2"
+            )
+        )
+        assertEqual(laterSchema.mapReader?.schemaVersion, 2, "later reader report decodes")
+        assertEqual(
+            DeviceMapReaderCapabilityPolicy.capabilities(
+                reported: laterSchema.mapReader, legacyFeatures: legacyFeatures
+            ),
+            DeviceMapReaderCapabilityPolicy.legacy(legacyFeatures),
+            "a later reader report schema falls back to the renderer feature bits"
+        )
         let reported = DeviceMapReaderCapabilityPolicy.capabilities(
             reported: productionFirmware.mapReader,
             legacyFeatures: LegacyDeviceRendererFeatures(
@@ -399,18 +446,15 @@ enum MapCompatibilityContractTests {
                     "the firmware's own report outranks renderer feature bits")
         assertEqual(
             OfflineMapPlatformError.mapStreamCompatibilityRejected(.firmwareIdentityMismatch)
-                .errorDescription?.contains("before durable maps"),
+                .errorDescription?.contains("isn't a durable map"),
             true,
-            "only pre-baseline maps fail on a firmware identity and say so"
+            "only maps outside the contract fail on a firmware identity and say so"
         )
     }
 
     fileprivate static func testCatalogEligibilityForBothApps(_ corpus: Corpus) {
         let buildings = corpus.map("buildings-3d-v1")
         let everyTier = catalogMap(buildings, variants: buildings.variants, deliveryState: "production")
-        let productionArtifacts = Set(buildings.production.values.map {
-            $0.streamArtifact["sha256"] as? String ?? ""
-        })
         assertEqual(
             OfflineMapCatalogAvailabilityPolicy.availability(
                 for: everyTier, channel: "production", trustStore: corpus.productionTrust
@@ -418,13 +462,32 @@ enum MapCompatibilityContractTests {
             .available,
             "Bicino downloads approved production artifacts"
         )
-        assert(
-            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
-                localArtifactSHA256s: productionArtifacts,
-                map: everyTier, channel: "production", trustStore: corpus.productionTrust
-            ),
-            "a saved production copy stays current after rotation and a worker update"
-        )
+        // Whichever production copy the library lists after a key rotation or
+        // worker update, the map stays available and a saved copy of that
+        // head is current. A saved earlier copy may be offered the update, but
+        // keeps validating and installing (see the install and reopen tests).
+        for name in ["production", "production-rotated-key", "production-updated-worker"] {
+            guard let head = buildings.production[name] else {
+                corpusFailure("corpus has \(name)")
+            }
+            let library = catalogMap(
+                buildings, variants: [buildings.development, head], deliveryState: "production"
+            )
+            assertEqual(
+                OfflineMapCatalogAvailabilityPolicy.availability(
+                    for: library, channel: "production", trustStore: corpus.productionTrust
+                ),
+                .available,
+                "\(name) head keeps the library map available"
+            )
+            assert(
+                !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                    localArtifactSHA256s: [head.streamArtifact["sha256"] as? String ?? ""],
+                    map: library, channel: "production", trustStore: corpus.productionTrust
+                ),
+                "a saved copy of the \(name) head is current"
+            )
+        }
         assertEqual(
             OfflineMapCatalogAvailabilityPolicy.availability(
                 for: everyTier, channel: "development", trustStore: corpus.developmentAppTrust
@@ -555,11 +618,11 @@ enum MapCompatibilityContractTests {
             .streamV2,
             "a firmware update does not strand a saved durable map"
         )
-        assert(!SavedMapCompatibilityPolicy.isPreBaseline(packURL: saved),
+        assert(!SavedMapCompatibilityPolicy.lacksDurableContract(packURL: saved),
                "Saved Maps does not mark a durable map")
     }
 
-    fileprivate static func testPreBaselineMapsAreMarkedWithoutCoercion(_ corpus: Corpus) {
+    fileprivate static func testMapsOutsideTheContractAreMarkedWithoutCoercion(_ corpus: Corpus) {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("map-pre-baseline-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -577,19 +640,21 @@ enum MapCompatibilityContractTests {
         }
         let stream = directory.appendingPathComponent("contour-fixture.bmap")
         try! earlierStream.write(to: stream)
-        assert(SavedMapCompatibilityPolicy.isPreBaseline(packURL: stream),
-               "a signed stream without a marker is pre-baseline")
+        assert(SavedMapCompatibilityPolicy.lacksDurableContract(packURL: stream),
+               "a signed stream without a marker is outside the contract")
         let archive = directory.appendingPathComponent("legacy.zip")
         try! Data("PK".utf8).write(to: archive)
-        assert(SavedMapCompatibilityPolicy.isPreBaseline(packURL: archive),
-               "an unsigned archive is pre-baseline")
+        assert(SavedMapCompatibilityPolicy.lacksDurableContract(packURL: archive),
+               "an unsigned archive is outside the contract")
         let unreadable = directory.appendingPathComponent("damaged.bmap")
         try! Data([0x42]).write(to: unreadable)
-        assert(!SavedMapCompatibilityPolicy.isPreBaseline(packURL: unreadable),
+        assert(!SavedMapCompatibilityPolicy.lacksDurableContract(packURL: unreadable),
                "a damaged file reports its own validation error")
         for map in corpus.maps {
-            assert(!SavedMapCompatibilityPolicy.isPreBaseline(packURL: map.development.url),
-                   "\(map.profile) is not marked pre-baseline")
+            for variant in map.variants {
+                assert(!SavedMapCompatibilityPolicy.lacksDurableContract(packURL: variant.url),
+                       "\(variant.file) is not marked as outside the contract")
+            }
         }
     }
 
