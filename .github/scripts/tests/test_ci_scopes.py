@@ -28,7 +28,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_firmware_profiles_and_boards(self):
         full=components.select_firmware_targets('175')
-        targets=scope.firmware_targets(['esp32/lib/map_transfer/map_transfer.cpp'],full)
+        targets=scope.firmware_targets(['esp32/lib/device_transfer/durable_operation.cpp'],full)
         self.assertEqual(targets,tuple(t for t in full if t.endswith(('_PRODUCTION','_LIFECYCLE_QUALIFICATION'))))
         self.assertIn('WAVESHARE_AMOLED_175_REMOTE_DEBUG',scope.firmware_targets(['esp32/lib/device_debug/device_debug_http.cpp'],full))
         for path in ('esp32/platformio.ini','esp32/tools/build_firmware.py','esp32/include/board.h','esp32/lib/panel/WAVESHARE_AMOLED_175.cpp'):
@@ -41,6 +41,59 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(scope.board_firmware_targets(('175','206')),components.select_firmware_targets('all'))
         self.assertIn('WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION',scope.firmware_targets(['esp32/platformio.ini'],full))
         self.assertIn('WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION',scope.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'],full))
+
+    def test_firmware_conditional_consumers_keep_the_profiles_that_compile_them(self):
+        for board in ('175', '206', 'all'):
+            full = components.select_firmware_targets(board)
+            expected = tuple(t for t in full if t.endswith(('_REMOTE_DEBUG', '_PRODUCTION', '_POI_LIFECYCLE_QUALIFICATION')))
+            for path in ('esp32/lib/ble_navigation/ble_navigation.cpp',
+                         'esp32/lib/ble_navigation/firmware_diagnostics_config.hpp',
+                         'esp32/lib/ble_navigation/map_profile_protocol.hpp',
+                         'esp32/lib/map_transfer/map_transfer.cpp',
+                         'esp32/lib/map_transfer/map_stream_compiled_trust.cpp',
+                         'esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc'):
+                # Exact suffixes: plain lifecycle must not ride along with the POI image.
+                self.assertEqual(scope.firmware_targets([path], full), expected, path)
+
+    def test_docs_and_ci_inputs_do_not_expand_to_unrequested_boards(self):
+        full = components.select_firmware_targets('175')
+        ble = 'esp32/lib/ble_navigation/ble_navigation.cpp'
+        self.assertEqual(scope.firmware_targets([ble, 'docs/ble-protocol.md'], full),
+                         scope.firmware_targets([ble], full))
+        for path in ('.github/workflows/ci.yml', 'tools/dev_check.py'):
+            self.assertEqual(scope.firmware_targets([path], full), full)
+        # Lifecycle adapter implementations and shared board/build inputs retain
+        # broader qualification; manual/release scopes preserve the chosen matrix.
+        for path in ('esp32/lib/firmware_update/firmware_update_http.cpp',
+                     'esp32/lib/map_transfer_http/map_transfer_http.cpp'):
+            self.assertIn('WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION',
+                          scope.firmware_targets([path], full))
+        self.assertEqual(scope.firmware_targets(None, components.select_firmware_targets('all')),
+                         components.select_firmware_targets('all'))
+
+    def test_shared_fast_inputs_keep_only_their_consumers(self):
+        fixture = ['protocol/fixtures/workout-zones-v1.json', 'docs/example.md']
+        self.assertEqual(scope.ios_scopes(fixture, native=False, selected=True),
+                         {'ios_checks': ['ios-navigation-workout'], 'ios_simulator': False, 'ios_release': False})
+        tools = ['tools/firmware_release_history.py', 'tools/verify_firmware_boot_acceptance.py',
+                 'tools/development/tests/test_development_checks.py']
+        self.assertEqual(scope.firmware_host_checks(tools, selected=True),
+                         ['esp32-host-firmware-manifest-tests'])
+        mixed = tools + ['esp32/lib/power/power.cpp']
+        self.assertIn('esp32-host-usb-recovery-status', scope.firmware_host_checks(mixed, selected=True))
+        with self.assertRaisesRegex(ValueError, 'no checks'):
+            scope.firmware_host_checks(fixture, selected=True)
+        with patch.dict(scope.SHARED_FAST_CHECKS, {'tools/firmware_release_history.py': ('missing-check',)}):
+            with self.assertRaisesRegex(ValueError, 'unknown checks'):
+                scope.shared_fast_checks(tools)
+
+    def test_renderer_cost_is_reserved_for_potential_render_changes(self):
+        for path in ('esp32/lib/ble_navigation/ble_navigation.cpp',
+                     'esp32/lib/map_transfer/map_stream_compiled_trust.cpp'):
+            self.assertFalse(scope.firmware_renderer_required([path, 'docs/example.md']))
+        for paths in (None, ['esp32/lib/maps/mapTiles.cpp'], ['.github/workflows/ci.yml'],
+                      ['esp32/lib/device_debug/device_debug_http.cpp']):
+            self.assertTrue(scope.firmware_renderer_required(paths))
 
     def test_ios_scopes_keep_consumers_and_unknown_fallback(self):
         select=lambda paths:scope.ios_scopes(paths,native=True,selected=True)

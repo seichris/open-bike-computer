@@ -751,7 +751,8 @@
       "cwd": ".",
       "command": "python3 -m unittest discover -s .github/scripts/tests",
       "tools": [
-        "python3"
+        "python3",
+        "g++"
       ]
     },
     {
