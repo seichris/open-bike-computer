@@ -30,7 +30,7 @@ private struct SocialHubContent: View {
     var body: some View {
         List {
             if store.session.state == .unavailable {
-                Section { Text("Social riding is not available in this build. Navigation and private workouts are still available.") }
+                Section { Text("Your account could not be initialized. Reopen Bicino to try again. Navigation and private workouts are still available.") }
             } else if store.session.state == .restoring {
                 Section { ProgressView("Restoring your account…") }
             } else if store.session.state != .signedIn {
