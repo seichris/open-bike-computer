@@ -136,6 +136,26 @@ class DevelopmentChecksTests(unittest.TestCase):
         self.assertEqual(report["source"]["commit"], "a" * 40)
         self.assertEqual(Path(report["checks"][0]["log"]).read_text().strip(), "checked")
 
+    def test_shared_fast_input_auto_selection_matches_hosted_consumers(self):
+        cases = {
+            'protocol/fixtures/workout-zones-v1.json': {'ios-navigation-workout'},
+            'tools/firmware_release_history.py': {'esp32-host-firmware-manifest-tests'},
+        }
+        for path, expected in cases.items():
+            with patch.object(runner, 'changed_paths', return_value=[path]), \
+                 patch.object(runner, 'run_checks', return_value=0) as run:
+                self.assertEqual(runner.main(['--level', 'full', '--report', '/private/tmp/shared-plan-not-written.json']), 0)
+            product = {c['id'] for c in run.call_args.args[0] if c['component'] != 'development'}
+            self.assertEqual(product, expected)
+
+    def test_unknown_shared_input_cannot_execute_any_product_checks(self):
+        with patch.object(runner, 'changed_paths', return_value=['tools/new-shared-validator.py']), \
+             patch.object(runner, 'run_checks') as run, contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaises(SystemExit) as error:
+            runner.main([])
+        self.assertNotEqual(error.exception.code, 0)
+        run.assert_not_called()
+
     def test_registry_has_unique_ids_existing_workdirs_and_valid_graphs(self):
         registry = json.loads(runner.REGISTRY.read_text())["checks"]
         self.assertEqual(len(registry), len({c["id"] for c in registry}))
@@ -168,6 +188,28 @@ class DevelopmentChecksTests(unittest.TestCase):
             self.assertTrue(first["dirty"])
             self.assertEqual(first["commit"], second["commit"])
             self.assertNotEqual(first["workingStateSha256"], second["workingStateSha256"])
+
+    def test_renames_keep_deleted_source_consumers_for_committed_and_local_changes(self):
+        for committed in (False, True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                def git(*args):
+                    return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.DEVNULL).decode().strip()
+                git("init", "-q")
+                (root / "ios-app").mkdir()
+                (root / "docs").mkdir()
+                (root / "ios-app/retired.swift").write_text("// Former app source\n")
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base")
+                base = git("rev-parse", "HEAD")
+                git("mv", "ios-app/retired.swift", "docs/retired.swift")
+                if committed:
+                    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Rename")
+                with patch.object(runner, "ROOT", root):
+                    paths = runner.changed_paths(base)
+                self.assertEqual(paths, ["docs/retired.swift", "ios-app/retired.swift"])
+                self.assertIn("ios", runner.components(paths, base))
+                self.assertIn("ios_native", runner.components(paths, base))
 
 
 class SimulatorOwnershipTests(unittest.TestCase):
