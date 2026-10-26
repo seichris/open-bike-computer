@@ -6888,6 +6888,173 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testFirmwareInstallRetainsOriginalDevice() async {
+        for boundary in ["download", "eligibility", "before-task", "reconnect", "unchanged"] {
+            let suite = "firmware-intent-test.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwarePausedDownloadProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer {
+                session.invalidateAndCancel()
+                FirmwarePausedDownloadProtocol.onStart = nil
+            }
+            let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+            let image = Data("abc".utf8)
+            let manifest = FirmwareReleaseManifest(
+                schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.0",
+                build: 87, gitSha: String(repeating: "a", count: 40), size: image.count,
+                sha256: FirmwareUpdateManager.sha256Hex(image),
+                url: URL(string: "https://firmware.invalid/image.bin")!,
+                minUpdaterProtocol: 1, signature: nil)
+            // This fixture starts at the already-verified manifest cache. It
+            // tests install orchestration, without changing production trust.
+            manager.setVerifiedManifestForTesting(manifest)
+            let ble = BLEManager()
+            func ready() {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-a")
+                ble.isConnected = true
+                ble.isNavigationReady = true
+                ble.firmwareTarget = manifest.target
+                ble.firmwareBuild = 1
+            }
+            ready()
+            var packets: [String] = []
+            func status(_ json: String) {
+                _ = ble.handleDeviceTransferStatusNotification(
+                    Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8))
+            }
+            let eligible = #"{"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"normal","correlation":0},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}"#
+            let endpoint = NavigationWriteEndpoint(maximumWriteLength: 96, canSend: { true }, write: { packet in
+                let text = String(decoding: packet, as: UTF8.self)
+                packets.append(text)
+                if text == "DTRNprepare|firmware" {
+                    Task { @MainActor in
+                        status(#"{"enabled":false,"mode":"","lastError":{"code":"fixture_rejected","message":"fixture rejection","sequence":1}}"#)
+                    }
+                } else if text == "DTRNexit" {
+                    Task { @MainActor in status(eligible) }
+                }
+            })
+            ble.installNavigationWriteEndpoint(endpoint)
+            var download: FirmwarePausedDownloadProtocol?
+            var downloadCount = 0
+            FirmwarePausedDownloadProtocol.onStart = { request in
+                Task { @MainActor in
+                    downloadCount += 1
+                    download = request
+                }
+            }
+            func waitUntil(_ condition: () -> Bool) async {
+                for _ in 0..<400 where !condition() {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+                assert(condition(), "firmware intent fixture reached \(boundary) boundary")
+            }
+
+            manager.installLatest(bleManager: ble)
+            if boundary == "before-task" {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+                await waitUntil { manager.errorMessage != nil }
+                assert(packets.isEmpty, "a changed install intent must not request status from another device")
+                continue
+            }
+            await waitUntil { packets.contains("DSTS") }
+            if boundary == "eligibility" {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+            }
+            status(eligible)
+            if boundary == "eligibility" {
+                await waitUntil { !manager.isBusy || download != nil }
+                assert(download == nil, "stale eligibility must stop before downloading an update")
+            } else {
+                await waitUntil { download != nil }
+                let persisted = defaults.data(forKey: "firmware.pendingUpdate")!
+                let downloading = try! JSONDecoder().decode(PendingFirmwareUpdate.self, from: persisted)
+                assertEqual(downloading.deviceID, "ota-intent-device-a",
+                            "download intent is durably bound before the response arrives")
+                manager.installLatest(bleManager: ble)
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                let retained = try! JSONDecoder().decode(PendingFirmwareUpdate.self,
+                    from: defaults.data(forKey: "firmware.pendingUpdate")!)
+                assert(manager.isBusy, "a repeated install cannot release the active operation")
+                assertEqual(retained.operationID, downloading.operationID, "a repeated install keeps the active intent")
+                assertEqual(downloadCount, 1, "a repeated install does not start a second download")
+                if boundary == "download" {
+                    ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+                } else if boundary == "reconnect" {
+                    let oldEpoch = ble.transferConnectionEpoch
+                    ble.clearConnectionStateForTesting()
+                    ready()
+                    ble.installNavigationWriteEndpoint(endpoint)
+                    assert(ble.transferConnectionEpoch != oldEpoch, "fixture reconnect changes epoch")
+                }
+                download!.complete(with: image)
+                await waitUntil { !manager.isBusy || packets.contains("DTRNprepare|firmware") }
+            }
+            let prepared = packets.contains("DTRNprepare|firmware")
+            assertEqual(prepared, boundary == "unchanged",
+                        "only the original live connection may enter firmware maintenance after \(boundary)")
+            await waitUntil { !manager.isBusy }
+            if boundary != "unchanged" {
+                assertEqual(manager.errorMessage, FirmwareUpdateError.deviceNotReady.errorDescription,
+                            "changed install owner is rejected at \(boundary)")
+            }
+            if boundary == "unchanged", let data = defaults.data(forKey: "firmware.pendingUpdate") {
+                let pending = try! JSONDecoder().decode(PendingFirmwareUpdate.self, from: data)
+                assertEqual(pending.deviceID, "ota-intent-device-a", "pending OTA keeps the original device")
+            } else {
+                assert(boundary != "unchanged", "a possibly accepted command retains its pending operation")
+                manager.reconcilePendingUpdate(bleManager: ble)
+                assert(defaults.data(forKey: "firmware.pendingUpdate") == nil,
+                       "an aborted local preparation remains retryable after status reconciliation")
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwareLocalPreparationRecovery() {
+        let suite = "firmware-local-recovery.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let ble = BLEManager()
+        ble.setConnectedDeviceIDForTesting("device-b")
+        ble.isNavigationReady = true
+        ble.firmwareTarget = "WAVESHARE_AMOLED_175"
+        ble.firmwareVersion = "0.3.0"
+        ble.firmwareBuild = 1
+        ble.firmwareGitSha = String(repeating: "a", count: 40)
+        ble.setFirmwareBootCheckpointForTesting(normalReady: true)
+        for deviceID: String? in [nil, "device-a"] {
+            for stage: FirmwareUpdateTransactionStage in [.downloading, .imageVerified, .maintenanceRequested, .finalizing] {
+                let pending = PendingFirmwareUpdate(target: ble.firmwareTarget, version: "0.4.0", build: 87,
+                    gitSha: String(repeating: "b", count: 40), startedAt: Date(), status: "interrupted",
+                    deviceID: deviceID, transactionStage: stage)
+                defaults.set(try! JSONEncoder().encode(pending), forKey: "firmware.pendingUpdate")
+                let restored = FirmwareUpdateManager(defaults: defaults)
+                restored.reconcilePendingUpdate(bleManager: ble)
+                let local = stage == .downloading || stage == .imageVerified
+                assertEqual(defaults.data(forKey: "firmware.pendingUpdate") == nil, local,
+                            "only a known local preparation is cleared on relaunch: \(stage)")
+                assertEqual(restored.statusMessage,
+                            local ? "firmware update cancelled" : "firmware update status unresolved",
+                            "relaunch keeps remote uncertainty distinct from an unstarted install")
+            }
+        }
+        for receipt in [false, true] {
+            let contradictory = PendingFirmwareUpdate(target: ble.firmwareTarget, version: "0.4.0", build: 87,
+                gitSha: String(repeating: "b", count: 40), startedAt: Date(), status: "interrupted",
+                deviceID: "device-a", maintenanceCorrelation: receipt ? nil : 42,
+                transactionStage: .downloading, requiresOperationReceipt: receipt)
+            defaults.set(try! JSONEncoder().encode(contradictory), forKey: "firmware.pendingUpdate")
+            FirmwareUpdateManager(defaults: defaults).reconcilePendingUpdate(bleManager: ble)
+            assert(defaults.data(forKey: "firmware.pendingUpdate") != nil,
+                   "remote operation evidence prevents discarding a contradictory local stage")
+        }
+    }
+
+    @MainActor
     static func testFirmwarePendingIdentityReconciliation() async {
         let suiteName = "FirmwarePendingIdentity.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
