@@ -17,6 +17,15 @@ SPEC.loader.exec_module(detect_worker_change)
 
 
 class DetectWorkerChangeTests(unittest.TestCase):
+    def test_poi_and_terrain_policy_edits_rebuild_the_worker(self) -> None:
+        workflow = (MODULE_PATH.parents[2] / ".github/workflows/map-platform-image.yml").read_text()
+        for version in (3, 4):
+            path = f"map-platform/config/generation-profile-policy-v{version}.json"
+            self.assertTrue(detect_worker_change.image_inputs_changed([path]))
+            self.assertTrue(detect_worker_change.promotion_inputs_changed([path]))
+            self.assertFalse(detect_worker_change.worker_inputs_changed([path]))
+            self.assertIn(path, workflow)
+
     def test_all_declared_worker_roots_are_classified_as_worker_changes(self) -> None:
         for root in detect_worker_change.WORKER_CLASSIFICATION_ROOTS:
             with self.subTest(root=root):

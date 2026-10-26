@@ -134,6 +134,9 @@ struct NavigationWrite {
     let onWrite: (() -> Void)?
     let onDrop: (() -> Void)?
     let onWriteFailure: (() -> Void)?
+    /// Runs after a successful ATT write response. A write without response
+    /// has no stronger evidence, so it runs once that write is issued.
+    let onWriteSuccess: (() -> Void)?
     let transportCanSend: (() -> Bool)?
     let transportExpectsWriteResponse: Bool?
     /// The actual CoreBluetooth characteristic used by `transportWrite`.
@@ -156,6 +159,7 @@ struct NavigationWrite {
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil,
         transportCanSend: (() -> Bool)? = nil,
         transportExpectsWriteResponse: Bool? = nil,
         transportCharacteristicUUIDString: String? = nil,
@@ -173,6 +177,7 @@ struct NavigationWrite {
         self.onWrite = onWrite
         self.onDrop = onDrop
         self.onWriteFailure = onWriteFailure
+        self.onWriteSuccess = onWriteSuccess
         self.transportCanSend = transportCanSend
         self.transportExpectsWriteResponse = transportExpectsWriteResponse
         self.transportCharacteristicUUIDString =
@@ -204,6 +209,7 @@ struct NavigationWrite {
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:
@@ -226,6 +232,7 @@ struct NavigationWrite {
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:

@@ -593,6 +593,15 @@ jobs:
       - name: Binary map block format host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-binary-map-block-format-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-binary-map-block-format-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-binary-map-block-format-host-tests/results.json"
+      - name: Nearby POI query host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-query-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-query-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-query-host-tests/results.json"
+      - name: Nearby POI layout host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-layout-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-layout-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-layout-host-tests/results.json"
+      - name: Nearby POI feature gate host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-feature-gate-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-feature-gate-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-feature-gate-host-tests/results.json"
       - name: Durable map operation host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-durable-map-operation-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-durable-map-operation-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-durable-map-operation-host-tests/results.json"

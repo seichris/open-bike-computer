@@ -7,6 +7,7 @@
 - User explicitly requested a revision that preserves the five correctness fixes while reducing CI time to a reasonable minimum. This authorizes the cost redesign and its additional delta review; it does not reset the original three passes.
 - Mode/profile/strategy/gate: `publish` / `deep-pr-review` / `sequential-local` / P0/P1/P2. Zero subagents. High risk: selection determines which checks may be omitted.
 - Original review: 3/3 passes, retained in [the original report](astra-ci-evidence-2026-10-25.md). The explicitly authorized cost revision used 3/3 additional passes, numbered 4–6 cumulatively. Pass 6 is the clean confirming pass; **0 active findings, 8 fixed+verified, 0 invalidated, 0 deferred**. This is the local review state; new-head hosted qualification is recorded separately in the PR.
+- **Superseded current state (2026-10-26):** the PR was updated by merging `origin/main` at `964bdbfe333b6f30c54c244c6319e7e1e55c7f04`. The separately authorized post-conflict delta review is cumulative pass 7; ledger **0 active, 9 fixed+verified (CI-EVID-001–009), 0 invalidated, 0 deferred**. See [Post-merge delta — 2026-10-26](#post-merge-delta--2026-10-26). Verification recorded for `34cb71af` is historical and does not qualify the merged head.
 - Work remains in the assigned isolated worktree. No unrelated worktree, release, deployment, physical device, real signing key or receipt publication is part of this change.
 
 ## Resulting policy
@@ -59,8 +60,9 @@ Read-only timing data and three-version scope comparison are retained in this wo
 | CI-EVID-006 | P2 | Initial PR's shared-input/profile expansion violated the clarified cost constraint. Targeted selection, conditional profile coverage and executable work-budget cases replace it. |
 | CI-EVID-007 | P2 | Pre-existing non-firmware/doc paths escalated routine firmware changes to both boards. Consumer filtering and requested-family selection remove this expansion. |
 | CI-EVID-008 | P2 | Revision pass 5 found that the initial cheaper mixed-path rule could hide a board/build edit behind a CI edit. Board/runtime routing now takes precedence; mixed 206/common-board regressions verify it. |
+| CI-EVID-009 | P2 | Merge interaction with main's POI budget profiles (2026-10-26). The two-profile BLE/map-transfer selection, merged unchanged, would stop building the only diagnostics-off, 3 MiB-slot image of their nearby-POI code while every existing test stayed green. They now select production, remote-debug and POI lifecycle; a platformio-derived regression requires that image. |
 
-All eight findings are **fixed+verified** within the stated source/selection scope. No findings were dropped or severity-downgraded to meet the review bound. Runtime/physical limits and timing-estimate limits remain explicit.
+All nine findings are **fixed+verified** within the stated source/selection scope (CI-EVID-009 since the 2026-10-26 merge). No findings were dropped or severity-downgraded to meet the review bound. Runtime/physical limits and timing-estimate limits remain explicit.
 
 ## Delta review record
 
@@ -92,3 +94,85 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=bicino.localResultsKey GIT_CONFIG_VALUE_0= \
 - No local firmware image/app-container build, simulator run, physical-device operation or real receipt publication was performed for this revision. Only one batched source push is intended; no intermediate CI runs were requested.
 
 Recovery: revert the cost-revision commit on the PR branch to restore the first published head, or revert both PR commits to restore the recorded base. The former restores the expensive selection; the latter also restores the original correctness gaps. Neither requires device, service, signing-key or receipt-branch rollback. Keep all existing merge, release and physical acceptance requirements.
+
+## Post-merge delta — 2026-10-26
+
+### Target, identity and authorization
+
+- User request (Claude Mac app, 2026-10-26): resolve conflicts, merge freshly fetched `origin/main` into the existing PR branch, run a post-conflict delta review, push one batched update and update the PR description/report. Merging the PR, deployment, flashing, signing and manual CI actions are not authorized.
+- Worktree `/Users/chris/.codex/worktrees/astra-six-reviews-20261025-c5e83d/ci-evidence`, owned by `chris`; clean at start, branch `fix/ci-evidence-coverage-20261025`, HEAD equal to live PR head `34cb71af5cd2c72dda128500407ee8e79dd96cdb`. GitHub reported `mergeable=CONFLICTING`. Other worktrees and the primary checkout were not touched.
+- Fetched immediately before the update: `origin/main` = `964bdbfe333b6f30c54c244c6319e7e1e55c7f04` (merge of #378, map POI visibility), confirmed through the GitHub API. Merge base `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d`; main added 87 commits and 186 changed files.
+- Update method: a normal merge commit with parents `34cb71af…` and `964bdbfe…`, pushed without force. Its SHA is recorded in the PR description, not here, to avoid a self-reference.
+- Review: cumulative **pass 7**, authorized by this request; it does not reset the earlier six passes. Mode/strategy/gate: `publish` / sequential local / P0/P1/P2; zero subagents. Risk remains **high** (CI selection decides which work is omitted).
+
+### Conflict decisions
+
+Six PR files also changed on main. Git auto-merged five; `.github/scripts/ci_scopes.py` conflicted in `firmware_targets`.
+
+| Area | Main's change | Decision |
+| --- | --- | --- |
+| `ci_scopes.firmware_targets` | `board_firmware_targets` helper with a fifth `_POI_LIFECYCLE_QUALIFICATION` suffix; mixed non-firmware paths still selected both boards | Keep main's helper for common board/build and 206 selection. Keep the PR's ordering: board/runtime inputs first, then CI/runner inputs → requested board family (CI-EVID-007/008). |
+| BLE/map-transfer profiles | Implicitly production + lifecycle + POI lifecycle (`endswith('_LIFECYCLE_QUALIFICATION')` also matches POI) | Production + remote-debug + POI lifecycle; see CI-EVID-009. Other production libraries explicitly keep lifecycle + POI lifecycle, as main did implicitly. Profile matching is now exact, so the POI image is selected explicitly instead of through the plain-lifecycle suffix. |
+| `ci.yml` host job | Three new Nearby POI host steps without selection conditions | Gate each on its registry ID like every other step. The raw merge failed `test_every_registered_firmware_host_check_is_reachable_in_ci`; ungated, they would also run for manifest-only selections. |
+| Preprocessor guard | `MAP_STREAM_QUALIFICATION_TRUST` arm, defined only by the manual 175 isolated POI profile outside `FIRMWARE_TARGETS` | Model it with the other non-regular macros. The raw merge raised `unmodeled preprocessor inputs`. Host map-stream tests still compile that arm; no CI firmware build of the isolated profile is added. |
+| Cost budgets | Common board/build now 10 targets | Assert `board_firmware_targets(('175', '206'))` instead of a literal 8. |
+| `changed_components.py`, `checks.json`, `test_changed_components.py`, docs | POI targets, source-shard OSM routing, new registry checks | Auto-merged; retained unchanged. All 186 main-changed paths classify without the unmapped-input error. |
+
+Raw-merge evidence (`.venv/review-evidence/merge-20261026/pre-reconcile.{json,log}`): development 69 passed; CI 124 ran with 2 failures and 1 error, exactly the three guard rows above. No main-only file differs from `964bdbfe` in the merge result; the merged PR diff against main is the same 16 owned files.
+
+### CI-EVID-009 (P2) — POI budget image dropped for BLE/map-transfer
+
+- **Trigger/impact:** after #378, `MAP_POIS_RUNTIME_ENABLED=1` code exists in `esp32/lib/map_transfer/map_transfer.cpp` (POI block/index validation), `map_stream_parser.cpp` and `esp32/lib/ble_navigation/map_profile_protocol.hpp`. Remote-debug also defines the macro, so line-level preprocessor coverage stays complete, but it links into the 6 MiB development slot (`partitions_remote_debug.csv`) with diagnostics on. `*_POI_LIFECYCLE_QUALIFICATION` is the only regular image building that code diagnostics-off in the nearly full dual 3 MiB production slot (`partitions.csv`). Main built it for every library change. The PR's two-profile rule would have dropped it for BLE/map-transfer edits while every test stayed green.
+- **Reproduction:** with the raw-merge selection, `test_selected_profiles_cover_existing_library_conditional_arms` passed (no compile-coverage gap), confirming the omission was silent. Both new regressions fail against that selection (2/2).
+- **Fix:** `.github/scripts/ci_scopes.py` adds `_POI_LIFECYCLE_QUALIFICATION` to the BLE/map-transfer pair and uses exact suffix matching. `test_transfer_libraries_keep_the_production_slot_poi_image` derives the POI budget image from `platformio.ini` partitions and flags on both boards; cost-budget and scope tests pin the exact three-target selection.
+- **Provenance:** introduced by combining the PR's narrowed selection with main's new profile; identified during conflict reconciliation and fixed in the same batch, before the confirming review below.
+
+### Pass 7 — post-conflict delta review, all four lenses
+
+1. **Code/integration/security:** reviewed the complete merged PR diff against `964bdbfe`, the resolved selector, exact-suffix filter (targets always match `WAVESHARE_AMOLED_\d{3}…`), host-step gating, `FIRMWARE_HOST_CHECKS` validation and CI Gate. A simulated hosted `pull_request` selection for the merged diff emits all components, five 175 targets and 41 host checks, including the three POI checks. No new permission, secret, shell interpolation or release path.
+2. **Claims/spec/reachability:** checked profile definitions and partitions in `esp32/platformio.ini`, main's lifecycle/POI tests, the lifecycle-adapter CI audit (`endsWith('_LIFECYCLE_QUALIFICATION')` still covers the POI image), map-platform/OSM additions and new registry checks. Updated `docs/development-checks.md`; the earlier "2 builds" claims elsewhere in this report are historical for `34cb71af`.
+3. **Tests/verification:** guard failures on the raw merge were reconciled, not suppressed. Mutation checks: the pre-fix BLE/transfer selection fails both new regressions; each selected BLE/transfer profile is needed for at least one file's line coverage or for the production-slot POI image. Results below.
+4. **Repository policy/hygiene:** normal merge, no rebase or force; only owned files differ from main; signing/publication disabled for every runner, commit and push process; no hosted dispatch, rerun or cancellation.
+
+Result: **clean; 0 active findings, 9 fixed+verified, 0 invalidated, 0 deferred.** Stop at cumulative pass 7. A later change needs new user authorization for another pass.
+
+### Selection after the merge (requested family 175)
+
+Deterministic selector output for the same paths, recorded in `.venv/review-evidence/merge-20261026/sel-*.json`:
+
+| Change | Main `964bdbfe` | PR `34cb71af` | Merged |
+| --- | --- | --- | --- |
+| BLE or map-transfer implementation | 3: production, lifecycle, POI | 2: production, remote-debug | **3**: production, remote-debug, POI |
+| BLE plus documentation | 10 | 2 | **3** |
+| CI/runner inputs (this PR) | 10 | 4 | **5** (all 175 profiles, including POI) |
+| Common board/build plus CI | 10 | 8 | 10 |
+| Device-transfer library | 3 | 2 | 3: production, lifecycle, POI |
+| Maps library | 4 | 3 | 4 |
+| BLE plus device-transfer | 3 | 3 | 4: union of debug, lifecycle and POI consumers |
+| Workout fixture / release tool | No product validation | Targeted Swift / manifest checks | Unchanged targeted checks |
+| Unmapped shared input | No product validation | Fails selection | Fails selection |
+
+Relative to main the merged PR keeps the same BLE/transfer build count while trading plain lifecycle (no conditional arm there) for remote-debug coverage. Relative to `34cb71af`, BLE/transfer changes add one POI build; #378's run [40211250543](https://github.com/seichris/open-bike-computer/actions/runs/40211250543) measured those builds at 896 s (175) and 537 s (206). This PR's own push selects five 175 builds, one more than the last run, because main added the profile. These are estimates from existing runs, not a measured new-head speedup.
+
+### Verification (merged tree, before the commit)
+
+All commands ran from the PR worktree with `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=bicino.localResultsKey GIT_CONFIG_VALUE_0=`; reports under `.venv/review-evidence/merge-20261026/`.
+
+| Command / evidence | Result |
+| --- | --- |
+| `tools/dev-env tools/dev-check --check ci-routing --check development-tools` on the raw merge | Exit 1 as expected: 3 guard failures listed above |
+| `tools/dev-env tools/dev-check --check development-tools --check ci-routing --check esp32-host-usb-recovery-status --report …/pre-commit.json` | Exit 0; **69 development + 125 CI tests**, USB recovery request test passed; `sourceUnchanged: true`, all executed locally, no receipts |
+| `tools/dev-env tools/dev-check --plan --base origin/main` | Exit 0; automatic local selection resolves for the merged diff (map backend blocked only by its separate environment, as documented) |
+| Pinned actionlint `rhysd/actionlint@sha256:887a259a…147e9 -shellcheck=` under OrbStack, read-only mount | Exit 0 |
+| `git diff --check` | Exit 0 |
+| Classifier sweep | All 186 main-changed paths classify; selector comparison and hosted-selection simulation as above |
+
+Source patch against `964bdbfe`, excluding `docs/reviews/*`: SHA-256 `a69c03dd7ecf1bf9c9f8f5a872c1dd75ccf0d3f195bbbb1c8de13deb070b926d` (82,694 bytes). The committed head's clean-checkout verification and hosted status are recorded in the PR description.
+
+### Limits and recovery
+
+- No firmware image, app container, simulator or physical device was built or run locally; hosted CI from the single push supplies firmware/native evidence. The guard remains preprocessor coverage, not binary equivalence or slot-fit proof; the POI build itself checks slot fit.
+- The preprocessor guard was not rerun under Linux GCC locally for this delta; the hosted selection job runs it on Ubuntu.
+- Swift workout, firmware manifest and two-board zone results were not repeated locally: the merge changed none of their inputs or routing, and the hosted run executes them (`dev_check.py` changes select every component).
+- Pre-existing, unchanged by this merge: ten tracked tool/protocol/CI paths (for example `protocol/fixtures/world-radio-v1.txt`, `.github/scripts/workflow_policy.py`) still have no consumer mapping, so a future edit to one fails selection until mapped, as designed at `34cb71af`. The manual isolated POI profile remains outside CI firmware builds per main's policy.
+- Recovery: `git revert -m 1` of the merge commit returns the branch tree to `34cb71af` (and its conflicts with main); reverting the PR commits restores the recorded base as before. No device, service, signing key or receipt-branch state is involved.

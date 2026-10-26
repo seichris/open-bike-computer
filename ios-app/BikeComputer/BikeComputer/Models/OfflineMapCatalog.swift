@@ -345,7 +345,8 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
               ) else {
             return false
         }
-        if map.rendererFormatVersion == 4,
+        if (map.rendererFormatVersion == 4 ||
+            (map.rendererFormatVersion == 5 && map.features.contains("contours"))),
            OfflineMapTopographyCompanionPolicy.compatibleCompanion(
             for: map,
             deliveryTier: artifact.deliveryTier
@@ -412,8 +413,8 @@ nonisolated struct OfflineMapReaderCapabilities: Codable, Equatable, Sendable {
         renderers: [
             Renderer(
                 renderer: "esp32-fmb",
-                formatVersions: [1, 2, 3, 4],
-                features: ["3d-buildings", "contours", "street-labels"]
+                formatVersions: [1, 2, 3, 4, 5],
+                features: ["3d-buildings", "contours", "map-pois", "street-labels"]
             ),
         ]
     )
@@ -499,8 +500,10 @@ nonisolated enum OfflineMapTopographyCompanionPolicy {
         for map: OfflineMapCatalogMap,
         deliveryTier: String
     ) -> OfflineMapCatalogArtifact? {
-        guard map.rendererFormatVersion == 4,
-              map.features == ["3d-buildings", "contours", "street-labels"],
+        guard (map.rendererFormatVersion == 4 &&
+              map.features == ["3d-buildings", "contours", "street-labels"]) ||
+              (map.rendererFormatVersion == 5 &&
+               map.features == ["3d-buildings", "contours", "map-pois", "street-labels"]),
               let contentReceipt = map.contentReceipt,
               isSHA256(contentReceipt) else {
             return nil

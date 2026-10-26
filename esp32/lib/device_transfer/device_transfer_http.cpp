@@ -1400,24 +1400,7 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   }
 
   HttpRequest request;
-  std::string version;
-  std::string requestLineTrailing;
-  {
-    size_t position = 0;
-    const auto readToken = [&]() {
-      const size_t start = requestLine.find_first_not_of(" \t\n\r\f\v", position);
-      if (start == std::string::npos) return std::string();
-      const size_t end = requestLine.find_first_of(" \t\n\r\f\v", start);
-      position = end == std::string::npos ? requestLine.size() : end;
-      return requestLine.substr(start, position - start);
-    };
-    request.method = readToken();
-    request.path = readToken();
-    version = readToken();
-    requestLineTrailing = readToken();
-  }
-  if (request.method.empty() || request.path.empty() ||
-      version != "HTTP/1.1" || !requestLineTrailing.empty()) {
+  if (!parseHttpRequestLine(requestLine, request.method, request.path)) {
     sendError(client, 400, "bad_request", "invalid request line");
     return false;
   }
@@ -1483,8 +1466,6 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   // renderer metrics take their heap sample or build a response so a short
   // request line/header cannot overlap those bounded allocations.
   std::string().swap(requestLine);
-  std::string().swap(version);
-  std::string().swap(requestLineTrailing);
   std::string().swap(line);
   client.setHttpRequestBodyLength(request.hasContentLength
                                       ? request.contentLength

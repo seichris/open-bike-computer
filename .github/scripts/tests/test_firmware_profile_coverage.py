@@ -37,9 +37,11 @@ def flags(target):
 PLATFORM_DEFINES = ('ARDUINO=10812', 'ARDUINO_ARCH_ESP32', 'ESP_PLATFORM',
                     'BOARD_HAS_PSRAM', 'MBEDTLS_VERSION_NUMBER=0x03000000',
                     'MBEDTLS_VERSION_MAJOR=3', 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1')
-# Separate host/diagnostic experiments, absent from all four regular profiles.
+# Separate host/diagnostic experiments and the isolated, manually built POI
+# qualification signer, absent from every regular CI profile.
 UNDEFINED_IN_REGULAR_PROFILES = {'DEVICE_OWNERSHIP_HOST_TEST', 'BLE_DEV_RANDOM_IDENTITY',
-    'BLE_RADIO_CHARACTERIZATION', 'DISPLAY_POWER_DIAGNOSTICS', 'POWER_METRICS'}
+    'BLE_RADIO_CHARACTERIZATION', 'DISPLAY_POWER_DIAGNOSTICS', 'POWER_METRICS',
+    'MAP_STREAM_QUALIFICATION_TRUST'}
 
 
 def check_condition_inputs(source):
@@ -102,11 +104,33 @@ class FirmwareProfileCoverageTests(unittest.TestCase):
     def test_guard_detects_a_new_ordinary_or_lifecycle_only_branch(self):
         profiles = changed_components.select_firmware_targets('175')
         selected = ci_scopes.firmware_targets(['esp32/lib/ble_navigation/ble_navigation.cpp'], profiles)
-        for expression in ('FIRMWARE_DIAGNOSTICS && !DEVICE_REMOTE_DEBUG', 'FIRMWARE_OPERATIONS_V1_ENABLED'):
+        for expression in ('FIRMWARE_DIAGNOSTICS && !DEVICE_REMOTE_DEBUG',
+                           'FIRMWARE_OPERATIONS_V1_ENABLED && !MAP_POIS_RUNTIME_ENABLED'):
             source = f'#if {expression}\nint requires_another_profile;\n#endif\n'
             all_lines = set().union(*(active_lines(source, flags(p)) for p in profiles))
             selected_lines = set().union(*(active_lines(source, flags(p)) for p in selected))
             self.assertTrue(all_lines - selected_lines, expression)
+
+    def test_transfer_libraries_keep_the_production_slot_poi_image(self):
+        # Line coverage cannot see slot fit or diagnostics-off interactions of
+        # nearby-POI code; remote-debug compiles it in a larger development slot.
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(ROOT / 'esp32/platformio.ini')
+
+        def option(section, key):
+            while key not in config[section]:
+                section = config[section]['extends'].strip()
+            return config[section][key].strip()
+
+        for board in ('175', '206'):
+            profiles = changed_components.select_firmware_targets(board)
+            production_slot = option(f'env:WAVESHARE_AMOLED_{board}_PRODUCTION', 'board_build.partitions')
+            budget = {p for p in profiles if '-DMAP_POIS_RUNTIME_ENABLED=1' in flags(p)
+                      and option('env:' + p, 'board_build.partitions') == production_slot}
+            self.assertEqual(budget, {f'WAVESHARE_AMOLED_{board}_POI_LIFECYCLE_QUALIFICATION'})
+            for library in ('ble_navigation', 'map_transfer'):
+                selected = ci_scopes.firmware_targets([f'esp32/lib/{library}/example.cpp'], profiles)
+                self.assertLessEqual(budget, set(selected), library)
 
     def test_selected_profiles_cover_existing_library_conditional_arms(self):
         for board in ('175', '206'):

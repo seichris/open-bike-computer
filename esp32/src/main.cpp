@@ -2084,6 +2084,9 @@ void setup() {
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
+  mapTransferHttp.setRendererHealthProbes(
+      [] { return mapView.debugStreetLabelFontHealthy(); },
+      [] { return mapView.nearbyIndexHealthy(); });
   mapTransferHttp.setStreamStorageSpaceProbe([]() -> std::optional<uint64_t> {
     uint64_t bytes = 0;
     if (!storage.tryRemovableSdFreeBytes(bytes)) return std::nullopt;

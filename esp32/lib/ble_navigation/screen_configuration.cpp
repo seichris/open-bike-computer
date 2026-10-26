@@ -2,6 +2,7 @@
 
 #include "ble_navigation.hpp"
 #include "map_profile_persistence.hpp"
+#include "../utils/src/startup_constructed.hpp"
 
 #include <Preferences.h>
 
@@ -48,7 +49,8 @@ struct ReplayRecord {
 };
 
 Preferences preferences;
-Snapshot active{};
+StartupConstructed<Snapshot> activeStorage;
+Snapshot &active = activeStorage.value;
 bool ready = false;
 char activeSlot = 'A';
 uint32_t activeLegacyDigest = 0;
@@ -73,7 +75,8 @@ MapProfile captureProfile(const ScreenMapRenderSettings &source,
   profile.positionMarkerScale = source.positionMarkerScale;
   profile.zoomLevel = source.zoomLevel;
   profile.visibilityMask =
-      source.visibilityMask | legacy.navigationOverlayVisibilityMask;
+      (source.visibilityMask | legacy.navigationOverlayVisibilityMask) &
+      screen_configuration_protocol::ALLOWED_VISIBILITY_MASK;
   profile.labelDensity = source.labelDensity;
   profile.labelLanguageMode = source.labelLanguageMode;
   profile.labelTextSize = source.labelTextSize;
@@ -423,7 +426,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
       instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
   };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  constexpr uint8_t SCREEN_TYPE_COUNT = static_cast<uint8_t>(ScreenType::Elevation) + 1;
+  constexpr uint8_t SCREEN_TYPE_COUNT = static_cast<uint8_t>(ScreenType::Nearby) + 1;
   bool represented[SCREEN_TYPE_COUNT]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
@@ -452,6 +455,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     case ScreenType::BatteryStatus: name = "Battery Status"; break;
     case ScreenType::WorldRadio: name = "World Radio"; break;
     case ScreenType::Elevation: name = "Elevation"; break;
+    case ScreenType::Nearby: name = "Nearby"; break;
     }
     (void)screen_configuration_protocol::setName(instance, name,
                                                   std::strlen(name));

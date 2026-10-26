@@ -41,6 +41,10 @@ public:
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
+  void setRendererHealthProbes(bool (*font)(), bool (*pois)()) {
+    fontHealthy_ = font;
+    poisHealthy_ = pois;
+  }
   void setStreamStorageSpaceProbe(MapStreamFreeSpaceProbe probe) { streamStorageSpaceProbe_ = std::move(probe); }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
@@ -86,6 +90,8 @@ public:
   void submitPendingMapLibrary() { submitLibraryTask(); }
 
 private:
+  bool (*fontHealthy_)() = nullptr;
+  bool (*poisHealthy_)() = nullptr;
   class OperationStoreGuard {
   public:
     explicit OperationStoreGuard(const MapTransferHttpServer &owner) : owner_(owner) {
@@ -150,6 +156,8 @@ private:
   std::string terminalOperationID_;
   std::string terminalSessionID_;
   std::string terminalMapID_;
+  bool terminalCleanupReported_ = false;
+  uint32_t terminalCleanupReportedAtMs_ = 0;
   bool terminalAutomaticExit_ = false;
   bool terminalFailed_ = false;
   std::string rollbackOperationID_;

@@ -83,6 +83,15 @@ def map_scopes(paths, *, selected):
     return result
 
 
+# Profile suffixes of changed_components.FIRMWARE_TARGETS, in registry order.
+FIRMWARE_PROFILE_SUFFIXES = ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION',
+                             '_POI_LIFECYCLE_QUALIFICATION')
+
+
+def board_firmware_targets(boards):
+    return tuple('WAVESHARE_AMOLED_'+b+s for b in boards for s in FIRMWARE_PROFILE_SUFFIXES)
+
+
 def firmware_targets(paths, full_targets):
     if not paths:
         return full_targets
@@ -91,14 +100,14 @@ def firmware_targets(paths, full_targets):
     if not relevant:
         return full_targets
     if all('206' in p for p in relevant):
-        return tuple('WAVESHARE_AMOLED_206'+s for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+        return board_firmware_targets(('206',))
     # Common board/runtime/config changes qualify both families and every profile.
     if any(not p.startswith('esp32/lib/') or p.startswith(('esp32/lib/panel/', 'esp32/lib/power/', 'esp32/lib/display/')) for p in relevant):
         if all('206' in p for p in relevant):
             boards = ('206',)
         else:
             boards = ('175', '206')
-        return tuple('WAVESHARE_AMOLED_'+b+s for b in boards for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+        return board_firmware_targets(boards)
     if len(relevant) != len(paths):
         # CI/runner inputs exercise the requested hardware family. Resolve
         # board/runtime changes first so a mixed diff cannot hide their board.
@@ -110,16 +119,19 @@ def firmware_targets(paths, full_targets):
     for path in relevant:
         if path.startswith(('esp32/lib/ble_navigation/', 'esp32/lib/map_transfer/')):
             # Remote-debug inherits ordinary diagnostics and adds debug/trust
-            # branches; production exercises their disabled branches. Neither
-            # library contains the lifecycle-only adapter implementation.
-            profiles.add('_REMOTE_DEBUG')
+            # branches; production exercises their disabled branches. The POI
+            # budget profile is the only diagnostics-off, 3 MiB-slot image of
+            # their nearby-POI code. Neither library contains the lifecycle-only
+            # adapter implementation.
+            profiles.update(('_REMOTE_DEBUG', '_POI_LIFECYCLE_QUALIFICATION'))
         else:
-            profiles.add('_LIFECYCLE_QUALIFICATION')
+            profiles.update(('_LIFECYCLE_QUALIFICATION', '_POI_LIFECYCLE_QUALIFICATION'))
             if path.startswith(('esp32/lib/device_debug/', 'esp32/lib/gui/', 'esp32/lib/maps/')):
                 profiles.add('_REMOTE_DEBUG')
             if path.startswith(('esp32/lib/world_radio/', 'esp32/lib/gui/')):
                 profiles.update(('', '_REMOTE_DEBUG'))
-    return tuple(t for t in full_targets if any(t.endswith(s) if s else t[-3:].isdigit() for s in profiles))
+    # Match exact suffixes: '_LIFECYCLE_QUALIFICATION' is also a POI suffix tail.
+    return tuple(t for t in full_targets if re.fullmatch(r'WAVESHARE_AMOLED_\d{3}(.*)', t)[1] in profiles)
 
 
 def ios_scopes(paths, *, native, selected):

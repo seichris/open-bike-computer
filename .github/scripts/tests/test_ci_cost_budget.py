@@ -29,23 +29,26 @@ class CiCostBudgetTests(unittest.TestCase):
             self.assertEqual(scopes.firmware_host_checks([path], selected=True), ['esp32-host-firmware-manifest-tests'])
             self.assertFalse(scopes.zone_contracts_required([path], ios=False, firmware_host=True))
 
-    def test_routine_firmware_changes_keep_two_builds_per_requested_board(self):
+    def test_routine_firmware_changes_keep_three_builds_per_requested_board(self):
         for board in ('175', '206'):
             full = components.select_firmware_targets(board)
             for library in ('ble_navigation', 'map_transfer'):
                 paths = [f'esp32/lib/{library}/example.cpp', 'docs/change.md', '.github/scripts/tests/test_ci_scopes.py']
                 targets = scopes.firmware_targets(paths, full)
-                self.assertEqual(set(targets), {f'WAVESHARE_AMOLED_{board}_PRODUCTION', f'WAVESHARE_AMOLED_{board}_REMOTE_DEBUG'})
+                # Ordinary and plain lifecycle builds add no conditional arm here.
+                self.assertEqual(set(targets), {f'WAVESHARE_AMOLED_{board}_PRODUCTION', f'WAVESHARE_AMOLED_{board}_REMOTE_DEBUG',
+                                                f'WAVESHARE_AMOLED_{board}_POI_LIFECYCLE_QUALIFICATION'})
                 self.assertFalse(scopes.firmware_renderer_required(paths))
 
     def test_ci_recipe_edits_do_not_double_the_selected_hardware_matrix(self):
         for board in ('175', '206', 'all'):
             full = components.select_firmware_targets(board)
             self.assertEqual(scopes.firmware_targets(['.github/workflows/ci.yml', 'tools/dev_check.py'], full), full)
-        self.assertEqual(len(scopes.firmware_targets(['esp32/platformio.ini'], components.select_firmware_targets('175'))), 8)
+        both_boards = scopes.board_firmware_targets(('175', '206'))
+        self.assertEqual(scopes.firmware_targets(['esp32/platformio.ini'], components.select_firmware_targets('175')), both_boards)
         for other in ('.github/workflows/ci.yml', 'tools/dev_check.py', 'ios-app/BikeComputer/App.swift'):
             targets = scopes.firmware_targets(['esp32/platformio.ini', other], components.select_firmware_targets('175'))
-            self.assertEqual(len(targets), 8)
+            self.assertEqual(targets, both_boards)
             targets = scopes.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp', other], components.select_firmware_targets('175'))
             self.assertTrue(targets)
             self.assertTrue(all('206' in target for target in targets))

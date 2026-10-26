@@ -22,6 +22,7 @@ struct RideDiagnosticsSettingsView: View {
     @State private var isExporting = false
     @State private var localMarkerStatus: String?
     @State private var deviceMarkerStatus: String?
+    @State private var deviceMarkerIncidentID: UUID?
     @State private var exportTask: Task<Void, Never>?
 
     var body: some View {
@@ -85,15 +86,15 @@ struct RideDiagnosticsSettingsView: View {
                     let incidentID = UUID()
                     guard recorder.markIssue(selectedIssue, incidentID: incidentID) else {
                         localMarkerStatus = "Failed"
+                        deviceMarkerIncidentID = nil
                         deviceMarkerStatus = "Not attempted"
                         statusMessage = "The issue marker could not be saved on this iPhone."
                         return
                     }
                     localMarkerStatus = "Saved"
                     let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue, incidentID: incidentID)
-                    deviceMarkerStatus = deviceMarked
-                        ? "Queued; persistence pending"
-                        : "Failed — device not ready"
+                    deviceMarkerIncidentID = deviceMarked ? incidentID : nil
+                    deviceMarkerStatus = deviceMarked ? nil : "Failed — device not ready"
                     statusMessage = deviceMarked
                         ? "Issue marker saved on the iPhone and queued for Bicino."
                         : "Issue marker saved on this iPhone; Bicino was not ready."
@@ -103,8 +104,8 @@ struct RideDiagnosticsSettingsView: View {
                 if let localMarkerStatus {
                     LabeledContent("iPhone marker", value: localMarkerStatus)
                 }
-                if let deviceMarkerStatus {
-                    LabeledContent("Bicino marker", value: deviceMarkerStatus)
+                if let markerDeliveryStatus = deviceMarkerDeliveryStatus {
+                    LabeledContent("Bicino marker", value: markerDeliveryStatus)
                 }
             } header: {
                 Text("Issue marker")
@@ -315,6 +316,21 @@ struct RideDiagnosticsSettingsView: View {
                 }
             }
         )
+    }
+
+    /// Firmware never acknowledges a marker, so a successful BLE write is the
+    /// strongest delivery this screen can report.
+    private var deviceMarkerDeliveryStatus: String? {
+        guard let deviceMarkerIncidentID,
+              let delivery = bleManager.diagnosticsIssueMarkerDelivery,
+              delivery.incidentID == deviceMarkerIncidentID else {
+            return deviceMarkerStatus
+        }
+        switch delivery.state {
+        case .pending: return "Pending"
+        case .sent: return "Sent to Bicino"
+        case .notDelivered: return "Not delivered"
+        }
     }
 
     private var deviceDiagnosticsSupportLabel: String {

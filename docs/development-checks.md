@@ -151,8 +151,8 @@ needed. Empty diffs run full coverage. Deletions and renames retain old/new path
 | Firmware release history / boot-acceptance verifier | Existing Python manifest/tool tests only; no native host dependency installation or unrelated zone contracts |
 | iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
 | iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
-| Production firmware libraries | Production and lifecycle, with extra ordinary/debug profiles for their conditional features |
-| BLE navigation or map-transfer libraries | Production plus remote-debug (2 builds per selected board). A preprocessor coverage test checks all four profiles on both boards and rejects uncovered ordinary/lifecycle-only branches |
+| Production firmware libraries | Production, lifecycle and the POI lifecycle budget image, with extra ordinary/debug profiles for their conditional features |
+| BLE navigation or map-transfer libraries | Production, remote-debug and the POI lifecycle budget image (3 builds per selected board); the plain lifecycle and ordinary profiles add no branch there. A preprocessor coverage test checks all five regular profiles on both boards and rejects uncovered ordinary/lifecycle-only branches. Remote-debug also compiles nearby-POI code, but only the POI image builds it diagnostics-off in the 3 MiB production slot |
 | Firmware board/runtime/build configuration | Every regular profile for both boards; board-specific 206 files retain 206 selection |
 | CI/shared-runner configuration | Every regular profile for the requested board family (175 by default); full manual/release requests still select both families |
 

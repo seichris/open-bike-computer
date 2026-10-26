@@ -555,4 +555,18 @@ for environment, target in expected_targets.items():
     mapping = f"target: {target}\n            environment: {profile}"
     assert mapping in release_candidate_workflow
 
+isolated_poi = "env:WAVESHARE_AMOLED_175_POI_ISOLATED_LIFECYCLE_QUALIFICATION"
+assert isolated_poi.endswith("_LIFECYCLE_QUALIFICATION")  # Retain reserve gate.
+assert config.get(isolated_poi, "extends") == (
+    "env:WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION"
+)
+assert inherited_option(isolated_poi, "board_build.partitions") == "partitions.csv"
+assert "-DMAP_POIS_RUNTIME_ENABLED=1" in inherited_option(isolated_poi, "build_flags")
+for section in config.sections():
+    if section.startswith("env:"):
+        flags = inherited_option(section, "build_flags")
+        assert ("-DMAP_STREAM_QUALIFICATION_TRUST=1" in flags) == (section == isolated_poi), section
+assert isolated_poi.removeprefix("env:") not in release_candidate_workflow
+assert isolated_poi.removeprefix("env:") not in firmware_routing
+
 print("firmware production profile contracts passed")

@@ -1,6 +1,6 @@
 # CI selection and local evidence review — 2026-10-25
 
-This is the historical review of the initial published commit `6c2ca6a622342ece89910e3f1f51907d165be449`. The user subsequently authorized a CI-cost redesign. Its revised policy, cost evidence, cumulative review passes and finding states are recorded in [the cost-revision report](astra-ci-cost-revision-2026-10-25.md).
+This is the historical review of the initial published commit `6c2ca6a622342ece89910e3f1f51907d165be449`. The user subsequently authorized a CI-cost redesign. Its revised policy, cost evidence, cumulative review passes and finding states are recorded in [the cost-revision report](astra-ci-cost-revision-2026-10-25.md). That report also records the 2026-10-26 latest-main merge and its post-conflict delta review (cumulative pass 7).
 
 ## Scope and immutable source
 
