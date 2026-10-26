@@ -2115,13 +2115,13 @@ current chunk; short, normal rides are therefore included without exposing a
 mutable tail. Acquiring the lease before the seal keeps retention enumeration
 out of the seal deadline. Because the writer serializes pruning and sealing,
 seal completion also proves that any prune which began before the lease has
-finished. The recorder root is stable
-for the complete boot. When removable SD was mounted at boot, diagnostics uses
-that mount without unmounting it beneath map/font readers. When the boot is
-already using the bounded internal FFat fallback, diagnostics exports FFat and
-does not switch to a newly inserted removable card while recorder files may
-still be open; the firmware pins the boot's backend, so adopting removable
-storage requires a reboot. FFat
+finished. The firmware pins the storage backend mounted at boot, so the
+recorder root is stable for the complete boot. When removable SD was mounted at
+boot, diagnostics uses that mount without unmounting it beneath map/font
+readers. When the boot is already using the bounded internal FFat fallback,
+which never holds maps, diagnostics exports FFat and does not switch to a newly
+inserted removable card while recorder file
+handles may still be open; adopting removable storage requires a reboot. FFat
 uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
 while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
 [Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
