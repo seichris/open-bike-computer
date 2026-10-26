@@ -815,9 +815,13 @@ three attempts with full `SD_MMC.end()` teardown before each attempt and 50 ms
 then 150 ms recovery delays. Success still requires a card type and root-open
 health check. Native failure runs the equally bounded migration HSPI sequence;
 only failure of both removable-card transports retains the existing FFat
-fallback. `MAPIO:` timing is
-verbose and must remain opt-in because redraw logging can add USB CDC pressure
-during normal app-driven map use.
+fallback. That fallback keeps diagnostics and other device files only: maps,
+map fonts, terrain and Nearby/POI indexes are read only from removable SD, and
+the map renderer never opens an FFat file. Setup pins whichever backend it
+mounted for the whole boot; a card that fails or is removed stays unavailable
+without a remount or FFat substitution, and a card inserted later is used
+after a restart. `MAPIO:` timing is verbose and must remain opt-in because
+redraw logging can add USB CDC pressure during normal app-driven map use.
 
 Validation recorded on 2026-08-28 for the 1.75-inch developer target at exact
 Git SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`:

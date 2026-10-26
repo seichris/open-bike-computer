@@ -2119,8 +2119,9 @@ finished. The recorder root is stable
 for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
-does not switch to a newly inserted removable card while recorder or map file
-handles may still be open; adopting removable storage requires a reboot. FFat
+does not switch to a newly inserted removable card while recorder files may
+still be open; the firmware pins the boot's backend, so adopting removable
+storage requires a reboot. FFat
 uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
 while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
 [Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
@@ -2343,8 +2344,18 @@ body becomes paused and cannot queue activation after authorization is revoked.
 Protocol v2 is advertised only while the SD map namespace is mounted and
 accessible. Entering map-transfer mode and accepting a v2 body also require a
 successful writable probe. A blank mounted card creates the map namespace
-during that probe, and a removed/reinserted card is unmounted and remounted on
-the next authenticated enter request rather than requiring a device reboot.
+during that probe.
+
+Map data lives only on removable SD: blocks, terrain, map fonts, Nearby/POI
+indexes and the catalog, activation and rollback journals. When no card mounts
+at boot, the internal FFat fallback keeps diagnostics and other device files
+but is never searched for maps or used for map operations; guidance and the
+device UI continue with a "No microSD card" map state. The storage backend
+chosen at boot stays mounted until shutdown. An enter request only validates
+that card: it never unmounts, remounts or falls back to FFat. A missing,
+failed, removed or replaced card therefore returns `sd_unavailable` with a
+restart hint, and a card inserted after boot is used after the device
+restarts.
 
 After the active pointer transaction, the final step remains nonterminal until
 the main loop locates and parses a renderer block from the new root. All blocks

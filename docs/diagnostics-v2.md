@@ -420,8 +420,12 @@ treated as an empty queue, because a producer that then finds the queue full
 does not notify. This reduces scheduling pressure but cannot guarantee lossless
 recording under sustained overload or arbitrarily slow storage. Queue loss and
 storage failures continue to be counted separately.
-Explicit storage transitions fence ordinary admission (`storage_transition`),
-seal the old medium and park its writer before remount. If the old medium is
+The firmware pins the storage backend mounted at boot and never remounts it at
+runtime, so the recorder keeps one medium for the whole boot; a card inserted
+or replaced later is used after a restart. No runtime path calls the
+storage-transition API any more. It is kept for an explicit remount: it fences
+ordinary admission (`storage_transition`), then seals the old medium and parks
+its writer before the remount. If the old medium is
 unavailable, queued losses become a fault capsule before changing identity.
 A remount allocates a namespace above both media's retained boot IDs. Existing
 nonempty chunks are never reopened for append. Failed fault-capsule writes
