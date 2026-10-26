@@ -115,6 +115,9 @@ SHARED_FMB_FIXTURE_PREFIX = "tools/tests/fixtures/fmb/"
 SHARED_MAP_STREAM_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
 )
+SHARED_CONTOUR_COMPANION_FIXTURE_PATH = (
+    "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
+)
 SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
     "tools/generate_route_elevation_fixtures.py",
@@ -293,6 +296,12 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         if path == SHARED_MAP_STREAM_FIXTURE_PATH:
             # The same signed-stream bytes are parsed by backend, iOS, and firmware.
             selected["firmware_host"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path == SHARED_CONTOUR_COMPANION_FIXTURE_PATH:
+            # Backend-produced signed maps and companions drive the iPhone
+            # delivery contract tests.
             selected["ios"] = True
             selected["map_backend"] = True
 

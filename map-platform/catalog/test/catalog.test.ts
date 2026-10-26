@@ -225,6 +225,46 @@ function developmentTopographicPublication(label: string) {
   return validatePublication(candidate as unknown as Record<string, unknown>);
 }
 
+const combinedFeatures = [
+  "3d-buildings",
+  "contours",
+  "map-pois",
+  "street-labels",
+];
+
+// A target-5 POI map carries contours only when its signed layer list says
+// so; the companion follows that layer, never the renderer version.
+function developmentCombinedPublication(label: string, contours = true) {
+  const candidate = structuredClone(developmentTopographicPublication(label));
+  const features = contours
+    ? combinedFeatures
+    : combinedFeatures.filter((feature) => feature !== "contours");
+  candidate.rendererFormatVersion = 5;
+  candidate.features = features;
+  candidate.artifacts[0].readerRequirements = {
+    ...candidate.artifacts[0].readerRequirements!,
+    rendererFormatVersion: 5,
+    requiredFeatures: features,
+  };
+  if (!contours) {
+    candidate.artifacts = candidate.artifacts.filter(
+      (artifact) => artifact.format !== "topography-ios-v1",
+    );
+  }
+  return validatePublication(candidate as unknown as Record<string, unknown>);
+}
+
+const combinedReaderCapabilities = {
+  ...readerCapabilities,
+  renderers: [
+    {
+      renderer: "esp32-fmb",
+      formatVersions: [1, 2, 3, 4, 5],
+      features: combinedFeatures,
+    },
+  ],
+};
+
 function publication() {
   return validatePublication({
     publicationId: "job-test-publication",
@@ -870,6 +910,123 @@ describe("catalog library", () => {
     expect(
       (await resolveDownloadGrant(env, companionToken, "library")).id,
     ).toBe(grant.companion!.artifact.artifactId);
+  });
+
+  it("grants a combined POI and contour stream with its exact companion", async () => {
+    const library = await bootstrapLibrary(env);
+    const grants = [];
+    for (const contours of [true, false]) {
+      const candidate = developmentCombinedPublication(
+        contours ? "combined-grant" : "poi-only-grant",
+        contours,
+      );
+      await finalizePublication(
+        env,
+        candidate,
+        candidate.publicationId,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+      await attachLibrary(
+        env,
+        candidate.publicationId,
+        library.libraryId,
+        undefined,
+        "development",
+      );
+      grants.push({
+        candidate,
+        grant: await createLibraryDownloadGrant(
+          env,
+          library.libraryId,
+          candidate.mapEntryId,
+          "development",
+          [{ keyId: "prod", keySha256: signerSha }],
+          appIdentity,
+          combinedReaderCapabilities,
+        ),
+      });
+    }
+    const [{ candidate, grant }, { grant: poiOnly }] = grants;
+    expect(grant.artifact.readerRequirements?.requiredFeatures).toEqual(
+      combinedFeatures,
+    );
+    const companion = candidate.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!;
+    expect(grant.companion?.artifact.artifactId).toBe(companion.artifactId);
+    expect(grant.companion?.artifact.companionRequirements).toMatchObject({
+      mapContentReceipt: candidate.contentReceipt,
+      mapId: candidate.legacyMapId,
+    });
+    const companionToken = new URL(grant.companion!.downloadURL).pathname
+      .split("/")
+      .at(-1)!;
+    expect(
+      (await resolveDownloadGrant(env, companionToken, "library")).id,
+    ).toBe(companion.artifactId);
+    expect(poiOnly.artifact.readerRequirements?.requiredFeatures).not.toContain(
+      "contours",
+    );
+    expect(poiOnly.companion).toBeNull();
+  });
+
+  it("refuses a contour stream whose companion is missing or ambiguous", async () => {
+    const library = await bootstrapLibrary(env);
+    const candidate = developmentCombinedPublication("combined-ambiguous");
+    const rival = structuredClone(candidate);
+    rival.publicationId = `${candidate.publicationId}-rival`;
+    const rivalCompanion = rival.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!;
+    rivalCompanion.artifactId = fixtureID("artifact");
+    rivalCompanion.sha256 = "4".repeat(64);
+    rivalCompanion.objectKey = `maps/${rival.legacyMapId}/topography-ios-v1/${rival.contentReceipt}/${rivalCompanion.sha256}.btopo`;
+    rivalCompanion.companionRequirements = {
+      ...rivalCompanion.companionRequirements!,
+      intermediateSha256: "4".repeat(64),
+    };
+    for (const value of [candidate, rival]) {
+      await finalizePublication(
+        env,
+        value,
+        value.publicationId,
+        await sha256Hex(JSON.stringify(value)),
+        null,
+        verifyTestArtifact,
+      );
+    }
+    await attachLibrary(
+      env,
+      candidate.publicationId,
+      library.libraryId,
+      undefined,
+      "development",
+    );
+    const grant = () =>
+      createLibraryDownloadGrant(
+        env,
+        library.libraryId,
+        candidate.mapEntryId,
+        "development",
+        [{ keyId: "prod", keySha256: signerSha }],
+        appIdentity,
+        combinedReaderCapabilities,
+      );
+    await expect(grant()).rejects.toMatchObject({
+      status: 409,
+      message: "topography companion is unavailable",
+    });
+    await env.DB.prepare(
+      "UPDATE artifacts SET state = 'quarantined' WHERE map_entry_id = ? AND format = 'topography-ios-v1'",
+    )
+      .bind(candidate.mapEntryId)
+      .run();
+    await expect(grant()).rejects.toMatchObject({
+      status: 409,
+      message: "topography companion is unavailable",
+    });
   });
 
   it("delivery stop rejects new grants and existing bearer resolution, failing closed when unset", async () => {
@@ -2217,6 +2374,60 @@ describe("validation", () => {
     ).toThrow("non-topographic map contains a companion artifact");
   });
 
+  it("binds the declared contours layer, not a renderer version, to one companion", () => {
+    const combined = developmentCombinedPublication("combined-contract");
+    const companion = combined.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!;
+    expect(companion.companionRequirements).toMatchObject({
+      mapContentReceipt: combined.contentReceipt,
+      mapId: combined.legacyMapId,
+    });
+    const poiOnly = developmentCombinedPublication("poi-only-contract", false);
+    expect(
+      poiOnly.artifacts.some(
+        (artifact) => artifact.format === "topography-ios-v1",
+      ),
+    ).toBe(false);
+
+    const reject = (
+      value: ReturnType<typeof developmentCombinedPublication>,
+      message: string,
+    ) =>
+      expect(() =>
+        validatePublication(value as unknown as Record<string, unknown>),
+      ).toThrow(message);
+    const missing = structuredClone(combined);
+    missing.artifacts = missing.artifacts.filter(
+      (artifact) => artifact.format !== "topography-ios-v1",
+    );
+    reject(missing, "topographic map companion contract is incomplete");
+    const duplicated = structuredClone(combined);
+    duplicated.artifacts.push({
+      ...structuredClone(companion),
+      artifactId: fixtureID("artifact"),
+      objectKey: companion.objectKey.replace(companion.sha256, "4".repeat(64)),
+      sha256: "4".repeat(64),
+    });
+    reject(duplicated, "topographic map companion contract is incomplete");
+    const foreignFile = structuredClone(combined);
+    foreignFile.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!.filename = "another-map.btopo";
+    reject(foreignFile, "topographic map companion contract is incomplete");
+    const foreignObject = structuredClone(combined);
+    foreignObject.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!.objectKey = companion.objectKey.replace(
+      combined.contentReceipt,
+      "0".repeat(64),
+    );
+    reject(foreignObject, "topographic map companion contract is incomplete");
+    const undeclared = structuredClone(poiOnly);
+    undeclared.artifacts.push(structuredClone(companion));
+    reject(undeclared, "non-topographic map contains a companion artifact");
+  });
+
   it("normalizes aliases using the cross-platform Unicode contract", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
     expect(normalizeAlias("\uFEFFMap name\uFEFF")).toBe("Map name");
@@ -2608,6 +2819,30 @@ describe("catalog lifecycle boundaries", () => {
       status: 409,
       message: "topographic promotion is not qualified",
     });
+  });
+
+  it("gates combined POI contour maps by their contours layer", async () => {
+    const candidate = developmentCombinedPublication("combined-gated");
+    await finalizePublication(
+      env,
+      candidate,
+      candidate.publicationId,
+      await sha256Hex(JSON.stringify(candidate)),
+      null,
+      verifyTestArtifact,
+    );
+    await expect(
+      createPromotionGrant(env, candidate.mapEntryId),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "topographic promotion is not qualified",
+    });
+    // Target-5 POI maps stay outside automatic production promotion even
+    // after contour promotion is qualified.
+    const enabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "1" };
+    expect(
+      (await listPromotionCandidates(enabled, null, 100)).mapEntryIds,
+    ).not.toContain(candidate.mapEntryId);
   });
 
   it("promotes a qualified topographic stream with its exact companion", async () => {

@@ -1,5 +1,53 @@
 # PR #378 review fixes
 
+## October 26 R53/R56 contour companion contract (focused repair)
+
+Explicitly authorized focused R53/R56 repair after PR #378 merged. Mode:
+implement, verify and open a PR; no merge, deployment, app installation or
+firmware flash. This focused scope has its own pass count; it preserves the
+historical PR #378 records below and does not reopen a whole-PR audit.
+Base: main `964bdbfe333b6f30c54c244c6319e7e1e55c7f04`; the branch is integrated
+with the current main before publication. Exact candidate SHA, executed checks
+and CI belong in the PR description.
+
+Root cause: every map already declared its contours layer in the signed BMAP
+manifest (`topography`, plus `layers.contours` on target 5), but consumers
+re-derived companion handling from renderer format 4. The catalog worker
+rejected target-5 publications that carried a companion and granted companions
+only for format 4; the iPhone fetched direct-job companions only for format 4
+and rejected granted catalog companions for any other renderer; promotion,
+promotion downloads and share notices also keyed on format 4. A combined
+target-5 map therefore lost its companion silently (direct job) or failed
+(catalog).
+
+Contract: the signed contours layer alone requires exactly one
+`topography-ios-v1` companion, bound by filename, object key, content receipt
+and the signed contour digests; see the
+[delivery contract](../topography-artifact-format.md#delivery-contract).
+
+| ID | State and evidence |
+| --- | --- |
+| R53/R56, P2 | Fixed+verified locally: catalog validation, grants, promotion and share notices, backend promotion/reuse/publication and both iPhone download paths use the layer. New regressions failed on unchanged main (catalog 5/5; iPhone combined direct-job save, invalid companion sets and catalog download) and pass after the fix. |
+| R53-ASSOC-REKEY, P2 | Fixed+verified: saved maps re-derived their companion from mutable `catalogMapEntryID`, so library attachment orphaned a direct-job companion after relaunch. Saved metadata now records the exact companion receipt. |
+| R53-PAIR-COMMIT, P2 | Fixed+verified: the companion committed before its map, so a failed map replacement kept a companion bound to a stream that never saved. The saved map pair is now the commit point; a mutant with the old order fails the interrupted-replacement test. |
+| R53-SHARED-ID, P2 | Fixed: a direct job with a catalog entry ID shared one companion file with a catalog copy of that entry; direct jobs now use `job_v1_<jobId>`. |
+| CC-1, P2 (review pass 1) | Fixed+verified: if a map replacement failed after writing new metadata and its own journal recovery also failed, companion recovery could trust uncommitted map metadata. Companion recovery now settles map journals first and stops if that fails; a mutant without that step fails the new recovery cases. |
+| CC-2, P2 (review pass 1) | Fixed+verified: the display-switch assertion was vacuous in the macOS host build. A Mac Catalyst test now opens the real UIKit overlay from saved state, toggles it without network or map jobs, and covers the outdated and tampered states. |
+| R54, R55 | Unchanged: R54 stays explicitly deferred; R55 reuse performance stays separate. Target-5 contour subset reuse still falls back to a full build, so companion correctness holds there. |
+
+Not addressed (pre-existing, separate follow-up): saved-map inventory sync
+reads metadata, awaits the network and writes it back, so a concurrent
+replacement can be overwritten; contour state then fails closed to "download
+again". The local OSM extraction suite cannot run on this Mac because Homebrew
+GDAL fails to load `libx265`; this change does not touch the extractor.
+
+Breaking changes: contour maps saved before this contract (including renderer-4
+maps) show "download the map again" on the iPhone until re-downloaded; an
+unsigned ZIP that declares contours is rejected. No migration is provided.
+Deploy the catalog worker before relying on combined catalog maps; the app
+change ships with the next app release; backend changes follow the normal
+image promotion. Firmware and the device manifest are unchanged.
+
 ## October 26 iOS Fast Tests timing repair
 
 CI-MARKER-WAIT-STATE, P2: CI run40209219652 failed the capture-rotation

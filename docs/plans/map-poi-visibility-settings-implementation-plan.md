@@ -13,6 +13,13 @@
 > scratch storage stays off the GUI stack, and render/input slice budgets and
 > production hardware qualification gates remain unchanged.
 
+> Contour companion contract (2026-10-26): R53/R56 is repaired in a focused
+> follow-up. The signed contours layer, not renderer version 4, now decides the
+> iPhone companion for combined target-5 maps across the backend, catalog and
+> app; see the [delivery contract](../topography-artifact-format.md#delivery-contract)
+> and the [review ledger](pr378-review-fix-ledger.md). R54 stays deferred and
+> R55 stays separate.
+
 
 ## Outcome
 

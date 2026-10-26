@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>LetItRide.BikeComputer.contour-companion-host-tests</string>
+	<key>BicinoMapServiceHost</key>
+	<string>maps-dev.8o.vc</string>
+	<key>BicinoMapCatalogHost</key>
+	<string>maps-share-staging.8o.vc</string>
+	<key>BicinoMapR2DownloadHost</key>
+	<string>0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com</string>
+</dict>
+</plist>

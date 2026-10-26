@@ -53,10 +53,12 @@ companion pairs. No provider has thereby gained production approval.
   atomic installer; active-map status reports profile, intervals, source-policy
   prefix, no-data summary, contour presence, and section health.
 - The signed stream, ZIP, and `.btopo` companion are generated and published as
-  one content-bound catalog contract. Development library grants authorize the
-  exact matching stream and companion together. The app validates, journals,
-  restores, replaces, and deletes that association without trusting filenames
-  or SQLite self-description.
+  one content-bound catalog contract for every map whose signed manifest carries
+  contours (renderer 4, or renderer 5 with `layers.contours: included`); see the
+  [delivery contract](topography-artifact-format.md#delivery-contract).
+  Development library grants authorize the exact matching stream and companion
+  together. The app validates, journals, restores, replaces, and deletes that
+  association without trusting filenames or SQLite self-description.
 - The MapKit tile overlay is independently owned, cancellation-aware, and
   purges its bounded encoded-tile cache on memory pressure. Replacement/removal
   does not change routes or camera state. Saved-map details expose contour

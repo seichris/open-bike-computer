@@ -266,6 +266,22 @@ class ChangedComponentsTests(unittest.TestCase):
             selected,
         )
 
+    def test_contour_companion_fixture_selects_backend_and_ios(self) -> None:
+        selected = changed_components.classify_paths(
+            ["map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"]
+        )
+
+        self.assertEqual(
+            {
+                "firmware_build": False,
+                "firmware_host": False,
+                "ios": True,
+                "map_backend": True,
+                "osm": False,
+            },
+            selected,
+        )
+
     def test_route_elevation_fixtures_select_every_consumer(self) -> None:
         for path in (
             "protocol/fixtures/route-elevation-v1/transfer-v1.txt",

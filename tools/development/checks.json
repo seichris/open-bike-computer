@@ -45,6 +45,8 @@
           "navigation-8",
           "navigation-9",
           "navigation-10",
+          "contour-companion-1",
+          "contour-companion-2",
           "offline-route-1",
           "saved-route-map-1",
           "saved-route-map-2",
@@ -52,12 +54,14 @@
           "bluetooth-restoration-corebluetooth-double"
         ],
         "inputPrefixes": [
+          "ios-app/tests/contour-companion-host/",
           "ios-app/tests/durable-download-host/",
           "ios-app/tests/map-upload-binding-host/"
         ],
         "inputs": [
           "ios-app/BikeComputerTests/DeviceMapOperationTests.swift",
-          "ios-app/BikeComputerTests/DeviceOperationCoordinatorTests.swift"
+          "ios-app/BikeComputerTests/DeviceOperationCoordinatorTests.swift",
+          "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
         ]
       }
     },
