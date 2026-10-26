@@ -607,6 +607,24 @@ final class TestClock {
     }
 }
 
+final class FirmwarePausedDownloadProtocol: URLProtocol {
+    static var onStart: ((FirmwarePausedDownloadProtocol) -> Void)?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.onStart?(self) }
+    override func stopLoading() {}
+
+    func complete(with data: Data) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+
 final class FirmwareRequestCaptureProtocol: URLProtocol {
     static var handler: ((URLRequest, Data) throws -> (HTTPURLResponse, Data))?
 
@@ -830,6 +848,13 @@ struct NavigationProtocolTests {
             await testDeviceTransferManagerSurfacesFreshMapRejectionEarly()
             await testDeviceTransferManagerKeepsMapStartupBeforeFirstLinkStatus()
             print("Delayed map startup regression passed")
+            return
+        }
+        if CommandLine.arguments.contains("--firmware-install-intent-only") {
+            testFirmwareLocalPreparationRecovery()
+            await testFirmwareInstallRetainsOriginalDevice()
+            await testFirmwareMaintenancePreparationFlow()
+            print("Firmware install intent regressions passed")
             return
         }
 #if BLUETOOTH_RESTORATION_ADAPTER_TESTING
@@ -1185,6 +1210,8 @@ struct NavigationProtocolTests {
         testFirmwareSourceIdentityMigration()
         testFirmwareOperationReceiptReconciliation()
         await testFirmwarePendingIdentityReconciliation()
+        testFirmwareLocalPreparationRecovery()
+        await testFirmwareInstallRetainsOriginalDevice()
         await testOfflineMapRecoveryRoutes()
         print("NavigationProtocolTests passed")
     }

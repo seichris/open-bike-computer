@@ -231,6 +231,11 @@ struct PendingFirmwareUpdate: Codable, Equatable {
     var operationID: String? = nil
     var imageSHA256: String? = nil
     var requiresOperationReceipt: Bool? = nil
+
+    var isLocalPreparation: Bool {
+        maintenanceCorrelation == nil && requiresOperationReceipt != true &&
+            (transactionStage == .downloading || transactionStage == .imageVerified)
+    }
 }
 
 struct FirmwareStorageMigrationNotice: Codable, Equatable {
@@ -391,8 +396,23 @@ final class FirmwareUpdateManager: ObservableObject {
     }
 
     func installLatest(bleManager: BLEManager) {
+        // Bind the user's intent before scheduling work or awaiting a download.
+        let requestedDeviceID = bleManager.connectedDeviceID
+        let requestedEpoch = bleManager.transferConnectionEpoch
+        let requestedConnectionReady = bleManager.isNavigationReady
         Task {
             await runBusy {
+                guard requestedConnectionReady, let requestedDeviceID else {
+                    throw FirmwareUpdateError.deviceNotReady
+                }
+                @MainActor func requireRequestedConnection() throws {
+                    guard bleManager.isNavigationReady,
+                          bleManager.connectedDeviceID == requestedDeviceID,
+                          bleManager.transferConnectionEpoch == requestedEpoch else {
+                        throw FirmwareUpdateError.deviceNotReady
+                    }
+                }
+                try requireRequestedConnection()
                 if let pending = self.loadPendingUpdate(),
                    pending.transactionStage != .cancelled && pending.transactionStage != .failed && pending.transactionStage != .rolledBack {
                     throw FirmwareUpdateError.serverError("Reconcile the pending firmware operation before starting another update")
@@ -403,19 +423,23 @@ final class FirmwareUpdateManager: ObservableObject {
                 } else {
                     manifest = try await self.fetchLatestManifest(bleManager: bleManager)
                 }
+                try requireRequestedConnection()
                 try self.validateInstall(manifest, bleManager: bleManager)
                 try await self.deviceTransferManager
                     .requireFirmwareMaintenanceEligibility(
                         bleManager: bleManager
                     )
+                try requireRequestedConnection()
                 bleManager.beginFirmwareMaintenanceReconnect()
                 defer { bleManager.endFirmwareMaintenanceReconnect() }
                 self.latestManifest = manifest
                 self.statusMessage = "downloading firmware"
-                self.persistPendingUpdate(manifest: manifest, status: self.statusMessage)
+                self.persistPendingUpdate(manifest: manifest, deviceID: requestedDeviceID,
+                                          status: self.statusMessage)
                 self.downloadProgress = 0
                 self.uploadProgress = 0
                 let image = try await self.downloadFirmware(manifest: manifest)
+                try requireRequestedConnection()
                 self.downloadProgress = 1
                 try self.verify(image: image, manifest: manifest)
                 self.updatePending(
@@ -424,23 +448,19 @@ final class FirmwareUpdateManager: ObservableObject {
                 )
 
                 self.statusMessage = "restarting in firmware maintenance"
-                self.updatePendingIdentity(
-                    deviceID: bleManager.connectedDeviceID
-                )
                 self.updatePending(
                     status: self.statusMessage,
                     stage: .maintenanceRequested
                 )
                 let maintenanceCorrelation = try await self.deviceTransferManager.prepareFirmwareMaintenance(
-                    bleManager: bleManager
+                    bleManager: bleManager,
+                    expectedDeviceID: requestedDeviceID,
+                    expectedConnectionEpoch: requestedEpoch
                 ) { message in
                     self.statusMessage = message
                     self.updatePendingStatus(message)
                 }
-                self.updatePendingMaintenanceCorrelation(
-                    maintenanceCorrelation,
-                    deviceID: bleManager.connectedDeviceID
-                )
+                self.updatePendingMaintenanceCorrelation(maintenanceCorrelation)
                 self.updatePending(
                     status: "firmware maintenance ready",
                     stage: .maintenanceReady
@@ -470,7 +490,7 @@ final class FirmwareUpdateManager: ObservableObject {
                 }
                 defer { deviceSession.invalidateAndCancel() }
 
-                let transferDeviceID = bleManager.connectedDeviceID
+                let transferDeviceID = requestedDeviceID
                 let transferEpoch = bleManager.transferConnectionEpoch
                 @MainActor func requireTransferOwner() throws {
                     guard bleManager.isNavigationReady,
@@ -799,6 +819,13 @@ final class FirmwareUpdateManager: ObservableObject {
 
     func reconcilePendingUpdate(bleManager: BLEManager) {
         guard !isBusy, let pending = loadPendingUpdate() else { return }
+        if pending.isLocalPreparation {
+            // No maintenance command was attempted at these durable stages.
+            // Relaunch may discard the interrupted local download on any bike.
+            statusMessage = "firmware update cancelled"
+            clearPendingUpdate()
+            return
+        }
         if let expectedDeviceID = pending.deviceID,
            bleManager.connectedDeviceID != expectedDeviceID {
             statusMessage = "firmware update status unresolved"
@@ -886,7 +913,7 @@ final class FirmwareUpdateManager: ObservableObject {
             manifest.gitSha, target: manifest.target, version: manifest.version, build: manifest.build)
     }
 
-    private func persistPendingUpdate(manifest: FirmwareReleaseManifest, status: String) {
+    private func persistPendingUpdate(manifest: FirmwareReleaseManifest, deviceID: String, status: String) {
         let pending = PendingFirmwareUpdate(target: manifest.target,
                                             version: manifest.version,
                                             build: manifest.build,
@@ -895,7 +922,7 @@ final class FirmwareUpdateManager: ObservableObject {
                                                 version: manifest.version, build: manifest.build) ?? manifest.gitSha,
                                             startedAt: Date(),
                                             status: status,
-                                            deviceID: nil,
+                                            deviceID: deviceID,
                                             maintenanceCorrelation: nil,
                                             transactionStage: .downloading,
                                             operationID: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
@@ -903,19 +930,9 @@ final class FirmwareUpdateManager: ObservableObject {
         savePendingUpdate(pending)
     }
 
-    private func updatePendingMaintenanceCorrelation(
-        _ correlation: UInt32,
-        deviceID: String?
-    ) {
+    private func updatePendingMaintenanceCorrelation(_ correlation: UInt32) {
         guard var pending = loadPendingUpdate() else { return }
         pending.maintenanceCorrelation = correlation
-        pending.deviceID = deviceID
-        savePendingUpdate(pending)
-    }
-
-    private func updatePendingIdentity(deviceID: String?) {
-        guard var pending = loadPendingUpdate() else { return }
-        pending.deviceID = deviceID
         savePendingUpdate(pending)
     }
 
@@ -995,6 +1012,7 @@ final class FirmwareUpdateManager: ObservableObject {
     }
 
     private func runBusy(_ operation: @MainActor @escaping () async throws -> Void) async {
+        guard !isBusy else { return }
         isBusy = true
         errorMessage = nil
         do {
@@ -1003,23 +1021,31 @@ final class FirmwareUpdateManager: ObservableObject {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             statusMessage = errorMessage ?? "firmware update failed"
             if let pending = loadPendingUpdate() {
-                switch pending.transactionStage {
-                case .maintenanceRequested, .finalizing, .rebooting, .unresolved:
-                    errorMessage = nil
-                    statusMessage = "firmware update status unresolved"
-                    updatePending(
-                        status: statusMessage,
-                        stage: .unresolved
-                    )
-                default:
+                if pending.isLocalPreparation {
+                    clearPendingUpdate()
                     if error is CancellationError {
                         errorMessage = nil
                         statusMessage = "firmware update cancelled"
                     }
-                    updatePending(
-                        status: statusMessage,
-                        stage: error is CancellationError ? .cancelled : .failed
-                    )
+                } else {
+                    switch pending.transactionStage {
+                    case .maintenanceRequested, .finalizing, .rebooting, .unresolved:
+                        errorMessage = nil
+                        statusMessage = "firmware update status unresolved"
+                        updatePending(
+                            status: statusMessage,
+                            stage: .unresolved
+                        )
+                    default:
+                        if error is CancellationError {
+                            errorMessage = nil
+                            statusMessage = "firmware update cancelled"
+                        }
+                        updatePending(
+                            status: statusMessage,
+                            stage: error is CancellationError ? .cancelled : .failed
+                        )
+                    }
                 }
             }
         }
@@ -1044,6 +1070,12 @@ final class FirmwareUpdateManager: ObservableObject {
     nonisolated static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
+
+#if HOST_TESTING
+    func setVerifiedManifestForTesting(_ manifest: FirmwareReleaseManifest) {
+        latestManifest = manifest
+    }
+#endif
 }
 
 struct FirmwareUpdateDeviceClient {

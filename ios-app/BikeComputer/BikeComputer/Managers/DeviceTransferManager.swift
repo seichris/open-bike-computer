@@ -1735,11 +1735,28 @@ final class DeviceTransferManager {
 
     func prepareFirmwareMaintenance(
         bleManager: BLEManager,
+        expectedDeviceID: String,
+        expectedConnectionEpoch: UInt64,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> UInt32 {
+        func requireRequestedConnection() throws {
+            guard bleManager.isNavigationReady,
+                  bleManager.connectedDeviceID == expectedDeviceID,
+                  bleManager.transferConnectionEpoch == expectedConnectionEpoch else {
+                throw FirmwareUpdateError.deviceNotReady
+            }
+        }
+        try requireRequestedConnection()
         try await beginOperation(mode: .firmware, bleManager: bleManager)
         do {
-            let result = try await performPrepareFirmwareMaintenance(bleManager: bleManager, status: status)
+            // Cleanup recovery can await. Revalidate the original intent before
+            // the first command; only the correlated reboot may change epochs.
+            try requireRequestedConnection()
+            guard ownsConnection(bleManager) else {
+                throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+            let result = try await performPrepareFirmwareMaintenance(
+                bleManager: bleManager, expectedDeviceID: expectedDeviceID, status: status)
             guard let lease = operationLease, bleManager.connectedDeviceID == lease.deviceID else {
                 throw DeviceOperationCoordinator.Failure.staleOwner
             }
@@ -1756,12 +1773,12 @@ final class DeviceTransferManager {
 
     private func performPrepareFirmwareMaintenance(
         bleManager: BLEManager,
+        expectedDeviceID: String,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> UInt32 {
         guard bleManager.isNavigationReady else {
             throw FirmwareUpdateError.deviceNotReady
         }
-        let expectedDeviceID = bleManager.connectedDeviceID
         let initialRevision = bleManager.deviceTransferStatusRevision
         let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
         status("requesting firmware maintenance")
@@ -1814,8 +1831,7 @@ final class DeviceTransferManager {
                     bleManager.reconnectToLastDevice()
                 }
             } else if sawDisconnect,
-                      expectedDeviceID == nil ||
-                        bleManager.connectedDeviceID == expectedDeviceID {
+                      bleManager.connectedDeviceID == expectedDeviceID {
                 _ = bleManager.requestDeviceTransferStatus(
                     forMaintenanceReconnect: true
                 )
