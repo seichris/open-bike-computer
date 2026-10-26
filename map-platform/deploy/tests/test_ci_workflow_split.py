@@ -39,10 +39,10 @@ class CIWorkflowSplitTests(unittest.TestCase):
     def test_reusable_map_jobs_follow_inputs_and_manual_defaults_run_both(self) -> None:
         map_ci = workflow_source("map-platform-ci.yml")
 
-        self.assertIn("    if: inputs.run_backend\n", map_ci)
+        self.assertIn("inputs.run_source || inputs.run_deploy", map_ci)
         self.assertIn("    if: inputs.run_osm\n", map_ci)
         self.assertNotIn("github.event_name != 'workflow_call'", map_ci)
-        self.assertEqual(map_ci.count("        default: true\n"), 2)
+        self.assertEqual(map_ci.count("        default: true\n"), 12)
 
     def test_image_promotion_watches_and_dispatches_dedicated_ci(self) -> None:
         image_workflow = workflow_source("map-platform-image.yml")
@@ -53,8 +53,7 @@ class CIWorkflowSplitTests(unittest.TestCase):
             "python3 map-platform/deploy/export_pending_compose.py",
             image_workflow,
         )
-        self.assertEqual(2, image_workflow.count("gh workflow run ci.yml"))
-        self.assertEqual(2, image_workflow.count("-f scope=map"))
+        self.assertEqual(2, image_workflow.count("python3 .github/scripts/dispatch_promotion_ci.py"))
         self.assertNotIn("gh workflow run map-platform-ci.yml", image_workflow)
 
     def test_production_and_development_have_independent_promotion_locks(self) -> None:

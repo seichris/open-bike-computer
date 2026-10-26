@@ -156,6 +156,10 @@ class BikeComputerCoordinator: ObservableObject {
     // Route Calculation
     @Published var routeCalculation = RouteCalculationState()
 
+    // Route elevation: optional, and navigation never waits for it.
+    @Published private(set) var navigationElevation: RouteElevationNavigationPresentationV1?
+    private(set) var routeElevationService: RouteElevationService?
+
     // Alerts
     @Published var alert = AlertState()
 
@@ -192,6 +196,13 @@ class BikeComputerCoordinator: ObservableObject {
     private var pendingDeviceDestinationRequestDeadline: DispatchWorkItem?
     private var pendingDeviceDestinationRouteGeneration: UInt?
     private var wasNavigating = false
+    private var routeElevationDeviceSync: RouteElevationDeviceSync?
+    private var navigationElevationTask: Task<Void, Never>?
+    private var navigationElevationRetryTask: Task<Void, Never>?
+    private var navigationElevationSubject: RouteElevationSubjectV1?
+    private var navigationElevationKey: RouteElevationDeliveryPlannerV1.RouteKey?
+    private var navigationElevationState: RouteElevationStateV1?
+    private var navigationElevationProgress: NavigationElevationProgressV1?
 
     private struct PendingRoutePlan {
         let alternatives: [NavigationRouteAlternativeV1]
@@ -677,6 +688,186 @@ class BikeComputerCoordinator: ObservableObject {
         processNavigationLocation(location)
     }
 #endif
+
+    // MARK: - Route Elevation
+
+    /// Enables elevation for navigation and the device. The app calls this
+    /// once; tests and previews run without it.
+    func configureRouteElevation(_ service: RouteElevationService) {
+        guard routeElevationService == nil else { return }
+        routeElevationService = service
+        let sync = RouteElevationDeviceSync(bleManager: bleManager)
+        sync.onStatusChange = { [weak self] _, _ in self?.publishNavigationElevation() }
+        routeElevationDeviceSync = sync
+        navEngine.$elevationRoute
+            .removeDuplicates()
+            .sink { [weak self] route in self?.navigationElevationRouteChanged(route) }
+            .store(in: &cancellables)
+        navEngine.$elevationProgress
+            .removeDuplicates()
+            .sink { [weak self] progress in
+                self?.navigationElevationProgress = progress
+                self?.navigationElevationProgressChanged()
+            }
+            .store(in: &cancellables)
+        Publishers.CombineLatest3(
+            bleManager.$isConnected,
+            bleManager.$hasReceivedDeviceCapabilities,
+            bleManager.$supportsRouteElevation
+        )
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in self?.publishNavigationElevation() }
+        .store(in: &cancellables)
+    }
+
+    /// Asks again after a failure; a provider's Retry-After is still honored.
+    func retryNavigationElevation() {
+        guard let subject = navigationElevationSubject,
+              let key = navigationElevationKey,
+              navigationElevationState?.profile == nil else { return }
+        applyNavigationElevation(.loading, key: key)
+        resolveNavigationElevation(subject, key: key, retry: true)
+    }
+
+    private func navigationElevationRouteChanged(_ route: NavigationElevationRouteV1?) {
+        navigationElevationTask?.cancel()
+        navigationElevationTask = nil
+        navigationElevationRetryTask?.cancel()
+        navigationElevationRetryTask = nil
+        guard let route, let service = routeElevationService else {
+            navigationElevationSubject = nil
+            navigationElevationKey = nil
+            navigationElevationState = nil
+            routeElevationDeviceSync?.update(route: nil, content: nil)
+            publishNavigationElevation()
+            return
+        }
+        let subject = RouteElevationSubjectV1(
+            route: route.route,
+            binding: route.contentHash.map {
+                RouteElevationArchiveBindingV1(
+                    routeID: route.route.id, revision: route.route.revision, contentHash: $0
+                )
+            }
+        )
+        let key = RouteElevationDeliveryPlannerV1.RouteKey(
+            navigationGeneration: route.navigationGeneration,
+            routeID: route.route.id,
+            revision: route.route.revision
+        )
+        navigationElevationSubject = subject
+        navigationElevationKey = key
+        if let cached = service.cachedState(for: subject) {
+            applyNavigationElevation(cached, key: key)
+        } else {
+            applyNavigationElevation(.loading, key: key)
+            resolveNavigationElevation(subject, key: key, retry: false)
+        }
+    }
+
+    private func resolveNavigationElevation(
+        _ subject: RouteElevationSubjectV1,
+        key: RouteElevationDeliveryPlannerV1.RouteKey,
+        retry: Bool
+    ) {
+        guard let service = routeElevationService else { return }
+        navigationElevationTask?.cancel()
+        navigationElevationTask = Task { [weak self] in
+            let state = await service.resolve(subject, retry: retry)
+            guard let self, !Task.isCancelled, self.navigationElevationKey == key else { return }
+            self.applyNavigationElevation(state, key: key)
+        }
+    }
+
+    private func applyNavigationElevation(
+        _ state: RouteElevationStateV1,
+        key: RouteElevationDeliveryPlannerV1.RouteKey
+    ) {
+        navigationElevationState = state
+        routeElevationDeviceSync?.update(route: key, content: .init(state))
+        navigationElevationProgressChanged()
+        scheduleNavigationElevationRetry(after: state, key: key)
+    }
+
+    /// A rider cannot tap Try Again mid-ride: offline and temporary failures
+    /// are asked again once their backoff has passed.
+    private func scheduleNavigationElevationRetry(
+        after state: RouteElevationStateV1,
+        key: RouteElevationDeliveryPlannerV1.RouteKey
+    ) {
+        navigationElevationRetryTask?.cancel()
+        navigationElevationRetryTask = nil
+        guard case .unavailable(let reason) = state,
+              let delay = RouteElevationPreparationV1.automaticRetryDelay(for: reason) else { return }
+        navigationElevationRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled, self.navigationElevationKey == key,
+                  let subject = self.navigationElevationSubject,
+                  self.navigationElevationState?.profile == nil else { return }
+            self.resolveNavigationElevation(subject, key: key, retry: false)
+        }
+    }
+
+    /// Progress for the active profile only; a stale route's progress is ignored.
+    private var currentNavigationElevationProgress: NavigationElevationProgressV1? {
+        guard let key = navigationElevationKey,
+              let progress = navigationElevationProgress,
+              progress.navigationGeneration == key.navigationGeneration,
+              progress.routeID == key.routeID,
+              progress.revision == key.revision else { return nil }
+        return progress
+    }
+
+    private func navigationElevationProgressChanged() {
+        let progress = currentNavigationElevationProgress
+        let position = progress.flatMap { progress in
+            navigationElevationState?.profile?.position(atDistance: progress.distanceAlongGeometryMeters)
+        }
+        routeElevationDeviceSync?.update(progress: progress.map {
+            RouteElevationDeliveryPlannerV1.Progress(
+                meters: $0.distanceAlongGeometryMeters,
+                position: $0.onRoute ? position : nil,
+                onRoute: $0.onRoute
+            )
+        })
+        publishNavigationElevation()
+    }
+
+    private func publishNavigationElevation() {
+        guard let state = navigationElevationState, navigationElevationKey != nil else {
+            if navigationElevation != nil { navigationElevation = nil }
+            return
+        }
+        let progress = currentNavigationElevationProgress
+        let position = progress.flatMap { progress in
+            progress.onRoute
+                ? state.profile?.position(atDistance: progress.distanceAlongGeometryMeters)
+                : nil
+        }
+        let presentation = RouteElevationNavigationPresentationV1(
+            state: state,
+            progressMeters: progress?.distanceAlongGeometryMeters,
+            position: position,
+            onRoute: progress?.onRoute ?? true,
+            device: deviceElevationStatus
+        )
+        if presentation != navigationElevation { navigationElevation = presentation }
+    }
+
+    private var deviceElevationStatus: RouteElevationDeviceStatusV1 {
+        guard bleManager.isConnected else { return .notConnected }
+        guard let sync = routeElevationDeviceSync, sync.isLinked else {
+            return bleManager.hasReceivedDeviceCapabilities && !bleManager.supportsRouteElevation
+                ? .unsupportedFirmware
+                : .connecting
+        }
+        switch sync.status {
+        case .idle, .sending: return .sending
+        case .delivered: return .delivered
+        case .showingState: return .showingState
+        case .failed: return .failed
+        }
+    }
 
     // MARK: - Public API: BLE
 

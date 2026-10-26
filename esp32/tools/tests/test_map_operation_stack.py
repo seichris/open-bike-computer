@@ -130,11 +130,18 @@ int main() {
                 (('selectReadyStreamMap',), 1536),
                 (('recoverStreamActivationTransaction',), 1536),
                 (('finalizeOperation',), 1024),
+                (('readInstalledMap',), 1024),
+                (('readMapLibrary',), 768),
+                (('selectInstalledMap',), 1024),
+                (('removeInstalledMap',), 1536),
+                (('installedMapCovers',), 512),
+                (('mapRootHasBlock',), 512),
+                (('pruneObsoleteInstalledMaps',), 2048),
                 (('fileSha256Hex',), 256),
                 (('writeActiveMap',), 128),
                 (('persistPredecessorAnchor',), 768),
             ):
-                values = [value for name, value in frames.items() if any(marker in name for marker in names) and "clE" not in name and "lambda" not in name and "Workspace" not in name and ".cold" not in name]
+                values = [value for name, value in frames.items() if any(marker in name for marker in names) and "clE" not in name and "$_" not in name and "lambda" not in name and "Workspace" not in name and ".cold" not in name]
                 self.assertEqual(len(values), 1, names)
                 self.assertLessEqual(values[0], limit, names)
 

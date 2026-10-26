@@ -83,6 +83,12 @@ def load_contract() -> dict:
     if sorted(widgets.values()) != list(range(22)):
         raise SystemExit("Ride Stats widgets must retain their append-only v1 IDs 0...21")
     screen_types = contract["screen_types"]
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio",
+                           "elevation")
+    if any(screen_types.get(name) != value
+           for value, name in enumerate(legacy_screen_types)):
+        raise SystemExit("legacy screen setting IDs 0...6 must remain unchanged")
     values = list(screen_types.values())
     if (not screen_types or len(values) != len(set(values))
             or any(type(value) is not int or not 0 <= value < 8 for value in values)
@@ -195,6 +201,8 @@ def render_swift(contract: dict) -> str:
             f'    static let destinationRequestMagic = "{requests["destination_magic"]}"',
             f'    static let worldRadioRequestMagic = "{requests["world_radio_request_magic"]}"',
             f'    static let worldRadioStatusMagic = "{requests["world_radio_status_magic"]}"',
+            f'    static let routeElevationMagic = "{requests["route_elevation_magic"]}"',
+            f'    static let routeElevationAcknowledgementMagic = "{requests["route_elevation_ack_magic"]}"',
             f'    static let applicationCommandMagic = "{delivery["command_magic"]}"',
             f'    static let applicationAcknowledgementMagic = "{delivery["ack_magic"]}"',
             f"    static let applicationDeliveryVersion: UInt8 = {delivery['version']}",
@@ -224,16 +232,22 @@ def render_swift(contract: dict) -> str:
     for name, value in screen_configuration["results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
-    # Separate legacy Int and wire UInt8 adapters preserve source compatibility;
-    # both are generated from the same identifiers, never from UI ordering.
+    # The legacy screen-settings channel carries the released screens through
+    # Elevation. Nearby is configurable-screen wire-only and must never leak
+    # into the old screen-settings channel.
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio",
+                           "elevation")
     for enum_name, raw_type in (("RideBLEScreenTypeV1", "UInt8"),
                                 ("RideBLELegacyScreenV1", "Int")):
         lines.append(f"nonisolated enum {enum_name}: {raw_type}, CaseIterable, Codable, Sendable {{")
-        for name, value in contract["screen_types"].items():
+        names = contract["screen_types"] if raw_type == "UInt8" else legacy_screen_types
+        for name in names:
+            value = contract["screen_types"][name]
             lines.append(f"    case {camel(name)} = {value}")
         if raw_type == "Int":
             lines.extend(["", "    var wireType: RideBLEScreenTypeV1 {", "        switch self {"])
-            for name in contract["screen_types"]:
+            for name in legacy_screen_types:
                 lines.append(f"        case .{camel(name)}: return .{camel(name)}")
             lines.extend(["        }", "    }"])
         lines.extend(["}", ""])
@@ -302,6 +316,8 @@ def render_cpp(contract: dict) -> str:
             f'inline constexpr char DESTINATION_REQUEST_MAGIC[] = "{requests["destination_magic"]}";',
             f'inline constexpr char WORLD_RADIO_REQUEST_MAGIC[] = "{requests["world_radio_request_magic"]}";',
             f'inline constexpr char WORLD_RADIO_STATUS_MAGIC[] = "{requests["world_radio_status_magic"]}";',
+            f'inline constexpr char ROUTE_ELEVATION_MAGIC[] = "{requests["route_elevation_magic"]}";',
+            f'inline constexpr char ROUTE_ELEVATION_ACK_MAGIC[] = "{requests["route_elevation_ack_magic"]}";',
             f"inline constexpr uint8_t SCREEN_CONFIGURATION_SCHEMA_VERSION = {screen_configuration['schema_version']};",
             f"inline constexpr uint8_t SCREEN_CONFIGURATION_CAPABILITY_TLV_TYPE = {screen_configuration['capability_tlv_type']};",
             f"inline constexpr std::size_t MAXIMUM_SCREEN_CONFIGURATION_INSTANCES = {screen_configuration['maximum_instances']};",

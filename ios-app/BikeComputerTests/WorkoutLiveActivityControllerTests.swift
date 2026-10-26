@@ -826,13 +826,17 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
             finalizationBackgroundLease: lease
         )
         controller.start(isApplicationForeground: false)
-        await settle()
+        try await waitUntil("initial duplicate end is suspended") {
+            client.endAttempts == ["duplicate"]
+        }
 
         source.send(terminal)
         XCTAssertTrue(lease.isActive)
         source.send(active)
         client.resumeSuspendedEnd()
-        await settle()
+        try await waitUntil("retracted terminal lease is released after cleanup") {
+            client.endings.map(\.0) == ["duplicate"] && !lease.isActive
+        }
 
         XCTAssertEqual(client.endings.map(\.0), ["duplicate"])
         XCTAssertFalse(lease.isActive)

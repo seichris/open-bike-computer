@@ -536,10 +536,14 @@ assert not raw_write_offenders, (
 release_candidate_workflow = (
     repo_root / ".github/workflows/firmware-release-candidate.yml"
 ).read_text()
-assert (
-    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
-    in release_candidate_workflow
-)
+# Production is built once in the required CI workflow. The candidate consumes
+# its checked bytes only after that workflow has completed successfully.
+canonical_ci = (repo_root / ".github/workflows/ci.yml").read_text()
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in canonical_ci
+assert "name: verified-production-${{ matrix.target }}" in canonical_ci
+assert "needs: validate" in release_candidate_workflow
+assert "name: verified-production-${{ matrix.environment }}" in release_candidate_workflow
+assert "firmware_release_candidate.py record" in release_candidate_workflow
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment in personal_profiles:
@@ -550,5 +554,19 @@ for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
     assert mapping in release_candidate_workflow
+
+isolated_poi = "env:WAVESHARE_AMOLED_175_POI_ISOLATED_LIFECYCLE_QUALIFICATION"
+assert isolated_poi.endswith("_LIFECYCLE_QUALIFICATION")  # Retain reserve gate.
+assert config.get(isolated_poi, "extends") == (
+    "env:WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION"
+)
+assert inherited_option(isolated_poi, "board_build.partitions") == "partitions.csv"
+assert "-DMAP_POIS_RUNTIME_ENABLED=1" in inherited_option(isolated_poi, "build_flags")
+for section in config.sections():
+    if section.startswith("env:"):
+        flags = inherited_option(section, "build_flags")
+        assert ("-DMAP_STREAM_QUALIFICATION_TRUST=1" in flags) == (section == isolated_poi), section
+assert isolated_poi.removeprefix("env:") not in release_candidate_workflow
+assert isolated_poi.removeprefix("env:") not in firmware_routing
 
 print("firmware production profile contracts passed")

@@ -6,6 +6,7 @@ on:
       - "v*"
 
 permissions:
+  actions: read
   attestations: read
   contents: read
   packages: read
@@ -25,9 +26,12 @@ jobs:
   diagnostics:
     name: Validate diagnostic firmware
     uses: ./.github/workflows/firmware-diagnostics.yml
+    with:
+      include_remote_debug: false
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Bind verified ${{ matrix.target }}
+    needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -45,17 +49,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Restore pinned PlatformIO downloads
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: esp32/.pio/open-bike-build/downloads
-          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
-      - name: Restore verified firmware build caches
-        uses: ./.github/actions/firmware-build-cache
-        with:
-          environment: ${{ matrix.environment }}
-      - name: Build with the repository-owned firmware runtime
-        run: env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "${{ matrix.environment }}" --factory-output-dir dist
+          name: verified-production-${{ matrix.environment }}
+          path: esp32/dist/
       - name: Bind the exact release candidate
         env:
           RELEASE_TARGET: ${{ matrix.target }}
@@ -65,7 +62,6 @@ jobs:
           RELEASE_GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          cp ".pio/build/${RELEASE_ENVIRONMENT}/firmware.bin" "dist/${RELEASE_TARGET}.bin"
           python3 ../tools/firmware_release_candidate.py record \
             --artifact-dir dist \
             --output dist/candidate-receipt.json \

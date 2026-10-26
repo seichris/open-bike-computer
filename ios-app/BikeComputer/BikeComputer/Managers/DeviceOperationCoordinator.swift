@@ -61,7 +61,8 @@ final class DeviceOperationCoordinator {
         requestStatus: () -> Bool,
         pause: () async throws -> Void = {
             try await Task.sleep(nanoseconds: 250_000_000)
-        }
+        },
+        adoptActive: Bool = true
     ) async throws -> Lease? {
         guard lease == nil, let stored = unresolved,
               stored.deviceID == deviceID else { throw Failure.cleanupUnresolved }
@@ -83,6 +84,9 @@ final class DeviceOperationCoordinator {
                     reconcileClear(deviceID: deviceID)
                     return nil
                 }
+                // Passive convergence only clears; fresh evidence of any active
+                // session ends it immediately without adopting or exiting it.
+                guard adoptActive else { throw Failure.cleanupUnresolved }
                 if current.mode == stored.mode, let tokenDigest,
                    current.tokenDigest == tokenDigest,
                    let transferGeneration,

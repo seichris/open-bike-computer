@@ -68,6 +68,13 @@ public:
   Result acknowledgeResult(const Identity &identity);
   Result query(const Identity &identity, Record &record) const;
   Result queryID(const std::string &operation, Record &record) const;
+  bool hasUnresolvedOperation() const {
+    for (const auto &record : records_)
+      if (!record.identity.operation.empty() &&
+          (record.phase == Phase::Receiving || record.phase == Phase::Prepared || record.phase == Phase::Accepted))
+        return true;
+    return false;
+  }
   const std::array<Record, kCapacity> &records() const { return records_; }
 private:
   Result admitInternal(const Identity &identity);

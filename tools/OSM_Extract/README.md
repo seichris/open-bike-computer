@@ -113,9 +113,43 @@ one-metre quantization.
 `extract_features.py --renderer-format` selects the durable binary output:
 
 - format 1 writes the existing FMB v2 blocks;
-- format 2 writes FMB v3 blocks plus the shared FMA1 street-label asset; and
+- format 2 writes FMB v3 blocks plus the shared FMA1 street-label asset;
 - format 3 writes FMB v4 blocks with the same label sections plus the bounded
-  building section documented in [`docs/fmb-v4.md`](../../docs/fmb-v4.md).
+  building section documented in [`docs/fmb-v4.md`](../../docs/fmb-v4.md); and
+- format 5 writes FMB v6 blocks with required contour and POI sections as
+  documented in [`docs/fmb-v6-pois.md`](../../docs/fmb-v6-pois.md).
+
+Target 4 is the backend's FMB v5 topography composition path, not a POI
+extractor mode. Format 5 classifies the checked-in Shops, Restaurants & Cafes, Public Toilets,
+Gas Stations, and Bicycle Shops & Repair rules during extraction. It emits a
+valid section even when a block has zero matching POIs. The backend adds the
+signed Nearby index after final block composition and checks deterministic
+category totals against the complete artifact.
+
+### Native POI source equivalence
+
+`tests/test_poi_source_equivalence.py` runs the actual Osmium shard preparer
+and production `pbf_to_geojson.sh` conversion. It compares normalized POI
+records, category counts and encoded section bytes across the full source,
+cold sealed shards and warm reused shards, with both default and selected-area
+OGR profiles. Synthetic data covers all five groups, inactive/out-of-bounds
+points, nonbuilding concave areas, holes and multi-outer relations spanning
+one-degree shard and 4,096-metre render-block boundaries.
+
+From the repository root, run it in the product tools image:
+
+```sh
+docker compose -f tools/OSM_Extract/docker-compose.yml build tools
+docker compose -f tools/OSM_Extract/docker-compose.yml run --rm \
+  --volume "$PWD:/repo:ro" --workdir /repo/tools/OSM_Extract \
+  --env OBC_REQUIRE_POI_OGR_TESTS=1 \
+  tools python -m unittest discover -s tests -p test_poi_source_equivalence.py -v
+```
+
+CI requires this container check after building the image. The environment
+flag turns absent native tools into an error; a host-only skipped check is
+not source-equivalence evidence. This fixture gate does not replace signed
+real-area pack or physical-device acceptance.
 
 The format-3 stage reads `building=*` and `building:part=*` ways and
 multipolygon relations directly from the clipped Geofabrik/OSM PBF. It keeps

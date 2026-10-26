@@ -25,6 +25,8 @@ private final class MapOperationRecoveryTestBLEManager: BLEManager {
     var recoveryDeviceID: String?
     var recoveryEpoch: UInt64 = 0
     var requestedOperationIDs: [String] = []
+    var mapStatusRequests = 0
+    var onOperationStatusRequest: (() -> Void)?
 
     override var activeDeviceID: String? {
         get { recoveryDeviceID }
@@ -37,8 +39,103 @@ private final class MapOperationRecoveryTestBLEManager: BLEManager {
 
     override func requestMapOperationStatus(operationID: String) -> Bool {
         requestedOperationIDs.append(operationID)
+        onOperationStatusRequest?()
         return true
     }
+
+    override func requestMapTransferStatus() -> Bool {
+        mapStatusRequests += 1
+        return super.requestMapTransferStatus()
+    }
+}
+
+/// Firmware transfer state for map transport cleanup. `finalizing` means the
+/// installed receipt is saved while finalize still holds the commit grant, so
+/// the firmware refuses exit with `commit_in_progress`.
+@MainActor
+private final class MapTransportCleanupDevice {
+    enum State { case idle, map, finalizing, otherSession }
+    static let token = String(repeating: "d", count: 32)
+    static let generation: UInt32 = 10
+    var state = State.idle
+    var answersStatus = true
+    var onStatusRequest: (() -> Void)?
+    var packets: [String] = []
+    weak var ble: BLEManager?
+
+    func statusPacket() -> Data {
+        let prefix = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
+        guard state != .idle else {
+            return prefix + Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        }
+        let other = state == .otherSession
+        let token = other ? String(repeating: "f", count: 32) : Self.token
+        let generation = other ? Self.generation + 1 : Self.generation
+        let refusal = state == .finalizing
+            ? #","lastError":{"code":"commit_in_progress","message":"commit boundary","sequence":7}"# : ""
+        let json = #"{"configured":true,"enabled":true,"port":8080,"mode":"map","# +
+            #""baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","# +
+            #""apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","# +
+            #""sessionToken":"\#(token)","tls":{"identityVersion":1,"certificateSha256":"# +
+            #""\#(String(repeating: "c", count: 64))"},"transferGeneration":\#(generation),"# +
+            #""capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"mapOperationsV1":true,"# +
+            #""legacyArchivePolicy":"disabled"}\#(refusal)}"#
+        return prefix + Data(json.utf8)
+    }
+
+    func publishSoon() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            guard let self, let ble = self.ble else { return }
+            _ = ble.handleDeviceTransferStatusNotification(self.statusPacket())
+        }
+    }
+
+    func handle(_ packet: Data) {
+        let text = String(data: packet, encoding: .utf8) ?? "<binary>"
+        packets.append(text)
+        switch text {
+        case "DTRNexit":
+            if state == .map { state = .idle }
+            publishSoon()
+        case "DSTS":
+            onStatusRequest?()
+            if answersStatus { publishSoon() }
+        case "DTRNenter|map":
+            state = .map
+            publishSoon()
+        default:
+            break
+        }
+    }
+}
+
+@MainActor
+private func mapTransportCleanupBLE(deviceID: String,
+                                    device: MapTransportCleanupDevice) -> MapOperationRecoveryTestBLEManager {
+    let ble = MapOperationRecoveryTestBLEManager()
+    ble.recoveryDeviceID = deviceID
+    ble.recoveryEpoch = 2
+    ble.setConnectedDeviceIDForTesting(deviceID)
+    ble.isConnected = true
+    ble.isNavigationReady = true
+    device.ble = ble
+    ble.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+        maximumWriteLength: 64, canSend: { true }, write: { device.handle($0) }))
+    _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+    return ble
+}
+
+/// Leaves the cleanup record exactly as an exit refused during finalize does,
+/// with the recorded session identity, without waiting out the exit window.
+@MainActor
+private func strandMapTransport(_ coordinator: DeviceOperationCoordinator, deviceID: String) throws {
+    let lease = try coordinator.acquire(deviceID: deviceID, mode: "map", epoch: 2)
+    coordinator.recordAuthorization(lease,
+        digest: SHA256.hash(data: Data(MapTransportCleanupDevice.token.utf8))
+            .map { String(format: "%02x", $0) }.joined(),
+        generation: MapTransportCleanupDevice.generation)
+    coordinator.finish(lease, remoteClear: false)
 }
 
 
@@ -3136,12 +3233,13 @@ extension NavigationProtocolTests {
             source.contains("if item.isActiveOnDevice {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 source.contains("? \"arrow.clockwise.circle\"") &&
-                source.contains(": \"arrow.up.circle\"") &&
+                source.contains("\"arrow.up.circle\"") &&
+                !source.contains("\"arrow.triangle.swap\"") &&
                 !source.contains("IPhoneDownloadStatusIcon") &&
                 !source.contains("Image(systemName: \"iphone\")") &&
                 !source.contains("BikeComputerMapStatusIcon") &&
                 !source.contains("Text(\"b\")"),
-            "saved maps use the same active check and inactive upload icons regardless of origin"
+            "saved maps use the upload icon for retained SD maps and keep active and retry states"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
@@ -3150,7 +3248,8 @@ extension NavigationProtocolTests {
         assert(
             source.contains("This map is not saved on this iPhone") &&
                 source.contains("is active on the Bike Computer") &&
-                source.contains("Transfer \\(displayName) to device"),
+                source.contains("Install \\(displayName) on the Bike Computer") &&
+                source.contains("already installed on the SD card"),
             "saved-map presence indicators expose accessible state labels"
         )
         assert(
@@ -3248,13 +3347,14 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains("manager.detailPreviewImage(for: preview.item)") &&
-                source.contains("Loading high-resolution preview") &&
+                source.contains("Loading map preview…") &&
+                !previewSource.contains("fallbackImage") &&
                 source.contains(".interpolation(.high)") &&
                 source.contains(".task(id: preview.id)") &&
                 source.contains(
                     "await manager.loadDetailPreviewIfNeeded(for: preview.item)"
                 ),
-            "the preview modal upgrades its thumbnail through cancellable Retina loading"
+            "the preview modal loads Retina directly without showing the list thumbnail first"
         )
         assert(
             source.contains("manager.savedMapListItems(") &&
@@ -3682,7 +3782,7 @@ extension NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -3978,7 +4078,9 @@ extension NavigationProtocolTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         for scenario in ["retire", "same-epoch", "commit", "accepted", "wrong-admission-device",
                          "wrong-receipt-operation", "foreign-app", "cleanup-failed", "cleanup-stale",
-                         "device-changed", "epoch-changed", "write-failed"] {
+                         "device-changed", "epoch-changed", "write-failed",
+                         "query-disconnected", "query-epoch-changed", "query-token-rotated",
+                         "query-no-http-context"] {
             let suite = "fenced-retirement-\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
@@ -4019,7 +4121,7 @@ extension NavigationProtocolTests {
             ble.recoveryEpoch = 2
             ble.isConnected = true
             ble.isNavigationReady = true
-            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferSessionToken = scenario == "query-no-http-context" ? nil : "test-token"
             ble.deviceTransferMode = "map"
             var cleanupCount = 0
             manager.useFencedRetirementCleanupForTesting { _ in
@@ -4043,6 +4145,21 @@ extension NavigationProtocolTests {
             var paths: [String] = []
             FirmwareRequestCaptureProtocol.handler = { request, _ in
                 paths.append(request.url!.lastPathComponent)
+                if request.url!.lastPathComponent == fixture.wireOperationID,
+                   scenario.hasPrefix("query-") {
+                    let changeConnection = {
+                        MainActor.assumeIsolated {
+                            switch scenario {
+                            case "query-disconnected": ble.isConnected = false
+                            case "query-epoch-changed": ble.recoveryEpoch += 1
+                            case "query-token-rotated": ble.deviceTransferSessionToken = "replacement-test-token"
+                            default: break
+                            }
+                        }
+                    }
+                    if Thread.isMainThread { changeConnection() }
+                    else { DispatchQueue.main.sync(execute: changeConnection) }
+                }
                 let object: [String: Any]
                 if request.url!.lastPathComponent == "admission" {
                     object = ["schemaVersion": 1,
@@ -4060,11 +4177,15 @@ extension NavigationProtocolTests {
             let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!,
                 sessionToken: "test-token", session: session)
             var clock = Date(timeIntervalSince1970: 100)
+            var pollSleeps = 0
             var result: MapActivationConfirmationResult?
             do {
                 result = try await manager.confirmActivatedMap(expectedMapId: fixture.mapID, sessionId: fixture.sessionID,
                     previousMapId: nil, previousSessionId: nil, previousSequence: nil, acceptedSequence: nil,
-                    client: client, bleManager: ble, timeout: 1, now: { clock }, sleep: { _ in clock.addTimeInterval(2) })
+                    client: client, bleManager: ble, timeout: 1, now: { clock }, sleep: { _ in
+                        pollSleeps += 1
+                        clock.addTimeInterval(2)
+                    })
             } catch {
                 assertEqual(scenario, "write-failed", "only injected persistence failure may throw")
             }
@@ -4087,9 +4208,160 @@ extension NavigationProtocolTests {
             } else {
                 assert(result != .retiredUnknown, "\(scenario) cannot release admission")
                 assertEqual(try! store.records(), [fixture], "\(scenario) preserves the original operation")
+                if scenario.hasPrefix("query-") {
+                    assertEqual(paths, scenario == "query-no-http-context" ? [] : [fixture.wireOperationID],
+                        "a stale recovery owner sends no further HTTP controls")
+                    assertEqual(ble.requestedOperationIDs.count, 0, "a stale recovery owner must not poll the replacement BLE connection")
+                    assertEqual(pollSleeps, 0, "a stale recovery owner exits immediately, not at the ten-minute deadline")
+                    if case .continuesOnDevice? = result {} else {
+                        assert(false, "a changed recovery session preserves the unresolved result")
+                    }
+                }
                 if ["same-epoch", "commit", "accepted", "wrong-admission-device", "wrong-receipt-operation", "foreign-app"].contains(scenario) {
                     assertEqual(cleanupCount, 0, "\(scenario) cannot stop transport without a valid fence")
                 }
+            }
+        }
+    }
+
+    @MainActor
+    static func testOfflineMapManagerConfirmsAcceptedOperationAfterTransportExit() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // After accepting a commit the device installs on its own, pushes the
+        // MSTS receipt and then leaves transfer mode, revoking the HTTP session
+        // while the BLE link that carries the receipt stays current.
+        for scenario in ["exit-during-sleep", "exit-during-query", "exit-before-receipt",
+                         "saved-result-link-not-ready", "accepted-link-lost"] {
+            let suite = "accepted-exit-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier)
+            let base = DeviceMapOperationRecord(schemaVersion: 1,
+                deviceID: String(repeating: "a", count: 32), operationID: UUID(),
+                sessionID: "accepted-session", mapID: "accepted-map", manifestReceipt: String(repeating: "b", count: 64),
+                signedManifestReceipt: String(repeating: "c", count: 64), streamSHA256: String(repeating: "d", count: 64),
+                streamBytes: 123, artifactFilename: "accepted.bmap", appNamespace: namespace,
+                createdAt: Date(timeIntervalSince1970: 1), connectionEpoch: 2, observation: "commit_accepted",
+                cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil,
+                admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42,
+                commitRequestedAt: Date(timeIntervalSince1970: 2))
+            let receipt = { (phase: String, revision: UInt64) in
+                DeviceMapOperationReceipt(schemaVersion: 1, deviceID: base.deviceID,
+                    operationID: base.wireOperationID, sessionID: base.sessionID, mapID: base.mapID,
+                    manifestReceipt: base.manifestReceipt, signedManifestReceipt: base.signedManifestReceipt,
+                    streamSHA256: base.streamSHA256, streamBytes: base.streamBytes,
+                    phase: phase, revision: revision, status: nil)
+            }
+            let accepted = receipt("accepted", 3)
+            let installed = receipt("installed", 4)
+            var operation = base
+            operation.lastReceipt = accepted
+            if scenario == "saved-result-link-not-ready" {
+                operation.observation = "installed_confirmed"
+                operation.lastReceipt = installed
+            }
+            let fixture = operation
+            defaults.set(fixture.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            defaults.set(fixture.mapID, forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(fixture.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            let store = DeviceMapOperationStore(url: directory.appendingPathComponent("\(scenario)/operations.json"))
+            try! store.save(fixture)
+            let manager = OfflineMapManager(defaults: defaults,
+                cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
+            manager.useMapOperationStoreForTesting(store)
+            let ble = MapOperationRecoveryTestBLEManager()
+            ble.recoveryDeviceID = fixture.deviceID
+            ble.setConnectedDeviceIDForTesting(fixture.deviceID)
+            ble.recoveryEpoch = 2
+            ble.isConnected = true
+            ble.isNavigationReady = scenario != "saved-result-link-not-ready"
+            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferMode = "map"
+            let deliverReceipt = { (operationReceipt: DeviceMapOperationReceipt) in
+                let object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(operationReceipt))
+                let body = try! JSONSerialization.data(withJSONObject: ["operation": object])
+                assert(ble.handleMapTransferStatusNotification(Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + body),
+                       "the real MSTS parser accepts the device operation receipt")
+            }
+            let deliverAutomaticExit = {
+                assert(ble.handleDeviceTransferStatusNotification(Data("DSTS{\"enabled\":false,\"mode\":\"\"}".utf8)),
+                       "the real DSTS parser accepts the automatic transfer exit")
+            }
+            if scenario == "exit-before-receipt" {
+                ble.onOperationStatusRequest = { deliverReceipt(installed) }
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+            var paths: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                var linkDropped = false
+                let observe = {
+                    MainActor.assumeIsolated {
+                        paths.append(request.url!.lastPathComponent)
+                        guard request.url!.lastPathComponent == fixture.wireOperationID else { return }
+                        switch scenario {
+                        case "exit-during-query":
+                            deliverReceipt(installed)
+                            deliverAutomaticExit()
+                            linkDropped = true
+                        case "accepted-link-lost":
+                            ble.isConnected = false
+                        default: break
+                        }
+                    }
+                }
+                if Thread.isMainThread { observe() } else { DispatchQueue.main.sync(execute: observe) }
+                if linkDropped { throw URLError(.networkConnectionLost) }
+                let body = request.url!.lastPathComponent == fixture.wireOperationID
+                    ? try JSONEncoder().encode(accepted) : Data()
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+            }
+            let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!,
+                sessionToken: "test-token", session: session)
+            var clock = Date(timeIntervalSince1970: 100)
+            var pollSleeps = 0
+            var result: MapActivationConfirmationResult?
+            do {
+                result = try await manager.confirmActivatedMap(expectedMapId: fixture.mapID, sessionId: fixture.sessionID,
+                    previousMapId: nil, previousSessionId: nil, previousSequence: nil, acceptedSequence: nil,
+                    client: client, bleManager: ble, timeout: 60, now: { clock }, sleep: { _ in
+                        pollSleeps += 1
+                        clock.addTimeInterval(2)
+                        guard pollSleeps == 1 else { return }
+                        switch scenario {
+                        case "exit-during-sleep":
+                            deliverReceipt(installed)
+                            deliverAutomaticExit()
+                        case "exit-before-receipt":
+                            deliverAutomaticExit()
+                        default: break
+                        }
+                    })
+            } catch {
+                assert(false, "\(scenario) cannot fail an accepted operation: \(error)")
+            }
+            let persisted = try! store.records()[0]
+            if scenario == "accepted-link-lost" {
+                if case .continuesOnDevice? = result {} else {
+                    assert(false, "a changed BLE link still yields accepted work to a fresh owner")
+                }
+                assertEqual(persisted, fixture, "a lost link preserves the accepted operation")
+                assertEqual(ble.requestedOperationIDs.count, 0, "accepted work never polls a changed BLE link")
+                assertEqual(pollSleeps, 0, "a lost link exits immediately")
+                continue
+            }
+            assertEqual(result, .installed, "\(scenario) confirms the autonomous installation in the foreground")
+            assertEqual(persisted.observation, "installed_confirmed", "\(scenario) records the installed receipt")
+            assertEqual(persisted.lastReceipt?.phase, "installed", "\(scenario) keeps the device receipt")
+            assertEqual(paths.filter { $0 == fixture.wireOperationID }.count,
+                scenario == "saved-result-link-not-ready" ? 0 : 1,
+                "\(scenario) sends no operation query through the revoked HTTP session")
+            if scenario == "saved-result-link-not-ready" {
+                assertEqual(ble.requestedOperationIDs.count, 0, "a saved result needs no live link")
             }
         }
     }
@@ -4176,7 +4448,7 @@ extension NavigationProtocolTests {
             } catch OfflineMapPlatformError.mapStreamCompatibilityRejected(let rejection) {
                 assertEqual(rejection, .signingKeyNotTrusted, "control failure cannot hide the original rejection")
             } catch { assert(false, "the original rejection is preserved") }
-            assert(manager.errorMessage?.contains("signing_key_not_trusted") == true, "the preflight cause remains visible")
+            assert(manager.errorMessage?.contains("does not trust this map's signing key") == true, "the preflight cause remains visible")
             let persisted = try! store.records()[0]
             if scenario == "cancelled" {
                 assertEqual(paths, ["cancel", "acknowledge"], "matching saved terminal receipt permits ACK")
@@ -4302,6 +4574,12 @@ extension NavigationProtocolTests {
                     manager.reconcileLastTransfer(bleManager: ble)
                     assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
                         "polling yields while the foreground recovery owns query and control")
+                    let statusRequestsBeforeMonitor = ble.mapStatusRequests
+                    manager.pollActivationReconciliationForTesting(bleManager: ble)
+                    assertEqual(ble.mapStatusRequests, statusRequestsBeforeMonitor,
+                        "the background monitor cannot queue status snapshots during foreground recovery")
+                    assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
+                        "the background monitor cannot invalidate the foreground operation proof")
                     assertEqual(try store.records(), original,
                         "starting transport recovery does not infer a terminal map result")
                 }
@@ -5189,6 +5467,97 @@ extension NavigationProtocolTests {
                     "recorded legacy transfer identity refreshes the live inventory")
         assert(refreshedItems[0].isOnIPhone && refreshedItems[0].isActiveOnDevice,
                "protocol-v1 fallback installation merges without an app relaunch")
+
+        let installedStream = DeviceInstalledMap(
+            sessionID: "retained-stream", mapID: "stream-map",
+            manifestReceipt: streamArtifact.manifestReceipt!,
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 1024, boundsE7: nil
+        )
+        let sdOnlyMap = DeviceInstalledMap(
+            sessionID: "retained-city", mapID: "sd-city",
+            manifestReceipt: String(repeating: "e", count: 64),
+            signedManifestReceipt: String(repeating: "f", count: 64),
+            displayName: "SD-only City", payloadBytes: 8192,
+            boundsE7: [-1_000_000, -1_000_000, 1_000_000, 1_000_000]
+        )
+        var library = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: true, busy: false, revision: 1, error: "",
+            selectedSessionID: "", maps: [installedStream, sdOnlyMap])
+        var retainedItems = streamManager.savedMapListItems(
+            activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2,
+                    "Saved Maps merges the exact installed version and includes SD-only maps")
+        assert(retainedItems.contains { $0.isOnIPhone && $0.installedDeviceMap == installedStream },
+               "a retained map is marked as saved on Bicino without claiming it is active")
+        assert(retainedItems.contains {
+            !$0.isOnIPhone && !$0.isActiveOnDevice && $0.installedDeviceMap == sdOnlyMap &&
+                $0.previewDeviceMap?.bounds != nil
+        }, "inactive SD-only maps remain previewable and selectable in Saved Maps")
+        var damaged = installedStream
+        damaged.available = false
+        library.maps = [damaged, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2, "damaged maps stay visible for explicit SD removal")
+        assert(retainedItems.contains { $0.installedDeviceMap?.isAvailable == false },
+               "damaged copies do not become a healthy saved-on-Bicino status")
+        let differentVersion = DeviceInstalledMap(
+            sessionID: "another-stream-version", mapID: "stream-map",
+            manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 2048, boundsE7: nil
+        )
+        library.maps = [differentVersion, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 3, "different signed versions of the same city stay distinct")
+        assertEqual(streamManager.savedMapListItems(activeDeviceMap: nil).count, 1,
+                    "disconnect removes SD-only entries and preserves the local map")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .switchMap(sdOnlyMap), "a verified covering SD map offers switching instead of downloading")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 1, longitude: 1),
+                    .none, "coverage from an earlier GPS block cannot prompt at a new location")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: .nan, longitude: 0),
+                    .none, "invalid GPS cannot produce a map prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "stale-selection", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "a changed active map invalidates a previously checked suggestion")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: true,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "working current coverage needs neither prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .download, "a checked hole with no covering installed map keeps Download Map")
+        let smallMap = DeviceInstalledMap(sessionID: "small-map", mapID: "small-map",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64), displayName: "Small Map",
+            payloadBytes: 2048, boundsE7: [10_000, 10_000, 100_000, 100_000])
+        var smallLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: false,
+            busy: false, revision: 2, error: "", selectedSessionID: "", maps: [smallMap])
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 0, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .none, "entering a small map inside the same renderer block waits for a new probe")
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 1, selectedSessionID: "", suggestedSessionID: smallMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .switchMap(smallMap), "the refreshed bounds context offers the installed small map")
+        library.coverage = nil
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "an inventory without a completed coverage check cannot claim no suitable map exists")
+        let inventoryJSON = try! JSONEncoder().encode(library)
+        let inventoryStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":".utf8) + inventoryJSON + Data("}".utf8))
+        assert(inventoryStatus.hasMapLibrary && inventoryStatus.mapLibrary != nil,
+               "valid inventory advertises the installed-map capability")
+        let malformedInventory = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":{\"schemaVersion\":999}}".utf8))
+        assert(malformedInventory.hasMapLibrary && malformedInventory.mapLibrary == nil,
+               "malformed modern inventory cannot masquerade as firmware without a map library")
     }
 
     static func testOfflineMapManifestDecoding() {
@@ -6515,6 +6884,173 @@ extension NavigationProtocolTests {
                     assert(false, "truncated or corrupt image must fail")
                 } catch { }
             }
+        }
+    }
+
+    @MainActor
+    static func testFirmwareInstallRetainsOriginalDevice() async {
+        for boundary in ["download", "eligibility", "before-task", "reconnect", "unchanged"] {
+            let suite = "firmware-intent-test.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwarePausedDownloadProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer {
+                session.invalidateAndCancel()
+                FirmwarePausedDownloadProtocol.onStart = nil
+            }
+            let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+            let image = Data("abc".utf8)
+            let manifest = FirmwareReleaseManifest(
+                schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.0",
+                build: 87, gitSha: String(repeating: "a", count: 40), size: image.count,
+                sha256: FirmwareUpdateManager.sha256Hex(image),
+                url: URL(string: "https://firmware.invalid/image.bin")!,
+                minUpdaterProtocol: 1, signature: nil)
+            // This fixture starts at the already-verified manifest cache. It
+            // tests install orchestration, without changing production trust.
+            manager.setVerifiedManifestForTesting(manifest)
+            let ble = BLEManager()
+            func ready() {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-a")
+                ble.isConnected = true
+                ble.isNavigationReady = true
+                ble.firmwareTarget = manifest.target
+                ble.firmwareBuild = 1
+            }
+            ready()
+            var packets: [String] = []
+            func status(_ json: String) {
+                _ = ble.handleDeviceTransferStatusNotification(
+                    Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8))
+            }
+            let eligible = #"{"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"normal","correlation":0},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}"#
+            let endpoint = NavigationWriteEndpoint(maximumWriteLength: 96, canSend: { true }, write: { packet in
+                let text = String(decoding: packet, as: UTF8.self)
+                packets.append(text)
+                if text == "DTRNprepare|firmware" {
+                    Task { @MainActor in
+                        status(#"{"enabled":false,"mode":"","lastError":{"code":"fixture_rejected","message":"fixture rejection","sequence":1}}"#)
+                    }
+                } else if text == "DTRNexit" {
+                    Task { @MainActor in status(eligible) }
+                }
+            })
+            ble.installNavigationWriteEndpoint(endpoint)
+            var download: FirmwarePausedDownloadProtocol?
+            var downloadCount = 0
+            FirmwarePausedDownloadProtocol.onStart = { request in
+                Task { @MainActor in
+                    downloadCount += 1
+                    download = request
+                }
+            }
+            func waitUntil(_ condition: () -> Bool) async {
+                for _ in 0..<400 where !condition() {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+                assert(condition(), "firmware intent fixture reached \(boundary) boundary")
+            }
+
+            manager.installLatest(bleManager: ble)
+            if boundary == "before-task" {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+                await waitUntil { manager.errorMessage != nil }
+                assert(packets.isEmpty, "a changed install intent must not request status from another device")
+                continue
+            }
+            await waitUntil { packets.contains("DSTS") }
+            if boundary == "eligibility" {
+                ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+            }
+            status(eligible)
+            if boundary == "eligibility" {
+                await waitUntil { !manager.isBusy || download != nil }
+                assert(download == nil, "stale eligibility must stop before downloading an update")
+            } else {
+                await waitUntil { download != nil }
+                let persisted = defaults.data(forKey: "firmware.pendingUpdate")!
+                let downloading = try! JSONDecoder().decode(PendingFirmwareUpdate.self, from: persisted)
+                assertEqual(downloading.deviceID, "ota-intent-device-a",
+                            "download intent is durably bound before the response arrives")
+                manager.installLatest(bleManager: ble)
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                let retained = try! JSONDecoder().decode(PendingFirmwareUpdate.self,
+                    from: defaults.data(forKey: "firmware.pendingUpdate")!)
+                assert(manager.isBusy, "a repeated install cannot release the active operation")
+                assertEqual(retained.operationID, downloading.operationID, "a repeated install keeps the active intent")
+                assertEqual(downloadCount, 1, "a repeated install does not start a second download")
+                if boundary == "download" {
+                    ble.setConnectedDeviceIDForTesting("ota-intent-device-b")
+                } else if boundary == "reconnect" {
+                    let oldEpoch = ble.transferConnectionEpoch
+                    ble.clearConnectionStateForTesting()
+                    ready()
+                    ble.installNavigationWriteEndpoint(endpoint)
+                    assert(ble.transferConnectionEpoch != oldEpoch, "fixture reconnect changes epoch")
+                }
+                download!.complete(with: image)
+                await waitUntil { !manager.isBusy || packets.contains("DTRNprepare|firmware") }
+            }
+            let prepared = packets.contains("DTRNprepare|firmware")
+            assertEqual(prepared, boundary == "unchanged",
+                        "only the original live connection may enter firmware maintenance after \(boundary)")
+            await waitUntil { !manager.isBusy }
+            if boundary != "unchanged" {
+                assertEqual(manager.errorMessage, FirmwareUpdateError.deviceNotReady.errorDescription,
+                            "changed install owner is rejected at \(boundary)")
+            }
+            if boundary == "unchanged", let data = defaults.data(forKey: "firmware.pendingUpdate") {
+                let pending = try! JSONDecoder().decode(PendingFirmwareUpdate.self, from: data)
+                assertEqual(pending.deviceID, "ota-intent-device-a", "pending OTA keeps the original device")
+            } else {
+                assert(boundary != "unchanged", "a possibly accepted command retains its pending operation")
+                manager.reconcilePendingUpdate(bleManager: ble)
+                assert(defaults.data(forKey: "firmware.pendingUpdate") == nil,
+                       "an aborted local preparation remains retryable after status reconciliation")
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwareLocalPreparationRecovery() {
+        let suite = "firmware-local-recovery.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let ble = BLEManager()
+        ble.setConnectedDeviceIDForTesting("device-b")
+        ble.isNavigationReady = true
+        ble.firmwareTarget = "WAVESHARE_AMOLED_175"
+        ble.firmwareVersion = "0.3.0"
+        ble.firmwareBuild = 1
+        ble.firmwareGitSha = String(repeating: "a", count: 40)
+        ble.setFirmwareBootCheckpointForTesting(normalReady: true)
+        for deviceID: String? in [nil, "device-a"] {
+            for stage: FirmwareUpdateTransactionStage in [.downloading, .imageVerified, .maintenanceRequested, .finalizing] {
+                let pending = PendingFirmwareUpdate(target: ble.firmwareTarget, version: "0.4.0", build: 87,
+                    gitSha: String(repeating: "b", count: 40), startedAt: Date(), status: "interrupted",
+                    deviceID: deviceID, transactionStage: stage)
+                defaults.set(try! JSONEncoder().encode(pending), forKey: "firmware.pendingUpdate")
+                let restored = FirmwareUpdateManager(defaults: defaults)
+                restored.reconcilePendingUpdate(bleManager: ble)
+                let local = stage == .downloading || stage == .imageVerified
+                assertEqual(defaults.data(forKey: "firmware.pendingUpdate") == nil, local,
+                            "only a known local preparation is cleared on relaunch: \(stage)")
+                assertEqual(restored.statusMessage,
+                            local ? "firmware update cancelled" : "firmware update status unresolved",
+                            "relaunch keeps remote uncertainty distinct from an unstarted install")
+            }
+        }
+        for receipt in [false, true] {
+            let contradictory = PendingFirmwareUpdate(target: ble.firmwareTarget, version: "0.4.0", build: 87,
+                gitSha: String(repeating: "b", count: 40), startedAt: Date(), status: "interrupted",
+                deviceID: "device-a", maintenanceCorrelation: receipt ? nil : 42,
+                transactionStage: .downloading, requiresOperationReceipt: receipt)
+            defaults.set(try! JSONEncoder().encode(contradictory), forKey: "firmware.pendingUpdate")
+            FirmwareUpdateManager(defaults: defaults).reconcilePendingUpdate(bleManager: ble)
+            assert(defaults.data(forKey: "firmware.pendingUpdate") != nil,
+                   "remote operation evidence prevents discarding a contradictory local stage")
         }
     }
 
@@ -8971,7 +9507,11 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 31, "capability version negotiates the shared friend-marker size alongside group riders and terrain")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 33, "capability version negotiates POIs after route elevation, friend-marker size, group riders and terrain")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature, 1 << 2, "extended bit 2 advertises route elevation profiles")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1MinimumClientVersion, 32, "route elevation negotiation requires protocol 32")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisFeature, 1 << 3, "extended bit 3 advertises map POIs and Nearby")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisMinimumClientVersion, 33, "POI negotiation requires protocol 33")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature, 1 << 1, "extended bit 1 advertises the shared friend-marker size")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1MinimumClientVersion, 31, "friend-marker size negotiation requires protocol 31")
         assertEqual(DeviceBLEProtocol.friendMarkerScaleSettingID, 39, "the friend-marker size uses the first free global setting ID")
@@ -9081,14 +9621,16 @@ extension NavigationProtocolTests {
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
         assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
+        assertEqual(DeviceScreen.elevation.rawValue, 6, "Elevation screen uses protocol value 6")
+        assertEqual(DeviceScreen.elevation.title, "Elevation", "Elevation has a user-facing label")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
         assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
-                    "World Radio precedes Battery Status in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
-        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
+                    [.mapPlusNavigation, .rideStats, .elevation, .map, .navigation, .worldRadio, .batteryStatus],
+                    "Elevation follows Ride Stats and World Radio precedes Battery Status, matching the firmware cycle")
+        assertEqual(DeviceScreen.allScreensMask, 0x7F, "all supported device screens use the low seven mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio and Elevation are off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
@@ -9913,4 +10455,403 @@ extension NavigationProtocolTests {
                "ending freshness loss uses the priority lane")
     }
 
+    static func testDeviceMapLibrary() {
+        let receipt = String(repeating: "a", count: 64)
+        let signed = String(repeating: "b", count: 64)
+        let map = DeviceInstalledMap(sessionID: "shanghai-1", mapID: "shanghai",
+            manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Shanghai",
+            payloadBytes: 1_354_311, boundsE7: [1_210_000_000, 310_000_000, 1_220_000_000, 320_000_000])
+        let library = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 7, error: "", selectedSessionID: "", maps: [map])
+        assert(library.isValid, "valid installed map inventory")
+        assertEqual(library.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed), map,
+                    "exact verified version can be reused")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signed) == nil, "same name with different content must upload")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: receipt,
+            signedManifestReceipt: String(repeating: "c", count: 64)) == nil, "different signed version must upload")
+        let packet = DeviceMapLibrary.command("select", map: map)!
+        assertEqual(String(data: packet, encoding: .utf8), "MTRNlibrary-select|shanghai-1|" + receipt,
+                    "library selection binds the installed session and receipt")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "../map", manifestReceipt: receipt) == nil,
+               "reject unsafe session")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map|injected", manifestReceipt: receipt) == nil,
+               "reject command delimiter injection")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map", manifestReceipt: "short") == nil,
+               "reject truncated identity")
+        assert(DeviceMapLibrary.command("unknown") == nil, "reject unknown library actions")
+        assertEqual(String(data: MapLibraryControlPacket.page(offset: 4)!, encoding: .utf8), "MTRNlibrary-page|4",
+                    "small BLE pages use a bounded read-only command")
+        assert(MapLibraryControlPacket.page(offset: 3) == nil && MapLibraryControlPacket.page(offset: 32) == nil,
+               "reject invalid page offsets")
+        let pagedMaps = (0..<6).map { index in
+            DeviceInstalledMap(sessionID: "page-\(index)", mapID: "map-\(index)",
+                manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Map \(index)",
+                payloadBytes: 100, boundsE7: nil)
+        }
+        var firstPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.prefix(4)))
+        firstPage.offset = 0; firstPage.total = 6
+        var lastPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.suffix(2)))
+        lastPage.offset = 4; lastPage.total = 6
+        var malformed = firstPage; malformed.offset = Int.min; malformed.total = Int.max
+        assert(!malformed.isValid, "untrusted pagination integers cannot overflow validation")
+        var pages = DeviceMapLibraryPages()
+        let partial = pages.ingest(firstPage)
+        assert(partial.library?.isComplete == false && partial.nextOffset == 4,
+               "partial inventories never authorize reuse")
+        var stale = lastPage; stale = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: stale.maps, offset: 4, total: 6)
+        assertEqual(pages.ingest(stale).nextOffset, 0, "mixed revisions restart from page zero")
+        _ = pages.ingest(firstPage)
+        let assembled = pages.ingest(lastPage)
+        assertEqual(assembled.library?.maps.count, 6, "all maps assemble from one snapshot")
+        assert(assembled.library?.isComplete == true && assembled.nextOffset == nil,
+               "only a complete snapshot enables commands")
+        assertEqual(pages.ingest(firstPage).library?.maps.count, 6, "late duplicate pages cannot replace a complete snapshot")
+        pages = DeviceMapLibraryPages()
+        assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
+
+        let nonce = String(repeating: "a", count: 32)
+        assertEqual(String(data: MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: nonce)!, encoding: .utf8),
+                    "MTRNlibrary-select|city|\(receipt)|\(nonce)", "selection results match an exact request nonce")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: "bad") == nil,
+               "reject malformed selection request identity")
+        let futureStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"enabled\":false,\"mapLibrary\":{\"schemaVersion\":2}}".utf8))
+        assert(futureStatus.mapLibrary == nil && futureStatus.enabled == false,
+               "a future optional inventory cannot break ordinary HTTP transfer status")
+        var damagedMap = map; damagedMap.available = false
+        let damagedLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 10, error: "", selectedSessionID: "", maps: [damagedMap])
+        assert(damagedLibrary.installed(mapID: map.mapID, manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "damaged payloads remain removable but never authorize reuse")
+        assert(OfflineMapPlatformError.serverStatus(503, "{\"code\":\"stream_storage_unavailable\"}").localizedDescription.contains("busy or unavailable"),
+               "temporary SD unavailability is distinct from a full card")
+        let fullCard = OfflineMapPlatformError.serverStatus(507,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_sd_full\",\"message\":\"remove a map\"},\"operation\":{\"phase\":\"failed\"}}")
+        assert(DeviceMapLibrary.requiresLibraryAction(fullCard) && fullCard.localizedDescription.contains("needs space"),
+               "a full-card refusal names the SD-library remedy even when an upload pauses")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")
+                .localizedDescription.contains("damaged"), "a damaged SD copy is repaired by removal, then reinstall")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_session_conflict\"}}")
+                .localizedDescription.contains("Another copy"), "a protected or different copy needs an explicit choice")
+        assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
+            "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")), "repair refusals are not resumable")
+        assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(500, "{}")) &&
+               !DeviceMapLibrary.requiresLibraryAction(CancellationError()), "ordinary interruptions still resume")
+        assert(DeviceMapLibrary.errorDescription("library_operation_pending").contains("cancel"),
+               "a pending installation prerequisite is actionable")
+        assert(DeviceMapLibrary.errorDescription("library_in_use").contains("in use"),
+               "protected removal explains why it is refused")
+        let encoded = try! JSONEncoder().encode(library)
+        assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
+        let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map, map])
+        assert(!duplicate.isValid, "duplicate installed identities cannot drive actions")
+        let future = DeviceMapLibrary(schemaVersion: 2, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(!future.isValid, "future inventory schemas fail closed")
+        let busy = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: true,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(busy.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "busy inventory is not reuse authority")
+    }
+
+}
+
+private func installedMapOperationRecord(deviceID: String, appNamespace: String? = nil) -> DeviceMapOperationRecord {
+    var record = DeviceMapOperationRecord(
+        schemaVersion: 1, deviceID: deviceID, operationID: UUID(),
+        sessionID: String(repeating: "6", count: 64), mapID: "cleanup-map",
+        manifestReceipt: String(repeating: "a", count: 64),
+        signedManifestReceipt: String(repeating: "6", count: 64),
+        streamSHA256: String(repeating: "b", count: 64), streamBytes: 1234,
+        artifactFilename: "cleanup-map.bmap",
+        appNamespace: appNamespace ?? BackgroundMapUploadSessionNamespace.identifier(
+            bundleIdentifier: Bundle.main.bundleIdentifier),
+        createdAt: Date(timeIntervalSince1970: 1_000), connectionEpoch: 2,
+        observation: "installed_confirmed", cleanup: "pending", usesDurableProtocol: true,
+        lastReceipt: nil, admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 15,
+        uploadAttemptID: UUID(), uploadCompletedAt: Date(timeIntervalSince1970: 1_100),
+        uploadHTTPStatus: 200, observationProcessID: DeviceMapOperationStore.observationProcessID,
+        commitRequestedAt: Date(timeIntervalSince1970: 1_101),
+        acknowledgedAt: Date(timeIntervalSince1970: 1_200))
+    record.lastReceipt = DeviceMapOperationReceipt(
+        schemaVersion: 1, deviceID: deviceID, operationID: record.wireOperationID,
+        sessionID: record.sessionID, mapID: record.mapID, manifestReceipt: record.manifestReceipt,
+        signedManifestReceipt: record.signedManifestReceipt, streamSHA256: record.streamSHA256,
+        streamBytes: record.streamBytes, phase: "installed", revision: 19, status: nil)
+    return record
+}
+
+extension NavigationProtocolTests {
+    /// Firmware refuses a map exit while it finalizes an install, which used to
+    /// strand the cleanup record until the next explicit transfer. The device's
+    /// own automatic exit must now converge it with one fresh status request.
+    @MainActor
+    static func testMapTransportCleanupConvergesAfterRefusedExit() async {
+        let suite = "map-transport-cleanup.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        var resolved: [String] = []
+        manager.onMapTransportCleanupResolved = { resolved.append($0) }
+        let device = MapTransportCleanupDevice()
+        let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+        do {
+            _ = try await manager.enterMapTransfer(bleManager: ble, status: { _ in })
+        } catch {
+            assert(false, "map transfer entry fixture: \(error)")
+            return
+        }
+        device.state = .finalizing
+        let exited = await manager.exitMapTransfer(bleManager: ble)
+        assert(!exited && coordinator.lease == nil && coordinator.unresolved != nil,
+               "an exit refused during finalize leaves the cleanup record")
+        device.packets.removeAll()
+        for _ in 0..<3 {
+            _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        assert(device.packets.isEmpty && coordinator.unresolved != nil && resolved.isEmpty,
+               "nothing is sent while the device still reports the recorded session")
+        // Finalize completed; the firmware leaves transfer mode by itself.
+        device.state = .idle
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        for _ in 0..<100 where !coordinator.isCleanupComplete {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assert(coordinator.isCleanupComplete, "the device's own exit converges the stranded cleanup")
+        assertEqual(device.packets, ["DSTS"], "one fresh status request confirms it and no exit is sent")
+        assertEqual(resolved, ["device-a"], "the journal owner learns the recorded device once")
+        assert(defaults.data(forKey: "device-operation-cleanup-v1") == nil,
+               "the saved cleanup record is removed only after fresh confirmation")
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assertEqual(device.packets, ["DSTS"], "later status traffic does not restart the confirmation")
+    }
+
+    /// Passive confirmation never displaces another device, an OS upload, the
+    /// recorded or an unrelated active session, or a replaced link, and a stale
+    /// cached idle status without a fresh answer is not enough.
+    @MainActor
+    static func testPassiveMapCleanupKeepsOwnerSessionAndLinkFences() async {
+        for scenario in ["other-device", "os-upload-claim", "recorded-session-active",
+                         "unrelated-session-active", "link-changed", "no-fresh-status"] {
+            let suite = "map-transport-fence.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            let manager = DeviceTransferManager(coordinator: coordinator)
+            let device = MapTransportCleanupDevice()
+            var ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+            do {
+                try strandMapTransport(coordinator, deviceID: "device-a")
+            } catch {
+                assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                continue
+            }
+            guard let stored = coordinator.unresolved else {
+                assert(false, "\(scenario): stranded cleanup record")
+                continue
+            }
+            var claim: UUID?
+            switch scenario {
+            case "other-device":
+                ble = mapTransportCleanupBLE(deviceID: "device-b", device: device)
+            case "os-upload-claim":
+                claim = coordinator.restoreClaim(operationID: stored.id, deviceID: "device-a", network: nil)
+                assert(claim != nil && coordinator.lease != nil, "\(scenario): restored OS upload claim")
+            case "recorded-session-active":
+                device.onStatusRequest = { device.state = .finalizing }
+            case "unrelated-session-active":
+                device.onStatusRequest = { device.state = .otherSession }
+            case "link-changed":
+                let link = ble
+                device.onStatusRequest = { link.recoveryEpoch += 1 }
+            default:
+                device.answersStatus = false
+            }
+            device.packets.removeAll()
+            let converged = await manager.reconcileUnresolvedMapCleanup(bleManager: ble)
+            assert(!converged, "\(scenario): no convergence")
+            assertEqual(coordinator.unresolved?.id, stored.id, "\(scenario): the cleanup record is kept")
+            assert(!device.packets.contains("DTRNexit"), "\(scenario): no exit is sent")
+            assert(scenario == "os-upload-claim" ? coordinator.lease != nil : coordinator.lease == nil,
+                   "\(scenario): no session is adopted")
+            if scenario == "other-device" || scenario == "os-upload-claim" {
+                assertEqual(device.packets, [], "\(scenario): rejected before any BLE command")
+            }
+            if let claim { coordinator.release(claim) }
+        }
+    }
+
+    /// An explicit transfer started while a passive confirmation waits for its
+    /// fresh status waits for it instead of failing busy or repeating recovery.
+    @MainActor
+    static func testExplicitTransferWaitsForPassiveMapCleanup() async {
+        let suite = "map-transport-serialize.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        let device = MapTransportCleanupDevice()
+        let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+        do {
+            try strandMapTransport(coordinator, deviceID: "device-a")
+        } catch {
+            assert(false, "stranded cleanup fixture: \(error)")
+            return
+        }
+        device.answersStatus = false // the fresh reply is late
+        device.packets.removeAll()
+        let passive = Task { await manager.reconcileUnresolvedMapCleanup(bleManager: ble) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let explicit = Task { try await manager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        device.answersStatus = true
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        let confirmed = await passive.value
+        do {
+            let session = try await explicit.value
+            assert(confirmed && session.operationLeaseID != nil,
+                   "the explicit transfer waits for the confirmation, then acquires")
+            assertEqual(device.packets.filter { $0 == "DTRNenter|map" }.count, 1, "one entry request")
+            assert(!device.packets.contains("DTRNexit"), "no exit while confirming")
+            device.state = .map
+            let cleaned = await manager.exitMapTransfer(bleManager: ble)
+            assert(cleaned && coordinator.isCleanupComplete, "the new transfer cleans up normally")
+        } catch {
+            assert(false, "explicit transfer beside a passive confirmation: \(error)")
+        }
+    }
+
+    /// Firmware, diagnostics and remote debug own separate managers on the
+    /// shared coordinator. Their recoveries must not race a passive one.
+    @MainActor
+    static func testOtherManagersSerializeWithPassiveMapCleanup() async {
+        for scenario in ["passive-first", "explicit-first"] {
+            let suite = "map-transport-managers.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            let mapManager = DeviceTransferManager(coordinator: coordinator)
+            let otherManager = DeviceTransferManager(coordinator: coordinator)
+            let device = MapTransportCleanupDevice()
+            let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+            do {
+                try strandMapTransport(coordinator, deviceID: "device-a")
+            } catch {
+                assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                continue
+            }
+            device.answersStatus = false // the fresh reply is late
+            device.packets.removeAll()
+            var passiveConfirmed = false
+            let explicit: Task<DeviceTransferSession, Error>
+            if scenario == "passive-first" {
+                let passive = Task { await mapManager.reconcileUnresolvedMapCleanup(bleManager: ble) }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                explicit = Task { try await otherManager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                device.answersStatus = true
+                _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+                passiveConfirmed = await passive.value
+            } else {
+                explicit = Task { try await otherManager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                let started = ProcessInfo.processInfo.systemUptime
+                let confirmed = await mapManager.reconcileUnresolvedMapCleanup(bleManager: ble)
+                assert(!confirmed && ProcessInfo.processInfo.systemUptime - started < 0.1,
+                       "a passive confirmation does not start beside another manager's recovery")
+                device.answersStatus = true
+                _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+            }
+            do {
+                let session = try await explicit.value
+                assert(session.operationLeaseID != nil,
+                       "\(scenario): the other manager's transfer recovers the record, then acquires")
+                assert(scenario != "passive-first" || passiveConfirmed,
+                       "the passive confirmation still completes first")
+                assertEqual(device.packets.filter { $0 == "DTRNenter|map" }.count, 1,
+                            "\(scenario): one entry request")
+                assert(!device.packets.contains("DTRNexit"), "\(scenario): no exit while recovering")
+                device.state = .map
+                let cleaned = await otherManager.exitMapTransfer(bleManager: ble)
+                assert(cleaned && coordinator.isCleanupComplete, "\(scenario): the transfer cleans up normally")
+            } catch {
+                assert(false, "\(scenario): another manager's transfer beside a passive confirmation: \(error)")
+            }
+        }
+    }
+
+    /// The app journal marks a terminal operation's transport cleanup only once
+    /// the recorded device is confirmed idle, whatever the displayed outcome, and
+    /// never for another device, another app or a device still in its session.
+    @MainActor
+    static func testTerminalJournalCleanupConvergesFromFreshIdleStatus() async {
+        let deviceID = String(repeating: "a", count: 32)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for scenario in ["clean-transport", "stranded-device-idle", "stranded-device-in-session",
+                         "other-app", "other-device", "selected-device-not-connected"] {
+            let suite = "map-cleanup-journal.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            if scenario != "clean-transport" {
+                do {
+                    try strandMapTransport(coordinator, deviceID: deviceID)
+                } catch {
+                    assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                    continue
+                }
+            }
+            let otherDevice = scenario == "other-device" || scenario == "selected-device-not-connected"
+            let record = installedMapOperationRecord(
+                deviceID: otherDevice ? String(repeating: "b", count: 32) : deviceID,
+                appNamespace: scenario == "other-app" ? "other.app.map-transfer.background" : nil)
+            let store = DeviceMapOperationStore(url: directory.appendingPathComponent("\(scenario)/operations.json"))
+            try! store.save(record)
+            defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            defaults.set(record.mapID, forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(record.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("installed", forKey: "offlineMap.lastTransfer.outcome")
+            let manager = OfflineMapManager(defaults: defaults,
+                cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"),
+                deviceTransferManager: DeviceTransferManager(coordinator: coordinator))
+            manager.useMapOperationStoreForTesting(store)
+            let device = MapTransportCleanupDevice()
+            device.state = scenario == "stranded-device-in-session" ? .finalizing : .idle
+            let ble = mapTransportCleanupBLE(deviceID: deviceID, device: device)
+            if scenario == "selected-device-not-connected" {
+                // The journal's device is selected while the previous one is
+                // still connected; that one's idle status says nothing about it.
+                ble.recoveryDeviceID = record.deviceID
+            }
+            device.packets.removeAll()
+            for _ in 0..<4 {
+                manager.reconcileLastTransfer(bleManager: ble)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            let saved = (try? store.records())?.first { $0.operationID == record.operationID }
+            let transfer = device.packets.filter { $0.hasPrefix("DTRN") || $0 == "DSTS" }
+            switch scenario {
+            case "clean-transport":
+                assertEqual(saved?.cleanup, "complete", "a clean transport marks the pending journal")
+                assertEqual(transfer, [], "without any BLE command")
+            case "stranded-device-idle":
+                assertEqual(saved?.cleanup, "complete", "a fresh idle status marks the journal")
+                assert(coordinator.isCleanupComplete, "and clears the transport record")
+                assertEqual(transfer, ["DSTS"], "with one fresh status request and no exit")
+            default:
+                assertEqual(saved?.cleanup, "pending", "\(scenario): the journal stays pending")
+                assertEqual(transfer, [], "\(scenario): nothing is sent")
+            }
+        }
+    }
 }

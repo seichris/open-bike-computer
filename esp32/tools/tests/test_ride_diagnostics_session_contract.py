@@ -15,6 +15,82 @@ MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 
 
 class RideDiagnosticsSessionContractTests(unittest.TestCase):
+    def test_actual_marker_replay_is_noop_across_capture_rebind(self):
+        from tools.tests.test_navigation_idle_clear import function
+        import shutil
+
+        harness = r'''
+#include <atomic>
+#include <cassert>
+#include <cstdio>
+#include "ride_diagnostics_control.hpp"
+namespace ride_diagnostics {
+enum class Level {Warning};
+std::atomic<uint32_t> lastMarkerSequence{0};
+std::atomic<bool> checkpointRequested{false};
+control::MarkerReplayReceipt lastMarkerReceipt;
+bool healthy=false;
+unsigned recorded=0;
+bool record(Level,const char *,const char *,const char *) {
+  if (!healthy) return false;
+  ++recorded; return true;
+}
+'''
+        harness += function(RECORDER, "bool validIssueCode(const char *value)")
+        harness += function(RECORDER, "bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId)")
+        harness += r'''
+}
+std::atomic<bool> bleSessionSupportsRideDiagnostics{true};
+struct Http {
+  unsigned errors=0;
+  void setLastError(const char *,const char *) {++errors;}
+} deviceTransferHttp;
+namespace ble_transfer {enum class Action {None}; enum {NotifyGeneric};}
+void queueTransferControl(ble_transfer::Action,int) {}
+void handle(const std::string &command) {
+'''
+        harness += function(BLE, 'if (command.rfind("mark|", 0) == 0)')
+        harness += r'''
+}
+int main() {
+  using namespace ride_diagnostics;
+  const char *a="123e4567-e89b-12d3-a456-426614174000";
+  const char *b="123e4567-e89b-12d3-a456-426614174001";
+  assert(!markIssue("other",7,a)); // failure cannot reserve a receipt
+  healthy=true;
+  handle(std::string("mark|2|7|other|")+a);
+  assert(recorded==1 && deviceTransferHttp.errors==0);
+  checkpointRequested=false;
+  // The first application succeeded but its ATT response was lost. Exact
+  // replay through the actual BLE handler must not poison transfer lastError.
+  handle(std::string("mark|2|7|other|")+a);
+  assert(recorded==1 && !checkpointRequested && deviceTransferHttp.errors==0);
+  assert(!markIssue("device_blank",7,a)); // conflicting payload is not a replay
+  assert(!markIssue("other",8,a));
+  lastMarkerSequence=control::markerSequenceAfterBinding(a,b,7);
+  handle(std::string("mark|2|7|other|")+a);
+  assert(recorded==1 && deviceTransferHttp.errors==0); // no event in new capture
+  assert(lastMarkerSequence==0); // replay does not mutate the new capture's sequence
+  assert(markIssue("other",1,b) && recorded==2); // independent new capture marker
+  assert(markIssue("other",1,b) && recorded==2);
+  assert(!markIssue("other",0,b));
+  assert(markIssue("other",2,nullptr) && recorded==3);
+  assert(!markIssue("other",2,nullptr)); // legacy is not silently made idempotent
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "marker.cpp"
+            source.write_text(harness)
+            compilers = ["g++"]
+            if shutil.which("g++-15"):
+                compilers.append("g++-15")
+            for index, compiler in enumerate(compilers):
+                executable = Path(directory) / f"marker-{index}"
+                subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                                "-I", str(ROOT / "lib/ride_diagnostics"), str(source),
+                                "-o", str(executable)], check=True)
+                subprocess.run([str(executable)], check=True)
+
     def test_actual_loss_summary_is_bounded_and_preserves_failed_receipts(self):
         start = RECORDER.index("  // Report cumulative per-reason counts")
         stop = RECORDER.index("  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs)", start)

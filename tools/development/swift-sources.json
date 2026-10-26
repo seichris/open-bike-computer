@@ -1,6 +1,12 @@
 {
   "schema": 1,
   "groups": {
+    "online-poi": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/OnlinePOISearchSession.swift",
+        "ios-app/BikeComputerTests/OnlinePOISearchTests.swift"
+      ]
+    },
     "topography-native-reader": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
@@ -402,7 +408,8 @@
       "groups": [
         "common-2",
         "common-3",
-        "common-6"
+        "common-6",
+        "route-elevation-core"
       ]
     },
     "watch-offline-navigation-1": {
@@ -479,6 +486,17 @@
         "ios-app/BikeComputerTests/WorldRadioTests.swift"
       ]
     },
+    "route-elevation-1": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputerTests/RouteElevationTests.swift"
+      ],
+      "groups": [
+        "common-2",
+        "common-6",
+        "route-elevation-core"
+      ]
+    },
     "common-1": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
@@ -500,6 +518,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyContourSection.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
@@ -607,7 +626,11 @@
         "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
         "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
-        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift"
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RouteElevationDeviceSync.swift"
+      ],
+      "groups": [
+        "route-elevation-core"
       ]
     },
     "common-6": {
@@ -699,6 +722,7 @@
         "ios-app/BikeComputer/BikeComputer/Services/SocialProfileMutationQueue.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialSavedRouteSharing.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialLinkLoader.swift",
         "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
         "ios-app/BikeComputer/BikeComputer/Services/FriendLiveService.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialSecureStore.swift",
@@ -709,6 +733,16 @@
         "ios-app/BikeComputerTests/SocialRuntimeTests.swift",
         "ios-app/BikeComputerTests/FriendLiveServiceTests.swift",
         "ios-app/BikeComputerTests/SocialSavedRouteSharingTests.swift"
+      ]
+    },
+    "route-elevation-core": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/RouteElevationProfile.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/RouteElevationProcessing.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/RouteElevationDeviceProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/RouteElevationSidecar.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/RouteElevationDelivery.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RouteElevationService.swift"
       ]
     }
   }

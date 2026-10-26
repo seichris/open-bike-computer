@@ -6,6 +6,7 @@
 #include "../utils/src/wireBytes.hpp"
 #include "ride_ble_protocol.generated.hpp"
 #include "../world_radio/world_radio_config.hpp"
+#include "../route_elevation/route_elevation_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -31,12 +32,12 @@ constexpr uint32_t REASSEMBLY_TIMEOUT_MS = 5000;
 constexpr uint8_t INSTANCE_ENABLED_FLAG = 1U << 0;
 constexpr uint32_t APP_INSTANCE_ID_MASK = 1UL << 31;
 constexpr uint32_t ALLOWED_VISIBILITY_MASK =
-    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
+    map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK |
     map_profile_protocol::VISIBILITY_CONTOURS |
     map_profile_protocol::VISIBILITY_TERRAIN;
 constexpr uint32_t DEFAULT_VISIBILITY_MASK =
-    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
+    map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;
 
 using ScreenType = ride_ble_protocol_generated::ScreenType;
@@ -51,7 +52,10 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::RideStats) |
     screenTypeBit(ScreenType::MapNavigation) |
     screenTypeBit(ScreenType::BatteryStatus) |
-    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
+    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0) |
+    (route_elevation_config::ENABLED ? screenTypeBit(ScreenType::Elevation) : 0) |
+    (map_profile_protocol::POIS_RUNTIME_ENABLED
+         ? screenTypeBit(ScreenType::Nearby) : 0);
 
 using RideStatsWidget = ride_ble_protocol_generated::RideStatsWidget;
 
@@ -218,7 +222,8 @@ inline bool isValidUtf8Name(const char *value, std::size_t length) {
 
 inline bool isSupportedScreenType(ScreenType type) {
   const uint8_t raw = static_cast<uint8_t>(type);
-  return raw <= static_cast<uint8_t>(ScreenType::WorldRadio) &&
+  // Nearby (7) is the highest raw type; Elevation (6) precedes it.
+  return raw <= static_cast<uint8_t>(ScreenType::Nearby) &&
          (SUPPORTED_SCREEN_TYPES & (1UL << raw)) != 0;
 }
 
@@ -238,7 +243,7 @@ inline bool isValidMapProfile(const MapProfile &profile, ScreenType type) {
       profile.labelDensity > 3 || profile.labelLanguageMode > 2 ||
       profile.labelTextSize > 2 || profile.labelOrientation > 1)
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return profile.rotationMode <= 1;
   if (type == ScreenType::MapNavigation)
     return (profile.visibilityMask & map_profile_protocol::TERRAIN_EXPERIMENT_MASK) == 0 &&
@@ -266,6 +271,7 @@ inline ValidationError validate(const Document &document) {
         instance.name[instance.nameLength] != '\0')
       return ValidationError::InvalidName;
     if ((instance.type == ScreenType::Map ||
+         instance.type == ScreenType::Nearby ||
          instance.type == ScreenType::MapNavigation) &&
         !isValidMapProfile(instance.mapProfile, instance.type))
       return ValidationError::InvalidPayload;
@@ -293,6 +299,8 @@ inline ValidationError validate(const Document &document) {
 
 inline MapProfile defaultMapProfile(ScreenType type) {
   MapProfile profile{};
+  if (type == ScreenType::Nearby)
+    profile.visibilityMask &= ~map_profile_protocol::VISIBILITY_POI_MASK;
   if (type == ScreenType::MapNavigation) {
     profile.rotationMode = 1;
     profile.detailLevel =
@@ -396,6 +404,7 @@ private:
 inline std::size_t payloadSize(ScreenType type) {
   switch (type) {
   case ScreenType::Map:
+  case ScreenType::Nearby:
     return MAP_PAYLOAD_BYTES;
   case ScreenType::MapNavigation:
     return MAP_NAVIGATION_PAYLOAD_BYTES;
@@ -404,6 +413,7 @@ inline std::size_t payloadSize(ScreenType type) {
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
   case ScreenType::WorldRadio:
+  case ScreenType::Elevation:
     return EMPTY_PAYLOAD_BYTES;
   }
   return 0;
@@ -424,7 +434,7 @@ inline bool encodeMapProfile(Writer &writer, const MapProfile &profile,
       !writer.byte(profile.labelTextSize) ||
       !writer.byte(profile.labelOrientation))
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return writer.byte(profile.rotationMode);
   return writer.byte(profile.birdsEyeEnabled ? 1 : 0) &&
          writer.byte(profile.birdsEyePerspective) &&
@@ -435,6 +445,7 @@ inline bool encodeMapProfile(Writer &writer, const MapProfile &profile,
 inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
   switch (instance.type) {
   case ScreenType::Map:
+  case ScreenType::Nearby:
   case ScreenType::MapNavigation:
     return encodeMapProfile(writer, instance.mapProfile, instance.type);
   case ScreenType::RideStats:
@@ -450,6 +461,7 @@ inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
   case ScreenType::WorldRadio:
+  case ScreenType::Elevation:
     return writer.byte(PAYLOAD_VERSION);
   }
   return false;
@@ -507,7 +519,7 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
       !reader.byte(profile.labelTextSize) ||
       !reader.byte(profile.labelOrientation))
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return reader.byte(profile.rotationMode);
   profile.rotationMode = 1;
   return reader.byte(birdsEye) && birdsEye <= 1 &&
@@ -516,6 +528,49 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
          ((profile.birdsEyeEnabled = birdsEye == 1), true) &&
          ((profile.buildings3DEnabled = buildings3D == 1), true) &&
          (legacyNavigation || reader.byte(profile.rotationMode));
+}
+
+// Stored documents only: firmware without the Nearby runtime keeps every
+// other screen with its order, ID and settings. A removed default moves to the
+// first enabled screen. If none remains, the enabled default Nearby screen
+// becomes a Map screen with the same ID and map settings. Documents that were
+// already invalid are not repaired and still fail validation.
+inline void removeUnsupportedNearby(Document &document, uint32_t nearbyIndexes) {
+  static_assert(MAX_INSTANCES <= 32, "Nearby index mask must fit 32 bits");
+  bool enabledRemains = false;
+  bool defaultRemoved = false;
+  int replacement = -1;
+  for (uint8_t index = 0; index < document.instanceCount; ++index) {
+    const ScreenInstance &instance = document.instances[index];
+    if ((nearbyIndexes & (1UL << index)) == 0) {
+      enabledRemains = enabledRemains || instance.enabled;
+    } else if (instance.id == document.defaultInstanceID) {
+      defaultRemoved = true;
+      if (instance.enabled) replacement = index;
+    }
+  }
+  if (enabledRemains) replacement = -1;
+  uint8_t count = 0;
+  for (uint8_t index = 0; index < document.instanceCount; ++index) {
+    if ((nearbyIndexes & (1UL << index)) != 0 && index != replacement) continue;
+    ScreenInstance instance = document.instances[index];
+    if (index == replacement) {
+      instance.type = ScreenType::Map;
+      (void)setName(instance, "Map", 3);
+    }
+    document.instances[count++] = instance;
+  }
+  for (uint8_t index = count; index < MAX_INSTANCES; ++index)
+    document.instances[index] = ScreenInstance{};
+  document.instanceCount = count;
+  if (defaultRemoved && replacement < 0) {
+    for (uint8_t index = 0; index < count; ++index) {
+      if (document.instances[index].enabled) {
+        document.defaultInstanceID = document.instances[index].id;
+        break;
+      }
+    }
+  }
 }
 
 inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
@@ -542,6 +597,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       !reader.uint32(document.defaultInstanceID))
     return DecodeResult::Malformed;
   document.instanceCount = count;
+  uint32_t unsupportedNearby = 0;
   for (uint8_t index = 0; index < count; ++index) {
     ScreenInstance &instance = document.instances[index];
     uint8_t rawType = 0;
@@ -555,8 +611,14 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
         reader.remaining() < static_cast<std::size_t>(nameLength) +
                                  payloadLength)
       return DecodeResult::Malformed;
-    if (!isSupportedScreenType(static_cast<ScreenType>(rawType)))
+    // A wire upload of an unsupported Nearby screen is still rejected.
+    const bool storedNearbyWithoutRuntime =
+        stored && rawType == static_cast<uint8_t>(ScreenType::Nearby) &&
+        !isSupportedScreenType(ScreenType::Nearby);
+    if (!storedNearbyWithoutRuntime &&
+        !isSupportedScreenType(static_cast<ScreenType>(rawType)))
       return DecodeResult::Unsupported;
+    if (storedNearbyWithoutRuntime) unsupportedNearby |= 1UL << index;
     instance.type = static_cast<ScreenType>(rawType);
     instance.enabled = (flags & INSTANCE_ENABLED_FLAG) != 0;
     instance.nameLength = nameLength;
@@ -566,6 +628,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
     const std::size_t payloadStart = reader.offset();
     switch (instance.type) {
     case ScreenType::Map:
+    case ScreenType::Nearby:
     case ScreenType::MapNavigation:
       instance.mapProfile = defaultMapProfile(instance.type);
       if (!decodeMapProfile(reader, payloadLength, instance.type,
@@ -574,8 +637,11 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       if (stored) {
         // Only local, CRC-checked persistence may shed unsupported experiments.
         // Wire documents still fail validation instead of silently changing.
-        const uint32_t remove = map_profile_protocol::TERRAIN_EXPERIMENT_MASK &
-            ~(instance.type == ScreenType::Map ? map_profile_protocol::VISIBILITY_TERRAIN : 0);
+        const uint32_t remove =
+            (map_profile_protocol::TERRAIN_EXPERIMENT_MASK &
+             ~(instance.type == ScreenType::Map ? map_profile_protocol::VISIBILITY_TERRAIN : 0)) |
+            (map_profile_protocol::POIS_RUNTIME_ENABLED ? 0U :
+             map_profile_protocol::VISIBILITY_POI_MASK);
         if (normalized && (instance.mapProfile.visibilityMask & remove)) *normalized = true;
         instance.mapProfile.visibilityMask &= ~remove;
       }
@@ -602,7 +668,8 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
     }
     case ScreenType::Navigation:
     case ScreenType::BatteryStatus:
-    case ScreenType::WorldRadio: {
+    case ScreenType::WorldRadio:
+    case ScreenType::Elevation: {
       uint8_t version = 0;
       if (payloadLength != EMPTY_PAYLOAD_BYTES || !reader.byte(version) ||
           version != PAYLOAD_VERSION)
@@ -615,6 +682,10 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
   }
   if (reader.remaining() != 0)
     return DecodeResult::Malformed;
+  if (unsupportedNearby != 0) {
+    removeUnsupportedNearby(document, unsupportedNearby);
+    if (normalized) *normalized = true;
+  }
   const ValidationError error = validate(document);
   if (error == ValidationError::UnsupportedType ||
       error == ValidationError::UnsupportedWidget)

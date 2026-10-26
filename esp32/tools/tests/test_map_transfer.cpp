@@ -1,5 +1,7 @@
 #include "../../lib/map_transfer/map_transfer.hpp"
+#include "../../lib/map_transfer/map_renderer_status.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
+#include "../../lib/maps/src/mapNearbyStorage.hpp"
 
 #include <cassert>
 #include <cstring>
@@ -115,7 +117,8 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
   return crc ^ 0xFFFFFFFFU;
 }
 
-static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
+static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3,
+                                 bool withPoi = false, uint16_t poiCount = 1) {
   std::vector<uint8_t> data = {
       'F', 'M', 'B', version, 0, 0, 0, 0, 'E', 'X', 'T',
       static_cast<uint8_t>('0' + version), version, 0, 0, 0};
@@ -123,8 +126,22 @@ static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
   appendLe32(labels, fingerprint);
   appendLe16(labels, 0);
   std::vector<std::vector<uint8_t>> sections = {{0, 0}, {0, 0}, labels};
-  if (version == 4)
+  if (version >= 4)
     sections.push_back({0, 0, 0, 0, 0, 0, 0, 0});
+  if (version >= 5)
+    sections.push_back({1, 0, 20, 0, 100, 0, 0, 0, 0, 0, 0, 0});
+  if (version >= 6) {
+    std::vector<uint8_t> pois;
+    appendLe16(pois, withPoi ? poiCount : 0);
+    appendLe16(pois, 8);
+    appendLe32(pois, withPoi ? 1 : 0);
+    for (uint16_t index = 0; withPoi && index < poiCount; ++index) {
+      appendLe16(pois, 120 + index);
+      appendLe16(pois, 80);
+      pois.insert(pois.end(), {1, 2, 0, 0});
+    }
+    sections.push_back(std::move(pois));
+  }
   uint32_t offset =
       static_cast<uint32_t>(data.size() + sections.size() * 16U);
   for (uint8_t index = 0; index < sections.size(); ++index) {
@@ -157,6 +174,201 @@ static std::string emptyFontAsset(uint32_t fingerprint) {
   data.insert(data.end(), language.begin(), language.end());
   data.insert(data.end(), face.begin(), face.end());
   return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static std::string poiIndexOneBlock(int32_t x, int32_t y,
+                                    uint32_t sectionOffset,
+                                    uint32_t sectionBytes, uint16_t count = 1) {
+  std::vector<uint8_t> body;
+  appendLe32(body, static_cast<uint32_t>(x));
+  appendLe32(body, static_cast<uint32_t>(y));
+  appendLe32(body, 1);
+  appendLe16(body, count);
+  for (int category = 1; category < 5; ++category)
+    appendLe16(body, 0);
+  appendLe32(body, sectionOffset);
+  appendLe32(body, sectionBytes);
+  appendLe16(body, 0);
+  assert(body.size() == 32);
+  std::vector<uint8_t> data = {'F', 'P', 'I', '1'};
+  appendLe16(data, 32);
+  appendLe16(data, 0);
+  appendLe32(data, 1);
+  appendLe32(data, crc32(body));
+  data.insert(data.end(), body.begin(), body.end());
+  return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static void testNearbyIndexReadsYieldBetweenBatches() {
+  const std::string root = tempRoot();
+  assert(::system((std::string("mkdir -p ") + root + "/assets").c_str()) == 0);
+  std::vector<uint8_t> table;
+  for (int x = 0; x < 1000; ++x) {
+    const auto row = poiIndexOneBlock(x, 0, 142, 16);
+    table.insert(table.end(), row.begin() + 16, row.end());
+  }
+  std::vector<uint8_t> bytes{'F', 'P', 'I', '1'};
+  appendLe16(bytes, 32);
+  appendLe16(bytes, 0);
+  appendLe32(bytes, 1000);
+  appendLe32(bytes, crc32(table));
+  bytes.insert(bytes.end(), table.begin(), table.end());
+  writeFile(root + "/assets/nearby-pois.fpi", std::string(bytes.begin(), bytes.end()));
+  // No restaurants: the query must not try to open any block, but it must
+  // still resume between bounded reads while validating the full index CRC.
+  map_nearby_storage::SearchCursor query(root, {0, 0}, 2, 10000);
+  size_t slices = 0;
+  while (!query.step()) {
+    assert(query.result().count == 0);
+    assert(++slices < 20);
+  }
+  assert(slices >= 9);
+  assert(query.result().status == map_nearby_storage::Status::Ok);
+  assert(query.result().count == 0 && query.result().searchedBlocks == 0);
+}
+
+static void testTargetFiveIndexMatchesSignedBlocks() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string mapId = "map-pois";
+  const std::string blockPath = "VECTMAP/map-pois/+000+000/0_0.fmb";
+  const std::string indexPath = "VECTMAP/map-pois/assets/nearby-pois.fpi";
+  const std::string fontPath = "VECTMAP/map-pois/assets/street-labels.fma";
+  const std::string block = emptyLabelFmb(0x12345678, 6, true);
+  const std::string font = emptyFontAsset(0x12345678);
+  const std::string index = poiIndexOneBlock(0, 0, 142, 16);
+  const auto manifestText = [&](const std::string &indexBytes) {
+    return "{\"schemaVersion\":1,\"mapId\":\"" + mapId +
+           "\",\"target\":{\"renderer\":\"esp32-fmb\","
+           "\"formatVersion\":5,\"labelProfileVersion\":1,"
+           "\"labelLanguages\":[\"en\"],\"internationalFallback\":\"en\","
+           "\"buildingProfileVersion\":1,\"poiProfileVersion\":1,"
+           "\"poiIndexProfileVersion\":1,\"requestedFeatures\":["
+           "\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+           "\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
+           "\"blocks\":[[0,0]],\"profileVersion\":1},"
+           "\"layers\":{\"contours\":\"not-included\"},"
+           "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
+           "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
+           "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
+           "\"pois\":{\"recordCount\":1,\"shopsCount\":1,"
+           "\"restaurantsAndCafesCount\":0,\"publicToiletsCount\":0,"
+           "\"gasStationsCount\":0,\"bicycleServicesCount\":0},"
+           "\"files\":[{\"path\":\"" + blockPath + "\",\"bytes\":" +
+           std::to_string(block.size()) + ",\"sha256\":\"" + sha(block) +
+           "\"},{\"path\":\"" + indexPath + "\",\"bytes\":" +
+           std::to_string(indexBytes.size()) + ",\"sha256\":\"" +
+           sha(indexBytes) + "\"},{\"path\":\"" + fontPath +
+           "\",\"bytes\":" + std::to_string(font.size()) +
+           ",\"sha256\":\"" + sha(font) + "\"}]}\n";
+  };
+  const auto stage = [&](const std::string &session,
+                         const std::string &indexBytes) {
+    const std::string directory = installer.stagingRoot(session);
+    assert(::system((std::string("mkdir -p ") + directory +
+                     "/VECTMAP/map-pois/+000+000 " + directory +
+                     "/VECTMAP/map-pois/assets").c_str()) == 0);
+    writeFile(directory + "/" + blockPath, block);
+    writeFile(directory + "/" + fontPath, font);
+    writeFile(directory + "/" + indexPath, indexBytes);
+    writeFile(directory + "/manifest.json", manifestText(indexBytes));
+  };
+
+  stage("session-pois", index);
+  MapManifest parsed;
+  const auto valid = installer.validateStagedMap("session-pois", parsed);
+  if (!valid.ok) std::cerr << valid.code << ": " << valid.message << "\n";
+  assert(valid.ok);
+  assert(installer.activateStagedMap("session-pois", parsed).ok);
+  ActiveMapSelection active;
+  assert(installer.readActiveMap(active).ok);
+  assert(active.target.formatVersion == 5);
+  assert(active.target.poiProfileVersion == 1);
+  assert(active.target.poiIndexProfileVersion == 1);
+  assert(active.target.poiRecordCount == 1);
+  assert(!active.target.contoursIncluded);
+  assert(active.target.poiIndexSha256 == sha(index));
+  // Golden bytes recorded from the operator+ serializers before they became
+  // in-place appends: an unchanged manifest must keep its persisted receipt
+  // and active-map metadata byte for byte.
+  assert(readFile(root + active.root + "/.verified.sha256") ==
+         "9b665e07393055d7cc4e24ee9e3fbe3143845b6bbdb3ccf1c4aa9bbea5a46ff0");
+  assert(readFile(root + "/VECTMAP/active-map.json") ==
+         "{\"mapId\":\"map-pois\",\"sessionId\":\"session-pois\","
+         "\"root\":\"/VECTMAP/.maps/session-pois\",\"renderer\":\"esp32-fmb\","
+         "\"formatVersion\":5,\"labelProfileVersion\":1,"
+         "\"labelLanguages\":[\"en\"],\"internationalFallback\":\"en\","
+         "\"buildingProfileVersion\":1,\"poiProfileVersion\":1,"
+         "\"poiIndexProfileVersion\":1,\"poiRecordCount\":1,"
+         "\"contoursIncluded\":0,\"poiIndexSha256\":\"" + sha(index) +
+         "\"}\n");
+
+  const std::string installedRoot = root + active.root;
+  std::string status;
+  map_transfer::appendRendererLayerStatus(status, active.target, false, true);
+  assert(status.find("\"poiIndexHealthy\":true") != std::string::npos);
+  assert(status.find("\"fontAssetHealthy\":false") != std::string::npos);
+  assert(status.find("\"contourLayerIncluded\":false") != std::string::npos);
+  assert(!map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::ReadFailed));
+  assert(!map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::ResourceRejected));
+  assert(map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::Corrupt));
+  map_nearby_storage::SearchCursor cursor(installedRoot, {0, 0}, 1, 10000);
+  size_t slices = 0;
+  while (!cursor.step()) {
+    ++slices; // a pending render may run here without resetting query progress
+    assert(cursor.result().count == 0);
+  }
+  assert(slices >= 6 && cursor.result().count == 1);
+  const auto nearby = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0);
+  assert(nearby.status == map_nearby_storage::Status::Ok);
+  assert(nearby.count == 1 && nearby.searchedBlocks == 1);
+  assert(nearby.places[0].category == 1);
+  assert(nearby.places[0].directDistanceM > 100.0 &&
+         nearby.places[0].directDistanceM < 200.0);
+  const auto noRestaurants = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 2U, 10000.0);
+  assert(noRestaurants.status == map_nearby_storage::Status::Ok &&
+         noRestaurants.count == 0);
+  auto cancel = [](void *) { return true; };
+  const auto cancelled = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0, cancel);
+  assert(cancelled.status == map_nearby_storage::Status::Cancelled);
+
+  std::string damagedBlock = block;
+  damagedBlock.back() ^= 1;
+  writeFile(installedRoot + "/+000+000/0_0.fmb", damagedBlock);
+  const auto damaged = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0);
+  assert(damaged.status == map_nearby_storage::Status::Corrupt &&
+         damaged.count == 0);
+
+  // Three record batches are required. Simulate returning to the render loop
+  // between batches, and prove no incomplete top-ten set leaks to the UI.
+  constexpr uint16_t denseCount = 513;
+  writeFile(installedRoot + "/+000+000/0_0.fmb",
+            emptyLabelFmb(0x12345678, 6, true, denseCount));
+  writeFile(installedRoot + "/assets/nearby-pois.fpi",
+            poiIndexOneBlock(0, 0, 142, 8 + denseCount * 8, denseCount));
+  map_nearby_storage::SearchCursor dense(installedRoot, {0, 0}, 1, 10000);
+  size_t denseSlices = 0;
+  while (!dense.step()) {
+    assert(dense.result().count == 0);
+    assert(++denseSlices < 30);
+  }
+  assert(denseSlices >= 8 && dense.result().count == 10);
+  assert(dense.result().places[0].recordOrdinal == 0);
+  assert(dense.result().places[9].recordOrdinal == 9);
+  map_nearby_storage::SearchCursor interrupted(installedRoot, {0, 0}, 1, 10000);
+  assert(!interrupted.step());
+  assert(interrupted.step(cancel));
+  assert(interrupted.result().status == map_nearby_storage::Status::Cancelled);
+  assert(interrupted.result().count == 0);
+
+  const std::string mismatched = poiIndexOneBlock(1, 0, 142, 16);
+  stage("session-pois-mismatch", mismatched);
+  const auto rejected = installer.validateStagedMap("session-pois-mismatch", parsed);
+  assert(!rejected.ok && rejected.code == "poi_index_contract");
 }
 
 static void writeLe16(std::ofstream &out, uint16_t value) {
@@ -502,6 +714,70 @@ static void testRejectsUnsafeManifestPath() {
   auto status = installer.validateManifestText(manifestText, manifest);
   assert(!status.ok);
   assert(status.code == "manifest_path");
+
+  for (const auto &path : {"VECTMAP/map-1/./evil.fmb",
+                           "VECTMAP/map-1//evil.fmb",
+                           "VECTMAP/map-1/.hidden/evil.fmb",
+                           "VECTMAP/map-1/nested/.hidden.fmb",
+                           "VECTMAP/map-1/nested/name..fmb",
+                           "/VECTMAP/map-1/evil.fmb"}) {
+    const std::string unsafe =
+        "{\"schemaVersion\":1,\"mapId\":\"map-1\",\"files\":[{\"path\":\"" +
+        std::string(path) + "\",\"bytes\":1,\"sha256\":\"" +
+        std::string(64, '0') + "\"}]}";
+    const auto rejected = installer.validateManifestText(unsafe, manifest);
+    assert(!rejected.ok);
+    assert(rejected.code == "manifest_path");
+  }
+}
+
+static void testTargetFiveRequiresCompletePoiSummary() {
+  MapTransferInstaller installer("/tmp/root");
+  MapManifest manifest;
+  const std::string target =
+      "\"target\":{\"renderer\":\"esp32-fmb\",\"formatVersion\":5,"
+      "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+      "\"internationalFallback\":\"en\",\"buildingProfileVersion\":1,"
+      "\"poiProfileVersion\":1,\"poiIndexProfileVersion\":1,"
+      "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+      "\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
+      "\"blocks\":[[1,0]],\"profileVersion\":1},"
+      "\"layers\":{\"contours\":\"not-included\"},"
+      "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
+      "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
+      "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
+      "\"pois\":{\"recordCount\":0,\"shopsCount\":0,"
+      "\"restaurantsAndCafesCount\":0,\"publicToiletsCount\":0,"
+      "\"gasStationsCount\":0,\"bicycleServicesCount\":0},";
+  const std::string files =
+      "\"files\":[{\"path\":\"VECTMAP/map-4/+000+000/1_0.fmb\","
+      "\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
+      "\"},{\"path\":\"VECTMAP/map-4/assets/nearby-pois.fpi\","
+      "\"bytes\":16,\"sha256\":\"" + std::string(64, '2') +
+      "\"},{\"path\":\"VECTMAP/map-4/assets/street-labels.fma\","
+      "\"bytes\":1,\"sha256\":\"" + std::string(64, '1') + "\"}]}";
+  const std::string valid =
+      "{\"schemaVersion\":1,\"mapId\":\"map-4\"," + target + files;
+  assert(installer.validateManifestText(valid, manifest).ok);
+  for (const std::string &replacement : {
+           std::string("\"blocks\":[]"),
+           std::string("\"blocks\":[[0,0]]"),
+           std::string("\"blocks\":[[1,0],[1,0]]")}) {
+    std::string changed = valid;
+    const std::string original = "\"blocks\":[[1,0]]";
+    const size_t offset = changed.find(original);
+    assert(offset != std::string::npos);
+    changed.replace(offset, original.size(), replacement);
+    const auto invalid = installer.validateManifestText(changed, manifest);
+    assert(!invalid.ok && invalid.code == "manifest_poi_coverage");
+  }
+
+  std::string missingCategory = valid;
+  const std::string field = "\"shopsCount\":0,";
+  missingCategory.erase(missingCategory.find(field), field.size());
+  const auto status = installer.validateManifestText(missingCategory, manifest);
+  assert(!status.ok);
+  assert(status.code == "manifest_pois");
 }
 
 static std::string presentationManifest(const std::string &metadata) {
@@ -545,6 +821,26 @@ static void testParsesOptionalActiveMapPresentationMetadata() {
       manifest);
   assert(status.ok);
   assert(manifest.displayName == maximumName);
+
+  // A user's map name may equal a manifest key, and the backend's sorted
+  // keys place displayName before buildings, layers, nearbyCoverage and pois.
+  for (const char *name : {"pois", "layers", "nearbyCoverage", "buildings"}) {
+    status = installer.validateManifestText(
+        "{\"displayName\":\"" + std::string(name) +
+            "\",\"files\":[{\"bytes\":1,\"path\":"
+            "\"VECTMAP/map-1/+0000+0000/1.fmb\",\"sha256\":\"" +
+            std::string(64, '0') + "\"}],\"mapId\":\"map-1\","
+            "\"schemaVersion\":1}",
+        manifest);
+    assert(status.ok);
+    assert(manifest.displayName == name);
+  }
+  std::vector<map_nearby_coverage::Block> coverage;
+  assert(map_nearby_coverage::decodeManifest(
+      "{\"displayName\":\"nearbyCoverage\",\"nearbyCoverage\":"
+      "{\"blockSizeMeters\":4096,\"blocks\":[[0,0]],\"profileVersion\":1}}",
+      coverage));
+  assert(coverage.size() == 1 && coverage[0].x == 0 && coverage[0].y == 0);
 }
 
 static void testIgnoresInvalidOptionalActiveMapPresentationMetadata() {
@@ -984,7 +1280,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
   assert(!exists(maps + "/obsolete"));
 }
 
-static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
+static void testPreservesLegacyLayoutAfterVersionedMapIsActive() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
@@ -1004,7 +1300,7 @@ static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
 
   assert(installer.pruneObsoleteInstalledMaps());
   assert(exists(vectmap + "/.maps/current/+0032+0008/new.fmb"));
-  assert(!exists(vectmap + "/+9999+9999"));
+  assert(exists(vectmap + "/+9999+9999/old.fmb"));
   assert(exists(vectmap + "/active-map.json"));
 }
 
@@ -1304,6 +1600,106 @@ static void testCorruptJournalRollsBackUnverifiableSelectedMap() {
   assert(!exists(root + "/VECTMAP/.maps/session-commit"));
 }
 
+static void testDamagedPrimaryKeepsSignedBackupEvidence() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  prepareInterruptedSelectedVersion(root, validFmb());
+  const std::string journal = root + "/VECTMAP/.activation-transaction.json";
+  const std::string primary = "{not-json}\n";
+  const std::string backup = "{\"protocolVersion\":2,\"sessionId\":\"foreign\","
+                             "\"operationID\":\"" + std::string(32, '8') + "\"}";
+  writeFile(journal, primary);
+  writeFile(journal + ".bak", backup);
+  const std::string selectedBefore = readFile(root + "/VECTMAP/active-map.json");
+
+  // The damaged primary says nothing; the backup is signed, durable evidence
+  // of another operation. Legacy recovery would select and delete both.
+  const auto recovered = installer.recoverInterruptedActivation();
+  assert(!recovered.ok);
+  assert(readFile(journal) == primary);
+  assert(readFile(journal + ".bak") == backup);
+  assert(readFile(root + "/VECTMAP/active-map.json") == selectedBefore);
+  assert(exists(root + "/VECTMAP/.maps/session-commit"));
+  assert(exists(root + "/VECTMAP/.maps/session-old"));
+  assert(installer.hasInterruptedActivation());
+}
+
+static void testJournalVersionEvidenceBlocksLegacyRecovery() {
+  struct Version { const char *name; bool present; std::string bytes; bool evidence; };
+  const std::string oversized(5000, ' ');
+  // "legacy" keeps the fixture's own interrupted legacy journal.
+  const std::vector<Version> primaries = {
+      {"absent", false, "", false}, {"legacy", true, "", false},
+      {"damaged", true, "{not-json}\n", false}};
+  const std::vector<Version> backups = {
+      {"absent", false, "", false},
+      {"torn", true, "{\"sessionId\":\"sess", false},
+      {"v2", true, "{\"protocolVersion\":2,\"sessionId\":\"session-commit\"}", true},
+      {"v2-foreign", true, "{\"protocolVersion\":2,\"sessionId\":\"foreign\","
+                           "\"operationID\":\"" + std::string(32, '8') + "\"}", true},
+      {"receipt", true, "{\"sessionId\":\"session-commit\",\"manifestReceipt\":\"" +
+                            std::string(64, '3') + "\"}", true},
+      {"operation", true, "{\"operationID\":\"" + std::string(32, '8') + "\"}", true},
+      {"unreadable", true, oversized, true}};
+  // An unpublished temporary only counts when it carries evidence itself.
+  const std::vector<Version> temporaries = {
+      {"absent", false, "", false}, {"torn", true, "{\"phase\":\"re", false},
+      {"unreadable", true, oversized, false},
+      {"v2", true, "{\"protocolVersion\":2,\"operationID\":\"" +
+                       std::string(32, '9') + "\"}", true}};
+  for (const auto &primary : primaries) {
+    std::string baseline;
+    for (const auto &backup : backups) {
+      // Without a primary or backup the temporary alone is removed (liveness);
+      // a v2 backup alone dispatches the unchanged v2 recovery.
+      if (!primary.present && (!backup.present ||
+          backup.bytes.find("\"protocolVersion\":2") != std::string::npos)) continue;
+      for (const auto &temporary : temporaries) {
+        const std::string label = std::string(primary.name) + "/" + backup.name + "/" +
+                                  temporary.name;
+        const std::string root = tempRoot();
+        MapTransferInstaller installer(root);
+        prepareInterruptedSelectedVersion(root, validFmb());
+        const std::string journal = root + "/VECTMAP/.activation-transaction.json";
+        if (!primary.present) assert(::unlink(journal.c_str()) == 0);
+        else if (!primary.bytes.empty()) writeFile(journal, primary.bytes);
+        if (backup.present) writeFile(journal + ".bak", backup.bytes);
+        if (temporary.present) writeFile(journal + ".tmp", temporary.bytes);
+        const std::string selectedBefore = readFile(root + "/VECTMAP/active-map.json");
+        const std::string primaryBefore = primary.present ? readFile(journal) : "";
+        const auto recovered = installer.recoverInterruptedActivation();
+        const auto check = [&](bool condition, const char *expectation) {
+          if (condition) return;
+          std::cerr << "FAIL " << label << ": " << expectation << " (" << recovered.code
+                    << ")\n";
+          std::abort();
+        };
+        if (backup.evidence || temporary.evidence) {
+          check(!recovered.ok, "evidence in any journal version blocks legacy recovery");
+          check(!primary.present || readFile(journal) == primaryBefore, "primary preserved");
+          check(!backup.present || readFile(journal + ".bak") == backup.bytes,
+                "backup preserved");
+          check(!temporary.present || readFile(journal + ".tmp") == temporary.bytes,
+                "temporary preserved");
+          check(readFile(root + "/VECTMAP/active-map.json") == selectedBefore,
+                "selection unchanged");
+          check(exists(root + "/VECTMAP/.maps/session-commit") &&
+                    exists(root + "/VECTMAP/.maps/session-old"),
+                "map versions kept");
+          check(installer.hasInterruptedActivation(), "journal still pending");
+        } else {
+          check(recovered.ok, "evidence-free journals keep the legacy recovery");
+          check(!exists(journal) && !exists(journal + ".bak") && !exists(journal + ".tmp"),
+                "legacy recovery clears every journal version");
+          check(!installer.hasInterruptedActivation(), "activation is no longer blocked");
+          if (baseline.empty()) baseline = recovered.code;
+          check(recovered.code == baseline, "same outcome as without other versions");
+        }
+      }
+    }
+  }
+}
+
 static void testRejectsChecksumMismatch() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -1490,12 +1886,281 @@ static void testPendingArchiveActivationSurvivesRestart() {
   assert(!afterRestart.readPendingArchiveActivation(recoveredSession));
 }
 
+static void testPersistentMapLibrary() {
+  const auto root = tempRoot();
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < 6; ++i) {
+    const auto session = "city-" + std::to_string(i);
+    const auto mapID = "map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"displayName\":\"City " + std::to_string(i) +
+        "\",\"boundsE7\":[1200000000,300000000,1220000000,320000000],\"files\":[{\"path\":\"VECTMAP/" +
+        mapID + "/+0000+0000/0.fmb\",\"bytes\":" + std::to_string(data.size()) +
+        ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+    assert(installer.pruneObsoleteInstalledMaps());
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 6);
+  assert(maps[0].presentation.displayName == "City 0");
+  // Golden receipt recorded before the receipt serializer used appends.
+  assert(maps[0].manifestReceipt ==
+         "1bb8e3b231b440be1d878d92341b02563724611b0b315b10958e05df8e7d46a5");
+  assert(maps[0].payloadBytes == data.size());
+  assert(maps[0].contains(310000000, 1210000000));
+  assert(!maps[0].contains(310000000, 1030000000));
+  assert(!installer.installedMapCovers(maps[0], 310000000, 1210000000));
+  auto origin = maps[0]; origin.presentation.boundsE7 = {-1000000, -1000000, 1000000, 1000000};
+  assert(::system(("mkdir -p " + root + origin.root + "/+000+000").c_str()) == 0);
+  writeFile(root + origin.root + "/+000+000/0_0.fmb", data);
+  assert(installer.installedMapCovers(origin, 0, 0));
+  assert(installer.mapRootHasBlock(origin.root, 0, 0));
+  assert(!installer.mapRootHasBlock(origin.root, 900000000, 0));
+  assert(map_transfer::libraryPositionBlockKey(0, 0) == map_transfer::libraryPositionBlockKey(1, 1));
+
+
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "city-0");
+  assert(map_transfer::coveringLibraryMap(maps, maps[5].root, 310000000, 1210000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1030000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000, {"city-0"})->sessionId == "city-1");
+  auto smaller = maps[0]; smaller.sessionId = "smaller"; smaller.root += "-smaller";
+  smaller.presentation.boundsE7 = {1205000000, 305000000, 1215000000, 315000000};
+  maps.push_back(smaller);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "smaller");
+  maps.pop_back();
+  const auto path = root + maps[0].root + "/+0000+0000/0.fmb";
+  struct stat before{}, after{};
+  assert(::stat(path.c_str(), &before) == 0);
+  assert(!installer.selectInstalledMap(maps[0].sessionId, std::string(64, '0')).ok);
+  assert(installer.selectInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(selected.previousSessionId == "city-5");
+  assert(::stat(path.c_str(), &after) == 0 && before.st_ino == after.st_ino);
+  assert(installer.recoverInterruptedActivation().ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.removeInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  assert(!installer.removeInstalledMap(maps[5].sessionId, maps[5].manifestReceipt).ok);
+  assert(installer.removeInstalledMap(maps[2].sessionId, maps[2].manifestReceipt).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  // Same-size corruption is deliberately invisible to cheap inventory, but
+  // must be rejected before selecting/reusing the installed payload.
+  const auto corrupt = root + maps[1].root + "/+0000+0000/0.fmb";
+  writeFile(corrupt, std::string(data.size(), 'x'));
+  assert(installer.selectInstalledMap(maps[1].sessionId, maps[1].manifestReceipt).code == "library_integrity");
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  MetadataWriteFailingInstaller failing(root);
+  assert(!failing.selectInstalledMap(maps[3].sessionId, maps[3].manifestReceipt).ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.selectInstalledMap("../city-1", maps[1].manifestReceipt).ok);
+  assert(installer.automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(false));
+  assert(!MapTransferInstaller(root).automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(true));
+  assert(MapTransferInstaller(root).automaticMapSelection());
+  // A truncated completed root remains visible and removable; a cut after
+  // rename can no longer hide an undeletable half-removed installation.
+  auto damaged = maps[1];
+  writeFile(root + damaged.root + "/+0000+0000/0.fmb", "");
+  assert(installer.readMapLibrary(maps).ok);
+  const auto unavailable = std::find_if(maps.begin(), maps.end(), [&](const auto &m) { return m.sessionId == damaged.sessionId; });
+  assert(unavailable != maps.end() && !unavailable->available);
+  class RemovalCut : public MapTransferInstaller {
+  public: using MapTransferInstaller::MapTransferInstaller;
+  protected:
+    void storageMutationBoundary(const char *op, const std::string &path, bool after) const override {
+      if (after && std::string(op) == "rename" && path.find("/.removing-") != std::string::npos) throw 42;
+    }
+  } removal(root);
+  bool interrupted = false;
+  try { removal.removeInstalledMap(damaged.sessionId, damaged.manifestReceipt); } catch (int) { interrupted = true; }
+  assert(interrupted);
+  const auto tombstone = root + "/VECTMAP/.maps/.removing-" + damaged.sessionId;
+  assert(exists(tombstone));
+  assert(installer.pruneObsoleteInstalledMaps());
+  assert(!exists(tombstone));
+  const auto overflowRoot = tempRoot();
+  for (int i = 0; i < 33; ++i) {
+    const auto slot = overflowRoot + "/VECTMAP/.maps/external-" + std::to_string(i);
+    assert(::system(("mkdir -p " + slot + " && cp -R " + root + "/VECTMAP/.maps/city-0/. " + slot).c_str()) == 0);
+  }
+  MapTransferInstaller overflow(overflowRoot);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
+  assert(overflow.removeInstalledMap(maps.front().sessionId, maps.front().manifestReceipt).ok);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
+}
+
+// Simulates a power cut at an exact atomic-write boundary (before or after the
+// write lands), or a write that fails without crashing.
+struct WriteCut {};
+class CuttingInstaller : public MapTransferInstaller {
+public:
+  enum class Mode { BeforeWrite, AfterWrite, FailWrite };
+  CuttingInstaller(const std::string &root, std::string suffix, Mode mode)
+      : MapTransferInstaller(root), suffix_(std::move(suffix)), mode_(mode) {}
+
+protected:
+  bool writeTextFileAtomic(const std::string &path, const std::string &text) const override {
+    const bool target = path.size() >= suffix_.size() &&
+        path.compare(path.size() - suffix_.size(), suffix_.size(), suffix_) == 0;
+    if (target && mode_ == Mode::BeforeWrite) throw WriteCut{};
+    if (target && mode_ == Mode::FailWrite) return false;
+    const bool written = MapTransferInstaller::writeTextFileAtomic(path, text);
+    if (target && mode_ == Mode::AfterWrite) throw WriteCut{};
+    return written;
+  }
+
+private:
+  std::string suffix_;
+  Mode mode_;
+};
+
+static std::vector<map_transfer::InstalledMap> buildLibrary(const std::string &root, int count) {
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < count; ++i) {
+    const auto session = "town-" + std::to_string(i);
+    const auto mapID = "town-map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"files\":[{\"path\":\"VECTMAP/" + mapID + "/+0000+0000/0.fmb\",\"bytes\":" +
+        std::to_string(data.size()) + ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == size_t(count));
+  return maps;
+}
+
+// N6: a manual Use journals its exact target before the pointer moves. Every
+// pointer/policy boundary reconciles to the durable pointer: pinned manual if
+// it moved, otherwise the earlier policy is untouched.
+static void testManualSelectionJournalRecovery() {
+  using Mode = CuttingInstaller::Mode;
+  const auto useTarget = [](MapTransferInstaller &installer, const map_transfer::InstalledMap &map) {
+    assert(installer.writeManualSelectionIntent(map.sessionId, map.root, map.manifestReceipt));
+    return installer.selectInstalledMap(map.sessionId, map.manifestReceipt);
+  };
+  for (const bool earlierAutomatic : {true, false}) {
+    // Cut after the journal, before the pointer: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/.library-selection-intent.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.manualSelectionIntentPending());
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut before the canonical pointer write lands: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::BeforeWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root != maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic);
+    }
+    // Cut after the pointer, before the policy: the reboot pins manual.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root == maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut after the policy, before the journal cleanup: settles idempotently.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      CuttingInstaller cut(root, "/VECTMAP/.library-automatic", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)cut.reconcileManualSelectionIntent(); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted && installer.manualSelectionIntentPending() && !installer.automaticMapSelection());
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Renderer rollback after a durable pointer write: the journal is dropped
+    // and the earlier policy stays exactly as it was.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      assert(installer.rollbackActiveMap(maps[0].sessionId).ok);
+      assert(installer.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(installer.automaticMapSelection() == earlierAutomatic);
+    }
+  }
+  // A policy write failure keeps the journal as the durable manual pin and is
+  // retried until it lands; a failed journal write performs no selection.
+  {
+    const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+    MapTransferInstaller installer(root);
+    assert(useTarget(installer, maps[1]).ok);
+    CuttingInstaller failing(root, "/VECTMAP/.library-automatic", Mode::FailWrite);
+    assert(failing.reconcileManualSelectionIntent().code == "library_policy_write");
+    assert(failing.manualSelectionIntentPending() && failing.automaticMapSelection());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_manual");
+    assert(!installer.automaticMapSelection() && !installer.manualSelectionIntentPending());
+    CuttingInstaller noJournal(root, "/.library-selection-intent.json", Mode::FailWrite);
+    assert(!noJournal.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(!noJournal.manualSelectionIntentPending());
+    // An explicit automatic choice discards an unsettled journal.
+    assert(installer.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(installer.setAutomaticMapSelection(true) && installer.discardManualSelectionIntent());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_none" && installer.automaticMapSelection());
+  }
+}
+
 int main() {
+  testNearbyIndexReadsYieldBetweenBatches();
+  testManualSelectionJournalRecovery();
+  testPersistentMapLibrary();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+#if MAP_POIS_RUNTIME_ENABLED
+  testTargetFiveRequiresCompletePoiSummary();
+  testTargetFiveIndexMatchesSignedBlocks();
+#else
+  {
+    MapTransferInstaller installer("/tmp/map-transfer-disabled-pois");
+    MapManifest parsed;
+    const auto disabled = installer.validateManifestText(
+        "{\"schemaVersion\":1,\"mapId\":\"map-pois\",\"target\":"
+        "{\"renderer\":\"esp32-fmb\",\"formatVersion\":5}}",
+        parsed);
+    assert(!disabled.ok && disabled.code == "manifest_target");
+  }
+#endif
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testBindsActivePresentationToManifestReceipt();
@@ -1510,7 +2175,7 @@ int main() {
   testPruningPreservesForeignFilesystemEntries();
   testPreservesPreviousAndPrunesObsoleteVersions();
   testPruningPreservesLiveDurableStreamReferences();
-  testPrunesLegacyRollbackAfterVersionedMapIsActive();
+  testPreservesLegacyLayoutAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testRollbackPreservesPendingArchiveForBootResume();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();
@@ -1524,6 +2189,8 @@ int main() {
   testRecoveryClearsCorruptMetadataWithoutJournal();
   testRecoveryClearsCorruptJournalWithoutBlockingActiveMap();
   testCorruptJournalRollsBackUnverifiableSelectedMap();
+  testDamagedPrimaryKeepsSignedBackupEvidence();
+  testJournalVersionEvidenceBlocksLegacyRecovery();
   testRejectsChecksumMismatch();
   testVerificationReceiptControlsResumeEligibility();
   testStoredArchivePreparesAndActivatesInBackgroundTransferPath();

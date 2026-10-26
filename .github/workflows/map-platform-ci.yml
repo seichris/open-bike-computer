@@ -3,6 +3,31 @@ name: Map Platform CI
 on:
   workflow_call:
     inputs:
+      run_source:
+        description: Validate map source
+        type: boolean
+        required: false
+        default: true
+      run_catalog:
+        description: Validate map catalog
+        type: boolean
+        required: false
+        default: true
+      run_social:
+        description: Validate map social
+        type: boolean
+        required: false
+        default: true
+      run_readers:
+        description: Validate map readers
+        type: boolean
+        required: false
+        default: true
+      run_deploy:
+        description: Validate map deploy
+        type: boolean
+        required: false
+        default: true
       run_backend:
         description: Validate the backend, deployment, and production image
         required: true
@@ -13,6 +38,31 @@ on:
         type: boolean
   workflow_dispatch:
     inputs:
+      run_source:
+        description: Validate map source
+        type: boolean
+        required: false
+        default: true
+      run_catalog:
+        description: Validate map catalog
+        type: boolean
+        required: false
+        default: true
+      run_social:
+        description: Validate map social
+        type: boolean
+        required: false
+        default: true
+      run_readers:
+        description: Validate map readers
+        type: boolean
+        required: false
+        default: true
+      run_deploy:
+        description: Validate map deploy
+        type: boolean
+        required: false
+        default: true
       run_backend:
         description: Validate the backend, deployment, and production image
         required: true
@@ -30,7 +80,7 @@ permissions:
 jobs:
   topography-readers:
     name: Topography Native Readers
-    if: inputs.run_backend
+    if: inputs.run_backend && inputs.run_readers
     runs-on: macos-latest
     timeout-minutes: 15
     defaults:
@@ -55,7 +105,7 @@ jobs:
 
   catalog:
     name: Cloudflare Map Catalog
-    if: inputs.run_backend
+    if: inputs.run_backend && inputs.run_catalog
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -129,10 +179,18 @@ jobs:
         run: docker compose build tools
       - name: Smoke test tools image
         run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import osmium; import shapely; import yaml; from osgeo import ogr"
+      - name: Require real full-source and prepared-shard POI equivalence
+        run: >-
+          docker compose run --rm
+          --volume "${{ github.workspace }}:/repo:ro"
+          --workdir /repo/tools/OSM_Extract
+          --env OBC_REQUIRE_POI_OGR_TESTS=1
+          tools python -m unittest discover -s tests
+          -p test_poi_source_equivalence.py -v
 
   social-postgres:
     name: Social PostgreSQL contracts
-    if: inputs.run_backend
+    if: inputs.run_backend && inputs.run_social
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -157,7 +215,7 @@ jobs:
 
   backend:
     name: Map Backend
-    if: inputs.run_backend
+    if: inputs.run_backend && (inputs.run_source || inputs.run_deploy)
     runs-on: ubuntu-latest
     permissions:
       attestations: read
@@ -173,12 +231,15 @@ jobs:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Install backend test dependencies
+        if: inputs.run_source
         run: python -m pip install -e '.[test,object-storage,topography,social]'
       - name: Install OSM extraction test tool
+        if: inputs.run_source
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool
       - name: Python syntax
+        if: inputs.run_source
         run: >-
           python -m py_compile
           map_platform/*.py
@@ -187,11 +248,15 @@ jobs:
           ../deploy/*.py
           ../deploy/tests/*.py
       - name: Generated map stream trust registry
+        if: inputs.run_source
         run: |
           python tools/generate_map_stream_trust.py --check
           python tools/check_map_stream_hardware_gate.py --validate-requirements
       - name: Unit tests
-        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-backend-tests --check map-deploy-tests --report "$RUNNER_TEMP/dev-checks/map-backend-tests/results.json"
+        if: inputs.run_source
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-backend-tests --report "$RUNNER_TEMP/dev-checks/map-backend-tests/results.json"
+      - name: Deployment policy tests
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-deploy-tests --report "$RUNNER_TEMP/dev-checks/map-deploy-tests/results.json"
       - name: Production promotion scheduler image
         working-directory: .
         run: >-
@@ -209,6 +274,7 @@ jobs:
           docker build --platform linux/amd64 --target validation
           -f map-platform/deploy/client-compatibility/Dockerfile .
       - name: Production Compose config
+        if: inputs.run_source
         env:
           MAP_PLATFORM_DOWNLOAD_SECRET: ci-download-secret
           MAP_PLATFORM_INSTALLATION_SECRET: ci-installation-secret-32-bytes-minimum
@@ -230,12 +296,14 @@ jobs:
           python ../deploy/verify_registry_images.py \
             ../deploy/compose.development.yaml
       - name: Build backend production image
+        if: inputs.run_source
         run: >-
           docker build
           --file Dockerfile
           --tag open-bike-map-platform-ci
           ../..
       - name: Smoke-start backend production image
+        if: inputs.run_source
         run: >-
           docker run --rm
           -e MAP_PLATFORM_DOWNLOAD_SECRET=ci-download-secret
@@ -244,6 +312,7 @@ jobs:
           open-bike-map-platform-ci
           python -c "import osmium; from pathlib import Path; from map_platform.api import create_app; from map_platform.map_stream_build_identity import verify_map_stream_build_identity; identity = verify_map_stream_build_identity(Path('/app/map-platform/config/map-stream-build-identity.json'), Path('/app')); assert len(identity.producer_build_sha256) == 64; app = create_app(); assert app.title"
       - name: Smoke worker heartbeat
+        if: inputs.run_source
         run: >-
           docker run --rm
           -e MAP_PLATFORM_DATA_ROOT=/tmp/map-platform-data

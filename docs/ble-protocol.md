@@ -325,8 +325,12 @@ Offset  Size  Field
 
 Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
 clear is two members on both iPhone and Watch (empty route plus
-the canonical `1|0|Navigation idle` maneuver). A workout group contains the
-canonical core, extended, and optional origin frames in their existing order.
+the canonical `1|0|Navigation idle` maneuver). Firmware treats that exact
+maneuver, grouped or not, as clearing navigation data rather than as a live
+maneuver, so the clear holds whichever member is applied first and an idle
+Map + Navigation screen is not held in course-up guidance. A workout group
+contains the canonical core, extended, and optional origin frames in their
+existing order.
 Only terminal/idle workout state and explicit navigation clear require this
 application acknowledgement; replaceable GPS, route windows, maneuvers, and
 ordinary live workout snapshots retain latest-state resynchronization semantics.
@@ -961,19 +965,19 @@ Current setting IDs:
 | `3` | Map route line width | `2...48` |
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
-| `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours |
+| `7` | Map zoom level | `0...5`; firmware renders `1...5` and draws a stored `0` at `1`, so the app offers `1...5` |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours, bits 18-22 shops, restaurants/cafes, public toilets, gas stations, and bicycle shops/repair respectively |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
 | `12` | Device brightness | Whole-number percent. Firmware clamps the signed value to `5...100`, saves the normalized value in NVS, and applies it from the display task. First boot defaults to `100`; the saved value is restored across reboot and display sleep/wake. |
-| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
-| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
+| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status; optional bit 5 World Radio, bit 6 Elevation and bit 7 Nearby only in qualifying firmware. Invalid or empty masks fall back to the five ordinary screens, not the opt-in screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
+| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status; optional `5` World Radio, `6` Elevation and `7` Nearby. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
 | `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. An unclaimed device waiting to be added applies a minimum 600-second registration grace period; `0` still disables automatic disconnected sleep. |
 | `16` | Map + Navigation minimum polygon size | `0...50` |
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
 | `18` | Map + Navigation route line width | `2...48` |
-| `19` | Map + Navigation zoom level | `0...5` |
+| `19` | Map + Navigation zoom level | Same values as ID `7` |
 | `20` | Map + Navigation feature visibility mask | feature bits and the extended-mask marker use the same meanings as ID `8`; navigation overlay bits remain global via ID `8` |
 | `21` | Map + Navigation street width | Absolute rendered width is `1...24` px, encoded as `width - 4` (`-3...20`) for compatibility. |
 | `22` | Map + Navigation current-position marker scale | `1...5` |
@@ -994,6 +998,12 @@ Current setting IDs:
 | `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
 | `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
 | `39` | Friend marker size | Percent of the normal friend marker, clamped to `100...300`; defaults to `100` and is persisted as `friendScale`. One global value for every map screen (Map, Map + Navigation and terrain/topographic Map instances); portraits, initials, distances and grouped counts scale together around the rider. The iPhone offers `100`, `125`, `150`, `200`, `250` and `300`, uses the same value for its own map, and sends it only after extended capability bit `1`. |
+
+iOS resends a state setting whose acknowledged write fails at the ATT layer:
+at most three attempts in total, one second apart, with the same value and
+only on the connection whose write failed. A newer value for
+the same ID supersedes the retry. The legacy reboot command (ID `5`) is
+never resent.
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -1046,11 +1056,16 @@ local and service roads and bit `2` to both paths and tracks.
 Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
+POI visibility bits `18...22` are sent only after authenticated CAP2 extended bit `3`
+negotiation. Fresh Map profiles enable all five; fresh Map + Navigation profiles
+disable all five. Older firmware receives no POI bits and saved choices remain
+available for a later capable connection. Nearby uses an independent transient
+category selection and never rewrites either saved visibility mask.
 
 Visibility bit `13` controls FMB5 topographic contours independently for Map
 and Map + Navigation. It remains off in fresh profiles. iOS exposes and sends
-the bit only when CAP2 bit `30`, active renderer format `4`, topography profile
-`1`, and a healthy active contour section all agree. Firmware preserves the bit
+the bit only when CAP2 bit `30`, an active contour-containing renderer target
+`4` or `5`, topography profile `1`, and a healthy active contour section all agree. Firmware preserves the bit
 through configurable-screen round trips and ignores it for older blocks. This
 source contract does not by itself enable production generation or establish
 physical performance qualification.
@@ -1072,7 +1087,10 @@ MaximumDocumentBytes: UInt16LE (=4096)
 ```
 
 Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
-Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Navigation`, `4=Battery Status`, optional `5=World Radio`, `6=Elevation`
+and `7=Nearby`. Nearby is advertised in `SupportedScreenTypes` only by the
+POI-enabled development firmware; production keeps it hidden pending hardware
+acceptance. Multiple instances may use the same type.
 Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
 name, and type-specific payload. The ordered enabled instances define the
 device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
@@ -1089,7 +1107,7 @@ DocumentCRC32: UInt32LE
 ```
 
 Flag bit `0` means enabled; other flag bits are invalid. Navigation and Battery
-Status payloads contain only payload version `1`. Map and Map + Navigation
+Status payloads contain only payload version `1`. Map, Nearby, and Map + Navigation
 payloads carry the complete independent map profile (detail, widths, zoom,
 visibility, labels, rotation, and the type-specific bird's-eye fields). Map +
 Navigation appends its independent rotation byte (`0` north-up, `1` course-up)
@@ -1327,7 +1345,10 @@ reports the complete configurable-screen store, characteristic, codec, and runti
 path described above. Bit `27` reports World Radio. Bit `28` reports the
 atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
 `29` reports versioned workout zones. Bit `30` reports the complete renderer
-format 4/FMB5 contour decode, installation, status, and visibility path. Client version `11` requests
+format 4/FMB5 contour decode, installation, status, and visibility path. Bit
+`31` reports diagnostic terrain experiments. Extended bit `3` reports the
+target-5/FMB6 POI reader, independent visibility controls and indexed Nearby
+screen; it is not part of this primary word. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1348,10 +1369,19 @@ versioned workout zones. Version `28` requests bit `30`, topographic contours.
 Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
 requests the extended feature word (TLV type `3`), with bit `0` for group riders.
 Version `31` requests extended bit `1`, the shared friend-marker size (setting
-ID `39`).
-The current iPhone client negotiates version `31`; older direct Watch clients
+ID `39`). Version `32` requests extended bit `2`, route elevation profiles
+(`ELV1`, see [Route elevation profiles](#route-elevation-profiles-elv1-v1)).
+Version `33` requests extended bit `3`, map POIs and Nearby. Versions `31` and
+`32` retain their released friend-marker sizing and route elevation meanings
+and cannot negotiate POIs.
+The current iPhone client negotiates version `33`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
+Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
+configurable-screen store and characteristic are ready. The opt-in
+`*_REMOTE_DEBUG` and `*_POI_LIFECYCLE_QUALIFICATION` profiles (including the
+1.75-inch isolated qualification variant) currently enable it for physical
+qualification; ordinary and production profiles keep it clear.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
 omits both the screen and capability pending physical interaction qualification.
@@ -1384,8 +1414,9 @@ persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
-numbered from the first word. Its bit `0` is `group_riders_v1` and bit `1` is
-`friend_marker_scale_v1`; absent means zero. Firmware sets bit `1` whenever it
+numbered from the first word. Its bit `0` is `group_riders_v1`, bit `1` is
+`friend_marker_scale_v1`, bit `2` is `route_elevation_v1`, and bit `3` is
+`map_pois`; absent means zero. Firmware sets bit `1` whenever it
 can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
 independent of this session's group-rider relay, so a stored size can be
 changed before friends appear. Firmware without bit `1` ignores setting `39`.
@@ -1455,6 +1486,19 @@ Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
 
 Topographic contours, CAP2 schema 1, only feature bit 30:
 43 41 50 32 01 00 00 00 40
+
+Diagnostic terrain experiments, CAP2 schema 1, only primary feature bit 31:
+43 41 50 32 01 00 00 00 80
+
+Friend-marker sizing, CAP2 schema 1, extended feature bit 1 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 02 00 00 00
+
+Route elevation profiles, CAP2 schema 1, extended feature bit 2 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 04 00 00 00
+
+Map POIs and Nearby, CAP2 schema 1, extended feature bit 3 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 08 00 00 00
+This isolates the feature bit; usable POIs also require the map prerequisites.
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1790,6 +1834,11 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | --- | --- | --- | --- |
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
+| `MTRN` | iOS -> ESP32 | `library` | Refresh the completed SD-map inventory without enabling Wi-Fi. |
+| `MTRN` | iOS -> ESP32 | `library-page\|offset` | Read four cached entries at offsets 0, 4, 8, ... without filesystem access. |
+| `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Legacy automatic/manual policy commands; current GPS updates only suggest maps. |
+| `MTRN` | iOS -> ESP32 | `library-select\|sessionID\|manifestReceipt` | Verify and select an exact completed installation; disables automatic selection. |
+| `MTRN` | iOS -> ESP32 | `library-remove\|sessionID\|manifestReceipt` | Remove an exact unselected installation, subject to recovery protection. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
@@ -1803,7 +1852,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|h1\|e` | Re-enter diagnostics on the protected hotspot after the iPhone confirms that the advertised LAN endpoint is unreachable. |
 | `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is sent only with CAP2 bit `21` and is rejected by firmware without the read-only ride-automation shadow producer. |
 | `DTRN` | iOS -> ESP32 | `mark\|1\|<sequence>\|<code>` | Persist one predefined issue marker. Sequence is positive and strictly increasing for the bound capture; replayed or out-of-order markers are rejected. |
-| `DTRN` | iOS -> ESP32 | `mark\|2\|<sequence>\|<code>\|<incident-uuid>` | Registry-v2 marker carrying the phone's shared lowercase incident UUID. `mark\|1` sequence rules apply; the command is at most 100 bytes. iOS sends it only when `DSTS.diagnosticsPolicy.schemaDigest` matches its registry, otherwise `mark\|1`. |
+| `DTRN` | iOS -> ESP32 | `mark\|2\|<sequence>\|<code>\|<incident-uuid>` | Registry-v2 marker carrying the phone's shared lowercase incident UUID. `mark\|1` sequence rules apply, except for the explicitly advertised latest-marker replay contract below; the command is at most 100 bytes. iOS sends it only when `DSTS.diagnosticsPolicy.schemaDigest` matches its registry, otherwise `mark\|1`. |
 | `DTRN` | iOS -> ESP32 | `policy\|2\|<capture-uuid>\|<generation>\|<mask>\|<minimumLevel>\|<durationSeconds>\|<budgetBytes>\|<registrySha256>` | Install a bounded debug/trace lease for the bound capture. Sent after `capture\|1` and only when the registry digest matches. The lowercase UUID must equal the bound capture; generation is positive; mask is nonzero and within `supportedMask`; level is `0`-`5` (trace-fatal); duration is `1`-`14400` seconds; budget is `1024` bytes to 32 MiB; the command is at most 240 bytes. A same-generation retry must be identical and never renews the lease or budget; a lower generation is rejected. Failure records `diagnostics_policy_rejected`. |
 | `DTRN` | iOS -> ESP32 | `live\|2\|<boot>\|<after>` | Request one live-tail page in the next `DSTS` as `diagnosticsLive`. Cursor fields are unsigned 32-bit decimals; boot `0` returns the newest events. Malformed requests, and more than one request per second, are ignored. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
@@ -1825,6 +1874,26 @@ an accepted `live|2` request, the next status may include `diagnosticsLive`:
 `nextSequence`, `gap`, `more`, `durability` `enqueued_not_durable` and at most
 two `events` from a 16-entry RAM ring. It is omitted while the recorder is busy
 and never proves durable storage.
+
+Upgraded firmware additionally advertises `diagnosticsPolicy.markerReplaySafe`
+`true`. It retains one bounded RAM receipt for the **latest accepted v2 marker**
+(sequence, code, incident UUID), including through capture end/rebinding. An
+exact replay succeeds as a no-op; a conflicting reuse of that incident is
+rejected. The receipt is replaced by the next accepted marker, and is not a
+durable SD acknowledgement. V1 sequence semantics remain unchanged. iOS retries
+only incident-bearing v2 markers when this explicit field is true and the
+registry matches; an absent/false field keeps legacy one-shot delivery. Retry
+attempts are bounded by the existing policy, fenced to the same authenticated
+link, latest marker, local capture and binding generation, and revalidated at
+queue dispatch. Capture change/end invalidates queued retries. No queued retry
+is migrated to a new capture or link; ATT success still only means sent.
+
+`marker_rejected` may still be published for a genuinely rejected first marker
+application (for example, a busy recorder). It belongs to marker delivery, not
+diagnostics session entry. The iOS diagnostics-entry waiter leaves this shared
+error intact but does not treat it as entry rejection, including at its deadline.
+Only validated secure readiness completes entry; genuine fresh entry failures
+(including unknown future codes) still fail it, and absent readiness still times out.
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for
@@ -2709,3 +2778,176 @@ line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
 the published projection is stable. The existing full-buffer/full-refresh display
 strategy is unchanged.
+
+## Persistent SD map library
+
+See [Device map library](device-map-library.md) for lifecycle, limits, migration,
+and physical qualification. No BLE characteristic or UUID changes.
+
+Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
+
+```json
+{
+  "schemaVersion": 1,
+  "known": true,
+  "automatic": true,
+  "busy": false,
+  "revision": 1,
+  "error": "",
+  "selectedSessionID": "installed-session",
+  "commandID": "<32 lowercase hex characters of the last explicit command, or empty>",
+  "commandError": "",
+  "coverage": {
+    "known": true,
+    "currentCovered": false,
+    "blockX": 3299,
+    "blockY": 890,
+    "boundsMask": 1,
+    "selectedSessionID": "installed-session",
+    "suggestedSessionID": "another-installed-session"
+  },
+  "offset": 0,
+  "total": 1,
+  "maps": [{
+    "sessionID": "installed-session",
+    "mapID": "shanghai-map",
+    "manifestReceipt": "<64 lowercase hex characters>",
+    "signedManifestReceipt": "<64 lowercase hex characters, or empty for a legacy archive>",
+    "displayName": "Shanghai",
+    "payloadBytes": 1350000,
+    "available": true,
+    "boundsE7": [1210000000, 310000000, 1220000000, 320000000]
+  }]
+}
+```
+
+`coverage` is optional for backwards compatibility. It is a read-only storage-worker
+result, never a selection request or upload receipt. `known:false`, a busy/partial
+inventory, a changed `selectedSessionID`, or a different current GPS block makes
+the result unusable for prompting. `blockX` and `blockY` are signed Web Mercator
+meter coordinates truncated to int32 then shifted right by 12, matching renderer
+block addressing. `boundsMask` is a uint32 bitmap in assembled inventory order:
+bit i is set when the checked coordinate lies within map i's declared bounds.
+Clients recompute it for the current GPS fix, and the firmware re-probes when
+this membership changes even inside the same block. A known empty `suggestedSessionID` with `currentCovered:false`
+means no completed usable installation has a renderer block at that location;
+bounds alone cannot establish coverage. Pages must agree on the complete coverage
+object as well as revision. The GPS loop queues suggestions only and never moves
+the canonical selection. The landing-page confirmation opens Saved Maps; selecting
+there remains a separate explicit authenticated action.
+
+`automatic` is a legacy policy value; the app no longer exposes its toggle.
+`automatic` is false while a manual **Use** journal is unsettled, because that
+journal already pins the manual choice. `selectedSessionID` names only the root
+the renderer acknowledged; after a failed library switch it keeps naming the
+renderer's previous live map.
+
+`boundsE7` is optional. `payloadBytes` sums installed manifest payloads, excluding
+archive framing and filesystem allocation overhead. Inventory is boot/connection
+scoped, bounded to 32 maps, and not persistent evidence of a completed new upload.
+Unknown, busy, malformed, duplicate-session, or future-schema inventory cannot
+authorize app-side reuse. Exact signed reuse matches map ID, manifest receipt,
+and signed manifest receipt. Version changes require installation.
+
+Library commands require the existing owner-authenticated BLE envelope. Callbacks
+only enqueue bounded work; the storage worker dispatches filesystem work through
+the internal operation owner. Commands wait for map/firmware transfer mode to
+exit and reject unresolved durable map operations with `library_operation_pending`,
+except that removal may proceed while a *different* map's upload is Receiving or
+Prepared (removal frees space for it); that upload's own map and any Accepted
+activation still block it. Selection retains the prior
+map, rechecks file checksums and reader contracts, and uses the existing canonical
+pointer/readback/recovery mechanism. The renderer must acknowledge the new root
+before `selectedSessionID` identifies it as in use. Selection does not issue or
+rewrite an upload operation's Installed receipt. Removal cannot delete selected,
+rollback, transaction, selection-anchor or live-renderer roots.
+
+A durable `PUT /map-transfer/sessions/<session>/install-stream` refused before it writes payload, such
+as `stream_sd_full` (507) or `stream_storage_unavailable` (503) for a fresh
+attempt, resolves its own Receiving operation as `failed` and returns that receipt
+beside the error: `{"ok":false,"error":{"code":"stream_sd_full","message":"..."},
+"operation":{...,"phase":"failed",...}}`. Interrupted uploads with durable progress
+stay resumable, except for a full card. Reinstalling a damaged copy of the same
+signed version returns 409 `stream_repair_requires_removal`; a protected root or a
+different version in the same slot returns 409 `stream_session_conflict`. Neither
+overwrites the existing copy.
+
+
+BLE library inventory is paginated in four-map pages inside the existing MSTS
+chunk stream. `offset` and `total` describe the immutable cached inventory at
+`revision`; HTTPS returns the complete inventory at offset zero. The app requests
+subsequent cached pages only after assembling the current one, and restarts at
+zero if a revision, selection, policy, count, or ordering changes. Duplicate
+sessions or malformed pages are rejected. A partial or connection-stale inventory
+cannot drive reuse or removal. This keeps a full SD library from exceeding the
+255-chunk status limit at reduced ATT MTUs.
+
+Library follow-up semantics: `library-select|session|receipt|requestID` and
+`library-remove|session|receipt|requestID` accept an optional 32-lowercase-hex client
+request ID. `mapLibrary.commandID` / `commandError` echo only explicit command
+results; coverage probes do not overwrite them. Pages must also agree on these
+fields. `available:false` keeps a completed version with damaged payload files
+visible for removal while disabling reuse. Busy rejections and owner failures
+publish a revision and the exact request result. BLE status requests received
+while a chunk stream is active schedule a fresh snapshot after it finishes.
+
+## Route elevation profiles (ELV1 v1)
+
+CAP2 extended feature word (TLV type `3`) bit `2` (`route_elevation_v1`)
+requires client version `32`, an owner-authenticated session, ATT MTU of at
+least 100 and the PSRAM session state. Firmware compiles the transport and the
+optional Elevation screen (screen type `6`, legacy mask bit `6`) only where
+`ROUTE_ELEVATION_SCREEN_ENABLED` is set: today the 1.75-inch development
+(`FIRMWARE_DIAGNOSTICS=1`) profiles. Production and 2.06-inch builds advertise
+neither bit `2` nor screen type `6`. The screen is default-off and follows Ride
+Stats in the cycle. Scoped Watch sessions are rejected. See
+[Route elevation](route-elevation-profile.md) for the profile contract.
+
+The phone owns retrieval, processing, statistics and route matching. Firmware
+stages, validates and atomically activates a compact display profile, places
+the marker from the phone's along-route progress and shows phone-computed
+values; it never derives ascent or grade itself.
+
+All fields are little endian. Frames use the protected navigation
+characteristic; every frame starts with `ELV1`, version `1` (u8) and an
+operation (u8).
+
+| Op | Bytes after header | Meaning |
+| --- | --- | --- |
+| 1 state | token:u32, revision:u16, state:u8, reason:u8 | `0` cleared (token/revision may be 0), `1` loading, `2` unavailable, `3` failed. A non-ready state replaces any active profile. Reasons: `0` unspecified, `1` phone offline, `2` source not permitted, `3` service unavailable, `4` quota exhausted, `5` no coverage, `6` transfer failed, `7` route too long |
+| 2 begin | token:u32, revision:u16, transfer:u16, bodyLength:u16, chunkCount:u8, reserved:u8=0, crc32:u32 | Starts staging; a new token/revision binding shows loading |
+| 3 chunk | transfer:u16, index:u8, bytes | Strictly ordered, contiguous body bytes |
+| 4 commit | transfer:u16 | Validates length, chunk count, CRC-32 (IEEE), body and binding, then activates |
+| 5 progress | token:u32, revision:u16, sequence:u16, progress:u32 m (`0xFFFFFFFF` unknown), flags:u8, reserved:u8=0, elevation:i16 m, grade:i16 0.1 %, ascentRemaining:u16 m | Ignored unless it matches the active profile; repeated sequence ignored; progress clamps to the route length. Flags: on route, elevation valid, elevation estimated, grade valid, grade estimated, remaining valid, remaining is a lower bound |
+
+The body is a 32-byte header — version `1`, flags (stats complete, includes
+estimated, partial, ambiguous structures, ascent valid, range valid), source
+(`1` GPX, `2` hosted terrain, `3` internal DEM), point count (2–192), token,
+revision, coverage (per mille), route length (m), total ascent and descent (m),
+minimum and maximum elevation (i16 m), estimated distance (per mille) and a
+reserved zero u16 — followed by 7-byte points: distance:u32 m (non-decreasing,
+within the route length), elevation:i16 m (`-32768` unknown, otherwise
+−500…9000) and flags (grade band in bits 0–2, estimated bit 3, structure level
+unknown bit 4, bridge or tunnel bit 5). The largest body is 1,376 bytes in at
+most 64 chunks. The phone sends at most 160 points: min/max per bucket keeps
+peaks, valleys and gap boundaries, while totals always come from the canonical
+profile.
+
+Each BEGIN and COMMIT returns a protected 16-byte `EAK1`: magic:4, version:u8,
+op:u8, result:u8 (`0` applied, `1` stale, `2` malformed, `3` CRC mismatch,
+`4` incomplete, `5` unsupported), reserved:u8, token:u32, revision:u16,
+transfer:u16. A malformed BEGIN or COMMIT is acknowledged so the phone stops
+waiting; an unknown frame version answers op `1` with `unsupported`. A staged
+transfer expires after 10 seconds.
+
+The iPhone sends a STATE or a complete BEGIN…COMMIT batch atomically, uses a
+fresh random token per route and BLE session, takes a new nonzero revision for
+every content change, waits up to 6 seconds for COMMIT, retries at most three
+times with a new transfer ID and then sends `failed`/`transfer failed`.
+Progress follows only after an applied COMMIT, at most once per second when it
+changes and every 15 seconds otherwise. Stopping navigation sends `cleared`.
+Disconnect, authentication changes and ownership reset clear the device state.
+
+`protocol/fixtures/route-elevation-v1/transfer-v1.txt` holds golden bodies,
+frames, progress, state and acknowledgement bytes; the Swift encoder and the
+C++ decoder are both checked against them.

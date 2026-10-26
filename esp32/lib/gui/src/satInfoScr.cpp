@@ -176,15 +176,15 @@ void satelliteScr(_lv_obj_t *screen)
         
   pdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(pdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(pdopLabel, "PDOP: %.1f", 0);
+  lv_label_set_text(pdopLabel, "PDOP: 0.0");
   
   hdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(hdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(hdopLabel, "HDOP: %.1f", 0);
+  lv_label_set_text(hdopLabel, "HDOP: 0.0");
   
   vdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(vdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(vdopLabel, "VDOP: %.1f", 0);
+  lv_label_set_text(vdopLabel, "VDOP: 0.0");
   
   altLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(altLabel, fontDefault, 0);
@@ -268,15 +268,15 @@ void satelliteScr(_lv_obj_t *screen)
         
   pdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(pdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(pdopLabel, "PDOP: %.1f", 0);
+  lv_label_set_text(pdopLabel, "PDOP: 0.0");
   
   hdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(hdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(hdopLabel, "HDOP: %.1f", 0);
+  lv_label_set_text(hdopLabel, "HDOP: 0.0");
   
   vdopLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(vdopLabel, fontDefault, 0);
-  lv_label_set_text_fmt(vdopLabel, "VDOP: %.1f", 0);
+  lv_label_set_text(vdopLabel, "VDOP: 0.0");
   
   altLabel = lv_label_create(infoGrid);
   lv_obj_set_style_text_font(altLabel, fontDefault, 0);

@@ -6,6 +6,19 @@ struct SocialHubView: View {
     @ObservedObject var store: SocialCoordinator
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     var offersProfileSetup = true
+
+    var body: some View {
+        SocialHubContent(store: store, routeLibrary: routeLibrary, offersProfileSetup: offersProfileSetup)
+            .id(store.session.generation)
+    }
+}
+
+/// Retire navigation destinations and ephemeral profile/route state together
+/// when the authenticated account changes.
+private struct SocialHubContent: View {
+    @ObservedObject var store: SocialCoordinator
+    @ObservedObject var routeLibrary: PhoneRouteLibrary
+    var offersProfileSetup = true
     @State private var username = ""
     @State private var found: SocialProfile?
     @State private var joinCode = ""
@@ -61,7 +74,7 @@ struct SocialHubView: View {
                 if store.live.ride == nil && !store.rides.isEmpty {
                     Section("My Group Rides") {
                         ForEach(store.rides.filter { $0.id != store.live.ride?.id }) { ride in
-                            Button(ride.title) { perform { try await store.live.select(ride, shareOnJoin: true) } }
+                            Button(ride.title) { perform { try await store.live.select(ride) } }
                         }
                     }
                 }
@@ -78,6 +91,9 @@ struct SocialHubView: View {
                                         if let username = friend.username, !username.isEmpty {
                                             Text("@\(username)").font(.caption).foregroundStyle(.secondary)
                                         }
+                                        if store.friendLive.pendingIDs.contains(friend.id) {
+                                            Text("Waiting to resume sharing").font(.caption).foregroundStyle(.secondary)
+                                        }
                                     }
                                 }
                             }
@@ -86,7 +102,14 @@ struct SocialHubView: View {
                                 set: { enabled in setFriendSharing(enabled, with: friend.id) }
                             ))
                             .labelsHidden()
-                            .disabled(!store.capabilities.friendSharing || store.friendLive.busyIDs.contains(friend.id))
+                            .disabled((!store.capabilities.friendSharing && !store.friendLive.sharingIDs.contains(friend.id))
+                                      || store.friendLive.busyIDs.contains(friend.id))
+                        }
+                    }
+                    if !store.friendLive.pendingIDs.isEmpty {
+                        Text("Waiting to resume sharing").foregroundStyle(.secondary)
+                        Button("Stop all friend sharing") {
+                            perform { try await store.friendLive.stopSharingWithAll() }
                         }
                     }
                     SocialRiderSearchRow(username: $username, search: searchForRider)
@@ -97,8 +120,8 @@ struct SocialHubView: View {
                 } header: {
                     Text("Friends")
                 } footer: {
-                    Text(store.capabilities.friendSharing
-                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. They choose whether to share back. Turn off, remove or block to stop."
+                    Text((store.capabilities.friendSharing || !store.friendLive.sharingIDs.isEmpty)
+                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. Sharing resumes when you reopen this app, for the time remaining. They choose whether to share back. Turn off, remove or block to stop."
                          : "Live sharing with individual friends is not available on this server yet.")
                     if let error = store.friendLive.error { Text(error).foregroundStyle(.red) }
                 }
@@ -186,9 +209,13 @@ struct SocialHubView: View {
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
         busy = true; store.error = nil
+        let generation = store.session.generation
         Task { @MainActor in
             defer { busy = false }
-            do { try await work() } catch SocialFailure.cancelled { } catch { store.error = error.localizedDescription }
+            guard generation == store.session.generation else { return }
+            do { try await work() } catch SocialFailure.cancelled { } catch {
+                if generation == store.session.generation { store.error = error.localizedDescription }
+            }
         }
     }
 
@@ -369,6 +396,10 @@ private struct SocialLiveControls: View {
             Text("\(ride.members.count) \(ride.members.count == 1 ? "rider" : "riders")")
             if store.live.isSharing {
                 Button("Stop sharing", role: .destructive) { Task { await store.live.stopSharing() } }
+            } else {
+                Button("Share live location and ride stats") { run { try await store.live.startSharing(stats: true) } }
+                Text("Share your live location, speed, distance and times with this group for up to 4 hours.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Button("Save shared route") { run { try store.saveRideRoute(ride, to: routeLibrary) } }
             if let mapAction {

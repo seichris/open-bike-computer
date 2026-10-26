@@ -29,6 +29,7 @@ public:
                     MapStreamStatusCallback onStatus = {},
                     std::string operationID = {});
 
+  void setFreeSpaceProbe(MapStreamFreeSpaceProbe probe) { installer_.setFreeSpaceProbe(std::move(probe)); }
   bool feed(const uint8_t *data, size_t size);
   bool readyToFinish() const;
   MapStreamReceiveResult abort();

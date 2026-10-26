@@ -82,7 +82,7 @@ final class BicinoServiceSession {
             serverURLString: serverURLString,
             defaults: defaults
         )
-        let isManaged = OfflineMapServerIdentity.isManaged(
+        let isManaged = requiresAppAttest(
             baseURL.absoluteString
         )
         return OfflineMapPlatformClient(
@@ -187,11 +187,29 @@ final class BicinoServiceSession {
         return url
     }
 
+    private func requiresAppAttest(_ origin: String) -> Bool {
+        if OfflineMapServerIdentity.isManaged(origin) { return true }
+#if DEBUG
+        guard OfflineMapServiceConfig.defaultServerURLString ==
+                OfflineMapServiceConfig.developmentServerURLString else {
+            return false
+        }
+        return OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
+            origin,
+            configuredOrigin: defaults.string(
+                forKey: OfflineMapServiceConfig.lanQualificationOriginDefaultsKey
+            )
+        )
+#else
+        return false
+#endif
+    }
+
     private func registerInstallation(
         client: OfflineMapPlatformClient,
         honorRefreshBackoff: Bool
     ) async throws -> OfflineMapPlatformClient {
-        if OfflineMapServerIdentity.isManaged(
+        if requiresAppAttest(
             client.baseURL.absoluteString
         ) {
             return try await registerManagedInstallation(

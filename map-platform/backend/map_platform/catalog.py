@@ -77,6 +77,12 @@ def renderer_features(job: MapJob) -> tuple[str, int, list[str]]:
         3: ["3d-buildings", "street-labels"],
         4: ["3d-buildings", "contours", "street-labels"],
     }
+    if format_version == 5:
+        from .map_pois import requested_poi_features
+        try:
+            return renderer, format_version, list(requested_poi_features(job.request))
+        except ValueError as exc:
+            raise CatalogPublicationError("ready POI map has invalid requested features") from exc
     try:
         features = features_by_format[format_version]
     except KeyError as exc:
@@ -267,7 +273,7 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
         artifact for artifact in artifact_values
         if artifact["format"] == TOPOGRAPHY_COMPANION_FORMAT
     ]
-    if format_version == 4:
+    if "contours" in features:
         if len(companions) != 1 or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt:
             raise CatalogPublicationError("topographic map requires one exact companion artifact")
     elif companions:

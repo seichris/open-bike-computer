@@ -74,6 +74,21 @@ int main() {
                 28);
   static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
                 (1UL << 30));
+  // Main's released route elevation owns extended bit 2/client 32; POIs use
+  // the next unassigned bit and client version.
+  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 33);
+  static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
+                (1UL << 3));
+  assert(!device_capabilities_protocol::supportsMapPois(30, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(31, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(32, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(33, false, true));
+  assert(!device_capabilities_protocol::supportsMapPois(33, true, false));
+  assert(device_capabilities_protocol::supportsMapPois(33, true, true));
+  static_assert((device_capabilities_protocol::MAP_POIS_FEATURE &
+                 (ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE |
+                  ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE |
+                  ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE)) == 0);
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
@@ -124,7 +139,9 @@ int main() {
       0, extendedPower, true, output, extendedSize - 1, screens, sizeof(screens), 1) == 0);
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE == 2);
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 31);
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 33);
   // The friend-marker size flag shares the extended word with group riders.
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
@@ -133,6 +150,14 @@ int main() {
   const uint8_t friendScaleGolden[] = {3, 4, 3, 0, 0, 0};
   for (size_t index = 0; index < sizeof(friendScaleGolden); ++index)
     assert(output[30 + index] == friendScaleGolden[index]);
+  // Route elevation is extended bit 2, independent of the first word's bit 2.
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE) == extendedSize);
+  const uint8_t routeElevationGolden[] = {3, 4, 4, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(routeElevationGolden); ++index)
+    assert(output[30 + index] == routeElevationGolden[index]);
+  assert(output[5] == 0 && output[6] == 0 && output[7] == 0 && output[8] == 0);
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));
@@ -216,6 +241,23 @@ int main() {
   assert(topographicContoursSize == sizeof(expectedTopographicContours));
   for (size_t index = 0; index < topographicContoursSize; ++index)
     assert(output[index] == expectedTopographicContours[index]);
+  const size_t mapPoisSize = device_capabilities_protocol::encodeCap2(
+      0, nullptr, false, output, sizeof(output), nullptr, 0,
+      device_capabilities_protocol::MAP_POIS_FEATURE);
+  const uint8_t expectedMapPois[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x00,
+      3, 4, 0x08, 0x00, 0x00, 0x00};
+  assert(mapPoisSize == sizeof(expectedMapPois));
+  for (size_t index = 0; index < mapPoisSize; ++index)
+    assert(output[index] == expectedMapPois[index]);
+  // Elevation and POIs are independent flags in the same extended word.
+  const size_t elevationAndPoisSize = device_capabilities_protocol::encodeCap2(
+      0, nullptr, false, output, sizeof(output), nullptr, 0,
+      ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE |
+          device_capabilities_protocol::MAP_POIS_FEATURE);
+  assert(elevationAndPoisSize == sizeof(expectedMapPois));
+  assert(output[11] == 0x0c && output[12] == 0 && output[13] == 0 &&
+         output[14] == 0);
   const size_t rideDiagnosticsSize = device_capabilities_protocol::encodeCap2(
       device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE, nullptr, false,
       output, sizeof(output));

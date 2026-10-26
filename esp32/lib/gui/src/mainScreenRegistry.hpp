@@ -2,7 +2,9 @@
 
 #include "mainScreenTypes.hpp"
 #include "../../ble_navigation/ride_ble_protocol.generated.hpp"
+#include "../../ble_navigation/map_profile_protocol.hpp"
 #include "../../world_radio/world_radio_config.hpp"
+#include "../../route_elevation/route_elevation_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -19,11 +21,22 @@ struct Descriptor {
   const char *debugName;
 };
 
-inline constexpr std::array<Descriptor, world_radio_config::ENABLED ? 6 : 5> SCREENS{{
+inline constexpr std::size_t SCREEN_COUNT =
+    5 + (world_radio_config::ENABLED ? 1 : 0) +
+    (route_elevation_config::ENABLED ? 1 : 0) +
+    (map_profile_protocol::POIS_RUNTIME_ENABLED ? 1 : 0);
+
+inline constexpr std::array<Descriptor, SCREEN_COUNT> SCREENS{{
     {MAP_GUIDANCE, DeviceScreenId::MapPlusNavigation, true,
      "map guidance"},
     {RIDESTATS, DeviceScreenId::RideStats, false, "ride telemetry"},
+#if ROUTE_ELEVATION_SCREEN_ENABLED
+    {ELEVATION, DeviceScreenId::Elevation, false, "elevation"},
+#endif
     {MAP, DeviceScreenId::Map, true, "map"},
+#if MAP_POIS_RUNTIME_ENABLED
+    {NEARBY, DeviceScreenId::Nearby, true, "nearby"},
+#endif
     {NAV, DeviceScreenId::Navigation, false, "navigation"},
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     {WORLD_RADIO, DeviceScreenId::WorldRadio, false, "world radio"},
@@ -44,6 +57,12 @@ constexpr uint8_t supportedMask() {
 }
 
 inline constexpr uint8_t SUPPORTED_MASK = supportedMask();
+// Extension screens are opt-in, matching DEVICE_SCREEN_DEFAULT_MASK.
+inline constexpr uint8_t DEFAULT_MASK = static_cast<uint8_t>(
+    SUPPORTED_MASK &
+    ~(screenBit(DeviceScreenId::WorldRadio) |
+      screenBit(DeviceScreenId::Elevation) |
+      screenBit(DeviceScreenId::Nearby)));
 
 constexpr const Descriptor *descriptorForTile(tileName tile) {
   for (const Descriptor &screen : SCREENS) {
@@ -84,7 +103,7 @@ constexpr tileName tileForDeviceScreen(uint8_t deviceScreen,
 
 constexpr uint8_t normalizedMask(uint8_t mask) {
   const uint8_t supported = static_cast<uint8_t>(mask & SUPPORTED_MASK);
-  return supported == 0 ? SUPPORTED_MASK : supported;
+  return supported == 0 ? DEFAULT_MASK : supported;
 }
 
 constexpr bool isEnabled(tileName tile, uint8_t enabledMask) {

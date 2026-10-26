@@ -173,6 +173,7 @@ public:
   bool storagePowerCycleRequired() const;
   bool canRetryRemovableSd() const;
   uint64_t removableSdFreeBytes() const;
+  bool tryRemovableSdFreeBytes(uint64_t &bytes) const;
   ride_diagnostics::transfer_policy::StoragePreparation
   prepareDiagnosticsStorage();
   bool ensureDiagnosticsSdMounted();

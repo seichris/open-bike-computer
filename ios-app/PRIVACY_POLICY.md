@@ -146,6 +146,31 @@ service. This installation-linked history is used to list and recover maps,
 keep downloads consistent across retries, and show their current status; it is
 not used to analyze how people use the app.
 
+### Route elevation
+
+Bicino shows an elevation profile for a route when it can. If an imported GPX
+route contains trustworthy elevation values, the app computes the profile on
+your iPhone from those values and sends nothing. Otherwise, for an imported GPX
+route or an Apple Maps route you select or navigate, the app sends that route's coordinates and a random request
+identifier to the Bicino service with your installation credential. The service
+samples points along the route and looks up their terrain heights with its
+terrain provider, Geoapify, or with elevation data hosted by the service.
+Geoapify receives only sample coordinates from our server, not your
+installation identifier or network address. The service does not store the
+route coordinates; it may keep the resulting profile, which contains distances
+and heights but no coordinates, in memory for up to 10 minutes so a retry does
+not repeat the lookup. To enforce daily limits it keeps a usage count keyed by a
+pseudonym of your installation identifier, deleted no later than 48 hours after
+the day it counts.
+
+Strava routes are never sent for elevation. A Strava route's own GPX elevation
+values may be used on your iPhone. A saved route keeps
+its profile and any GPX elevation values in a companion file on your iPhone,
+excluded from backups and deleted with the route. The phone sends a compact
+copy of the profile and your progress along the route to a connected bike
+computer that shows elevation; it is cleared when navigation stops or Bluetooth
+disconnects.
+
 ## Installation identifier and network protection
 
 The Bicino service creates a random installation identifier and a high-entropy
@@ -170,7 +195,8 @@ connected device and is not used for tracking.
 
 We do not share personal data with advertisers or data brokers. Information may
 be processed by infrastructure providers only as needed to operate requested
-functionality, such as building and delivering an offline map. Workout and
+functionality, such as building and delivering an offline map or looking up
+terrain heights for a route elevation profile. Workout and
 HealthKit information is not sent to those providers. We require service
 providers that process information for us to use it only on our instructions
 and to provide the same or equivalent privacy protection described in this

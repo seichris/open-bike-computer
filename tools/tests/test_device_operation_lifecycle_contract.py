@@ -15,14 +15,23 @@ class DeviceOperationLifecycleContractTests(unittest.TestCase):
         begin = MANAGER[MANAGER.index("private func beginOperation"):MANAGER.index("private static func authorizationDigest")]
         self.assertIn("bleManager.isNavigationReady", begin)
         self.assertIn("try await coordinator.recover(", begin)
+        self.assertIn("let deviceID = bleManager.connectedDeviceID", begin)
+        for field in ("deviceID: deviceID",
+                      "connectionEpoch: bleManager.transferConnectionEpoch",
+                      "status: { Self.recoveryStatus(bleManager) }",
+                      "requestStatus: { bleManager.requestDeviceTransferStatus() }"):
+            self.assertIn(field, begin)
+        self.assertLess(begin.index("let deviceID = bleManager.connectedDeviceID"),
+                        begin.index("coordinator.recover("))
+        status = MANAGER[MANAGER.index("private static func recoveryStatus("):MANAGER.index("private func ownsConnection(")]
         for field in ("deviceID: bleManager.connectedDeviceID",
                       "connectionEpoch: bleManager.transferConnectionEpoch",
+                      "ready: bleManager.isNavigationReady",
                       "revision: bleManager.deviceTransferStatusRevision",
                       "mode: bleManager.deviceTransferMode",
                       "Self.authorizationDigest($0)",
-                      "transferGeneration: bleManager.deviceTransferGeneration",
-                      "requestStatus: { bleManager.requestDeviceTransferStatus() }"):
-            self.assertIn(field, begin)
+                      "transferGeneration: bleManager.deviceTransferGeneration"):
+            self.assertIn(field, status)
         self.assertLess(begin.index("coordinator.recover("), begin.index("coordinator.acquire("))
         recovery = REGISTRY[REGISTRY.index("func recover("):REGISTRY.index("init(defaults:")]
         for fence in ("stored.deviceID == deviceID", "current.deviceID == deviceID",

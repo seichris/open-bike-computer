@@ -163,4 +163,19 @@ int main() {
   assert(!radioFailure.release());
   radioStopFails = false;
   assert(!radioFailure.start() && !radioFailure.release());
+  Owner mutexTimeout;
+  Owner::Command command; command.operation = Owner::Operation::Quiesce;
+  bool issued = true;
+  mutexFails = true;
+  assert(mutexTimeout.execute(command, reply, nullptr, nullptr, nullptr, 1, &issued) == ESP_ERR_TIMEOUT);
+  assert(!issued);
+  mutexFails = false;
+  for (bool replyTimeout : {false, true}) {
+    Owner pending;
+    assert(pending.start());
+    sendFails = !replyTimeout; receiveFails = replyTimeout; issued = false;
+    assert(pending.execute(command, reply, nullptr, nullptr, nullptr, 1, &issued) == ESP_ERR_TIMEOUT);
+    assert(issued == replyTimeout); // Queue rejection owns no callback; a late reply does.
+    sendFails = receiveFails = false;
+  }
 }

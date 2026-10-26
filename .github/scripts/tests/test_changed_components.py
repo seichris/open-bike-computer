@@ -99,6 +99,25 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
+    def test_unclassified_shared_inputs_stop_before_product_jobs(self):
+        for path in ('protocol/new-contract.json', 'tools/new-validator.py',
+                     '.github/workflows/new-validation.yml'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'explicit consumer mapping'):
+                changed_components.classify_paths([path])
+        for path in ('.github/scripts/tests/test_ci_scopes.py', 'tools/README.md'):
+            self.assertFalse(any(changed_components.classify_paths([path]).values()))
+
+    def test_known_shared_inputs_select_only_executable_consumers(self):
+        for path in ('tools/firmware_release_history.py', 'tools/verify_firmware_boot_acceptance.py'):
+            selection = changed_components.classify_paths([path])
+            self.assertEqual([c for c, enabled in selection.items() if enabled], ['firmware_host'])
+            self.assertFalse(changed_components.native_ios_required([path]))
+        path = 'protocol/fixtures/workout-zones-v1.json'
+        self.assertEqual([c for c, v in changed_components.classify_paths([path]).items() if v], ['ios'])
+        self.assertFalse(changed_components.native_ios_required([path]))
+        selection = changed_components.classify_paths(['tools/ride_stats_preview/emit_preview.cpp'])
+        self.assertEqual([c for c, v in selection.items() if v], ['firmware_build', 'firmware_host'])
+
     def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
             "esp32/tools/shared_firmware_cache.py", "esp32/tools/firmware_compile_cache.py",
@@ -127,7 +146,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native"}, set(selected))
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "firmware_host_checks", "firmware_renderer", "zone_contracts", "ios_native", "ios_checks", "ios_simulator", "ios_release", *changed_components.ci_scopes.MAP_SCOPES}, set(selected))
                 self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:
@@ -186,6 +205,19 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(selected["osm"])
         self.assertTrue(selected["map_backend"])
 
+    def test_source_shard_changes_require_native_poi_equivalence(self) -> None:
+        for path in (
+            "map-platform/backend/map_platform/source_shards.py",
+            "map-platform/backend/map_platform/__init__.py",
+            "map-platform/backend/tests/test_source_shards.py",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected["osm"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertFalse(selected["ios"])
+
     def test_shared_fmb_fixture_selects_every_consumer(self) -> None:
         selected = changed_components.classify_paths(
             ["tools/tests/fixtures/fmb/golden_blocks.txt"]
@@ -233,6 +265,25 @@ class ChangedComponentsTests(unittest.TestCase):
             },
             selected,
         )
+
+    def test_route_elevation_fixtures_select_every_consumer(self) -> None:
+        for path in (
+            "protocol/fixtures/route-elevation-v1/transfer-v1.txt",
+            "protocol/fixtures/route-elevation-v1/processing.json",
+            "protocol/fixtures/route-elevation-v1/service-response-v1.json",
+            "tools/generate_route_elevation_fixtures.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": True,
+                        "ios": True,
+                        "map_backend": True,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
 
     def test_contract_documents_select_their_consumers(self) -> None:
         firmware_contracts = (
@@ -370,12 +421,14 @@ class ChangedComponentsTests(unittest.TestCase):
             "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_175_PRODUCTION",
             "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
+            "WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION",
         )
         targets_206 = (
             "WAVESHARE_AMOLED_206",
             "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_206_PRODUCTION",
             "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
+            "WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION",
         )
 
         self.assertEqual(

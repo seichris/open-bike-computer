@@ -78,7 +78,8 @@ bool load(Record &record) {
 
 namespace firmware_update {
 esp_err_t DeviceOperationOwner::execute(const Command &command, Result &result,
-    const uint8_t *, const std::string *, const std::string *, TickType_t) {
+    const uint8_t *, const std::string *, const std::string *, TickType_t, bool *issued) {
+  if (issued) *issued = true;
   ++dispatches;
   // Queueing from the owner would self-deadlock; BLE reads must not queue
   // behind a long activation. Only the fake owner below changes stack context.

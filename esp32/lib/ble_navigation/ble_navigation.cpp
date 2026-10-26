@@ -11,6 +11,7 @@ extern Power power;
 
 #include "ble_navigation.hpp"
 #include "../utils/src/runtime_ownership.hpp"
+#include "../utils/src/startup_constructed.hpp"
 #include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -31,6 +32,7 @@ extern Power power;
 #include "deferred_notification_dispatch_policy.hpp"
 #include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
+#include "../map_transfer/map_renderer_status.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -40,6 +42,7 @@ extern Power power;
 #include "ride_delivery_protocol.hpp"
 #include "screen_configuration.hpp"
 #include "authenticated_workout_telemetry.hpp"
+#include "../route_elevation/route_elevation_runtime.hpp"
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 #include "../world_radio/world_radio_runtime.hpp"
 #endif
@@ -149,6 +152,7 @@ static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
 static std::atomic<bool> bleSessionSupportsGroupRiders{false};
+static std::atomic<bool> bleSessionSupportsRouteElevation{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -158,7 +162,10 @@ static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 // mutex.
 static std::atomic<uint32_t> rideDeliveryLeaseGenerationSnapshot{0};
 static std::atomic<uint32_t> ridePayloadGeneration{1};
-static ride_delivery_protocol::GroupTracker rideDeliveryTracker;
+static StartupConstructed<ride_delivery_protocol::GroupTracker>
+    rideDeliveryTrackerStorage;
+static ride_delivery_protocol::GroupTracker &rideDeliveryTracker =
+    rideDeliveryTrackerStorage.value;
 static portMUX_TYPE rideDeliveryTrackerMux = portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
 static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
@@ -178,6 +185,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static bool pendingMapTransferStatusRefresh = false;
 static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
@@ -249,8 +257,10 @@ struct DeferredNotification {
   uint16_t length = 0;
   uint8_t payload[kDeferredNotificationBytes] = {};
 };
-static DeferredNotification deferredNotifications[
-    kDeferredNotificationCapacity];
+static StartupConstructed<DeferredNotification[kDeferredNotificationCapacity]>
+    deferredNotificationsStorage;
+static DeferredNotification (&deferredNotifications)[
+    kDeferredNotificationCapacity] = deferredNotificationsStorage.value;
 static uint8_t deferredNotificationHead = 0;
 static uint8_t deferredNotificationTail = 0;
 static uint8_t deferredNotificationCount = 0;
@@ -297,7 +307,9 @@ static std::atomic<bool> diagnosticsSessionPreparationComplete{false};
 static ride_diagnostics::transfer_policy::StoragePreparation diagnosticsStorageResult{};
 static ride_diagnostics::transfer_policy::SealPreparation diagnosticsSealResult{};
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
-static DestinationCatalogSnapshot destinationCatalog;
+static StartupConstructed<DestinationCatalogSnapshot> destinationCatalogStorage;
+static DestinationCatalogSnapshot &destinationCatalog =
+    destinationCatalogStorage.value;
 static DestinationPickerStatusSnapshot destinationPickerStatus;
 static destination_picker_protocol::CatalogReassembler destinationCatalogReassembler;
 static StaticSemaphore_t destinationCatalogReassemblerMutexStorage;
@@ -340,7 +352,10 @@ static StaticSemaphore_t screenConfigurationMutexStorage;
 static SemaphoreHandle_t screenConfigurationMutex = nullptr;
 static screen_configuration_protocol::UploadReassembler
     screenConfigurationUpload;
-static PendingScreenConfigurationControl pendingScreenConfiguration;
+static StartupConstructed<PendingScreenConfigurationControl>
+    pendingScreenConfigurationStorage;
+static PendingScreenConfigurationControl &pendingScreenConfiguration =
+    pendingScreenConfigurationStorage.value;
 static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
 static std::atomic<bool> screenConfigurationSnapshotActive{false};
 static std::atomic<bool> screenConfigurationResetRequested{false};
@@ -834,18 +849,21 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
+  // Nearby is the highest raw screen type; Elevation precedes it.
+  static_assert(DEVICE_SCREEN_NEARBY > DEVICE_SCREEN_ELEVATION &&
+                DEVICE_SCREEN_NEARBY < 8, "screen bits must fit one byte");
+  return (screen <= DEVICE_SCREEN_NEARBY) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
   uint8_t mask = (uint8_t)rawMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
+  return mask == 0 ? DEVICE_SCREEN_DEFAULT_MASK : mask;
 }
 
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_NEARBY
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -863,8 +881,14 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
   }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NEARBY)) {
+    return DEVICE_SCREEN_NEARBY;
+  }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
     return DEVICE_SCREEN_WORLD_RADIO;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_ELEVATION)) {
+    return DEVICE_SCREEN_ELEVATION;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS)) {
     return DEVICE_SCREEN_BATTERY_STATUS;
@@ -1299,10 +1323,22 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
                     : advertisedAddress);
 }
 
+// Second member of an explicit navigation clear (docs/ble-protocol.md).
+static constexpr char kNavigationIdlePacket[] = "1|0|Navigation idle";
+
 /**
  * @brief Parse navigation instruction data
  */
 static void parseNavigationData(const std::string &data) {
+  // The idle maneuver ends guidance; it is not a live maneuver. Stored as one,
+  // every screen treated the rider as navigating and course-up Map +
+  // Navigation deferred each frame while stationary. Clearing here also makes
+  // the clear independent of when the route member reaches the UI task.
+  if (data == kNavigationIdlePacket) {
+    clearCurrentNavigationData();
+    return;
+  }
+
   // Format: "IconID|Distance|Instruction"
   int firstPipe = data.find('|');
   int secondPipe = data.find('|', firstPipe + 1);
@@ -1417,6 +1453,8 @@ static bool decodeSessionPayload(
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -2246,6 +2284,8 @@ static void handleAuthPayload(const std::string &frame) {
       clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
@@ -2291,6 +2331,8 @@ static void handleAuthPayload(const std::string &frame) {
                 clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
                 rideDeliveryLeaseGenerationSnapshot.store(
                     0, std::memory_order_release);
                 advanceRidePayloadGeneration();
@@ -2306,6 +2348,8 @@ static void handleAuthPayload(const std::string &frame) {
                 clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
@@ -2380,6 +2424,8 @@ static void handleAuthPayload(const std::string &frame) {
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -2799,11 +2845,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
         body +=
             "\"" + status_json::escape(activeMap.target.labelLanguages[index]) + "\"";
       }
-      body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion >= 2 &&
-                      mapView.debugStreetLabelFontHealthy()
-                  ? "true"
-                  : "false";
+      body += "]";
+      map_transfer::appendRendererLayerStatus(body, activeMap.target,
+          mapView.debugStreetLabelFontHealthy(), mapView.nearbyIndexHealthy());
       body += ",\"topographyProfileVersion\":" +
               std::to_string(activeMap.target.topographyProfileVersion) +
               ",\"topographyQualityMode\":\"" +
@@ -2820,7 +2864,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
               status_json::escape(
                   activeMap.target.topographySourcePolicySha256.substr(0, 12)) +
               "\",\"topographySectionHealthy\":";
-      body += activeMap.target.formatVersion == 4 &&
+      body += (activeMap.target.formatVersion == 4 ||
+               (activeMap.target.formatVersion == 5 &&
+                activeMap.target.contoursIncluded)) &&
                       activeMap.target.topographyProfileVersion == 1
                   ? "true"
                   : "false";
@@ -2848,7 +2894,10 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
 }
 
 static std::string mapTransferStatusJson() {
-  return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  auto body = composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  body.pop_back();
+  body += ",\"mapLibrary\":" + mapTransferHttp.mapLibraryJson(true) + "}";
+  return body;
 }
 
 static std::atomic<bool> diagnosticsLiveRequested{false};
@@ -3182,6 +3231,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   if (pendingMapTransferStatusChunks.active()) {
+    pendingMapTransferStatusRefresh = true;
     pumpPendingMapTransferStatusChunks();
     return;
   }
@@ -3232,6 +3282,7 @@ static void pumpPendingMapTransferStatusChunks() {
   if (!bleSessionAuthenticated ||
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
+    pendingMapTransferStatusRefresh = false;
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
@@ -3255,6 +3306,10 @@ static void pumpPendingMapTransferStatusChunks() {
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
+    if (pendingMapTransferStatusRefresh) {
+      pendingMapTransferStatusRefresh = false;
+      queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    }
   }
 }
 
@@ -4324,13 +4379,28 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     const bool supportsFriendMarkerScale = social_riders::ENABLED &&
         clientVersion >= ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION &&
         social_riders::ready();
-    const uint32_t extendedFeatureFlags =
+    // Profile chunks need room for the 22-byte protected envelope plus a
+    // useful payload; the PSRAM session must exist before advertising.
+    const bool supportsRouteElevation =
+        route_elevation_config::supportsClient(clientVersion) &&
+        activePeerMtu.load(std::memory_order_acquire) >= 100 &&
+        route_elevation_runtime::ready();
+    bleSessionSupportsRouteElevation.store(supportsRouteElevation, std::memory_order_release);
+    uint32_t extendedFeatureFlags =
         (supportsGroup ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0) |
         (supportsFriendMarkerScale
-             ? ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE : 0);
+             ? ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE : 0) |
+        (supportsRouteElevation
+             ? ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE : 0);
     if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
         ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
       featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
+    if (device_capabilities_protocol::supportsMapPois(
+            clientVersion, map_profile_protocol::POIS_RUNTIME_ENABLED,
+            (featureFlags & device_capabilities_protocol::
+                                SCREEN_CONFIGURATION_FEATURE) != 0)) {
+      extendedFeatureFlags |= device_capabilities_protocol::MAP_POIS_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -4651,6 +4721,38 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::DisableMap,
                          ble_transfer::NotifyMap);
     Serial.println("BLE Map Transfer: exit queued");
+    return;
+  }
+
+  if (command.compare(0, 13, "library-page|") == 0) {
+    const auto offset = command.substr(13);
+    if (!offset.empty() && offset.size() <= 2 &&
+        std::all_of(offset.begin(), offset.end(), [](char c) { return c >= '0' && c <= '9'; }))
+      (void)mapTransferHttp.requestMapLibraryPage(static_cast<size_t>(std::atoi(offset.c_str())));
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    return;
+  }
+
+  if (command == "library" || command == "library-auto" || command == "library-manual") {
+    const auto action = command == "library" ? "refresh" :
+        (command == "library-auto" ? "auto" : "manual");
+    if (!mapTransferHttp.requestMapLibrary(action))
+      mapTransferHttp.setLastError("library_busy", "map library is busy");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    return;
+  }
+  const auto first = command.find('|');
+  const auto second = first == std::string::npos ? std::string::npos : command.find('|', first + 1);
+  const auto third = second == std::string::npos ? std::string::npos : command.find('|', second + 1);
+  if (second != std::string::npos && (third == std::string::npos || command.find('|', third + 1) == std::string::npos) &&
+      (command.substr(0, first) == "library-select" || command.substr(0, first) == "library-remove")) {
+    const auto action = command.substr(0, first) == "library-select" ? "select" : "remove";
+    if (!mapTransferHttp.requestMapLibrary(action,
+        command.substr(first + 1, second - first - 1),
+        command.substr(second + 1, third == std::string::npos ? std::string::npos : third - second - 1),
+        third == std::string::npos ? "" : command.substr(third + 1)))
+      mapTransferHttp.setLastError("library_busy", "map library command was not accepted");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
     return;
   }
 
@@ -5988,6 +6090,8 @@ public:
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
@@ -6145,6 +6249,8 @@ public:
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -6240,12 +6346,11 @@ public:
       return;
     }
     if (hasDeliveryMember) {
-      static constexpr char kNavigationIdle[] = "1|0|Navigation idle";
       if (deliveryMember.memberCount != 2 ||
           deliveryMember.memberIndex != 1 ||
-          deliveryMember.payloadLength != sizeof(kNavigationIdle) - 1 ||
-          std::memcmp(deliveryMember.payload, kNavigationIdle,
-                      sizeof(kNavigationIdle) - 1) != 0) {
+          deliveryMember.payloadLength != sizeof(kNavigationIdlePacket) - 1 ||
+          std::memcmp(deliveryMember.payload, kNavigationIdlePacket,
+                      sizeof(kNavigationIdlePacket) - 1) != 0) {
         noteRideDeliveryMember(
             deliveryMember, ride_delivery_protocol::Result::Malformed,
             deliveryLeaseGeneration);
@@ -6293,6 +6398,27 @@ public:
       return;
     }
 #endif
+
+    if (route_elevation_protocol::hasFrameMagic(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      // Builds without the Elevation screen never advertise the capability
+      // and drop ELV1 frames here, before any other parser sees them.
+      if constexpr (route_elevation_config::ENABLED) {
+        // Owner-only: scoped Watch sessions are default-denied above and
+        // never relay elevation profiles.
+        if (scopedWatchSession || !requireAuthenticated("route elevation") ||
+            !bleSessionSupportsRouteElevation.load(std::memory_order_acquire)) return;
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+        route_elevation_runtime::ingest(reinterpret_cast<const uint8_t *>(value.data()),
+                                        value.size(), millis());
+        std::array<uint8_t, route_elevation_protocol::ACK_BYTES> acknowledgement{};
+        while (route_elevation_runtime::takeAcknowledgement(acknowledgement)) {
+          notifyAuthenticatedNavigation(pChar, acknowledgement.data(), acknowledgement.size());
+        }
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+      return;
+    }
 
     if (value.size() >= 4 && std::memcmp(value.data(), "GRUP", 4) == 0) {
       if (scopedWatchSession || !requireAuthenticated("group riders") ||
@@ -7483,6 +7609,11 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 #endif
 }
 
+bool BLENavigationServer::routeElevationSessionActive() const {
+  return route_elevation_config::ENABLED && connected && bleSessionAuthenticated &&
+         bleSessionSupportsRouteElevation.load(std::memory_order_acquire);
+}
+
 bool BLENavigationServer::canRequestWorldRadio() const {
 #if !defined(FIRMWARE_DIAGNOSTICS) || !FIRMWARE_DIAGNOSTICS
   return false;
@@ -7581,6 +7712,8 @@ bool BLENavigationServer::forgetOwner() {
   clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.authenticated = false;
   });

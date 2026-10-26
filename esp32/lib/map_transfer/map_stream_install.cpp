@@ -1,4 +1,5 @@
 #include "map_stream_install.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
@@ -271,12 +272,10 @@ bool readText(const std::string &path, std::string &value,
   uint64_t bytes = 0;
   if (!regularFileSize(path, bytes) || bytes > maximumBytes)
     return false;
-  struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
-  std::unique_ptr<FILE, FileCloser> input(std::fopen(path.c_str(), "rb"));
-  if (!input) return false;
-  value.resize(static_cast<size_t>(bytes));
-  const size_t read = bytes == 0 ? 0 : std::fread(&value[0], 1, value.size(), input.get());
-  return read == bytes && std::fgetc(input.get()) == EOF && !std::ferror(input.get());
+  MapReadFile input(path);
+  if (!input)
+    return false;
+  return input.readAll(value, static_cast<size_t>(bytes));
 }
 
 std::string jsonEscape(const std::string &value) {
@@ -667,6 +666,17 @@ bool MapStreamInstallSession::onManifest(
   canonicalManifest_ = canonicalManifest;
   checkpointAtMilliseconds_ = now_();
   const bool prepared = prepareRoot(manifest, canonicalManifest);
+  if (prepared && freeSpaceProbe_) {
+    // FAT allocation slack plus metadata/checkpoints. Verified resumed files
+    // need no second payload allocation. This runs before the first file callback.
+    const uint64_t remainingFiles = status_.totalFiles - status_.durableFilePrefix;
+    const uint64_t required = status_.totalPayloadBytes - status_.completedPayloadBytes +
+        remainingFiles * 65536ULL + (remainingFiles ? 1048576ULL : 65536ULL);
+    const auto available = freeSpaceProbe_();
+    if (!available) return fail("stream_storage_unavailable", "SD storage is busy or unavailable; try again shortly");
+    if (*available < required)
+      return fail("stream_sd_full", "remove a map from Maps on this Bike Computer before installing another");
+  }
   publishStatus();
   return prepared;
 }
@@ -887,17 +897,47 @@ bool MapStreamInstallSession::prepareRoot(
   if (status_.state == MapStreamInstallState::Failed)
     return false;
   if (!resumed) {
+    // Selected and rollback content is never rewritten, damaged or not.
     std::string active;
     const std::string activePath =
         joinPath(storageRoot_, "/VECTMAP/active-map.json");
     for (const std::string &candidate : {activePath, activePath + ".bak"}) {
-      if (storage_->readText(candidate, active, 2048) &&
+      // Same 4 KiB limit as the installer's pointer reader and writer.
+      if (storage_->readText(candidate, active, 4096) &&
           (jsonString(active, "root") == inactiveRootRelative() ||
            jsonString(active, "previousRoot") == inactiveRootRelative())) {
         return fail("stream_session_conflict",
                     "cannot replace an active or rollback map root in place");
       }
     }
+    std::string consumed;
+    for (const char *name : {".activation-consumed", ".activation-consumed.bak"}) {
+      if (!storage_->readText(joinPath(inactiveRoot(), name), consumed, 2048))
+        continue;
+      // The same signed version failed byte validation above, so its SD copy is
+      // damaged. Repair goes through explicit, protection-checked removal; the
+      // installer never deletes a completed version as an upload side effect.
+      if (jsonString(consumed, "sessionId") == sessionId_ &&
+          jsonString(consumed, "mapId") == status_.mapId &&
+          jsonString(consumed, "manifestReceipt") == manifest.manifestReceipt &&
+          jsonString(consumed, "signedManifestReceipt") == manifest.signedManifestReceipt)
+        return fail("stream_repair_requires_removal",
+                    "this map's SD copy is damaged; remove it in Maps on this Bike Computer, then install it again");
+      return fail("stream_session_conflict", "completed map versions cannot be replaced in place");
+    }
+    uint64_t completedBytes = 0;
+    if (storage_->regularFileSize(joinPath(inactiveRoot(), ".activation-consumed"), completedBytes) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), ".activation-consumed.bak"), completedBytes))
+      return fail("stream_session_conflict", "completed map versions cannot be replaced in place");
+    // A legacy archive receipt is installation evidence. Signed streams also
+    // write this file before activation, so their unconsumed staging is repairable.
+    uint64_t ignored = 0;
+    const bool signedStaging = storage_->regularFileSize(joinPath(inactiveRoot(), kReadyFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), std::string(kReadyFile) + ".bak"), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), kCheckpointFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), ".operation-prepared"), ignored);
+    if (!signedStaging && storage_->regularFileSize(joinPath(inactiveRoot(), kManifestReceiptFile), ignored))
+      return fail("stream_session_conflict", "completed archive versions cannot be replaced in place");
     if (!storage_->removeTree(inactiveRoot()) ||
         !storage_->createDirectories(inactiveRoot()))
       return fail("stream_root_prepare", "could not prepare inactive map root");

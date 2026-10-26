@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "../maps/src/mapNearbyCoverage.hpp"
+
 namespace map_transfer {
 
 struct ManifestFile {
@@ -20,6 +22,7 @@ struct MapPresentationMetadata {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
 };
 
 struct MapPresentationRevision {
@@ -34,6 +37,7 @@ struct MapManifest {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::string renderer;
   uint32_t formatVersion = 0;
   uint32_t labelProfileVersion = 0;
@@ -43,6 +47,12 @@ struct MapManifest {
   uint32_t topographyProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  std::vector<std::string> requestedFeatures;
+  bool contoursIncluded = false;
+  uint32_t poiRecordCount = 0;
+  uint32_t poiCategoryCounts[5] = {0, 0, 0, 0, 0};
   uint32_t contourRecordCount = 0;
   uint32_t contourPointCount = 0;
   uint32_t contourMinorIntervalM = 0;
@@ -79,6 +89,11 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  uint32_t poiRecordCount = 0;
+  bool contoursIncluded = false;
+  std::string poiIndexSha256;
   uint32_t topographyProfileVersion = 0;
   std::string topographyQualityMode;
   uint32_t contourMinorIntervalM = 0;
@@ -113,6 +128,21 @@ struct ReadyStreamMap {
   uint32_t fileCount = 0;
   uint64_t payloadBytes = 0;
 };
+
+// A completed installation, independently of the current renderer selection.
+// The bound keeps authenticated BLE inventory snapshots below the chunk limit.
+constexpr size_t kMaximumLibraryMaps = 32;
+struct InstalledMap {
+  std::string sessionId, mapId, root, manifestReceipt, signedManifestReceipt;
+  MapPresentationMetadata presentation;
+  uint64_t payloadBytes = 0;
+  bool available = true;
+  bool contains(int32_t latitudeE7, int32_t longitudeE7) const;
+};
+uint64_t libraryPositionBlockKey(int32_t latitudeE7, int32_t longitudeE7);
+const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
+    const std::string &currentRoot, int32_t latitudeE7, int32_t longitudeE7,
+    const std::vector<std::string> &rejectedSessions = {});
 
 class Sha256Hasher {
 public:
@@ -236,6 +266,26 @@ public:
       const ActiveMapSelection &selection,
       MapPresentationRevision &revision) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  InstallStatus readInstalledMap(const std::string &sessionId, InstalledMap &map, bool requirePayload = true) const;
+  InstallStatus readMapLibrary(std::vector<InstalledMap> &maps) const;
+  bool mapRootHasBlock(const std::string &root, int32_t latitudeE7, int32_t longitudeE7) const;
+  bool installedMapCovers(const InstalledMap &map, int32_t latitudeE7, int32_t longitudeE7) const;
+  InstallStatus selectInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  InstallStatus removeInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  bool automaticMapSelection() const;
+  bool setAutomaticMapSelection(bool enabled) const;
+  // A manual Use journals its exact target before the canonical pointer moves.
+  // Reconciliation pins manual selection only when that pointer survived
+  // (renderer rollback/recovery included); otherwise the journal is dropped and
+  // the previous automatic/manual policy remains untouched.
+  bool writeManualSelectionIntent(const std::string &sessionId,
+                                  const std::string &root,
+                                  const std::string &receipt) const;
+  bool manualSelectionIntentPending() const;
+  bool discardManualSelectionIntent() const;
+  InstallStatus reconcileManualSelectionIntent() const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(
       const std::string &sessionId) const;
@@ -275,6 +325,12 @@ private:
   __attribute__((noinline)) InstallStatus resolvePendingStreamActivation(
       std::string &sessionId) const;
   __attribute__((noinline)) InstallStatus recoverActiveSelection() const;
+  __attribute__((noinline)) InstallStatus recoverTerminalSelection() const;
+  __attribute__((noinline)) InstallStatus dispatchActivationRecovery(const std::string &transaction) const;
+  bool journalNeedsOwner(const std::string &transaction) const;
+  bool journalVersionsNeedOwner() const;
+  bool quarantineTransaction(const std::string &path, const std::string &bytes,
+                             const std::string &operationID) const;
   bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
   InstallStatus readStreamMapMetadata(const std::string &sessionId,
                                       ReadyStreamMap &ready, bool prepared) const;
@@ -328,6 +384,7 @@ private:
       const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;
   bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
+  bool restoreRetainedLibraryVersion(const std::string &sessionId) const;
   bool rollbackRootMatches(const std::string &root, const std::string &mapId,
                            const std::string &manifestReceipt,
                            const std::string &signedManifestReceipt) const;

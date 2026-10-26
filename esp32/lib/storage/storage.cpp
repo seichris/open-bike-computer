@@ -333,23 +333,30 @@ bool Storage::canRetryRemovableSd() const {
 }
 
 uint64_t Storage::removableSdFreeBytes() const {
+  uint64_t bytes = 0;
+  return tryRemovableSdFreeBytes(bytes) ? bytes : 0;
+}
+
+bool Storage::tryRemovableSdFreeBytes(uint64_t &bytes) const {
+  bytes = 0;
   storage_shutdown::OperationLease operation(streamAdmission_);
-  if (!operation.held()) return 0;
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (!isSdLoaded.load())
-    return 0;
+    return false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
   const StorageBackend activeBackend = mountedBackend.load();
   const uint64_t total = removableTotalBytes(activeBackend);
   const uint64_t used = removableUsedBytes(activeBackend);
-  return total > used ? total - used : 0;
+  bytes = total > used ? total - used : 0;
 #else
   // Persistent diagnostics is enabled only on the Waveshare targets. Other
   // legacy storage backends do not expose a portable free-space query here.
-  return UINT64_MAX;
+  bytes = UINT64_MAX;
 #endif
+  return true;
 }
 
 StoragePreparation Storage::prepareDiagnosticsStorage() {

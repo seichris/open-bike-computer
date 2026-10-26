@@ -15,6 +15,7 @@
 #include "ride_stats_widget.hpp"
 #include "mainScr.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
+#include "../../utils/src/startup_constructed.hpp"
 
 #include <array>
 #include <cstdio>
@@ -72,9 +73,11 @@ int8_t displayedMetricLayout = -1;
 bool rideStartWorkoutRequestPending = false;
 uint32_t rideStartWorkoutRequestStartedAtMs = 0;
 constexpr uint32_t START_WORKOUT_REQUEST_TIMEOUT_MS = 20000;
-std::array<ConfigurableSlotView,
-           screen_configuration_protocol::RIDE_STATS_SLOT_COUNT>
-    configurableSlots{};
+using ConfigurableSlotViews =
+    std::array<ConfigurableSlotView,
+               screen_configuration_protocol::RIDE_STATS_SLOT_COUNT>;
+StartupConstructed<ConfigurableSlotViews> configurableSlotsStorage;
+ConfigurableSlotViews &configurableSlots = configurableSlotsStorage.value;
 
 ride_metric_typography::Role metricFontRole() {
   return ride_telemetry_layout::useLargeMetricValueFont(rideLayout.screenWidth)

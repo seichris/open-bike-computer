@@ -29,6 +29,9 @@ struct NavigationSnapshotV1: Equatable {
     let offRouteDistanceMeters: Double?
     let mode: NavigationModeV1
     let routeWindow: Data
+    /// Monotonic progress along `route.points` (unscaled haversine metres), the
+    /// axis of a route elevation profile for the same geometry.
+    var distanceAlongGeometryMeters: Double? = nil
 }
 
 enum NavigationRuntimeError: Error, Equatable {
@@ -185,7 +188,8 @@ struct NavigationRuntimeV1 {
                 expectedArrival: snapshot.expectedArrival,
                 offRouteDistanceMeters: snapshot.offRouteDistanceMeters,
                 mode: mode,
-                routeWindow: snapshot.routeWindow
+                routeWindow: snapshot.routeWindow,
+                distanceAlongGeometryMeters: snapshot.distanceAlongGeometryMeters
             )
         }
     }
@@ -331,7 +335,8 @@ struct NavigationRuntimeV1 {
                 ? selectedProjection.crossTrackDistanceMeters
                 : nil,
             mode: mode,
-            routeWindow: window
+            routeWindow: window,
+            distanceAlongGeometryMeters: distanceAlongGeometry
         )
         snapshot = next
         lastProcessedSample = sample
