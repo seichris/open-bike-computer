@@ -361,6 +361,8 @@ def promote_catalog_map(
                                 ["3d-buildings", "contours", "street-labels"])
         ):
             raise CatalogPromotionError("promotion map metadata does not match its ZIP")
+        # Production promotion supports renderer targets 1-4 only; target-5 POI
+        # maps stay behind their production rollout gate.
         expected_features = {
             1: [],
             2: ["street-labels"],
@@ -369,6 +371,13 @@ def promote_catalog_map(
         }.get(format_version)
         if expected_features is None or features != expected_features:
             raise CatalogPromotionError("promotion renderer features are unsupported")
+        # The declared contours layer and the signed manifest's topography must
+        # agree; that layer alone decides whether a companion is required.
+        contour_layer = "contours" in features
+        if contour_layer != isinstance(manifest.get("topography"), dict):
+            raise CatalogPromotionError("promotion contour layer does not match its ZIP")
+        if not contour_layer and grant.get("companion") is not None:
+            raise CatalogPromotionError("promotion companion has no contour layer")
         canonical_content_receipt = manifest_receipt(
             canonical_stream_manifest_bytes(manifest)
         )
@@ -406,7 +415,7 @@ def promote_catalog_map(
             format_version,
         )
         production_companion: ArtifactRecord | None = None
-        if format_version == 4:
+        if contour_layer:
             companion_grant = grant.get("companion")
             topo = manifest.get("topography")
             if not isinstance(companion_grant, dict) or not isinstance(topo, dict):

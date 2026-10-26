@@ -273,8 +273,14 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
         artifact for artifact in artifact_values
         if artifact["format"] == TOPOGRAPHY_COMPANION_FORMAT
     ]
+    # The declared contours layer, never the renderer version, requires the
+    # iPhone companion; a contour-free map must not carry one.
     if "contours" in features:
-        if len(companions) != 1 or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt:
+        if (
+            len(companions) != 1
+            or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt
+            or companions[0]["filename"] != f"{job.map_id}.btopo"
+        ):
             raise CatalogPublicationError("topographic map requires one exact companion artifact")
     elif companions:
         raise CatalogPublicationError("non-topographic map contains a companion artifact")

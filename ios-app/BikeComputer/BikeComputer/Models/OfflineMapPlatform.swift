@@ -1604,6 +1604,9 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     let files: [File]?
     let bounds: [Double]?
     let boundsE7: [Int]?
+    /// A manifest carries `topography` exactly when it declares contours,
+    /// independent of renderer version.
+    let declaresContours: Bool
 
     var previewBounds: OfflineMapPreviewBounds? {
         if let bounds, let decoded = OfflineMapPreviewBounds(coordinates: bounds) {
@@ -1624,6 +1627,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case files
         case bounds
         case boundsE7
+        case topography
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -1636,6 +1640,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         files = try container.decodeIfPresent([File].self, forKey: .files)
         bounds = try? container.decode([Double].self, forKey: .bounds)
         boundsE7 = try? container.decode([Int].self, forKey: .boundsE7)
+        declaresContours = container.contains(.topography)
     }
 }
 

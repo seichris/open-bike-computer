@@ -156,9 +156,11 @@ nonisolated enum SavedTopographyCompanionStorage {
 }
 
 /// Crash-safe two-file replacement for a companion and its external binding.
-/// The journal is committed only after both new files and the directory have
-/// been synchronized. Recovery therefore keeps either the old pair or the new
-/// pair, never a newly trusted database with an old association.
+/// The saved map pair it decorates is the commit point: the journal stays
+/// uncommitted until that map commits, and recovery keeps the new companion
+/// only when the saved map is the exact stream it is bound to. Recovery
+/// therefore keeps either the old pair or the new pair, never a newly trusted
+/// database with an old association or a companion for a rolled-back map.
 nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
     static let suffix = ".topography-replacement.json"
 
@@ -167,6 +169,11 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
     let hadArtifact: Bool
     let hadAssociation: Bool
     var committed: Bool
+    /// The saved map file and exact stream this replacement belongs to.
+    var mapArtifactFilename: String? = nil
+    var streamArtifactSHA256: String? = nil
+    /// Set once the new companion and association are both synchronized.
+    var staged: Bool? = nil
 
     func artifact(in directory: URL) -> URL {
         directory.appendingPathComponent(filename)
@@ -193,7 +200,11 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
         try Self.sync(directory)
     }
 
-    static func begin(at destination: URL) throws -> Self {
+    static func begin(
+        at destination: URL,
+        mapArtifactFilename: String? = nil,
+        streamArtifactSHA256: String? = nil
+    ) throws -> Self {
         guard destination.pathExtension == "btopo",
               destination.lastPathComponent == URL(
                 fileURLWithPath: destination.lastPathComponent
@@ -209,7 +220,9 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                 atPath: SavedTopographyCompanionStorage
                     .associationURL(for: destination).path
             ),
-            committed: false
+            committed: false,
+            mapArtifactFilename: mapArtifactFilename,
+            streamArtifactSHA256: streamArtifactSHA256
         )
         try value.save(in: destination.deletingLastPathComponent())
         return value
@@ -246,7 +259,12 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
         try Self.sync(directory)
     }
 
-    static func recover(in directory: URL) throws {
+    /// `savedStreamSHA256` returns the exact stream of a saved map file after
+    /// that map's own replacement journal has been recovered.
+    static func recover(
+        in directory: URL,
+        savedStreamSHA256: (String) -> String? = { _ in nil }
+    ) throws {
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
@@ -261,7 +279,7 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                   (values.fileSize ?? Int.max) <= 4096 else {
                 throw POSIXError(.EINVAL)
             }
-            let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+            var value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
             guard value.filename.hasPrefix("topography-"),
                   value.filename.hasSuffix(".btopo"),
                   !value.filename.contains("/"),
@@ -273,6 +291,13 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                   ) == value.filename,
                   value.url(in: directory).standardizedFileURL == file.standardizedFileURL else {
                 throw POSIXError(.EINVAL)
+            }
+            if !value.committed, value.staged == true,
+               let mapArtifactFilename = value.mapArtifactFilename,
+               let streamArtifactSHA256 = value.streamArtifactSHA256,
+               savedStreamSHA256(mapArtifactFilename) == streamArtifactSHA256 {
+                // The map pair committed before the process stopped.
+                value.committed = true
             }
             try value.finish(in: directory)
         }

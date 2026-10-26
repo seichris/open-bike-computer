@@ -458,6 +458,42 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
 
     @unittest.skipIf(
         os.environ.get("MAP_PLATFORM_PINNED_PROMOTION_COMPAT") == "1",
+        "the pinned production converter predates layer-driven companions",
+    )
+    def test_promotion_companion_follows_the_signed_contour_layer(self):
+        receipt = "4" * 64
+
+        def promotion(format_version, features, manifest_topography):
+            manifest = self.manifest()
+            manifest["target"]["formatVersion"] = format_version
+            if manifest_topography:
+                manifest["topography"] = {"intermediateSha256": "5" * 64}
+            grant = self.grant(content_receipt=receipt, entry_id="map_v1_" + "M" * 43)
+            grant["map"]["rendererFormatVersion"] = format_version
+            grant["map"]["features"] = features
+            return grant, manifest
+
+        topographic = ["3d-buildings", "contours", "street-labels"]
+        grant, manifest = promotion(4, topographic, manifest_topography=False)
+        with self.assertRaisesRegex(CatalogPromotionError, "contour layer does not match"):
+            self.promote_until_identity_validation(grant, manifest)
+        grant, manifest = promotion(3, ["3d-buildings", "street-labels"], manifest_topography=True)
+        with self.assertRaisesRegex(CatalogPromotionError, "contour layer does not match"):
+            self.promote_until_identity_validation(grant, manifest)
+        grant, manifest = promotion(1, [], manifest_topography=False)
+        grant["companion"] = {"artifact": {}, "downloadURL": "https://maps-share.8o.vc/x"}
+        with self.assertRaisesRegex(CatalogPromotionError, "companion has no contour layer"):
+            self.promote_until_identity_validation(grant, manifest)
+        # Combined POI maps stay behind the production POI rollout gate.
+        grant, manifest = promotion(
+            5, ["3d-buildings", "contours", "map-pois", "street-labels"],
+            manifest_topography=True,
+        )
+        with self.assertRaisesRegex(CatalogPromotionError, "does not match its ZIP"):
+            self.promote_until_identity_validation(grant, manifest)
+
+    @unittest.skipIf(
+        os.environ.get("MAP_PLATFORM_PINNED_PROMOTION_COMPAT") == "1",
         "the pinned production converter predates topographic companions",
     )
     def test_topographic_promotion_publishes_signed_stream_and_bound_companion(self):

@@ -1595,7 +1595,108 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var catalogSyncState: String? = nil
     var readerRequirements: OfflineMapReaderRequirements? = nil
     var catalogContentReceipt: String? = nil
+    /// The signed manifest's contours layer. Present exactly when the saved
+    /// map requires `topographyCompanion`.
     var topography: VerifiedBikeMapTopography? = nil
+    /// The companion this map was saved with, fixed at download time. Later
+    /// catalog attachment never changes which companion belongs to the map.
+    var topographyCompanion: TopographyCompanionReceipt? = nil
+}
+
+/// Resolves the iPhone contour companion of each saved map from the map's own
+/// signed contours layer and saved companion receipt.
+nonisolated enum SavedTopographyCompanionSelection: Equatable {
+    /// No saved map declares contours.
+    case none
+    /// A saved map declares contours but its companion is missing, stale or
+    /// saved under an unsupported contract; the map must be downloaded again.
+    case unavailable(mapID: String)
+    case ready(
+        associationID: String,
+        companionURL: URL,
+        association: SavedTopographyCompanionAssociation
+    )
+
+    static func companion(
+        for metadata: SavedMapArtifactMetadata,
+        in directory: URL
+    ) -> (URL, SavedTopographyCompanionAssociation)? {
+        guard let topography = metadata.topography,
+              let receipt = metadata.topographyCompanion,
+              (try? receipt.validate()) != nil,
+              receipt.mapID == metadata.mapID,
+              receipt.intermediateSha256 == topography.intermediateSHA256,
+              receipt.sourcePolicySha256 == topography.sourcePolicySHA256,
+              receipt.attributionSha256 == topography.attributionSHA256,
+              let streamSHA256 = metadata.primaryArtifact?.sha256,
+              let filename = SavedTopographyCompanionStorage.filename(
+                mapEntryID: receipt.mapEntryID
+              ) else {
+            return nil
+        }
+        let companionURL = directory.appendingPathComponent(filename)
+        guard let association = SavedTopographyCompanionStorage.load(
+            for: companionURL,
+            expectedMapEntryID: receipt.mapEntryID,
+            expectedMapContentReceipt: receipt.mapContentReceipt,
+            expectedStreamArtifactSHA256: streamSHA256
+        ), association.receipt == receipt else {
+            return nil
+        }
+        return (companionURL, association)
+    }
+
+    /// The preferred map is the most recently saved contour map; if its
+    /// companion is unusable the state is explicit rather than silently
+    /// showing another map's contours.
+    static func select(
+        _ maps: [SavedMapArtifactMetadata],
+        in directory: URL,
+        preferredAssociationID: String?
+    ) -> Self {
+        let contourMaps = maps.filter { $0.topography != nil }.sorted {
+            let lhs = $0.topographyCompanion?.mapEntryID
+            let rhs = $1.topographyCompanion?.mapEntryID
+            if lhs == preferredAssociationID, rhs != preferredAssociationID { return true }
+            if rhs == preferredAssociationID, lhs != preferredAssociationID { return false }
+            return (lhs ?? $0.mapID) < (rhs ?? $1.mapID)
+        }
+        guard let first = contourMaps.first else { return .none }
+        if let preferredAssociationID,
+           first.topographyCompanion?.mapEntryID == preferredAssociationID,
+           companion(for: first, in: directory) == nil {
+            return .unavailable(mapID: first.mapID)
+        }
+        for metadata in contourMaps {
+            if let found = companion(for: metadata, in: directory) {
+                return .ready(
+                    associationID: found.1.receipt.mapEntryID,
+                    companionURL: found.0,
+                    association: found.1
+                )
+            }
+        }
+        return .unavailable(mapID: first.mapID)
+    }
+}
+
+extension SavedTopographyCompanionReplacementJournal {
+    /// Recovers companion replacements after saved-map recovery, keeping a new
+    /// companion only when its saved map committed the exact bound stream.
+    /// Saved-map journals are settled first; if that fails, companion journals
+    /// stay untouched so uncommitted map metadata never decides them.
+    static func recoverBoundToSavedMaps(in directory: URL) throws {
+        try SavedMapReplacementJournal.recover(in: directory)
+        try recover(in: directory) { filename in
+            guard !filename.isEmpty, !filename.hasPrefix("."),
+                  !filename.contains("/"), !filename.contains("\\") else {
+                return nil
+            }
+            return SavedMapArtifactMetadataStore.load(
+                for: directory.appendingPathComponent(filename)
+            )?.primaryArtifact?.sha256
+        }
+    }
 }
 
 nonisolated enum SavedMapRendererCompatibilityPolicy {
@@ -2450,8 +2551,7 @@ final class OfflineMapManager: ObservableObject {
                 maxLon: bounds.maxLongitude, maxLat: bounds.maxLatitude
             ),
             bleManager: bleManager,
-            preserveContours: manifest.target?.formatVersion == 4 ||
-                manifest.target?.requestedFeatures?.contains("contours") == true ||
+            preserveContours: manifest.declaresContours ||
                 bleManager.activeMapContourLayerIncluded,
             poiRequirement: poiRequirement
         )
@@ -3860,22 +3960,24 @@ final class OfflineMapManager: ObservableObject {
               ) else {
             throw OfflineMapCatalogError.missingCompatibleArtifact
         }
-        let expectedCompanion = OfflineMapTopographyCompanionPolicy
-            .compatibleCompanion(
-                for: map,
-                deliveryTier: grant.artifact.deliveryTier
-            )
-        if map.rendererFormatVersion == 4 {
-            guard let expectedCompanion,
-                  let grantedCompanion = grant.companion,
-                  grantedCompanion.artifact.artifactId ==
-                    expectedCompanion.artifactId,
-                  grantedCompanion.artifact.companionRequirements ==
-                    expectedCompanion.companionRequirements else {
-                throw OfflineMapCatalogError.missingCompatibleArtifact
+        let requiresCompanion = OfflineMapTopographyCompanionPolicy
+            .requiresCompanion(features: map.features)
+        if requiresCompanion {
+            guard let expectedCompanion = OfflineMapTopographyCompanionPolicy
+                    .compatibleCompanion(
+                        for: map,
+                        deliveryTier: grant.artifact.deliveryTier
+                    ),
+                  let grantedCompanion = grant.companion?.artifact,
+                  grantedCompanion.artifactId == expectedCompanion.artifactId,
+                  grantedCompanion.platformArtifact ==
+                    expectedCompanion.platformArtifact,
+                  grantedCompanion.deliveryTier ==
+                    expectedCompanion.deliveryTier else {
+                throw OfflineMapTopographyCompanionError.missing
             }
         } else if grant.companion != nil {
-            throw OfflineMapCatalogError.invalidResponse
+            throw OfflineMapTopographyCompanionError.undeclared
         }
         downloadURL = grant.downloadURL
         statusMessage = "downloading shared map"
@@ -3919,15 +4021,25 @@ final class OfflineMapManager: ObservableObject {
             }
             verifiedReaderRequirements = requirements
             verifiedTopography = verified.topography
-            if let companionGrant = grant.companion {
-                try validateTopographyCompanionBinding(
-                    companionGrant.artifact.platformArtifact,
-                    signedTopography: verified.topography
+            // Reader requirements already equal the signed manifest's
+            // features; the signed contours layer must agree with the grant.
+            guard (verified.topography != nil) == requiresCompanion else {
+                throw OfflineMapTopographyCompanionError.mismatched
+            }
+            if let companionGrant = grant.companion,
+               let signedTopography = verified.topography,
+               let contentReceipt = map.contentReceipt {
+                let companion = companionGrant.artifact.platformArtifact
+                try OfflineMapTopographyCompanionPolicy.validate(
+                    companion,
+                    mapID: map.mapId,
+                    mapContentReceipt: contentReceipt,
+                    signedTopography: signedTopography
                 )
                 topographyDownload = try await
                     downloadAndValidateTopographyCompanion(
                         from: companionGrant.downloadURL,
-                        artifact: companionGrant.artifact.platformArtifact,
+                        artifact: companion,
                         associationID: map.mapEntryId,
                         mapID: map.mapId,
                         streamArtifactSHA256: artifact.sha256,
@@ -3936,6 +4048,8 @@ final class OfflineMapManager: ObservableObject {
                             r2DownloadHost.lowercased(),
                         ]
                     )
+            } else if requiresCompanion {
+                throw OfflineMapTopographyCompanionError.missing
             }
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
@@ -3984,39 +4098,18 @@ final class OfflineMapManager: ObservableObject {
             catalogSyncState: "synced",
             readerRequirements: verifiedReaderRequirements,
             catalogContentReceipt: map.contentReceipt,
-            topography: verifiedTopography
+            topography: verifiedTopography,
+            topographyCompanion: topographyDownload?.association.receipt
         )
-        do {
-            if let topographyDownload {
-                let companionDestination = try cachedTopographyCompanionURL(
-                    associationID: map.mapEntryId
-                )
-                try replaceTopographyCompanion(
-                    at: topographyDownload.temporaryURL,
-                    destination: companionDestination,
-                    association: topographyDownload.association
-                )
-                defaults.set(
-                    map.mapEntryId,
-                    forKey: OfflineMapDefaults.activeTopographyAssociationKey
-                )
-            }
-            try replaceDownloadedArtifact(
-                at: temporaryURL,
-                destination: destination,
-                metadata: metadata,
-                mapID: map.mapId,
-                fileExtension: "bmap",
-                obsoleteDestination: obsoleteDestination
-            )
-        } catch {
-            if let topographyDownload {
-                try? FileManager.default.removeItem(
-                    at: topographyDownload.temporaryURL
-                )
-            }
-            throw error
-        }
+        try saveDownloadedMap(
+            at: temporaryURL,
+            destination: destination,
+            metadata: metadata,
+            mapID: map.mapId,
+            fileExtension: "bmap",
+            obsoleteDestination: obsoleteDestination,
+            topography: topographyDownload
+        )
         upsertCatalogMap(map)
         packDisplayNames[destination.lastPathComponent] = map.alias
         persistPackDisplayNames()
@@ -5386,7 +5479,7 @@ final class OfflineMapManager: ObservableObject {
               SavedTopographyCompanionStorage.filename(
                 mapEntryID: associationID
               ) != nil else {
-            throw OfflineMapCatalogError.invalidResponse
+            throw OfflineMapTopographyCompanionError.mismatched
         }
         let constraints = try OfflineMapDownloadConstraints
             .topographyCompanion(
@@ -5434,23 +5527,10 @@ final class OfflineMapManager: ObservableObject {
             return (temporaryURL, association)
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
+            if error is TopographyCompanionError {
+                throw OfflineMapTopographyCompanionError.unverified
+            }
             throw error
-        }
-    }
-
-    private func validateTopographyCompanionBinding(
-        _ artifact: OfflineMapArtifact,
-        signedTopography: VerifiedBikeMapTopography?
-    ) throws {
-        guard let signedTopography,
-              signedTopography.profileVersion == 1,
-              artifact.intermediateSha256 ==
-                signedTopography.intermediateSHA256,
-              artifact.sourcePolicySha256 ==
-                signedTopography.sourcePolicySHA256,
-              artifact.attributionSha256 ==
-                signedTopography.attributionSHA256 else {
-            throw OfflineMapCatalogError.invalidResponse
         }
     }
 
@@ -5497,6 +5577,7 @@ final class OfflineMapManager: ObservableObject {
         var artifactDisplayName: String?
         var rendererFormatVersion: Int?
         var verifiedTopography: VerifiedBikeMapTopography?
+        var unsignedContourDeclaration = false
         let trustStore = mapStreamTrustStore
         do {
             let constraints = try OfflineMapDownloadConstraints.mapArtifact(primaryArtifact)
@@ -5507,7 +5588,7 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             let validationTask = Task.detached(priority: .userInitiated) {
-                () throws -> (String?, Int?, VerifiedBikeMapTopography?) in
+                () throws -> (String?, Int?, VerifiedBikeMapTopography?, Bool) in
                 switch choice {
                 case .bikeMapStream(let artifact, _):
                     let verified = try BikeMapStreamArtifactValidator.validate(
@@ -5519,7 +5600,8 @@ final class OfflineMapManager: ObservableObject {
                     return (
                         verified.displayName,
                         verified.rendererFormatVersion,
-                        verified.topography
+                        verified.topography,
+                        false
                     )
                 case .legacyZip(let artifact):
                     if let artifact {
@@ -5534,7 +5616,8 @@ final class OfflineMapManager: ObservableObject {
                     return (
                         manifest.displayName,
                         manifest.target?.formatVersion,
-                        nil
+                        nil,
+                        manifest.declaresContours
                     )
                 }
             }
@@ -5546,6 +5629,7 @@ final class OfflineMapManager: ObservableObject {
             artifactDisplayName = validation.0
             rendererFormatVersion = validation.1
             verifiedTopography = validation.2
+            unsignedContourDeclaration = validation.3
             try Task.checkCancellation()
         } catch {
             if let temporaryURL {
@@ -5558,31 +5642,35 @@ final class OfflineMapManager: ObservableObject {
             downloadURL = nil
             throw OfflineMapPlatformError.missingDownloadURL
         }
-        if rendererFormatVersion == 4 {
-            guard let streamArtifact = primaryArtifact,
-                  streamArtifact.isBikeMapStream else {
-                try? FileManager.default.removeItem(at: temporaryURL)
-                downloadURL = nil
-                throw OfflineMapCatalogError.missingCompatibleArtifact
+        do {
+            // Only a signed stream can bind an iPhone companion; an unsigned
+            // archive that declares contours is an unsupported contract.
+            guard !unsignedContourDeclaration else {
+                throw OfflineMapTopographyCompanionError.requiresSignedStream
             }
-            let companions = (job.artifacts ?? []).filter(
-                \.isTopographyCompanion
-            )
-            guard companions.count == 1 else {
-                try? FileManager.default.removeItem(at: temporaryURL)
-                downloadURL = nil
-                throw OfflineMapCatalogError.missingCompatibleArtifact
-            }
-            let companion = companions[0]
-            let associationID = job.catalogMapEntryId.flatMap {
-                SavedTopographyCompanionStorage.filename(mapEntryID: $0) == nil
-                    ? nil : $0
-            } ?? "job_v1_\(job.jobId)"
-            do {
-                try validateTopographyCompanionBinding(
+            if let companion = try OfflineMapTopographyCompanionPolicy.requiredCompanion(
+                in: job.artifacts ?? [],
+                signedTopography: verifiedTopography
+            ) {
+                guard let signedTopography = verifiedTopography,
+                      let streamArtifact = primaryArtifact,
+                      streamArtifact.isBikeMapStream else {
+                    throw OfflineMapTopographyCompanionError.requiresSignedStream
+                }
+                let archives = (job.artifacts ?? []).filter(\.isStoredZip)
+                guard archives.count == 1,
+                      let contentReceipt = archives[0].manifestReceipt else {
+                    throw OfflineMapTopographyCompanionError.mismatched
+                }
+                try OfflineMapTopographyCompanionPolicy.validate(
                     companion,
-                    signedTopography: verifiedTopography
+                    mapID: mapId,
+                    mapContentReceipt: contentReceipt,
+                    signedTopography: signedTopography
                 )
+                // Each saved copy owns its companion: a direct job never shares
+                // a file with a catalog download of the same entry.
+                let associationID = "job_v1_\(job.jobId)"
                 let companionURL = try await client.artifactDownloadURL(
                     mapId: mapId,
                     jobId: job.jobId,
@@ -5596,11 +5684,11 @@ final class OfflineMapManager: ObservableObject {
                         mapID: mapId,
                         streamArtifactSHA256: streamArtifact.sha256
                     )
-            } catch {
-                try? FileManager.default.removeItem(at: temporaryURL)
-                downloadURL = nil
-                throw error
             }
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            downloadURL = nil
+            throw error
         }
         let destination = try cachedPackURL(mapId: mapId, fileExtension: fileExtension)
         let existingMetadata = ["bmap", "zip"]
@@ -5654,39 +5742,19 @@ final class OfflineMapManager: ObservableObject {
             lastTransferOutcome: nil,
             userDefinedDisplayName: userDefinedDisplayName,
             downloadReceiptID: downloadReceiptID,
-            catalogContentReceipt:
-                topographyDownload?.association.receipt.mapContentReceipt,
-            topography: verifiedTopography
+            topography: verifiedTopography,
+            topographyCompanion: topographyDownload?.association.receipt
         )
         do {
-            if let topographyDownload {
-                let companionDestination = try cachedTopographyCompanionURL(
-                    associationID:
-                        topographyDownload.association.receipt.mapEntryID
-                )
-                try replaceTopographyCompanion(
-                    at: topographyDownload.temporaryURL,
-                    destination: companionDestination,
-                    association: topographyDownload.association
-                )
-                defaults.set(
-                    topographyDownload.association.receipt.mapEntryID,
-                    forKey: OfflineMapDefaults.activeTopographyAssociationKey
-                )
-            }
-            try replaceDownloadedArtifact(
+            try saveDownloadedMap(
                 at: temporaryURL,
                 destination: destination,
                 metadata: metadata,
                 mapID: mapId,
-                fileExtension: fileExtension
+                fileExtension: fileExtension,
+                topography: topographyDownload
             )
         } catch {
-            if let topographyDownload {
-                try? FileManager.default.removeItem(
-                    at: topographyDownload.temporaryURL
-                )
-            }
             downloadURL = nil
             throw error
         }
@@ -7584,22 +7652,6 @@ final class OfflineMapManager: ObservableObject {
         defaults.set(packDisplayNames, forKey: OfflineMapDefaults.packDisplayNamesKey)
     }
 
-    private func topographyAssociationID(
-        for metadata: SavedMapArtifactMetadata
-    ) -> String? {
-        if let mapEntryID = metadata.catalogMapEntryID,
-           SavedTopographyCompanionStorage.filename(
-            mapEntryID: mapEntryID
-           ) != nil {
-            return mapEntryID
-        }
-        guard let jobID = metadata.jobID else { return nil }
-        let identifier = "job_v1_\(jobID)"
-        return SavedTopographyCompanionStorage.filename(
-            mapEntryID: identifier
-        ) == nil ? nil : identifier
-    }
-
     private func cachedTopographyCompanionURL(
         associationID: String
     ) throws -> URL {
@@ -7611,14 +7663,99 @@ final class OfflineMapManager: ObservableObject {
         return try cachedPackDirectory().appendingPathComponent(filename)
     }
 
-    private func replaceTopographyCompanion(
+    /// Saves a verified map and, when its signed manifest declares contours,
+    /// the companion it was verified with as one unit. The saved map pair is
+    /// the commit point: the staged companion is finalized only by recovery
+    /// against the saved map, so success, failure and relaunch share one rule.
+    private func saveDownloadedMap(
         at temporaryURL: URL,
         destination: URL,
-        association: SavedTopographyCompanionAssociation
+        metadata: SavedMapArtifactMetadata,
+        mapID: String,
+        fileExtension: String,
+        obsoleteDestination: URL? = nil,
+        topography: (
+            temporaryURL: URL,
+            association: SavedTopographyCompanionAssociation
+        )?
+    ) throws {
+        guard (metadata.topography != nil) == (topography != nil),
+              metadata.topographyCompanion == topography?.association.receipt else {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            if let topography {
+                try? FileManager.default.removeItem(at: topography.temporaryURL)
+            }
+            throw OfflineMapTopographyCompanionError.mismatched
+        }
+        let directory = destination.deletingLastPathComponent()
+        let previous = SavedMapArtifactMetadataStore.load(for: destination)
+        if let topography {
+            do {
+                try stageTopographyCompanion(
+                    at: topography.temporaryURL,
+                    destination: try cachedTopographyCompanionURL(
+                        associationID: topography.association.receipt.mapEntryID
+                    ),
+                    association: topography.association,
+                    mapArtifactFilename: destination.lastPathComponent
+                )
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                try? FileManager.default.removeItem(at: topography.temporaryURL)
+                throw error
+            }
+        }
+        do {
+            try replaceDownloadedArtifact(
+                at: temporaryURL,
+                destination: destination,
+                metadata: metadata,
+                mapID: mapID,
+                fileExtension: fileExtension,
+                obsoleteDestination: obsoleteDestination
+            )
+        } catch {
+            // The staged companion survives only if the new map pair committed.
+            try? SavedTopographyCompanionReplacementJournal
+                .recoverBoundToSavedMaps(in: directory)
+            throw error
+        }
+        if let companion = metadata.topographyCompanion {
+            // The map committed, so recovery keeps its bound companion; a
+            // failure here is repeated by launch recovery with the same result.
+            try? SavedTopographyCompanionReplacementJournal
+                .recoverBoundToSavedMaps(in: directory)
+            defaults.set(
+                companion.mapEntryID,
+                forKey: OfflineMapDefaults.activeTopographyAssociationKey
+            )
+        }
+        if let superseded = previous?.topographyCompanion,
+           superseded.mapEntryID != metadata.topographyCompanion?.mapEntryID,
+           let companionURL = try? cachedTopographyCompanionURL(
+            associationID: superseded.mapEntryID
+           ),
+           SavedTopographyCompanionStorage.load(
+            for: companionURL,
+            expectedMapEntryID: superseded.mapEntryID,
+            expectedMapContentReceipt: superseded.mapContentReceipt,
+            expectedStreamArtifactSHA256: previous?.primaryArtifact?.sha256 ?? ""
+           ) != nil {
+            try? SavedTopographyCompanionStorage.delete(for: companionURL)
+        }
+    }
+
+    private func stageTopographyCompanion(
+        at temporaryURL: URL,
+        destination: URL,
+        association: SavedTopographyCompanionAssociation,
+        mapArtifactFilename: String
     ) throws {
         let directory = destination.deletingLastPathComponent()
         var journal = try SavedTopographyCompanionReplacementJournal.begin(
-            at: destination
+            at: destination,
+            mapArtifactFilename: mapArtifactFilename,
+            streamArtifactSHA256: association.streamArtifactSHA256
         )
         let backup = journal.backup(in: directory)
         let associationURL = SavedTopographyCompanionStorage.associationURL(
@@ -7647,14 +7784,12 @@ final class OfflineMapManager: ObservableObject {
             try SavedTopographyCompanionReplacementJournal.sync(destination)
             try SavedTopographyCompanionReplacementJournal.sync(associationURL)
             try SavedTopographyCompanionReplacementJournal.sync(directory)
-            journal.committed = true
+            journal.staged = true
             try journal.save(in: directory)
-            try? journal.finish(in: directory)
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
-            try? SavedTopographyCompanionReplacementJournal.recover(
-                in: directory
-            )
+            try? SavedTopographyCompanionReplacementJournal
+                .recoverBoundToSavedMaps(in: directory)
             throw error
         }
     }
@@ -7662,29 +7797,38 @@ final class OfflineMapManager: ObservableObject {
     private func deleteTopographyCompanions(
         matching metadata: SavedMapArtifactMetadata?
     ) throws {
-        guard let metadata,
-              let directory = try? cachedPackDirectory() else { return }
-        let files = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
-        for companionURL in files
-        where companionURL.pathExtension.lowercased() == "btopo" {
-            let associationURL = SavedTopographyCompanionStorage
-                .associationURL(for: companionURL)
-            guard let data = try? Data(contentsOf: associationURL),
-                  let association = try? JSONDecoder().decode(
-                    SavedTopographyCompanionAssociation.self,
-                    from: data
-                  ),
-                  association.receipt.mapID == metadata.mapID,
-                  association.streamArtifactSHA256 ==
-                    metadata.primaryArtifact?.sha256 else {
-                continue
-            }
-            try SavedTopographyCompanionStorage.delete(for: companionURL)
+        guard let receipt = metadata?.topographyCompanion,
+              let companionURL = try? cachedTopographyCompanionURL(
+                associationID: receipt.mapEntryID
+              ),
+              let association = SavedTopographyCompanionStorage.load(
+                for: companionURL,
+                expectedMapEntryID: receipt.mapEntryID,
+                expectedMapContentReceipt: receipt.mapContentReceipt,
+                expectedStreamArtifactSHA256:
+                    metadata?.primaryArtifact?.sha256 ?? ""
+              ),
+              association.receipt == receipt else {
+            return
         }
+        try SavedTopographyCompanionStorage.delete(for: companionURL)
+    }
+
+    /// The companion state the iPhone contour overlay shows, derived only from
+    /// downloaded saved maps; display switches never regenerate a map.
+    var topographyCompanionSelection: SavedTopographyCompanionSelection {
+        guard let directory = try? cachedPackDirectory() else {
+            return .none
+        }
+        return SavedTopographyCompanionSelection.select(
+            cachedMapRecords.compactMap {
+                SavedMapArtifactMetadataStore.load(for: $0.packURL)
+            },
+            in: directory,
+            preferredAssociationID: defaults.string(
+                forKey: OfflineMapDefaults.activeTopographyAssociationKey
+            )
+        )
     }
 
 #if canImport(UIKit) && canImport(MapKit)
@@ -7698,54 +7842,32 @@ final class OfflineMapManager: ObservableObject {
             topographyOverlayStatus = "Topographic contours are turned off."
             return
         }
-        guard let directory = try? cachedPackDirectory() else {
+        guard (try? cachedPackDirectory()) != nil else {
             topographyOverlay = nil
             topographyOverlayStatus = "Topographic map storage is unavailable."
             return
         }
-        let preferredID = defaults.string(
-            forKey: OfflineMapDefaults.activeTopographyAssociationKey
-        )
-        let candidates = cachedMapRecords.compactMap {
-            record -> (
-                String,
-                URL,
-                SavedTopographyCompanionAssociation
-            )? in
-            guard let metadata = SavedMapArtifactMetadataStore.load(
-                for: record.packURL
-            ),
-            let associationID = topographyAssociationID(for: metadata),
-            let contentReceipt = metadata.catalogContentReceipt,
-            let streamSHA256 = metadata.primaryArtifact?.sha256,
-            let filename = SavedTopographyCompanionStorage.filename(
-                mapEntryID: associationID
-            ) else { return nil }
-            let companionURL = directory.appendingPathComponent(filename)
-            guard let association = SavedTopographyCompanionStorage.load(
-                for: companionURL,
-                expectedMapEntryID: associationID,
-                expectedMapContentReceipt: contentReceipt,
-                expectedStreamArtifactSHA256: streamSHA256
-            ) else { return nil }
-            return (associationID, companionURL, association)
-        }.sorted { lhs, rhs in
-            if lhs.0 == preferredID { return true }
-            if rhs.0 == preferredID { return false }
-            return lhs.0 < rhs.0
-        }
-        guard let selected = candidates.first else {
+        let selected: (URL, SavedTopographyCompanionAssociation)
+        switch topographyCompanionSelection {
+        case .none:
             topographyOverlay = nil
             topographyOverlayStatus =
                 "Download a topographic map to show offline contours."
             return
+        case .unavailable:
+            topographyOverlay = nil
+            topographyOverlayStatus =
+                "The saved map's contour file is missing or outdated. Download the map again to show offline contours."
+            return
+        case .ready(_, let companionURL, let association):
+            selected = (companionURL, association)
         }
         topographyOverlayStatus = "Verifying topographic contours…"
         topographyOverlayTask = Task { [weak self] in
             do {
                 let overlay = try await BicinoTopographyTileOverlay.open(
-                    url: selected.1,
-                    receipt: selected.2.receipt
+                    url: selected.0,
+                    receipt: selected.1.receipt
                 )
                 try Task.checkCancellation()
                 guard let self,
@@ -7764,7 +7886,7 @@ final class OfflineMapManager: ObservableObject {
                 }
                 self.topographyOverlay = nil
                 self.topographyOverlayStatus =
-                    "The saved contour companion could not be verified."
+                    "The saved contour file could not be verified. Download the map again to show offline contours."
             }
         }
     }
@@ -7845,8 +7967,7 @@ final class OfflineMapManager: ObservableObject {
                 at: cacheDirectoryOverride,
                 withIntermediateDirectories: true
             )
-            try SavedMapReplacementJournal.recover(in: cacheDirectoryOverride)
-            try SavedTopographyCompanionReplacementJournal.recover(
+            try SavedTopographyCompanionReplacementJournal.recoverBoundToSavedMaps(
                 in: cacheDirectoryOverride
             )
             return cacheDirectoryOverride
@@ -7864,7 +7985,9 @@ final class OfflineMapManager: ObservableObject {
             directory: directory,
             legacy: legacy
         )
-        try SavedTopographyCompanionReplacementJournal.recover(in: prepared)
+        try SavedTopographyCompanionReplacementJournal.recoverBoundToSavedMaps(
+            in: prepared
+        )
         return prepared
     }
 

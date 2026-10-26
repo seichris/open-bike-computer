@@ -156,23 +156,21 @@ struct SettingsView: View {
         NavigationStack {
             ScrollViewReader { proxy in
             Form {
-                if social.session.state != .unavailable {
-                    Section {
-                        Button { showsAccount = true } label: {
-                            SettingsProfileHeader(
-                                profile: social.profile,
-                                image: social.profile?.avatarID.flatMap { social.photos[$0] },
-                                isSignedIn: social.session.state == .signedIn,
-                                isRestoring: social.session.state == .restoring,
-                                friends: social.friends, photos: social.photos
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityHint("Opens your profile, friends and group rides")
-                        .accessibilityIdentifier("settings.profile")
-                        .listRowBackground(Color.clear)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                Section {
+                    Button { showsAccount = true } label: {
+                        SettingsProfileHeader(
+                            profile: social.profile,
+                            image: social.profile?.avatarID.flatMap { social.photos[$0] },
+                            isSignedIn: social.session.state == .signedIn,
+                            isRestoring: social.session.state == .restoring,
+                            friends: social.friends, photos: social.photos
+                        )
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens your profile, friends and group rides")
+                    .accessibilityIdentifier("settings.profile")
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                 }
 
                 if shouldPromoteBikeComputerSettings {
