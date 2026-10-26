@@ -192,17 +192,28 @@ final class LiveRideService: ObservableObject {
                     // clears the room, while transport loss can reconnect safely.
                     do {
                         _ = try await self.client.request("group-rides/\(ride.id)", method: "GET", body: nil, contentType: "application/json", query: [])
-                    } catch SocialFailure.server(let code) {
-                        if ["ride_ended", "membership_required", "not_found", "account_unavailable", "feature_unavailable"].contains(code) {
+                    } catch {
+                        guard !Task.isCancelled, epoch == self.localEpoch else { return }
+                        if Self.endsRoomAccess(error) {
                             self.reset()
                             return
                         }
-                    } catch { }
+                    }
+                    guard !Task.isCancelled, epoch == self.localEpoch else { return }
                     try? await Task.sleep(nanoseconds: self.reconnectNanoseconds)
                 }
             }
         }
         if shareOnJoin { await beginSharingOnJoin() }
+    }
+
+    private static func endsRoomAccess(_ error: Error) -> Bool {
+        guard let failure = error as? SocialFailure else { return false }
+        if failure.endsAccountSession { return true }
+        if case .server(let code) = failure {
+            return ["ride_ended", "ride_closed", "membership_required", "not_found", "feature_unavailable"].contains(code)
+        }
+        return false
     }
 
     private func beginSharingOnJoin() async {
@@ -293,6 +304,7 @@ final class LiveRideService: ObservableObject {
             while !Task.isCancelled && epoch == self.localEpoch && revision == self.sharingRevision && self.isSharing {
                 if self.uptime() >= self.sharingDeadline {
                     await self.stopSharing()
+                    guard epoch == self.localEpoch, !self.isSharing else { return }
                     self.show(.sharingEnded, "Location sharing ended.")
                     return
                 }
@@ -321,8 +333,13 @@ final class LiveRideService: ObservableObject {
                         self.resolve(.publishFailed)
                     } catch {
                         guard revision == self.sharingRevision, epoch == self.localEpoch else { return }
-                        if case SocialFailure.server(let code) = error, ["sharing_disabled", "ride_ended", "membership_required", "account_unavailable", "account_deleting"].contains(code) {
+                        if Self.endsRoomAccess(error) {
+                            self.reset()
+                            return
+                        }
+                        if error as? SocialFailure == .server("sharing_disabled") {
                             await self.stopSharing()
+                            guard epoch == self.localEpoch, !self.isSharing else { return }
                             self.show(.sharingEnded, "Location sharing ended.")
                             return
                         }
@@ -362,7 +379,9 @@ final class LiveRideService: ObservableObject {
 
     func leave(end: Bool = false) async throws {
         guard let ride else { return }
+        let selection = localEpoch
         await stopSharing()
+        guard selection == localEpoch else { throw SocialFailure.cancelled }
         if end { saveInvitation?(ride.id, nil) }
         reset()
         _ = try await client.json("group-rides/\(ride.id)/\(end ? "end" : "leave")", method: "POST")
@@ -370,14 +389,19 @@ final class LiveRideService: ObservableObject {
 
     func send(_ status: String) async throws {
         guard let ride else { return }
+        let selection = localEpoch
         _ = try await client.json("group-rides/\(ride.id)/messages", method: "POST", body: ["status": status])
+        guard selection == localEpoch else { throw SocialFailure.cancelled }
         try await refreshMessages()
     }
 
     func refreshMessages() async throws {
         guard let ride else { return }
-        messages = try JSONDecoder().decode(SocialPage<SocialQuickMessage>.self,
+        let selection = localEpoch
+        let response = try JSONDecoder().decode(SocialPage<SocialQuickMessage>.self,
             from: await client.request("group-rides/\(ride.id)/messages", method: "GET", body: nil, contentType: "application/json", query: [])).items
+        guard selection == localEpoch, !Task.isCancelled else { throw SocialFailure.cancelled }
+        messages = response
     }
 
     func reset() {

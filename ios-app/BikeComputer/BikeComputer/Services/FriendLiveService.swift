@@ -302,8 +302,8 @@ final class FriendLiveService: ObservableObject {
         } catch {
             guard expected == generation, !Task.isCancelled else { return }
             updateRiders(riders.filter { $0.age(at: Date()) < 60 })
-            if case SocialFailure.server(let code) = error,
-               ["feature_unavailable", "account_unavailable", "account_deleting"].contains(code) {
+            if let failure = error as? SocialFailure,
+               failure.endsAccountSession || failure == .server("feature_unavailable") {
                 reset(); return
             }
         }
@@ -352,6 +352,10 @@ final class FriendLiveService: ObservableObject {
             if saved, error != nil { error = nil }
         } catch {
             guard expected == generation else { return }
+            if let failure = error as? SocialFailure,
+               failure.endsAccountSession || failure == .server("feature_unavailable") {
+                reset(); return
+            }
             // A cancelled or lost request may still have been committed.
             lastPublicationAttempt = uptime()
             guard !Task.isCancelled, !Self.isCancellation(error) else { return }
@@ -389,8 +393,13 @@ final class FriendLiveService: ObservableObject {
     }
 
     func forget(_ id: String) {
-        leases[id] = nil; remembered[id] = nil; persistRemoval(); updateSharing()
-        riders.removeAll { $0.id == id }
+        // Retire snapshots and consent responses read before the confirmed
+        // removal, including a pending start for this friend. Keep other leases.
+        generation = UUID()
+        busyIDs = []
+        leases[id] = nil; remembered[id] = nil; saveStop(); updateSharing()
+        updateRiders(riders.filter { $0.id != id })
+        resumePolling()
     }
 
     func reset() {
