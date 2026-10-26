@@ -168,6 +168,9 @@ jobs:
       needs.changes.outputs.firmware_build == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -182,10 +185,12 @@ jobs:
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
-      - name: Restore verified firmware build caches
+      - id: cache
+        name: Restore verified firmware build caches
         uses: ./.github/actions/firmware-build-cache
         with:
           environment: ${{ matrix.target }}
+          github-token: ${{ github.token }}
       - name: Build with the repository-owned firmware runtime
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
@@ -206,6 +211,31 @@ jobs:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
           BICINO_BUILD_EVIDENCE_DIR: ${{ runner.temp }}/bicino-build-symbols
         run: python3 ../tools/build_evidence.py firmware --environment "$BUILD_ENVIRONMENT"
+      - id: core_identity
+        name: Record the verified core identity
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: python3 .github/scripts/firmware_core_artifact.py identity --project esp32 --environment "$BUILD_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+      - name: Pack the verified core entry for pull requests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+          CORE_INPUT_KEY: ${{ steps.core_identity.outputs.core-input-key }}
+        run: |
+          python3 .github/scripts/firmware_core_artifact.py pack \
+            --root "${OPEN_BIKE_FIRMWARE_BUILD_CACHE}/cores-v1/${BUILD_ENVIRONMENT}" \
+            --key "${CORE_INPUT_KEY}" --output "${RUNNER_TEMP}/firmware-core-entry.tar"
+      - name: Publish the verified core entry for pull requests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.cache.outputs.core-artifact-name }}
+          path: ${{ runner.temp }}/firmware-core-entry.tar
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
       - name: Stress eight rider badges with the pinned LVGL renderer
         if: contains(matrix.target, '_REMOTE_DEBUG') && needs.changes.outputs.firmware_renderer != 'false'
         env:
@@ -661,11 +691,12 @@ jobs:
 
   gate:
     name: >-
-      ${{ (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' ||
+      ${{ (!inputs.scope || inputs.scope == 'all' ||
       (inputs.scope == 'map' &&
       (github.ref == 'refs/heads/deploy/map-platform-production' ||
       github.ref == 'refs/heads/deploy/map-platform-development'))) && 'CI Gate' ||
-      format('Manual CI Gate ({0})', inputs.scope) }}
+      (github.event_name == 'workflow_dispatch' && format('Manual CI Gate ({0})', inputs.scope) ||
+      format('Partial CI Gate ({0})', inputs.scope)) }}
     needs:
       - changes
       - esp32

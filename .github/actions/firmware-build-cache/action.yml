@@ -1,9 +1,30 @@
 name: Verified firmware build caches
-description: Restore immutable runtime/core transport and content-keyed compiler objects
+description: Restore the pinned runtime, the verified core transport and content-keyed compiler objects
 inputs:
   environment:
     description: Exact PlatformIO environment
     required: true
+  github-token:
+    description: >-
+      Token with actions:read. When set, a core cache miss restores the entry
+      that the firmware scope on the publication branch uploaded as a workflow
+      artifact; build_firmware.py still verifies it before use.
+    required: false
+    default: ""
+  publication-branch:
+    description: Branch whose own runs may publish core entries
+    required: false
+    default: main
+outputs:
+  core-cache-hit:
+    description: true when the exact content-keyed core entry came from the Actions cache
+    value: ${{ steps.core.outputs.cache-hit }}
+  core-artifact-name:
+    description: Artifact name of this environment's core entry for the current inputs
+    value: ${{ steps.keys.outputs.core-artifact-name }}
+  core-artifact-fresh:
+    description: true when the publication branch already holds a recent core entry for these inputs
+    value: ${{ steps.lookup.outputs.fresh }}
 runs:
   using: composite
   steps:
@@ -12,13 +33,80 @@ runs:
       run: |
         echo "OPEN_BIKE_FIRMWARE_BUILD_CACHE=${RUNNER_TEMP}/firmware-build-cache" >> "$GITHUB_ENV"
         echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=${RUNNER_TEMP}/firmware-runtime-cache" >> "$GITHUB_ENV"
-    - name: Restore verified dependency and compiler caches
+    - id: keys
+      name: Derive content keys
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        RUNTIME_HASH: ${{ hashFiles('esp32/tools/firmware-runtime/lock-v1.json') }}
+        # A superset of every input to the helper's own coreInputKey, so an exact
+        # hit always holds a usable entry and a changed input always misses.
+        CORE_HASH: ${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}
+      run: |
+        set -euo pipefail
+        [[ "$ENVIRONMENT" =~ ^WAVESHARE_AMOLED_(175|206)(_[A-Z0-9_]+)?$ ]]
+        [[ -n "$RUNTIME_HASH" && -n "$CORE_HASH" ]]
+        host="${RUNNER_OS}-${RUNNER_ARCH}"
+        {
+          echo "runtime-key=firmware-runtime-v2-${host}-${RUNTIME_HASH}"
+          echo "core-key=firmware-core-v2-${host}-${ENVIRONMENT}-${CORE_HASH}"
+          echo "objects-key=firmware-objects-v2-${host}-${ENVIRONMENT}-${CORE_HASH}"
+          echo "core-artifact-name=firmware-core-${host}-${ENVIRONMENT}-${CORE_HASH}"
+        } >> "$GITHUB_OUTPUT"
+    - name: Restore the pinned firmware runtime
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
-        path: |
-          ${{ runner.temp }}/firmware-build-cache
-          ${{ runner.temp }}/firmware-runtime-cache
-          esp32/.pio/open-bike-build/platformio/${{ inputs.environment }}/build-cache/application
-        key: firmware-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}-${{ github.sha }}
+        path: ${{ runner.temp }}/firmware-runtime-cache
+        key: ${{ steps.keys.outputs.runtime-key }}
+    - id: core
+      name: Restore the verified core transport
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: ${{ runner.temp }}/firmware-build-cache/cores-v1/${{ inputs.environment }}
+        key: ${{ steps.keys.outputs.core-key }}
+    - id: lookup
+      name: Find the core entry published from the trusted branch
+      if: inputs.github-token != '' && (steps.core.outputs.cache-hit != 'true' || github.ref == format('refs/heads/{0}', inputs.publication-branch))
+      # An API failure only costs a cold build; it never fails the job.
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARTIFACT_NAME: ${{ steps.keys.outputs.core-artifact-name }}
+        PUBLICATION_BRANCH: ${{ inputs.publication-branch }}
+        REPOSITORY_ID: ${{ github.repository_id }}
+      run: |
+        set -euo pipefail
+        python3 .github/scripts/firmware_core_artifact.py select \
+          --name "$ARTIFACT_NAME" --repository-id "$REPOSITORY_ID" \
+          --branch "$PUBLICATION_BRANCH" --max-age-days 7 >> "$GITHUB_OUTPUT"
+    - id: download
+      name: Download the published core entry
+      if: steps.core.outputs.cache-hit != 'true' && steps.lookup.outputs.found == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ steps.keys.outputs.core-artifact-name }}
+        run-id: ${{ steps.lookup.outputs.run-id }}
+        github-token: ${{ inputs.github-token }}
+        path: ${{ runner.temp }}/firmware-core-artifact
+    - name: Install the published core entry
+      if: steps.core.outputs.cache-hit != 'true' && steps.download.outcome == 'success'
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        python3 .github/scripts/firmware_core_artifact.py install \
+          --archive "${RUNNER_TEMP}/firmware-core-artifact/firmware-core-entry.tar" \
+          --root "${OPEN_BIKE_FIRMWARE_BUILD_CACHE}/cores-v1/${ENVIRONMENT}"
+        rm -rf "${RUNNER_TEMP}/firmware-core-artifact"
+    - name: Restore content-keyed compiler objects
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: esp32/.pio/open-bike-build/platformio/${{ inputs.environment }}/build-cache/application
+        key: ${{ steps.keys.outputs.objects-key }}-${{ github.sha }}
         restore-keys: |
-          firmware-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}-
+          ${{ steps.keys.outputs.objects-key }}-
