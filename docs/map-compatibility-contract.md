@@ -107,7 +107,7 @@ hardware gate.
 | Reader | Must read | Trusts |
 | --- | --- | --- |
 | Bicino (production app) | production profiles | registered production signers |
-| Bicino Dev | every profile: development artifacts first, then the production copy | production and development signers |
+| Bicino Dev | every profile: development artifacts first, then the production copy, among the copies the connected bike trusts when there are any | production and development signers |
 | Production and ordinary firmware | production profiles | production signers |
 | `*_PERSONAL` firmware | production profiles | production and development signers |
 | `*_REMOTE_DEBUG` and POI qualification firmware | every profile | as compiled (`*_REMOTE_DEBUG` adds the development signer) |

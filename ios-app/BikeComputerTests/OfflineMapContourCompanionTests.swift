@@ -15,6 +15,101 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { fail(message) }
 }
 
+/// The contour map of the frozen durable-map corpus
+/// (map-platform/backend/tests/fixtures/map-compatibility-v1): a development
+/// and a production copy signed by different keys, each with its companion.
+private struct CompatibilityCorpusContours {
+    static let directory = "map-platform/backend/tests/fixtures/map-compatibility-v1/"
+    /// Bicino Dev trusts every corpus signer.
+    let appTrust: BikeMapStreamTrustStore
+    /// The `streamTrust` that production and ordinary firmware report.
+    let productionSigners: [String]
+    let map: OfflineMapCatalogMap
+    let payloads: [String: Data]
+
+    static func load() -> Self {
+        func file(_ name: String) -> Data {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: directory + name)) else {
+                fail("compatibility corpus has \(name)")
+            }
+            return data
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: file("corpus.json")) as? [String: Any],
+              let signers = root["signers"] as? [[String: String]],
+              let entry = (root["maps"] as? [[String: Any]])?.first(where: {
+                  $0["id"] as? String == "topographic-contours-v1"
+              }),
+              let mapID = entry["mapId"] as? String,
+              let companionFile = entry["companionFile"] as? String,
+              let development = entry["development"] as? [String: Any],
+              let production = (entry["production"] as? [[String: Any]])?.first(where: {
+                  $0["variant"] as? String == "production"
+              }),
+              let publication = development["publication"] as? [String: Any] else {
+            fail("compatibility corpus contour map decodes")
+        }
+        var keys: [String: Data] = [:]
+        for signer in signers {
+            guard let keyID = signer["keyId"],
+                  let key = signer["publicKeyX963Hex"].flatMap(Data.init(ownershipHex:)) else {
+                fail("compatibility corpus signer decodes")
+            }
+            keys[keyID] = key
+        }
+        let appTrust = BikeMapStreamTrustStore(publicKeysByID: keys)
+        let companion = file(companionFile)
+        var artifacts: [[String: Any]] = []
+        var payloads: [String: Data] = [:]
+        for variant in [development, production] {
+            guard let name = variant["file"] as? String,
+                  let list = (variant["publication"] as? [String: Any])?["artifacts"] as? [[String: Any]] else {
+                fail("compatibility corpus publication decodes")
+            }
+            for artifact in list where artifact["format"] as? String != OfflineMapArtifact.storedZipFormat {
+                guard let sha256 = artifact["sha256"] as? String else {
+                    fail("compatibility corpus artifact has a digest")
+                }
+                artifacts.append(artifact)
+                payloads[sha256] = artifact["format"] as? String == OfflineMapArtifact.bikeMapStreamFormat
+                    ? file(name) : companion
+            }
+        }
+        let map: [String: Any] = [
+            "mapEntryId": publication["mapEntryId"] as Any,
+            "mapId": mapID,
+            "contentReceipt": publication["contentReceipt"] as Any,
+            "alias": "Durable contours",
+            "aliasSource": "generated",
+            "aliasRevision": 1,
+            "canonicalName": publication["canonicalName"] as Any,
+            "originChannel": "development",
+            "renderer": publication["renderer"] as Any,
+            "rendererFormatVersion": publication["rendererFormatVersion"] as Any,
+            "features": publication["features"] as Any,
+            "deliveryState": "production",
+            "addedAt": "2026-10-26T00:00:00Z",
+            "updatedAt": "2026-10-26T00:00:00Z",
+            "artifacts": artifacts,
+        ]
+        guard let decoded = try? JSONDecoder().decode(
+            OfflineMapCatalogMap.self,
+            from: JSONSerialization.data(withJSONObject: map)
+        ) else {
+            fail("compatibility corpus library map decodes")
+        }
+        return Self(
+            appTrust: appTrust,
+            productionSigners: signers
+                .filter { $0["channel"] == "production" }
+                .compactMap { $0["keyId"] }
+                .sorted()
+                .compactMap(appTrust.capability(for:)),
+            map: decoded,
+            payloads: payloads
+        )
+    }
+}
+
 final class ContourCompanionURLProtocol: URLProtocol {
     typealias Handler = (URLRequest) -> (Int, Data)
     nonisolated(unsafe) private static var handler: Handler?
@@ -55,6 +150,22 @@ final class ContourCompanionURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// URLSession hands protocol classes a request body as a stream.
+    static func bodyData(from request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }
 
 @MainActor
@@ -120,6 +231,7 @@ struct ContourScenario {
     func manager(
         fixture: ContourFixture,
         payloads: [String: Data]? = nil,
+        trustStore: BikeMapStreamTrustStore? = nil,
         metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
             try SavedMapArtifactMetadataStore.save(metadata, for: url)
         }
@@ -129,7 +241,7 @@ struct ContourScenario {
             defaults: defaults,
             mapPlatformSession: session,
             cacheDirectory: cache,
-            mapStreamTrustStore: fixture.trustStore,
+            mapStreamTrustStore: trustStore ?? fixture.trustStore,
             catalogAppIdentity: Self.appIdentity,
             catalogHost: OfflineMapCatalogConfig.developmentHost,
             catalogClient: try! OfflineMapCatalogClient(
@@ -212,6 +324,15 @@ struct ContourScenario {
         stream: OfflineMapCatalogArtifact,
         companion: OfflineMapCatalogArtifact?
     ) {
+        serveCatalogGrants(map: map) { _ in (stream, companion) }
+    }
+
+    /// Serves each catalog grant that `choose` picks from the request's
+    /// accepted `keyId=keySha256` signers; nil answers like the Worker's 409.
+    func serveCatalogGrants(
+        map: OfflineMapCatalogMap,
+        choose: @escaping ([String]) -> (OfflineMapCatalogArtifact, OfflineMapCatalogArtifact?)?
+    ) {
         let libraryID = "lib_v1_" + String(repeating: "L", count: 43)
         ContourCompanionURLProtocol.configure { request in
             if request.url?.path == "/v1/libraries/bootstrap" {
@@ -220,8 +341,17 @@ struct ContourScenario {
                     "credential": "cat_v1_" + String(repeating: "K", count: 43),
                 ]))
             }
-            guard request.url?.path == "/v1/library/maps/\(map.mapEntryId)/download-grants" else {
+            guard request.url?.path == "/v1/library/maps/\(map.mapEntryId)/download-grants",
+                  let body = try? JSONSerialization.jsonObject(
+                    with: ContourCompanionURLProtocol.bodyData(from: request)
+                  ) as? [String: Any],
+                  let accepted = body["acceptedSigners"] as? [[String: String]] else {
                 return (404, Data())
+            }
+            guard let (stream, companion) = choose(accepted.map {
+                "\($0["keyId"] ?? "")=\($0["keySha256"] ?? "")"
+            }) else {
+                return (409, Data(#"{"error":"no compatible artifact is available"}"#.utf8))
             }
             var grant: [String: Any] = [
                 "downloadURL": "https://\(OfflineMapCatalogConfig.developmentHost)/v1/downloads/stream",
@@ -333,6 +463,7 @@ struct OfflineMapContourCompanionTests {
         testInterruptedCompanionReplacementRecovery(fixture)
         await testCatalogDeliversCombinedCompanion(fixture)
         await testCatalogRejectsInconsistentCompanionGrants(fixture)
+        await testCatalogDownloadFollowsBikeTrust(fixture)
         await testUnsupportedSavedContourContractIsExplicit(fixture)
         print("Offline map contour companion tests passed")
     }
@@ -751,6 +882,99 @@ struct OfflineMapContourCompanionTests {
             check(manager.cachedPackURLs.isEmpty, "\(name) catalog grant saves no map")
             check(scenario.savedCompanionFiles.isEmpty, "\(name) catalog grant saves no companion")
         }
+    }
+
+    /// Bicino Dev trusts development and production signers; production and
+    /// ordinary firmware only production ones. The grant asks only for signers
+    /// the connected bike trusts while the library has such a copy, so Bicino
+    /// Dev saves the production copy and its companion for stock firmware.
+    @MainActor
+    static func testCatalogDownloadFollowsBikeTrust(_ fixture: ContourFixture) async {
+        let corpus = CompatibilityCorpusContours.load()
+        func stream(_ tier: String) -> OfflineMapCatalogArtifact {
+            corpus.map.artifacts.first { $0.platformArtifact.isBikeMapStream && $0.deliveryTier == tier }!
+        }
+        func companion(_ tier: String) -> OfflineMapCatalogArtifact? {
+            corpus.map.artifacts.first { $0.platformArtifact.isTopographyCompanion && $0.deliveryTier == tier }
+        }
+        let everySigner = corpus.appTrust.capabilityHeaderValue?
+            .split(separator: ",").map(String.init) ?? []
+        let cases: [(bike: String, trust: [String]?, requested: [String], tier: String)] = [
+            ("unreported", nil, everySigner, "development"),
+            ("development", everySigner, everySigner, "development"),
+            ("stock", corpus.productionSigners, corpus.productionSigners, "production"),
+        ]
+        for item in cases {
+            let scenario = ContourScenario(
+                "bike-trust-\(item.bike)",
+                serverURL: OfflineMapServiceConfig.developmentServerURLString
+            )
+            defer { scenario.cleanup() }
+            var requests: [[String]] = []
+            // As the Worker does: development first, then production, taking
+            // the first copy whose signer the request accepts.
+            scenario.serveCatalogGrants(map: corpus.map) { accepted in
+                requests.append(accepted)
+                guard let tier = ["development", "production"].first(where: { tier in
+                    let candidate = stream(tier)
+                    return accepted.contains(
+                        "\(candidate.signatureKeyId ?? "")=\(candidate.signatureKeySha256 ?? "")"
+                    )
+                }) else {
+                    return nil
+                }
+                return (stream(tier), companion(tier))
+            }
+            let manager = scenario.manager(
+                fixture: fixture,
+                payloads: corpus.payloads,
+                trustStore: corpus.appTrust
+            )
+            manager.downloadCatalogMap(corpus.map, deviceStreamTrust: item.trust)
+            let finished = await waitForIdle(manager)
+            check(finished, "\(item.bike) bike: catalog download finishes")
+            check(manager.errorMessage == nil,
+                  "\(item.bike) bike: catalog map downloads: \(manager.errorMessage ?? "")")
+            check(requests == [item.requested],
+                  "\(item.bike) bike: grant requests \(item.requested), not \(requests)")
+            guard let packURL = manager.downloadedPackURL,
+                  let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+                  let association = scenario.savedCompanion(associationID: corpus.map.mapEntryId) else {
+                fail("\(item.bike) bike: catalog map and companion are saved")
+            }
+            check(metadata.primaryArtifact?.sha256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: saves the \(item.tier) copy")
+            check(association.streamArtifactSHA256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: companion is bound to the \(item.tier) copy")
+        }
+
+        // A grant outside the signers the bike trusts is refused before download.
+        let scenario = ContourScenario(
+            "bike-trust-refused",
+            serverURL: OfflineMapServiceConfig.developmentServerURLString
+        )
+        defer { scenario.cleanup() }
+        scenario.serveCatalogGrant(
+            map: corpus.map,
+            stream: stream("development"),
+            companion: companion("development")
+        )
+        let manager = scenario.manager(
+            fixture: fixture,
+            payloads: corpus.payloads,
+            trustStore: corpus.appTrust
+        )
+        manager.downloadCatalogMap(corpus.map, deviceStreamTrust: corpus.productionSigners)
+        let finished = await waitForIdle(manager)
+        check(finished, "an untrusted grant finishes")
+        check(
+            manager.errorMessage?.contains(
+                OfflineMapCatalogError.missingCompatibleArtifact.errorDescription!
+            ) == true,
+            "a grant the bike cannot install is refused: \(manager.errorMessage ?? "no error")"
+        )
+        check(manager.cachedPackURLs.isEmpty, "an untrusted grant saves no map")
+        check(scenario.savedCompanionFiles.isEmpty, "an untrusted grant saves no companion")
     }
 
     /// Contour maps saved before the companion receipt was part of saved map

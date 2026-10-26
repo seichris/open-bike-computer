@@ -2245,7 +2245,9 @@ Status responses should include:
   workflows never build those profiles. iOS selects v2 only when the artifact's
   key identity matches one of these entries; a device with an older or
   rotated-out trust set rejects installation until firmware or the artifact is
-  updated.
+  updated. When the shared map library holds a copy signed by one of these
+  entries, iOS downloads that copy (and offers it in place of a saved copy the
+  bike cannot install); otherwise it keeps its own signer preference.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
 - `transferGeneration`: nonzero boot-local authorization generation. BLE
   disconnect, exit, or mode replacement increments it so in-flight requests

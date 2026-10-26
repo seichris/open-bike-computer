@@ -97,6 +97,14 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
         return combined.contains(keyID: keyID) ? combined : nil
     }
 
+    /// The keys whose exact `keyId=SHA256(X9.63)` capability is listed, such as
+    /// a bike's reported `streamTrust`.
+    func restricted(to capabilities: Set<String>) -> Self {
+        Self(publicKeysByID: publicKeysByID.filter { keyID, _ in
+            capability(for: keyID).map(capabilities.contains) ?? false
+        })
+    }
+
     var isEmpty: Bool { publicKeysByID.isEmpty }
 
 }

@@ -541,7 +541,9 @@ struct ContentView: View {
                     offlineMapManager.catalogAvailability(for: $0).claimActionTitle
                 } ?? "Add Map"
             ) {
-                offlineMapManager.claimPendingShare()
+                offlineMapManager.claimPendingShare(
+                    deviceStreamTrust: coordinator.bleManager.mapTransferStreamTrust
+                )
             }
             Button("Cancel", role: .cancel) {
                 offlineMapManager.dismissPendingShare()

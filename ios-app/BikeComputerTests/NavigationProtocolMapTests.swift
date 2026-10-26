@@ -3297,7 +3297,7 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains(
-                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)"
+                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh("
             ) &&
                 source.contains("Label(\"Updated map available\"") &&
                 source.contains(".accessibilityLabel(\"Update \\(displayName) on this iPhone\")") &&
@@ -3305,6 +3305,13 @@ extension NavigationProtocolTests {
                 source.contains("manager.hasActiveBackgroundUpload ||") &&
                 source.contains("isPausedUpload ||"),
             "a stale local catalog artifact offers a current verified download before transfer"
+        )
+        assertEqual(
+            source.components(
+                separatedBy: "deviceStreamTrust: bleManager.mapTransferStreamTrust"
+            ).count - 1,
+            3,
+            "the refresh check and both catalog downloads follow the connected bike's map trust"
         )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&

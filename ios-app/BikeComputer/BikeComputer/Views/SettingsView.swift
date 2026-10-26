@@ -1594,7 +1594,10 @@ private struct SavedMapRow: View {
         ) ?? false
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
-        let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)
+        let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(
+            for: item,
+            deviceStreamTrust: bleManager.mapTransferStreamTrust
+        )
         let uploadProgress = packURL.flatMap(manager.mapUploadProgress(for:))
         let activationProgress = item.localRecord?.mapID == manager.lastTransferMapId
             ? manager.activationProgress
@@ -1714,7 +1717,10 @@ private struct SavedMapRow: View {
                     Button {
                         finishRenaming()
                         focusedPackFilename = nil
-                        manager.downloadCatalogMap(catalogMap)
+                        manager.downloadCatalogMap(
+                            catalogMap,
+                            deviceStreamTrust: bleManager.mapTransferStreamTrust
+                        )
                     } label: {
                         Image(systemName: "arrow.down.circle")
                             .frame(width: 32, height: 32)
@@ -1775,7 +1781,10 @@ private struct SavedMapRow: View {
                     Button {
                         finishRenaming()
                         focusedPackFilename = nil
-                        manager.downloadCatalogMap(catalogMap)
+                        manager.downloadCatalogMap(
+                            catalogMap,
+                            deviceStreamTrust: bleManager.mapTransferStreamTrust
+                        )
                     } label: {
                         Image(
                             systemName: catalogAvailability?.canDownload == true
