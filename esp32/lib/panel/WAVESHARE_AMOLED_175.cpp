@@ -7,6 +7,11 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#if defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_DISPLAY_TEST) && \
+    !defined(WAVESHARE_DISPLAY_PROBE)
+#include "early_boot_logo.hpp"
+#include "../images/src/bicino_logo.h"
+#endif
 #include "../device_debug/device_debug_frame_store.hpp"
 #include "../device_debug/device_debug_input.hpp"
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
@@ -240,6 +245,13 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx->writeAddrWindow(targetX, targetY, targetW, targetH);
   gfx->writePixels(pixels, targetW * targetH);
   gfx->endWrite();
+
+#if defined(WAVESHARE_AMOLED_175) && FIRMWARE_DIAGNOSTICS
+  if (displayFlushCount == 0) {
+    Serial.printf("BOOT_VISUAL schema=1 milestone=first_ui uptimeMs=%lu\n",
+                  static_cast<unsigned long>(millis()));
+  }
+#endif
 
 #ifdef WAVESHARE_AMOLED_206
   // The 2.06-inch CO5300 presents the completed frame after a following window
@@ -1135,8 +1147,33 @@ void setupDisplay() {
   drawDisplayTestPatterns(rotation);
 #endif
 
-  // Clear screen for LVGL
+  // Establish the background before the first UI frame.
   gfx->fillScreen(0x0000); // BLACK
+#if defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_DISPLAY_TEST) && \
+    !defined(WAVESHARE_DISPLAY_PROBE)
+  // Give immediate visual feedback while storage/map recovery and application
+  // services initialize. Reuse the canonical wordmark, with native-panel
+  // rotation and alpha composited onto black. LVGL later replaces this image
+  // through its unchanged full-screen flush; boot readiness is unchanged.
+  const uint32_t logoStartUs = micros();
+  const early_boot_logo::Image logo{
+      bicino_logo.data, bicino_logo.data_size,
+      static_cast<uint16_t>(bicino_logo.header.w),
+      static_cast<uint16_t>(bicino_logo.header.h),
+      static_cast<uint16_t>(bicino_logo.header.stride)};
+  const bool logoDrawn =
+      bicino_logo.header.cf == LV_COLOR_FORMAT_RGB565A8 &&
+      early_boot_logo::drawCentered(
+          logo, SCREEN_WIDTH, SCREEN_HEIGHT,
+          rotation == waveshare_board::display::ROTATION_90,
+          [](uint16_t x, uint16_t y, uint16_t *pixels, uint16_t width) {
+            gfx->draw16bitRGBBitmap(x, y, pixels, width, 1);
+          });
+  Serial.printf("BOOT_VISUAL schema=1 milestone=logo drawn=%u uptimeMs=%lu "
+                "drawUs=%lu\n", logoDrawn ? 1U : 0U,
+                static_cast<unsigned long>(millis()),
+                static_cast<unsigned long>(micros() - logoStartUs));
+#endif
   Serial.println("Arduino_GFX display ready");
 }
 
