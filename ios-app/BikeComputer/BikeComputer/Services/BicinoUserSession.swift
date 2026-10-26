@@ -23,8 +23,7 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
     override init() {
         super.init()
         let info = Bundle.main.infoDictionary ?? [:]
-        guard (info["BicinoSocialEnabled"] as? String) == "YES",
-              let keychainGroup = info["BicinoSocialKeychainGroup"] as? String,
+        guard let keychainGroup = info["BicinoSocialKeychainGroup"] as? String,
               !keychainGroup.contains("$("), keychainGroup.hasSuffix("." + (Bundle.main.bundleIdentifier ?? "")),
               let reversedID = info["BicinoGoogleReversedClientID"] as? String,
               reversedID.hasPrefix("com.googleusercontent.apps."),

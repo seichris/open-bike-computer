@@ -21,17 +21,37 @@ struct SocialQRCode: View {
 struct SocialLinkView: View {
     @ObservedObject var store: SocialCoordinator
     let routeLibrary: PhoneRouteLibrary
-    @State private var profile: SocialProfile?
-    @State private var content: SocialContent?
-    @State private var preview: SocialRidePreview?
+    @StateObject private var loader: SocialLinkLoader
     @State private var error: String?
     @State private var completed = false
+
+    init(store: SocialCoordinator, routeLibrary: PhoneRouteLibrary) {
+        self.store = store
+        self.routeLibrary = routeLibrary
+        _loader = StateObject(wrappedValue: SocialLinkLoader(client: store.client,
+            currentGeneration: { store.session.generation }))
+    }
+
+    private var profile: SocialProfile? {
+        if case .profile(let value) = loader.value(for: store.pendingLink) { return value }
+        return nil
+    }
+    private var content: SocialContent? {
+        if case .content(let value) = loader.value(for: store.pendingLink) { return value }
+        return nil
+    }
+    private var preview: SocialRidePreview? {
+        if case .ride(let value) = loader.value(for: store.pendingLink) { return value }
+        return nil
+    }
+    private var loadID: String { "\(store.session.generation)|\(store.session.state)|\(store.pendingLink?.absoluteString ?? "")" }
     var body: some View {
         Group {
             if store.session.state != .signedIn {
                 SocialHubView(store: store, routeLibrary: routeLibrary, offersProfileSetup: false)
             } else if let content {
                 SocialContentDetail(store: store, item: content, routeLibrary: routeLibrary)
+                    .id(loadID)
             } else {
                 List {
                     if let profile {
@@ -55,23 +75,27 @@ struct SocialLinkView: View {
             }
         }
         .modifier(SocialProfileSetupPresentation(store: store))
-        .task(id: store.session.state) {
+        .task(id: loadID) {
+            loader.reset(); completed = false; error = nil
             guard store.session.state == .signedIn, let url = store.pendingLink else { return }
-            run {
+            let generation = store.session.generation
+            do {
                 try await store.refresh()
-                guard let target = SocialLinkTarget(url: url) else { throw SocialFailure.invalidResponse }
-                let id = target.id
-                switch target.kind {
-                case "profile": profile = try JSONDecoder().decode(SocialProfile.self, from: await store.client.request("profiles/\(id)"))
-                case "shared": content = try JSONDecoder().decode(SocialContent.self, from: await store.client.request("shared/resolve", method: "POST", body: JSONSerialization.data(withJSONObject: ["code": id])))
-                case "ride": preview = try JSONDecoder().decode(SocialRidePreview.self, from: await store.client.request("group-rides/preview", method: "POST", body: JSONSerialization.data(withJSONObject: ["code": id])))
-                default: throw SocialFailure.invalidResponse
+                guard generation == store.session.generation, url == store.pendingLink, !Task.isCancelled else { return }
+                try await loader.load(url)
+            } catch {
+                guard generation == store.session.generation, url == store.pendingLink, !Task.isCancelled else { return }
+                self.error = error.localizedDescription
                 }
-            }
         }
     }
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
-        Task { do { try await action() } catch { self.error = error.localizedDescription } }
+        let generation = store.session.generation
+        Task {
+            guard generation == store.session.generation else { return }
+            do { try await action() } catch {
+                if generation == store.session.generation { self.error = error.localizedDescription }
+            }
+        }
     }
 }
-private struct SocialRidePreview: Decodable { let title: String; let route: SocialContentBody }

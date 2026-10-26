@@ -1,9 +1,9 @@
 # Social riding rollout and operations
 
-This implementation is opt-in. Existing navigation, installation credentials, BLE
-ownership, and local workouts remain independent of a Bicino account. Do not turn
-on social uploads until both repository PRs, provider configuration, privacy
-review, and the acceptance matrix below are complete.
+Profile, Friends & Group Rides is available by default in Bicino and Bicino Dev.
+Signing in and sharing remain optional. Existing navigation, installation
+credentials, BLE ownership, and local workouts remain independent of a Bicino
+account. Service deployments retain their provider, privacy, and acceptance gates.
 
 ## Identity and native configuration
 
@@ -15,12 +15,14 @@ Enable native Sign in with Apple and Push Notifications in the developer portal.
 Register the Google iOS client and reversed client-ID callback scheme. Do not
 copy server credentials into Xcode or the application bundle.
 
-Set build settings `BICINO_FIREBASE_APP_ID`, `BICINO_FIREBASE_SENDER_ID`,
-`BICINO_FIREBASE_API_KEY`, `BICINO_FIREBASE_PROJECT_ID`, `BICINO_GOOGLE_CLIENT_ID`,
-and `BICINO_GOOGLE_REVERSED_CLIENT_ID`, then `BICINO_SOCIAL_ENABLED = YES`.
-Their committed defaults are empty / NO, except for a valid inactive Google
-callback scheme. The disabled build hides Friends & Group Rides. Social startup
-requires a configured Google reversed client ID. Firebase explicitly selects the
+The checked-in `Development.xcconfig` and `Production.xcconfig` contain each
+environment's public Firebase app identifiers, API key, and Google client/callback
+identifiers. These are client configuration, not server credentials. No external
+xcconfig or app feature switch is required. Development uses `bicino-dev` and
+production uses `bicino-prod`; keep their clients and accounts separate.
+Social startup still validates the client configuration and private Keychain
+group. Settings always exposes the account menu, including an initialization
+error when credentials cannot be restored. Firebase explicitly selects the
 app-private `BicinoSocialKeychainGroup`; the existing map-library group remains
 first in the enabled entitlement array, preserving all pre-existing unscoped credential
 stores. No BLE owner, transfer, diagnostics or App Attest credential migration is
@@ -276,15 +278,13 @@ deleted account, never one the rider switched to. Receipts survive identity
 cleanup and expire after 30 days. APNs keeps its HTTP/2 connection and caches
 provider tokens for 50 minutes, below Apple's one-hour limit.
 
-The signing entitlement path is selected by `BICINO_SOCIAL_ENABLED`: `NO` uses
-the baseline file without Apple/Push or the Firebase group; `YES` selects
-`BikeComputerSocial.entitlements`. Xcode build-setting resolution verifies both
-paths. Release readiness remains separate from source tests: validate production App ID
+Both iPhone configurations use `BikeComputerSocial.entitlements`, including
+Apple sign-in, the environment-specific Push entitlement, and the private
+Firebase Keychain group. Release readiness remains separate from source tests: validate production App ID
 Sign in with Apple/Push capabilities, provisioning, callback configuration and
 APNs topic before the next signed TestFlight archive. The shared image includes
 social dependencies; its promotion still moves the signed map worker and must
-pass the existing worker/hardware promotion gates. Feature-off is not a waiver
-for signing, packaging or deployment gates.
+pass the existing worker/hardware promotion gates.
 
 ## Runtime
 

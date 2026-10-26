@@ -280,8 +280,11 @@ class LocalResultsTests(unittest.TestCase):
 
     def test_receipt_miss_executes_the_normalized_profile_without_test_filters(self):
         self.check["command"] = 'test -z "${ONLY_TESTING:-}${BASH_ENV:-}${SDKROOT:-}${PYTHONPATH:-}"'
+        # run_ci still calls git with the ambient environment. On macOS an
+        # unresolvable SDKROOT makes /usr/bin/git open the Command Line Tools
+        # installer, so use a real SDK name that the profile must still drop.
         with patch.dict(os.environ, {"ONLY_TESTING": "OneTest", "BASH_ENV": "/nonexistent",
-                                     "SDKROOT": "/fake-sdk", "PYTHONPATH": "/fake-imports"}):
+                                     "SDKROOT": "macosx", "PYTHONPATH": "/fake-imports"}):
             code, report, _ = self.run_ci(None)
         self.assertEqual(code, 0)
         self.assertEqual(report["checks"][0]["execution"], "hosted")

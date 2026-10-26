@@ -207,24 +207,31 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             load_xcconfig(IOS_PROJECT / "Configuration" / "HealthKitZones.xcconfig"),
             expected_zone_flags,
         )
-        expected_social_defaults = {
-            "BICINO_SOCIAL_ENABLED": "NO",
-            "BICINO_SIGNING_ENTITLEMENTS_NO": "BikeComputer/BikeComputer.entitlements",
-            "BICINO_SIGNING_ENTITLEMENTS_YES": "BikeComputer/BikeComputerSocial.entitlements",
-            "BICINO_FIREBASE_APP_ID": "",
-            "BICINO_FIREBASE_SENDER_ID": "",
-            "BICINO_FIREBASE_API_KEY": "",
-            "BICINO_FIREBASE_PROJECT_ID": "",
-            "BICINO_GOOGLE_CLIENT_ID": "",
-            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "$(BICINO_URL_SCHEME)-google-disabled",
+        # Firebase's public client identities must match the app family; neither
+        # build requires an external feature switch to expose account features.
+        expected_development_social = {
+            "BICINO_FIREBASE_API_KEY": "AIzaSyAqEA5LP16RFDQcPXBMeqEvGOPsuIEZ1b0",
+            "BICINO_FIREBASE_APP_ID": "1:508574122896:ios:6edaa42944894d22b86915",
+            "BICINO_FIREBASE_PROJECT_ID": "bicino-dev",
+            "BICINO_FIREBASE_SENDER_ID": "508574122896",
+            "BICINO_GOOGLE_CLIENT_ID": "508574122896-bg7ciq6ecdsq0j450mduvnfp9c7ubsko.apps.googleusercontent.com",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "com.googleusercontent.apps.508574122896-bg7ciq6ecdsq0j450mduvnfp9c7ubsko",
+        }
+        expected_production_social = {
+            "BICINO_FIREBASE_APP_ID": "1:578330303218:ios:fcc893df60771bd1d60e6b",
+            "BICINO_FIREBASE_SENDER_ID": "578330303218",
+            "BICINO_FIREBASE_API_KEY": "AIzaSyAt1IoeVRCF8lGTO5tkXfKyaXXAnMFrtFw",
+            "BICINO_FIREBASE_PROJECT_ID": "bicino-prod",
+            "BICINO_GOOGLE_CLIENT_ID": "578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi.apps.googleusercontent.com",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "com.googleusercontent.apps.578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi",
         }
         self.assertEqual(development, {
             **expected_zone_flags, **expected_development,
-            **expected_social_defaults, "BICINO_APNS_ENVIRONMENT": "development",
+            **expected_development_social, "BICINO_APNS_ENVIRONMENT": "development",
         })
         self.assertEqual(production, {
             **expected_zone_flags, **expected_production,
-            **expected_social_defaults, "BICINO_APNS_ENVIRONMENT": "production",
+            **expected_production_social, "BICINO_APNS_ENVIRONMENT": "production",
         })
 
         development_key_id = development[
@@ -604,10 +611,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(
             project.count(
                 "CODE_SIGN_ENTITLEMENTS = "
-                '\"$(BICINO_SIGNING_ENTITLEMENTS_$(BICINO_SOCIAL_ENABLED))\";'
+                "BikeComputer/BikeComputerSocial.entitlements;"
             ),
             2,
-            "iPhone Debug and Release must select the configured entitlement set",
+            "iPhone Debug and Release must include Apple sign-in, push and private social Keychain access",
         )
         self.assertEqual(
             project.count(
