@@ -343,8 +343,8 @@ def request_profile(
     """Return the durable profile a renderer request produces, if any.
 
     Renderer targets outside the contract stay uncovered: their manifests carry
-    no marker. A terrain experiment is an optional layer that every reader of
-    its profile must accept and may ignore.
+    no marker. Terrain profile 1 is the contour profile's optional layer; the
+    iPhone sends it only to firmware that accepts terrain files.
     """
     from .map_labels import renderer_format_version
     from .map_pois import POI_RENDERER_FORMAT_VERSION, requested_poi_features

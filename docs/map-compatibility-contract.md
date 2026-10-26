@@ -152,8 +152,9 @@ message never points to a firmware build.
   reader requirements and contract from the manifest. Install needs three
   things: the bike trusts the signer, the bike's reader capabilities cover the
   requirements, and the phone can read them. For a durable map, firmware
-  identities in saved or delivered metadata are ignored, and an optional layer
-  never blocks the install. A URL refresh compares only immutable artifact
+  identities in saved or delivered metadata are ignored, and the optional
+  terrain layer goes to any bike that reports `mapReader` (older firmware needs
+  the terrain experiment). A URL refresh compares only immutable artifact
   identity, so a new approval or backend version cannot break a re-download.
 - **Firmware.** The HTTPS and BLE map transfer status report `mapReader`. The
   report is derived from the same compile flags that decide which renderer
@@ -175,8 +176,9 @@ message never points to a firmware build.
    build identity, so it ships through a worker promotion and hardware approval.
 3. **New semantics need new requirements.** A changed meaning needs a new
    renderer target, feature, manifest schema or stream format, so older readers
-   refuse it cleanly. Never reuse an existing identifier. New content that older
-   readers can safely ignore may be an optional layer instead.
+   refuse it cleanly. Never reuse an existing identifier. Current parsers refuse
+   unknown files and `mapReader` schema 1 lists no layers, so a new optional
+   layer also needs readers that report it before the iPhone may send it.
 4. **Contract numbers.** The marker is exactly `{"contract": N}`, with N from 1
    to 255. A later contract adds a contract file and a corpus directory; readers
    and the backend keep accepting every earlier contract. The iPhone treats any
@@ -234,9 +236,10 @@ and the signer registry the backend suites.
 Every corpus stream comes from the real packaging, promotion, companion and
 signing code. The `*-osm-*` maps also carry blocks that the production worker
 extracted from checked-in OSM fixtures. The other maps use small test-helper
-blocks, every contour layer uses a test DEM sample, and no map has real POI
-records, because the OSM fixtures have no POI tags. The firmware suite runs only
-the current parser, so it cannot show which older releases read a frozen map.
+blocks, every contour layer and terrain grid uses test elevation data, and no
+map has real POI records, because the OSM fixtures have no POI tags. The
+firmware suite runs only the current parser, so it cannot show which older
+releases read a frozen map.
 
 These checks do not prove physical installs. The physical gates in the
 [rollout runbook](map-stream-rollout-runbook.md) still apply, and each new

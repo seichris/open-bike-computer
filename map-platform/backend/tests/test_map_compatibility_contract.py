@@ -189,7 +189,12 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
             "layer on another target": lambda value: value["profiles"][0].update(
                 optionalLayers=[TERRAIN_EXPERIMENT_LAYER]
             ),
-            "layers not a list": lambda value: value.update(optionalLayers={}),
+            # With no profile referring to a layer, only the shape check
+            # rejects a mapping in place of the list.
+            "layers not a list": lambda value: (
+                value["profiles"][1].update(optionalLayers=[]),
+                value.update(optionalLayers={}),
+            ),
         }
         for name, change in changes.items():
             with self.subTest(change=name):
