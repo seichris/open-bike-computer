@@ -6745,10 +6745,25 @@ extension NavigationProtocolTests {
         }
 
         sentPackets.removeAll()
+        let expectedEpoch = bleManager.transferConnectionEpoch
+        for (deviceID, epoch) in [("device-b", expectedEpoch), ("device-a", expectedEpoch &+ 1)] {
+            do {
+                _ = try await manager.prepareFirmwareMaintenance(
+                    bleManager: bleManager, expectedDeviceID: deviceID,
+                    expectedConnectionEpoch: epoch, status: { _ in })
+                assert(false, "stale maintenance intent must be rejected")
+            } catch FirmwareUpdateError.deviceNotReady {
+                assert(sentPackets.isEmpty, "stale maintenance intent sends no control packets")
+            } catch {
+                assert(false, "unexpected stale maintenance intent error: \(error)")
+            }
+        }
         var waitingForMaintenanceReconnect = false
         let preparation = Task {
             try await manager.prepareFirmwareMaintenance(
                 bleManager: bleManager,
+                expectedDeviceID: "device-a",
+                expectedConnectionEpoch: expectedEpoch,
                 status: { message in
                     if message == "waiting for firmware maintenance" {
                         waitingForMaintenanceReconnect = true
