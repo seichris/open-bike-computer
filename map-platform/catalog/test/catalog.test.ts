@@ -2428,6 +2428,69 @@ describe("validation", () => {
     reject(undeclared, "non-topographic map contains a companion artifact");
   });
 
+  it("accepts only the renderer profiles the map backend publishes", () => {
+    const retarget = (
+      source: ReturnType<typeof publication>,
+      rendererFormatVersion: number,
+      features: string[],
+      renderer = "esp32-fmb",
+    ) => {
+      const candidate = structuredClone(source);
+      candidate.renderer = renderer;
+      candidate.rendererFormatVersion = rendererFormatVersion;
+      candidate.features = features;
+      candidate.artifacts[0].readerRequirements = {
+        ...candidate.artifacts[0].readerRequirements!,
+        renderer,
+        rendererFormatVersion,
+        requiredFeatures: features,
+      };
+      return candidate as unknown as Record<string, unknown>;
+    };
+    const plain = publication();
+    const contoured = topographicPublication();
+    // Contour-free targets 1 and 2 predate the durable contract but are
+    // still valid publications.
+    for (const [version, features] of [
+      [1, []],
+      [2, ["street-labels"]],
+      [3, ["3d-buildings", "street-labels"]],
+    ] as const) {
+      expect(
+        validatePublication(retarget(plain, version, [...features])),
+      ).toMatchObject({ rendererFormatVersion: version, features });
+    }
+    expect(contoured.features).toEqual([
+      "3d-buildings",
+      "contours",
+      "street-labels",
+    ]);
+    expect(
+      developmentCombinedPublication("profile-poi", false).features,
+    ).toEqual(["3d-buildings", "map-pois", "street-labels"]);
+    expect(
+      developmentCombinedPublication("profile-poi-contours").features,
+    ).toEqual(combinedFeatures);
+
+    // Each candidate otherwise satisfies the stream and companion contract.
+    const reject = (value: Record<string, unknown>) =>
+      expect(() => validatePublication(value)).toThrow(
+        "renderer features are not publishable",
+      );
+    reject(
+      retarget(contoured, 3, ["3d-buildings", "contours", "street-labels"]),
+    );
+    reject(
+      retarget(contoured, 5, ["3d-buildings", "contours", "street-labels"]),
+    );
+    reject(retarget(plain, 4, ["3d-buildings", "street-labels"]));
+    reject(retarget(plain, 5, ["map-pois", "street-labels"]));
+    reject(retarget(plain, 3, ["3d-buildings", "map-pois", "street-labels"]));
+    reject(retarget(plain, 1, ["street-labels"]));
+    reject(retarget(plain, 6, ["3d-buildings", "street-labels"]));
+    reject(retarget(plain, 3, ["3d-buildings", "street-labels"], "fmb"));
+  });
+
   it("normalizes aliases using the cross-platform Unicode contract", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
     expect(normalizeAlias("\uFEFFMap name\uFEFF")).toBe("Map name");
@@ -2821,28 +2884,50 @@ describe("catalog lifecycle boundaries", () => {
     });
   });
 
-  it("gates combined POI contour maps by their contours layer", async () => {
-    const candidate = developmentCombinedPublication("combined-gated");
-    await finalizePublication(
-      env,
-      candidate,
-      candidate.publicationId,
-      await sha256Hex(JSON.stringify(candidate)),
-      null,
-      verifyTestArtifact,
-    );
-    await expect(
-      createPromotionGrant(env, candidate.mapEntryId),
-    ).rejects.toMatchObject({
-      status: 409,
-      message: "topographic promotion is not qualified",
-    });
-    // Target-5 POI maps stay outside automatic production promotion even
-    // after contour promotion is qualified.
+  it("keeps target-5 POI maps out of every promotion entry point", async () => {
     const enabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "1" };
-    expect(
-      (await listPromotionCandidates(enabled, null, 100)).mapEntryIds,
-    ).not.toContain(candidate.mapEntryId);
+    for (const candidate of [
+      developmentCombinedPublication("poi-gated", false),
+      developmentCombinedPublication("combined-gated"),
+    ]) {
+      await finalizePublication(
+        env,
+        candidate,
+        candidate.publicationId,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+      // Backend promotion refuses target 5, so neither discovery nor a
+      // manual grant may lease one, whatever its contour qualification.
+      for (const promotionEnv of [env, enabled]) {
+        expect(
+          (await listPromotionCandidates(promotionEnv, null, 100)).mapEntryIds,
+        ).not.toContain(candidate.mapEntryId);
+        await expect(
+          createPromotionGrant(promotionEnv, candidate.mapEntryId),
+        ).rejects.toMatchObject({
+          status: 409,
+          message: "renderer target is not promotable",
+        });
+      }
+      const state = await env.DB.prepare(
+        `SELECT me.delivery_state,
+                (SELECT COUNT(*) FROM promotion_leases lease
+                  WHERE lease.map_entry_id = me.id) AS leases,
+                (SELECT COUNT(*) FROM download_grants grant_row
+                   JOIN artifacts a ON a.id = grant_row.artifact_id
+                  WHERE a.map_entry_id = me.id) AS grants
+           FROM map_entries me WHERE me.id = ?`,
+      )
+        .bind(candidate.mapEntryId)
+        .first<{ delivery_state: string; leases: number; grants: number }>();
+      expect(state).toEqual({
+        delivery_state: "development",
+        leases: 0,
+        grants: 0,
+      });
+    }
   });
 
   it("promotes a qualified topographic stream with its exact companion", async () => {

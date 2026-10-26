@@ -35,6 +35,9 @@ const MAX_LIVE_ARTIFACT_GENERATION_CLASSES = 16;
 const MAX_RETENTION_BATCH = 10;
 const RETENTION_AUTHORIZATION_MILLISECONDS = 15 * 60 * 1000;
 const PROMOTION_LEASE_MILLISECONDS = 60 * 60 * 1000;
+// Backend promotion repackages renderer targets 1-4 only; target-5 POI maps
+// stay behind their production rollout gate.
+const PROMOTABLE_RENDERER_FORMAT_VERSIONS = [1, 2, 3, 4];
 // SQL form of hasContourLayer for one map_entries row alias.
 const CONTOUR_LAYER_SQL = (alias: string) =>
   `EXISTS (SELECT 1 FROM json_each(${alias}.features_json) WHERE value = 'contours')`;
@@ -62,7 +65,7 @@ export async function listPromotionCandidates(
   const rows = await env.DB.prepare(
     `SELECT m.id FROM map_entries m
       WHERE m.id > ? AND m.origin_channel = 'development'
-        AND m.renderer_format_version IN (1, 2, 3, 4)
+        AND m.renderer_format_version IN (${PROMOTABLE_RENDERER_FORMAT_VERSIONS.join(", ")})
         AND (NOT ${CONTOUR_LAYER_SQL("m")} OR ? = '1')
         AND m.delivery_state IN ('development', 'promotion_pending')
         AND EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
@@ -2053,6 +2056,11 @@ export async function createPromotionGrant(
     !["development", "promotion_pending"].includes(map.delivery_state)
   ) {
     throw new HttpError(409, "map is not eligible for promotion");
+  }
+  if (
+    !PROMOTABLE_RENDERER_FORMAT_VERSIONS.includes(map.renderer_format_version)
+  ) {
+    throw new HttpError(409, "renderer target is not promotable");
   }
   const contourLayer = hasContourLayer(
     parseJSON<string[]>(map.features_json, []),
