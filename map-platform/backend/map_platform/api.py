@@ -592,6 +592,7 @@ def create_app(
                 client_app_build,
                 client_app_git_sha,
                 client_app_build_sha256,
+                compatibility_contract=job.compatibility_contract,
             ):
                 continue
             stream_allowed = True
@@ -601,6 +602,7 @@ def create_app(
                     **map_stream_rollout.artifact_delivery_requirements(
                         client_app_build, client_app_git_sha, client_app_build_sha256,
                         reader_contract=reader_contract,
+                        compatibility_contract=job.compatibility_contract,
                     ),
                 }
             )
@@ -2023,6 +2025,7 @@ def create_app(
                 app_build,
                 app_git_sha,
                 app_build_sha256,
+                compatibility_contract=job.compatibility_contract,
             )
         ):
             raise HTTPException(status_code=404, detail="map artifact not ready")
@@ -2052,6 +2055,7 @@ def create_app(
                 map_stream_rollout.artifact_delivery_requirements(
                     app_build, app_git_sha, app_build_sha256,
                     reader_contract=x_map_stream_reader_contract,
+                    compatibility_contract=job.compatibility_contract,
                 )
                 if artifact_format == BIKE_MAP_STREAM_FORMAT
                 else {}

@@ -118,6 +118,11 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 SHARED_CONTOUR_COMPANION_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
 )
+SHARED_MAP_COMPATIBILITY_PATHS = (
+    "map-platform/backend/tests/fixtures/map-compatibility-v1/",
+    "map-platform/config/map-compatibility-contract-v1.json",
+    "protocol/fixtures/map-reader-capabilities-v1.txt",
+)
 SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
     "tools/generate_route_elevation_fixtures.py",
@@ -302,6 +307,14 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         if path == SHARED_CONTOUR_COMPANION_FIXTURE_PATH:
             # Backend-produced signed maps and companions drive the iPhone
             # delivery contract tests.
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path.startswith(SHARED_MAP_COMPATIBILITY_PATHS):
+            # The durable map contract, its frozen producer corpus and the
+            # device reader report are read by the backend, catalog, iPhone and
+            # firmware compatibility tests.
+            selected["firmware_host"] = True
             selected["ios"] = True
             selected["map_backend"] = True
 

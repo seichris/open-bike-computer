@@ -96,6 +96,14 @@ digest comes from the digest-pinned image reference used to start that worker;
 neither is accepted from an artifact caller. The signing-key fingerprint
 stays in the key-specific artifact identity described below, so a pure key
 rotation preserves `manifestReceipt` while changing `signedManifestReceipt`.
+Maps created from the durable baseline also carry the top-level
+`compatibility` object, `{"contract": 1}`, inside the signed manifest. It marks
+the map as covered by [durable map compatibility](map-compatibility-contract.md)
+contract v1; a manifest without it is pre-baseline. The producer stamps it only
+for a registered profile and signs it only with a registered signer. Readers
+accept any positive contract number and keep later keys in the object, so the
+renderer target, features and signer remain the only read gates; existing
+firmware already skips unknown top-level keys.
 `mapId`, the directory below it, and the filename (including extension) are each
 1...64 ASCII bytes. With the literal `VECTMAP` prefix and separators, the exact
 maximum relative path is therefore 202 bytes. Readers must enforce both the
@@ -163,11 +171,12 @@ The exact object key is
 iOS requires those values, the content-addressed object key, the actual trusted
 public key, and the signed manifest producer object to agree before upload. The
 rollout API uses the same key material, producer build identity, and image
-digest to exclude artifacts outside an approved hardware candidate. Every
-stream response binds the requesting app's numeric build, full clean git SHA,
-and generated component SHA-256; promoted responses additionally bind the
-required firmware version, bounded build number, and full clean firmware git
-SHA. Any mismatch stays on the retained ZIP path.
+digest to exclude artifacts outside an approved hardware candidate; a durable
+map stays available while any recorded approval covers its producer and a
+still-trusted signer. Requester app fields are audit context only. Promoted
+responses for pre-baseline maps additionally carry the approval's required
+firmware version, build number and git SHA; durable maps never do, and iOS
+checks the device's reported reader capabilities instead.
 
 ## Required Failure Behavior
 

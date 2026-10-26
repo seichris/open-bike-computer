@@ -473,6 +473,9 @@ class MapWorker:
                 built_archive=archive_path,
                 published_archive=published_archive,
                 artifacts=getattr(build_result, "artifacts", None),
+                compatibility_contract=getattr(
+                    build_result, "compatibility_contract", None
+                ),
                 artifact_metrics=getattr(build_result, "artifact_metrics", None),
                 build_cache_key=(
                     getattr(build_result, "build_cache_key", None)

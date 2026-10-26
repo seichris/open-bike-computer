@@ -1850,6 +1850,16 @@ private struct SavedMapRow: View {
                     .font(.caption).foregroundColor(.secondary)
             }
 
+            if let packURL, manager.isPreBaselineSavedMap(packURL) {
+                Label(
+                    "Saved before durable maps. To keep it working after updates, download this area again.",
+                    systemImage: "clock.arrow.circlepath"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .accessibilityLabel("\(displayName): saved before durable maps")
+            }
+
             if let packURL,
                let topography = SavedMapArtifactMetadataStore.load(
                    for: packURL

@@ -18,7 +18,9 @@ from .preview import render_boundary_preview
 
 MAP_BLOCK_SIZE_METERS = 1 << 12
 MAP_FOLDER_BLOCKS = 1 << 4
-MAP_REUSE_SCHEMA_VERSION = 4
+# Version 5 separates durable-contract packs (signed compatibility marker)
+# from earlier packs, so exact reuse never hands out a pre-baseline map.
+MAP_REUSE_SCHEMA_VERSION = 5
 EARTH_RADIUS_METERS = 6_378_137
 WEB_MERCATOR_LIMIT_METERS = math.pi * EARTH_RADIUS_METERS
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")

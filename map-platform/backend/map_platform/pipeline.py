@@ -64,6 +64,12 @@ from .map_buildings import (
     renderer_includes_buildings,
 )
 from .map_pois import POI_RENDERER_FORMAT_VERSION, renderer_includes_pois, request_has_contours
+from .map_compatibility import (
+    MapCompatibilityContract,
+    load_map_compatibility_contract,
+    request_profile,
+    require_contract_signer,
+)
 from .topography_artifacts import (
     TOPOGRAPHY_PROFILE_VERSION,
     TOPOGRAPHY_RENDERER_FORMAT_VERSION,
@@ -179,6 +185,7 @@ class MapBuildResult:
     build_cache_aliases: list[str] | None = None
     build_identity_derivation: dict[str, Any] | None = None
     build_compatibility_key: str | None = None
+    compatibility_contract: int | None = None
 
     def __iter__(self):
         yield self.map_id
@@ -1760,8 +1767,14 @@ class MapBuildPipeline:
         topography_builder: Callable[..., tuple[dict[str, Any], Path]] | None = None,
         preparation_store=None,
         deployment_channel: str = "development",
+        compatibility_contract: MapCompatibilityContract | None = None,
     ):
         self.paths = paths
+        self.compatibility_contract = (
+            compatibility_contract
+            if compatibility_contract is not None
+            else load_map_compatibility_contract()
+        )
         self.runner = runner or CommandRunner()
         self.source_cache = source_cache or SourceCache(paths.repo_root)
         self.artifact_store = artifact_store
@@ -6000,6 +6013,11 @@ class MapBuildPipeline:
         building_preprocessing_summary = self._building_preprocessing_summary(
             metrics.get("buildingPreprocessing")
         )
+        durable_profile = request_profile(job.request, self.compatibility_contract)
+        if durable_profile is not None:
+            self.compatibility_contract.require_publishable(
+                durable_profile, self.deployment_channel
+            )
         manifest = build_manifest(
             job,
             pack_root,
@@ -6008,6 +6026,11 @@ class MapBuildPipeline:
             building_preprocessing=building_preprocessing_summary,
             poi_stats=metrics.get("poiBuild"),
             topography=topography_receipt,
+            compatibility=(
+                self.compatibility_contract.manifest_marker
+                if durable_profile is not None
+                else None
+            ),
         )
         reserved_preview_sha256 = getattr(
             job, "_reserved_preview_sha256", None
@@ -6145,6 +6168,13 @@ class MapBuildPipeline:
                 "buildSha256": self.producer_build_sha256,
                 "imageDigest": self.producer_image_digest,
             }
+            require_contract_signer(
+                stream_manifest,
+                self.deployment_channel,
+                self.map_signer.key_id,
+                self.map_signer.public_key_sha256,
+                self.compatibility_contract,
+            )
             stream_build = write_map_stream_artifact(
                 pack_root,
                 stream_manifest,
@@ -6230,6 +6260,11 @@ class MapBuildPipeline:
             build_cache_aliases=list(job.build_cache_aliases),
             build_identity_derivation=job.build_identity_derivation,
             build_compatibility_key=job.build_compatibility_key,
+            compatibility_contract=(
+                self.compatibility_contract.contract
+                if durable_profile is not None
+                else None
+            ),
         )
 
     @staticmethod

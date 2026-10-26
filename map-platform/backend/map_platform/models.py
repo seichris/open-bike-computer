@@ -167,6 +167,9 @@ class MapJob:
     pack_path: str | None = None
     pack_bytes: int | None = None
     artifacts: list[ArtifactRecord] = field(default_factory=list)
+    # Durable compatibility contract declared by the signed manifest of these
+    # artifacts; None marks a pre-baseline map. See map_compatibility.py.
+    compatibility_contract: int | None = None
     artifact_metrics: dict[str, Any] | None = None
     user_label: str | None = None
     catalog_publication_id: str | None = None
@@ -282,6 +285,7 @@ class MapJob:
             ]
             result["pendingArtifactKeys"] = self.pending_artifact_keys
             result["artifactGcKeys"] = self.artifact_gc_keys
+            result["compatibilityContract"] = self.compatibility_contract
             result["schedulerYielded"] = self.scheduler_yielded
             result["catalogPublicationError"] = self.catalog_publication_error
             result["catalogPublicationAttempts"] = self.catalog_publication_attempts
@@ -330,6 +334,9 @@ class MapJob:
             pack_path=data.get("packPath"),
             pack_bytes=data.get("packBytes"),
             artifacts=[ArtifactRecord.from_dict(value) for value in data.get("artifacts", [])],
+            compatibility_contract=_compatibility_contract(
+                data.get("compatibilityContract")
+            ),
             artifact_metrics=dict(data["artifactMetrics"]) if data.get("artifactMetrics") else None,
             user_label=data.get("userLabel"),
             catalog_publication_id=data.get("catalogPublicationId"),
@@ -663,6 +670,14 @@ def _duration_seconds(started_at: str | None, finished_at: str | None) -> float 
     if start is None or finish is None:
         return None
     return max((finish - start).total_seconds(), 0)
+
+
+def _compatibility_contract(value: Any) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= 255:
+        raise ValueError("map compatibility contract is invalid")
+    return value
 
 
 def _catalog_publication_state(value: Any) -> str | None:

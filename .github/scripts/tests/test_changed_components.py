@@ -282,6 +282,25 @@ class ChangedComponentsTests(unittest.TestCase):
             selected,
         )
 
+    def test_map_compatibility_contract_selects_every_reader(self) -> None:
+        for path in (
+            "map-platform/backend/tests/fixtures/map-compatibility-v1/corpus.json",
+            "map-platform/backend/tests/fixtures/map-compatibility-v1/map-pois-v1.development.bmap",
+            "map-platform/config/map-compatibility-contract-v1.json",
+            "protocol/fixtures/map-reader-capabilities-v1.txt",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": True,
+                        "ios": True,
+                        "map_backend": True,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
     def test_route_elevation_fixtures_select_every_consumer(self) -> None:
         for path in (
             "protocol/fixtures/route-elevation-v1/transfer-v1.txt",

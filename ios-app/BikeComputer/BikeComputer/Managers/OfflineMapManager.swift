@@ -2292,6 +2292,7 @@ final class OfflineMapManager: ObservableObject {
     private var fencedRetirementCleanupForTesting: ((BLEManager) async -> Bool)?
 #endif
     @Published private var packDisplayNames: [String: String]
+    private var preBaselineSavedMaps: [String: (revision: String, preBaseline: Bool)] = [:]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
     private var inventorySyncTask: Task<Void, Never>?
@@ -4121,6 +4122,22 @@ final class OfflineMapManager: ObservableObject {
         downloadProgress = 1
         downloadByteProgress = nil
         statusMessage = "shared map downloaded"
+    }
+
+    /// Cached per file revision: Saved Maps renders this for every row.
+    func isPreBaselineSavedMap(_ packURL: URL) -> Bool {
+        let values = try? packURL.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        let revision = "\(values?.fileSize ?? -1):" +
+            "\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        let key = packURL.lastPathComponent
+        if let cached = preBaselineSavedMaps[key], cached.revision == revision {
+            return cached.preBaseline
+        }
+        let preBaseline = SavedMapCompatibilityPolicy.isPreBaseline(packURL: packURL)
+        preBaselineSavedMaps[key] = (revision, preBaseline)
+        return preBaseline
     }
 
     func isCachedPackInstalled(_ packURL: URL,
@@ -6136,8 +6153,9 @@ final class OfflineMapManager: ObservableObject {
                supportsMapPois: bleManager.supportsMapPois,
                includesContours: metadata.topography != nil
            ) {
-            throw OfflineMapPlatformError.invalidPack(
-                "This saved map is not compatible with the connected device. Regenerate it for this firmware."
+            throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                bleManager.hasReceivedDeviceCapabilities
+                    ? .deviceReaderUnsupported : .deviceReaderUnknown
             )
         }
         statusMessage = "preparing transfer"
@@ -6192,8 +6210,9 @@ final class OfflineMapManager: ObservableObject {
                supportsMapPois: bleManager.supportsMapPois,
                includesContours: prepared.artifact.topography != nil
            ) {
-            throw OfflineMapPlatformError.invalidPack(
-                "This saved map is not compatible with the connected device. Regenerate it for this firmware."
+            throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                bleManager.hasReceivedDeviceCapabilities
+                    ? .deviceReaderUnsupported : .deviceReaderUnknown
             )
         }
         guard transferDeviceID == bleManager.activeDeviceID,
@@ -6540,6 +6559,18 @@ final class OfflineMapManager: ObservableObject {
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
                        readerRequirements: artifact.readerRequirements,
+                       compatibilityContract: artifact.compatibilityContract,
+                       deviceReaderCapabilities: DeviceMapReaderCapabilityPolicy.capabilities(
+                           reported: initialDeviceStatus.mapReader,
+                           legacyFeatures: bleManager.hasReceivedDeviceCapabilities
+                               ? LegacyDeviceRendererFeatures(
+                                   streetLabels: bleManager.supportsStreetLabels,
+                                   buildings3D: bleManager.supports3DBuildings,
+                                   contours: bleManager.supportsTopographicContours,
+                                   mapPois: bleManager.supportsMapPois
+                               )
+                               : nil
+                       ),
                        requiredFirmwareVersion: artifact.requiredFirmwareVersion,
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,

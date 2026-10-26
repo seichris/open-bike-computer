@@ -1360,8 +1360,15 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             switch rejection {
             case .readerRequirementsUnsupported:
                 return "This map uses a format this app does not support. Update Bicino and try again."
-            case .deviceProtocolUnsupported, .firmwareIdentityIncomplete, .firmwareIdentityMismatch:
+            case .deviceReaderUnsupported:
+                return "This Bike Computer's firmware can't read this map's features. Install firmware that supports them, or download the area without them."
+            case .deviceReaderUnknown:
+                return "Reconnect the Bike Computer so Bicino can check which maps it can read, then try again."
+            case .deviceProtocolUnsupported:
                 return "This map needs compatible Bike Computer firmware. Update the device firmware and try again."
+            case .firmwareIdentityIncomplete, .firmwareIdentityMismatch:
+                // Only pre-baseline maps carry an exact firmware identity.
+                return "This map was saved before durable maps and only installs on the firmware it was approved for. Download the area again to get a copy that keeps working after updates."
             case .signingKeyNotTrusted:
                 return "The Bike Computer does not trust this map's signing key. Update its firmware and try again."
             case .notSignedStream, .missingSignatureCapability:
@@ -1607,6 +1614,13 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     /// A manifest carries `topography` exactly when it declares contours,
     /// independent of renderer version.
     let declaresContours: Bool
+    /// Durable map contract marker, read for display only; installation
+    /// re-verifies the signed manifest.
+    let compatibilityContract: Int?
+
+    private struct Compatibility: Decodable {
+        let contract: Int
+    }
 
     var previewBounds: OfflineMapPreviewBounds? {
         if let bounds, let decoded = OfflineMapPreviewBounds(coordinates: bounds) {
@@ -1628,6 +1642,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         case bounds
         case boundsE7
         case topography
+        case compatibility
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -1641,6 +1656,28 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
         bounds = try? container.decode([Double].self, forKey: .bounds)
         boundsE7 = try? container.decode([Int].self, forKey: .boundsE7)
         declaresContours = container.contains(.topography)
+        compatibilityContract = (try? container.decodeIfPresent(
+            Compatibility.self, forKey: .compatibility
+        ))?.contract
+    }
+}
+
+nonisolated enum SavedMapCompatibilityPolicy {
+    /// Whether a saved file predates the durable map contract: archives always
+    /// do, and a signed stream does when its manifest has no contract marker.
+    /// Unreadable files are reported by their own validation errors instead.
+    static func isPreBaseline(packURL: URL) -> Bool {
+        switch packURL.pathExtension.lowercased() {
+        case "zip":
+            return true
+        case "bmap":
+            guard let manifest = OfflineMapPackPreviewReader.manifest(for: packURL) else {
+                return false
+            }
+            return manifest.compatibilityContract == nil
+        default:
+            return false
+        }
     }
 }
 
@@ -1858,6 +1895,9 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     let firmwareVersion: String?
     let firmwareBuild: UInt32?
     let firmwareGitSha: String?
+    /// Reader formats and features this firmware installs and draws. Older
+    /// firmware omits it; see DeviceMapReaderCapabilityPolicy.
+    var mapReader: OfflineMapReaderCapabilities? = nil
 
     var supportsBikeMapStreamV1: Bool {
         protocols?.contains(2) == true &&
@@ -1871,7 +1911,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
 
 extension MapTransferDeviceStatus {
-    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activeRendererFormat, labelProfileVersion, labelLanguages, fontAssetHealthy, poiProfileVersion, poiIndexProfileVersion, poiDataHealthy, poiIndexHealthy, contourLayerIncluded, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
+    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activeRendererFormat, labelProfileVersion, labelLanguages, fontAssetHealthy, poiProfileVersion, poiIndexProfileVersion, poiDataHealthy, poiIndexHealthy, contourLayerIncluded, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha, mapReader }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
@@ -1903,6 +1943,11 @@ extension MapTransferDeviceStatus {
         firmwareVersion = try container.decodeIfPresent(String.self, forKey: .firmwareVersion)
         firmwareBuild = try container.decodeIfPresent(UInt32.self, forKey: .firmwareBuild)
         firmwareGitSha = try container.decodeIfPresent(String.self, forKey: .firmwareGitSha)
+        // A malformed report falls back to the renderer feature bits rather
+        // than rejecting an otherwise valid authenticated status.
+        mapReader = try? container.decodeIfPresent(
+            OfflineMapReaderCapabilities.self, forKey: .mapReader
+        )
         if mapLibrary?.isValid == false { mapLibrary = nil }
     }
 }
@@ -1923,6 +1968,8 @@ nonisolated enum MapInstallProtocolRejection: String, Equatable {
     case deviceProtocolUnsupported = "device_protocol_unsupported"
     case signingKeyNotTrusted = "signing_key_not_trusted"
     case readerRequirementsUnsupported = "reader_requirements_unsupported"
+    case deviceReaderUnsupported = "device_reader_unsupported"
+    case deviceReaderUnknown = "device_reader_unknown"
     case firmwareIdentityIncomplete = "firmware_identity_incomplete"
     case firmwareIdentityMismatch = "firmware_identity_mismatch"
 }
@@ -1945,6 +1992,8 @@ nonisolated enum MapInstallProtocolSelector {
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
         readerRequirements: OfflineMapReaderRequirements? = nil,
+        compatibilityContract: Int? = nil,
+        deviceReaderCapabilities: OfflineMapReaderCapabilities? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
@@ -1954,6 +2003,8 @@ nonisolated enum MapInstallProtocolSelector {
             isBikeMapStream: isBikeMapStream,
             signatureTrustCapability: signatureTrustCapability,
             readerRequirements: readerRequirements,
+            compatibilityContract: compatibilityContract,
+            deviceReaderCapabilities: deviceReaderCapabilities,
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
             requiredFirmwareGitSha: requiredFirmwareGitSha,
@@ -1961,10 +2012,17 @@ nonisolated enum MapInstallProtocolSelector {
         ).selection
     }
 
+    /// `compatibilityContract` comes only from the verified signed manifest and
+    /// `deviceReaderCapabilities` from the pinned transfer status (or the
+    /// legacy feature bits). A durable map installs wherever those and the
+    /// device trust cover it; firmware identities from delivery metadata are
+    /// ignored. Pre-baseline maps keep their original exact-firmware rule.
     static func evaluate(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
         readerRequirements: OfflineMapReaderRequirements? = nil,
+        compatibilityContract: Int? = nil,
+        deviceReaderCapabilities: OfflineMapReaderCapabilities? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
@@ -1987,6 +2045,19 @@ nonisolated enum MapInstallProtocolSelector {
               OfflineMapReaderCompatibilityPolicy.supports(readerRequirements) else {
             return .rejected(.readerRequirementsUnsupported)
         }
+        if let deviceReaderCapabilities {
+            guard OfflineMapReaderCompatibilityPolicy.supports(
+                readerRequirements,
+                capabilities: deviceReaderCapabilities
+            ) else {
+                return .rejected(.deviceReaderUnsupported)
+            }
+        } else if compatibilityContract != nil {
+            return .rejected(.deviceReaderUnknown)
+        }
+        if compatibilityContract != nil {
+            return .streamV2
+        }
         let deviceRequirements = (
             requiredFirmwareVersion,
             requiredFirmwareBuild,
@@ -2007,6 +2078,57 @@ nonisolated enum MapInstallProtocolSelector {
             return .rejected(.firmwareIdentityMismatch)
         }
         return .streamV2
+    }
+}
+
+/// Renderer feature bits from the BLE capability exchange, for firmware that
+/// predates the `mapReader` report. They only gate the attempt: the firmware
+/// parser still refuses any target it cannot read before writing a payload.
+nonisolated struct LegacyDeviceRendererFeatures: Equatable, Sendable {
+    let streetLabels: Bool
+    let buildings3D: Bool
+    let contours: Bool
+    let mapPois: Bool
+}
+
+nonisolated enum DeviceMapReaderCapabilityPolicy {
+    /// The firmware's own report when present; otherwise the reader implied
+    /// by the renderer feature bits of firmware that predates the report.
+    static func capabilities(
+        reported: OfflineMapReaderCapabilities?,
+        legacyFeatures: LegacyDeviceRendererFeatures?
+    ) -> OfflineMapReaderCapabilities? {
+        if let reported { return reported }
+        return legacyFeatures.map(legacy)
+    }
+
+    /// Mirrors SavedMapRendererCompatibilityPolicy: each renderer target needs
+    /// exactly the feature readers that its signed manifest can declare.
+    static func legacy(
+        _ features: LegacyDeviceRendererFeatures
+    ) -> OfflineMapReaderCapabilities {
+        var formats = [1]
+        var names: [String] = []
+        if features.streetLabels {
+            formats.append(2)
+            names.append("street-labels")
+        }
+        if features.buildings3D { names.append("3d-buildings") }
+        if features.contours { names.append("contours") }
+        if features.mapPois { names.append("map-pois") }
+        if features.streetLabels && features.buildings3D {
+            formats.append(3)
+            if features.contours { formats.append(4) }
+            if features.mapPois { formats.append(5) }
+        }
+        return OfflineMapReaderCapabilities(
+            schemaVersion: 1,
+            streamFormats: OfflineMapReaderCapabilities.current.streamFormats,
+            renderers: [
+                .init(renderer: "esp32-fmb", formatVersions: formats,
+                      features: names.sorted()),
+            ]
+        )
     }
 }
 
@@ -4145,9 +4267,10 @@ struct OfflineMapPlatformClient {
               response.signatureKeySha256 == artifact.signatureKeySha256,
               response.producerBuildSha256 == artifact.producerBuildSha256,
               response.producerImageDigest == artifact.producerImageDigest,
-              response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
-              response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
-              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha,
+              // Firmware requirements are delivery metadata, not the immutable
+              // identity being refreshed: a durable map ignores them and a
+              // pre-baseline map keeps the values it was listed with. A new
+              // approval or backend version must not break a re-download.
               response.mapContentReceipt == artifact.mapContentReceipt,
               response.intermediateSha256 == artifact.intermediateSha256,
               response.sourcePolicySha256 == artifact.sourcePolicySha256,
