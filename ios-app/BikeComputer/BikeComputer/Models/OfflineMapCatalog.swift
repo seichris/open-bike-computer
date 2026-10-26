@@ -345,8 +345,7 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
               ) else {
             return false
         }
-        if (map.rendererFormatVersion == 4 ||
-            (map.rendererFormatVersion == 5 && map.features.contains("contours"))),
+        if OfflineMapTopographyCompanionPolicy.requiresCompanion(features: map.features),
            OfflineMapTopographyCompanionPolicy.compatibleCompanion(
             for: map,
             deliveryTier: artifact.deliveryTier
@@ -492,18 +491,25 @@ nonisolated enum OfflineMapReaderCompatibilityPolicy {
     }
 }
 
+/// The single contour-companion contract shared by catalog and direct-job
+/// delivery. A map's contours layer is declared by its signed manifest (and
+/// mirrored by its verified feature list); that layer alone decides whether
+/// exactly one iPhone companion is required. Renderer versions never do.
 nonisolated enum OfflineMapTopographyCompanionPolicy {
     static let format = "topography-ios-v1"
     static let mediaType = "application/vnd.bicino.topography+sqlite3"
+    static let contoursFeature = "contours"
+    static let maximumBytes: Int64 = 256 * 1024 * 1024
+
+    static func requiresCompanion(features: [String]) -> Bool {
+        features.contains(contoursFeature)
+    }
 
     static func compatibleCompanion(
         for map: OfflineMapCatalogMap,
         deliveryTier: String
     ) -> OfflineMapCatalogArtifact? {
-        guard (map.rendererFormatVersion == 4 &&
-              map.features == ["3d-buildings", "contours", "street-labels"]) ||
-              (map.rendererFormatVersion == 5 &&
-               map.features == ["3d-buildings", "contours", "map-pois", "street-labels"]),
+        guard requiresCompanion(features: map.features),
               let contentReceipt = map.contentReceipt,
               isSHA256(contentReceipt) else {
             return nil
@@ -514,29 +520,120 @@ nonisolated enum OfflineMapTopographyCompanionPolicy {
         }
         let candidates = map.artifacts.filter { artifact in
             guard artifact.format == format,
-                  artifact.mediaType == mediaType,
-                  artifact.filename.hasSuffix(".btopo"),
-                  artifact.bytes > 0,
-                  artifact.bytes <= 256 * 1024 * 1024,
-                  isSHA256(artifact.sha256),
                   artifact.deliveryTier.lowercased() == preferredTier,
-                  let requirements = artifact.companionRequirements else {
+                  let requirements = artifact.companionRequirements,
+                  requirements.schemaVersion == 1,
+                  requirements.role == format,
+                  requirements.profileVersion == 1 else {
                 return false
             }
-            return requirements.schemaVersion == 1 &&
-                requirements.role == format &&
-                requirements.profileVersion == 1 &&
-                requirements.mapContentReceipt == contentReceipt &&
-                requirements.mapId == map.mapId &&
-                isSHA256(requirements.intermediateSha256) &&
-                isSHA256(requirements.sourcePolicySha256) &&
-                isSHA256(requirements.attributionSha256)
+            return (try? validateDeliveryIdentity(
+                artifact.platformArtifact,
+                mapID: map.mapId,
+                mapContentReceipt: contentReceipt
+            )) != nil
         }
         return candidates.count == 1 ? candidates[0] : nil
     }
 
+    /// Selects the companion a verified stream requires, or proves that a
+    /// contour-free stream was delivered without one.
+    static func requiredCompanion(
+        in artifacts: [OfflineMapArtifact],
+        signedTopography: VerifiedBikeMapTopography?
+    ) throws -> OfflineMapArtifact? {
+        let companions = artifacts.filter(\.isTopographyCompanion)
+        guard signedTopography != nil else {
+            guard companions.isEmpty else {
+                throw OfflineMapTopographyCompanionError.undeclared
+            }
+            return nil
+        }
+        guard companions.count <= 1 else {
+            throw OfflineMapTopographyCompanionError.ambiguous
+        }
+        guard let companion = companions.first else {
+            throw OfflineMapTopographyCompanionError.missing
+        }
+        return companion
+    }
+
+    /// Binds one delivery record to the exact signed map it decorates before
+    /// any companion byte is downloaded or saved.
+    static func validate(
+        _ artifact: OfflineMapArtifact,
+        mapID: String,
+        mapContentReceipt: String,
+        signedTopography: VerifiedBikeMapTopography
+    ) throws {
+        try validateDeliveryIdentity(
+            artifact,
+            mapID: mapID,
+            mapContentReceipt: mapContentReceipt
+        )
+        guard signedTopography.profileVersion == 1,
+              artifact.intermediateSha256 == signedTopography.intermediateSHA256,
+              artifact.sourcePolicySha256 == signedTopography.sourcePolicySHA256,
+              artifact.attributionSha256 == signedTopography.attributionSHA256 else {
+            throw OfflineMapTopographyCompanionError.mismatched
+        }
+    }
+
+    private static func validateDeliveryIdentity(
+        _ artifact: OfflineMapArtifact,
+        mapID: String,
+        mapContentReceipt: String
+    ) throws {
+        let objectKeyPrefix = "maps/\(mapID)/\(format)"
+        let objectKeySuffix = "\(mapContentReceipt)/\(artifact.sha256).btopo"
+        guard artifact.isTopographyCompanion,
+              artifact.mediaType == mediaType,
+              artifact.filename == "\(mapID).btopo",
+              (512...maximumBytes).contains(artifact.bytes),
+              isSHA256(artifact.sha256),
+              isSHA256(mapContentReceipt),
+              artifact.mapContentReceipt == mapContentReceipt,
+              [
+                  "\(objectKeyPrefix)/\(objectKeySuffix)",
+                  "\(objectKeyPrefix)/production/\(objectKeySuffix)",
+              ].contains(artifact.objectKey),
+              [
+                  artifact.intermediateSha256,
+                  artifact.sourcePolicySha256,
+                  artifact.attributionSha256,
+              ].allSatisfy({ $0.map(isSHA256) == true }) else {
+            throw OfflineMapTopographyCompanionError.mismatched
+        }
+    }
+
     private static func isSHA256(_ value: String) -> Bool {
         value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+}
+
+nonisolated enum OfflineMapTopographyCompanionError: LocalizedError, Equatable {
+    case missing
+    case ambiguous
+    case undeclared
+    case mismatched
+    case unverified
+    case requiresSignedStream
+
+    var errorDescription: String? {
+        switch self {
+        case .missing:
+            return "This map includes contours, but its iPhone contour file is missing. Download the map again."
+        case .ambiguous:
+            return "This map arrived with more than one iPhone contour file. Download the map again."
+        case .undeclared:
+            return "This map has no contour layer but arrived with a contour file. Download the map again."
+        case .mismatched:
+            return "The iPhone contour file does not belong to this map. Download the map again."
+        case .unverified:
+            return "The iPhone contour file failed verification. Download the map again."
+        case .requiresSignedStream:
+            return "Contour maps require a signed map stream. Download the map again with the current app."
+        }
     }
 }
 

@@ -88,8 +88,10 @@ Target 5 requires label, building, POI and index profile version 1. Its sorted
 those three plus `contours`. `layers.contours` is `included` or `not-included`
 accordingly. Both variants contain section 5; the no-elevation variant uses
 only the canonical empty contour section and has no topography metadata or
-iPhone companion. The included variant keeps the target-4 topography source
-and companion requirements. In either variant, `pois` gives total records and
+iPhone companion. The included variant carries the same signed `topography`
+metadata as target 4 and requires exactly one iPhone companion under the
+layer-driven [delivery contract](topography-artifact-format.md#delivery-contract).
+In either variant, `pois` gives total records and
 the five category counts, which must match the blocks and FPI1.
 
 Target 5 also requires signed `nearbyCoverage` with `profileVersion: 1`,

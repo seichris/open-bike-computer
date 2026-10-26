@@ -108,6 +108,28 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-9 -- \
 
 "${PREVIEW_CATALYST_OUT}"
 
+# The embedded Info.plist supplies the build-owned development map service
+# and catalog hosts that OfflineMapManager reads from Bundle.main.
+CONTOUR_COMPANION_OUT="${TMPDIR:-/tmp}/open-bike-contour-companion-tests"
+python3 "${DEV_SWIFT_COMPILER}" contour-companion-1 -- \
+  -D HOST_TESTING -parse-as-library \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "${IOS_DIR}/tests/contour-companion-host/Info.plist" \
+  -o "${CONTOUR_COMPANION_OUT}"
+"${CONTOUR_COMPANION_OUT}"
+
+CONTOUR_OVERLAY_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-contour-overlay-tests"
+python3 "${DEV_SWIFT_COMPILER}" contour-companion-2 -- \
+  -D HOST_TESTING \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CONTOUR_OVERLAY_CATALYST_OUT}"
+"${CONTOUR_OVERLAY_CATALYST_OUT}"
+
 CONTOUR_LABEL_OUT="${TMPDIR:-/tmp}/open-bike-contour-label-tests"
 python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
   -parse-as-library \

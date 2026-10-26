@@ -59,6 +59,28 @@ export interface TopographyCompanionRequirements {
   attributionSha256: string;
 }
 
+export const TOPOGRAPHY_COMPANION_FORMAT = "topography-ios-v1";
+
+// The map's declared contours layer is the only companion trigger: every
+// renderer that carries contours needs exactly one iPhone companion, and a
+// contour-free map has none. Clients verify the feature list against the
+// signed manifest, so this never depends on a renderer format version.
+export function hasContourLayer(features: readonly string[]): boolean {
+  return features.includes("contours");
+}
+
+export function topographyCompanionObjectKeys(
+  mapId: string,
+  mapContentReceipt: string,
+  sha256: string,
+): string[] {
+  const prefix = `maps/${mapId}/${TOPOGRAPHY_COMPANION_FORMAT}`;
+  return [
+    `${prefix}/${mapContentReceipt}/${sha256}.btopo`,
+    `${prefix}/production/${mapContentReceipt}/${sha256}.btopo`,
+  ];
+}
+
 export interface PublicationInput {
   publicationId: string;
   mapEntryId: string;
@@ -482,16 +504,21 @@ export function validatePublication(
     throw new HttpError(400, "artifact IDs are duplicated");
   }
   const topography = artifacts.filter(
-    (artifact) => artifact.format === "topography-ios-v1",
+    (artifact) => artifact.format === TOPOGRAPHY_COMPANION_FORMAT,
   );
-  if (Number(value.rendererFormatVersion) === 4) {
+  if (hasContourLayer(value.features as string[])) {
+    const companion = topography[0];
     if (
       topography.length !== 1 ||
-      topography[0].companionRequirements?.mapContentReceipt !==
+      companion.companionRequirements?.mapContentReceipt !==
         value.contentReceipt ||
-      topography[0].companionRequirements?.mapId !== value.legacyMapId ||
-      (value.features as string[]).join("\u0000") !==
-        ["3d-buildings", "contours", "street-labels"].join("\u0000")
+      companion.companionRequirements?.mapId !== value.legacyMapId ||
+      companion.filename !== `${value.legacyMapId}.btopo` ||
+      !topographyCompanionObjectKeys(
+        String(value.legacyMapId),
+        String(value.contentReceipt),
+        companion.sha256,
+      ).includes(companion.objectKey)
     ) {
       throw new HttpError(
         400,

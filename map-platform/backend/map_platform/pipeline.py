@@ -5343,6 +5343,9 @@ class MapBuildPipeline:
                     return self._validate_topography_exact_candidate(
                         job, candidate, archive_path, Path(temporary)
                     )
+                # A contour-free map never carries an iPhone companion.
+                if any(value.format == TOPOGRAPHY_COMPANION_FORMAT for value in candidate.artifacts):
+                    return False
                 pack_root = Path(temporary) / "pack"
                 manifest = self._stage_subset_pack(job, candidate, pack_root)
                 expected_build_identity = build_identity_manifest(
