@@ -88,8 +88,52 @@ The iPhone reader requires a separate trusted receipt binding file bytes/SHA,
 map entry, device-content receipt, map ID, intermediate, source policy and
 attribution. Self-declared SQLite metadata cannot establish that trust. The
 reader is actor-serialized and read-only; its PNG cache is capped at 4 MiB and
-128 entries. Download grants, durable association journaling and regional
-alignment eligibility are separate, still-unfinished integration layers.
+128 entries. Regional alignment eligibility is a separate integration layer.
+
+### Delivery contract
+
+One rule governs every producer and consumer, independent of renderer format:
+
+- **Layers.** A map contains contours exactly when its signed BMAP manifest
+  carries `topography`. Renderer 4 always does; renderer 5 does exactly when
+  `layers.contours` is `included`, and readers reject any other combination.
+  Catalog `features` and stream `readerRequirements.requiredFeatures` mirror
+  the layer as `contours`; clients verify them against the signed manifest.
+- **Companion requirement.** A map with contours has exactly one
+  `topography-ios-v1` companion; a contour-free map has none. Missing,
+  duplicate or undeclared companions are errors, never silently dropped.
+- **Association.** The companion delivery record carries `filename`
+  `<mapId>.btopo`, its byte count and SHA-256, the object key
+  `maps/<mapId>/topography-ios-v1/[production/]<mapContentReceipt>/<sha256>.btopo`,
+  and `companionRequirements` (`mapContentReceipt`, `mapId`,
+  `intermediateSha256`, `sourcePolicySha256`, `attributionSha256`). The map
+  content receipt is the producer-independent manifest receipt of the map's ZIP
+  and catalog entry. The intermediate, source-policy and attribution digests
+  must equal the signed manifest's `topography`, and the SQLite metadata must
+  agree again before the file is trusted.
+- **Consumers.** The backend packages the companion with the map that produced
+  it, rejects contour-free exact-reuse candidates that carry one, and publishes
+  it only with the contours feature. The catalog accepts and grants exactly one
+  live companion per contour stream and none otherwise, and gates contour
+  promotion on the same layer (target-5 POI maps remain outside production
+  promotion). Before a contour map from a direct job or the catalog is saved
+  (and so before it can be shown or sent to the device), the iPhone verifies the
+  companion's delivery record against the signed stream and content receipt,
+  then its bytes and SQLite content.
+- **Saved state.** Saved map metadata records the exact companion receipt it
+  was activated with; later catalog attachment cannot re-key it. The companion
+  association file binds the companion to the exact saved stream. The saved map
+  pair is the commit point: a staged companion is kept only if its saved map
+  committed the bound stream, so failed, cancelled or interrupted replacements
+  keep the previous map and companion. Deleting a map deletes its companion.
+- **Display.** The iPhone overlay and the device contour switches act only on
+  downloaded layers and never regenerate a map. A saved contour map without a
+  valid companion, including one saved before this contract, is reported as
+  needing a fresh download rather than adapted.
+
+The companion's digest is bound by authenticated delivery metadata and the
+signed contour identity, not by the BMAP signature itself: adding it to the
+signed manifest would change the device-installed manifest contract.
 
 Native-runtime changes can alter SQLite/PNG bytes. Repeated builds in the same
 tested runtime are deterministic; cross-platform producer locking and visual

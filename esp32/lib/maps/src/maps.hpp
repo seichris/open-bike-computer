@@ -23,6 +23,11 @@
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
 #include "mapBuildingBlock.hpp"
+#include "mapPoiBlock.hpp"
+#include "mapPoiLayout.hpp"
+#include "mapNearbyStorage.hpp"
+#include "mapNearbyLayout.hpp"
+#include "mapNearbyViewport.hpp"
 #include "mapBuildingRenderer.hpp"
 #include "mapCamera.hpp"
 #include "mapContourBlock.hpp"
@@ -116,6 +121,7 @@ private:
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
     map_label_block::Block labelData;
     map_building_block::Block buildingData;
+    map_poi_block::Block poiData;
     map_contour_block::Block contourData;
 #if FIRMWARE_DIAGNOSTICS
     std::vector<map_terrain::Grid, PsramAllocator<map_terrain::Grid>> terrain;
@@ -204,6 +210,17 @@ private:
     uint32_t extrudedFarthestDistancePx = 0;
     uint32_t buildingProjectionMs = 0;
     uint32_t buildingDrawMs = 0;
+    uint32_t candidatePois = 0;
+    uint32_t acceptedPois = 0;
+    uint32_t collisionRejectedPois = 0;
+    uint32_t offscreenPois = 0;
+    uint32_t capacityDeferredPois = 0;
+    uint32_t decodedPoiRecords = 0;
+    uint32_t decodedPoiBytes = 0;
+    uint32_t poiGatherMs = 0;
+    uint32_t poiLayoutMs = 0;
+    uint32_t poiDrawMs = 0;
+    std::array<uint32_t, 5> acceptedPoiCategories = {};
     uint8_t buildingLimiterFlags = 0;
     bool allocationFallback = false;
   };
@@ -271,6 +288,8 @@ private:
   String vectorMapFolder = "/sdcard/VECTMAP/";
   map_font_asset::Asset labelFontAsset;
   std::atomic<bool> streetLabelFontHealthy{false};
+  std::atomic<bool> nearbyPoiIndexHealthy{false};
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::atomic<map_font_asset::RuntimeError> streetLabelRuntimeFailure{
       map_font_asset::RuntimeError::None};
   map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;
@@ -283,6 +302,7 @@ private:
     uint32_t fontFingerprint = 0;
     uint32_t visibilityMask = 0;
     uint64_t blockSignature = 0;
+    uint64_t poiSignature = 0;
     uint8_t zoom = 0;
     uint8_t density = 0;
     uint8_t languageMode = 0;
@@ -309,6 +329,8 @@ private:
       diagnostics = {};
     }
   } labelLayoutCache;
+  MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReservedRegions;
+  uint64_t poiLayoutSignature = 0;
   Point32 point = viewPort.center; // Vector map GPS position point
   double lat2y(double lat);
   double lon2x(double lon);
@@ -421,6 +443,10 @@ private:
   bool takeVectorMapActivationRequest(VectorMapActivationRequest &request);
   bool processPendingVectorMapActivation();
   bool processPendingStorageControl();
+  bool processPendingNearbySearch();
+#if MAP_POIS_RUNTIME_ENABLED
+  void pauseNearbySearchOnStorageOwner();
+#endif
   void (*pendingStorageControl_)(void *) = nullptr;
   void *pendingStorageControlContext_ = nullptr;
   map_probe_diagnostics::Result
@@ -477,6 +503,24 @@ private:
   VectorMapActivationCompletion completedVectorMapActivation{};
   bool pendingVectorMapActivationValid = false;
   bool completedVectorMapActivationValid = false;
+  struct NearbySearchRequest {
+    uint32_t sequence = 0;
+    map_nearby_query::Position rider{};
+    uint32_t selectedMask = 0;
+    double radiusM = 10000.0;
+  } pendingNearbySearch{};
+  struct NearbySearchCompletion {
+    uint32_t sequence = 0;
+    map_nearby_storage::SearchResult result{};
+  } readyNearbySearch{};
+  std::atomic<uint32_t> nearbySearchGeneration{0};
+  bool pendingNearbySearchValid = false;
+  bool readyNearbySearchValid = false;
+#if MAP_POIS_RUNTIME_ENABLED
+  NearbySearchRequest activeNearbyRequest{};
+  std::unique_ptr<map_nearby_storage::SearchCursor> activeNearbyCursor;
+  map_nearby_viewport::Bookmark nearbyViewport;
+#endif
   uint32_t vectorMapActivationSequence = 0;
   bool publishedMapFrame = false;
   bool publishedMapFound = false;
@@ -673,6 +717,31 @@ public:
   // Bounded command admission; callback/context must live through completion.
   // Runs between jobs on the sole map storage owner, never on the UI task.
   bool requestStorageControl(void (*work)(void *), void *context);
+  uint32_t requestNearbySearch(map_nearby_query::Position rider,
+                               uint32_t selectedMask, double radiusM);
+  void cancelNearbySearch();
+  bool nearbySearchIsCurrent(uint32_t sequence) const {
+    return sequence != 0 && sequence ==
+        nearbySearchGeneration.load(std::memory_order_acquire) &&
+        !renderWorkerShutdown.load(std::memory_order_acquire);
+  }
+  bool takeNearbySearchResult(uint32_t &sequence,
+                              map_nearby_storage::SearchResult &result);
+  bool projectNearbyResult(const map_nearby_query::Result &place,
+                           map_nearby_layout::Input &projected) const;
+  bool nearbyIndexHealthy() const {
+    return nearbyPoiIndexHealthy.load(std::memory_order_acquire);
+  }
+#if MAP_POIS_RUNTIME_ENABLED
+  void beginNearbyViewport() { nearbyViewport.capture(followGps, point); }
+  void endNearbyViewport() {
+    if (nearbyViewport.restore(followGps, point)) {
+      isPosMoved = true;
+      redrawMap = true;
+    }
+  }
+#endif
+  uint32_t currentMapEpoch() const { return mapEpoch; }
   bool pollShutdownQuiescence();
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
@@ -695,6 +764,7 @@ public:
   void updateMap();
   void panMap(int8_t dx, int8_t dy);
   void centerOnGps(double lat, double lon);
+  void centerOnCoordinate(double lat, double lon);
   void scrollMap(int16_t dx, int16_t dy);
   void preloadTiles(int8_t dirX, int8_t dirY);
   bool preparePinchZoomOutBackdrop(uint8_t baseZoom);

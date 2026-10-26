@@ -49,10 +49,16 @@ private final class RideFixture: SocialRideNetworking {
     var holdStart=false,holdStop=false
     var held:CheckedContinuation<Void,Never>?
     var stateFailures=0,socketDrops=0
+    var roomID = "ride-1"
+    var holdMessages = false, holdRead = false
+    var heldMessages: CheckedContinuation<Void, Never>?
+    var heldRead: CheckedContinuation<Void, Never>?
+    var readFailure: SocialFailure?
+    var mutations: [String] = []
     private(set) var sockets:[SocketFixture]=[]
     var snapshot:URLSessionWebSocketTask.Message { .data(try! JSONSerialization.data(withJSONObject:room)) }
     var room:[String:Any] {
-        ["id":"ride-1","owner":"owner","title":"Test","status":"active","expiresAt":100000.0,
+        ["id":roomID,"owner":"owner","title":"Test","status":"active","expiresAt":100000.0,
          "route":[:],"members":[],"riders":dropSocket ? [["profile":["id":"friend","displayName":"Friend"],
             "latitude":1.0,"longitude":2.0,"capturedAt":1000.0,"receivedAt":1000.0,
             "horizontalAccuracy":5.0,"sequence":1,"age":0.0]] : [],
@@ -68,6 +74,7 @@ private final class RideFixture: SocialRideNetworking {
     }
     func request(_ path:String,method:String,body:Data?,contentType:String,query:[URLQueryItem]) async throws -> Data {
         var result:[String:Any]=room
+        if method != "GET" { mutations.append(path) }
         if path.hasSuffix("/consent") && method=="POST" {
             let payload=try JSONSerialization.jsonObject(with:body!) as! [String:Any]
             let location=payload["location"] as! Bool
@@ -87,9 +94,23 @@ private final class RideFixture: SocialRideNetworking {
             acceptedSequence=sequences.last!
             if lostFirst && sequences.count==1 { throw URLError(.timedOut) }
             result=["accepted":sequences.last!]
-        } else if path.hasSuffix("/messages") { result=["items":[]] }
+        } else if path.hasSuffix("/messages") {
+            result=["items":[]]
+            if holdMessages {
+                holdMessages = false
+                result=["items":[["id":"old-message", "sender":"old-rider", "status":"waiting", "created":1000.0]]]
+                await withCheckedContinuation { heldMessages = $0 }
+            }
+        }
         else if method=="GET" {
             reads+=1
+            if holdRead {
+                holdRead = false
+                let failure = readFailure
+                await withCheckedContinuation { heldRead = $0 }
+                if let failure { throw failure }
+            }
+            if let readFailure { throw readFailure }
             if revoked && reads>1 { throw SocialFailure.server("membership_required") }
         }
         return try JSONSerialization.data(withJSONObject:result)
@@ -142,6 +163,25 @@ private final class ProtocolFixture: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+@MainActor
+private final class LinkFixture: SocialRideNetworking {
+    var generation = UUID()
+    var failure: SocialFailure?
+    var hold = false
+    var held: CheckedContinuation<Void, Never>?
+    func request(_ path: String, method: String, body: Data?, contentType: String, query: [URLQueryItem]) async throws -> Data {
+        if let failure { throw failure }
+        let response: [String: Any]
+        if path == "shared/resolve" {
+            response = ["id": "shared-route", "owner": "alice", "kind": "route", "revision": 1,
+                        "title": "Alice's route", "visibility": "link", "body": ["archive": "private fixture geometry"]]
+        } else { response = ["title": "Alice's ride", "route": ["archive": "private fixture geometry"]] }
+        if hold { hold = false; await withCheckedContinuation { held = $0 } }
+        return try JSONSerialization.data(withJSONObject: response)
+    }
+    func socket(rideID: String) async throws -> any SocialSocket { throw SocialFailure.unavailable }
+}
+
 @main
 @MainActor
 struct SocialRuntimeTests {
@@ -163,7 +203,16 @@ struct SocialRuntimeTests {
                 network.lastState["movingSeconds"] != nil && network.lastState["elapsedSeconds"] != nil,
                 "default publication includes speed, distance, moving and elapsed time")
         try await live.select(network.selected())
-        require(!live.isSharing, "opening a room alone never restarts stopped sharing")
+        require(!live.isSharing && !network.serverSharing, "opening a room alone never restarts stopped sharing")
+        // A relaunch uses the same viewing path as My Group Rides, with no join intent.
+        live.reset()
+        let restored = LiveRideService(client: network)
+        restored.prepareLocation = { true }
+        try await restored.select(network.selected())
+        require(!restored.isSharing && !network.serverSharing, "reopening a remembered room after relaunch cannot mint sharing consent")
+        try await restored.startSharing(stats: true)
+        require(restored.isSharing && network.serverStats, "a separate explicit action can resume sharing")
+        await restored.stopSharing(); restored.reset()
         live.prepareLocation = { false }
         try await live.select(network.selected(), shareOnJoin: true)
         require(live.ride != nil && !live.isSharing && live.error?.contains("joined") == true,
@@ -223,6 +272,9 @@ struct SocialRuntimeTests {
     }
 
     static func main() async throws {
+        let privacyFailures = try await FriendLiveServiceTests.privacyRegressions() + roomPrivacyRegressions()
+        require(privacyFailures.isEmpty, privacyFailures.joined(separator: "\n"))
+        try await linkAccountIsolation()
         try await FriendLiveServiceTests.run()
         profileSetupPresentation()
         sharedRideProgressIgnoresStationaryJitter()
@@ -456,6 +508,102 @@ struct SocialRuntimeTests {
         friendMarkerScaleMigration()
         try await SocialMaintenanceTests.run()
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
+    }
+
+    private static func linkAccountIsolation() async throws {
+        let network = LinkFixture()
+        let loader = SocialLinkLoader(client: network, currentGeneration: { network.generation })
+        for kind in ["shared", "ride"] {
+            let url = URL(string: "https://bicino.com/social/\(kind)#capability-secret-1234567890")!
+            try await loader.load(url)
+            require(loader.value(for: url) != nil, "authorized link data is available")
+            network.generation = UUID()
+            require(loader.value(for: url) == nil, "ASP-004: changing accounts hides an already loaded preview synchronously")
+            network.failure = .server("not_found")
+            do { try await loader.load(url); preconditionFailure("new account must be denied") }
+            catch SocialFailure.server("not_found") { }
+            require(loader.value(for: url) == nil, "a denied replacement read cannot fall back to another account's preview")
+            network.failure = nil; network.hold = true
+            let previous = Task { try await loader.load(url) }
+            try await wait { network.held != nil }
+            network.generation = UUID(); loader.reset()
+            network.held?.resume(); network.held = nil
+            do { try await previous.value; preconditionFailure("retired preview must be discarded") }
+            catch SocialFailure.cancelled { }
+            require(loader.value(for: url) == nil, "ASP-004: a pending response cannot repopulate a new account")
+        }
+        let oldURL = URL(string: "https://bicino.com/social/ride#old-capability-secret-1234567890")!
+        let newURL = URL(string: "https://bicino.com/social/ride#new-capability-secret-1234567890")!
+        network.hold = true
+        let previous = Task { try await loader.load(oldURL) }
+        try await wait { network.held != nil }
+        try await loader.load(newURL)
+        network.held?.resume(); network.held = nil
+        do { try await previous.value; preconditionFailure("old link response must be discarded") }
+        catch SocialFailure.cancelled { }
+        require(loader.value(for: oldURL) == nil && loader.value(for: newURL) != nil,
+                "an old link response cannot replace the current link even within one account")
+    }
+
+    private static func roomPrivacyRegressions() async throws -> [String] {
+        var failures: [String] = []
+        let messages = RideFixture()
+        let messageService = LiveRideService(client: messages)
+        try await messageService.select(messages.selected())
+        messages.holdMessages = true
+        let oldMessages = Task { try await messageService.refreshMessages() }
+        try await wait { messages.heldMessages != nil }
+        messageService.reset()
+        messages.heldMessages?.resume(); messages.heldMessages = nil
+        do { try await oldMessages.value } catch SocialFailure.cancelled { }
+        if !messageService.messages.isEmpty { failures.append("ASP-003: a retired room restored its private messages after reset") }
+        messageService.reset()
+
+        let reconnect = RideFixture()
+        let reconnectService = LiveRideService(client: reconnect)
+        try await reconnectService.select(reconnect.selected())
+        try await wait { !reconnect.sockets.isEmpty }
+        reconnect.holdRead = true
+        reconnect.readFailure = .server("membership_required")
+        // Invalid socket input drives the real reconnect membership check.
+        reconnect.sockets[0].queue.append(.string("{}"))
+        try await wait { reconnect.heldRead != nil }
+        reconnectService.reset()
+        reconnect.readFailure = nil; reconnect.roomID = "ride-2"
+        try await reconnectService.select(reconnect.selected())
+        reconnect.heldRead?.resume(); reconnect.heldRead = nil
+        for _ in 0..<30 { await Task.yield() }
+        if reconnectService.ride?.id != "ride-2" { failures.append("ASP-003: an old reconnect rejection cleared the newly selected room") }
+        reconnectService.reset()
+
+        let leaving = RideFixture()
+        let leavingService = LiveRideService(client: leaving)
+        try await leavingService.select(leaving.selected())
+        leaving.holdStop = true
+        let oldLeave = Task { try await leavingService.leave() }
+        try await wait { leaving.held != nil }
+        leavingService.reset(); leaving.roomID = "ride-2"
+        try await leavingService.select(leaving.selected())
+        leaving.held?.resume(); leaving.held = nil
+        do { try await oldLeave.value } catch SocialFailure.cancelled { }
+        if leavingService.ride?.id != "ride-2" || leaving.mutations.contains("group-rides/ride-1/leave") {
+            failures.append("ASP-003: a delayed Leave crossed the room/session boundary")
+        }
+        leavingService.reset()
+
+        for failure in [SocialFailure.server("authentication_required"), .server("account_deleted"), .identityMissing] {
+            let network = RideFixture()
+            let service = LiveRideService(client: network)
+            try await service.select(network.selected())
+            try await wait { !network.sockets.isEmpty }
+            network.readFailure = failure
+            network.sockets[0].queue.append(.string("{}"))
+            try await wait { network.reads >= 2 }
+            for _ in 0..<30 { await Task.yield() }
+            if service.ride != nil { failures.append("ASP-005: group snapshot survived confirmed identity loss: \(failure)") }
+            service.reset()
+        }
+        return failures
     }
 
     /// PR 610 stored separate picture and number sizes; the combined size

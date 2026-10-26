@@ -6,6 +6,19 @@
 
 <!-- List the checks, builds, devices, or tests used. -->
 
+## Risk and recovery
+
+<!-- Low / medium / high, with the concrete failure and affected users/systems.
+     Recovery steps and artifact/version to restore, or why not applicable.
+     Preserve existing human approval and release requirements. -->
+
+## Review record
+
+<!-- REVIEW.md: base/head SHAs; passes used / 3; full or delta scope;
+     finding IDs/states (or 0 active); clean / needs-rethink / blocked.
+     Include verification commands/results and any remaining coverage limits.
+     Carry this record across revisions; new commits do not reset the count. -->
+
 ## Contributor License Agreement
 
 Choose the statement that applies:

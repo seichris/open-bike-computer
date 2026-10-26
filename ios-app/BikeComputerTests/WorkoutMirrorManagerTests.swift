@@ -2938,9 +2938,14 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
     func testProductionSegmentTimeoutAcceptsCorrelatedLateSuccess()
         async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_380)
+        let timeoutWaiter = ControlledWorkoutTimeoutWaiter()
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02
+            controlConfirmationTimeout: 0.02,
+            controlConfirmationWait: { timeout in
+                XCTAssertEqual(timeout, 0.02)
+                try await timeoutWaiter.wait(timeout)
+            }
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
@@ -2955,7 +2960,17 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             XCTUnwrap(transport.sentData.first)
         )
 
-        try await Task.sleep(for: .milliseconds(50))
+        // A wall-clock sleep in this test does not order the separately
+        // scheduled MainActor timeout task under simulator load. Hold that
+        // task until it has registered, then release exactly its timeout.
+        try await waitUntil { timeoutWaiter.waitCallCount == 1 }
+        XCTAssertEqual(manager.store.presentation.pendingControl, .markSegment)
+        XCTAssertEqual(transport.sentData.count, 1)
+        timeoutWaiter.completeWait(at: 0)
+        try await waitUntil {
+            manager.store.presentation.pendingControl == nil &&
+                transport.sentData.count == 2
+        }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,

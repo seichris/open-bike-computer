@@ -148,6 +148,7 @@ struct DestinationCalloutLayoutTests {
     static func main() async {
         await testOnlinePOIReadOnlySelection()
         testLabelExpansion()
+        testInitialGPSFollow()
         testRouteAlternativeMapSelection()
         await testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
@@ -155,6 +156,35 @@ struct DestinationCalloutLayoutTests {
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testInitialGPSFollow() {
+        let map = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        coordinator.isUserLocationAuthorized = true
+        let firstFix = CLLocation(latitude: 1.3, longitude: 103.85)
+        coordinator.updateInitialRegionIfNeeded(mapView: map, location: nil,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(!coordinator.hasSetInitialRegion,
+                     "startup waits for an actual location before establishing its camera")
+        coordinator.updateInitialRegionIfNeeded(mapView: map, location: firstFix,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(coordinator.hasSetInitialRegion && map.userTrackingMode == .follow,
+                     "the first GPS fix enables native follow and its active tracking button")
+        let regionCount = map.regionUpdateCount
+        map.userTrackingMode = .none
+        coordinator.updateInitialRegionIfNeeded(mapView: map,
+            location: CLLocation(latitude: 1.31, longitude: 103.86),
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(map.regionUpdateCount == regionCount && map.userTrackingMode == .none,
+                     "later GPS fixes preserve a rider's manual pan")
+        let selection = MapViewContainer.Coordinator()
+        selection.isUserLocationAuthorized = true
+        selection.updateInitialRegionIfNeeded(mapView: map, location: firstFix,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: true)
+        precondition(!selection.hasSetInitialRegion && map.userTrackingMode == .none,
+                     "a first fix does not steal the camera from map selection")
     }
 
     @MainActor

@@ -195,6 +195,7 @@ std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
 #endif
 std::atomic<bool> captureBoundaryPending{false};
 std::atomic<uint32_t> lastMarkerSequence{0};
+control::MarkerReplayReceipt lastMarkerReceipt;
 char activePath[192] = {};
 std::atomic<bool> lastStorageAvailable{false};
 std::atomic<bool> sealRequested{false};
@@ -1442,6 +1443,7 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   detailedCapture.store(false);
 #endif
   lastMarkerSequence.store(0);
+  lastMarkerReceipt = {};
 #if PERSISTENT_RIDE_DIAGNOSTICS
   faultCapsuleGeneration.store(0, std::memory_order_release);
   faultCapsuleQueuedGeneration.store(UINT32_MAX, std::memory_order_release);
@@ -1750,7 +1752,7 @@ std::string capturePolicyJson() {
     "{\"schema\":2,\"schemaDigest\":\"%s\",\"supportedMask\":%lu,\"generation\":%lu,"
     "\"mask\":%lu,\"minimumLevel\":%lu,\"active\":%s,\"captureId\":\"%s\","
     "\"remainingBytes\":%lu,\"filteredCount\":%lu,\"deadlineUptimeMs\":%lu,"
-    "\"baselineMinimumLevel\":2,\"rawPayloads\":false}", registry::kSha256,
+    "\"baselineMinimumLevel\":2,\"rawPayloads\":false,\"markerReplaySafe\":true}", registry::kSha256,
     static_cast<unsigned long>(registry::kInstrumentedMask),
     static_cast<unsigned long>(policy.request.generation), static_cast<unsigned long>(policy.request.mask),
     static_cast<unsigned long>(policy.request.minimumLevel), enabled ? "true" : "false", policy.request.capture,
@@ -1792,9 +1794,16 @@ bool recordClockAnchor() {
 
 bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId) {
   if (!validIssueCode(code) || markerSequence == 0 ||
-      (incidentId != nullptr && !control::validIncidentId(incidentId)) ||
-      !control::markerSequenceCanAdvance(lastMarkerSequence.load(),
-                                         markerSequence))
+      (incidentId != nullptr && !control::validIncidentId(incidentId)))
+    return false;
+  // An ATT failure does not prove the first application failed. Replaying the
+  // latest exact v2 packet is successful without recording or changing capture
+  // state. The receipt is retained through capture_end/rebinding, but is RAM
+  // only: neither ATT success nor this no-op claims durable SD delivery.
+  if (lastMarkerReceipt.matches(markerSequence, code, incidentId))
+    return true;
+  if (lastMarkerReceipt.sameIncident(incidentId) ||
+      !control::markerSequenceCanAdvance(lastMarkerSequence.load(), markerSequence))
     return false;
   char fields[192] = {};
   if (incidentId != nullptr) {
@@ -1807,6 +1816,10 @@ bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId
   if (!record(Level::Warning, "user", "issue_marker", fields))
     return false;
   lastMarkerSequence.store(markerSequence);
+  if (incidentId != nullptr)
+    lastMarkerReceipt.remember(markerSequence, code, incidentId);
+  else
+    lastMarkerReceipt = {}; // only the latest accepted marker is replayable
   checkpointRequested.store(true);
   return true;
 }

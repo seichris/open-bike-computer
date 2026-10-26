@@ -33,6 +33,8 @@ runner are not eligible.
   code hashes must match. The tree also binds all scripts, dependency locks and
   Swift source lists. Reusable runs use a shared environment profile that removes
   test filters such as `ONLY_TESTING`, compiler overrides and shell startup hooks.
+  Checks requested with `--reuse-local` keep that profile on every fallback,
+  including unavailable policy, toolchain, or source evidence.
 - macOS build, CPU architecture, Python version/binary/package metadata, shell,
   Git, xcrun, Swift/Clang versions and binaries, Xcode build, and SDK builds must
   match the hosted runner. Simulator checks additionally match the selected iOS
@@ -89,3 +91,5 @@ Only ordinary same-repository PRs can reuse results. Forks, merge groups, manual
 qualification, reusable release workflows and tags always execute hosted checks.
 Linux/GCC coverage, firmware builds, app-container builds and exact-build symbols,
 release signing and physical device acceptance remain outside this mechanism.
+
+Reuse counters, categorized fallbacks, elapsed timings and aggregation are described in [Local-result reuse metrics](local-ci-metrics.md).

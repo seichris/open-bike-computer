@@ -14,4 +14,5 @@ enum tileName {
   BATTERY_STATUS = 6,
   WORLD_RADIO = 7,
   ELEVATION = 8,
+  NEARBY = 9,
 };

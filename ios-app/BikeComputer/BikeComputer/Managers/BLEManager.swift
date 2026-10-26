@@ -409,6 +409,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.birdsEyeStrongerPerspectiveFeature
     static let osm3DBuildingsCapabilityMask =
         RideBLEGeneratedProtocolV1.osm3DBuildingsFeature
+    static let mapPoisCapabilityMask =
+        RideBLEGeneratedProtocolV1.extendedMapPoisFeature
     static let explicitInvalidGPSHeadingCapabilityMask =
         RideBLEGeneratedProtocolV1.explicitInvalidGpsHeadingFeature
     static let scopedWatchControllerCapabilityMask =
@@ -469,6 +471,11 @@ enum DeviceBLEProtocol {
     static let tracksVisibilityMask: Int32 = 1 << 11
     static let extendedVisibilityMarker: Int32 = 1 << 12
     static let contoursVisibilityMask: Int32 = 1 << 13
+    static let poiShopsVisibilityMask: Int32 = 1 << 18
+    static let poiRestaurantsAndCafesVisibilityMask: Int32 = 1 << 19
+    static let poiPublicToiletsVisibilityMask: Int32 = 1 << 20
+    static let poiGasStationsVisibilityMask: Int32 = 1 << 21
+    static let poiBicycleServicesVisibilityMask: Int32 = 1 << 22
     static let defaultStreetWidth: Int32 = 4
 
     static let brightnessSettingID: UInt8 = 12
@@ -1023,6 +1030,30 @@ struct DeviceTransferWiFiStartFailure: Equatable {
     let after: Memory
 }
 
+/// Delivery of the latest issue marker sent to Bicino. Firmware does not
+/// acknowledge markers, so `.sent` proves only a successful BLE write.
+struct DiagnosticsIssueMarkerDelivery: Equatable {
+    enum State: Equatable {
+        case pending
+        case sent
+        case notDelivered
+    }
+
+    let sequence: UInt32
+    let incidentID: UUID?
+    var state: State
+}
+
+enum DiagnosticsIssueMarkerRetryPolicy {
+    static let maximumAttemptCount = 3
+    static let retryDelay: TimeInterval = 1
+}
+
+enum SettingWriteRetryPolicy {
+    static let maximumAttemptCount = 3
+    static let retryDelay: TimeInterval = 1
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1073,6 +1104,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideAutomation: Bool = false
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
+    @Published private(set) var supportsMapPois: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsGroupRiders = false
     @Published private(set) var supportsFriendMarkerScale = false
@@ -1149,6 +1181,18 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
     private var nextDiagnosticsMarkerSequence: UInt32 = 1
+    private var diagnosticsCaptureBindingGeneration: UInt64 = 0
+    @Published private(set) var diagnosticsIssueMarkerDelivery: DiagnosticsIssueMarkerDelivery?
+#if HOST_TESTING
+    private var diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+    private var settingWriteRetryDelay = SettingWriteRetryPolicy.retryDelay
+#else
+    private let diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+    private let settingWriteRetryDelay = SettingWriteRetryPolicy.retryDelay
+#endif
+    // The latest send of each setting ID; a retry yields to any newer send.
+    private var settingWriteGeneration: UInt64 = 0
+    private var latestSettingWriteGenerations: [UInt8: UInt64] = [:]
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
@@ -1167,8 +1211,13 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapLabelProfileVersion: Int?
     @Published private(set) var activeMapLabelLanguages: [String] = []
     @Published private(set) var activeMapFontAssetHealthy: Bool = false
+    @Published private(set) var activeMapPoiProfileVersion: Int?
+    @Published private(set) var activeMapPoiIndexProfileVersion: Int?
+    @Published private(set) var activeMapPoiDataHealthy = false
+    @Published private(set) var activeMapPoiIndexHealthy = false
     @Published private(set) var activeMapTopographyProfileVersion: Int?
     @Published private(set) var activeMapTopographySectionHealthy = false
+    @Published private(set) var activeMapContourLayerIncluded = false
     @Published private(set) var activeMapTopographyQualityMode = ""
     @Published private(set) var activeMapContourMinorIntervalM: Int?
     @Published private(set) var activeMapContourIndexIntervalM: Int?
@@ -1177,7 +1226,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapTopographySourcePolicyReceiptPrefix = ""
     var topographicContoursAvailable: Bool {
         supportsTopographicContours &&
-            activeMapRendererFormat == 4 &&
+            (activeMapRendererFormat == 4 ||
+             (activeMapRendererFormat == 5 && activeMapContourLayerIncluded)) &&
             activeMapTopographyProfileVersion == 1 &&
             activeMapTopographySectionHealthy
     }
@@ -1316,6 +1366,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
     @Published var showContours = false
+    @Published var showPOIShops = true
+    @Published var showPOIRestaurantsAndCafes = true
+    @Published var showPOIPublicToilets = true
+    @Published var showPOIGasStations = true
+    @Published var showPOIBicycleServices = true
     @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings {
         didSet {
             if !isLoadingSettings && oldValue != mapPlusNavigationShowBuildings {
@@ -1341,6 +1396,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationShowRailways = MapPlusNavigationDefaults.showRailways
     @Published var mapPlusNavigationShowOtherAreas = MapPlusNavigationDefaults.showOtherAreas
     @Published var mapPlusNavigationShowContours = MapPlusNavigationDefaults.showContours
+    @Published var mapPlusNavigationShowPOIShops = false
+    @Published var mapPlusNavigationShowPOIRestaurantsAndCafes = false
+    @Published var mapPlusNavigationShowPOIPublicToilets = false
+    @Published var mapPlusNavigationShowPOIGasStations = false
+    @Published var mapPlusNavigationShowPOIBicycleServices = false
     @Published var showRouteOverlay: Bool = true
     @Published var showCurrentPosition: Bool = true
     
@@ -1536,6 +1596,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite?.owner == .authentication
     }
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
+    private var navigationWriteWithResponseSuccessHandler: (() -> Void)?
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
@@ -1661,6 +1722,15 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
         static let mapPlusNavigationShowContours = "mapPlusNavigationSettings.showContours"
+        static let mapPlusNavigationShowPOIShops = "mapPlusNavigationSettings.showPOIShops"
+        static let mapPlusNavigationShowPOIRestaurantsAndCafes =
+            "mapPlusNavigationSettings.showPOIRestaurantsAndCafes"
+        static let mapPlusNavigationShowPOIPublicToilets =
+            "mapPlusNavigationSettings.showPOIPublicToilets"
+        static let mapPlusNavigationShowPOIGasStations =
+            "mapPlusNavigationSettings.showPOIGasStations"
+        static let mapPlusNavigationShowPOIBicycleServices =
+            "mapPlusNavigationSettings.showPOIBicycleServices"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
         static let streetLabelDefaultsMigrated = "streetLabels.defaults.v1"
@@ -1693,6 +1763,11 @@ class BLEManager: NSObject, ObservableObject {
         static let showRailways = "mapSettings.showRailways"
         static let showOtherAreas = "mapSettings.showOtherAreas"
         static let showContours = "mapSettings.showContours"
+        static let showPOIShops = "mapSettings.showPOIShops"
+        static let showPOIRestaurantsAndCafes = "mapSettings.showPOIRestaurantsAndCafes"
+        static let showPOIPublicToilets = "mapSettings.showPOIPublicToilets"
+        static let showPOIGasStations = "mapSettings.showPOIGasStations"
+        static let showPOIBicycleServices = "mapSettings.showPOIBicycleServices"
         static let showRouteOverlay = "mapSettings.showRouteOverlay"
         static let showCurrentPosition = "mapSettings.showCurrentPosition"
         static let legacyShowNature = "mapSettings.showNature"
@@ -1959,6 +2034,19 @@ class BLEManager: NSObject, ObservableObject {
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
         showContours = defaults.object(forKey: SettingsKeys.showContours) as? Bool ?? false
+        showPOIShops = defaults.object(forKey: SettingsKeys.showPOIShops) as? Bool ?? true
+        showPOIRestaurantsAndCafes = defaults.object(
+            forKey: SettingsKeys.showPOIRestaurantsAndCafes
+        ) as? Bool ?? true
+        showPOIPublicToilets = defaults.object(
+            forKey: SettingsKeys.showPOIPublicToilets
+        ) as? Bool ?? true
+        showPOIGasStations = defaults.object(
+            forKey: SettingsKeys.showPOIGasStations
+        ) as? Bool ?? true
+        showPOIBicycleServices = defaults.object(
+            forKey: SettingsKeys.showPOIBicycleServices
+        ) as? Bool ?? true
         let persistedMapProfileKeys = [
             SettingsKeys.minPolygonSize,
             SettingsKeys.detailLevel,
@@ -2082,6 +2170,21 @@ class BLEManager: NSObject, ObservableObject {
                 forKey: SettingsKeys.mapPlusNavigationShowContours
             ) as? Bool ?? MapPlusNavigationDefaults.showContours
         }
+        mapPlusNavigationShowPOIShops = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIShops
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIRestaurantsAndCafes = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIRestaurantsAndCafes
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIPublicToilets = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIPublicToilets
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIGasStations = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIGasStations
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIBicycleServices = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIBicycleServices
+        ) as? Bool ?? false
         mapPlusNavigationBirdsEyeViewEnabled = defaults.object(
             forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled
         ) as? Bool ?? true
@@ -2249,6 +2352,14 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
         defaults.set(showContours, forKey: SettingsKeys.showContours)
+        defaults.set(showPOIShops, forKey: SettingsKeys.showPOIShops)
+        defaults.set(showPOIRestaurantsAndCafes,
+                     forKey: SettingsKeys.showPOIRestaurantsAndCafes)
+        defaults.set(showPOIPublicToilets,
+                     forKey: SettingsKeys.showPOIPublicToilets)
+        defaults.set(showPOIGasStations, forKey: SettingsKeys.showPOIGasStations)
+        defaults.set(showPOIBicycleServices,
+                     forKey: SettingsKeys.showPOIBicycleServices)
         defaults.set(mapPlusNavigationShowBuildings, forKey: SettingsKeys.mapPlusNavigationShowBuildings)
         defaults.set(mapPlusNavigationShowGreenSpace, forKey: SettingsKeys.mapPlusNavigationShowGreenSpace)
         defaults.set(mapPlusNavigationShowPaths, forKey: SettingsKeys.mapPlusNavigationShowPaths)
@@ -2260,6 +2371,16 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
         defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
         defaults.set(mapPlusNavigationShowContours, forKey: SettingsKeys.mapPlusNavigationShowContours)
+        defaults.set(mapPlusNavigationShowPOIShops,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIShops)
+        defaults.set(mapPlusNavigationShowPOIRestaurantsAndCafes,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIRestaurantsAndCafes)
+        defaults.set(mapPlusNavigationShowPOIPublicToilets,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIPublicToilets)
+        defaults.set(mapPlusNavigationShowPOIGasStations,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIGasStations)
+        defaults.set(mapPlusNavigationShowPOIBicycleServices,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIBicycleServices)
         defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
         defaults.set(showRouteOverlay, forKey: SettingsKeys.showRouteOverlay)
         defaults.set(showCurrentPosition, forKey: SettingsKeys.showCurrentPosition)
@@ -5084,6 +5205,11 @@ class BLEManager: NSObject, ObservableObject {
         cancelPendingRideApplicationDeliveries(
             notifyFailure: notifyFailure
         )
+        // A marker still queued, in flight or awaiting a retry left with its
+        // link: the queue and ATT handlers are cleared without callbacks.
+        if let marker = diagnosticsIssueMarkerDelivery {
+            settleDiagnosticsIssueMarker(sequence: marker.sequence, state: .notDelivered)
+        }
     }
 
     private var isWaitingForRideApplicationAcknowledgement: Bool {
@@ -5417,7 +5543,26 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     private func sendSettingPacket(id: UInt8, value: Int32, label: String) -> Bool {
         guard isConnected, isNavigationReady else { return false }
+        settingWriteGeneration &+= 1
+        latestSettingWriteGenerations[id] = settingWriteGeneration
+        return sendSettingPacketAttempt(
+            id: id,
+            value: value,
+            label: label,
+            generation: settingWriteGeneration,
+            attempt: 1,
+            connectionGeneration: rideDeliveryConnectionGeneration
+        )
+    }
 
+    private func sendSettingPacketAttempt(
+        id: UInt8,
+        value: Int32,
+        label: String,
+        generation: UInt64,
+        attempt: Int,
+        connectionGeneration: UInt64
+    ) -> Bool {
         var data = Data()
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -5459,6 +5604,21 @@ class BLEManager: NSObject, ObservableObject {
         } else {
             onDrop = nil
         }
+        // A setting is device state, not a replaceable snapshot: a write that
+        // fails at the ATT layer (e.g. while a chunked status reply holds the
+        // device's BLE buffers) would otherwise leave the device on the old
+        // value until the next connection. Setting 5 is the one-shot reboot
+        // command, which is never repeated.
+        let onWriteFailure: (() -> Void)? = id == 5 ? nil : { [weak self] in
+            self?.retrySettingPacket(
+                id: id,
+                value: value,
+                label: label,
+                generation: generation,
+                failedAttempt: attempt,
+                connectionGeneration: connectionGeneration
+            )
+        }
 
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -5466,7 +5626,8 @@ class BLEManager: NSObject, ObservableObject {
                     data,
                     label: label,
                     coalescingKey: coalescingKey,
-                    onDrop: onDrop
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure
                 )
             },
             fallback: {
@@ -5478,10 +5639,44 @@ class BLEManager: NSObject, ObservableObject {
                     fallback,
                     label: label,
                     coalescingKey: coalescingKey,
-                    onDrop: onDrop
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure
                 )
             }
         )
+    }
+
+    private func retrySettingPacket(
+        id: UInt8,
+        value: Int32,
+        label: String,
+        generation: UInt64,
+        failedAttempt: Int,
+        connectionGeneration: UInt64
+    ) {
+        guard failedAttempt < SettingWriteRetryPolicy.maximumAttemptCount else {
+            log("\(label) not delivered after \(failedAttempt) failed writes")
+            return
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + settingWriteRetryDelay
+        ) { [weak self] in
+            // Resend only the latest value, on the link whose write failed.
+            guard let self,
+                  self.latestSettingWriteGenerations[id] == generation,
+                  self.isConnected,
+                  self.isNavigationReady,
+                  self.rideDeliveryConnectionGeneration == connectionGeneration else { return }
+            self.log("Retrying \(label) after a failed write")
+            _ = self.sendSettingPacketAttempt(
+                id: id,
+                value: value,
+                label: label,
+                generation: generation,
+                attempt: failedAttempt + 1,
+                connectionGeneration: connectionGeneration
+            )
+        }
     }
 
 #if canImport(UIKit) && !HOST_TESTING
@@ -5679,6 +5874,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
@@ -5753,6 +5949,21 @@ class BLEManager: NSObject, ObservableObject {
             if topographicContoursAvailable && showContours {
                 mask |= DeviceBLEProtocol.contoursVisibilityMask
             }
+            if supportsMapPois {
+                if showPOIShops { mask |= DeviceBLEProtocol.poiShopsVisibilityMask }
+                if showPOIRestaurantsAndCafes {
+                    mask |= DeviceBLEProtocol.poiRestaurantsAndCafesVisibilityMask
+                }
+                if showPOIPublicToilets {
+                    mask |= DeviceBLEProtocol.poiPublicToiletsVisibilityMask
+                }
+                if showPOIGasStations {
+                    mask |= DeviceBLEProtocol.poiGasStationsVisibilityMask
+                }
+                if showPOIBicycleServices {
+                    mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
+                }
+            }
             settingID = 8
         case .mapPlusNavigation:
             if mapPlusNavigationShowBuildings { mask |= (1 << 0) }
@@ -5770,6 +5981,23 @@ class BLEManager: NSObject, ObservableObject {
             }
             if topographicContoursAvailable && mapPlusNavigationShowContours {
                 mask |= DeviceBLEProtocol.contoursVisibilityMask
+            }
+            if supportsMapPois {
+                if mapPlusNavigationShowPOIShops {
+                    mask |= DeviceBLEProtocol.poiShopsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIRestaurantsAndCafes {
+                    mask |= DeviceBLEProtocol.poiRestaurantsAndCafesVisibilityMask
+                }
+                if mapPlusNavigationShowPOIPublicToilets {
+                    mask |= DeviceBLEProtocol.poiPublicToiletsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIGasStations {
+                    mask |= DeviceBLEProtocol.poiGasStationsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIBicycleServices {
+                    mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
+                }
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
         case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:
@@ -6332,10 +6560,14 @@ class BLEManager: NSObject, ObservableObject {
         // flags are cleared. Persist the recorder's requested state before any
         // connection/capability guard so reconnect never revives a stale ride
         // ID or stale detailed consent.
-        desiredDiagnosticsCaptureBinding = RideDiagnosticsCaptureBinding(
+        let binding = RideDiagnosticsCaptureBinding(
             captureID: captureID,
             detailed: requestedDetailed
         )
+        if desiredDiagnosticsCaptureBinding != binding {
+            diagnosticsCaptureBindingGeneration &+= 1
+        }
+        desiredDiagnosticsCaptureBinding = binding
         guard supportsRideDiagnostics else { return false }
         // Production firmware supports standard correlation but deliberately
         // omits the detailed one-Hz producer. Downgrade the binding instead of
@@ -6402,18 +6634,125 @@ class BLEManager: NSObject, ObservableObject {
             marker = "mark|1|\(markerSequence)|\(code.rawValue)"
         }
         let packet = Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(marker)".utf8)
-        let queued = sendTransferControlPacket(
+        let captureGeneration = diagnosticsCaptureBindingGeneration
+        let captureID = diagnosticsRecorder?.currentCaptureID
+        let connectionGeneration = rideDeliveryConnectionGeneration
+        let replaySafe = incidentID != nil &&
+            diagnosticsCaptureStatus?.valid == true &&
+            diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest &&
+            diagnosticsCaptureStatus?.markerReplaySafe == true
+        let isCurrent: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.isNavigationReady && self.supportsRideDiagnostics &&
+                self.rideDeliveryConnectionGeneration == connectionGeneration &&
+                self.diagnosticsCaptureBindingGeneration == captureGeneration &&
+                self.diagnosticsRecorder?.currentCaptureID == captureID &&
+                self.diagnosticsIssueMarkerDelivery?.sequence == markerSequence &&
+                (!replaySafe || (self.diagnosticsCaptureStatus?.valid == true &&
+                    self.diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest &&
+                    self.diagnosticsCaptureStatus?.markerReplaySafe == true))
+        }
+        // Publish before queueing: a write without response can succeed
+        // before the send call returns.
+        let previousDelivery = diagnosticsIssueMarkerDelivery
+        diagnosticsIssueMarkerDelivery = DiagnosticsIssueMarkerDelivery(
+            sequence: markerSequence,
+            incidentID: incidentID,
+            state: .pending
+        )
+        guard sendDiagnosticsIssueMarkerAttempt(
+            packet,
+            sequence: markerSequence,
+            attempt: 1,
+            replaySafe: replaySafe,
+            isCurrent: isCurrent
+        ) else {
+            diagnosticsIssueMarkerDelivery = previousDelivery
+            return false
+        }
+        nextDiagnosticsMarkerSequence &+= 1
+        return true
+    }
+
+    private func sendDiagnosticsIssueMarkerAttempt(
+        _ packet: Data,
+        sequence: UInt32,
+        attempt: Int,
+        replaySafe: Bool,
+        isCurrent: @escaping () -> Bool
+    ) -> Bool {
+        sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",
-            coalescingKey: nil
+            coalescingKey: nil,
+            isStillValid: isCurrent,
+            onDrop: { [weak self] in
+                self?.settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+            },
+            onWriteFailure: { [weak self] in
+                self?.retryDiagnosticsIssueMarker(
+                    packet,
+                    sequence: sequence,
+                    failedAttempt: attempt,
+                    replaySafe: replaySafe,
+                    isCurrent: isCurrent
+                )
+            },
+            onWriteSuccess: { [weak self] in
+                self?.settleDiagnosticsIssueMarker(sequence: sequence, state: .sent)
+            }
         )
-        if queued { nextDiagnosticsMarkerSequence &+= 1 }
-        return queued
+    }
+
+    private func retryDiagnosticsIssueMarker(
+        _ packet: Data,
+        sequence: UInt32,
+        failedAttempt: Int,
+        replaySafe: Bool,
+        isCurrent: @escaping () -> Bool
+    ) {
+        guard replaySafe,
+              failedAttempt < DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount else {
+            settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+            return
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + diagnosticsIssueMarkerRetryDelay
+        ) { [weak self] in
+            guard let self,
+                  self.diagnosticsIssueMarkerDelivery?.sequence == sequence,
+                  self.diagnosticsIssueMarkerDelivery?.state == .pending else { return }
+            // Recheck again at dispatch, not just here: a queued retry can be
+            // overtaken by a capture binding while another ATT write is busy.
+            guard isCurrent(),
+                  self.sendDiagnosticsIssueMarkerAttempt(
+                    packet,
+                    sequence: sequence,
+                    attempt: failedAttempt + 1,
+                    replaySafe: replaySafe,
+                    isCurrent: isCurrent
+                  ) else {
+                self.settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+                return
+            }
+        }
+    }
+
+    private func settleDiagnosticsIssueMarker(
+        sequence: UInt32,
+        state: DiagnosticsIssueMarkerDelivery.State
+    ) {
+        // Only the latest marker is tracked: firmware rejects a sequence
+        // below one it has already accepted, so an older retry is moot.
+        guard diagnosticsIssueMarkerDelivery?.sequence == sequence,
+              diagnosticsIssueMarkerDelivery?.state == .pending else { return }
+        diagnosticsIssueMarkerDelivery?.state = state
     }
 
     @discardableResult
     func endDiagnosticsCapture() -> Bool {
         guard supportsRideDiagnostics else { return false }
+        diagnosticsCaptureBindingGeneration &+= 1
         let packet = Data(
             "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture_end".utf8
         )
@@ -7044,6 +7383,11 @@ class BLEManager: NSObject, ObservableObject {
         activeMapLabelProfileVersion = nil
         activeMapLabelLanguages = []
         activeMapFontAssetHealthy = false
+        activeMapPoiProfileVersion = nil
+        activeMapPoiIndexProfileVersion = nil
+        activeMapPoiDataHealthy = false
+        activeMapPoiIndexHealthy = false
+        activeMapContourLayerIncluded = false
         activeMapTopographyProfileVersion = nil
         activeMapTopographySectionHealthy = false
         activeMapTopographyQualityMode = ""
@@ -7137,6 +7481,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
@@ -8505,6 +8850,7 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         endpoint: NavigationWriteEndpoint,
         label: String,
+        isStillValid: (() -> Bool)? = nil,
         writeClass: NavigationWriteClass = .other,
         coalescingKey: String? = nil,
         prioritized: Bool = false,
@@ -8516,7 +8862,8 @@ class BLEManager: NSObject, ObservableObject {
         applicationCommandID: UUID? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         if (firmwareMaintenanceActive ||
             firmwareMaintenanceReconnectExpected) &&
@@ -8527,10 +8874,12 @@ class BLEManager: NSObject, ObservableObject {
         let write = NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:
@@ -8704,12 +9053,14 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
+        isStillValid: (() -> Bool)? = nil,
         prioritized: Bool = false,
         atomically: Bool = false,
         payloadProvider: (() -> Data)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
@@ -8727,6 +9078,7 @@ class BLEManager: NSObject, ObservableObject {
             data,
             endpoint: endpoint,
             label: "fallback \(label)",
+            isStillValid: isStillValid,
             writeClass: writeClass,
             coalescingKey: coalescingKey,
             prioritized: prioritized,
@@ -8736,7 +9088,8 @@ class BLEManager: NSObject, ObservableObject {
             },
             onWrite: onWrite,
             onDrop: onDrop,
-            onWriteFailure: onWriteFailure
+            onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess
         ) else {
             log("Fallback \(label) not queued: write queue unavailable")
             return false
@@ -8750,8 +9103,11 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         label: String,
         coalescingKey: String?,
+        isStillValid: (() -> Bool)? = nil,
+        onDrop: (() -> Void)? = nil,
         forMaintenanceReconnect: Bool = false,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         if DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
             firmwareMaintenanceActive: firmwareMaintenanceActive,
@@ -8762,8 +9118,11 @@ class BLEManager: NSObject, ObservableObject {
                 label: label,
                 writeClass: .transfer,
                 coalescingKey: coalescingKey,
+                isStillValid: isStillValid,
                 prioritized: true,
-                onWriteFailure: onWriteFailure
+                onDrop: onDrop,
+                onWriteFailure: onWriteFailure,
+                onWriteSuccess: onWriteSuccess
             )
         }
         return DevicePacketRouting.sendPreferredThenFallback(
@@ -8773,8 +9132,11 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
+                    isStillValid: isStillValid,
                     prioritized: true,
-                    onWriteFailure: onWriteFailure
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure,
+                    onWriteSuccess: onWriteSuccess
                 )
             },
             fallback: {
@@ -8783,8 +9145,11 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
+                    isStillValid: isStillValid,
                     prioritized: true,
-                    onWriteFailure: onWriteFailure
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure,
+                    onWriteSuccess: onWriteSuccess
                 )
             }
         )
@@ -8796,9 +9161,11 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
+        isStillValid: (() -> Bool)? = nil,
         prioritized: Bool = false,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
@@ -8822,6 +9189,7 @@ class BLEManager: NSObject, ObservableObject {
             data,
             endpoint: endpoint,
             label: "native \(label)",
+            isStillValid: isStillValid,
             writeClass: writeClass,
             coalescingKey: coalescingKey,
             prioritized: prioritized,
@@ -8844,7 +9212,8 @@ class BLEManager: NSObject, ObservableObject {
             transportCharacteristicUUIDString:
                 characteristic.uuid.uuidString,
             onDrop: onDrop,
-            onWriteFailure: onWriteFailure
+            onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -8921,6 +9290,7 @@ class BLEManager: NSObject, ObservableObject {
                 beginNavigationWriteResponseWait(for: write)
             }
             write.perform(using: endpoint.write, preparedData: payload)
+            if !expectsWriteResponse { write.onWriteSuccess?() }
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         updateNavigationBackpressureWatchdog(
@@ -8988,9 +9358,12 @@ class BLEManager: NSObject, ObservableObject {
     private func completeNavigationWrite(error: Error?) {
         guard pendingATTWrite?.owner == .ride else { return }
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
+        let writeSuccessHandler = navigationWriteWithResponseSuccessHandler
         finishPendingATTWrite(error: error)
         if error != nil {
             writeFailureHandler?()
+        } else {
+            writeSuccessHandler?()
         }
         flushAuthMessageQueue()
         if isNavigationReady, let endpoint = navigationWriteEndpoint {
@@ -9024,7 +9397,8 @@ class BLEManager: NSObject, ObservableObject {
             writeClass: write.writeClass,
             byteCount: write.data.count,
             applicationCommandID: write.applicationCommandID,
-            failureHandler: write.onWriteFailure
+            failureHandler: write.onWriteFailure,
+            successHandler: write.onWriteSuccess
         )
     }
 
@@ -9036,10 +9410,12 @@ class BLEManager: NSObject, ObservableObject {
         writeClass: NavigationWriteClass,
         byteCount: Int,
         applicationCommandID: UUID?,
-        failureHandler: (() -> Void)?
+        failureHandler: (() -> Void)?,
+        successHandler: (() -> Void)? = nil
     ) {
         precondition(pendingATTWrite == nil)
         navigationWriteWithResponseFailureHandler = failureHandler
+        navigationWriteWithResponseSuccessHandler = successHandler
         navigationWriteResponseGeneration &+= 1
         if navigationWriteResponseGeneration == 0 {
             navigationWriteResponseGeneration = 1
@@ -9220,6 +9596,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite = nil
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseSuccessHandler = nil
         navigationBackpressureStartedAt = nil
         if rideTransportStateMachine.acceptsWriterCallbacks {
             let writerState: RideBLEWriterStateV1
@@ -9246,6 +9623,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite = nil
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseSuccessHandler = nil
         navigationBackpressureStartedAt = nil
         // Adoption clears the previous writer after entering .connecting.
         // Only publish writer changes in phases that admit them.
@@ -9344,6 +9722,12 @@ class BLEManager: NSObject, ObservableObject {
     var pendingNavigationClearForTesting: Bool { pendingNavigationClear != nil }
     func setRideApplicationAcknowledgementTimeoutForTesting(_ timeout: TimeInterval) {
         rideApplicationAcknowledgementTimeout = timeout
+    }
+    func setDiagnosticsIssueMarkerRetryDelayForTesting(_ delay: TimeInterval) {
+        diagnosticsIssueMarkerRetryDelay = delay
+    }
+    func setSettingWriteRetryDelayForTesting(_ delay: TimeInterval) {
+        settingWriteRetryDelay = delay
     }
     func retryNavigationClearForTesting() { retryPendingNavigationClear() }
     func adoptConnectionForTesting(connected: Bool) -> Bool {
@@ -10633,6 +11017,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
@@ -10805,6 +11190,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
         let hasTopographicContours =
             flags & DeviceBLEProtocol.topographicContoursCapabilityMask != 0
+        let hasMapPois =
+            extendedFeatureFlags & DeviceBLEProtocol.mapPoisCapabilityMask != 0 &&
+            hasExtendedMapVisibility && hasStreetLabels && has3DBuildings &&
+            hasTopographicContours
         let hasRideAutomation =
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
@@ -10912,6 +11301,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if hasReceivedDeviceCapabilities && !supports3DBuildings && has3DBuildings {
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities && !supportsMapPois && hasMapPois {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
         if hasReceivedDeviceCapabilities && !supportsMapNavigationOrientation &&
             flags & RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0 {
             hasSentMapNavigationProfileForConnection = false
@@ -10950,6 +11343,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = hasDestinationPicker
         supportsStreetLabels = hasStreetLabels
         supports3DBuildings = has3DBuildings
+        supportsMapPois = hasMapPois
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
         supportsTerrainExperiments = flags & RideBLEGeneratedProtocolV1.terrainExperimentsFeature != 0
@@ -11870,6 +12264,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = status.activeMapId ?? ""
         mapTransferActiveSessionId = status.activeSessionId ?? ""
         activeMapManifestReceipt = status.activeManifestReceipt ?? ""
+        // Only firmware that publishes the renderer-layer block (POI profile
+        // fields with runtime font/POI health) may replace the BLE-reported
+        // renderer state. Older HTTP status reports font health as merely
+        // "format >= 2", so keep the BLE projection exactly as before.
+        if status.poiProfileVersion != nil {
+            activeMapRendererFormat = status.activeRendererFormat
+            activeMapLabelProfileVersion = status.labelProfileVersion
+            activeMapLabelLanguages = status.labelLanguages ?? []
+            activeMapFontAssetHealthy = status.fontAssetHealthy ?? false
+            activeMapPoiProfileVersion = status.poiProfileVersion
+            activeMapPoiIndexProfileVersion = status.poiIndexProfileVersion
+            activeMapPoiDataHealthy = status.poiDataHealthy ?? false
+            activeMapPoiIndexHealthy = status.poiIndexHealthy ?? false
+            activeMapContourLayerIncluded = status.contourLayerIncluded ?? false
+        }
+        normalizeActiveMapPoiStatus()
         if let mapID = status.activeMapId {
             activeDeviceMap = DeviceActiveMapDescriptor(
                 mapID: mapID,
@@ -11919,6 +12329,20 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasFreshMapTransferStatus = true
     }
 
+    private func normalizeActiveMapPoiStatus() {
+        guard !mapTransferActiveMapId.isEmpty,
+              activeMapRendererFormat == 5,
+              activeMapPoiProfileVersion == 1,
+              activeMapPoiIndexProfileVersion == 1 else {
+            activeMapPoiProfileVersion = nil
+            activeMapPoiIndexProfileVersion = nil
+            activeMapPoiDataHealthy = false
+            activeMapPoiIndexHealthy = false
+            activeMapContourLayerIncluded = false
+            return
+        }
+    }
+
     private func applyMapTransferStatusBody(_ body: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             mapTransferStatusDescription = "invalid status"
@@ -11962,6 +12386,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             (object["labelProfileVersion"] as? NSNumber)?.intValue
         activeMapLabelLanguages = object["labelLanguages"] as? [String] ?? []
         activeMapFontAssetHealthy = object["fontAssetHealthy"] as? Bool ?? false
+        activeMapPoiProfileVersion =
+            (object["poiProfileVersion"] as? NSNumber)?.intValue
+        activeMapPoiIndexProfileVersion =
+            (object["poiIndexProfileVersion"] as? NSNumber)?.intValue
+        activeMapPoiDataHealthy = object["poiDataHealthy"] as? Bool ?? false
+        activeMapPoiIndexHealthy = object["poiIndexHealthy"] as? Bool ?? false
+        activeMapContourLayerIncluded = object["contourLayerIncluded"] as? Bool ?? false
         activeMapTopographyProfileVersion =
             (object["topographyProfileVersion"] as? NSNumber)?.intValue
         activeMapTopographySectionHealthy =
@@ -12007,6 +12438,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationOwnerRecoveryCode = nil
             mapTransferActivationTerminalCode = nil
         }
+        normalizeActiveMapPoiStatus()
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapStateKnown = object["mapStateKnown"] as? Bool ?? false
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool

@@ -126,6 +126,8 @@ bool mapStreamFileView(const ParsedMapStreamManifest &manifest,
                        MapStreamFileView &file);
 bool mapStreamFirmwareCompatible(const std::string &currentVersion,
                                  const std::string &minimumVersion);
+// Whether this build can present a map of the manifest's renderer target.
+bool mapStreamTargetSupported(const MapManifest &manifest);
 
 struct MapStreamParserOptions {
   uint64_t expectedContentBytes = std::numeric_limits<uint64_t>::max();

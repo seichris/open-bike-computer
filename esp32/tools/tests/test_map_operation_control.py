@@ -23,6 +23,154 @@ def method(source, name):
 
 
 class ExplicitMapOperationControlTests(unittest.TestCase):
+    def test_terminal_cleanup_preserves_error_and_commit_ownership(self):
+        source = (ROOT / 'lib/map_transfer_http/map_transfer_http.cpp').read_text()
+        start = source.index('void MapTransferHttpServer::executeOperationTask()')
+        end = source.index('\nvoid MapTransferHttpServer::armCommitRecovery', start)
+        # Execute the production worker, including its exception handler, with
+        # the real ledger. Only platform scheduling and the finalizer are seams.
+        fixture = r'''
+#include <cassert>
+#include <filesystem>
+#include <string>
+#include "map_transfer.hpp"
+#include "map_operation_journal.hpp"
+namespace ui_scheduler {enum class WakeReason {Transfer}; void notify(WakeReason) {}}
+unsigned long fakeMillis=0;
+unsigned long millis() {return fakeMillis;}
+namespace map_transfer {
+struct InstallerSeam {
+  ActiveMapSelection selected;
+  InstallStatus outcome{false,"operation_cleanup_conflict","another transaction owns recovery evidence"};
+  int calls=0;
+  bool throwAllocation=false;
+  InstallStatus readActiveMap(ActiveMapSelection &out) {out=selected;return {true,"ok",""};}
+  InstallStatus finalizeOperation(const std::string &,const std::string &) {
+    ++calls;if(throwAllocation) throw std::bad_alloc();return outcome;
+  }
+};
+struct TransferSeam {
+  struct Status {std::string lastErrorCode;};
+  std::string lastErrorCode;
+  Status status() const {return {lastErrorCode};}
+  void sampleResources(const char *) {}
+};
+class MapTransferHttpServer {
+public:
+  struct CommitRecovery {bool armed=false; std::string identity;};
+  struct StateGuard {explicit StateGuard(MapTransferHttpServer &) {}};
+  struct OperationStoreGuard {explicit OperationStoreGuard(MapTransferHttpServer &) {}};
+  CommitRecovery commitRecovery_;
+  std::string terminalOperationID_,terminalSessionID_,terminalMapID_,operationQuery_;
+  bool terminalAutomaticExit_=true,terminalFailed_=false,operationTaskSubmitted_=true;
+  bool terminalCleanupReported_=false;
+  uint32_t terminalCleanupReportedAtMs_=0;
+  std::string storageRoot_,operationDeviceID_,operationStatus_,errorCode,firstRecovery;
+  bool operationStatusNotification_=false;
+  InstallerSeam installer_;
+  TransferSeam transfer;
+  TransferSeam *transferServer_=&transfer;
+  int finishes=0,releases=0,exits=0,errorReports=0;
+  void lockState() {} void unlockState() {}
+  bool recoverCommitDisposition(const CommitRecovery &) {return false;}
+  bool observeOperationRevision(uint64_t) {return true;}
+  void rememberOwnerRecovery(const char *code) {if(firstRecovery.empty()) firstRecovery=code;}
+  void setLastError(const std::string &code,const std::string &) {
+    errorCode=code;transfer.lastErrorCode=code;++errorReports;
+  }
+  void finishActivation(const std::string &,const std::string &,const std::string &,const std::string &) {++finishes;}
+  void releaseCommitGrant() {++releases;}
+  void requestAutomaticExit() {++exits;}
+  std::string readOperationStatus(const std::string &id) {
+    MapOperationStorage storage(storageRoot_); operation::Store store(storage,operationDeviceID_);
+    operation::Record record;assert(store.restore()==operation::Result::Ok);
+    if(store.queryID(id,record)==operation::Result::Ok)return operationReceiptJson(record);
+    return "unavailable";
+  }
+  void executeOperationTask();
+};
+''' + source[start:end] + r'''
+}
+int main(int argc,char **argv) {
+  assert(argc==2);
+  using namespace map_transfer;
+  namespace op=map_transfer::operation;
+  const std::string root=argv[1];assert(!std::filesystem::exists(root));
+  std::filesystem::create_directories(root+"/VECTMAP");
+  op::Identity id{std::string(32,'a'),std::string(32,'1'),std::string(64,'2'),
+    std::string(64,'3'),std::string(64,'4'),2759933,std::string(64,'3'),"qualification"};
+  MapOperationStorage storage(root);op::Store store(storage,id.device);
+  assert(store.restore()==op::Result::Ok);assert(store.initializeAdmission(100)==op::Result::Ok);
+  assert(store.admit(id,store.admissionRevision())==op::Result::Ok);
+  assert(store.prepare(id)==op::Result::Ok);assert(store.accept(id)==op::Result::Ok);
+  MapTransferHttpServer worker;
+  worker.storageRoot_=root;worker.operationDeviceID_=id.device;
+  worker.terminalOperationID_=id.operation;worker.terminalSessionID_=id.session;worker.terminalMapID_=id.map;
+  auto &selected=worker.installer_.selected;
+  selected.sessionId=id.session;selected.mapId=id.map;selected.manifestReceipt=id.manifest;
+  selected.signedManifestReceipt=id.signedManifest;
+  worker.operationQuery_=id.operation;
+  worker.executeOperationTask();
+  assert(worker.installer_.calls==1);
+  assert(worker.finishes==0 && worker.releases==0 && worker.exits==0);
+  assert(!worker.terminalOperationID_.empty() && !worker.operationTaskSubmitted_);
+  assert(worker.operationStatus_.find("\"phase\":\"installed\"")!=std::string::npos);
+  assert(worker.errorCode=="operation_cleanup_conflict");
+  assert(worker.firstRecovery=="operation_cleanup_conflict");
+  assert(worker.errorReports==1);
+  // Phone ACK must not consume firmware cleanup ownership.
+  assert(store.restore()==op::Result::Ok);assert(store.acknowledgeResult(id)==op::Result::Ok);
+  worker.executeOperationTask();
+  assert(worker.installer_.calls==2 && worker.finishes==0 && worker.releases==0 && worker.exits==0);
+  assert(worker.errorReports==1); // Identical retries do not flood BLE status.
+  // Storage retries run back to back; each report pushes a full status
+  // stream. Alternating failures change at most once per interval.
+  for (int attempt=0;attempt<100;++attempt) {
+    ++fakeMillis;
+    worker.installer_.outcome=attempt%2==0 ?
+        InstallStatus{false,"operation_cleanup","confirmed operation cleanup must retry"} :
+        InstallStatus{false,"operation_cleanup_conflict","another transaction owns recovery evidence"};
+    worker.executeOperationTask();
+  }
+  assert(worker.installer_.calls==102 && worker.finishes==0 && worker.releases==0);
+  assert(worker.errorReports==1 && worker.errorCode=="operation_cleanup_conflict");
+  fakeMillis+=600000;
+  worker.installer_.outcome={false,"operation_cleanup","confirmed operation cleanup must retry"};
+  worker.executeOperationTask();
+  assert(worker.installer_.calls==103 && worker.finishes==0);
+  assert(worker.errorCode=="operation_cleanup");
+  assert(worker.firstRecovery=="operation_cleanup_conflict");
+  assert(worker.errorReports==2);
+  // An exit refused while the grant is held replaces the device's error. The
+  // cleanup failure returns after the interval instead of staying hidden.
+  worker.transfer.lastErrorCode="commit_in_progress";
+  ++fakeMillis;worker.executeOperationTask();
+  assert(worker.errorReports==2 && worker.transfer.lastErrorCode=="commit_in_progress");
+  fakeMillis+=600000;worker.executeOperationTask();
+  assert(worker.errorReports==3 && worker.transfer.lastErrorCode=="operation_cleanup");
+  assert(worker.firstRecovery=="operation_cleanup_conflict");
+  worker.installer_.throwAllocation=true;worker.executeOperationTask();
+  assert(worker.finishes==0 && worker.releases==0 && !worker.operationTaskSubmitted_);
+  worker.installer_.throwAllocation=false;
+  worker.installer_.outcome={true,"operation_terminal_cleaned",""};
+  worker.executeOperationTask();
+  assert(worker.finishes==1 && worker.releases==1 && worker.exits==1);
+  assert(worker.terminalOperationID_.empty());
+  assert(!worker.terminalCleanupReported_);
+  worker.executeOperationTask();
+  assert(worker.finishes==1 && worker.releases==1 && worker.exits==1);
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='map-terminal-cleanup-') as temporary:
+            path = Path(temporary)
+            (path / 'test.cpp').write_text(fixture)
+            subprocess.run([shutil.which('c++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                            '-I' + str(ROOT / 'lib/map_transfer'), str(path / 'test.cpp'),
+                            str(ROOT / 'lib/map_transfer/map_operation_journal.cpp'),
+                            str(ROOT / 'lib/device_transfer/durable_operation.cpp'),
+                            '-o', str(path / 'test')], check=True)
+            subprocess.run([str(path / 'test'), str(path / 'sd')], check=True)
+
     def test_real_handler_orders_grant_cancel_and_durable_intent(self):
         source = (ROOT / 'lib/map_transfer_http/map_transfer_http.cpp').read_text()
         shared = (ROOT / 'lib/device_transfer/device_transfer_http.cpp').read_text()

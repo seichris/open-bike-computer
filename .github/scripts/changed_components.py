@@ -22,12 +22,14 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_175_PRODUCTION",
         "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
+        "WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION",
     ),
     "206": (
         "WAVESHARE_AMOLED_206",
         "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_206_PRODUCTION",
         "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
+        "WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION",
     ),
 }
 FULL_CI_PATHS = {
@@ -64,6 +66,13 @@ MAP_WORKFLOW_PATHS = {
     ".github/workflows/map-platform-ci.yml",
     ".github/scripts/dispatch_promotion_ci.py",
     ".github/workflows/map-platform-image.yml",
+}
+# Native POI equivalence imports the backend shard producer/selector. Keep its
+# product-container gate active even when no extractor file changes.
+OSM_BACKEND_PATHS = {
+    "map-platform/backend/map_platform/__init__.py",
+    "map-platform/backend/map_platform/source_shards.py",
+    "map-platform/backend/tests/test_source_shards.py",
 }
 FIRMWARE_CONTRACT_PATHS = {
     "docs/device-ownership-test-vectors.json",
@@ -105,6 +114,9 @@ IOS_CONTRACT_PATHS = {
 SHARED_FMB_FIXTURE_PREFIX = "tools/tests/fixtures/fmb/"
 SHARED_MAP_STREAM_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
+)
+SHARED_CONTOUR_COMPANION_FIXTURE_PATH = (
+    "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
 )
 SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
@@ -155,7 +167,7 @@ def registry_changed_components(base, head=None):
 
 
 def native_ios_required(paths, *, run_all=False, registry_components=None):
-    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
+    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and p not in ci_scopes.SHARED_FAST_CHECKS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
                     and not (p == CHECK_REGISTRY and registry_components is not None and "ios_native" not in registry_components)]
     return classify_paths(native_paths, run_all=run_all, registry_components=registry_components)["ios"]
 
@@ -163,6 +175,22 @@ def native_ios_required(paths, *, run_all=False, registry_components=None):
 def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_components=None) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
 
+    paths = tuple(paths)
+    selected = _classify_known_paths(paths, run_all=run_all, registry_components=registry_components)
+    if not run_all:
+        for path in paths:
+            # Stop before expensive jobs when ownership is unknown. An explicit
+            # consumer mapping is required; neither a green skip nor full CI is
+            # a substitute for that decision.
+            if (path.startswith(("tools/", "protocol/", ".github/"))
+                    and not path.endswith(".md") and path != CHECK_REGISTRY
+                    and not path.startswith(("tools/development/tests/", ".github/scripts/tests/"))
+                    and not any(_classify_known_paths([path], registry_components=registry_components).values())):
+                raise ValueError(f'unclassified CI input: {path}; add an explicit consumer mapping')
+    return selected
+
+
+def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_components=None) -> dict[str, bool]:
     selected = {component: run_all for component in COMPONENTS}
     if run_all:
         return selected
@@ -170,6 +198,14 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
     for raw_path in paths:
         path = raw_path
         if not path:
+            continue
+
+        if path in ci_scopes.SHARED_FAST_CHECKS:
+            checks = {c['id']: c for c in ci_scopes.registry_checks()}
+            for identifier in ci_scopes.SHARED_FAST_CHECKS[path]:
+                if identifier not in checks:
+                    raise ValueError(f'unknown shared-input check: {identifier}')
+                selected[checks[identifier]['component']] = True
             continue
 
         # Runner/environment entry points route like their tools/development/ code.
@@ -201,7 +237,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
             ):
                 selected["firmware_build"] = True
 
-        if path in FIRMWARE_RENDER_TEST_PATHS:
+        if path in FIRMWARE_RENDER_TEST_PATHS or path.startswith('tools/ride_stats_preview/'):
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 
@@ -243,6 +279,9 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         if path == ".dockerignore" or path.startswith("map-platform/"):
             selected["map_backend"] = True
 
+        if path in OSM_BACKEND_PATHS:
+            selected["osm"] = True
+
         if path.startswith("tools/OSM_Extract/"):
             # The production backend image copies the extractor into its image.
             selected["map_backend"] = True
@@ -257,6 +296,12 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         if path == SHARED_MAP_STREAM_FIXTURE_PATH:
             # The same signed-stream bytes are parsed by backend, iOS, and firmware.
             selected["firmware_host"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path == SHARED_CONTOUR_COMPANION_FIXTURE_PATH:
+            # Backend-produced signed maps and companions drive the iPhone
+            # delivery contract tests.
             selected["ios"] = True
             selected["map_backend"] = True
 
@@ -432,7 +477,10 @@ def main() -> int:
     print(f"firmware_targets={firmware_targets}")
     print(f"ios_native={'true' if native_ios else 'false'}")
     details = {**ci_scopes.map_scopes(paths, selected=selected["map_backend"]),
-               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"])}
+               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"]),
+               'firmware_host_checks': ci_scopes.firmware_host_checks(paths, selected=selected['firmware_host']),
+               'firmware_renderer': ci_scopes.firmware_renderer_required(paths),
+               'zone_contracts': ci_scopes.zone_contracts_required(paths, ios=selected['ios'], firmware_host=selected['firmware_host'])}
     for key, value in details.items():
         print(f"{key}={json.dumps(value, separators=(',', ':'))}")
     return 0

@@ -4,6 +4,7 @@
 
 namespace map_transfer::selection_anchor {
 constexpr size_t kMaximumBytes = 2560;
+constexpr size_t kMaximumSelectionBytes = 2048;
 constexpr const char *kMagic = "OBC-SELECTION-ANCHOR/1\n";
 enum class Decode { Valid, Corrupt, Unsupported };
 struct Record {
@@ -21,7 +22,7 @@ inline std::string authenticatedBytes(const Record &r) {
   return std::string(kMagic)+std::to_string(r.sequence)+"\n"+r.device+"\n"+r.operation+"\n"+r.selection;
 }
 inline std::string encode(const Record &r) {
-  if (r.sequence==0 || r.selection.empty() || r.selection.size()>2048 ||
+  if (r.sequence==0 || r.selection.empty() || r.selection.size()>kMaximumSelectionBytes ||
       !token(r.device) || !token(r.operation)) return {};
   const auto authenticated=authenticatedBytes(r);
   const auto digest=sha256Hex(reinterpret_cast<const uint8_t*>(authenticated.data()),authenticated.size());
@@ -49,7 +50,7 @@ inline Decode decode(const std::string &bytes,Record &r) {
     r.sequence=r.sequence*10+uint64_t(c-'0');
   }
   r.selection=bytes.substr(position);
-  if(r.selection.empty() || r.selection.size()>2048) return Decode::Corrupt;
+  if(r.selection.empty() || r.selection.size()>kMaximumSelectionBytes) return Decode::Corrupt;
   const auto authenticated=authenticatedBytes(r);
   return sha256Hex(reinterpret_cast<const uint8_t*>(authenticated.data()),authenticated.size())==digest ? Decode::Valid : Decode::Corrupt;
 }

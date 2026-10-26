@@ -57,6 +57,26 @@ switching app variants. Do not add a shared Keychain access group merely to
 avoid pairing; that would let a development build read production ownership
 credentials.
 
+Saved signed maps remain usable across compatible app updates in both Debug
+and Release. Every download and saved-map install verifies the signature,
+manifest receipts, artifact/file hashes, supported reader schema, renderer
+format and requested features. Reader requirements are derived directly from
+the signed manifest, including for old sidecars that contain only requester
+app-build fields. Those legacy app fields are audit metadata and never decide
+whether a map can be installed. No map rewrite or regeneration is needed solely
+because the app build changes.
+
+The app advertises `X-Map-Stream-Reader-Contract: 1` to request version-independent
+artifact metadata. It also accepts older service responses and URL refreshes
+whose requester app fields change. Services keep legacy requester fields for
+older clients that omit the contract header. This allows app/service upgrades
+in either order without invalidating immutable map data.
+
+Device protocol, trusted public-key fingerprints and any explicit firmware
+qualification remain required. Unsupported map formats and retired signing
+keys still need a compatible map or firmware. Development builds must retain
+their commissioned public key to keep verifying maps from local test signers.
+
 For a connected iPhone, replace the generic destination and unsigned setting:
 
 ```sh

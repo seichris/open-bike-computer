@@ -69,6 +69,61 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (argc > 1 && std::strcmp(argv[1], "nearby") == 0) {
+    // POI-enabled firmware persisted the default duplicate as a Nearby screen.
+    // Without the Nearby runtime, boot keeps every other screen instead of
+    // replacing the document with migrated defaults.
+    const auto revision = activeSnapshot().revision;
+    for (auto &item : preferences_test::stores[kNamespace]) {
+      if (item.first != "slotA" && item.first != "slotB") continue;
+      auto &slot = item.second;
+      const auto length = readUInt16LE(slot.data() + 12);
+      auto *documentBytes = slot.data() + kSlotHeaderBytes;
+      size_t offset = DOCUMENT_HEADER_BYTES;
+      for (uint8_t i = 0; i < documentBytes[5]; ++i) {
+        if (readUInt32LE(documentBytes + offset) == duplicate.id)
+          documentBytes[offset + 4] = static_cast<uint8_t>(ScreenType::Nearby);
+        offset += 9 + documentBytes[offset + 6] +
+                  readUInt16LE(documentBytes + offset + 7);
+      }
+      writeUInt32LE(documentBytes + length - 4, crc32(documentBytes, length - 4));
+      writeUInt32LE(slot.data() + slot.size() - 4, crc32(slot.data(), slot.size() - 4));
+    }
+    uint32_t firstEnabled = 0;
+    for (uint8_t i = 0; i < document.instanceCount && firstEnabled == 0; ++i)
+      if (document.instances[i].enabled && document.instances[i].id != duplicate.id)
+        firstEnabled = document.instances[i].id;
+    for (int boot = 0; boot < 2; ++boot) { // the migration is durable
+      ready = false;
+      assert(initialize(mapRenderSettings));
+      const Document &restored = activeSnapshot().document;
+      if (map_profile_protocol::POIS_RUNTIME_ENABLED) {
+        // The Nearby runtime keeps the screen. Only the patched type is
+        // checked: its slot still carries the Map default's legacy digest.
+        assert(restored.instanceCount == document.instanceCount);
+        assert(restored.instances[5].id == duplicate.id &&
+               restored.instances[5].type == ScreenType::Nearby);
+        continue;
+      }
+      assert(activeSnapshot().revision == revision);
+      assert(restored.instanceCount == document.instanceCount - 1);
+      for (uint8_t i = 0, kept = 0; i < document.instanceCount; ++i) {
+        const ScreenInstance &expected = document.instances[i];
+        if (expected.id == duplicate.id) continue;
+        const ScreenInstance &actual = restored.instances[kept++];
+        assert(actual.id == expected.id && actual.type == expected.type);
+        assert(actual.enabled == expected.enabled);
+        assert(actual.nameLength == expected.nameLength &&
+               std::memcmp(actual.name.data(), expected.name.data(),
+                           expected.nameLength) == 0);
+        assert(actual.mapProfile.zoomLevel == expected.mapProfile.zoomLevel);
+      }
+      assert(restored.defaultInstanceID == firstEnabled);
+      assert(!restored.instances[restored.instanceCount - 1].enabled);
+    }
+    return 0;
+  }
+
   // This is the render-time projection installed while viewing duplicate Map.
   mapRenderSettings.mapStyle.zoomLevel = 5;
   if (argc > 1 && std::strcmp(argv[1], "legacy") == 0) {
