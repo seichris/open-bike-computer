@@ -202,7 +202,8 @@ private:
 
 class MapTransferInstaller {
 public:
-  explicit MapTransferInstaller(std::string storageRoot = "/sdcard");
+  // Firmware passes Storage::mapStorageRoot(): removable SD only, never FFat.
+  explicit MapTransferInstaller(std::string storageRoot);
   virtual ~MapTransferInstaller() = default;
   InstallStatus readReadyStreamMap(const std::string &sessionId,
                                    ReadyStreamMap &ready) const;

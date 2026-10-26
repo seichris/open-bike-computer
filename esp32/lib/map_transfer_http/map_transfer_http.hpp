@@ -36,7 +36,8 @@ public:
   bool requestOperationStatus(const std::string &operationID);
   std::string operationStatusJson() const;
   bool takeOperationStatusNotification();
-  void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080,
+  // storageRoot is Storage::mapStorageRoot(): removable SD only, never FFat.
+  void configure(std::string storageRoot, uint16_t port = 8080,
                  device_transfer::HttpTransferServer *sharedServer = nullptr);
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
@@ -114,7 +115,7 @@ private:
   private:
     const MapTransferHttpServer &owner_;
   };
-  std::string storageRoot_ = "/sdcard";
+  std::string storageRoot_; // Bound by configure(); empty names no volume.
   std::atomic<uint32_t> storageProgressSequence_{0};
   std::string operationDeviceID_;
   MapSelectionHealth selectionHealth_;
@@ -188,7 +189,7 @@ private:
   device_transfer::HttpTransferServer ownedTransferServer_;
   device_transfer::HttpTransferServer *transferServer_ =
       &ownedTransferServer_;
-  MapTransferInstaller installer_{"/sdcard"};
+  MapTransferInstaller installer_{std::string()};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t operationStoreMutex_ = nullptr;
   StaticSemaphore_t operationStoreMutexStorage_{};

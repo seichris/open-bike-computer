@@ -44,6 +44,10 @@ namespace {
 
 using ride_diagnostics::transfer_policy::StoragePreparation;
 
+// No filesystem is mounted here. A map path built on this root fails with
+// ENOENT before reaching any volume, including FFat mounted at /sdcard.
+constexpr const char *kUnavailableMapRoot = "/map-storage-unavailable";
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 void endWaveshareMigrationBus();
 #endif
@@ -234,7 +238,27 @@ void Storage::shutdownTask(void *context) {
   vTaskDelete(nullptr);
 }
 
-bool Storage::ensureSdMounted(bool allowInternalFallback) {
+void Storage::pinBackendForBoot() {
+  mapStorageAvailable_.store(
+      storage_mount_policy::removableHoldsMaps(isSdLoaded.load(),
+                                               internalFallbackMounted.load()),
+      std::memory_order_release);
+  backendPinned_.store(true, std::memory_order_release);
+}
+
+bool Storage::backendPinned() const {
+  return backendPinned_.load(std::memory_order_acquire);
+}
+
+bool Storage::mapStorageAvailable() const {
+  return mapStorageAvailable_.load(std::memory_order_acquire);
+}
+
+const char *Storage::mapStorageRoot() const {
+  return mapStorageAvailable() ? "/sdcard" : kUnavailableMapRoot;
+}
+
+bool Storage::ensureSdMounted() {
   storage_shutdown::OperationLease operation(streamAdmission_);
   if (!operation.held()) return false;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
@@ -259,36 +283,12 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
     root.close();
   }
 #endif
-  if (!ready) {
-    // The FFat fallback shares /sdcard with the removable card. Retrying the
-    // removable mount would have to unmount FFat and invalidate every map/file
-    // handle in the application. Automatic diagnostics recovery therefore
-    // retries only when no fallback is active. Existing explicit callers that
-    // allow the fallback retain the historical remount-and-restore behavior.
-    if (!storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
-            isSdLoaded.load(), internalFallbackMounted.load()) &&
-        !allowInternalFallback) {
-      xSemaphoreGive(mountMutex);
-      return false;
-    }
-    mountGeneration_.fetch_add(1, std::memory_order_acq_rel);
+  // Keep this boot's volume mounted as-is. Retrying the card, unmounting it or
+  // restoring FFat at /sdcard would pull files from under the renderer, fonts
+  // and the recorder, and FFat must never stand in for map storage. A failed
+  // or removed card stays unavailable; a replacement is adopted on restart.
+  if (!ready)
     isSdLoaded = false;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
-    defined(SPI_SHARED)
-    const bool restoreInternalFallback =
-        storage_mount_policy::shouldRestoreFallbackAfterFailedRetry(
-            allowInternalFallback, internalFallbackMounted.load());
-    FFat.end();
-    endRemovableStorage(mountedBackend.load());
-    mountedBackend = StorageBackend::Unavailable;
-    delay(25);
-#endif
-    ready = initSD() == ESP_OK;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-    if (!ready && restoreInternalFallback)
-      initSPIFFS();
-#endif
-  }
   xSemaphoreGive(mountMutex);
   return ready;
 }
@@ -325,11 +325,6 @@ const char *Storage::storageBackendName() const {
 
 bool Storage::storagePowerCycleRequired() const {
   return storageBackend() == StorageBackend::LegacySpiMigration;
-}
-
-bool Storage::canRetryRemovableSd() const {
-  return storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
-      isSdLoaded.load(), internalFallbackMounted.load());
 }
 
 uint64_t Storage::removableSdFreeBytes() const {
@@ -404,10 +399,9 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     return result;
   }
 
+  // Nothing was mounted at boot, and nothing may be mounted at runtime.
   xSemaphoreGive(mountMutex);
-  if (!ensureSdMounted(false))
-    return lastDiagnosticsMountResult.load();
-  return prepareDiagnosticsStorage();
+  return lastDiagnosticsMountResult.load();
 }
 
 bool Storage::ensureDiagnosticsSdMounted() {
@@ -425,10 +419,9 @@ bool Storage::getDiagnosticsSdLoaded() const {
 }
 
 bool Storage::canRetryDiagnosticsSd() const {
-  if (!diagnosticsSdHealthy.load())
-    return true;
-  return storage_mount_policy::shouldAttemptDiagnosticsRemovableRetry(
-      isSdLoaded.load(), internalFallbackMounted.load());
+  return storage_mount_policy::shouldReprobeDiagnostics(
+      diagnosticsSdHealthy.load(),
+      isSdLoaded.load() || internalFallbackMounted.load());
 }
 
 uint64_t Storage::diagnosticsSdFreeBytes() const {
@@ -462,6 +455,12 @@ const char *Storage::diagnosticsRootPath() const {
  * @brief Initialize removable storage with the active board backend
  */
 esp_err_t Storage::initSD() {
+  if (!storage_mount_policy::mayChangeMount(backendPinned()))
+    return ESP_ERR_INVALID_STATE;
+  return mountRemovableStorage();
+}
+
+esp_err_t Storage::mountRemovableStorage() {
   storage_shutdown::OperationLease operation(streamAdmission_);
   if (!operation.held()) return ESP_FAIL;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
@@ -814,6 +813,8 @@ esp_err_t Storage::initSD() {
  * @return esp_err_t Error code
  */
 esp_err_t Storage::initSPIFFS() {
+  if (!storage_mount_policy::mayChangeMount(backendPinned()))
+    return ESP_ERR_INVALID_STATE;
   storage_shutdown::OperationLease operation(streamAdmission_);
   if (!operation.held()) return ESP_FAIL;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
@@ -821,9 +822,9 @@ esp_err_t Storage::initSPIFFS() {
       power_management::LockDomain::Storage);
   ESP_LOGI(TAG, "Initializing FFat as /sdcard");
 
-  // Mount FFat at "/sdcard" so the rest of the application thinks it's
-  // reading from SD Partition label "ffat" is standard for the data partition
-  // even when using FFat
+  // The FFat fallback keeps the historical /sdcard path for diagnostics and
+  // other device files. Maps use Storage::mapStorageRoot(), which never names
+  // /sdcard on an FFat boot, so no map path can reach this volume.
   if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;

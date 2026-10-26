@@ -2679,7 +2679,15 @@ readActiveMapStatusSnapshot() {
   static ActivePresentationCache activePresentationCache;
   static ActiveMapStatusSnapshot snapshot;
 
-  map_transfer::MapTransferInstaller installer("/sdcard");
+  if (!storage.mapStorageAvailable()) {
+    // Without a card there is no active map, and FFat is never searched for
+    // one. The app shows the no-card state from "sdPresent".
+    activePresentationCache.clear();
+    snapshot.available = false;
+    snapshot.errorCode = "active_missing";
+    return snapshot;
+  }
+  map_transfer::MapTransferInstaller installer(storage.mapStorageRoot());
   map_transfer::ActiveMapSelection activeMap;
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
@@ -3992,38 +4000,34 @@ static void processPendingTransferControl() {
       Serial.println(
           "BLE Map Transfer: enter rejected, transfer worker is stopping");
     } else {
-      const bool transitionReady =
-          ride_diagnostics::beginStorageTransition();
-      if (!transitionReady) {
+      // Only validates the card this boot mounted. Storage never remounts or
+      // falls back to FFat here, so the recorder needs no checkpoint; a card
+      // that was missing, failed or replaced is used after a restart.
+      const bool mounted = storage.ensureSdMounted();
+      if (!mounted) {
         mapTransferHttp.setLastError(
             "sd_unavailable",
-            "diagnostic storage could not checkpoint before remounting SD");
+            storage.mapStorageAvailable()
+                ? "SD card is not readable; reinsert it and restart the device"
+                : "no SD card was mounted at startup; insert one and restart "
+                  "the device");
         Serial.println(
-            "BLE Map Transfer: enter rejected, diagnostics checkpoint failed");
+            "BLE Map Transfer: enter rejected, SD card is not mounted");
+      } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
+        storage.markSdUnavailable();
+        mapTransferHttp.setLastError(
+            "sd_unwritable", "SD card map storage is not writable");
+        Serial.println(
+            "BLE Map Transfer: enter rejected, SD card is not writable");
       } else {
-        const bool mounted = storage.ensureSdMounted();
-        if (!mounted) {
-          mapTransferHttp.setLastError("sd_unavailable",
-                                       "SD card is not mounted");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not mounted");
-        } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
-          storage.markSdUnavailable();
-          mapTransferHttp.setLastError(
-              "sd_unwritable", "SD card map storage is not writable");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not writable");
-        } else {
-          const bool enabled = mapTransferHttp.setEnabled(true);
-          Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
-                        enabled);
-          (void)ride_diagnostics::record(
-              enabled ? ride_diagnostics::Level::Info
-                      : ride_diagnostics::Level::Warning,
-              "map", "transfer_entered",
-              enabled ? "{\"active\":true}" : "{\"active\":false}");
-        }
-        ride_diagnostics::endStorageTransition();
+        const bool enabled = mapTransferHttp.setEnabled(true);
+        Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
+                      enabled);
+        (void)ride_diagnostics::record(
+            enabled ? ride_diagnostics::Level::Info
+                    : ride_diagnostics::Level::Warning,
+            "map", "transfer_entered",
+            enabled ? "{\"active\":true}" : "{\"active\":false}");
       }
     }
     break;

@@ -609,7 +609,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn('"No map for this area"', MAP_RENDERER_SOURCE)
         self.assertIn('"Download a map\\nin the Bicino app"', MAP_RENDERER_SOURCE)
         self.assertIn('"No microSD card"', MAP_RENDERER_SOURCE)
-        self.assertIn('"Insert a microSD card"', MAP_RENDERER_SOURCE)
+        self.assertIn('"Insert a microSD card\\nand restart"', MAP_RENDERER_SOURCE)
 
     def test_initial_map_canvas_allocation_does_not_stop_control_worker(self):
         create = function_body(MAP_RENDERER_SOURCE, "void Maps::createMapScrSprites")

@@ -130,7 +130,7 @@ int main() {
     def test_actual_backend_unmount_ack_and_fail_closed_paths(self):
         source = (ROOT / "esp32/lib/storage/storage.cpp").read_text()
         functions = source[source.index("bool Storage::pollShutdownQuiescence()"):
-                           source.index("bool Storage::ensureSdMounted(")]
+                           source.index("void Storage::pinBackendForBoot()")]
         self.run_cpp(r'''
 #include <atomic>
 #include <cassert>
