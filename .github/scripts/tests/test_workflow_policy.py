@@ -1197,5 +1197,74 @@ jobs:
         )
 
 
+class FirmwareCoreWarmPolicyTests(unittest.TestCase):
+    def test_main_pushes_warm_cores_through_the_partial_firmware_scope(self) -> None:
+        warm = workflow_source("firmware-core-warm.yml")
+        trigger = mapping_block(warm, "on", indent=0)
+        self.assertEqual(["  push:", "  schedule:", "  workflow_dispatch:"], re.findall(r"(?m)^  [a-z_]+:$", trigger))
+        push = mapping_block(warm, "push", indent=2)
+        self.assertIn("      - main\n", push)
+        self.assertIn('      - "esp32/**"\n', push)
+        self.assertIn('      - ".github/actions/firmware-build-cache/**"\n', push)
+        self.assertIn("uses: ./.github/workflows/ci.yml", warm)
+        self.assertIn("scope: firmware\n", warm)
+        self.assertIn("firmware_hardware: ${{ inputs.firmware_hardware || '175' }}", warm)
+        permissions = mapping_block(warm, "permissions", indent=0)
+        self.assertIn("  actions: read", permissions)
+        self.assertIn("  contents: read", permissions)
+        self.assertNotIn("write", permissions)
+        self.assertNotIn("secrets.", warm)
+        self.assertIn("cancel-in-progress: true", warm)
+        # The general workflow itself still never runs on push; only the caller
+        # selects the firmware scope, so iOS and map lanes stay pull-request only.
+        self.assertNotRegex(workflow_source("ci.yml"), r"(?m)^  push:")
+        import changed_components
+        selected = changed_components.classify_paths([".github/workflows/firmware-core-warm.yml"])
+        self.assertEqual(["firmware_host"], [key for key, value in selected.items() if value])
+        selected = changed_components.classify_paths([".github/scripts/firmware_core_artifact.py"])
+        self.assertEqual(["firmware_build", "firmware_host"], [key for key, value in selected.items() if value])
+
+    def test_partial_called_scopes_do_not_publish_the_protected_gate(self) -> None:
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
+        self.assertIn("(!inputs.scope || inputs.scope == 'all' ||", gate)
+        self.assertIn("format('Manual CI Gate ({0})', inputs.scope)", gate)
+        self.assertIn("format('Partial CI Gate ({0})', inputs.scope)", gate)
+        promotion = (WORKFLOW_SCRIPTS_ROOT / "dispatch_promotion_ci.py").read_text(encoding="utf-8")
+        self.assertIn("run.get('event') in ('pull_request', 'workflow_dispatch')", promotion)
+
+    def test_core_entries_publish_only_from_main_and_restore_read_only(self) -> None:
+        esp32 = mapping_block(workflow_source("ci.yml"), "esp32", indent=2)
+        self.assertIn("    permissions:\n      actions: read\n      contents: read\n", esp32)
+        steps = sequence_mapping_blocks(esp32, "steps", indent=4)
+        restore = [step for step in steps if "uses: ./.github/actions/firmware-build-cache" in step]
+        self.assertEqual(1, len(restore))
+        self.assertIn("id: cache", restore[0])
+        self.assertIn("github-token: ${{ github.token }}", restore[0])
+        publish = [step for step in steps if "name: ${{ steps.cache.outputs.core-artifact-name }}" in step]
+        self.assertEqual(1, len(publish))
+        main_only = "if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'"
+        self.assertIn(main_only, publish[0])
+        self.assertIn("compression-level: 0", publish[0])
+        self.assertIn("retention-days: 14", publish[0])
+        pack = [step for step in steps if "firmware_core_artifact.py pack" in step]
+        self.assertEqual(1, len(pack))
+        self.assertIn(main_only, pack[0])
+        self.assertIn("firmware_core_artifact.py identity", "\n".join(steps))
+        action = (REPO_ROOT / ".github/actions/firmware-build-cache/action.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2", action)
+        self.assertIn("run-id: ${{ steps.lookup.outputs.run-id }}", action)
+        self.assertIn('--branch "$PUBLICATION_BRANCH"', action)
+        self.assertIn("firmware_core_artifact.py install", action)
+        self.assertIn("if: inputs.github-token != '' &&", action)
+        self.assertEqual(2, action.count("continue-on-error: true"))
+        self.assertIn("steps.download.outcome == 'success'", action)
+        core_step = action.split("- id: core\n", 1)[1].split("- id: lookup", 1)[0]
+        self.assertNotIn("restore-keys", core_step)
+        self.assertNotIn("github.sha", core_step)
+        for workflow in ("firmware-diagnostics.yml", "speaker-firmware.yml"):
+            with self.subTest(workflow=workflow):
+                self.assertNotIn("github-token", workflow_source(workflow))
+
+
 if __name__ == "__main__":
     unittest.main()

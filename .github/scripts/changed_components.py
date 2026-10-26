@@ -55,6 +55,7 @@ FIRMWARE_WORKFLOW_PATHS = {
     ".github/scripts/diagnostic_changes.py",
     ".github/workflows/workout-zone-contracts.yml",
     ".github/workflows/firmware-cache-qualification.yml",
+    ".github/workflows/firmware-core-warm.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
@@ -225,7 +226,9 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         elif path.startswith("tools/development/") and not path.startswith("tools/development/tests/"):
             return {component: True for component in COMPONENTS}
 
-        if path.startswith(".github/actions/firmware-build-cache/"):
+        if (path.startswith(".github/actions/firmware-build-cache/")
+                or path == ".github/scripts/firmware_core_artifact.py"):
+            # Every firmware build restores through these; host tests cover their unit tests.
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 

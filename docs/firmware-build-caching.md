@@ -71,12 +71,32 @@ plan authorizes a device write.
 
 ## CI and qualification
 
-The reusable firmware-cache action restores pinned runtime transport, verified
-core transport, and application compiler objects. Keys separate OS,
-architecture, environment and build tools/configuration. Each source commit
-saves a fresh cache snapshot with a matching-input restore prefix. CI, release
-candidates, diagnostics, and speaker builds use this action. Mutable toolchain
-trees, current firmware manifests, upload plans, and final images are excluded.
+The reusable firmware-cache action restores three content-keyed entries:
+the pinned runtime transport (keyed by the runtime lock), the verified core
+transport for one environment (keyed by every core input), and that
+environment's compiler objects (keyed by core inputs plus commit, with a
+matching-input restore prefix). Runtime and core entries are saved only when
+their exact key is absent; a commit that changes no core input uploads
+nothing. CI, release candidates, diagnostics, and speaker builds use this
+action. Mutable toolchain trees, current firmware manifests, upload plans, and
+final images are excluded. The pinned download store keeps its own job cache.
+
+The Actions cache is scoped to a branch and capped per repository, so cores
+built on one pull request never warm another and the regular 1.75-inch cores
+do not fit the cap together. **Firmware core warm** therefore runs the normal
+`firmware` CI scope on every `main` push that touches `esp32/` or the cache
+tooling, plus a weekly schedule, and that run publishes each verified core
+entry as a workflow artifact named after its environment and content key
+(`firmware_core_artifact.py pack`, 14-day retention, re-uploaded once older
+than a week). A pull-request build whose core cache misses restores that
+artifact before building; an artifact lookup or download failure only costs a
+cold build. Only an artifact uploaded by a
+run of this repository's own `main` branch is accepted (`select` checks the
+uploading run's branch and repository id, so forks and other branches never
+supply cores), the extracted entry is sealed read-only, and
+`build_firmware.py` verifies it exactly like a locally shared entry. Partial
+scopes called from `main` publish `Partial CI Gate (firmware)`, never the
+protected **CI Gate**, and promotion dispatch ignores push runs.
 
 The manual **Firmware cache qualification** workflow offers either one macOS
 1.75-inch ordinary-profile job or the full eight-job Linux/macOS matrix for both
