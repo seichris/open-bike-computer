@@ -137,6 +137,13 @@ def parse_map_compatibility_contract(document: object) -> MapCompatibilityContra
         "has unexpected fields",
     )
     _require(document["schemaVersion"] == 1, "schema is unsupported")
+    _require(
+        all(
+            isinstance(document[key], list)
+            for key in ("streamFormats", "profiles", "optionalLayers", "companions")
+        ),
+        "lists are invalid",
+    )
     contract = document["contract"]
     _require(_positive(contract), "version is invalid")
     _require(
@@ -359,10 +366,11 @@ def request_profile(
     else:
         return None
     profile = contract.profile_for("esp32-fmb", format_version, features)
-    if (
-        profile is not None
-        and target.get("terrainProfileVersion") is not None
-        and TERRAIN_EXPERIMENT_LAYER not in profile.optional_layers
+    terrain = target.get("terrainProfileVersion")
+    if profile is not None and terrain is not None and (
+        type(terrain) is not int
+        or terrain != 1
+        or TERRAIN_EXPERIMENT_LAYER not in profile.optional_layers
     ):
         return None
     return profile

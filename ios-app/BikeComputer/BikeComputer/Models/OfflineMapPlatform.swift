@@ -1999,6 +1999,8 @@ nonisolated enum MapInstallProtocolSelector {
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
+        containsTerrain: Bool = false,
+        supportsTerrainExperiments: Bool = false,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolSelection {
         evaluate(
@@ -2010,6 +2012,8 @@ nonisolated enum MapInstallProtocolSelector {
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
             requiredFirmwareGitSha: requiredFirmwareGitSha,
+            containsTerrain: containsTerrain,
+            supportsTerrainExperiments: supportsTerrainExperiments,
             deviceStatus: deviceStatus
         ).selection
     }
@@ -2028,6 +2032,8 @@ nonisolated enum MapInstallProtocolSelector {
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
         requiredFirmwareGitSha: String? = nil,
+        containsTerrain: Bool = false,
+        supportsTerrainExperiments: Bool = false,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolEvaluation {
         guard isBikeMapStream else {
@@ -2056,6 +2062,13 @@ nonisolated enum MapInstallProtocolSelector {
             }
         } else if compatibilityContract != nil {
             return .rejected(.deviceReaderUnknown)
+        }
+        // A durable map's optional terrain layer installs on every firmware
+        // that reports mapReader. Older firmware, and any map outside the
+        // contract, needs the terrain experiment to accept terrain files.
+        if containsTerrain && !supportsTerrainExperiments &&
+            (compatibilityContract == nil || deviceStatus.mapReader == nil) {
+            return .rejected(.deviceReaderUnsupported)
         }
         if compatibilityContract != nil {
             return .streamV2

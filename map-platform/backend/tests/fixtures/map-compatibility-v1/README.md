@@ -13,9 +13,10 @@ with the real packaging, promotion, companion and signing code. It contains:
   plus the contour profile with its optional terrain layer;
 - `*-osm-*` maps whose blocks the production worker extracted from checked-in
   OSM fixtures (see [`map-compatibility-extraction-v1`](../map-compatibility-extraction-v1/README.md)):
-  real buildings (Singapore) and real street labels (Golden Gate). The other
-  maps use small test-helper blocks, and every contour layer uses a test DEM
-  sample;
+  building parts from the test-authored Singapore relation fixture, and roads
+  with a street label from the Golden Gate fixture, which includes real
+  OpenStreetMap ways. The other maps use small test-helper blocks, and every
+  contour layer uses a test DEM sample;
 - production promotions for every production-eligible profile, plus a rotated
   production key and an updated worker for `buildings-3d-v1`;
 - the iPhone contour companion for each contour map (`*.btopo`);

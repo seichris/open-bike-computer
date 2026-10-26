@@ -296,7 +296,9 @@ stays `trusted` until it is revoked for a compromise, because removing it would
 strand every durable map it signed (see
 [durable map compatibility](map-compatibility-contract.md)). CI enforces this.
 The worker does not read that registry, so registering a key needs no worker
-image, but register it before any worker signs with it.
+image, but register it before any worker signs with it. Bicino Dev and
+development firmware trust exactly one development key, so that key cannot
+rotate until both accept several.
 
 1. Generate a new dedicated key and add its public key to the trust registry as
    `trusted` while the old key remains trusted. Add it to

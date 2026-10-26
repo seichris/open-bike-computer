@@ -112,8 +112,9 @@ class CorpusMap:
 
 # Every production-eligible profile gets a production promotion; the plain 3D
 # map also covers key rotation and a worker update, and the contour profile is
-# frozen with and without its optional terrain layer. The OSM maps carry real
-# extracted buildings (Singapore) and street labels (Golden Gate).
+# frozen with and without its optional terrain layer. The OSM maps carry
+# worker-extracted buildings (Singapore fixture) and street labels (Golden Gate
+# fixture).
 MAPS = {
     "buildings-3d-v1": CorpusMap(
         "buildings-3d-v1", "compat-v1-buildings", (),

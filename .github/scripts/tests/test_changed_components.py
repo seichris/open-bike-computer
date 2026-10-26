@@ -309,6 +309,22 @@ class ChangedComponentsTests(unittest.TestCase):
                     changed_components.classify_paths([path]),
                 )
 
+    def test_map_stream_client_trust_selects_the_backend_trust_checks(self) -> None:
+        # The backend keeps generated client trust in sync with the registry
+        # and every durable map signer trusted (test_map_compatibility_contract).
+        for path, component in (
+            ("esp32/lib/map_transfer/map_stream_compiled_keys.generated.inc", "firmware_host"),
+            ("esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc",
+             "firmware_host"),
+            ("ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+             "ios"),
+            ("ios-app/BikeComputer/Configuration/Development.xcconfig", "ios"),
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected[component])
+
     def test_route_elevation_fixtures_select_every_consumer(self) -> None:
         for path in (
             "protocol/fixtures/route-elevation-v1/transfer-v1.txt",

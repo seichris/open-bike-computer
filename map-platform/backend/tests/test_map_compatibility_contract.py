@@ -78,9 +78,10 @@ V1_PROFILES = {
         5, ("3d-buildings", "contours", "map-pois", "street-labels"), {"development"}, (),
     ),
 }
-# Keys that sign durable maps. Each stays registered and client-trusted until
-# it is moved to revokedSigners after a compromise.
-V1_SIGNERS = {
+# Every key that has signed durable maps. Append only: a key leaves the signer
+# registry only for revokedSigners after a compromise, and a newly registered
+# key must be added here in the same change, so it cannot be dropped later.
+DURABLE_SIGNERS = {
     ("development", "map-dev-2026-08",
      "c8d0e9e85da681ec048c9abbbb96c87072b9f672b16c7fb40250df1ec60baa0e"),
     ("production", "map-prod-2026-08",
@@ -188,6 +189,7 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
             "layer on another target": lambda value: value["profiles"][0].update(
                 optionalLayers=[TERRAIN_EXPERIMENT_LAYER]
             ),
+            "layers not a list": lambda value: value.update(optionalLayers={}),
         }
         for name, change in changes.items():
             with self.subTest(change=name):
@@ -200,10 +202,14 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
         registry = load_map_compatibility_signers()
         self.assertEqual(registry.contract, 1)
         revoked = registry.revoked_signers
-        for signer in V1_SIGNERS:
+        # Removing a durable signer strands every map it signed. Only a
+        # compromise revocation may take it out of the registry.
+        self.assertEqual(
+            {signer[1:] for signer in registry.signers} | revoked,
+            {signer[1:] for signer in DURABLE_SIGNERS},
+        )
+        for signer in DURABLE_SIGNERS:
             with self.subTest(signer=signer[1]):
-                # Removing a durable signer strands every map it signed. Only a
-                # compromise revocation may take it out of the registry.
                 self.assertTrue(signer in registry.signers or signer[1:] in revoked)
         trusted = {
             (key.key_id, hashlib.sha256(bytes.fromhex(key.public_key_x963_hex)).hexdigest())
@@ -314,6 +320,12 @@ class MapCompatibilityContractFileTests(unittest.TestCase):
                 self.assertEqual(
                     request_profile(request(4, **target), contract).profile_id,
                     "topographic-contours-v1",
+                )
+        # Only terrain profile 1 is the registered optional layer.
+        for version in (2, True, "1"):
+            with self.subTest(terrain=version):
+                self.assertIsNone(
+                    request_profile(request(4, terrainProfileVersion=version), contract)
                 )
         self.assertEqual(
             request_profile(request(5, requestedFeatures=[

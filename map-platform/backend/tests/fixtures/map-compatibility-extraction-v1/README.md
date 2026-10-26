@@ -12,7 +12,11 @@ promotes them with the real producer code.
 | `singapore-buildings-t5` | same | target 5 with `map-pois`, same bbox | the same buildings with an empty POI section |
 | `golden-gate-labels-t3` | `map-platform/backend/tests/fixtures/route_elevation_structures.osm` | target 3, bbox `[-122.48, 37.808, -122.476, 37.829]` | 2 blocks of roads and one street label with its 13-glyph font |
 
-The fixtures have no POI tags, so no frozen map has real POI records.
+The Singapore fixture is test-authored geometry. The Golden Gate fixture mixes
+real ways retrieved from api.openstreetmap.org on 2026-10-23 with synthetic
+test ways, so its blocks include OpenStreetMap data © OpenStreetMap
+contributors, ODbL 1.0. Neither fixture has POI tags, so no frozen map has real
+POI records.
 
 How the blocks were produced:
 

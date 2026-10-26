@@ -1711,8 +1711,8 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         includesContours: Bool = false,
         compatibilityContract: Int? = nil
     ) -> Bool {
-        // Terrain is an optional layer of a durable contour map: every
-        // firmware that reads the profile accepts it and may ignore it.
+        // A durable map's optional terrain layer is checked against the bike's
+        // mapReader report at install time (MapInstallProtocolSelector).
         guard !containsTerrain || supportsTerrainExperiments || compatibilityContract != nil else {
             return false
         }
@@ -6580,6 +6580,8 @@ final class OfflineMapManager: ObservableObject {
                        requiredFirmwareVersion: artifact.requiredFirmwareVersion,
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
+                       containsTerrain: artifact.containsTerrain,
+                       supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
                        deviceStatus: initialDeviceStatus
                    )
                 if let rejection = protocolEvaluation.rejection {

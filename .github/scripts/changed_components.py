@@ -126,6 +126,14 @@ SHARED_MAP_COMPATIBILITY_CORPUS_PREFIX = (
 )
 SHARED_MAP_COMPATIBILITY_CONTRACT_PREFIX = "map-platform/config/map-compatibility-contract-v"
 SHARED_MAP_READER_CAPABILITY_FIXTURE_PREFIX = "protocol/fixtures/map-reader-capabilities-v"
+# Client map-stream trust. The backend checks that these still match the trust
+# registry and keep every durable map signer trusted.
+MAP_STREAM_CLIENT_TRUST_PATHS = {
+    "esp32/lib/map_transfer/map_stream_compiled_keys.generated.inc",
+    "esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc",
+    "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+    "ios-app/BikeComputer/Configuration/Development.xcconfig",
+}
 SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
     "tools/generate_route_elevation_fixtures.py",
@@ -327,6 +335,8 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             # Firmware must report these bytes; the iPhone decodes them.
             selected["firmware_host"] = True
             selected["ios"] = True
+        if path in MAP_STREAM_CLIENT_TRUST_PATHS:
+            selected["map_backend"] = True
 
         if path.startswith(SHARED_ROUTE_ELEVATION_FIXTURE_PATHS):
             # Backend processing, the Swift codec and the firmware decoder all

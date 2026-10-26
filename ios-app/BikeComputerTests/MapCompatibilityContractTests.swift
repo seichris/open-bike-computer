@@ -328,8 +328,9 @@ enum MapCompatibilityContractTests {
                     corpusFailure("\(variant.file) validates")
                 }
                 // The app's own renderer pre-check on firmware without the
-                // terrain experiment: an optional layer never blocks a durable
-                // map, but still blocks the same bytes outside the contract.
+                // terrain experiment defers a durable map's optional layer to
+                // the install check, but blocks the same bytes outside the
+                // contract.
                 func passesPreCheck(contract: Int?) -> Bool {
                     SavedMapRendererCompatibilityPolicy.isCompatible(
                         rendererFormatVersion: verified.rendererFormatVersion,
@@ -351,7 +352,8 @@ enum MapCompatibilityContractTests {
                 func evaluate(
                     _ status: MapTransferDeviceStatus,
                     contract: Int? = verified.compatibilityContract,
-                    reader: OfflineMapReaderCapabilities?? = nil
+                    reader: OfflineMapReaderCapabilities?? = nil,
+                    terrainExperiments: Bool = false
                 ) -> MapInstallProtocolEvaluation {
                     // The saved copy still carries the exact firmware identity an
                     // older controller attached for build 104.
@@ -364,10 +366,13 @@ enum MapCompatibilityContractTests {
                         requiredFirmwareVersion: "0.3.4",
                         requiredFirmwareBuild: 104,
                         requiredFirmwareGitSha: String(repeating: "4", count: 40),
+                        containsTerrain: verified.containsTerrain,
+                        supportsTerrainExperiments: terrainExperiments,
                         deviceStatus: status
                     )
                 }
                 let poi = map.features.contains("map-pois")
+                let terrain = verified.containsTerrain
                 let production = variant.deliveryTier == "production"
                 // Development firmware with the POI reader and the dev signer
                 // installs every durable map after a firmware update.
@@ -402,18 +407,31 @@ enum MapCompatibilityContractTests {
                         .split(separator: ",").map(String.init) ?? [],
                     mapReader: nil
                 )
+                // Firmware without the report may predate terrain support
+                // (releases before v0.3.4-release.11 refuse terrain files), so
+                // the optional layer then needs the terrain experiment.
                 assertEqual(evaluate(legacyStatus, reader: .some(legacyReader)).rejection,
-                            poi ? .deviceReaderUnsupported : nil,
+                            poi || terrain ? .deviceReaderUnsupported : nil,
                             "\(variant.file) on firmware that predates the reader report")
+                assertEqual(
+                    evaluate(legacyStatus, reader: .some(legacyReader),
+                             terrainExperiments: true).rejection,
+                    poi ? .deviceReaderUnsupported : nil,
+                    "\(variant.file) on older firmware with the terrain experiment"
+                )
                 assertEqual(evaluate(legacyStatus, reader: .some(nil)).rejection,
                             .deviceReaderUnknown,
                             "\(variant.file) needs authenticated reader capabilities")
                 // The same bytes without the signed marker are outside the
                 // contract and keep the exact firmware rule; nothing coerces
                 // them.
-                assertEqual(evaluate(developmentFirmware, contract: nil).rejection,
+                assertEqual(evaluate(developmentFirmware, contract: nil,
+                                     terrainExperiments: true).rejection,
                             .firmwareIdentityMismatch,
                             "\(variant.file) without a marker keeps the old firmware pin")
+                assertEqual(evaluate(developmentFirmware, contract: nil).rejection,
+                            terrain ? .deviceReaderUnsupported : .firmwareIdentityMismatch,
+                            "\(variant.file) without a marker needs the terrain experiment")
             }
         }
         let malformed = deviceStatus(trust: [], mapReader: "{\"schemaVersion\":\"one\"}")

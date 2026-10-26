@@ -37,8 +37,9 @@ A covered map keeps working after:
   copy;
 - a firmware update. Install depends on the bike's reader capabilities and
   trusted signers, never on its build or Git SHA;
-- a backend deployment, rollback or worker promotion. Earlier approved durable
-  maps stay listed and refreshable;
+- a backend deployment or worker promotion. Earlier approved durable maps stay
+  listed and refreshable (for a backend rollback, see
+  [Deployment order and rollback](#deployment-order-and-rollback));
 - a signing-key rotation. Readers keep every registered signer until it is
   revoked for a compromise;
 - a re-download from the catalog or a direct job.
@@ -78,12 +79,14 @@ at delivery. They are recognised as follows:
 
 The stream format is `bike-map-stream-v1` with manifest schema 1.
 
-An **optional layer** is extra signed content that every reader of its profile
-must accept and may ignore. `terrain-experiment-v1` adds the `.fme` terrain
-grids that Bicino Dev requests (`terrainProfileVersion`) from firmware with the
-terrain experiment. Every firmware build since 2026-10-17 installs those files
-for target 4, and only diagnostics builds render them. The iPhone therefore
-never requires the terrain experiment for a durable contour map.
+An **optional layer** is extra signed content that a reader of its profile
+accepts and may ignore. `terrain-experiment-v1` adds the `.fme` terrain grids
+that Bicino Dev requests (`terrainProfileVersion` 1) from firmware with the
+terrain experiment. Every firmware build from v0.3.4-release.11 on (main since
+#565, 2026-10-18) installs those files for target 4, and only diagnostics builds
+render them. Earlier releases that read target 4 refuse them. The iPhone
+therefore sends a durable map's terrain layer to any bike that reports
+`mapReader`, and to older firmware only when it has the terrain experiment.
 
 Not covered:
 
@@ -183,8 +186,11 @@ message never points to a firmware build.
    capability bits.
 6. **Signers.** Every key that signs durable maps is listed in
    `map-compatibility-signers-v1.json`. CI checks that each listed production
-   key stays `trusted` in `map-stream-trust.json` and that the development key
-   matches Bicino Dev and development firmware. Rotation works like this:
+   key stays `trusted` in `map-stream-trust.json`, that the development key
+   matches Bicino Dev and development firmware, and that no registered signer
+   disappears. Changes to the trust registry, the generated client trust files
+   or `Development.xcconfig` select these backend checks. Rotation works like
+   this:
    1. Add the new key to the trust registry and the signer registry.
    2. Ship apps and firmware that trust it.
    3. Switch the worker to the new key. The signer registry is not a worker
@@ -193,9 +199,10 @@ message never points to a firmware build.
    A key's `retireAfter` date is when it stops signing new maps. Readers keep
    trusting it after that date. Only a compromise moves a key to
    `revokedSigners`, which deliberately revokes its maps. The client trust list
-   is capped at four keys, so raising that cap is a reviewed change. The
-   registry cannot see which key a deployed worker uses: register a key before
-   any worker signs with it.
+   is capped at four keys, so raising that cap is a reviewed change. Bicino Dev
+   and development firmware trust exactly one development key, so it cannot
+   rotate until both accept several. The registry cannot see which key a
+   deployed worker uses: register a key before any worker signs with it.
 7. **Approvals.** A new hardware approval never hides earlier approved durable
    maps. To revoke a producer, remove its approval record in a reviewed change.
    Its durable artifacts are then no longer listed or refreshed, while
@@ -228,7 +235,8 @@ Every corpus stream comes from the real packaging, promotion, companion and
 signing code. The `*-osm-*` maps also carry blocks that the production worker
 extracted from checked-in OSM fixtures. The other maps use small test-helper
 blocks, every contour layer uses a test DEM sample, and no map has real POI
-records, because the OSM fixtures have no POI tags.
+records, because the OSM fixtures have no POI tags. The firmware suite runs only
+the current parser, so it cannot show which older releases read a frozen map.
 
 These checks do not prove physical installs. The physical gates in the
 [rollout runbook](map-stream-rollout-runbook.md) still apply, and each new
@@ -243,7 +251,9 @@ firmware profile needs both boards:
 Each part can ship independently:
 
 - **New app on older backends.** Maps carry no marker yet, so behavior for
-  maps outside the contract is unchanged.
+  maps outside the contract is unchanged. Saved Maps labels every new map as
+  not durable, and a re-download does not change that until the backend runs
+  this change, so deploy the backend before releasing the app.
 - **New app with older firmware.** The app falls back to the renderer capability
   bits.
 - **New worker behind an older controller.** Maps are marked, but the old
@@ -266,6 +276,7 @@ Rollback:
 - **App rollback.** The previous app enforces delivery firmware identities
   again.
 - **Firmware rollback.** Drops `mapReader`. The app then uses the capability
-  bits.
+  bits and sends a durable map's terrain layer only to firmware with the
+  terrain experiment.
 
 None of these rollbacks rewrites signed map bytes.
