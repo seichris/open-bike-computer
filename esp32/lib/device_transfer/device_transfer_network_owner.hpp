@@ -127,6 +127,10 @@ public:
   virtual bool healthy() const = 0;
   virtual uint32_t stackHighWaterBytes() const = 0;
   virtual bool stackSampleAvailable() const { return false; }
+  // Runs one bounded call on the owner's internal-RAM stack and returns after
+  // it completes. PSRAM-stack handlers use this before reading flash-backed
+  // storage such as FFat. An owner without that stack refuses the call.
+  virtual bool runOnInternalStack(void (*)(void *), void *) { return false; }
   // Called after the HTTP worker has stopped using the network. Quiesces the
   // owner and clears staging data; its fixed internal stack remains reserved.
   // A poisoned owner cannot acknowledge quiescence for the rest of this boot.

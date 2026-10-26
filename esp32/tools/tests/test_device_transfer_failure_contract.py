@@ -42,7 +42,7 @@ class TransferFailureContractTests(unittest.TestCase):
         self.assertIn("ferror(file)", read)
         self.assertIn("feof(file)", read)
         send = DIAGNOSTICS[DIAGNOSTICS.index("bool sendFile(") : DIAGNOSTICS.index("bool resolveClosedChunk")]
-        self.assertLess(send.index("client.noteFileRead("), send.index("storage.close(file);", send.index("client.noteFileRead(")))
+        self.assertLess(send.index("client.noteFileRead("), send.index("closeFile(server, file);", send.index("client.noteFileRead(")))
         self.assertIn("fileReadFailed(count, read.error)", send)
 
     def test_ios_preserves_exact_prefix_and_never_imports_partial_chunk(self):
