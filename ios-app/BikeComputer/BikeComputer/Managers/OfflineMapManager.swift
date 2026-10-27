@@ -2134,6 +2134,28 @@ nonisolated enum SavedMapRemovalPolicy {
     }
 }
 
+/// A library download saves its copy as `catalog-<mapEntryId>.bmap`. Any other
+/// saved copy attached to the same library entry, such as the direct-job file
+/// that inventory sync attached, is the version it replaces; one that a
+/// transfer still uses stays.
+nonisolated enum SupersededLibraryCopyPolicy {
+    static func retirableCopies(
+        of mapEntryID: String,
+        keeping kept: URL,
+        in records: [SavedMapLocalRecord],
+        isInUse: (URL) -> Bool
+    ) -> [URL] {
+        records.compactMap { record in
+            guard record.catalogMapEntryID == mapEntryID,
+                  record.packURL.standardizedFileURL.path != kept.standardizedFileURL.path,
+                  !isInUse(record.packURL) else {
+                return nil
+            }
+            return record.packURL
+        }
+    }
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     private static let maximumInMemoryDetailPreviewCount = 3
@@ -2870,30 +2892,64 @@ final class OfflineMapManager: ObservableObject {
 
     func deleteCachedPack(at packURL: URL) {
         do {
-            let mapID = savedMapID(for: packURL)
-            let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
-            let deletesLastTransferArtifact = defaults.string(
-                forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
-            ) == packURL.lastPathComponent
-            if FileManager.default.fileExists(atPath: packURL.path) {
-                try FileManager.default.removeItem(at: packURL)
-            }
-            if deletesLastTransferArtifact {
-                invalidateLastTransferForDeletedArtifact()
-            }
-            invalidateCachedPreview(for: packURL)
-            try SavedMapArtifactMetadataStore.delete(for: packURL)
-            try deleteTopographyCompanions(matching: metadata)
-            try deleteCompatibilityArtifacts(mapID: mapID)
-            packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
-            persistPackDisplayNames()
-            if downloadedPackURL == packURL {
-                downloadedPackURL = nil
-                transferProgress = 0
-            }
-            refreshCachedPacks()
+            try removeCachedPack(at: packURL)
         } catch {
             errorMessage = diagnosticMessage(for: error)
+        }
+    }
+
+    private func removeCachedPack(at packURL: URL) throws {
+        let mapID = savedMapID(for: packURL)
+        let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        let deletesLastTransferArtifact = defaults.string(
+            forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+        ) == packURL.lastPathComponent
+        if FileManager.default.fileExists(atPath: packURL.path) {
+            try FileManager.default.removeItem(at: packURL)
+        }
+        if deletesLastTransferArtifact {
+            invalidateLastTransferForDeletedArtifact()
+        }
+        invalidateCachedPreview(for: packURL)
+        try SavedMapArtifactMetadataStore.delete(for: packURL)
+        try deleteTopographyCompanions(matching: metadata)
+        try deleteCompatibilityArtifacts(mapID: mapID)
+        packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
+        persistPackDisplayNames()
+        if downloadedPackURL == packURL {
+            downloadedPackURL = nil
+            transferProgress = 0
+        }
+        refreshCachedPacks()
+    }
+
+    /// After a library download is saved, removes the copies it superseded so
+    /// the library entry keeps one Saved Maps row. Nothing is removed while a
+    /// transfer runs, nor a copy that the last transfer (until its result is
+    /// settled), a paused upload or an unfinished device operation still uses.
+    private func retireSupersededLibraryCopies(of mapEntryID: String, keeping kept: URL) {
+        guard !isDeviceTransferBusy, !hasActiveBackgroundUpload,
+              let operations = try? deviceMapOperationStore.records() else {
+            return
+        }
+        let operationFilenames = Set(operations.filter { !$0.isTerminal }.map(\.artifactFilename))
+        let lastTransferArtifact = defaults.string(
+            forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+        )
+        let lastTransferSettled = ["", "installed", "failed", "cancelled", "unknown"]
+            .contains(lastTransferOutcome)
+        let retirable = SupersededLibraryCopyPolicy.retirableCopies(
+            of: mapEntryID,
+            keeping: kept,
+            in: cachedMapRecords
+        ) { packURL in
+            operationFilenames.contains(packURL.lastPathComponent) ||
+                (!lastTransferSettled && packURL.lastPathComponent == lastTransferArtifact) ||
+                isPausedMapUpload(packURL)
+        }
+        for packURL in retirable {
+            // The new copy is already saved; a leftover row is the only cost.
+            try? removeCachedPack(at: packURL)
         }
     }
 
@@ -4115,6 +4171,7 @@ final class OfflineMapManager: ObservableObject {
         persistPackDisplayNames()
         downloadedPackURL = destination
         refreshCachedPacks()
+        retireSupersededLibraryCopies(of: map.mapEntryId, keeping: destination)
 #if canImport(UIKit)
         loadPreviewIfNeeded(forCachedPack: destination)
 #endif

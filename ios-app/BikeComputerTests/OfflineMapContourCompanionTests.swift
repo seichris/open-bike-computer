@@ -333,6 +333,8 @@ struct OfflineMapContourCompanionTests {
         testInterruptedCompanionReplacementRecovery(fixture)
         await testCatalogDeliversCombinedCompanion(fixture)
         await testCatalogRejectsInconsistentCompanionGrants(fixture)
+        testSupersededLibraryCopyPolicy()
+        await testLibraryUpdateReplacesAttachedDirectJobCopy(fixture)
         await testUnsupportedSavedContourContractIsExplicit(fixture)
         print("Offline map contour companion tests passed")
     }
@@ -750,6 +752,127 @@ struct OfflineMapContourCompanionTests {
             )
             check(manager.cachedPackURLs.isEmpty, "\(name) catalog grant saves no map")
             check(scenario.savedCompanionFiles.isEmpty, "\(name) catalog grant saves no companion")
+        }
+    }
+
+    /// Only another saved copy of the same library entry is superseded, and a
+    /// copy that a transfer still uses stays.
+    static func testSupersededLibraryCopyPolicy() {
+        func record(_ filename: String, entry: String?) -> SavedMapLocalRecord {
+            SavedMapLocalRecord(
+                packURL: URL(fileURLWithPath: "/maps/\(filename)"),
+                mapID: "map",
+                acceptedSessionIDs: [],
+                displayName: filename,
+                catalogMapEntryID: entry
+            )
+        }
+        let directJob = record("map.bmap", entry: "entry")
+        let inUse = record("map-sent.bmap", entry: "entry")
+        let retirable = SupersededLibraryCopyPolicy.retirableCopies(
+            of: "entry",
+            keeping: URL(fileURLWithPath: "/maps/./catalog-entry.bmap"),
+            in: [
+                record("catalog-entry.bmap", entry: "entry"),
+                directJob,
+                inUse,
+                record("other.bmap", entry: "other"),
+                record("unattached.bmap", entry: nil),
+            ]
+        ) { $0 == inUse.packURL }
+        check(retirable == [directJob.packURL],
+              "only the entry's other idle copy is superseded: \(retirable)")
+    }
+
+    /// Updating a direct-job map from its library entry leaves one saved copy:
+    /// the library download replaces the attached direct-job file and its
+    /// companion, unless an activation still waits on that file.
+    @MainActor
+    static func testLibraryUpdateReplacesAttachedDirectJobCopy(_ fixture: ContourFixture) async {
+        let map = fixture.catalogMap("combined")
+        let stream = map.artifacts.first { $0.platformArtifact.isBikeMapStream }!
+        let companion = map.artifacts.first { $0.platformArtifact.isTopographyCompanion }!
+        for awaitingActivation in [false, true] {
+            let name = awaitingActivation ? "awaiting activation" : "idle"
+            let scenario = ContourScenario("library-update-\(awaitingActivation)")
+            defer { scenario.cleanup() }
+            let jobManager = await runDirectJob(
+                scenario,
+                fixture: fixture,
+                variant: "combined",
+                artifacts: fixture.artifacts("combined")
+            )
+            guard let jobCopy = jobManager.downloadedPackURL,
+                  var metadata = SavedMapArtifactMetadataStore.load(for: jobCopy) else {
+                fail("\(name): the direct job is saved")
+            }
+            // As inventory sync records the job's library entry.
+            metadata.catalogMapEntryID = map.mapEntryId
+            metadata.catalogSyncState = "synced"
+            try! SavedMapArtifactMetadataStore.save(metadata, for: jobCopy)
+            if awaitingActivation {
+                // The job copy was uploaded to the bike before a relaunch, and
+                // its activation is not confirmed yet.
+                let sessionID = "session-awaiting-activation"
+                let descriptor = BackgroundMapUploadDescriptor(
+                    mapID: map.mapId,
+                    sessionID: sessionID,
+                    protocolVersion: 2,
+                    streamFormatVersion: 1,
+                    artifactFilename: jobCopy.lastPathComponent
+                )
+                BackgroundMapUploadStateStore.markStarted(
+                    taskID: 7, descriptor: descriptor, defaults: scenario.defaults
+                )
+                BackgroundMapUploadStateStore.markCompleted(
+                    taskID: 7, succeeded: true, errorCode: nil, defaults: scenario.defaults
+                )
+                scenario.defaults.set(map.mapId, forKey: "offlineMap.lastTransfer.mapId")
+                scenario.defaults.set("activating", forKey: "offlineMap.lastTransfer.outcome")
+                scenario.defaults.set(sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+                scenario.defaults.set(
+                    jobCopy.lastPathComponent,
+                    forKey: "offlineMap.lastTransfer.artifactFilename"
+                )
+            }
+            // Relaunch on the development generation server, whose catalog
+            // channel downloads this development-tier library entry.
+            scenario.defaults.set(
+                OfflineMapServiceConfig.developmentServerURLString,
+                forKey: "offlineMap.serverURL"
+            )
+            scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
+            let manager = scenario.manager(fixture: fixture)
+            check(manager.isAwaitingMapActivationConfirmation(jobCopy) == awaitingActivation,
+                  "\(name): activation state of the job copy")
+            manager.downloadCatalogMap(map)
+            let finished = await waitForIdle(manager)
+            check(finished, "\(name): library update finishes")
+            check(manager.errorMessage == nil,
+                  "\(name): library update downloads: \(manager.errorMessage ?? "")")
+            guard let libraryCopy = manager.downloadedPackURL,
+                  libraryCopy != jobCopy else {
+                fail("\(name): the library copy is saved")
+            }
+            check(FileManager.default.fileExists(atPath: jobCopy.path) == awaitingActivation,
+                  "\(name): the direct-job copy is replaced only when idle")
+            let entryRows = manager.savedMapListItems(activeDeviceMap: nil).filter {
+                $0.localRecord?.catalogMapEntryID == map.mapEntryId
+            }
+            check(entryRows.count == (awaitingActivation ? 2 : 1),
+                  "\(name): Saved Maps rows for the entry: \(entryRows.map(\.id))")
+            check(entryRows.contains {
+                    $0.packURL?.standardizedFileURL.path == libraryCopy.standardizedFileURL.path &&
+                        $0.catalogMap != nil
+                  },
+                  "\(name): the library copy is the library row: " +
+                    "\(entryRows.map { "\($0.id) library=\($0.catalogMap != nil)" }), " +
+                    "saved \(libraryCopy.path)")
+            let jobCompanion = "topography-job_v1_\(fixture.string("combined_job_id")).btopo"
+            check(scenario.savedCompanionFiles.contains(jobCompanion) == awaitingActivation,
+                  "\(name): the job companion goes with its map: \(scenario.savedCompanionFiles)")
+            expectReady(manager, associationID: map.mapEntryId, stream: stream.sha256,
+                        "\(name): the library copy keeps its own companion")
         }
     }
 
