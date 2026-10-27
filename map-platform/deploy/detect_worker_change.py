@@ -30,6 +30,7 @@ IMAGE_INPUT_ROOTS = (
     "map-platform/backend",
     "tools/OSM_Extract/conf",
     "tools/OSM_Extract/scripts",
+    "map-platform/config/map-compatibility-contract-v1.json",
     "map-platform/config/map-stream-hardware-gate.json",
     "map-platform/config/map-stream-rollout-approvals.json",
     "map-platform/config/map-stream-trust.json",

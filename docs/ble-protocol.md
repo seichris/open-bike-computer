@@ -2222,13 +2222,26 @@ Status responses should include:
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
   SHA from a clean source tree; dirty or unidentified builds fail closed and do
-  not advertise protocol v2. Promoted stream artifacts name the approved values
-  and iOS rejects device installation when any field differs.
+  not advertise protocol v2. Promoted stream artifacts outside the durable
+  contract name the approved values and iOS rejects their installation when any
+  field differs. Durable maps never depend on these fields; see `mapReader`.
 - `protocols`: supported map-install protocol versions. Version `2` is present
   only when SD storage is initialized and at least one production stream
   verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
+- `mapReader`: present with protocol v2. The reader capabilities this firmware
+  installs and draws, in the same schema the app sends to the catalog:
+  `schemaVersion` 1, `streamFormats` (format plus manifest schema versions) and
+  `renderers` (`esp32-fmb` format versions and features). Every profile reports
+  targets 1-4 with `3d-buildings`, `contours` and `street-labels`; profiles with
+  the POI reader add target 5 and `map-pois`. The exact bytes are pinned in
+  `protocol/fixtures/map-reader-capabilities-v1.txt`. iOS installs a
+  [durable map](map-compatibility-contract.md) when these capabilities and
+  `streamTrust` cover it, and falls back to the renderer capability bits for
+  firmware without the field. A malformed value is ignored rather than rejecting
+  the status. Schema 1 may gain optional fields; a changed meaning needs a new
+  `schemaVersion`, which older apps ignore in favour of the capability bits.
 - `streamTrust`: exact verification capabilities compiled into the running
   profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
   production firmware advertise only the production registry. Opt-in

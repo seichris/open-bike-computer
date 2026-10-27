@@ -1084,6 +1084,7 @@ struct NavigationProtocolTests {
         testBikeMapPOIIndexValidation()
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
+        MapCompatibilityContractTests.run()
         testSavedMapArtifactMetadataRoundTrip()
         testSavedMapRendererCompatibilityPolicy()
         testBackgroundMapUploadRestorationState()

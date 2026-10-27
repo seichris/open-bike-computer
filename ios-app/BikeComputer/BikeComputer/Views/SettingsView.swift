@@ -1850,6 +1850,16 @@ private struct SavedMapRow: View {
                     .font(.caption).foregroundColor(.secondary)
             }
 
+            if let packURL, manager.savedMapLacksDurableContract(packURL) {
+                Label(
+                    "Not a durable map, so an update may stop it working. Download this area again with current firmware to replace it.",
+                    systemImage: "clock.arrow.circlepath"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .accessibilityLabel("\(displayName): not a durable map")
+            }
+
             if let packURL,
                let topography = SavedMapArtifactMetadataStore.load(
                    for: packURL

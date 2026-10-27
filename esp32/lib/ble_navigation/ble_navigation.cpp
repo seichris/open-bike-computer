@@ -63,6 +63,7 @@ extern Power power;
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../map_transfer/map_reader_capabilities.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
@@ -2781,7 +2782,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (streamSupported ? "[2]" : "[]") +
                      (streamSupported
                           ? ",\"streamFormatVersions\":[1],\"streamTrust\":" +
-                                map_transfer::compiledMapStreamTrustCapabilitiesJson()
+                                map_transfer::compiledMapStreamTrustCapabilitiesJson() +
+                                ",\"mapReader\":" +
+                                map_transfer::mapReaderCapabilitiesJson()
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +

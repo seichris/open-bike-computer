@@ -15,7 +15,14 @@ KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 PUBLIC_KEY_PATTERN = re.compile(r"04[0-9a-f]{128}")
 MAXIMUM_TRUSTED_KEYS = 4
 FORBIDDEN_FIXTURE_KEY_IDS = frozenset(
-    {"map-test-2026-01", "map-test-2026-02"}
+    {
+        "map-test-2026-01",
+        "map-test-2026-02",
+        # Durable compatibility corpus signers (public test scalars).
+        "map-compat-fixture-dev-1",
+        "map-compat-fixture-prod-1",
+        "map-compat-fixture-prod-2",
+    }
 )
 FORBIDDEN_FIXTURE_PUBLIC_KEYS = frozenset(
     {
@@ -23,6 +30,12 @@ FORBIDDEN_FIXTURE_PUBLIC_KEYS = frozenset(
         "964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
         "047cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc4766997"
         "807775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1",
+        "047cb8198de377e7e1d46e5d6f97dac703b296c4058f814f843056e37ff9f0a584"
+        "4471c4ac402a6ec0e3bedec904c9f2f89e5e758a7aca95d7c6d91ae67fc0a99a",
+        "04d40147aebed5a952bd1ef2b640a8b0c0c34673c15ce6c8b8289816aa149d9593"
+        "c8183b68f89fb1d8222572f532ac1f905008f8c17da277497e58b03f50dd1f52",
+        "042de2523f4dd34ab08034e426210698034cce5b1d88b5ca56cdfc6d899e2ebce0"
+        "dce682effc9d04ce9bfab6cca1c003bba34897d64f700b2462cd90fb5cc7c801",
     }
 )
 

@@ -5,6 +5,7 @@
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "map_stream_compiled_trust.hpp"
+#include "map_reader_capabilities.hpp"
 #include "map_activation_workspace.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -1673,7 +1674,8 @@ void MapTransferHttpServer::handleStatus(device_transfer::TransferClient &client
                      (streamSupported ? "[2]" : "[]");
   if (streamSupported) {
     body += ",\"streamFormatVersions\":[1],\"streamTrust\":" +
-            compiledMapStreamTrustCapabilitiesJson();
+            compiledMapStreamTrustCapabilitiesJson() +
+            ",\"mapReader\":" + mapReaderCapabilitiesJson();
   }
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
