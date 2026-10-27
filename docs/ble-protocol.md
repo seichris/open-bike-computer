@@ -2354,8 +2354,10 @@ device UI continue with a "No microSD card" map state. The storage backend
 chosen at boot stays mounted until shutdown. An enter request only validates
 that card: it never unmounts, remounts or falls back to FFat. A missing,
 failed, removed or replaced card therefore returns `sd_unavailable` with a
-restart hint, and a card inserted after boot is used after the device
-restarts.
+restart hint and is treated as absent for map transfers and diagnostics until
+the device restarts; a card inserted after boot is likewise used only after a
+restart. A card that validates but whose map namespace cannot be written
+returns `sd_unwritable` and stays in use, so a later request probes it again.
 
 After the active pointer transaction, the final step remains nonterminal until
 the main loop locates and parses a renderer block from the new root. All blocks

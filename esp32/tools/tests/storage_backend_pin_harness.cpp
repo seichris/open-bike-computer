@@ -1,7 +1,8 @@
 // The production Storage header and its mount, pin, map-root and diagnostics
-// methods are inserted by test_sd_only_map_storage.py. The card, FFat and the
-// /sdcard VFS entry are fakes that count every mount and unmount, so a live
-// backend switch after setup pins the boot's storage is observable.
+// methods are inserted by test_sd_only_map_storage.py, followed by the BLE
+// map-download entry and active-map status read that use them. The card, FFat
+// and the /sdcard VFS entry are fakes that count every mount and unmount, so a
+// live backend switch after setup pins the boot's storage is observable.
 #define WAVESHARE_AMOLED_175 1 // Both boards share this storage path.
 #include <atomic>
 #include <cstdint>
@@ -145,6 +146,114 @@ esp_err_t Storage::mountRemovableStorage() {
 // PRODUCTION_METHODS
 #undef stat
 
+// Collaborators of the BLE map entry. The transfer server records what the
+// entry asked of it; the installer stands in for reads of the active pointer.
+namespace device_transfer {
+struct HttpTransferStatus {
+  bool enabled = false;
+  std::string mode;
+};
+} // namespace device_transfer
+struct FakeDeviceTransfer {
+  device_transfer::HttpTransferStatus status() const { return {}; }
+  bool waitUntilStopped(uint32_t) { return true; }
+} deviceTransferHttp;
+struct FakeMapTransfer {
+  struct Activation {
+    bool running = false;
+  };
+  std::string errorCode, errorMessage;
+  bool enabled = false, namespaceWritable = true;
+  unsigned writableProbes = 0;
+  Activation activationSnapshot() const { return {}; }
+  void setLastError(const std::string &code, const std::string &message) {
+    errorCode = code;
+    errorMessage = message;
+  }
+  // The server probes its bound root, which is the card only on a card boot.
+  bool refreshStreamStorageCapability(bool) {
+    ++writableProbes;
+    return namespaceWritable && removableVfsMounted && cardInserted;
+  }
+  bool setEnabled(bool value) { return enabled = value; }
+} mapTransferHttp;
+namespace ride_diagnostics {
+enum class Level { Info, Warning };
+bool record(Level, const char *, const char *, const char *) { return true; }
+} // namespace ride_diagnostics
+struct FakeSerial {
+  void println(const char *) {}
+  template <typename... Arguments>
+  void printf(const char *, const Arguments &...) {}
+} Serial;
+namespace ble_transfer {
+enum class Action { EnableMap, EnableFirmware };
+} // namespace ble_transfer
+namespace map_transfer {
+struct ActiveMapSelection {
+  std::string mapId, sessionId, root, manifestReceipt, signedManifestReceipt;
+};
+struct MapPresentationMetadata {
+  std::string displayName;
+};
+struct MapPresentationRevision {
+  uint64_t bytes = 0;
+  int64_t modifiedSeconds = 0;
+  uint64_t inode = 0;
+};
+struct InstallStatus {
+  bool ok = false;
+  std::string code;
+  std::string message;
+};
+unsigned installers = 0;
+class MapTransferInstaller {
+public:
+  explicit MapTransferInstaller(std::string root) : root_(std::move(root)) {
+    ++installers;
+  }
+  InstallStatus readActiveMap(ActiveMapSelection &active) const {
+    if (root_ != "/sdcard" || !removableVfsMounted || !cardInserted)
+      return {false, "active_missing", ""};
+    active = {"map", "session", "/VECTMAP/.maps/session", "manifest", "signed"};
+    return {true, "ok", ""};
+  }
+  bool readActiveMapPresentationRevision(const ActiveMapSelection &,
+                                         MapPresentationRevision &revision) {
+    revision = {1, 2, 3};
+    return true;
+  }
+  InstallStatus readActiveMapPresentation(const ActiveMapSelection &,
+                                          MapPresentationMetadata &metadata) {
+    metadata.displayName = "Area";
+    return {true, "ok", ""};
+  }
+
+private:
+  std::string root_;
+};
+} // namespace map_transfer
+
+Storage *bootStorage = nullptr;
+#define storage (*bootStorage)
+// PRODUCTION_ACTIVE_MAP_STATUS
+void handleTransferAction(ble_transfer::Action action) {
+  switch (action) {
+  // PRODUCTION_ENABLE_MAP
+  default:
+    break;
+  }
+}
+#undef storage
+
+void requestMapDownload(Storage &bootStorageForRequest) {
+  bootStorage = &bootStorageForRequest;
+  mapTransferHttp.errorCode.clear();
+  mapTransferHttp.errorMessage.clear();
+  mapTransferHttp.enabled = false;
+  handleTransferAction(ble_transfer::Action::EnableMap);
+}
+
 void resetHardware() {
   cardInserted = false;
   removableVfsMounted = false;
@@ -230,10 +339,76 @@ void unmountedBootNeverMountsLater() {
   CHECK(removableMounts == 1 && FFat.begins == 1 && !FFat.mounted);
 }
 
+// The rider's map-download request validates the card this boot pinned.
+void mapDownloadUsesOnlyTheBootCard() {
+  resetHardware();
+  cardInserted = true;
+  Storage storage;
+  CHECK(storage.initSD() == ESP_OK);
+  storage.pinBackendForBoot();
+  bootStorage = &storage;
+  map_transfer::installers = 0;
+  const auto &status = readActiveMapStatusSnapshot();
+  CHECK(status.available && status.activeMap.mapId == "map");
+  CHECK(map_transfer::installers == 1);
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.enabled && mapTransferHttp.errorCode.empty());
+
+  // A full or locked map namespace is refused, but the card stays in use for
+  // maps and diagnostics and the next request probes it again.
+  mapTransferHttp.namespaceWritable = false;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.errorCode == "sd_unwritable" && !mapTransferHttp.enabled);
+  CHECK(storage.getSdLoaded() && storage.getDiagnosticsSdLoaded());
+  mapTransferHttp.namespaceWritable = true;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.enabled && mapTransferHttp.errorCode.empty());
+
+  // A removed card is refused with a restart hint and is never remounted,
+  // even after it is reinserted.
+  cardInserted = false;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.errorCode == "sd_unavailable" && !mapTransferHttp.enabled);
+  CHECK(mapTransferHttp.errorMessage.find("restart") != std::string::npos);
+  CHECK(!storage.getSdLoaded());
+  cardInserted = true;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.errorCode == "sd_unavailable" && !mapTransferHttp.enabled);
+  CHECK(removableMounts == 1 && removableUnmounts == 0);
+  CHECK(FFat.begins == 0 && FFat.ends == 0);
+}
+
+// Without a card at boot, no map request reaches FFat or a later card.
+void noCardMapRequestsNeverReachFfat() {
+  resetHardware();
+  Storage storage;
+  CHECK(storage.initSD() != ESP_OK);
+  CHECK(storage.initSPIFFS() == ESP_OK);
+  storage.pinBackendForBoot();
+  bootStorage = &storage;
+  map_transfer::installers = 0;
+  const auto &status = readActiveMapStatusSnapshot();
+  CHECK(!status.available && status.errorCode == "active_missing");
+  CHECK(map_transfer::installers == 0);
+
+  mapTransferHttp.writableProbes = 0;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.errorCode == "sd_unavailable" && !mapTransferHttp.enabled);
+  CHECK(mapTransferHttp.errorMessage.find("restart") != std::string::npos);
+  cardInserted = true;
+  requestMapDownload(storage);
+  CHECK(mapTransferHttp.errorCode == "sd_unavailable" && !mapTransferHttp.enabled);
+  CHECK(mapTransferHttp.writableProbes == 0);
+  CHECK(FFat.mounted && FFat.begins == 1 && FFat.ends == 0);
+  CHECK(removableMounts == 1 && removableUnmounts == 0);
+}
+
 int main() {
   cardBootPinsTheCardAndNeverRemounts();
   noCardBootKeepsMapsOffFfat();
   unmountedBootNeverMountsLater();
+  mapDownloadUsesOnlyTheBootCard();
+  noCardMapRequestsNeverReachFfat();
   std::puts("storage backend pin harness passed");
   return 0;
 }

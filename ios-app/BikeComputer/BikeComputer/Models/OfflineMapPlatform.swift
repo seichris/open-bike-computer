@@ -1351,7 +1351,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .missingTransferBaseURL:
             return "Device map transfer mode is not ready"
         case .deviceSDCardUnavailable:
-            return "Device SD card is not mounted"
+            return "Device SD card is unavailable. Insert a microSD card, then restart the device."
         case .deviceMapTransferRejected(let message):
             return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:

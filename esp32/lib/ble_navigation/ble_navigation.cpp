@@ -4014,7 +4014,9 @@ static void processPendingTransferControl() {
         Serial.println(
             "BLE Map Transfer: enter rejected, SD card is not mounted");
       } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
-        storage.markSdUnavailable();
+        // The card validated; only its map namespace is not writable (full,
+        // locked or blocked). It stays in use for maps and diagnostics, and
+        // the next request probes it again.
         mapTransferHttp.setLastError(
             "sd_unwritable", "SD card map storage is not writable");
         Serial.println(

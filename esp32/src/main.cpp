@@ -1865,8 +1865,10 @@ void setup() {
   // File owners start below, so /sdcard keeps this boot's backend until
   // shutdown. Maps exist only on removable SD; FFat keeps diagnostics and
   // other device files, and a card inserted later is used after a restart.
+  // Both map owners take their root here, before boot recovery uses either.
   storage.pinBackendForBoot();
   mapView.bindMapStorageRoot(storage.mapStorageRoot());
+  mapTransferHttp.bindStorageRoot(storage.mapStorageRoot());
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const boot_diagnostics::Snapshot diagnosticBoot = boot_diagnostics::snapshot();
   ride_diagnostics::begin(
@@ -2104,7 +2106,7 @@ void setup() {
       boot_diagnostics::Stage::ApplicationServices);
 #endif
   deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
-  mapTransferHttp.configure(storage.mapStorageRoot(), 8080, &deviceTransferHttp);
+  mapTransferHttp.configure(8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
   mapTransferHttp.setRendererHealthProbes(

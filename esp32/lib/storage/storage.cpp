@@ -293,8 +293,6 @@ bool Storage::ensureSdMounted() {
   return ready;
 }
 
-void Storage::markSdUnavailable() { isSdLoaded = false; }
-
 bool Storage::hasInternalFallbackMounted() const {
   return internalFallbackMounted.load();
 }

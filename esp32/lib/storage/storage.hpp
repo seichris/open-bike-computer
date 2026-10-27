@@ -181,7 +181,6 @@ public:
   // Validates the pinned removable mount without mounting, remounting or
   // falling back. A failed or removed card is marked unavailable.
   bool ensureSdMounted();
-  void markSdUnavailable();
   bool hasInternalFallbackMounted() const;
   StorageBackend storageBackend() const;
   const char *storageBackendName() const;

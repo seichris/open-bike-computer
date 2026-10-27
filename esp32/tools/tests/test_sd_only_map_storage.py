@@ -1,10 +1,12 @@
 """Maps live only on removable SD, and the boot's storage backend stays pinned.
 
-These tests compile the production Storage and map-renderer entry points into
-host harnesses whose filesystem, card and FFat are fakes that count every call.
-Each harness also runs against small mutations of the production text, so a
-reintroduced FFat map read or live backend switch fails the test instead of
-merely changing source shape.
+These tests compile the production Storage, the BLE map-download entry and
+active-map status read, the map-renderer entry points and the map transfer
+server's root binding into host harnesses whose filesystem, card and FFat are
+fakes that count every call (the operation journal is real). Each harness also
+runs against small mutations of the production text, so a reintroduced FFat
+map read or live backend switch fails the test instead of merely changing
+source shape.
 """
 
 from pathlib import Path
@@ -25,14 +27,15 @@ def between(text, start, end):
     return text[first:text.index(end, first)]
 
 
-def run_harness(text, name, extra_args=(), flags=()):
+def run_harness(text, name, extra_args=(), flags=(), sources=()):
     with tempfile.TemporaryDirectory() as directory:
         unit = Path(directory) / f"{name}.cpp"
         binary = Path(directory) / name
         unit.write_text(text, encoding="utf-8")
         subprocess.run(
             ["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", *flags,
-             "-I", str(TESTS), str(unit), "-o", str(binary)],
+             "-I", str(TESTS), str(unit),
+             *(str(ROOT / extra) for extra in sources), "-o", str(binary)],
             check=True)
         return subprocess.run([str(binary), *extra_args], capture_output=True,
                               text=True)
@@ -108,13 +111,27 @@ def run_renderer(text, name):
         (installed / "+000+000/0_0.fmb").write_bytes(b"FMB-test-block")
         (installed / "+000+000/0_0.fme").write_bytes(b"terrain!")
         (installed / "assets/street-labels.fma").write_bytes(b"font")
-        # readMapBlock's legacy ASCII parser keeps two unused locals.
+        # readMapBlock's legacy ASCII parser keeps two unused locals, and glibc
+        # marks closedir nonnull, an attribute GCC drops from findMapBlock's
+        # deleter type with a warning.
         return run_harness(text, name, (root,),
                            ("-Wno-unused-variable",
-                            "-Wno-unused-but-set-variable"))
+                            "-Wno-unused-but-set-variable",
+                            "-Wno-ignored-attributes"))
 
 
-def storage_harness(mutate=None):
+def map_entry():
+    """The BLE active-map status read and map-download entry, as compiled."""
+    ble = source("lib/ble_navigation/ble_navigation.cpp")
+    start = ble.index("struct ActivePresentationCache {")
+    reader = ble.index("readActiveMapStatusSnapshot() {", start)
+    status = ble[start:matching_brace(ble, ble.index("{", reader)) + 1] + "\n"
+    entry = between(ble, "  case ble_transfer::Action::EnableMap: {",
+                    "  case ble_transfer::Action::EnableFirmware: {")
+    return status, entry
+
+
+def storage_harness(mutate=None, mutate_entry=None):
     header = "\n".join(
         line for line in source("lib/storage/storage.hpp").splitlines()
         if not line.startswith(("#include", "#pragma")))
@@ -136,10 +153,39 @@ def storage_harness(mutate=None):
     ])
     if mutate is not None:
         methods = mutate(methods)
+    status, entry = map_entry()
+    if mutate_entry is not None:
+        status, entry = mutate_entry(status, entry)
     harness = source("tools/tests/storage_backend_pin_harness.cpp")
     harness = harness.replace("// PRODUCTION_HEADER", header)
     harness = harness.replace("// PRODUCTION_UNAVAILABLE_ROOT", unavailable_root)
-    return harness.replace("// PRODUCTION_METHODS", methods)
+    harness = harness.replace("// PRODUCTION_METHODS", methods)
+    harness = harness.replace("// PRODUCTION_ACTIVE_MAP_STATUS", status)
+    return harness.replace("// PRODUCTION_ENABLE_MAP", entry)
+
+
+SERVER_METHODS = (
+    "void MapTransferHttpServer::bindStorageRoot(",
+    "std::string MapTransferHttpServer::selectionOperationID(",
+    "void MapTransferHttpServer::observeBootSelection(",
+)
+
+
+def binding_harness(mutate=None):
+    server = source("lib/map_transfer_http/map_transfer_http.cpp")
+    methods = "".join(definition(server, signature)
+                      for signature in SERVER_METHODS)
+    if mutate is not None:
+        methods = mutate(methods)
+    harness = source("tools/tests/map_transfer_root_binding_harness.cpp")
+    return harness.replace("// PRODUCTION_SERVER", methods)
+
+
+def run_binding(text, name):
+    with tempfile.TemporaryDirectory() as card:
+        return run_harness(text, name, (card,), sources=(
+            "lib/map_transfer/map_operation_journal.cpp",
+            "lib/device_transfer/durable_operation.cpp"))
 
 
 class BootPinnedStorageTests(unittest.TestCase):
@@ -177,6 +223,55 @@ class BootPinnedStorageTests(unittest.TestCase):
         for name, mutate in mutations.items():
             with self.subTest(name):
                 result = run_harness(storage_harness(mutate), "storage_pin_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_map_requests_without_a_usable_card_are_detected(self):
+        mutations = {
+            "status reads the active pointer without map storage": (
+                lambda status, entry: (mutated(
+                    status, "  if (!storage.mapStorageAvailable()) {\n"
+                    "    // Without a card", "  if (false) {\n    // Without a card"),
+                    entry)),
+            "download entry ignores the card check": (
+                lambda status, entry: (status, mutated(
+                    entry, "const bool mounted = storage.ensureSdMounted();",
+                    "const bool mounted = storage.ensureSdMounted() || true;"))),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate_entry=mutate),
+                                     "storage_entry_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_an_explicit_download_retry_cannot_bypass_the_pin(self):
+        # Even an entry that asks Storage to mount again keeps the boot's
+        # backend: the refusal is central, not in the caller.
+        retry = lambda status, entry: (status, mutated(
+            entry, "const bool mounted = storage.ensureSdMounted();",
+            "const bool mounted = (storage.initSD() == ESP_OK ||\n"
+            "                            storage.initSPIFFS() == ESP_OK ||\n"
+            "                            true) && storage.ensureSdMounted();"))
+        result = run_harness(storage_harness(mutate_entry=retry), "storage_retry")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class MapTransferRootBindingTests(unittest.TestCase):
+    def test_boot_recovery_reads_the_operation_journal_on_the_bound_card(self):
+        result = run_binding(binding_harness(), "root_binding")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unbound_server_roots_are_detected(self):
+        mutations = {
+            "binding keeps the empty root": (
+                "  storageRoot_ = std::move(storageRoot);\n", "  (void)storageRoot;\n"),
+            "installer keeps the unbound root": (
+                "  installer_ = MapTransferInstaller(storageRoot_);\n", ""),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(name):
+                result = run_binding(
+                    binding_harness(lambda text, o=old, n=new: mutated(text, o, n)),
+                    "root_binding_mutant")
                 self.assertEqual(result.returncode, 42, result.stderr)
 
 
@@ -245,6 +340,14 @@ class SdOnlyMapCallerContractTests(unittest.TestCase):
         pin = setup.index("storage.pinBackendForBoot();")
         self.assertLess(setup.index("storage.initSPIFFS();"), pin)
         self.assertLess(pin, setup.index("mapView.bindMapStorageRoot(storage.mapStorageRoot());"))
+        # Earlier references are shutdown callbacks; the first use after the pin
+        # binds the transfer server before boot recovery reads its journal.
+        bind = setup.index("mapTransferHttp.bindStorageRoot(storage.mapStorageRoot());")
+        self.assertEqual(setup.index("mapTransferHttp.", pin), bind)
+        for use in ("mapTransferHttp.setOperationDeviceID(",
+                    "mapTransferHttp.observeBootSelection(",
+                    "mapTransferHttp.configure(8080, &deviceTransferHttp);"):
+            self.assertLess(bind, setup.index(use), use)
         for owner in ("ride_diagnostics::begin(", "MapTransferInstaller mapInstaller(",
                       "mapTransferHttp.configure(", "mapView.initMap(", "initLVGL();"):
             self.assertLess(pin, setup.index(owner), owner)
@@ -253,7 +356,6 @@ class SdOnlyMapCallerContractTests(unittest.TestCase):
         self.assertLess(gate, setup.index("} else {", gate))
         self.assertLess(setup.index("} else {", gate), recovery)
         self.assertIn('"map_storage_unavailable"', setup[gate:recovery])
-        self.assertIn("mapTransferHttp.configure(storage.mapStorageRoot()", setup)
 
     def test_map_download_entry_only_validates_the_boot_card(self):
         ble = source("lib/ble_navigation/ble_navigation.cpp")

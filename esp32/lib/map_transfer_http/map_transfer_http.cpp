@@ -146,14 +146,16 @@ static std::string jsonEscape(const std::string &value) {
 
 } // namespace
 
-void MapTransferHttpServer::configure(
-    std::string storageRoot, uint16_t port,
-    device_transfer::HttpTransferServer *sharedServer) {
+void MapTransferHttpServer::bindStorageRoot(std::string storageRoot) {
   storageRoot_ = std::move(storageRoot);
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
   installer_ = MapTransferInstaller(storageRoot_);
   installer_.setOperationDeviceID(operationDeviceID_);
+}
+
+void MapTransferHttpServer::configure(
+    uint16_t port, device_transfer::HttpTransferServer *sharedServer) {
   installer_.setStorageProgressCallback([](void *context) {
     auto *server = static_cast<MapTransferHttpServer *>(context);
     server->storageProgressSequence_.fetch_add(1, std::memory_order_relaxed);
