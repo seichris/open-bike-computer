@@ -227,6 +227,31 @@ function companionRequirements(
   };
 }
 
+// Renderer profiles the map backend can publish (catalog.py renderer_features
+// and the generation profile policies). Targets 1-4 each have one feature
+// list; a target-5 POI map may add only the optional contours layer.
+const PUBLISHABLE_RENDERER = "esp32-fmb";
+const PUBLISHABLE_PROFILES: ReadonlyArray<{
+  rendererFormatVersion: number;
+  features: readonly string[];
+}> = [
+  { rendererFormatVersion: 1, features: [] },
+  { rendererFormatVersion: 2, features: ["street-labels"] },
+  { rendererFormatVersion: 3, features: ["3d-buildings", "street-labels"] },
+  {
+    rendererFormatVersion: 4,
+    features: ["3d-buildings", "contours", "street-labels"],
+  },
+  {
+    rendererFormatVersion: 5,
+    features: ["3d-buildings", "map-pois", "street-labels"],
+  },
+  {
+    rendererFormatVersion: 5,
+    features: ["3d-buildings", "contours", "map-pois", "street-labels"],
+  },
+];
+
 export function validatePublication(
   value: Record<string, unknown>,
 ): PublicationInput {
@@ -274,6 +299,17 @@ export function validatePublication(
     new Set(value.features).size !== value.features.length
   ) {
     throw new HttpError(400, "features are invalid");
+  }
+  if (
+    value.renderer !== PUBLISHABLE_RENDERER ||
+    !PUBLISHABLE_PROFILES.some(
+      (profile) =>
+        profile.rendererFormatVersion === value.rendererFormatVersion &&
+        profile.features.join("\u0000") ===
+          (value.features as string[]).join("\u0000"),
+    )
+  ) {
+    throw new HttpError(400, "renderer features are not publishable");
   }
   if (
     value.attribution === null ||
