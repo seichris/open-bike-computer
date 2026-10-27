@@ -1848,38 +1848,57 @@ export async function createLibraryDownloadGrant(
   )
     .bind(mapEntryID, tiers[0], tiers[1] ?? tiers[0], tiers[0])
     .all<ArtifactWithReaderDescriptor>();
-  const artifact = result.results.find((candidate) => {
+  // Candidates arrive in preference order. A contour stream is usable only
+  // with the single live companion of its own tier, so a tier without one
+  // yields to the next tier, as the app's availability check does.
+  let companionUnavailable = false;
+  let selected:
+    | {
+        artifact: ArtifactWithReaderDescriptor;
+        companion: ArtifactWithReaderDescriptor | null;
+      }
+    | undefined;
+  for (const candidate of result.results) {
     const signerAccepted = acceptedSigners.some(
       (signer) =>
         signer.keyId === candidate.signature_key_id &&
         signer.keySha256 === candidate.signature_key_sha256,
     );
-    if (!signerAccepted) return false;
+    if (!signerAccepted) continue;
     const requirements = readerRequirementsForArtifact(candidate);
-    return (
-      requirements !== null && readerCanUse(readerCapabilities, requirements)
+    if (
+      requirements === null ||
+      !readerCanUse(readerCapabilities, requirements)
+    ) {
+      continue;
+    }
+    if (!hasContourLayer(requirements.requiredFeatures)) {
+      selected = { artifact: candidate, companion: null };
+      break;
+    }
+    const pair = soleCompanion(
+      result.results,
+      candidate.map_content_receipt ?? "",
+      map.legacy_map_id,
+      candidate.delivery_tier,
     );
-  });
-  if (!artifact) {
+    if (pair) {
+      selected = { artifact: candidate, companion: pair };
+      break;
+    }
+    companionUnavailable = true;
+  }
+  if (!selected) {
     if (channel === "production" && result.results.length === 0)
       throw new HttpError(409, "production promotion required");
-    throw new HttpError(409, "no compatible artifact is available");
+    throw new HttpError(
+      409,
+      companionUnavailable
+        ? "topography companion is unavailable"
+        : "no compatible artifact is available",
+    );
   }
-  const artifactRequirements = readerRequirementsForArtifact(artifact);
-  const contourLayer = hasContourLayer(
-    artifactRequirements?.requiredFeatures ?? [],
-  );
-  const companion = contourLayer
-    ? soleCompanion(
-        result.results,
-        artifact.map_content_receipt ?? "",
-        map.legacy_map_id,
-        artifact.delivery_tier,
-      )
-    : null;
-  if (contourLayer && !companion) {
-    throw new HttpError(409, "topography companion is unavailable");
-  }
+  const { artifact, companion } = selected;
   const grant = randomToken(32);
   const companionGrant = companion ? randomToken(32) : null;
   const now = new Date();

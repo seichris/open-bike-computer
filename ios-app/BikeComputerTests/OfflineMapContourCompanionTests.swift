@@ -464,6 +464,7 @@ struct OfflineMapContourCompanionTests {
         await testCatalogDeliversCombinedCompanion(fixture)
         await testCatalogRejectsInconsistentCompanionGrants(fixture)
         await testCatalogDownloadFollowsBikeTrust(fixture)
+        testCatalogCompanionTierFallback(fixture)
         await testUnsupportedSavedContourContractIsExplicit(fixture)
         print("Offline map contour companion tests passed")
     }
@@ -1013,6 +1014,129 @@ struct OfflineMapContourCompanionTests {
         )
         check(manager.cachedPackURLs.isEmpty, "an untrusted grant saves no map")
         check(scenario.savedCompanionFiles.isEmpty, "an untrusted grant saves no companion")
+    }
+
+    /// A contour stream is downloadable only with the single companion of its
+    /// own tier, so a tier without one yields to the next tier's pair. The
+    /// catalog grant picks the same pair (map-platform/catalog/test/
+    /// catalog.test.ts, "grants the next tier's pair when a tier has no single
+    /// companion").
+    static func testCatalogCompanionTierFallback(_ fixture: ContourFixture) {
+        let source = fixture.catalogMap("combined")
+        func replacing(
+            _ artifact: OfflineMapCatalogArtifact,
+            _ changes: [String: Any]
+        ) -> OfflineMapCatalogArtifact {
+            var value = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(artifact)
+            ) as! [String: Any]
+            value.merge(changes) { $1 }
+            return try! JSONDecoder().decode(
+                OfflineMapCatalogArtifact.self,
+                from: JSONSerialization.data(withJSONObject: value)
+            )
+        }
+        func library(_ artifacts: [OfflineMapCatalogArtifact]) -> OfflineMapCatalogMap {
+            var value = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(source)
+            ) as! [String: Any]
+            value["deliveryState"] = "production"
+            value["artifacts"] = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(artifacts)
+            )
+            return try! JSONDecoder().decode(
+                OfflineMapCatalogMap.self,
+                from: JSONSerialization.data(withJSONObject: value)
+            )
+        }
+        let stream = source.artifacts.first { $0.platformArtifact.isBikeMapStream }!
+        let companion = source.artifacts.first { $0.platformArtifact.isTopographyCompanion }!
+        // The production pair, as catalog promotion publishes it.
+        let promotedStream = replacing(stream, [
+            "artifactId": "artifact_v1_" + String(repeating: "P", count: 43),
+            "deliveryTier": "production",
+            "sha256": String(repeating: "a", count: 64),
+            "objectKey": stream.objectKey + ".promoted",
+        ])
+        let promotedCompanion = replacing(companion, [
+            "artifactId": "artifact_v1_" + String(repeating: "Q", count: 43),
+            "deliveryTier": "production",
+            "objectKey": companion.objectKey.replacingOccurrences(
+                of: "/topography-ios-v1/",
+                with: "/topography-ios-v1/production/"
+            ),
+        ])
+        let rivalSHA256 = String(repeating: "4", count: 64)
+        let rivalCompanion = replacing(companion, [
+            "artifactId": "artifact_v1_" + String(repeating: "R", count: 43),
+            "sha256": rivalSHA256,
+            "objectKey": companion.objectKey.replacingOccurrences(
+                of: companion.sha256,
+                with: rivalSHA256
+            ),
+        ])
+
+        func expectSelection(
+            _ artifacts: [OfflineMapCatalogArtifact],
+            channel: String = "development",
+            _ expected: (stream: OfflineMapCatalogArtifact, companion: OfflineMapCatalogArtifact)?,
+            _ message: String
+        ) {
+            let map = library(artifacts)
+            let availability = OfflineMapCatalogAvailabilityPolicy.availability(
+                for: map, channel: channel, trustStore: fixture.trustStore
+            )
+            guard let expected else {
+                check(!availability.canDownload, "\(message): not downloadable (\(availability))")
+                return
+            }
+            check(availability == .available, "\(message): downloadable (\(availability))")
+            for candidate in [stream, promotedStream] {
+                check(
+                    OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                        localArtifactSHA256s: [candidate.sha256], map: map,
+                        channel: channel, trustStore: fixture.trustStore
+                    ) == (candidate.artifactId != expected.stream.artifactId),
+                    "\(message): selects the \(expected.stream.deliveryTier) stream"
+                )
+            }
+            // The download accepts only a grant that carries this companion.
+            check(
+                OfflineMapTopographyCompanionPolicy.compatibleCompanion(
+                    for: map, deliveryTier: expected.stream.deliveryTier
+                )?.artifactId == expected.companion.artifactId,
+                "\(message): pairs the \(expected.stream.deliveryTier) companion"
+            )
+        }
+
+        expectSelection(
+            [stream, companion, promotedStream, promotedCompanion],
+            (stream, companion),
+            "both pairs"
+        )
+        expectSelection(
+            [stream, promotedStream, promotedCompanion],
+            (promotedStream, promotedCompanion),
+            "missing development companion"
+        )
+        expectSelection(
+            [stream, companion, rivalCompanion, promotedStream, promotedCompanion],
+            (promotedStream, promotedCompanion),
+            "ambiguous development companion"
+        )
+        expectSelection([stream, promotedStream], nil, "no companion in any tier")
+        expectSelection(
+            [stream, companion, promotedStream, promotedCompanion],
+            channel: "production",
+            (promotedStream, promotedCompanion),
+            "Bicino with the production pair"
+        )
+        expectSelection(
+            [stream, companion, promotedStream],
+            channel: "production",
+            nil,
+            "Bicino without a production companion"
+        )
     }
 
     /// Contour maps saved before the companion receipt was part of saved map
