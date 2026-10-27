@@ -228,6 +228,16 @@ void HttpTransferServer::setNetworkOperationOwner(
   unlockState();
 }
 
+bool HttpTransferServer::runOnInternalStack(void (*call)(void *),
+                                            void *context) {
+  // The call may take this lock itself, e.g. through request authorization.
+  lockState();
+  NetworkOperationOwner *owner = networkOperationOwner_;
+  unlockState();
+  return call != nullptr && owner != nullptr &&
+         owner->runOnInternalStack(call, context);
+}
+
 bool HttpTransferServer::registerHandler(std::string pathPrefix,
                                          HttpRequestHandler *handler) {
   if (handler == nullptr || pathPrefix.empty())

@@ -2122,6 +2122,10 @@ readers. When the boot is already using the bounded internal FFat fallback,
 which never holds maps, diagnostics exports FFat and does not switch to a newly
 inserted removable card while recorder file
 handles may still be open; adopting removable storage requires a reboot. FFat
+is internal flash: reading it disables the flash cache, which ESP-IDF allows
+only on an internal-RAM task stack. The TLS worker's stack stays in PSRAM, so
+FFat index scans and chunk reads run on the transfer's internal operation
+owner; removable-SD exports read directly on the worker. FFat
 uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
 while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
 [Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
