@@ -2139,16 +2139,17 @@ nonisolated enum SavedMapRemovalPolicy {
 /// that inventory sync attached, is the version it replaces, unless something
 /// still uses it.
 nonisolated enum SupersededLibraryCopyPolicy {
-    /// What can still use a saved copy when a library download lands.
+    /// What can still use a saved copy when a library download lands. Every
+    /// field is required so that no source of use is left out by accident.
     struct Usage: Equatable {
-        var transferRunning = false
+        let transferRunning: Bool
         /// Files named by device operations that have not finished.
-        var operationFilenames: Set<String> = []
-        var pausedUploadFilenames: Set<String> = []
+        let operationFilenames: Set<String>
+        let pausedUploadFilenames: Set<String>
         /// The downloaded file of a direct job that still waits to install.
-        var pendingInstallFilename: String?
-        var lastTransferFilename: String?
-        var lastTransferOutcome = ""
+        let pendingInstallFilename: String?
+        let lastTransferFilename: String?
+        let lastTransferOutcome: String
     }
 
     /// Outcomes after which the last transfer no longer needs its file. Any

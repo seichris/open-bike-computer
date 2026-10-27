@@ -15,13 +15,14 @@ attribution follow without a full-height image spacer. Swiping an inactive map
 exposes **Remove from Bicino**, with confirmation bound to the phone connection
 and device identity. iPhone files and cloud references remain separate from SD
 removal. Damaged copies stay visible with repair instructions. A library
-download (an update or a claimed share) replaces the iPhone copy it supersedes:
-once it is verified and saved, another iPhone copy of the same library entry,
-such as the original direct-job file, is removed with its contour companion.
-Nothing is removed while a transfer runs. A copy that a transfer without a
-settled result, a paused upload, an unfinished device operation or a pending
-device install still uses is kept, and stays a separate row until it is removed
-by hand. SD installations are unaffected.
+download (an update or a claimed share) replaces the iPhone copies it
+supersedes: once it is verified and saved, every other iPhone copy attached to
+the same library entry, such as the original direct-job file, is removed with
+its contour companion. Nothing is removed while a transfer runs. A copy that a
+transfer without a settled result, a paused upload, an unfinished device
+operation or a pending device install still uses is kept as a separate row until
+it is removed by hand or a later library download finds it unused. SD
+installations are unaffected.
 
 When the upload action finds an exact verified signed version in a fresh device
 inventory, it selects that installation over authenticated BLE. No map payload
