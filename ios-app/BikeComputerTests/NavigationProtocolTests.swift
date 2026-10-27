@@ -9079,7 +9079,7 @@ struct NavigationProtocolTests {
             didLoadPreview,
             "a valid share reaches the explicit claim confirmation"
         )
-        manager.claimPendingShare()
+        manager.claimPendingShare(deviceStreamTrust: nil)
         let didFinish = await waitForMapTaskCompletion(manager)
         assert(
             didFinish,

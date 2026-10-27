@@ -1601,6 +1601,11 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     /// The companion this map was saved with, fixed at download time. Later
     /// catalog attachment never changes which companion belongs to the map.
     var topographyCompanion: TopographyCompanionReceipt? = nil
+    /// The bike `streamTrust` this catalog copy was chosen for; nil when no
+    /// bike had reported one. While no bike reports, the copy is judged and
+    /// re-downloaded for that bike, so a production copy chosen for stock
+    /// firmware is not traded back for a development copy.
+    var catalogDeviceStreamTrust: [String]? = nil
 }
 
 /// Resolves the iPhone contour companion of each saved map from the map's own
@@ -3670,12 +3675,19 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
-    func catalogArtifactNeedsRefresh(for item: SavedMapListItem) -> Bool {
+    /// `deviceStreamTrust` is the connected bike's reported signer list, so a
+    /// saved copy that bike cannot install is offered as an update. Without a
+    /// report, the copy is judged for the bike it was chosen for.
+    func catalogArtifactNeedsRefresh(
+        for item: SavedMapListItem,
+        deviceStreamTrust: [String]?
+    ) -> Bool {
         guard let record = item.localRecord,
               let map = item.catalogMap else {
             return false
         }
         let metadata = SavedMapArtifactMetadataStore.load(for: record.packURL)
+        let deviceStreamTrust = deviceStreamTrust ?? metadata?.catalogDeviceStreamTrust
         let localArtifactSHA256s: Set<String> = Set([
             metadata?.primaryArtifact?.sha256,
             metadata?.legacyArtifact?.sha256,
@@ -3690,7 +3702,24 @@ final class OfflineMapManager: ObservableObject {
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString
             ),
-            trustStore: mapStreamTrustStore
+            trustStore: catalogSelectionTrustStore(
+                for: map,
+                deviceStreamTrust: deviceStreamTrust
+            )
+        )
+    }
+
+    private func catalogSelectionTrustStore(
+        for map: OfflineMapCatalogMap,
+        deviceStreamTrust: [String]?
+    ) -> BikeMapStreamTrustStore {
+        OfflineMapCatalogAvailabilityPolicy.selectionTrustStore(
+            for: map,
+            channel: OfflineMapCatalogConfig.channel(
+                generationServerURLString: serverURLString
+            ),
+            trustStore: mapStreamTrustStore,
+            deviceStreamTrust: deviceStreamTrust
         )
     }
 
@@ -3884,7 +3913,7 @@ final class OfflineMapManager: ObservableObject {
         pendingSharePreview = nil
     }
 
-    func claimPendingShare() {
+    func claimPendingShare(deviceStreamTrust: [String]?) {
         guard let token = pendingShareToken,
               let preview = pendingSharePreview else { return }
         Task { [weak self] in
@@ -3910,6 +3939,7 @@ final class OfflineMapManager: ObservableObject {
                 try await self.downloadCatalogMap(
                     map,
                     sourceShareID: preview.shareId,
+                    deviceStreamTrust: deviceStreamTrust,
                     client: client,
                     credential: credential
                 )
@@ -3917,7 +3947,12 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    func downloadCatalogMap(_ map: OfflineMapCatalogMap) {
+    /// Downloads the copy the connected bike can install when the library has
+    /// one; `deviceStreamTrust` is that bike's reported signer list.
+    func downloadCatalogMap(
+        _ map: OfflineMapCatalogMap,
+        deviceStreamTrust: [String]?
+    ) {
         let availability = catalogAvailability(for: map)
         guard availability.canDownload else {
             statusMessage = availability.statusText ?? "shared map is unavailable"
@@ -3933,6 +3968,7 @@ final class OfflineMapManager: ObservableObject {
                 try await self.downloadCatalogMap(
                     map,
                     sourceShareID: nil,
+                    deviceStreamTrust: deviceStreamTrust,
                     client: client,
                     credential: credential
                 )
@@ -3943,23 +3979,37 @@ final class OfflineMapManager: ObservableObject {
     private func downloadCatalogMap(
         _ map: OfflineMapCatalogMap,
         sourceShareID: String?,
+        deviceStreamTrust: [String]?,
         client: OfflineMapCatalogClient,
         credential: OfflineMapCatalogCredential
     ) async throws {
         guard catalogAvailability(for: map).canDownload else {
             throw OfflineMapCatalogError.missingCompatibleArtifact
         }
+        // Without a report, an update keeps choosing for the bike that the
+        // saved copy was chosen for.
+        let deviceStreamTrust = deviceStreamTrust ?? (try? cachedCatalogPackURL(
+            mapEntryID: map.mapEntryId,
+            fileExtension: "bmap"
+        )).flatMap(SavedMapArtifactMetadataStore.load(for:))?.catalogDeviceStreamTrust
+        let selectionTrustStore = catalogSelectionTrustStore(
+            for: map,
+            deviceStreamTrust: deviceStreamTrust
+        )
         let grant = try await client.downloadGrant(
             mapEntryId: map.mapEntryId,
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString
             ),
-            trustStore: mapStreamTrustStore,
+            trustStore: selectionTrustStore,
             appIdentity: catalogAppIdentity,
             credential: credential.credential
         )
         let artifact = grant.artifact.platformArtifact
         guard artifact.isBikeMapStream,
+              let keyID = grant.artifact.signatureKeyId,
+              let keySHA256 = grant.artifact.signatureKeySha256,
+              selectionTrustStore.capability(for: keyID) == "\(keyID)=\(keySHA256)",
               OfflineMapReaderCompatibilityPolicy.isCompatible(
                 artifact: grant.artifact,
                 map: map
@@ -4105,7 +4155,8 @@ final class OfflineMapManager: ObservableObject {
             readerRequirements: verifiedReaderRequirements,
             catalogContentReceipt: map.contentReceipt,
             topography: verifiedTopography,
-            topographyCompanion: topographyDownload?.association.receipt
+            topographyCompanion: topographyDownload?.association.receipt,
+            catalogDeviceStreamTrust: deviceStreamTrust
         )
         try saveDownloadedMap(
             at: temporaryURL,

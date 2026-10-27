@@ -107,7 +107,7 @@ hardware gate.
 | Reader | Must read | Trusts |
 | --- | --- | --- |
 | Bicino (production app) | production profiles | registered production signers |
-| Bicino Dev | every profile: development artifacts first, then the production copy | production and development signers |
+| Bicino Dev | every profile: development artifacts first, then the production copy, among the copies the connected bike trusts when there are any | production and development signers |
 | Production and ordinary firmware | production profiles | production signers |
 | `*_PERSONAL` firmware | production profiles | production and development signers |
 | `*_REMOTE_DEBUG` and POI qualification firmware | every profile | as compiled (`*_REMOTE_DEBUG` adds the development signer) |
@@ -156,6 +156,9 @@ message never points to a firmware build.
   terrain layer goes to any bike that reports `mapReader` (older firmware needs
   the terrain experiment). A URL refresh compares only immutable artifact
   identity, so a new approval or backend version cannot break a re-download.
+  Shared-library downloads prefer the copies whose signer the connected bike
+  reports in `streamTrust` (or, with no bike reporting, the bike the saved copy
+  was chosen for), so Bicino Dev gives stock firmware the production copy.
 - **Firmware.** The HTTPS and BLE map transfer status report `mapReader`. The
   report is derived from the same compile flags that decide which renderer
   targets the parser admits. The parser still rejects unknown formats, untrusted

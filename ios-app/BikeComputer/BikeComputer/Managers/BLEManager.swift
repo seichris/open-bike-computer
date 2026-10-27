@@ -1244,6 +1244,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published private(set) var hasFreshMapTransferStatus = false
+    /// Map-stream signers the connected bike verifies (`keyId=SHA256(key)`),
+    /// from its authenticated map transfer status; nil until it reports them.
+    @Published private(set) var mapTransferStreamTrust: [String]?
     @Published private(set) var mapOperationStatus: DeviceMapOperationReceipt?
     @Published private(set) var mapOperationObservationGeneration: UInt64 = 0
     @Published private(set) var mapOperationConnectionEpoch: UInt64 = 0
@@ -7409,6 +7412,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         hasFreshMapTransferStatus = false
+        mapTransferStreamTrust = nil
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
         mapTransferStatusChunks.removeAll()
@@ -12264,6 +12268,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = status.activeMapId ?? ""
         mapTransferActiveSessionId = status.activeSessionId ?? ""
         activeMapManifestReceipt = status.activeManifestReceipt ?? ""
+        mapTransferStreamTrust = status.streamTrust
         // Only firmware that publishes the renderer-layer block (POI profile
         // fields with runtime font/POI health) may replace the BLE-reported
         // renderer state. Older HTTP status reports font health as merely
@@ -12372,6 +12377,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
+        mapTransferStreamTrust = object["streamTrust"] as? [String]
         activeDeviceMap = DeviceActiveMapDescriptor(statusObject: object)
         if let library = object["mapLibrary"],
            let data = try? JSONSerialization.data(withJSONObject: library),

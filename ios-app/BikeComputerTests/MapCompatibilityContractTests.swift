@@ -216,13 +216,21 @@ private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+/// A bike's `streamTrust` report for exactly these signers.
+private func streamTrust(_ trust: BikeMapStreamTrustStore) -> [String] {
+    trust.capabilityHeaderValue?.split(separator: ",").map(String.init) ?? []
+}
+
 enum MapCompatibilityContractTests {
+    @MainActor
     static func run() {
         let corpus = Corpus.load()
         testFrozenCorpusStillValidates(corpus)
         testThisAppReadsEveryContractProfile(corpus)
         testDurableInstallUsesDeviceReaderCapabilities(corpus)
         testCatalogEligibilityForBothApps(corpus)
+        testCatalogSelectionFollowsBikeTrust(corpus)
+        testBikeTrustComesFromAuthenticatedStatus(corpus)
         testSavedDurableMapReopensAfterAppUpdate(corpus)
         testMapsOutsideTheContractAreMarkedWithoutCoercion(corpus)
         testUnsupportedAndCorruptInputsAreRejected(corpus)
@@ -575,6 +583,180 @@ enum MapCompatibilityContractTests {
             ) != nil,
             "the promoted contour companion is selected for its production stream"
         )
+    }
+
+    /// Bicino Dev trusts both signer sets, but production and ordinary firmware
+    /// trust only production signers. The catalog copy follows the connected
+    /// bike's reported trust whenever the library has a copy that bike
+    /// installs, and keeps the app's own preference otherwise.
+    fileprivate static func testCatalogSelectionFollowsBikeTrust(_ corpus: Corpus) {
+        let developmentBike = streamTrust(corpus.developmentAppTrust)
+        let stockBike = streamTrust(corpus.productionTrust)
+        let readers = readerCapabilityFixture()
+        let stockFirmware = deviceStatus(trust: stockBike, mapReader: readers["production"])
+        let developmentFirmware = deviceStatus(trust: developmentBike, mapReader: readers["map_pois"])
+
+        func selection(
+            _ library: OfflineMapCatalogMap,
+            bike: [String]?,
+            channel: String = "development"
+        ) -> BikeMapStreamTrustStore {
+            OfflineMapCatalogAvailabilityPolicy.selectionTrustStore(
+                for: library,
+                channel: channel,
+                trustStore: channel == "development"
+                    ? corpus.developmentAppTrust : corpus.productionTrust,
+                deviceStreamTrust: bike
+            )
+        }
+        /// Whether `variant` is the copy the app downloads and keeps without
+        /// offering an update.
+        func selects(
+            _ variant: CorpusVariant,
+            in library: OfflineMapCatalogMap,
+            bike: [String]?,
+            channel: String = "development"
+        ) -> Bool {
+            !OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                localArtifactSHA256s: [variant.streamArtifact["sha256"] as? String ?? ""],
+                map: library,
+                channel: channel,
+                trustStore: selection(library, bike: bike, channel: channel)
+            )
+        }
+        func install(
+            _ map: CorpusMap,
+            _ variant: CorpusVariant,
+            on firmware: MapTransferDeviceStatus
+        ) -> MapInstallProtocolEvaluation {
+            guard let verified = try? BikeMapStreamArtifactValidator.validate(
+                url: variant.url, artifact: variant.platformArtifact,
+                expectedMapID: map.mapID, trustStore: corpus.developmentAppTrust
+            ) else {
+                corpusFailure("\(variant.file) validates in Bicino Dev")
+            }
+            return MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true,
+                signatureTrustCapability: "\(verified.signatureKeyID)=\(verified.signatureKeySHA256)",
+                readerRequirements: verified.readerRequirements,
+                compatibilityContract: verified.compatibilityContract,
+                deviceReaderCapabilities: firmware.mapReader,
+                deviceStatus: firmware
+            )
+        }
+
+        for id in ["buildings-3d-v1", "topographic-contours-v1"] {
+            let map = corpus.map(id)
+            guard let production = map.production["production"] else {
+                corpusFailure("\(id) has a production copy")
+            }
+            let library = catalogMap(
+                map, variants: [map.development, production], deliveryState: "production"
+            )
+            for bike in [nil, developmentBike, stockBike] {
+                assertEqual(
+                    OfflineMapCatalogAvailabilityPolicy.availability(
+                        for: library, channel: "development",
+                        trustStore: selection(library, bike: bike)
+                    ),
+                    .available,
+                    "\(id) availability does not depend on the connected bike"
+                )
+                assert(selects(production, in: library, bike: bike, channel: "production") &&
+                       !selects(map.development, in: library, bike: bike, channel: "production"),
+                       "Bicino keeps \(id)'s production copy whatever the bike trusts")
+            }
+            // No report now and none recorded with the saved copy (the
+            // manager passes the recorded one): the app's own preference.
+            assertEqual(selection(library, bike: nil), corpus.developmentAppTrust,
+                        "\(id) without any bike report keeps the app's signers")
+            assert(selects(map.development, in: library, bike: nil) &&
+                   !selects(production, in: library, bike: nil),
+                   "\(id) without any bike report keeps the development copy")
+            assertEqual(selection(library, bike: developmentBike), corpus.developmentAppTrust,
+                        "\(id) on development firmware keeps the app's signers")
+            assert(selects(map.development, in: library, bike: developmentBike) &&
+                   !selects(production, in: library, bike: developmentBike),
+                   "Bicino Dev keeps \(id)'s development copy for a bike that trusts it")
+            assertEqual(selection(library, bike: stockBike), corpus.productionTrust,
+                        "\(id) on stock firmware requests only production signers")
+            assert(selects(production, in: library, bike: stockBike) &&
+                   !selects(map.development, in: library, bike: stockBike),
+                   "a saved development copy of \(id) is offered the production copy on stock firmware")
+            assertEqual(install(map, production, on: stockFirmware), .streamV2,
+                        "stock firmware installs the \(id) copy selected for it")
+            assertEqual(install(map, map.development, on: stockFirmware).rejection,
+                        .signingKeyNotTrusted,
+                        "stock firmware refuses the \(id) development copy")
+            assertEqual(install(map, map.development, on: developmentFirmware), .streamV2,
+                        "development firmware installs the \(id) development copy")
+        }
+
+        // Trust is per key, not per tier: after a rotation, a bike that trusts
+        // only the new production key gets that key's copy. An entry counts
+        // only with the exact key fingerprint.
+        let buildings = corpus.map("buildings-3d-v1")
+        guard let updated = buildings.production["production-updated-worker"],
+              let rotated = buildings.production["production-rotated-key"],
+              let rotatedSigner = corpus.productionTrust.capability(for: "map-compat-fixture-prod-2"),
+              let originalSigner = corpus.productionTrust.capability(for: "map-compat-fixture-prod-1") else {
+            corpusFailure("corpus has both production keys")
+        }
+        let rotation = catalogMap(
+            buildings, variants: [buildings.development, updated, rotated], deliveryState: "production"
+        )
+        assert(selects(rotated, in: rotation, bike: [rotatedSigner]) &&
+               !selects(updated, in: rotation, bike: [rotatedSigner]) &&
+               !selects(buildings.development, in: rotation, bike: [rotatedSigner]),
+               "a bike that trusts only the rotated key gets the rotated copy")
+        let forged = "map-compat-fixture-dev-1=" + String(repeating: "0", count: 64)
+        assertEqual(selection(rotation, bike: [forged, originalSigner]),
+                    corpus.developmentAppTrust.restricted(to: [originalSigner]),
+                    "a key ID without its exact fingerprint is not bike trust")
+
+        // With no copy the bike trusts, the app keeps its own preference: a
+        // development-only map stays available to Bicino Dev, as before.
+        let pois = corpus.map("map-pois-v1")
+        let developmentOnly = catalogMap(pois, variants: [pois.development], deliveryState: "development")
+        assertEqual(selection(developmentOnly, bike: stockBike), corpus.developmentAppTrust,
+                    "with no copy the bike trusts, the app's signers decide")
+        assertEqual(
+            OfflineMapCatalogAvailabilityPolicy.availability(
+                for: developmentOnly, channel: "development",
+                trustStore: selection(developmentOnly, bike: stockBike)
+            ),
+            .available,
+            "a development-only map stays available to Bicino Dev"
+        )
+        assert(selects(pois.development, in: developmentOnly, bike: stockBike),
+               "the development-only copy stays current")
+    }
+
+    /// The connected bike's signers come from its authenticated map transfer
+    /// status (BLE or pinned HTTPS) and are forgotten with the connection.
+    @MainActor
+    fileprivate static func testBikeTrustComesFromAuthenticatedStatus(_ corpus: Corpus) {
+        let stockBike = streamTrust(corpus.productionTrust)
+        let developmentBike = streamTrust(corpus.developmentAppTrust)
+        let ble = BLEManager()
+        assertEqual(ble.mapTransferStreamTrust, nil, "no bike trust before a status report")
+        func notify(_ status: [String: Any]) {
+            let body = try! JSONSerialization.data(withJSONObject: status)
+            assert(ble.handleMapTransferStatusNotification(
+                Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + body
+            ), "BLE map transfer status is consumed")
+        }
+        notify(["enabled": false, "protocols": [2], "streamFormatVersions": [1],
+                "streamTrust": stockBike])
+        assertEqual(ble.mapTransferStreamTrust, stockBike, "BLE map status reports the bike's signers")
+        notify(["enabled": false, "protocols": [Int]()])
+        assertEqual(ble.mapTransferStreamTrust, nil,
+                    "firmware without signed map streams reports no signers")
+        ble.applyAuthenticatedMapTransferStatus(deviceStatus(trust: developmentBike, mapReader: nil))
+        assertEqual(ble.mapTransferStreamTrust, developmentBike,
+                    "pinned HTTPS status reports the bike's signers")
+        ble.clearConnectionStateForTesting()
+        assertEqual(ble.mapTransferStreamTrust, nil, "a disconnected bike's signers are forgotten")
     }
 
     fileprivate static func testSavedDurableMapReopensAfterAppUpdate(_ corpus: Corpus) {
