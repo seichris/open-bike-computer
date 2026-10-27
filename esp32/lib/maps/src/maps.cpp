@@ -4353,8 +4353,9 @@ void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
   hint_dsc.font = &lv_font_montserrat_16;
   hint_dsc.align = LV_TEXT_ALIGN_CENTER;
   // Storage is chosen once per boot, so a newly inserted card needs a restart.
+  // Keep that hint on one line: a second line sits under the rider marker.
   hint_dsc.text = sdPresent ? "Download a map\nin the Bicino app"
-                            : "Insert a microSD card\nand restart";
+                            : "Insert a microSD card and restart";
   lv_area_t hint_area = {16, (int16_t)(h / 2 - 6), (int16_t)(w - 17),
                          (int16_t)(h / 2 + 58)};
   lv_draw_label(&layer, &hint_dsc, &hint_area);
