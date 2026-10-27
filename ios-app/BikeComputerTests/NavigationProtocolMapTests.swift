@@ -3313,6 +3313,16 @@ extension NavigationProtocolTests {
             3,
             "the refresh check and both catalog downloads follow the connected bike's map trust"
         )
+        let contentSource = (try? String(
+            contentsOfFile: "ios-app/BikeComputer/BikeComputer/ContentView.swift",
+            encoding: .utf8
+        ))?.filter { !$0.isWhitespace } ?? ""
+        assert(
+            contentSource.contains(
+                "claimPendingShare(deviceStreamTrust:coordinator.bleManager.mapTransferStreamTrust)"
+            ),
+            "a claimed share downloads the copy the connected bike trusts"
+        )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
                 source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&

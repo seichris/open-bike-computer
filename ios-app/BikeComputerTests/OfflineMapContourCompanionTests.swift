@@ -828,7 +828,7 @@ struct OfflineMapContourCompanionTests {
             scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
             let manager = scenario.manager(fixture: fixture)
             check(manager.catalogAvailability(for: map).canDownload, "\(variant) catalog map is downloadable")
-            manager.downloadCatalogMap(map)
+            manager.downloadCatalogMap(map, deviceStreamTrust: nil)
             let finished = await waitForIdle(manager)
             check(finished, "\(variant) catalog download finishes")
             check(manager.errorMessage == nil, "\(variant) catalog map downloads: \(manager.errorMessage ?? "")")
@@ -872,7 +872,7 @@ struct OfflineMapContourCompanionTests {
             let stream = map.artifacts.first { $0.platformArtifact.isBikeMapStream }!
             scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
             let manager = scenario.manager(fixture: fixture)
-            manager.downloadCatalogMap(map)
+            manager.downloadCatalogMap(map, deviceStreamTrust: nil)
             let finished = await waitForIdle(manager)
             check(finished, "\(name) catalog grant finishes")
             check(
@@ -888,6 +888,8 @@ struct OfflineMapContourCompanionTests {
     /// ordinary firmware only production ones. The grant asks only for signers
     /// the connected bike trusts while the library has such a copy, so Bicino
     /// Dev saves the production copy and its companion for stock firmware.
+    /// While no bike reports, the saved copy is judged and updated for the
+    /// bike it was chosen for.
     @MainActor
     static func testCatalogDownloadFollowsBikeTrust(_ fixture: ContourFixture) async {
         let corpus = CompatibilityCorpusContours.load()
@@ -899,10 +901,16 @@ struct OfflineMapContourCompanionTests {
         }
         let everySigner = corpus.appTrust.capabilityHeaderValue?
             .split(separator: ",").map(String.init) ?? []
-        let cases: [(bike: String, trust: [String]?, requested: [String], tier: String)] = [
-            ("unreported", nil, everySigner, "development"),
-            ("development", everySigner, everySigner, "development"),
-            ("stock", corpus.productionSigners, corpus.productionSigners, "production"),
+        // Whether Saved Maps offers an update with no bike, a stock bike and a
+        // bike that trusts the development key connected.
+        let cases: [(
+            bike: String, trust: [String]?, requested: [String], tier: String,
+            refresh: (none: Bool, stock: Bool, development: Bool)
+        )] = [
+            ("unreported", nil, everySigner, "development", (false, true, false)),
+            ("development", everySigner, everySigner, "development", (false, true, false)),
+            ("stock", corpus.productionSigners, corpus.productionSigners, "production",
+             (false, false, true)),
         ]
         for item in cases {
             let scenario = ContourScenario(
@@ -946,6 +954,36 @@ struct OfflineMapContourCompanionTests {
                   "\(item.bike) bike: saves the \(item.tier) copy")
             check(association.streamArtifactSHA256 == stream(item.tier).sha256,
                   "\(item.bike) bike: companion is bound to the \(item.tier) copy")
+            guard let row = manager.savedMapListItems(activeDeviceMap: nil).first(where: {
+                $0.catalogMap?.mapEntryId == corpus.map.mapEntryId
+            }) else {
+                fail("\(item.bike) bike: the saved copy is a library row")
+            }
+            check(manager.catalogArtifactNeedsRefresh(for: row, deviceStreamTrust: nil) ==
+                    item.refresh.none,
+                  "\(item.bike) bike: update offer with no bike connected")
+            check(manager.catalogArtifactNeedsRefresh(
+                    for: row, deviceStreamTrust: corpus.productionSigners
+                  ) == item.refresh.stock,
+                  "\(item.bike) bike: update offer on stock firmware")
+            check(manager.catalogArtifactNeedsRefresh(for: row, deviceStreamTrust: everySigner) ==
+                    item.refresh.development,
+                  "\(item.bike) bike: update offer on development firmware")
+
+            // An update with no bike connected keeps choosing for that bike.
+            manager.downloadCatalogMap(corpus.map, deviceStreamTrust: nil)
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, manager.isBusy || ContourCompanionURLProtocol.requestPaths
+                .filter({ $0.hasSuffix("/download-grants") }).count < 2 {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            check(manager.errorMessage == nil,
+                  "\(item.bike) bike: update downloads: \(manager.errorMessage ?? "")")
+            check(requests == [item.requested, item.requested],
+                  "\(item.bike) bike: update requests \(item.requested) again: \(requests)")
+            check(manager.downloadedPackURL.flatMap(SavedMapArtifactMetadataStore.load(for:))?
+                    .primaryArtifact?.sha256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: update keeps the \(item.tier) copy")
         }
 
         // A grant outside the signers the bike trusts is refused before download.

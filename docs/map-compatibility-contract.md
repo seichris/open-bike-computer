@@ -156,6 +156,9 @@ message never points to a firmware build.
   terrain layer goes to any bike that reports `mapReader` (older firmware needs
   the terrain experiment). A URL refresh compares only immutable artifact
   identity, so a new approval or backend version cannot break a re-download.
+  Shared-library downloads prefer the copies whose signer the connected bike
+  reports in `streamTrust` (or, with no bike reporting, the bike the saved copy
+  was chosen for), so Bicino Dev gives stock firmware the production copy.
 - **Firmware.** The HTTPS and BLE map transfer status report `mapReader`. The
   report is derived from the same compile flags that decide which renderer
   targets the parser admits. The parser still rejects unknown formats, untrusted

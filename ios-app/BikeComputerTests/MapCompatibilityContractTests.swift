@@ -666,11 +666,13 @@ enum MapCompatibilityContractTests {
                        !selects(map.development, in: library, bike: bike, channel: "production"),
                        "Bicino keeps \(id)'s production copy whatever the bike trusts")
             }
+            // No report now and none recorded with the saved copy (the
+            // manager passes the recorded one): the app's own preference.
             assertEqual(selection(library, bike: nil), corpus.developmentAppTrust,
-                        "\(id) without a bike report keeps the app's signers")
+                        "\(id) without any bike report keeps the app's signers")
             assert(selects(map.development, in: library, bike: nil) &&
                    !selects(production, in: library, bike: nil),
-                   "\(id) without a bike report keeps the development copy")
+                   "\(id) without any bike report keeps the development copy")
             assertEqual(selection(library, bike: developmentBike), corpus.developmentAppTrust,
                         "\(id) on development firmware keeps the app's signers")
             assert(selects(map.development, in: library, bike: developmentBike) &&
