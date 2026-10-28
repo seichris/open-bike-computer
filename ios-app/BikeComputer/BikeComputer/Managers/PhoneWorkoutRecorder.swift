@@ -9,7 +9,7 @@ import HealthKit
 @MainActor
 final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     enum RecorderError: Error {
-        case unavailable, identityMismatch, ambiguousFinish, emptySaveResult
+        case unavailable, identityMismatch, ambiguousFinish
     }
     nonisolated static let ownerMetadataKey = "org.bicino.recordingOwner.v1"
     nonisolated static let segmentMetadataKey = "org.bicino.phoneSegment.v1"
@@ -18,6 +18,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private(set) var record: WorkoutRecordingRecord?
     private(set) var message: String?
     private let healthStore: HKHealthStore
+    private let savedWorkoutLookup: (@MainActor (UUID) async throws -> HKWorkout?)?
+    private let finishWorkoutCallback: @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void
+    private let nativeTransitionWrite: @MainActor (HKLiveWorkoutBuilder, HKWorkoutEvent) async throws -> Void
+    private var recoveryAttachmentPending = false
     private let persistence: any WorkoutRecordingPersisting
     private let onRecoveredMirror: (HKWorkoutSession) -> Void
     private let canStartAfterAuthorization: () -> Bool
@@ -58,6 +62,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var pauseOrigin: WorkoutTransitionOrigin?
     private var lastTransitionOrigin: WorkoutTransitionOrigin?
     private var lastTransitionAt: Date?
+    // A locked-device save can succeed without returning a readable object.
+    private var saveConfirmed = false
     private var savedWorkout: HKWorkout?
 
     private struct LocationWrite {
@@ -76,10 +82,20 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         healthStore: HKHealthStore = HKHealthStore(),
         onRecoveredMirror: @escaping (HKWorkoutSession) -> Void = { _ in },
         canStartAfterAuthorization: @escaping () -> Bool = { true },
-        requestLocationAuthorization: @escaping () -> Void = {}
+        requestLocationAuthorization: @escaping () -> Void = {},
+        finishWorkoutCallback: @escaping @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void = { builder, completion in
+            builder.finishWorkout(completion: completion)
+        },
+        savedWorkoutLookup: (@MainActor (UUID) async throws -> HKWorkout?)? = nil,
+        nativeTransitionWrite: @escaping @MainActor (HKLiveWorkoutBuilder, HKWorkoutEvent) async throws -> Void = { builder, event in
+            try await builder.addWorkoutEvents([event])
+        }
     ) {
         self.persistence = persistence
         self.healthStore = healthStore
+        self.finishWorkoutCallback = finishWorkoutCallback
+        self.savedWorkoutLookup = savedWorkoutLookup
+        self.nativeTransitionWrite = nativeTransitionWrite
         self.onRecoveredMirror = onRecoveredMirror
         self.canStartAfterAuthorization = canStartAfterAuthorization
         self.requestLocationAuthorization = requestLocationAuthorization
@@ -175,7 +191,15 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     /// Called before ANY new start, including on an ordinary cold launch.
     /// A missing/corrupt record is not proof that HealthKit has no primary session.
     func recover(expected: WorkoutRecordingRecord?) async throws {
-        guard session == nil else { return }
+        if let session {
+            guard recoveryAttachmentPending else { return }
+            guard let builder, let record,
+                  expected == nil || (expected?.owner == .iphone && expected?.sessionID == record.sessionID) else {
+                throw RecorderError.identityMismatch
+            }
+            try await attachRecoveredPrimarySession(session, builder: builder, record: record)
+            return
+        }
         let recovered: HKWorkoutSession?
         do {
             recovered = try await withCheckedThrowingContinuation { continuation in
@@ -211,6 +235,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             store.beginLocalWorkout()
             startDate = expected.startedAt
             if expected.phase == .finished {
+                saveConfirmed = expected.finishedChoice == .save
                 if expected.finishedChoice == .save,
                    let workout = try? await findSavedWorkout(id: expected.sessionID) {
                     savedWorkout = workout
@@ -229,6 +254,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             // crash. Query the original identity; never re-record the workout.
             if let workout = try await findSavedWorkout(id: expected.sessionID) {
                 savedWorkout = workout
+                saveConfirmed = true
                 startDate = workout.startDate
                 endDate = workout.endDate
                 var next = expected
@@ -264,6 +290,16 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             owner: .iphone, sessionID: id, requestedAt: recovered.startDate ?? Date()
         )
         next.startedAt = recovered.startDate ?? next.startedAt
+        try await attachRecoveredPrimarySession(recovered, builder: builder, record: next)
+    }
+
+    /// Completes attachment only after the original builder's pending events
+    /// have durable receipts. Retain this same attachment when a write fails.
+    func attachRecoveredPrimarySession(
+        _ recovered: HKWorkoutSession, builder: HKLiveWorkoutBuilder,
+        record next: WorkoutRecordingRecord
+    ) async throws {
+        let id = next.sessionID
         guard let date = next.startedAt else { throw RecorderError.identityMismatch }
         try persist(next)
         self.session = recovered
@@ -276,7 +312,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         builder.delegate = self
         recordBuilderDebugCheckpoint(reason: "recoveredBeforeDataSource")
         configureDataSource(builder, configuration: recovered.workoutConfiguration)
+        recoveryAttachmentPending = true
         try await drainNativeTransitions(builder: builder, sessionID: id)
+        guard self.session === recovered, self.builder === builder,
+              record?.sessionID == id else { throw RecorderError.identityMismatch }
         store.beginLocalWorkout()
         generation = UUID()
         sequence = 0
@@ -287,10 +326,12 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         timestampGate = WorkoutRouteTimestampGate(workoutStart: Date())
         restoreSegments(builder)
         if next.phase == .finished {
+            saveConfirmed = next.finishedChoice == .save
             // A terminal tombstone must never re-enter finishWorkout.
             if next.finishedChoice == .discard { builder.discardWorkout(); routeBuilder?.discard() }
             recovered.end()
             state = .ended
+            recoveryAttachmentPending = false
             publish()
             return
         }
@@ -304,6 +345,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             state = .starting
         @unknown default: throw RecorderError.identityMismatch
         }
+        recoveryAttachmentPending = false
         publish()
         startTimer()
         if let choice = next.finishChoice {
@@ -442,7 +484,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         collectionEnded = true
                     }
                     if routeWriteFailed && !recoveredRoute && insertedRoutePoints == 0 { routeBuilder?.discard() }
-                    if savedWorkout != nil {
+                    if saveConfirmed {
                         // HealthKit already confirmed success; only the local
                         // tombstone write failed. Do not require read permission
                         // or call finishWorkout again to retry that disk write.
@@ -451,6 +493,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                             throw RecorderError.ambiguousFinish
                         }
                         savedWorkout = existing
+                        saveConfirmed = true
                     } else {
                         // Set before calling out: a failed/ambiguous completion
                         // is reconciled, not blindly retried or rebuilt.
@@ -459,6 +502,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         try persist(attempted)
                         finishAttempted = true
                         savedWorkout = try await finishWorkout(builder)
+                        saveConfirmed = true
                     }
                 }
                 try complete(choice)
@@ -469,7 +513,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 routeBuilder = nil
                 timer?.cancel()
                 timer = nil
-                publish()
+                // complete(.save) published the builder's final statistics.
+                // A locked save can return no readable workout; preserve that
+                // snapshot after releasing the only remaining metric source.
+                if choice == .discard || savedWorkout != nil { publish() }
             } catch {
                 guard self.record?.sessionID == id else { return }
                 message = "iPhone could not confirm the finish. Unlock it and retry the same finish choice. Check Apple Health before recording again."
@@ -504,7 +551,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         sequence = 0; generation = UUID(); token = UInt16.random(in: 1...UInt16.max)
         collectionStarted = false; collectionEnded = false; finishAttempted = false
         routeWriteFailed = false; distanceWriteFailed = false; recoveredRoute = false
-        insertedRoutePoints = 0; savedWorkout = nil
+        insertedRoutePoints = 0; savedWorkout = nil; saveConfirmed = false
+        recoveryAttachmentPending = false
         startDate = nil; endDate = nil; latestLocation = nil; lastLocation = nil
         locationQueue.reset(); segments = WorkoutSegmentAccumulator()
         timestampGate = nil; pauseOrigin = nil; lastTransitionOrigin = nil; lastTransitionAt = nil
@@ -560,10 +608,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         || ($0.type == type && $0.dateInterval.start == intent.capturedAt)
                 }
                 if !alreadyWritten {
-                    try await builder.addWorkoutEvents([HKWorkoutEvent(
+                    try await nativeTransitionWrite(builder, HKWorkoutEvent(
                         type: type, dateInterval: DateInterval(start: intent.capturedAt, duration: 0),
                         metadata: [Self.nativeTransitionMetadataKey: intent.id.uuidString]
-                    )])
+                    ))
                 }
                 guard self.builder === builder, var next = record,
                       next.sessionID == sessionID, next.finishChoice != .discard else { return }
@@ -788,6 +836,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     private func findSavedWorkout(id: UUID) async throws -> HKWorkout? {
+        if let savedWorkoutLookup { return try await savedWorkoutLookup(id) }
         let identity = HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: [id.uuidString])
         let ownSource = HKQuery.predicateForObjects(from: HKSource.default())
         return try await withCheckedThrowingContinuation { continuation in
@@ -804,15 +853,33 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         }
     }
 
-    private func finishWorkout(_ builder: HKLiveWorkoutBuilder) async throws -> HKWorkout {
+    private func finishWorkout(_ builder: HKLiveWorkoutBuilder) async throws -> HKWorkout? {
         try await withCheckedThrowingContinuation { continuation in
-            builder.finishWorkout { workout, error in
+            finishWorkoutCallback(builder) { workout, error in
                 if let error { continuation.resume(throwing: error) }
-                else if let workout { continuation.resume(returning: workout) }
-                else { continuation.resume(throwing: RecorderError.emptySaveResult) }
+                else { continuation.resume(returning: workout) }
             }
         }
     }
+
+#if WORKOUT_CONTRACT_XCTEST
+    func configureFinalizationForTesting(session: HKWorkoutSession, record: WorkoutRecordingRecord) {
+        self.session = session
+        self.builder = session.associatedWorkoutBuilder()
+        self.record = record
+        startDate = record.startedAt
+        endDate = Date()
+        state = .ending
+        collectionStarted = true
+        collectionEnded = true
+        store.beginLocalWorkout()
+    }
+
+    func finalizeForTesting() async {
+        beginFinalization()
+        await finalization?.value
+    }
+#endif
 
     private static var distanceType: HKQuantityType { HKQuantityType(.distanceCycling) }
     private static var heartRateType: HKQuantityType { HKQuantityType(.heartRate) }
