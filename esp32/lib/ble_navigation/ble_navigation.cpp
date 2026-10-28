@@ -12,6 +12,7 @@ extern Power power;
 #include "ble_navigation.hpp"
 #include "../utils/src/runtime_ownership.hpp"
 #include "../utils/src/startup_constructed.hpp"
+#include "../utils/src/task_data_placement.hpp"
 #include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -351,20 +352,20 @@ struct OutgoingScreenConfigurationSnapshot {
 
 static StaticSemaphore_t screenConfigurationMutexStorage;
 static SemaphoreHandle_t screenConfigurationMutex = nullptr;
-static screen_configuration_protocol::UploadReassembler
+static BICINO_TASK_DATA screen_configuration_protocol::UploadReassembler
     screenConfigurationUpload;
-static StartupConstructed<PendingScreenConfigurationControl>
+static BICINO_TASK_DATA StartupConstructed<PendingScreenConfigurationControl>
     pendingScreenConfigurationStorage;
 static PendingScreenConfigurationControl &pendingScreenConfiguration =
     pendingScreenConfigurationStorage.value;
-static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
+static BICINO_TASK_DATA OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
 static std::atomic<bool> screenConfigurationSnapshotActive{false};
 static std::atomic<bool> screenConfigurationResetRequested{false};
 static bool screenConfigurationAckPending = false;
 static uint32_t screenConfigurationAckRequestID = 0;
 static screen_configuration::CommitOutcome screenConfigurationAckOutcome{};
 static NimBLECharacteristic *screenConfigurationCharacteristic = nullptr;
-static std::array<uint8_t,
+static BICINO_TASK_DATA std::array<uint8_t,
                   screen_configuration_protocol::MAX_DOCUMENT_BYTES>
     processingScreenConfigurationDocument{};
 
