@@ -2102,8 +2102,10 @@ InstallStatus MapTransferInstaller::readPreparedOperation(
 }
 
 InstallStatus MapTransferInstaller::readStreamMapMetadata(
-    const std::string &sessionId, ReadyStreamMap &ready, bool prepared) const {
+    const std::string &sessionId, ReadyStreamMap &ready, bool prepared,
+    std::string *validatedMarker) const {
   ready = ReadyStreamMap();
+  if (validatedMarker) validatedMarker->clear();
   if (!safeId(sessionId))
     return fail("stream_session_id", "stream session ID is invalid");
   ready.sessionId = sessionId;
@@ -2140,7 +2142,7 @@ InstallStatus MapTransferInstaller::readStreamMapMetadata(
     candidate.fileCount = static_cast<uint32_t>(fileCount);
     return true;
   };
-  std::string value;
+  std::string value, selectedMarker;
   bool markerFound = false;
   const bool operationReady = prepared || fileExists(joinPath(root, ".operation-ready")) ||
                               fileExists(joinPath(root, ".operation-ready.bak"));
@@ -2152,6 +2154,7 @@ InstallStatus MapTransferInstaller::readStreamMapMetadata(
             return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
           })))) {
       ready = std::move(candidate);
+      if (validatedMarker) selectedMarker = value;
       markerFound = true;
       break;
     }
@@ -2215,16 +2218,18 @@ InstallStatus MapTransferInstaller::readStreamMapMetadata(
                   "stream completion checkpoint is invalid");
     }
   }
+  if (validatedMarker) *validatedMarker = std::move(selectedMarker);
   return {true, "stream_ready", ""};
 }
 
 InstallStatus MapTransferInstaller::promotePreparedOperation(
     const std::string &sessionId, const std::string &operationID) const {
   ReadyStreamMap metadata;
-  auto status = readPreparedOperation(sessionId, metadata);
+  std::string marker;
+  auto status = readStreamMapMetadata(sessionId, metadata, true, &marker);
   if (!status.ok) {
     // A prior promotion may have completed before its response was lost.
-    status = readReadyStreamMap(sessionId, metadata);
+    status = readStreamMapMetadata(sessionId, metadata, false, &marker);
     if (!status.ok) return status;
   }
   if (metadata.operationID != operationID || operationID.empty() ||
@@ -2232,12 +2237,8 @@ InstallStatus MapTransferInstaller::promotePreparedOperation(
                             sessionId, metadata.manifestReceipt, metadata.signedManifestReceipt))
     return fail("operation_not_accepted", "prepared map has no matching accepted commit");
   const std::string root = joinPath(storageRoot_, metadata.root);
-  std::string marker;
-  if ((!readTextFile(joinPath(root, ".operation-prepared"), marker, 2048) &&
-       !readTextFile(joinPath(root, ".operation-prepared.bak"), marker, 2048)) &&
-      (!readTextFile(joinPath(root, ".operation-ready"), marker, 2048) &&
-       !readTextFile(joinPath(root, ".operation-ready.bak"), marker, 2048)))
-    return fail("operation_prepared_missing", "prepared metadata cannot be read");
+  // Publish the exact envelope that passed semantic and receipt validation.
+  // A readable but torn primary must not replace its verified backup here.
   if (!writeTextFileAtomic(joinPath(root, ".operation-ready"), marker))
     return fail("operation_ready_write", "accepted map ready marker needs recovery");
   const std::string pending =
@@ -2913,13 +2914,16 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
                     "could not clear invalid stream selection");
       }
     }
-    const bool cleaned = removeTree(joinPath(storageRoot_, root)) &&
+    // A reactivation may have reused completed library bytes. Apply the same
+    // protection/retention checks as runtime rollback, including fail-closed
+    // handling when the retained completion evidence cannot be verified.
+    const bool cleaned = discardUnselectedStreamMap(sessionId).ok &&
                          clearPendingStreamActivation(sessionId) &&
                          removeTree(transactionPath + ".tmp") &&
                          removeTree(transactionPath + ".bak") &&
                          removeTree(transactionPath);
     return cleaned ? InstallStatus{true, "recovered_rollback",
-                                   "discarded invalid ready stream map"}
+                                   "reconciled invalid ready stream map"}
                    : fail("stream_transaction_cleanup",
                           "could not clean invalid stream transaction");
   }
@@ -2963,7 +2967,10 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
     if (!writeActiveMap(rollback))
       return fail("stream_transaction_recovery",
                   "could not restore previous map after invalid pointer");
-    const bool cleaned = removeTree(joinPath(storageRoot_, root)) &&
+    // A reactivation may have reused completed library bytes. Apply the same
+    // protection/retention checks as runtime rollback, including fail-closed
+    // handling when the retained completion evidence cannot be verified.
+    const bool cleaned = discardUnselectedStreamMap(sessionId).ok &&
                          clearPendingStreamActivation(sessionId) &&
                          removeTree(transactionPath + ".tmp") &&
                          removeTree(transactionPath + ".bak") &&
