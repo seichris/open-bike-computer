@@ -22,17 +22,33 @@ void encodeContact(uint8_t *data, std::size_t offset, uint8_t id,
 } // namespace
 
 int main() {
-  using waveshare_board::touch_sampling_policy::shouldAttemptRead;
+  using waveshare_board::touch_sampling_policy::ReadWindow;
 
-  assert(shouldAttemptRead(true, false, false, false, 1000, 0));
-  assert(!shouldAttemptRead(false, false, false, false, 1000, 0));
-  assert(shouldAttemptRead(false, true, false, false, 1000, 0));
-  assert(shouldAttemptRead(false, false, true, false, 1000, 0));
-  assert(shouldAttemptRead(false, false, false, true, 1000, 0));
-  assert(shouldAttemptRead(false, false, false, false, 999, 1000));
-  assert(!shouldAttemptRead(false, false, false, false, 1000, 1000));
-  assert(shouldAttemptRead(false, false, false, false, UINT32_MAX - 2, 2));
-  assert(!shouldAttemptRead(false, false, false, false, 2, UINT32_MAX - 2));
+  ReadWindow reads;
+  // A cold, untouched controller stays quiet, including after long uptime.
+  for (uint32_t now : {0U, 400U, 10000U, 0x80000000U, UINT32_MAX}) {
+    assert(!reads.shouldAttemptRead(false, false, false, now));
+  }
+  // A pulse that ended during rendering still starts an immediate attempt.
+  assert(reads.shouldAttemptRead(false, false, true, 1000));
+  reads.arm(1000, 700);
+  // Failure/no-frame on the first attempt must not strand the latched event.
+  assert(reads.shouldAttemptRead(false, false, false, 1100));
+  assert(reads.shouldAttemptRead(false, false, false, 1699));
+  assert(!reads.shouldAttemptRead(false, false, false, 1700));
+  assert(!reads.shouldAttemptRead(false, false, false, UINT32_MAX));
+  // Sparse interrupts cannot stop a held/dragged contact. Release ends that
+  // exemption; only genuine activity rearms the follow-up window.
+  assert(reads.shouldAttemptRead(false, true, false, 1800));
+  assert(reads.shouldAttemptRead(true, false, false, 1800));
+  reads.arm(1800, 700);
+  assert(reads.shouldAttemptRead(false, false, false, 2499));
+  assert(!reads.shouldAttemptRead(false, false, false, 2500));
+  // The window expires across millis rollover and cannot resurrect later.
+  reads.arm(UINT32_MAX - 99, 700);
+  assert(reads.shouldAttemptRead(false, false, false, 599));
+  assert(!reads.shouldAttemptRead(false, false, false, 600));
+  assert(!reads.shouldAttemptRead(false, false, false, UINT32_MAX - 99));
 
   // Both CST9217 and FT3168 use the same generation gate. A new edge bypasses
   // throttling once, failure on that attempt does not create a busy retry

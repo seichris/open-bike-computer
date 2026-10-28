@@ -637,7 +637,10 @@ static uint32_t touchBackoffUntilMs = 0;
 static uint32_t lastTouchErrorLogMs = 0;
 static uint32_t lastTouchDebugLogMs = 0;
 static uint32_t lastTouchRawLogMs = 0;
-static uint32_t touchFastPollUntilMs = 0;
+static waveshare_board::touch_sampling_policy::ReadWindow touchReadWindow;
+#if DEVICE_REMOTE_DEBUG
+static uint32_t touchReadAttempts = 0;
+#endif
 static uint32_t lastValidTouchMs = 0;
 static uint32_t lastTouchHintActiveMs = 0;
 static uint32_t lastTouchHintChangeMs = 0;
@@ -784,8 +787,8 @@ static bool updateTouchHintState(bool active, uint32_t now) {
   if (changed) {
     lastTouchHintChangeMs = now;
     if (active) {
-      touchFastPollUntilMs =
-          now + waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS;
+      touchReadWindow.arm(
+          now, waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS);
     }
   }
 
@@ -795,6 +798,13 @@ static bool updateTouchHintState(bool active, uint32_t now) {
     Serial.printf("Touch debug: init=%d int=%s pressed=%d hint_age_ms=%lu\n",
                   touchInitialized, active ? "LOW(active)" : "HIGH(idle)",
                   touchPressed, static_cast<unsigned long>(msSinceHintChange));
+#if DEVICE_REMOTE_DEBUG
+    Serial.printf("TOUCH_TIMING schema=1 irq=%lu attemptedIrq=%lu reads=%lu window=%u\n",
+                  static_cast<unsigned long>(touchInterruptGeneration),
+                  static_cast<unsigned long>(attemptedTouchInterruptGeneration),
+                  static_cast<unsigned long>(touchReadAttempts),
+                  touchReadWindow.active(now) ? 1U : 0U);
+#endif
     lastTouchDebugLogMs = now;
     lastTouchHintActive = active;
     touchHintStateKnown = true;
@@ -830,7 +840,7 @@ static uint32_t touchReadInterval(bool hintActive, bool hintChanged,
           waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS) {
     return waveshare_board::touch::RECENT_HINT_READ_INTERVAL_MS;
   }
-  if (now < touchFastPollUntilMs) {
+  if (touchReadWindow.active(now)) {
     return waveshare_board::touch::FAST_FALLBACK_READ_INTERVAL_MS;
   }
   return waveshare_board::touch::IDLE_FALLBACK_READ_INTERVAL_MS;
@@ -936,6 +946,10 @@ void readTouch() {
     // Consume the one immediate attempt before initialization so an init
     // failure cannot leave the map renderer permanently interrupted.
     attemptedTouchInterruptGeneration = interruptGenerationBeforeAttempt;
+    // A latched pulse may already be HIGH by the time this task runs. Keep
+    // retries possible after that first attempt without polling forever idle.
+    touchReadWindow.arm(
+        now, waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS);
   }
   bool touchHintChanged = updateTouchHintState(touchHintActive, now);
 
@@ -958,13 +972,11 @@ void readTouch() {
     }
   }
 
-  // The CST9217's GPIO21 pulse is not a persistent touch level on the tested
-  // 1.75-inch board, so the existing throttled reader must retain its idle
-  // fallback even when automatic light sleep is enabled.
-  constexpr bool kAllowIdleFallback = true;
-  if (!waveshare_board::touch_sampling_policy::shouldAttemptRead(
-          kAllowIdleFallback, touchHintActive, touchPressed, interruptPending,
-          now, touchFastPollUntilMs)) {
+  // Read after a latched edge, while a contact is active, or during the
+  // bounded follow-up window. GPIO21 need not remain LOW. Do not issue idle
+  // register-pointer writes when there has been no touch activity.
+  if (!touchReadWindow.shouldAttemptRead(
+          touchHintActive, touchPressed, interruptPending, now)) {
     return;
   }
 
@@ -974,6 +986,9 @@ void readTouch() {
     return;
   }
   lastTouchReadMs = now;
+#if DEVICE_REMOTE_DEBUG
+  ++touchReadAttempts;
+#endif
 
   uint8_t data[waveshare_board::touch::CST9217_DATA_LENGTH] = {0};
   if (!readCst9217Register(waveshare_board::touch::CST9217_DATA_REG, data,
@@ -1037,8 +1052,8 @@ void readTouch() {
   }
 
   lastValidTouchMs = now;
-  touchFastPollUntilMs =
-      now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
+  touchReadWindow.arm(
+      now, waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS);
   updatePrimaryTouch(activeFrame);
   previousRawTouchFrame = activeFrame;
   publishTouchFrame(activeFrame, now);
