@@ -175,7 +175,11 @@ std::string formatSize(uint64_t size) {
 /**
  * @brief Storage Class constructor
  */
-Storage::Storage() : isSdLoaded(false), card(nullptr) {}
+Storage::Storage() : isSdLoaded(false), card(nullptr) {
+  // Construct once before any producer can publish this Storage instance.
+  mountMutex = xSemaphoreCreateMutexStatic(&mountMutexStorage_);
+  configASSERT(mountMutex != nullptr);
+}
 
 bool Storage::pollShutdownQuiescence() {
   streamAdmission_.closeAdmission();
@@ -241,8 +245,6 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
-  if (mountMutex == nullptr)
     return false;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
 
@@ -260,14 +262,13 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
   }
 #endif
   if (!ready) {
-    // The FFat fallback shares /sdcard with the removable card. Retrying the
-    // removable mount would have to unmount FFat and invalidate every map/file
-    // handle in the application. Automatic diagnostics recovery therefore
-    // retries only when no fallback is active. Existing explicit callers that
-    // allow the fallback retain the historical remount-and-restore behavior.
-    if (!storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
-            isSdLoaded.load(), internalFallbackMounted.load()) &&
-        !allowInternalFallback) {
+    // Map/font readers also own raw POSIX descriptors, outside this mutex
+    // and the wrapper stream registry. Only the complete shutdown barrier
+    // may revoke an existing backend; a failed health probe is not that ACK.
+    // Keep the volume (and its task-stack capability requirements) stable
+    // for this boot. First-mount retries remain possible when no owner exists.
+    if (mountedBackend.load() != StorageBackend::Unavailable ||
+        internalFallbackMounted.load()) {
       xSemaphoreGive(mountMutex);
       return false;
     }
@@ -366,8 +367,6 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     return StoragePreparation::MountFailed;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr) {
     lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return StoragePreparation::MountFailed;
@@ -405,8 +404,17 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
   }
 
   xSemaphoreGive(mountMutex);
-  if (!ensureSdMounted(false))
-    return lastDiagnosticsMountResult.load();
+  if (!ensureSdMounted(false)) {
+    // Refusing to revoke a live backend does not run initSD(), so the last
+    // mount result may still describe an earlier successful mount. Never
+    // let that cached readiness admit a new diagnostics transfer.
+    auto result = lastDiagnosticsMountResult.load();
+    if (ride_diagnostics::transfer_policy::storageReady(result))
+      result = StoragePreparation::MountFailed;
+    diagnosticsSdHealthy = false;
+    lastDiagnosticsMountResult = result;
+    return result;
+  }
   return prepareDiagnosticsStorage();
 }
 

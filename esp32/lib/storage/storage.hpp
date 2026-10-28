@@ -137,8 +137,7 @@ private:
   static void shutdownTask(void *context);
   // True when /sdcard is currently backed by the main-branch FFat fallback.
   // Diagnostics must not treat this as removable-SD availability, but a
-  // failed SD retry must restore it so the rest of the application keeps the
-  // same fallback behavior as the non-diagnostics firmware.
+  // live backend remains mounted until every file owner acknowledges shutdown.
   std::atomic<bool> internalFallbackMounted{false};
   // Recorder health is separate from the physical mount. A write fault must
   // not unmount SD beneath map/font readers or an in-flight diagnostics GET.
@@ -152,6 +151,7 @@ private:
       lastDiagnosticsMountResult{
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
   sdmmc_card_t *card;
+  StaticSemaphore_t mountMutexStorage_{};
   SemaphoreHandle_t mountMutex = nullptr;
 
 public:
@@ -162,9 +162,9 @@ public:
   // Starts a dedicated internal-stack unmount task; never waits on the UI.
   bool pollShutdownQuiescence();
   esp_err_t initSD();
-  // Remount the removable card when requested. Existing callers retain the
-  // FFat fallback by default. Diagnostics keeps whichever backend owns
-  // /sdcard stable for the complete boot.
+  // Validate the removable mount or mount it if no backend owns /sdcard.
+  // An unhealthy live backend requires a restart: retry cannot invalidate
+  // renderer/font handles. A first mount may use FFat if the caller allows it.
   bool ensureSdMounted(bool allowInternalFallback = true);
   void markSdUnavailable();
   bool hasInternalFallbackMounted() const;

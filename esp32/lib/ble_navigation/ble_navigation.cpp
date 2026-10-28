@@ -5894,28 +5894,23 @@ static void processPendingMapInputs() {
                            route.delivery.leaseGeneration);
   }
   processInput(takeSlot(pendingGpsInput));
-  while (true) {
+  // Bound each UI turn even when callbacks continuously refill settings.
+  // Round-robin selection also prevents a busy low ID starving older slots.
+  constexpr size_t kSettingsPerTurn = 4;
+  static size_t nextSettingId = 0; // Main-loop owner only.
+  for (size_t applied = 0; applied < kSettingsPerTurn; ++applied) {
     PendingMapInput input{};
     if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
       break;
     }
     int16_t pendingSettingId = -1;
-    for (size_t byteIndex = 0; byteIndex < MAP_SETTING_MASK_BYTES;
-         ++byteIndex) {
-      const uint8_t bits = pendingSettingMask[byteIndex];
-      if (bits == 0) {
-        continue;
-      }
-      for (uint8_t bit = 0; bit < 8; ++bit) {
-        if ((bits & static_cast<uint8_t>(1U << bit)) != 0) {
-          pendingSettingId =
-              static_cast<int16_t>(byteIndex * 8 + bit);
-          pendingSettingMask[byteIndex] &=
-              static_cast<uint8_t>(~(1U << bit));
-          break;
-        }
-      }
-      if (pendingSettingId >= 0) {
+    for (size_t offset = 0; offset < MAP_SETTING_SLOT_COUNT; ++offset) {
+      const size_t id = (nextSettingId + offset) % MAP_SETTING_SLOT_COUNT;
+      const uint8_t bit = static_cast<uint8_t>(1U << (id % 8));
+      if ((pendingSettingMask[id / 8] & bit) != 0) {
+        pendingSettingId = static_cast<int16_t>(id);
+        pendingSettingMask[id / 8] &= static_cast<uint8_t>(~bit);
+        nextSettingId = (id + 1) % MAP_SETTING_SLOT_COUNT;
         break;
       }
     }
@@ -5934,6 +5929,9 @@ static void processPendingMapInputs() {
       break;
     }
     processInput(input);
+  }
+  if (pendingMapInputCount.load(std::memory_order_acquire) != 0) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   }
 }
 
