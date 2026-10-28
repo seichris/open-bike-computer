@@ -799,7 +799,8 @@ static bool updateTouchHintState(bool active, uint32_t now) {
                   touchInitialized, active ? "LOW(active)" : "HIGH(idle)",
                   touchPressed, static_cast<unsigned long>(msSinceHintChange));
 #if DEVICE_REMOTE_DEBUG
-    Serial.printf("TOUCH_TIMING schema=1 irq=%lu attemptedIrq=%lu reads=%lu window=%u\n",
+    Serial.printf("TOUCH_TIMING schema=1 pin=%u irq=%lu attemptedIrq=%lu reads=%lu window=%u\n",
+                  static_cast<unsigned>(waveshare_board::touch::CST9217_INT_PIN),
                   static_cast<unsigned long>(touchInterruptGeneration),
                   static_cast<unsigned long>(attemptedTouchInterruptGeneration),
                   static_cast<unsigned long>(touchReadAttempts),
@@ -973,7 +974,7 @@ void readTouch() {
   }
 
   // Read after a latched edge, while a contact is active, or during the
-  // bounded follow-up window. GPIO21 need not remain LOW. Do not issue idle
+  // bounded follow-up window. TP_INT need not remain LOW. Do not issue idle
   // register-pointer writes when there has been no touch activity.
   if (!touchReadWindow.shouldAttemptRead(
           touchHintActive, touchPressed, interruptPending, now)) {

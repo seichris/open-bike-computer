@@ -2735,9 +2735,9 @@ void loop() {
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
 #ifdef WAVESHARE_AMOLED_175
-  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
-  // low-level state as a supplemental wake signal; decoded-frame activity from
-  // the throttled reader remains authoritative.
+  // TP_INT (GPIO11) may return HIGH before the latched edge is serviced. Keep
+  // its current LOW level as a supplemental wake signal; decoded-frame
+  // activity from the throttled reader remains authoritative.
   touchWake = display_inactivity::touchWakeRequested(
       currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif

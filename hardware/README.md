@@ -377,7 +377,7 @@ card, and factory firmware.
 | Component | IC | Bus | Address / Notes |
 |---|---|---|---|
 | Power Management | AXP2101 | I2C | 0x34; provides board power and charging; firmware treats output-rail registers as read-only |
-| Touch Controller | CST9217 | I2C | 0x5A; latched GPIO21 edge plus active-contact/bounded follow-up reads |
+| Touch Controller | CST9217 | I2C | 0x5A; latched GPIO11 edge plus active-contact/bounded follow-up reads |
 | I/O Expander | TCA9554 | I2C | 0x20; controls CST9217 reset on P0 |
 | RTC | PCF85063 | I2C | 0x51; on AXP2101 RTC rail, but no full power-removal retention on the tested board |
 | Audio Codec | ES8311 | I2C/I2S | Address 0x18; production playback verified |
@@ -403,7 +403,7 @@ card, and factory firmware.
 |---|---|---|
 | I2C SDA | GPIO 15 | Shared I2C bus |
 | I2C SCL | GPIO 14 | Shared I2C bus |
-| INT | GPIO 21 | Touch interrupt (optional for polling) |
+| INT | GPIO 11 | Touch interrupt (`TP_INT`); GPIO21 is IMU `QMI_INT2` |
 | RST | **TCA9554 P0** | **DO NOT USE GPIO 20** - see quirks below |
 
 #### CST9217 multi-contact contract
@@ -421,14 +421,20 @@ their ordinary primary pointer; a second CST9217 contact must not synthesize a
 release or click on those screens. The 2.06-inch FT3168 path remains
 single-contact only.
 
-GPIO21 is edge-latched with a monotonic interrupt generation counter so a short
+GPIO11 is edge-latched with a monotonic interrupt generation counter so a short
 touch indication cannot disappear while synchronous map cells are rendering.
 The ISR only increments that counter. All CST9217 I2C reads and frame
 acknowledgements remain in normal task context; never move I2C work into the
 interrupt handler or return to rapid ungated polling.
 
 The October 28 read-timing candidate removes indefinite 400 ms idle reads.
-A latched edge opens the existing 700 ms follow-up window even if GPIO21 is
+Its first image (`6973dfd0`) passed idle checks but failed touch wake and active
+input: it still listened on GPIO21. The retained vendor schematic, page 1,
+connects `TP_INT` to GPIO11 and `QMI_INT2` to GPIO21; vendor Arduino
+`Mylibrary/pin_config.h` independently agrees. The corrected candidate uses
+GPIO11 for the reader and the HAL-derived wake mask. Physical acceptance of
+that correction is still pending.
+A latched edge opens the existing 700 ms follow-up window even if GPIO11 is
 already HIGH when serviced, allowing a failed first read to retry at the existing
 backoff. Active contacts continue sampling without a sustained LOW interrupt;
 valid contact frames refresh the follow-up window. Once there is no contact,
@@ -680,11 +686,13 @@ The CST9217 reports coordinates in native panel orientation. Depending on physic
 - `y = 465 - y` (Mirror Y)
 - Or swap X/Y if rotated 90°
 
-Current firmware keeps GPIO21 as an active-low touch hint and uses throttled
-fallback polling. Do not make GPIO21 the only touch trigger: connected-device
-tests showed idle/no-ACK touch reads and intermittent Arduino Core 3.x
-`ESP_ERR_INVALID_STATE` failures, while the hint-plus-fallback policy kept tap,
-drag, and long-press usable.
+Earlier firmware used GPIO21 as a touch hint and kept throttled fallback
+polling. That fallback made tap, drag, and long-press usable despite the wrong
+interrupt pin. GPIO21 is the IMU interrupt, not a transient CST9217 signal.
+The corrected GPIO11 candidate must pass physical wake, drag, pinch and release
+checks before replacing the earlier hardware acceptance. The observed
+`ESP_ERR_INVALID_STATE` read retries remain a separate acceptance measurement;
+a quiet idle log alone does not qualify touch input.
 
 ### 4. Display Window / Rotation (CO5300)
 
@@ -878,7 +886,7 @@ When scanning the I2C bus, you should find:
 | Feature | Status | Notes |
 |---|---|---|
 | Display | ✅ Working | CO5300 QSPI via Arduino_GFX; vendor 466x466 + 6px X gap; 90-degree hardware rotation disabled |
-| Touch | Retest pending for timing candidate | CST9217 @ 0x5A, TCA9554 P0 reset, latched GPIO21 + bounded follow-up/active-contact sampling |
+| Touch | Retest pending for timing candidate | CST9217 @ 0x5A, TCA9554 P0 reset, latched GPIO11 + bounded follow-up/active-contact sampling |
 | SD Card | ⚠️ Working / qualification incomplete | One 1.75-inch board/card passed cold mount, subsequent reset, map write/install/read/render on exact SHA `059348754cce2c9712ff85f9a752bc2d5a7c8788`; the new native-first HSPI compatibility/user-flow path has host coverage but still needs exact-head physical migration validation, and the remaining target/card/fallback matrix is open |
 | RTC | ✅ Integrated | PCF85063 @ 0x51; invalid/voltage-low values rejected; BLE sync and warm-reset restore verified with battery present; full USB-removal retention still needs final battery retest |
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
