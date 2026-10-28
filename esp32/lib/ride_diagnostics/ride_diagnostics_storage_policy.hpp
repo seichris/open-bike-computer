@@ -48,9 +48,10 @@ inline constexpr bool constraintsExceeded(uint64_t retainedBytes,
 // buffers in PSRAM on these boards, so each SDMMC sector transfer allocates a
 // 512-byte bounce (ESP-IDF sdmmc_cmd.c); FFat reads into PSRAM borrow one too.
 // Starting that work during a short BLE crypto or Wi-Fi peak only turns the
-// peak into I/O errors and an abandoned chunk. The writer waits instead, and
-// never takes the headroom that the authenticated-BLE crypto guard requires
-// (device_ownership: 4096 bytes free, 1024 largest) plus one bounce.
+// peak into I/O errors and an abandoned chunk. The writer waits below the
+// authenticated-BLE crypto guard (4096 bytes free, 1024 largest) plus one
+// bounce. This is a best-effort sample, not a reservation against concurrent
+// allocators; every I/O failure must still be handled safely.
 constexpr uint32_t kSdmmcBounceBytes = 512;
 constexpr uint32_t kBackgroundIoMinimumDmaFreeBytes = 4096 + kSdmmcBounceBytes;
 constexpr uint32_t kBackgroundIoMinimumDmaLargestBytes = 1024;

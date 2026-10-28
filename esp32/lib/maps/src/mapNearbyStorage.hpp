@@ -2,6 +2,7 @@
 
 #include "mapNearbyQuery.hpp"
 #include "mapNearbyCoverage.hpp"
+#include "../../utils/src/descriptor_file.hpp"
 
 #include <array>
 #include <cerrno>
@@ -34,35 +35,27 @@ inline bool cancelled(Cancel callback, void *context) {
   return callback != nullptr && callback(context);
 }
 
-// glibc annotates fclose; GCC rejects those function-type attributes as an
-// ignored unique_ptr template argument under -Werror. Keep ownership in a
-// stateless deleter instead of depending on libc's function-pointer type.
-struct FileCloser {
-  void operator()(std::FILE *file) const noexcept {
-    if (file != nullptr) std::fclose(file);
-  }
-};
-using File = std::unique_ptr<std::FILE, FileCloser>;
+using File = descriptor_file::File;
 inline File open(const std::string &path) {
-  return File(std::fopen(path.c_str(), "rb"));
+  return File(path.c_str(), O_RDONLY);
 }
 
-inline bool readExact(std::FILE *file, void *buffer, size_t length) {
-  return file != nullptr && std::fread(buffer, 1, length, file) == length;
+inline bool readExact(int file, void *buffer, size_t length) {
+  return file >= 0 && descriptor_file::readExact(file, buffer, length);
 }
 
-inline bool seek(std::FILE *file, uint32_t offset) {
-  const long signedOffset = static_cast<long>(offset);
-  return file != nullptr && signedOffset >= 0 &&
+inline bool seek(int file, uint32_t offset) {
+  const off_t signedOffset = static_cast<off_t>(offset);
+  return file >= 0 && signedOffset >= 0 &&
          static_cast<uint32_t>(signedOffset) == offset &&
-         std::fseek(file, signedOffset, SEEK_SET) == 0;
+         ::lseek(file, signedOffset, SEEK_SET) >= 0;
 }
 
-inline bool fileSize(std::FILE *file, uint32_t &length) {
-  if (file == nullptr || std::fseek(file, 0, SEEK_END) != 0) return false;
-  const long value = std::ftell(file);
-  if (value < 0 || static_cast<unsigned long>(value) > UINT32_MAX ||
-      std::fseek(file, 0, SEEK_SET) != 0) return false;
+inline bool fileSize(int file, uint32_t &length) {
+  if (file < 0) return false;
+  const off_t value = ::lseek(file, 0, SEEK_END);
+  if (value < 0 || static_cast<uint64_t>(value) > UINT32_MAX ||
+      ::lseek(file, 0, SEEK_SET) < 0) return false;
   length = static_cast<uint32_t>(value);
   return true;
 }

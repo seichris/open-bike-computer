@@ -237,6 +237,9 @@ std::atomic<uint32_t> maximumMemoryDeferralMs{0};
 std::atomic<uint32_t> memoryDeferralMinimumDmaFree{UINT32_MAX};
 std::atomic<uint32_t> memoryDeferralMinimumDmaLargest{UINT32_MAX};
 uint32_t lastReportedMemoryDeferrals = 0;
+uint32_t lastReportedMemoryDeferralMs = 0;
+uint32_t lastReportedMemoryDmaFree = UINT32_MAX;
+uint32_t lastReportedMemoryDmaLargest = UINT32_MAX;
 
 struct SemaphoreGuard {
   explicit SemaphoreGuard(SemaphoreHandle_t handleRef) : handle(handleRef) {
@@ -1675,17 +1678,29 @@ void process(uint32_t nowMs) {
     // this reuses existing names: episodes, the longest one in ms, and the
     // lowest DMA free/largest values that caused a deferral.
     const uint32_t deferrals = memoryDeferrals.load(std::memory_order_relaxed);
-    if (deferrals != lastReportedMemoryDeferrals) {
+    const uint32_t duration = maximumMemoryDeferralMs.load(std::memory_order_relaxed);
+    const uint32_t minimumFree = memoryDeferralMinimumDmaFree.load(std::memory_order_relaxed);
+    const uint32_t minimumLargest = memoryDeferralMinimumDmaLargest.load(std::memory_order_relaxed);
+    // Completion and a deeper trough can change evidence without starting a
+    // new episode. Retry the complete snapshot until admission succeeds.
+    if (deferrals != lastReportedMemoryDeferrals ||
+        duration != lastReportedMemoryDeferralMs ||
+        minimumFree != lastReportedMemoryDmaFree ||
+        minimumLargest != lastReportedMemoryDmaLargest) {
       char fields[160] = {};
       snprintf(fields, sizeof(fields),
           "{\"eventCount\":%lu,\"durationMs\":%lu,"
           "\"minimumFreeBytes\":%lu,\"minimumLargestBytes\":%lu}",
           static_cast<unsigned long>(deferrals),
-          static_cast<unsigned long>(maximumMemoryDeferralMs.load(std::memory_order_relaxed)),
-          static_cast<unsigned long>(memoryDeferralMinimumDmaFree.load(std::memory_order_relaxed)),
-          static_cast<unsigned long>(memoryDeferralMinimumDmaLargest.load(std::memory_order_relaxed)));
-      if (record(Level::Warning, "storage", "memory_deferred", fields))
+          static_cast<unsigned long>(duration),
+          static_cast<unsigned long>(minimumFree),
+          static_cast<unsigned long>(minimumLargest));
+      if (record(Level::Warning, "storage", "memory_deferred", fields)) {
         lastReportedMemoryDeferrals = deferrals;
+        lastReportedMemoryDeferralMs = duration;
+        lastReportedMemoryDmaFree = minimumFree;
+        lastReportedMemoryDmaLargest = minimumLargest;
+      }
     }
   }
   if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {

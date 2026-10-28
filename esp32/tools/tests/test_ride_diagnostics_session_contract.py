@@ -109,10 +109,12 @@ using queue_policy::DropReason;
 constexpr unsigned kDropReasonCount = static_cast<unsigned>(DropReason::Count);
 std::atomic<unsigned> dropped{1}, dropsByReason[kDropReasonCount]{};
 std::atomic<unsigned> maximumWriterDelayMs{987}, maximumWriteDurationMs{123}, maxQueueDepth{24};
-std::atomic<uint32_t> memoryDeferrals{0}, maximumMemoryDeferralMs{340},
-    memoryDeferralMinimumDmaFree{1200}, memoryDeferralMinimumDmaLargest{40};
+std::atomic<uint32_t> memoryDeferrals{0}, maximumMemoryDeferralMs{0},
+    memoryDeferralMinimumDmaFree{UINT32_MAX}, memoryDeferralMinimumDmaLargest{UINT32_MAX};
 unsigned lastReportedDrops[kDropReasonCount]{}, lastLossSummaryMs=0;
 uint32_t lastReportedMemoryDeferrals=0;
+uint32_t lastReportedMemoryDeferralMs=0;
+uint32_t lastReportedMemoryDmaFree=UINT32_MAX, lastReportedMemoryDmaLargest=UINT32_MAX;
 unsigned depth=0, calls=0, deferralCalls=0;
 bool accept=false, acceptDeferral=false;
 enum class Level { Info, Warning };
@@ -149,11 +151,22 @@ int main() {
   // Memory deferrals follow the same bounded, drained, retried cadence.
   assert(deferralCalls==0);
   memoryDeferrals=2;
+  maximumMemoryDeferralMs=340;
+  memoryDeferralMinimumDmaFree=1200; memoryDeferralMinimumDmaLargest=40;
   depth=3; process(150001); assert(deferralCalls==0);
   depth=0; process(150002); assert(deferralCalls==1 && lastReportedMemoryDeferrals==0);
   acceptDeferral=true; process(180002); assert(deferralCalls==2 && lastReportedMemoryDeferrals==2);
   process(210002); assert(deferralCalls==2);
   memoryDeferrals=3; process(240002); assert(deferralCalls==3 && lastReportedMemoryDeferrals==3);
+  // Completion after the start/count was already reported must be durable.
+  maximumMemoryDeferralMs=987; acceptDeferral=false;
+  process(270002); assert(deferralCalls==4 && lastReportedMemoryDeferralMs==340);
+  acceptDeferral=true; process(300002);
+  assert(deferralCalls==5 && lastReportedMemoryDeferralMs==987);
+  process(330002); assert(deferralCalls==5); // unchanged evidence is not repeated
+  // A deeper trough within the same episode also changes the evidence.
+  memoryDeferralMinimumDmaFree=451; memoryDeferralMinimumDmaLargest=32;
+  process(360002); assert(deferralCalls==6 && lastReportedMemoryDmaFree==451);
 }
 '''.replace("// SUMMARY", summary)
         with tempfile.TemporaryDirectory() as directory:
@@ -168,10 +181,13 @@ int main() {
         sys.path.insert(0, str(ROOT.parent / "tools"))
         import ride_diagnostics as host_diagnostics
         summaries = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertEqual(len(summaries), 3)
-        self.assertEqual(summaries[-1], {"eventCount": 3, "durationMs": 340,
+        self.assertEqual(len(summaries), 6)
+        self.assertEqual(summaries[3], {"eventCount": 3, "durationMs": 987,
                                          "minimumFreeBytes": 1200,
                                          "minimumLargestBytes": 40})
+        self.assertEqual(summaries[-1], {"eventCount": 3, "durationMs": 987,
+                                         "minimumFreeBytes": 451,
+                                         "minimumLargestBytes": 32})
         for fields in summaries:
             for key in fields:
                 self.assertIn(key, host_diagnostics.ALLOWED_FIELD_KEYS)

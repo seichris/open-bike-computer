@@ -26,9 +26,11 @@ strategy, trust rules, protocol sizes or file formats.
 | Configuration serialized document | 4,096 | Main-loop serialization and persistence |
 | Nearby view/search/layout state | 7,760 | UI task, existing renderer snapshot protocol |
 | Nearby canvas pixels | 3,840 | LVGL software canvas; not the display DMA buffer |
+| Diagnostics retention scan | 6,144 | Writer-task pruning only |
+| Diagnostics pruning batch | 384 | Writer-task pruning only |
 
 The six screen buffers total 24,682 bytes; Nearby adds 11,600 only in profiles
-where that feature is compiled. These are old-image symbol sizes, not measured
+where that feature is compiled, and diagnostics adds 6,528. These are old-image symbol sizes, not measured
 runtime savings or a promise that the largest DMA block grows by that amount.
 The new ELF must prove each marked symbol is external. Production and debug
 profiles differ and need separate resource evidence.
@@ -49,8 +51,8 @@ The frozen ESP-IDF 5.5.1 sources define this behavior:
   configured memory test, and zeroes external BSS before C++ constructors.
   `StartupConstructed` still runs and supplies nonzero defaults/sentinels.
 - Enabling the SDK option also places supported vendor `lwip`, `net80211`, `pp`
-  and `bt` BSS in PSRAM. This is a core/link-layout change, not only the eight
-  application symbols above. Build all affected profiles and inspect their
+  and `bt` BSS in PSRAM. This is a core/link-layout change, not only the
+  application workspaces above. Build all affected profiles and inspect their
   resolved configuration and ELF; do not reuse an old core receipt.
 - Arduino `esp32-hal-misc.c` and `esp32-hal-psram.c` recognize `SPIRAM_BOOT_INIT`:
   they do not repeat hardware initialization or add the heap twice.
@@ -68,6 +70,27 @@ application boot diagnostics and safe-mode bookkeeping. Retain serial capture
 from power-on and the supported USB/BOOT recovery path in physical testing.
 
 ## Qualification boundaries
+
+Diagnostics probes, chunks, catalogs and exports use checked POSIX descriptors
+instead of newlib streams. The active map font, Nearby, transfer and operation
+journal paths do the same. These owners retain short-I/O, EOF, close, metadata
+readback and explicit fsync checks; file formats and acceptance rules do not
+change. Descriptor ownership survives allocation exceptions without leaking a
+handle. This removes the per-open newlib stream-lock abort, not every possible
+allocation failure in the firmware.
+
+Diagnostics defers background I/O below 4,608 DMA bytes free or a 1,024-byte
+largest block, keeping events in its bounded queue and counting overflow.
+This is a sample, not a memory reservation. Concurrent allocations may still
+make a syscall fail. Recovery waits five seconds, then backs off to at most
+60 seconds on repeated failure. Cumulative deferral counts, completed maximum
+duration and minimum headroom are reported using existing diagnostic fields;
+failed event admission retries the snapshot. These mechanisms still need
+physical verification of recording integrity under real concurrent load.
+
+Pre-existing local GPX import/edit stdio paths are outside this correction;
+they are not claimed safe under universal out-of-memory conditions. Legacy
+LovyanGFX PNG/calibration paths are excluded from the Waveshare configuration.
 
 Keep existing internal/DMA Wi-Fi admission floors and crypto guards. Static
 placement is one part of the budget; SDMMC bounce buffers, TLS, BLE authorization,
