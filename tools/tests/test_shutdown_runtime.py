@@ -311,7 +311,8 @@ int main() {
 #define PERSISTENT_RIDE_DIAGNOSTICS 1
 #define tskIDLE_PRIORITY 0
 #define pdPASS 1
-void *writerTaskHandle=reinterpret_cast<void*>(1), *activeFile=nullptr;
+void *writerTaskHandle=reinterpret_cast<void*>(1);
+int activeDescriptor=-1;
 std::atomic<bool> shutdownSealStarted{false}, shutdownSealReady{false}, storageTransitionRequested{false};
 int requests=0, tasks=0;
 void (*task)(void*)=nullptr;
@@ -351,7 +352,8 @@ int main() {
 #include <cassert>
 #include <cstdint>
 #define PERSISTENT_RIDE_DIAGNOSTICS 1
-void *writerTaskHandle=nullptr, *activeFile=nullptr;
+void *writerTaskHandle=nullptr;
+int activeDescriptor=-1;
 std::atomic<bool> storageTransitionRequested{false}, checkpointRequested{false};
 bool sealOK=false; int seals=0;
 enum class Level { Warning, Error };
@@ -365,7 +367,7 @@ int main() {
   writerTaskHandle=reinterpret_cast<void*>(1);
   assert(!prepareForShutdown(20)); assert(seals==1);
   sealOK=true; assert(prepareForShutdown(20));
-  writerTaskHandle=nullptr; activeFile=reinterpret_cast<void*>(1); sealOK=false;
+  writerTaskHandle=nullptr; activeDescriptor=3; sealOK=false;
   assert(!prepareForShutdown(20)); // Missing task cannot excuse an open writer.
 }
 ''')
