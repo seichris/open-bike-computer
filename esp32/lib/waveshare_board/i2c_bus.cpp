@@ -147,7 +147,10 @@ void logRetryResult(uint8_t address, uint16_t reg, const char *operation,
 
 template <typename Fn>
 bool withRetries(uint8_t address, uint16_t reg, const char *label,
-                 const char *operation, uint8_t attempts, Fn &&fn) {
+                 const char *operation, uint8_t attempts, Fn &&fn,
+                 TransactionTrace *trace = nullptr) {
+  const uint32_t traceStartedMs = trace ? millis() : 0;
+  if (trace) *trace = {};
   if (attempts == 0) {
     attempts = 1;
   }
@@ -156,6 +159,10 @@ bool withRetries(uint8_t address, uint16_t reg, const char *label,
       power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) {
+    if (trace) {
+      trace->failure(TransactionPhase::Lock, 0);
+      trace->elapsedMs = millis() - traceStartedMs;
+    }
     i2cStats.failedTransactions++;
     logFailure(label, operation, address);
     return false;
@@ -163,7 +170,9 @@ bool withRetries(uint8_t address, uint16_t reg, const char *label,
 
   const uint32_t startedMs = retryStartTime();
   for (uint8_t attempt = 0; attempt < attempts; attempt++) {
+    if (trace) trace->attempts = attempt + 1;
     if (fn()) {
+      if (trace) trace->elapsedMs = millis() - traceStartedMs;
       if (attempt > 0) {
         i2cStats.recoveredTransactions++;
         logRetryResult(address, reg, operation, attempt + 1, true, startedMs);
@@ -180,6 +189,7 @@ bool withRetries(uint8_t address, uint16_t reg, const char *label,
     }
   }
 
+  if (trace) trace->elapsedMs = millis() - traceStartedMs;
   logRetryResult(address, reg, operation, attempts, false, startedMs);
   logFailure(label, operation, address);
   return false;
@@ -316,18 +326,23 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
 }
 
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
-                     const char *label, uint8_t attempts) {
+                     const char *label, uint8_t attempts,
+                     TransactionTrace *trace) {
+  if (trace) *trace = {};
   if (!writeAllowed(address, reg, 2, 1, "write16")) {
     return false;
   }
   return withRetries(address, reg, label, "write16", attempts,
-                     [address, reg, value]() {
+                     [address, reg, value, trace]() {
                        Wire.beginTransmission(address);
                        Wire.write(static_cast<uint8_t>(reg >> 8));
                        Wire.write(static_cast<uint8_t>(reg & 0xFF));
                        Wire.write(value);
-                       return Wire.endTransmission() == 0;
-                     });
+                       const uint8_t status = Wire.endTransmission();
+                       if (trace && status != 0)
+                         trace->failure(TransactionPhase::Transmit, status);
+                       return status == 0;
+                     }, trace);
 }
 
 bool ensureAxp2101PowerButtonOffLevel(
@@ -568,27 +583,35 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
 }
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
-                    const char *label, uint8_t attempts) {
+                    const char *label, uint8_t attempts,
+                    TransactionTrace *trace) {
+  if (trace) *trace = {};
   if (data == nullptr || len == 0) {
     return false;
   }
 
   return withRetries(address, reg, label, "read16", attempts,
-                     [address, reg, data, len]() {
+                     [address, reg, data, len, trace]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg >> 8);
                        Wire.write(reg & 0xFF);
 #ifdef WAVESHARE_AMOLED_175
-                       if (Wire.endTransmission() != 0) {
+                       const uint8_t status = Wire.endTransmission();
 #else
-                       if (Wire.endTransmission(false) != 0) {
+                       const uint8_t status = Wire.endTransmission(false);
 #endif
+                       if (status != 0) {
+                         if (trace)
+                           trace->failure(TransactionPhase::Transmit, status);
                          return false;
                        }
 
                        delay(2);
-                       if (Wire.requestFrom(address, len,
-                                            static_cast<uint8_t>(true)) != len) {
+                       const uint8_t received = Wire.requestFrom(
+                           address, len, static_cast<uint8_t>(true));
+                       if (received != len) {
+                         if (trace)
+                           trace->failure(TransactionPhase::Receive, received);
                          return false;
                        }
 
@@ -596,7 +619,7 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                          data[i] = Wire.read();
                        }
                        return true;
-                     });
+                     }, trace);
 }
 
 } // namespace waveshare_board::i2c
