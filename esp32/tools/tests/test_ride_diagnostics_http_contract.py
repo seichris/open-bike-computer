@@ -79,8 +79,13 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
         self.assertIn("resolveClosedChunk", chunk)
         self.assertIn("sendFile(client, chunk, server_, request)", chunk)
         self.assertIn("sent != chunk.bytes || closeResult != 0", HTTP)
-        self.assertIn("readWithEvidence", HTTP)
+        self.assertIn("storage.readDescriptor(file, buffer, requested)", HTTP)
         self.assertIn("read.error", HTTP)
+        # Exports never open a newlib stream: fopen() aborts when its lock
+        # cannot be allocated from internal RAM under memory pressure.
+        code = re.sub(r"//[^\n]*", "", HTTP)
+        stream = re.search(r"storage\.(?:open|read|readWithEvidence|close)\(|\bfopen\(", code)
+        self.assertIsNone(stream, stream and stream.group(0))
 
     def test_zero_byte_crash_artifacts_are_ignored_but_read_errors_fail_closed(self):
         self.assertIn("CandidateDisposition::IgnoreEmpty", HTTP)
@@ -116,7 +121,8 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
 
         primitives = re.compile(
             r"storage\.(?:open|read|readWithEvidence|close|size|exists|write|"
-            r"flush|sync|seek|remove|mkdir|rmdir)\(|opendir\(|readdir\(|"
+            r"flush|sync|seek|remove|mkdir|rmdir|openDescriptor|readDescriptor|"
+            r"closeDescriptor|writeDescriptor|syncDescriptor)\(|opendir\(|readdir\(|"
             r"closedir\(|::stat\(|catalog_v2::read\(")
         steps = 0
         for match in primitives.finditer(HTTP):

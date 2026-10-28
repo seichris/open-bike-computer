@@ -204,6 +204,17 @@ public:
   // already-closing streams return EOF rather than closing a foreign handle.
   FILE *open(const char *path, const char *mode);
   int close(FILE *file);
+  // Raw descriptors for owners that must keep failing safely under memory
+  // pressure. fopen() aborts when newlib cannot allocate its stream lock from
+  // internal RAM; open(), write() and fsync() only return errors. A
+  // descriptor holds the same shutdown admission from open to close.
+  int openDescriptor(const char *path, int flags);
+  int closeDescriptor(int descriptor);
+  size_t writeDescriptor(int descriptor, const uint8_t *buffer, size_t size);
+  StorageReadEvidence readDescriptor(int descriptor, uint8_t *buffer,
+                                     size_t size);
+  // fsync commits FAT data, allocation and directory size.
+  int syncDescriptor(int descriptor);
   bool exists(const char *path);
   bool mkdir(const char *path);
   bool remove(const char *path);

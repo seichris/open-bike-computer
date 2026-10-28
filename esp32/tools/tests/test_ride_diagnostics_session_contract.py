@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -99,20 +101,30 @@ int main() {
 #include "ride_diagnostics_format.hpp"
 #include <atomic>
 #include <cassert>
+#include <cstdint>
+#include <cstdio>
 #include <string>
 namespace queue_policy = ride_diagnostics::queue_policy;
 using queue_policy::DropReason;
 constexpr unsigned kDropReasonCount = static_cast<unsigned>(DropReason::Count);
 std::atomic<unsigned> dropped{1}, dropsByReason[kDropReasonCount]{};
 std::atomic<unsigned> maximumWriterDelayMs{987}, maximumWriteDurationMs{123}, maxQueueDepth{24};
+std::atomic<uint32_t> memoryDeferrals{0}, maximumMemoryDeferralMs{340},
+    memoryDeferralMinimumDmaFree{1200}, memoryDeferralMinimumDmaLargest{40};
 unsigned lastReportedDrops[kDropReasonCount]{}, lastLossSummaryMs=0;
-unsigned depth=0, calls=0;
-bool accept=false;
-enum class Level { Info };
+uint32_t lastReportedMemoryDeferrals=0;
+unsigned depth=0, calls=0, deferralCalls=0;
+bool accept=false, acceptDeferral=false;
+enum class Level { Info, Warning };
 unsigned queuedDepth() { return depth; }
-bool record(Level, const char *category, const char *event, const char *fields) {
-  assert(std::string(category)=="logger" && std::string(event)=="loss");
+bool record(Level level, const char *category, const char *event, const char *fields) {
   assert(ride_diagnostics::detail::validateFieldsJson(fields, std::strlen(fields)));
+  if (std::string(category)=="storage") {
+    assert(std::string(event)=="memory_deferred" && level==Level::Warning);
+    std::printf("%s\n", fields);
+    ++deferralCalls; return acceptDeferral;
+  }
+  assert(std::string(category)=="logger" && std::string(event)=="loss");
   assert(std::strstr(fields, "\"writerDelayMs\":987"));
   assert(std::strstr(fields, "\"durationMs\":123"));
   assert(std::strstr(fields, "\"maxQueueDepth\":24"));
@@ -134,6 +146,14 @@ int main() {
   dropsByReason[reason]=2; dropped=2;
   process(120001); assert(calls==3 && lastReportedDrops[reason]==2);
   assert(dropped==2 && dropsByReason[reason]==2);
+  // Memory deferrals follow the same bounded, drained, retried cadence.
+  assert(deferralCalls==0);
+  memoryDeferrals=2;
+  depth=3; process(150001); assert(deferralCalls==0);
+  depth=0; process(150002); assert(deferralCalls==1 && lastReportedMemoryDeferrals==0);
+  acceptDeferral=true; process(180002); assert(deferralCalls==2 && lastReportedMemoryDeferrals==2);
+  process(210002); assert(deferralCalls==2);
+  memoryDeferrals=3; process(240002); assert(deferralCalls==3 && lastReportedMemoryDeferrals==3);
 }
 '''.replace("// SUMMARY", summary)
         with tempfile.TemporaryDirectory() as directory:
@@ -142,7 +162,20 @@ int main() {
             executable = Path(directory) / "loss"
             subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
                             "-I", str(ROOT / "lib/ride_diagnostics"), str(source), "-o", str(executable)], check=True)
-            subprocess.run([str(executable)], check=True)
+            result = subprocess.run([str(executable)], check=True, capture_output=True, text=True)
+        # Installed apps reject any field outside the closed vocabulary, so the
+        # deferral summary may only reuse existing numeric field names.
+        sys.path.insert(0, str(ROOT.parent / "tools"))
+        import ride_diagnostics as host_diagnostics
+        summaries = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(len(summaries), 3)
+        self.assertEqual(summaries[-1], {"eventCount": 3, "durationMs": 340,
+                                         "minimumFreeBytes": 1200,
+                                         "minimumLargestBytes": 40})
+        for fields in summaries:
+            for key in fields:
+                self.assertIn(key, host_diagnostics.ALLOWED_FIELD_KEYS)
+                self.assertIn(key, host_diagnostics.FIRMWARE_NUMBER_FIELD_KEYS)
 
     def test_actual_enqueue_accounts_for_each_admission_failure(self):
         note = RECORDER[RECORDER.index("void noteDrop(DropReason reason) {"):
@@ -183,6 +216,56 @@ int main() {
         start = RECORDER.index("void writerTask(void *) {")
         writer = RECORDER[start:RECORDER.index("bool enqueueFormattedEvent", start)]
         self.run_production_harness("ride_diagnostics_writer_harness.cpp", note + maximum + peek + writer)
+
+    def memory_pressure_functions(self):
+        start = RECORDER.index("void noteDrop(DropReason reason) {")
+        note = RECORDER[start:RECORDER.index("std::atomic<uint32_t> storageErrors", start)]
+        start = RECORDER.index("void noteMaximum(")
+        extremes = RECORDER[start:RECORDER.index("// When the reserved critical lane", start)]
+        start = RECORDER.index("bool peekNextEvent(")
+        peek = RECORDER[start:RECORDER.index("bool completeSealIfReady()", start)]
+        start = RECORDER.index("struct MemoryDeferral {")
+        writer = RECORDER[start:RECORDER.index("bool enqueueFormattedEvent", start)]
+        return note + extremes + peek + writer
+
+    def run_memory_pressure(self, functions):
+        harness = (ROOT / "tools/tests/ride_diagnostics_memory_pressure_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_FUNCTIONS", functions)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "pressure.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "pressure"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "lib/ride_diagnostics"), str(source),
+                            "-o", str(executable)], check=True)
+            return subprocess.run([str(executable)], capture_output=True, text=True)
+
+    def test_writer_defers_io_below_the_dma_floor_and_paces_recovery(self):
+        result = self.run_memory_pressure(self.memory_pressure_functions())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_memory_gate_and_recovery_regressions_are_detected(self):
+        functions = self.memory_pressure_functions()
+        mutations = {
+            "records written through a DMA trough": (
+                "const bool memoryWait = recorderHealthy && recordsWaiting && !ioAdmitted();",
+                "const bool memoryWait = false;"),
+            "probe immediately after the fault": (
+                "} else if (recovery.due(nowMs) &&", "} else if (true &&"),
+            "probe below the floor": (
+                "                storageRecoveryAllowedProbe()) &&\n               ioAdmitted()) {",
+                "                storageRecoveryAllowedProbe())) {"),
+            "checkpoint below the floor": (
+                "static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) &&\n        ioAdmitted()) {",
+                "static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {"),
+            "no backoff growth": (
+                "        recovery.probeFailed(nowMs);", "        recovery.reset();"),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(name):
+                self.assertIn(old, functions)
+                result = self.run_memory_pressure(functions.replace(old, new, 1))
+                self.assertEqual(result.returncode, 42, result.stderr)
 
     def test_oversized_index_cannot_claim_complete_inventory(self):
         http = (ROOT / "lib/ride_diagnostics/ride_diagnostics_http.cpp").read_text()

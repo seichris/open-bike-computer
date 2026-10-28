@@ -1,6 +1,7 @@
 // Compile the actual recorder maintenance functions with real host files and
 // inject a snapshot lease after each possible directory/size operation.
 #include "../../lib/ride_diagnostics/ride_diagnostics.hpp"
+#include "../../lib/ride_diagnostics/catalog_v2.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cassert>

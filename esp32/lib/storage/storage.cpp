@@ -9,6 +9,7 @@
 #include "storage.hpp"
 
 #include <cerrno>
+#include <fcntl.h>
 #include <unistd.h>
 #include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
@@ -58,22 +59,28 @@ bool mountedDirectoryAvailable(const char *root) {
          S_ISDIR(mounted.st_mode);
 }
 
+// The recorder repeats this probe while recovering from write faults, which
+// often happen under memory pressure. It must not use stdio: fopen() creates
+// the stream's newlib lock from internal RAM and aborts when that fails.
 bool writableProbeSucceeded(const char *root) {
   char probePath[128] = {};
-  snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
-  FILE *probe = fopen(probePath, "wb");
-  if (probe == nullptr)
+  const int length =
+      snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
+  if (length < 0 || static_cast<size_t>(length) >= sizeof(probePath))
+    return false;
+  const int probe = ::open(probePath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (probe < 0)
     return false;
   const uint8_t marker = 1;
-  const bool wrote =
-      fwrite(&marker, 1, sizeof(marker), probe) == sizeof(marker);
-  const bool flushed = wrote && fflush(probe) == 0;
-  // fclose() closes the stream even when its implicit flush reports failure,
-  // so remove the probe in every opened-file path. A failed remove is itself
-  // evidence that the backend cannot complete the export lifecycle safely.
-  const bool closed = fclose(probe) == 0;
-  const bool removed = unlink(probePath) == 0;
-  return wrote && flushed && closed && removed;
+  const bool wrote = ::write(probe, &marker, sizeof(marker)) ==
+                     static_cast<ssize_t>(sizeof(marker));
+  const bool synced = wrote && ::fsync(probe) == 0;
+  // close() releases the descriptor even when it reports failure, so remove
+  // the probe in every opened-file path. A failed remove is itself evidence
+  // that the backend cannot complete the export lifecycle safely.
+  const bool closed = ::close(probe) == 0;
+  const bool removed = ::unlink(probePath) == 0;
+  return wrote && synced && closed && removed;
 }
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
@@ -974,6 +981,90 @@ int Storage::close(FILE *file) {
   // uncertainty permanently, while still allowing the caller to complete.
   streamAdmission_.finishClose(slot, result == 0);
   return result;
+}
+
+int Storage::openDescriptor(const char *path, int flags) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) {
+    errno = EBUSY;
+    return -1;
+  }
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  const size_t slot = streamAdmission_.reserveOpen();
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EBUSY;
+    return -1;
+  }
+  const int descriptor = ::open(path, flags, 0644);
+  streamAdmission_.finishOpenDescriptor(slot, descriptor);
+  return descriptor;
+}
+
+int Storage::closeDescriptor(int descriptor) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  const size_t slot = streamAdmission_.beginCloseDescriptor(descriptor);
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EINVAL;
+    return -1;
+  }
+  const int result = ::close(descriptor);
+  // Like fclose, close retires the descriptor even when it reports failure.
+  streamAdmission_.finishClose(slot, result == 0);
+  return result;
+}
+
+size_t Storage::writeDescriptor(int descriptor, const uint8_t *buffer,
+                                size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  if (descriptor < 0 || (buffer == nullptr && size > 0))
+    return 0;
+  size_t written = 0;
+  while (written < size) {
+    const ssize_t result =
+        ::write(descriptor, buffer + written, size - written);
+    if (result <= 0)
+      break;
+    written += static_cast<size_t>(result);
+  }
+  return written;
+}
+
+StorageReadEvidence Storage::readDescriptor(int descriptor, uint8_t *buffer,
+                                            size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  StorageReadEvidence evidence;
+  evidence.requested = size;
+  if (descriptor < 0 || (buffer == nullptr && size > 0)) {
+    evidence.error = true;
+    return evidence;
+  }
+  // Same contract as fread: fill the request unless end of file or an error
+  // stops it first.
+  while (evidence.returned < size) {
+    errno = 0;
+    const ssize_t result = ::read(descriptor, buffer + evidence.returned,
+                                  size - evidence.returned);
+    if (result < 0) {
+      evidence.error = true;
+      evidence.errorNumber = errno;
+      break;
+    }
+    if (result == 0) {
+      evidence.eof = true;
+      break;
+    }
+    evidence.returned += static_cast<size_t>(result);
+  }
+  return evidence;
+}
+
+int Storage::syncDescriptor(int descriptor) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return descriptor < 0 ? -1 : ::fsync(descriptor);
 }
 
 /**

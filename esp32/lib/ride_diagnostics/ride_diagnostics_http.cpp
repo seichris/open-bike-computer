@@ -10,6 +10,7 @@
 #include <Arduino.h>
 #include <dirent.h>
 #include <esp_memory_utils.h>
+#include <fcntl.h>
 #include <mbedtls/sha256.h>
 #include <sys/stat.h>
 
@@ -116,10 +117,12 @@ bool runStorage(device_transfer::HttpTransferServer *server, Step &step) {
       server, [](void *context) { (*static_cast<Step *>(context))(); }, &step);
 }
 
-int closeFile(device_transfer::HttpTransferServer *server, FILE *file) {
-  int result = EOF;
-  auto closeStep = [&] { result = storage.close(file); };
-  return runStorage(server, closeStep) ? result : EOF;
+// Exports read through raw descriptors, like the recorder that writes them:
+// fopen() aborts when newlib cannot allocate its stream lock from internal RAM.
+int closeFile(device_transfer::HttpTransferServer *server, int file) {
+  int result = -1;
+  auto closeStep = [&] { result = storage.closeDescriptor(file); };
+  return runStorage(server, closeStep) ? result : -1;
 }
 
 bool sha256File(const char *path, std::string &out, uint32_t &bytes,
@@ -127,9 +130,9 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
                 device_transfer::TransferClient &client,
                 device_transfer::HttpTransferServer *server,
                 const device_transfer::HttpRequest &request) {
-  FILE *file = nullptr;
-  auto openStep = [&] { file = storage.open(path, "rb"); };
-  if (!runStorage(server, openStep) || file == nullptr)
+  int file = -1;
+  auto openStep = [&] { file = storage.openDescriptor(path, O_RDONLY); };
+  if (!runStorage(server, openStep) || file < 0)
     return false;
   mbedtls_sha256_context context;
   mbedtls_sha256_init(&context);
@@ -143,7 +146,7 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   uint32_t lastResponseProgressBytes = 0;
   bool ok = true;
   // The index already snapshots the closed file's exact stat size. Read only
-  // those bytes instead of issuing one extra fread past EOF. Some embedded
+  // those bytes instead of issuing one extra read past EOF. Some embedded
   // FAT/VFS paths report that probe as an I/O error even after all requested
   // bytes were returned, which used to abort the response immediately after
   // its final progress byte and before the chunk digest was emitted.
@@ -153,15 +156,17 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
       break;
     }
     const size_t remaining = expectedBytes - bytes;
-    size_t count = 0;
+    StorageReadEvidence read;
+    read.error = true; // Kept only when the read step could not run.
     auto readStep = [&] {
-      count = storage.read(file, buffer, std::min<std::size_t>(remaining,
-                                                              sizeof(buffer)));
+      read = storage.readDescriptor(
+          file, buffer, std::min<std::size_t>(remaining, sizeof(buffer)));
     };
-    if (!runStorage(server, readStep) || count == 0) {
+    if (!runStorage(server, readStep) || read.error || read.returned == 0) {
       ok = false;
       break;
     }
+    const size_t count = read.returned;
     if (mbedtls_sha256_update(&context, buffer, count) != 0) {
       ok = false;
       break;
@@ -444,9 +449,11 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
     client.stop();
     return false;
   }
-  FILE *file = nullptr;
-  auto openStep = [&] { file = storage.open(chunk.path.c_str(), "rb"); };
-  if (!runStorage(server, openStep) || file == nullptr)
+  int file = -1;
+  auto openStep = [&] {
+    file = storage.openDescriptor(chunk.path.c_str(), O_RDONLY);
+  };
+  if (!runStorage(server, openStep) || file < 0)
     return device_transfer::sendHttpError(client, 404, "chunk_missing",
                                           "diagnostic chunk is unavailable");
   if (!device_transfer::sendHttpHead(client, 200, chunk.bytes, "application/x-ndjson")) {
@@ -470,7 +477,7 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
     read.requested = requested;
     read.error = true; // Kept only when the read step could not run.
     auto readStep = [&] {
-      read = storage.readWithEvidence(file, buffer, requested);
+      read = storage.readDescriptor(file, buffer, requested);
     };
     (void)runStorage(server, readStep);
     const size_t count = read.returned;
