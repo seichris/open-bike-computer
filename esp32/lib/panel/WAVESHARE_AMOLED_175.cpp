@@ -1127,6 +1127,9 @@ void readTouch() {
   }
 
   if (decodedFrame.count == 0) {
+    // Only a valid, acknowledged release ends follow-up sampling. Keep failed
+    // first reads and no-frame packets eligible for their bounded retries.
+    touchReadWindow.confirmRelease();
     releaseAllTouches(now);
     return;
   }
@@ -1137,6 +1140,7 @@ void readTouch() {
   const auto activeFrame =
       waveshare_board::touch::activeCst9217Contacts(decodedFrame);
   if (activeFrame.count == 0) {
+    touchReadWindow.confirmRelease();
     releaseAllTouches(now);
     return;
   }

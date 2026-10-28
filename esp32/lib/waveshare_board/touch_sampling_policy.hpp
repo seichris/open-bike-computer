@@ -7,7 +7,8 @@ namespace waveshare_board::touch_sampling_policy {
 // A short INT pulse is remembered by the caller's generation latch. Keep a
 // bounded follow-up window after that event (including a failed first read),
 // and keep sampling an active gesture even when INT has returned high. A fully
-// idle controller is not polled without evidence of touch activity.
+// idle controller is not polled without evidence of touch activity. A valid,
+// acknowledged release completes that activity and closes its follow-up window.
 // Cadence, failure backoff and the one immediate attempt per new edge remain
 // the caller's responsibility.
 class ReadWindow {
@@ -17,6 +18,10 @@ public:
     durationMs_ = durationMs;
     armed_ = true;
   }
+
+  // This is not an error/no-frame response: those still need bounded retries.
+  // The caller's independent interrupt-generation latch is never consumed here.
+  void confirmRelease() { armed_ = false; }
 
   bool active(uint32_t nowMs) {
     if (armed_ && nowMs - startedMs_ >= durationMs_) {
