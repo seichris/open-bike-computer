@@ -91,6 +91,55 @@ class MapStreamRolloutPolicyTests(unittest.TestCase):
         })
         self.assertEqual(policy.public_summary()["approvedIosBuilds"], "100,101")
 
+    def test_durable_maps_from_earlier_approved_workers_stay_deliverable(self):
+        earlier = approval("msr-20261026-durable-earlier")
+        current = replace(
+            earlier, promotion_id="msr-20261027-durable-current",
+            producer_build_sha256="b" * 64, worker_image_digest=WORKER_IMAGE_DIGEST,
+            firmware_build=43, firmware_git_sha="c" * 40,
+        )
+        earlier = replace(earlier, worker_image_digest="sha256:" + "d" * 64)
+        untrusted = replace(
+            earlier, promotion_id="msr-20261025-durable-untrusted",
+            producer_build_sha256="e" * 64,
+            approved_signing_keys=frozenset({("map-prod-retired", "f" * 64)}),
+        )
+        policy = self.policy(
+            approved_promotions={
+                value.promotion_id: value for value in (earlier, current, untrusted)
+            },
+            MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE="all",
+            MAP_PLATFORM_MAP_STREAM_PROMOTION_ID=current.promotion_id,
+        )
+        self.assertEqual(policy.producer_build_sha256, current.producer_build_sha256)
+        self.assertEqual(policy.approved_producers, frozenset({
+            (earlier.producer_build_sha256, earlier.worker_image_digest, "map-prod-1", "4" * 64),
+            (current.producer_build_sha256, current.worker_image_digest, "map-prod-1", "4" * 64),
+        }))
+        trust = frozenset({("map-prod-1", "4" * 64)})
+
+        def allowed(producer, contract):
+            return policy.allows_artifact(
+                INSTALLATION_A, "map-prod-1", "4" * 64,
+                producer.producer_build_sha256, producer.worker_image_digest,
+                trust, None, None, None, compatibility_contract=contract,
+            )
+
+        self.assertTrue(allowed(earlier, 1))
+        self.assertTrue(allowed(current, 1))
+        # Artifacts outside the contract keep the single-approval rule.
+        self.assertFalse(allowed(earlier, None))
+        self.assertTrue(allowed(current, None))
+        self.assertFalse(allowed(untrusted, 1))
+        self.assertEqual(policy.artifact_delivery_requirements(compatibility_contract=1), {})
+        self.assertEqual(
+            policy.artifact_delivery_requirements(reader_contract=None, compatibility_contract=1),
+            {},
+        )
+        self.assertEqual(
+            policy.artifact_delivery_requirements()["requiredFirmwareBuild"], 43
+        )
+
     def test_other_approval_cannot_change_selected_hardware_producer_or_trust(self):
         original = approval("msr-20261003-original-app")
         differences = {

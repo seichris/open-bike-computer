@@ -149,6 +149,10 @@ class MapDownloadReceipt:
         )
 
 
+# Artifact-metrics key for the durable map contract the producer signed.
+COMPATIBILITY_CONTRACT_METRIC = "compatibilityContract"
+
+
 @dataclass
 class MapJob:
     job_id: str
@@ -207,6 +211,19 @@ class MapJob:
     progress_total_units: int | None = None
     progress_indeterminate: bool | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def compatibility_contract(self) -> int | None:
+        """Durable contract the producer signed into these artifacts, or None.
+
+        The producer records it in the artifact metrics. Every control-plane
+        version saves those verbatim and exact reuse copies them, so an older
+        backend that rewrites this job cannot turn a durable map into a
+        map outside the contract. See map_compatibility.py.
+        """
+        metrics = self.artifact_metrics if isinstance(self.artifact_metrics, dict) else {}
+        value = metrics.get(COMPATIBILITY_CONTRACT_METRIC)
+        return value if type(value) is int and 1 <= value <= 255 else None
 
     @property
     def artifact_display_name(self) -> str:

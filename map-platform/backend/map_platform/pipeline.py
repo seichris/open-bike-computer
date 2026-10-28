@@ -64,6 +64,11 @@ from .map_buildings import (
     renderer_includes_buildings,
 )
 from .map_pois import POI_RENDERER_FORMAT_VERSION, renderer_includes_pois, request_has_contours
+from .map_compatibility import (
+    MapCompatibilityContract,
+    load_map_compatibility_contract,
+    request_profile,
+)
 from .topography_artifacts import (
     TOPOGRAPHY_PROFILE_VERSION,
     TOPOGRAPHY_RENDERER_FORMAT_VERSION,
@@ -135,7 +140,7 @@ from .building_identity import (
     selected_building_block_cache_identity,
     selected_building_identity,
 )
-from .models import JobStatus, MapJob, SourceRegion
+from .models import COMPATIBILITY_CONTRACT_METRIC, JobStatus, MapJob, SourceRegion
 from .monitoring import MapMonitoringStore
 from .preview import render_boundary_preview
 from .reuse import (
@@ -1760,8 +1765,14 @@ class MapBuildPipeline:
         topography_builder: Callable[..., tuple[dict[str, Any], Path]] | None = None,
         preparation_store=None,
         deployment_channel: str = "development",
+        compatibility_contract: MapCompatibilityContract | None = None,
     ):
         self.paths = paths
+        self.compatibility_contract = (
+            compatibility_contract
+            if compatibility_contract is not None
+            else load_map_compatibility_contract()
+        )
         self.runner = runner or CommandRunner()
         self.source_cache = source_cache or SourceCache(paths.repo_root)
         self.artifact_store = artifact_store
@@ -5943,6 +5954,9 @@ class MapBuildPipeline:
         packaging_started = time.perf_counter()
         self._resolve_source_preview_geometry(job)
         metrics: dict[str, Any] = dict(build_metrics or {})
+        # Subset builds start from their parent's metrics; this map records
+        # only the contract its own manifest declares.
+        metrics.pop(COMPATIBILITY_CONTRACT_METRIC, None)
         topography_receipt: dict[str, Any] | None = None
         companion_path: Path | None = None
         if request_has_contours(job.request):
@@ -6000,6 +6014,15 @@ class MapBuildPipeline:
         building_preprocessing_summary = self._building_preprocessing_summary(
             metrics.get("buildingPreprocessing")
         )
+        # A profile this channel may not publish stays an uncovered map. CI
+        # keeps the generation policies inside the contract's channels.
+        durable_profile = request_profile(job.request, self.compatibility_contract)
+        if durable_profile is not None and not self.compatibility_contract.publishes(
+            durable_profile, self.deployment_channel
+        ):
+            durable_profile = None
+        if durable_profile is not None:
+            metrics[COMPATIBILITY_CONTRACT_METRIC] = self.compatibility_contract.contract
         manifest = build_manifest(
             job,
             pack_root,
@@ -6008,6 +6031,11 @@ class MapBuildPipeline:
             building_preprocessing=building_preprocessing_summary,
             poi_stats=metrics.get("poiBuild"),
             topography=topography_receipt,
+            compatibility=(
+                self.compatibility_contract.manifest_marker
+                if durable_profile is not None
+                else None
+            ),
         )
         reserved_preview_sha256 = getattr(
             job, "_reserved_preview_sha256", None

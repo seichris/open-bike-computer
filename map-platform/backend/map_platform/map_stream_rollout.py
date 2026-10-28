@@ -144,6 +144,10 @@ class MapStreamRolloutPolicy:
     requirements_sha256: str | None = None
     approved_signing_keys: frozenset[tuple[str, str]] = frozenset()
     approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
+    # Every hardware-approved producer whose signer is still trusted. Durable
+    # maps from an earlier approval stay deliverable after a new worker is
+    # promoted; removing its approval record is the revocation path.
+    approved_producers: frozenset[tuple[str, str, str, str]] = frozenset()
 
     @classmethod
     def from_environment(
@@ -195,6 +199,7 @@ class MapStreamRolloutPolicy:
         approval: MapStreamPromotionApproval | None = None
         approved_keys: frozenset[tuple[str, str]] = frozenset()
         approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
+        approved_producers: frozenset[tuple[str, str, str, str]] = frozenset()
         if mode == MapStreamRolloutMode.ALLOWLIST and not allowlist_values:
             raise ValueError("allowlist rollout mode requires at least one installation ID")
         if mode == MapStreamRolloutMode.PERCENTAGE:
@@ -252,6 +257,17 @@ class MapStreamRolloutPolicy:
                     for name in compatibility_fields
                 )
             )
+            approved_producers = frozenset(
+                (
+                    item.producer_build_sha256,
+                    item.worker_image_digest,
+                    key_id,
+                    key_sha256,
+                )
+                for item in (approved_promotions_by_id or {}).values()
+                for key_id, key_sha256 in item.approved_signing_keys
+                if (key_id, key_sha256) in current_keys
+            )
         elif promotion_id:
             raise ValueError(
                 "rollout promotion ID is only valid in percentage or all mode"
@@ -276,6 +292,7 @@ class MapStreamRolloutPolicy:
             requirements_sha256=approval.requirements_sha256 if approval else None,
             approved_signing_keys=approved_keys if promotion_id else frozenset(),
             approved_ios_identities=approved_ios_identities,
+            approved_producers=approved_producers,
         )
 
     def includes(self, installation_id: str | None) -> bool:
@@ -306,6 +323,8 @@ class MapStreamRolloutPolicy:
         client_app_build: str | None,
         client_app_git_sha: str | None,
         client_app_build_sha256: str | None,
+        *,
+        compatibility_contract: int | None = None,
     ) -> bool:
         if not self.includes(installation_id):
             return False
@@ -321,6 +340,15 @@ class MapStreamRolloutPolicy:
         del client_app_build, client_app_git_sha, client_app_build_sha256
         if self.mode == MapStreamRolloutMode.ALLOWLIST:
             return True
+        if compatibility_contract is not None:
+            # A durable map stays available while any recorded approval still
+            # covers its producer and trusted signer, not only the newest one.
+            return (
+                producer_build_sha256,
+                producer_image_digest,
+                *artifact_key,
+            ) in self.approved_producers
+        # Maps outside the contract keep the single-approval behavior.
         return bool(
             artifact_key in self.approved_signing_keys
             and producer_build_sha256 == self.producer_build_sha256
@@ -334,11 +362,17 @@ class MapStreamRolloutPolicy:
         client_app_build_sha256: str | None = None,
         *,
         reader_contract: str | None = "1",
+        compatibility_contract: int | None = None,
     ) -> dict[str, str | int]:
         # New clients derive compatibility from the signed manifest. Keep the
         # old response shape only for clients that predate that reader contract.
         values: dict[str, str | int] = {}
-        if self.mode != MapStreamRolloutMode.ALLOWLIST:
+        # Durable maps never carry the approval's exact firmware identity:
+        # readers check the device's reported reader capabilities instead.
+        if (
+            self.mode != MapStreamRolloutMode.ALLOWLIST
+            and compatibility_contract is None
+        ):
             if (
                 self.required_firmware_version is None
                 or self.required_firmware_build is None

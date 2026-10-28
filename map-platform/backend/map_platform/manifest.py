@@ -202,6 +202,7 @@ def build_manifest(
     building_preprocessing: dict[str, Any] | None = None,
     poi_stats: dict[str, Any] | None = None,
     topography: dict[str, Any] | None = None,
+    compatibility: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -273,6 +274,10 @@ def build_manifest(
     build_identity = build_identity_manifest(job, building_preprocessing)
     if build_identity is not None:
         manifest["buildIdentity"] = build_identity
+    if compatibility is not None:
+        # Signed with the content, so every copy and reader sees the same
+        # durable-contract classification; see map_compatibility.py.
+        manifest["compatibility"] = dict(compatibility)
     if renderer_has_labels(format_version):
         labels = job.request["labels"]
         manifest["target"]["labelProfileVersion"] = labels["profileVersion"]

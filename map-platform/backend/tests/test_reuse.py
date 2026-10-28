@@ -574,6 +574,7 @@ class MapReuseTests(unittest.TestCase):
                 artifact_metrics={
                     "buildingPreprocessing": preprocessing,
                     "buildingPhaseTimings": {"blockEncoding": 9.0},
+                    "compatibilityContract": 1,
                 },
                 finished=True,
             )
@@ -617,6 +618,8 @@ class MapReuseTests(unittest.TestCase):
             self.assertEqual(reloaded.build_cache_aliases, [base_keys.exact])
             self.assertEqual(reloaded.build_identity_derivation, derivation)
             self.assertEqual(reloaded.reuse_source_job_id, parent.job_id)
+            # Exact reuse keeps the source's durable map classification.
+            self.assertEqual(reloaded.compatibility_contract, 1)
             self.assertEqual(
                 reloaded.artifact_metrics["sourceArtifactMetrics"][
                     "buildingPreprocessing"
