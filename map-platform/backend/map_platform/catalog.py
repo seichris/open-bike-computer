@@ -224,7 +224,13 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
     renderer, format_version, features = renderer_features(job)
     content_receipt = catalog_content_receipt(job)
     entry_id = map_entry_id(job)
-    delivery_requirements = catalog_delivery_requirements(channel)
+    # A durable map's signed manifest is its reader contract. Configured
+    # catalog firmware gates apply only to maps outside the contract.
+    delivery_requirements = (
+        catalog_delivery_requirements(channel)
+        if job.compatibility_contract is None
+        else {}
+    )
     artifact_values: list[dict[str, Any]] = []
     for artifact in job.artifacts:
         value = {
