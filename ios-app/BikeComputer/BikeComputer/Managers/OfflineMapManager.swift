@@ -2283,8 +2283,16 @@ final class OfflineMapManager: ObservableObject {
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
+    // Discovery has no selected job yet. A completed job/cache selection may
+    // still be retained for other UI, but must not masquerade as pending work.
+    var isCheckingForServerMaps: Bool {
+        isServerRecoveryCheckPending &&
+            OfflineMapJobPersistence.activeJobId(defaults: defaults) == nil
+    }
+
     var activityProgress: Double? {
-        OfflineMapProgressPresentation.value(
+        guard !isCheckingForServerMaps else { return nil }
+        return OfflineMapProgressPresentation.value(
             job: currentJob,
             downloadProgress: downloadProgress
         )
@@ -2296,7 +2304,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasTerminalMapJobFailure: Bool {
-        ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
+        guard !isCheckingForServerMaps else { return false }
+        return ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
     }
 
     var hasPendingDeviceActivation: Bool {

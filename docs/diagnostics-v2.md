@@ -551,3 +551,21 @@ The firmware index stays bounded to 256 chunks and 64 KiB. If a snapshot lease
 or deferred pruning exposes more closed chunks, the index fails explicitly with
 `diagnostics_index_unreadable`; it never advertises a truncated subset as a
 complete inventory. Retry after the lease ends and retention runs.
+
+## I2C retry attribution on remote-debug firmware
+
+The Waveshare remote-debug profiles emit `I2C_RETRY schema=1` on USB serial
+after a retried transaction settles. Records include the 7-bit device address,
+register (`regKnown=0` for probes), operation, `recovered` or `exhausted` outcome,
+attempt count, failed-attempt count and elapsed milliseconds. They contain no
+register values or sensor payloads. Each address/outcome can emit at most once
+per five seconds after its first record; `suppressed` counts intervening outcomes.
+This is sampled USB evidence, not retained diagnostics or a complete event log.
+A recovered transaction with three attempts contributes two failed attempts but
+one recovery to the existing counters. Bus-lock admission failures retain the
+existing separate log; passive one-shot inspection reads do not enter retries.
+
+The limiter uses fixed storage only in `DEVICE_REMOTE_DEBUG` builds. Production
+logging, retry count/delay, shared-bus locking, touch interrupt gating and PMIC
+write policy remain unchanged. Debug logging has timing/memory cost; compare
+exact images and preserve the separate physical acceptance gate.

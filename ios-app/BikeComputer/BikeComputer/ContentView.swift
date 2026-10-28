@@ -2292,9 +2292,10 @@ struct ContentView: View {
     }
 
     private var isOnlyCheckingForServerMaps: Bool {
-        offlineMapManager.isServerRecoveryCheckPending
-            && offlineMapManager.currentJob == nil
-            && offlineMapManager.downloadedPackURL == nil
+        offlineMapManager.isCheckingForServerMaps
+            && !offlineMapManager.hasPendingDeviceActivation
+            && !offlineMapManager.isDeviceTransferBusy
+            && !offlineMapManager.hasActiveBackgroundUpload
             && offlineMapManager.errorMessage == nil
     }
 
@@ -2320,7 +2321,9 @@ struct ContentView: View {
 
     private var offlineMapStatusTitle: String {
         if let error = offlineMapManager.errorMessage, !error.isEmpty {
-            return "Map download needs attention"
+            return offlineMapManager.isCheckingForServerMaps
+                ? "Map server check needs attention"
+                : "Map download needs attention"
         }
         if offlineMapManager.downloadedPackURL != nil {
             return "Map is ready to upload to your Bicino"

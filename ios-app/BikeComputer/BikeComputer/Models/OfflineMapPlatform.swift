@@ -754,10 +754,9 @@ enum OfflineMapDownloadingSectionPresentation {
         hasDownloadedPack: Bool,
         errorMessage: String?
     ) -> Bool {
-        isServerRecoveryCheckPending &&
-            !hasCurrentJob &&
-            !hasDownloadedPack &&
-            errorMessage == nil
+        // Discovery is authoritative: these selections can belong to a
+        // previously completed map, not to a job found by this server scan.
+        isServerRecoveryCheckPending && errorMessage == nil
     }
 
     static func isVisible(
