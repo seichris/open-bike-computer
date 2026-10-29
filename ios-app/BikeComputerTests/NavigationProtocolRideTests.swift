@@ -8026,7 +8026,7 @@ extension NavigationProtocolTests {
         assertEqual(freshManager.defaultDeviceScreen, .mapPlusNavigation, "fresh installs default to Map + Navigation")
         assertEqual(freshManager.detailLevel, 2, "fresh Map profiles default to high detail")
         assertEqual(freshManager.zoomLevel, 3, "fresh Map profiles default to zoom level 3")
-        assertEqual(freshManager.routeLineWidth, 4, "fresh Map profiles default to a 4 px route")
+        assertEqual(freshManager.routeLineWidth, 10, "fresh Map profiles default to a 10 px route")
         assertEqual(freshManager.streetLineWidth, 4, "fresh Map profiles default to 4 px streets")
         assert(freshManager.mapLabelsEnabled,
                "fresh Map profiles show street labels")
@@ -8040,10 +8040,10 @@ extension NavigationProtocolTests {
                     "fresh Map profiles keep labels upright")
         assertEqual(freshManager.mapPlusNavigationDetailLevel, 0,
                     "fresh Map + Navigation profiles default to low detail")
-        assertEqual(freshManager.mapPlusNavigationZoomLevel, 3,
-                    "fresh Map + Navigation profiles default to zoom level 3")
-        assertEqual(freshManager.mapPlusNavigationRouteLineWidth, 15,
-                    "fresh Map + Navigation profiles default to a 15 px route")
+        assertEqual(freshManager.mapPlusNavigationZoomLevel, 2,
+                    "fresh Map + Navigation profiles default to zoom level 2")
+        assertEqual(freshManager.mapPlusNavigationRouteLineWidth, 10,
+                    "fresh Map + Navigation profiles default to a 10 px route")
         assertEqual(freshManager.mapPlusNavigationStreetLineWidth, 4,
                     "fresh Map + Navigation profiles default to 4 px streets")
         assertEqual(freshManager.mapPlusNavigationPositionMarkerScale, 2,
@@ -8150,12 +8150,12 @@ extension NavigationProtocolTests {
                     "older firmware receives major roads, local roads, and water without buildings")
         assertEqual(readInt32LE(freshDetailPacket!, offset: 5), 0,
                     "fresh Map + Navigation sends low detail")
-        assertEqual(readInt32LE(freshRoutePacket!, offset: 5), 15,
-                    "fresh Map + Navigation sends a 15 px route")
+        assertEqual(readInt32LE(freshRoutePacket!, offset: 5), 10,
+                    "fresh Map + Navigation sends a 10 px route")
         assertEqual(readInt32LE(freshStreetPacket!, offset: 5), 0,
                     "fresh Map + Navigation encodes its 4 px street width compatibly")
-        assertEqual(readInt32LE(freshZoomPacket!, offset: 5), 3,
-                    "fresh Map + Navigation sends zoom level 3")
+        assertEqual(readInt32LE(freshZoomPacket!, offset: 5), 2,
+                    "fresh Map + Navigation sends zoom level 2")
 
         freshProfilePackets.removeAll()
         let buildingCapabilities =
@@ -8261,8 +8261,10 @@ extension NavigationProtocolTests {
         let manager = BLEManager()
         manager.mapRotationMode = 1
         manager.zoomLevel = 5
+        manager.routeLineWidth = 7
         manager.mapPlusNavigationDetailLevel = 0
         manager.mapPlusNavigationZoomLevel = 3
+        manager.mapPlusNavigationRouteLineWidth = 13
         manager.mapPlusNavigationShowBuildings = true
         manager.showTracks = false
         manager.showServiceRoads = false
@@ -8285,6 +8287,9 @@ extension NavigationProtocolTests {
         let reloaded = BLEManager()
         assertEqual(reloaded.mapRotationMode, 1, "map rotation mode should persist across BLEManager reloads")
         assertEqual(reloaded.zoomLevel, 5, "zoom level should persist across BLEManager reloads")
+        assertEqual(reloaded.routeLineWidth, 7, "custom Map route width persists")
+        assertEqual(reloaded.mapPlusNavigationRouteLineWidth, 13,
+                    "custom Map + Navigation route width persists independently")
         assertEqual(reloaded.mapPlusNavigationDetailLevel, 0,
                     "Map + Navigation detail should persist independently")
         assertEqual(reloaded.mapPlusNavigationZoomLevel, 3,

@@ -973,10 +973,10 @@ enum MapNavigationBirdsEyePerspective: Int, CaseIterable, Identifiable {
 private enum MapPlusNavigationDefaults {
     static let minPolygonSize: Double = 0
     static let detailLevel = 0
-    static let routeLineWidth: Double = 15
+    static let routeLineWidth: Double = 10
     static let streetLineWidth: Double = 4
     static let positionMarkerScale: Double = 2
-    static let zoomLevel = 3
+    static let zoomLevel = 2
     static let showBuildings = false
     static let showGreenSpace = false
     static let showPaths = false
@@ -1316,7 +1316,7 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Map Settings (persisted for UI display)
     @Published var minPolygonSize: Double = 0
     @Published var detailLevel: Int = 2
-    @Published var routeLineWidth: Double = 4
+    @Published var routeLineWidth: Double = 10
     @Published var streetLineWidth: Double = 4
     @Published var positionMarkerScale: Double = 2
     @Published var mapRotationMode: Int = 0 // 0=North Up, 1=Course Up
@@ -1875,7 +1875,7 @@ class BLEManager: NSObject, ObservableObject {
         let defaults = UserDefaults.standard
         minPolygonSize = defaults.double(forKey: SettingsKeys.minPolygonSize)
         detailLevel = defaults.object(forKey: SettingsKeys.detailLevel) as? Int ?? 2
-        routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 4.0
+        routeLineWidth = defaults.object(forKey: SettingsKeys.routeLineWidth) as? Double ?? 10.0
         if let storedWidth = defaults.object(forKey: SettingsKeys.streetLineWidth) as? Double {
             streetLineWidth = DeviceBLEProtocol.normalizedStreetWidth(storedWidth)
         } else {
