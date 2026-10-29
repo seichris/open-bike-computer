@@ -23,6 +23,10 @@ from factory_release_manifest import FULL_GIT_SHA, _validated_release_tag, read_
 from firmware_manifest import _private_key
 
 DOMAIN = b"bicino-web-flasher-v1\n"
+# Separate domain: an image identity signature can never verify as a recipe.
+IDENTITY_DOMAIN = b"bicino-image-identity-v1\n"
+IDENTITY_HEAD = 4096
+IDENTITY_TAIL = 32
 LAYOUT_ID = "esp32s3-16m-dual3m-ffat9m-v1"
 FLASH_BYTES = 0x1000000
 SECTOR = 0x1000
@@ -134,10 +138,43 @@ def recovery_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, 
     return value, assets
 
 
-def sign(payload: dict, scalar: str) -> dict:
+def app_descriptor(image: bytes) -> dict | None:
+    """The ESP-IDF app description as the publisher reads it; informational."""
+    if len(image) < 0x120 or image[0] != 0xE9 or struct.unpack_from("<I", image, 0x20)[0] != 0xABCD5432:
+        return None
+
+    def text(offset: int, length: int) -> str:
+        raw = image[0x20 + offset:0x20 + offset + length].split(b"\0", 1)[0]
+        return "".join(chr(b) if 0x20 <= b < 0x7F else "?" for b in raw)
+
+    return {"version": text(0x10, 32), "projectName": text(0x30, 32),
+            "elfSha256": image[0xB0:0xD0].hex()}
+
+
+def identity_payload(value: dict, firmware: bytes) -> dict:
+    """Bind the exact application bytes a device may hold to this release.
+
+    The browser rules an image out of a slot from its first 4 KiB and last 32
+    bytes (the ESP appended image digest) and only then reads the whole slot.
+    """
+    if value["writes"][0]["sha256"] != digest(firmware) or len(firmware) != value["writes"][0]["length"]:
+        raise ValueError("identity image differs from the signed recovery recipe")
+    head = firmware[:IDENTITY_HEAD]
+    return {
+        "schemaVersion": 1, "artifactType": "bicino-image-identity",
+        "target": value["target"], "environment": value["environment"],
+        "version": value["version"], "build": value["build"], "gitSha": value["gitSha"],
+        "releaseTag": value["releaseTag"],
+        "image": {"size": len(firmware), "sha256": digest(firmware), "headLength": len(head),
+                  "headSha256": digest(head), "tail": firmware[-IDENTITY_TAIL:].hex()},
+        "descriptor": app_descriptor(firmware),
+    }
+
+
+def sign(payload: dict, scalar: str, domain: bytes = DOMAIN) -> dict:
     data = canonical(payload)
     key = _private_key(scalar)
-    r, s = utils.decode_dss_signature(key.sign(DOMAIN + data, ec.ECDSA(hashes.SHA256())))
+    r, s = utils.decode_dss_signature(key.sign(domain + data, ec.ECDSA(hashes.SHA256())))
     return {"schemaVersion": 1, "keyId": "bicino-release-p256-1", "algorithm": "ES256-P1363",
             "payload": base64.b64encode(data).decode("ascii"),
             "signature": base64.b64encode(r.to_bytes(32, "big") + s.to_bytes(32, "big")).decode("ascii")}
@@ -173,7 +210,11 @@ def publish(args: argparse.Namespace) -> None:
     payload["factoryDescriptorSha256"] = digest(descriptor_bytes)
     payload["factoryArchiveSha256"] = archive_digest
     payload["releaseTag"] = args.tag
-    assets[f"{args.target}.web-recovery.json"] = canonical(sign(payload, os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]))
+    key = os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]
+    assets[f"{args.target}.web-recovery.json"] = canonical(sign(payload, key))
+    firmware = assets[payload["writes"][0]["asset"]]
+    assets[f"{args.target}.image-identity.json"] = canonical(
+        sign(identity_payload(payload, firmware), key, IDENTITY_DOMAIN))
     if args.output_dir.is_symlink():
         raise ValueError("unsafe output directory")
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -85,10 +85,17 @@ class WebManifestTests(unittest.TestCase):
                              git_sha=factory_tests.GIT_SHA, version="2.3.4", build=57, tag="v2.3.4", output_dir=root / "web")
             with patch.dict("os.environ", {"FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY": key}):
                 web.publish(args)
-                self.assertEqual(len(list(args.output_dir.iterdir())), 3)
+                self.assertEqual(len(list(args.output_dir.iterdir())), 4)
                 envelope = json.loads((args.output_dir / f"{factory_tests.TARGET}.web-recovery.json").read_text())
                 payload = json.loads(base64.b64decode(envelope["payload"]))
                 self.assertEqual(payload["factoryDescriptorSha256"], web.digest(descriptor_path.read_bytes()))
+                identity_envelope = json.loads(
+                    (args.output_dir / f"{factory_tests.TARGET}.image-identity.json").read_text())
+                identity = json.loads(base64.b64decode(identity_envelope["payload"]))
+                firmware = images["images/00010000-firmware.bin"]
+                self.assertEqual(identity, web.identity_payload(payload, firmware))
+                self.assertEqual((identity["releaseTag"], identity["build"], identity["image"]["sha256"]),
+                                 ("v2.3.4", 57, payload["writes"][0]["sha256"]))
                 with self.assertRaisesRegex(ValueError, "create-only"):
                     web.publish(args)
                 descriptor["sourceIdentity"] = "0" * 40
@@ -153,6 +160,59 @@ class WebManifestTests(unittest.TestCase):
         payload, _ = web.recovery_payload(*inputs())
         payload.update(factoryArchiveSha256="b" * 64, releaseTag="v0.3.5")
         self.assertEqual(base64.b64decode(vector["envelope"]["payload"]), web.canonical(payload))
+
+    def signed_identity(self):
+        payload, assets = web.recovery_payload(*inputs())
+        payload.update(factoryArchiveSha256="b" * 64, releaseTag="v0.3.5")
+        return payload, assets[payload["writes"][0]["asset"]]
+
+    def test_identity_binds_the_exact_signed_application(self):
+        payload, firmware = self.signed_identity()
+        identity = web.identity_payload(payload, firmware)
+        self.assertEqual(identity["image"], {
+            "size": len(firmware), "sha256": web.digest(firmware), "headLength": 4096,
+            "headSha256": web.digest(firmware[:4096]), "tail": firmware[-32:].hex()})
+        for field in ("target", "environment", "version", "build", "gitSha", "releaseTag"):
+            self.assertEqual(identity[field], payload[field])
+        self.assertIsNone(identity["descriptor"])
+        with self.assertRaisesRegex(ValueError, "identity image"):
+            web.identity_payload(payload, firmware + b"\0")
+
+    def test_app_descriptor_is_informational_printable_ascii(self):
+        image = bytearray(b"\xe9" + bytes(0x1FF))
+        struct.pack_into("<I", image, 0x20, 0xABCD5432)
+        image[0x30:0x38] = b"v1.2.3\x01\x80"
+        image[0x50:0x55] = b"esp32"
+        image[0xB0:0xD0] = bytes(range(32))
+        self.assertEqual(web.app_descriptor(bytes(image)),
+                         {"version": "v1.2.3??", "projectName": "esp32", "elfSha256": bytes(range(32)).hex()})
+        image[0x20] ^= 1
+        self.assertIsNone(web.app_descriptor(bytes(image)))
+        self.assertIsNone(web.app_descriptor(b"\xe9" * 0x100))
+
+    def test_identity_signature_is_domain_separated(self):
+        payload, firmware = self.signed_identity()
+        identity = web.identity_payload(payload, firmware)
+        key = ec.derive_private_key(1, ec.SECP256R1())  # public test key only
+        envelope = web.sign(identity, base64.b64encode((1).to_bytes(32, "big")).decode(), web.IDENTITY_DOMAIN)
+        raw = base64.b64decode(envelope["signature"])
+        der = utils.encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        key.public_key().verify(der, web.IDENTITY_DOMAIN + web.canonical(identity), ec.ECDSA(hashes.SHA256()))
+        with self.assertRaises(Exception):
+            key.public_key().verify(der, web.DOMAIN + web.canonical(identity), ec.ECDSA(hashes.SHA256()))
+
+    def test_identity_golden_vector(self):
+        path = Path(__file__).parents[1] / "web-flasher" / "identity-test-vector.json"
+        if not path.exists():
+            self.fail("cross-language identity vector missing")
+        vector = json.loads(path.read_text())
+        payload, firmware = self.signed_identity()
+        data = base64.b64decode(vector["envelope"]["payload"])
+        self.assertEqual(data, web.canonical(web.identity_payload(payload, firmware)))
+        raw = base64.b64decode(vector["envelope"]["signature"])
+        der = utils.encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        public = ec.derive_private_key(1, ec.SECP256R1()).public_key()
+        public.verify(der, web.IDENTITY_DOMAIN + data, ec.ECDSA(hashes.SHA256()))
 
 
 if __name__ == "__main__":
