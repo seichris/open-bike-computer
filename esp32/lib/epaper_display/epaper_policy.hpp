@@ -12,7 +12,10 @@ constexpr uint32_t fullWaveformRestMs = 1000;
 // cleaning interval. Count successful partial waveforms instead of refreshing
 // static glass on a timer. The provisional count remains a qualification item.
 constexpr uint32_t busyTimeoutMs = 10000;
-constexpr uint16_t partialLimit = 20;
+// Ghosting experiment, not for release or PR #442: clean only after 160
+// partials so the owner can record when shadows first appear at room
+// temperature (docs/epaper-refresh-qualification.md). The PR keeps 20.
+constexpr uint16_t partialLimit = 160;
 constexpr uint32_t panelIdleSleepMs = 60000;
 
 enum class RefreshReason : uint8_t { Startup, Partial, Cleaning, Wake, Recovery };
