@@ -1,3 +1,6 @@
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -12,6 +15,13 @@ if __package__:
     from . import test_generated_sdkconfig as fixtures
 else:
     import test_generated_sdkconfig as fixtures
+
+# The CI side of shared-core transport: firmware-core-warm packs entries, and
+# pull-request builds install them before build_firmware.py restores them.
+_ARTIFACT_SCRIPT = Path(__file__).resolve().parents[3] / ".github/scripts/firmware_core_artifact.py"
+_spec = importlib.util.spec_from_file_location("firmware_core_artifact", _ARTIFACT_SCRIPT)
+core_artifact = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(core_artifact)
 
 
 class SharedCoreCacheTests(unittest.TestCase):
@@ -60,6 +70,32 @@ class SharedCoreCacheTests(unittest.TestCase):
             binary = installed / "packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/libcore.a"
             self.assertEqual(binary.read_bytes(), b"\x00" + os.fsencode(str(origin)))
             self.assertTrue(core.prepare_generated_sdkconfigs(target, self.environment))
+
+    def test_ci_artifact_restores_on_a_runner_without_the_producer_cache(self):
+        def ci(*arguments):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                core_artifact.main(list(arguments))
+            return dict(line.split("=", 1) for line in output.getvalue().splitlines())
+
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin):
+            self.publish(origin)
+        # The warm run knows only the attested manifest's core input key, while
+        # the shared entry is named by the request key a consumer computes.
+        key = ci("identity", "--project", str(origin), "--environment", self.environment)["core-input-key"]
+        archive = self.root / "firmware-core-entry.tar"
+        packed = ci("pack", "--root", str(self.root / "transport/cores-v1" / self.environment),
+                    "--key", key, "--output", str(archive))
+        self.assertNotEqual(packed["request-key"], key)
+        runner = self.root / "pull-request-runner"
+        ci("install", "--archive", str(archive), "--root", str(runner / "cores-v1" / self.environment))
+        target = self.project("consumer")
+        with self.fixture.fake_core(target), patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(runner)}):
+            (target / "sdkconfig.defaults").unlink()
+            self.assertEqual(core.core_request_key(target, self.environment), packed["request-key"])
+            self.assertTrue(restore_shared_core(target, self.environment))
+            self.assertEqual(core.core_input_key(target, self.environment), key)
 
     def test_config_change_is_a_miss(self):
         origin = self.project("producer")

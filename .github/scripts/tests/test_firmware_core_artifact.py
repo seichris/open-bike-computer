@@ -15,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import firmware_core_artifact as cores
 
 KEY = "a" * 64
+# Shared entries are named by request key; only transport.json records the
+# attested build's core input key, which always differs in real builds.
+INPUT_KEY = "c" * 64
 NOW = dt.datetime(2026, 10, 26, 12, 0, tzinfo=dt.timezone.utc)
 REPOSITORY = 1001
 
@@ -99,15 +102,21 @@ class EntryTransportTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "producer/cores-v1/WAVESHARE_AMOLED_175"
-        entry = self.root / KEY
+        self.publish(KEY, {"requestKey": KEY, "coreInputKey": INPUT_KEY})
+        # The publisher's lock file sits beside its entries.
+        (self.root / ".lock").write_text("")
+        self.archive = Path(self.temporary.name) / "firmware-core-entry.tar"
+
+    def publish(self, request_key, transport):
+        entry = self.root / request_key
         (entry / "core").mkdir(parents=True)
-        (entry / "transport.json").write_text(json.dumps({"requestKey": KEY}))
+        (entry / "transport.json").write_text(json.dumps(transport))
         (entry / "core/core-artifacts.tar").write_bytes(b"\x00" * 4096)
         (entry / "core/manifest.json").write_text("{}")
         for path in sorted(entry.rglob("*"), reverse=True):
             path.chmod(0o555 if path.is_dir() else 0o444)
         entry.chmod(0o555)
-        self.archive = Path(self.temporary.name) / "firmware-core-entry.tar"
+        return entry
 
     def tearDown(self):
         for path in Path(self.temporary.name).rglob("*"):
@@ -118,14 +127,18 @@ class EntryTransportTests(unittest.TestCase):
         return {str(p.relative_to(root)): oct(stat.S_IMODE(p.stat().st_mode)) for p in sorted(root.rglob("*"))}
 
     def test_pack_and_install_round_trip_keeps_read_only_entry(self):
-        packed = cores.main(["pack", "--root", str(self.root), "--key", KEY, "--output", str(self.archive)])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            packed = cores.main(["pack", "--root", str(self.root), "--key", INPUT_KEY, "--output", str(self.archive)])
         self.assertEqual(0, packed)
+        self.assertIn(f"request-key={KEY}\n", output.getvalue())
         consumer = Path(self.temporary.name) / "consumer/cores-v1/WAVESHARE_AMOLED_175"
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             cores.main(["install", "--archive", str(self.archive), "--root", str(consumer)])
         self.assertIn("installed=true\n", output.getvalue())
-        self.assertIn(f"core-input-key={KEY}\n", output.getvalue())
+        self.assertIn(f"request-key={KEY}\n", output.getvalue())
+        (self.root / ".lock").unlink()
         self.assertEqual(self.modes(self.root), self.modes(consumer))
         self.assertEqual({f"{KEY}": "0o555", f"{KEY}/core": "0o555", f"{KEY}/core/core-artifacts.tar": "0o444",
                           f"{KEY}/core/manifest.json": "0o444", f"{KEY}/transport.json": "0o444"}, self.modes(consumer))
@@ -137,11 +150,44 @@ class EntryTransportTests(unittest.TestCase):
             cores.main(["install", "--archive", str(self.archive), "--root", str(consumer)])
         self.assertIn("installed=false\n", output.getvalue())
 
-    def test_pack_requires_a_complete_entry(self):
+    def pack(self, key=INPUT_KEY, root=None):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cores.main(["pack", "--root", str(root or self.root), "--key", key, "--output", str(self.archive)])
+
+    def test_pack_selects_the_entry_by_its_recorded_core_input_key(self):
+        # The entry name is a request key, never the build's core input key.
+        for key in ("b" * 64, KEY, "../x"):
+            with self.subTest(key=key), self.assertRaises(SystemExit):
+                self.pack(key)
         with self.assertRaises(SystemExit):
-            cores.main(["pack", "--root", str(self.root), "--key", "b" * 64, "--output", str(self.archive)])
+            self.pack(root=self.root.parent / "missing")
+        self.publish("d" * 64, {"requestKey": "d" * 64, "coreInputKey": "e" * 64})
+        self.assertEqual(0, self.pack())
+        with tarfile.open(self.archive) as archive:
+            self.assertEqual({KEY}, {Path(name).parts[0] for name in archive.getnames()})
+
+    def test_pack_fails_closed_on_ambiguous_or_malformed_entries(self):
+        cases = {
+            "second entry with the same core input key": {"requestKey": "d" * 64, "coreInputKey": INPUT_KEY},
+            "transport naming another entry": {"requestKey": KEY, "coreInputKey": "e" * 64},
+            "transport without a request key": {"coreInputKey": "e" * 64},
+        }
+        for label, transport in cases.items():
+            with self.subTest(label=label):
+                entry = self.publish("d" * 64, transport)
+                with self.assertRaises(SystemExit):
+                    self.pack()
+                for path in [entry, *entry.rglob("*")]:
+                    if path.is_dir():
+                        path.chmod(0o755)
+                for path in sorted(entry.rglob("*"), reverse=True):
+                    path.rmdir() if path.is_dir() else path.unlink()
+                entry.rmdir()
+        incomplete = self.root / ("d" * 64)
+        incomplete.mkdir()
+        (incomplete / "transport.json").write_text(json.dumps({"requestKey": "d" * 64, "coreInputKey": "e" * 64}))
         with self.assertRaises(SystemExit):
-            cores.main(["pack", "--root", str(self.root), "--key", "../x", "--output", str(self.archive)])
+            self.pack()
 
     def test_install_rejects_foreign_archive_members(self):
         def archive_with(members):
