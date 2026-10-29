@@ -205,6 +205,40 @@ static void assertMatchedFailureQueuesClearedUiSnapshot(
   assert(renderGate.renderedGeneration() == 0);
 }
 
+// An unauthenticated client keeps the link for 120 s while a pairing code is
+// open, otherwise 12 s, counted from the link's acceptance or from ownership
+// registration on it. Counting from the connection cut a new owner off before
+// OWNER/PROOF whenever the physical confirmation came more than 12 s in.
+static void testUnauthenticatedDeadline() {
+  using ble_connection_policy::unauthenticatedDeadlinePassed;
+  const uint32_t connectedMs = 1000;
+  assert(!unauthenticatedDeadlinePassed(connectedMs + 12000, connectedMs, false));
+  assert(unauthenticatedDeadlinePassed(connectedMs + 12001, connectedMs, false));
+  assert(!unauthenticatedDeadlinePassed(connectedMs + 120000, connectedMs, true));
+  assert(unauthenticatedDeadlinePassed(connectedMs + 120001, connectedMs, true));
+  // Confirmed and registered 15 s in: the connection anchor has run out; the
+  // restarted window covers authentication, and only for 12 s.
+  const uint32_t registeredMs = connectedMs + 15000;
+  assert(unauthenticatedDeadlinePassed(registeredMs + 100, connectedMs, false));
+  assert(!unauthenticatedDeadlinePassed(registeredMs + 100, registeredMs, false));
+  assert(!unauthenticatedDeadlinePassed(registeredMs + 12000, registeredMs, false));
+  assert(unauthenticatedDeadlinePassed(registeredMs + 12001, registeredMs, false));
+  // A registration late in the comparison still gets 12 s, not the 120 s.
+  const uint32_t lateRegistrationMs = connectedMs + 110000;
+  assert(unauthenticatedDeadlinePassed(lateRegistrationMs + 12001,
+                                       lateRegistrationMs, false));
+  // A restart stored by another task after `now` was read is a window that
+  // just began, not one that expired 49 days ago.
+  assert(!unauthenticatedDeadlinePassed(registeredMs, registeredMs + 5, false));
+  assert(!unauthenticatedDeadlinePassed(registeredMs, registeredMs + 5, true));
+  // millis() wraps after about 49.7 days.
+  const uint32_t beforeWrapMs = 0xFFFFF000u;
+  assert(!unauthenticatedDeadlinePassed(beforeWrapMs + 12000u, beforeWrapMs,
+                                        false));
+  assert(unauthenticatedDeadlinePassed(beforeWrapMs + 12001u, beforeWrapMs,
+                                       false));
+}
+
 int main() {
   int unmatchedCallbacks = 0;
   assert(!ownership_ui_dispatch_policy::dispatchMatchedCommand(
@@ -292,6 +326,7 @@ int main() {
       }));
   assert(activeHandle == ble_connection_policy::noConnection &&
          sessionResets == 2);
+  testUnauthenticatedDeadline();
   int bootConfirmations = 0;
   int bootFallbacks = 0;
   assert(ownership_button_policy::handleShortPress(
