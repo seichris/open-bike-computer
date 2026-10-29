@@ -150,6 +150,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
 
     static var mapDefault: DeviceScreenMapProfile {
         var profile = DeviceScreenMapProfile()
+        profile.routeLineWidth = 10
         profile.visibilityMask |= poiVisibilityMask
         return profile
     }
@@ -167,7 +168,8 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     static var mapPlusNavigationDefault: DeviceScreenMapProfile {
         var profile = DeviceScreenMapProfile()
         profile.detailLevel = 0
-        profile.routeLineWidth = 15
+        profile.routeLineWidth = 10
+        profile.zoomLevel = 2
         profile.visibilityMask = 0x0339
         profile.labelDensity = 0
         profile.rotationMode = 1
