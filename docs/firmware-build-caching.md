@@ -96,7 +96,11 @@ do not fit the cap together. **Firmware core warm** therefore runs the normal
 tooling, plus a weekly schedule, and that run publishes each verified core
 entry as a workflow artifact named after its environment and content key
 (`firmware_core_artifact.py pack`, 14-day retention, re-uploaded once older
-than a week). A pull-request build whose core cache misses restores that
+than a week). Shared entries are named by the request key, which a new
+worktree can compute before generated SDK sidecars exist, but the attested
+build manifest records only the core input key. `pack` therefore archives the
+single entry whose `transport.json` records that core input key, under its
+request-key name. A pull-request build whose core cache misses restores that
 artifact before building; an artifact lookup or download failure only costs a
 cold build. Only an artifact uploaded by a
 run of this repository's own `main` branch is accepted (`select` checks the
