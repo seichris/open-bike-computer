@@ -6418,32 +6418,53 @@ void Maps::bindMapStorageRoot(const char *root) {
   vectorMapFolder = String(root) + "/VECTMAP/";
 }
 
-bool Maps::setVectorMapFolder(const std::string &folder) {
-  String normalized(folder.c_str());
-  if (!normalized.endsWith("/"))
-    normalized += "/";
-  if (normalized == vectorMapFolder)
-    return true;
-
+map_probe_diagnostics::Result
+Maps::activateVectorMapFolderDetailed(const std::string &folder) {
+  const uint32_t startedMs = millis();
   const bool restartWorker = renderWorkerTaskHandle != nullptr;
   if (restartWorker && !stopRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map root switch deferred: render worker is busy");
-    return false;
+    ESP_LOGE(TAG, "Vector map activation deferred: render worker is busy");
+    return {map_probe_diagnostics::Code::WorkerStopFailed,
+            millis() - startedMs};
   }
 
-  const bool switched = switchVectorMapFolderOnStorageOwner(folder);
-  if (switched)
+  map_probe_diagnostics::Result result =
+      activateVectorMapFolderOnStorageOwner(folder);
+  if (result.loaded())
     finalizeVectorMapFolderSwitchOnUi();
+
   if (restartWorker && !startRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map root switched but render worker restart failed");
-    return false;
+    ESP_LOGE(TAG, "Vector map activation completed but worker restart failed");
+    result.code = map_probe_diagnostics::Code::WorkerRestartFailed;
   }
-  if (switched)
-    ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
-  return switched;
+  result.elapsedMs = millis() - startedMs;
+  return result;
 }
 
-bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
+map_probe_diagnostics::Result
+Maps::activateVectorMapFolderOnStorageOwner(const std::string &folder) {
+  const uint32_t startedMs = millis();
+  map_font_asset::Asset validatedFont;
+  map_probe_diagnostics::Result result =
+      probeVectorMapFolderOnStorageOwner(folder, &validatedFont);
+  if (result.loaded()) {
+    const bool reusable = validatedFont.isOpen();
+    const uint32_t switchStartedMs = millis();
+    const bool switched =
+        switchVectorMapFolderOnStorageOwner(folder, &validatedFont);
+    result.rootSwitchMs = millis() - switchStartedMs;
+    // A moved-from asset is closed: the switch consumed the validated font.
+    result.fontValidationReused =
+        switched && reusable && !validatedFont.isOpen();
+    if (!switched)
+      result.code = map_probe_diagnostics::Code::RootSwitchFailed;
+  }
+  result.elapsedMs = millis() - startedMs;
+  return result;
+}
+
+bool Maps::switchVectorMapFolderOnStorageOwner(
+    const std::string &folder, map_font_asset::Asset *validatedFont) {
   if (!mapFilesAvailable()) {
     ESP_LOGE(TAG, "Vector map root switch refused: no map storage");
     return false;
@@ -6462,13 +6483,19 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   }
 
   map_font_asset::Asset candidateFont;
-  const std::string fontPath =
-      std::string(normalized.c_str()) + "assets/street-labels.fma";
-  struct stat fontMetadata = {};
-  if (::stat(fontPath.c_str(), &fontMetadata) == 0 &&
-      (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath))) {
-    ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
-    return false;
+  if (validatedFont != nullptr && validatedFont->isOpen()) {
+    // The probe just validated this descriptor and its block contract on the
+    // same storage owner; reopening would revalidate every byte again.
+    candidateFont = std::move(*validatedFont);
+  } else {
+    const std::string fontPath =
+        std::string(normalized.c_str()) + "assets/street-labels.fma";
+    struct stat fontMetadata = {};
+    if (::stat(fontPath.c_str(), &fontMetadata) == 0 &&
+        (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath))) {
+      ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
+      return false;
+    }
   }
 
   power_management::ScopedLock powerLock(
@@ -6479,11 +6506,12 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
       map_nearby_storage::Status::Unavailable;
   std::vector<map_nearby_coverage::Block> candidateCoverage;
   try {
-    MapNearbyVector<map_poi_index::Entry> entries;
     std::string root(normalized.c_str());
     while (!root.empty() && root.back() == '/') root.pop_back();
-    poiIndexReady = map_nearby_storage::readIndex(
-        root, entries, nullptr, nullptr, poiActivationStatus);
+    // Activation needs only the index's health. Queries stream the file
+    // themselves, so validate it without materializing its entries.
+    poiIndexReady = map_nearby_storage::validateIndex(
+        root, nullptr, nullptr, poiActivationStatus);
     if (poiIndexReady) {
       poiIndexReady = map_nearby_storage::readCoverage(
           root, candidateCoverage, poiActivationStatus);
@@ -6545,33 +6573,9 @@ bool Maps::takeStreetLabelRuntimeFailure(std::string &code) {
   return true;
 }
 
-bool Maps::probeVectorMapFolder(const std::string &folder) {
-  return probeVectorMapFolderDetailed(folder).loaded();
-}
-
 map_probe_diagnostics::Result
-Maps::probeVectorMapFolderDetailed(const std::string &folder) {
-  const uint32_t startedMs = millis();
-  const bool restartWorker = renderWorkerTaskHandle != nullptr;
-  if (restartWorker && !stopRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map probe deferred: render worker is busy");
-    return {map_probe_diagnostics::Code::WorkerStopFailed,
-            millis() - startedMs};
-  }
-
-  map_probe_diagnostics::Result result =
-      probeVectorMapFolderOnStorageOwner(folder);
-
-  if (restartWorker && !startRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map probe completed but worker restart failed");
-    result.code = map_probe_diagnostics::Code::WorkerRestartFailed;
-  }
-  result.elapsedMs = millis() - startedMs;
-  return result;
-}
-
-map_probe_diagnostics::Result
-Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
+Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder,
+                                         map_font_asset::Asset *validatedFont) {
   const uint32_t startedMs = millis();
   map_probe_diagnostics::Result result;
   if (!mapFilesAvailable()) {
@@ -6595,7 +6599,10 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
       power_management::LockDomain::Storage);
   size_t visited = 0;
   std::string blockBase;
-  if (!findMapBlock(normalized, blockBase, visited, 0)) {
+  const uint32_t lookupStartedMs = millis();
+  const bool blockFound = findMapBlock(normalized, blockBase, visited, 0);
+  result.blockLookupMs = millis() - lookupStartedMs;
+  if (!blockFound) {
     ESP_LOGE(TAG, "No map block found under %s", normalized.c_str());
     result.code = map_probe_diagnostics::Code::BlockNotFound;
     result.elapsedMs = millis() - startedMs;
@@ -6606,7 +6613,9 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 
   const bool previousMapFound = isMapFound.load();
   isMapFound = false;
+  const uint32_t blockStartedMs = millis();
   std::unique_ptr<MapBlock> blockOwner(readMapBlock(String(blockBase.c_str())));
+  result.blockLoadMs = millis() - blockStartedMs;
   MapBlock *block = blockOwner.get();
   loaded = block != nullptr && isMapFound.load();
   if (!loaded)
@@ -6615,7 +6624,10 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
     result.formatVersion = block->formatVersion;
     map_font_asset::Asset candidateFont;
     const std::string fontPath = normalized + "/assets/street-labels.fma";
-    if (!candidateFont.open(fontPath)) {
+    const uint32_t fontStartedMs = millis();
+    const bool fontOpened = candidateFont.open(fontPath);
+    result.fontValidationMs = millis() - fontStartedMs;
+    if (!fontOpened) {
       loaded = false;
       result.code = map_probe_diagnostics::Code::FontOpenFailed;
     } else if (candidateFont.profileFingerprint() !=
@@ -6631,6 +6643,8 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
     if (!loaded) {
       ESP_LOGE(TAG, "Street-label block/font contract failed under %s",
                normalized.c_str());
+    } else if (validatedFont != nullptr) {
+      *validatedFont = std::move(candidateFont);
     }
   } else if (loaded) {
     result.formatVersion = block->formatVersion;
@@ -6938,12 +6952,10 @@ bool Maps::processPendingVectorMapActivation() {
   map_probe_diagnostics::Result probe;
   bool loaded = false;
   try {
-    probe = probeVectorMapFolderOnStorageOwner(request.folder);
+    // Probe and root switch share one label-font validation; a failed switch
+    // reports RootSwitchFailed and keeps the old root.
+    probe = activateVectorMapFolderOnStorageOwner(request.folder);
     loaded = probe.loaded();
-    if (loaded && !switchVectorMapFolderOnStorageOwner(request.folder)) {
-      loaded = false;
-      probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
-    }
   } catch (const std::bad_alloc &) {
     loaded = false;
     probe.code = map_probe_diagnostics::Code::RootSwitchFailed;

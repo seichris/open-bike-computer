@@ -84,6 +84,7 @@ RENDERER_ENTRY_POINTS = (
     "bool mapFilesAvailable()",
     "bool findMapBlock(",
     "Maps::MapBlock *Maps::readMapBlock(String fileName)",
+    "map_probe_diagnostics::Result\nMaps::activateVectorMapFolderOnStorageOwner(",
     "map_probe_diagnostics::Result\nMaps::probeVectorMapFolderOnStorageOwner(",
     "bool Maps::switchVectorMapFolderOnStorageOwner(",
     "bool Maps::requestStorageControl(",
@@ -296,8 +297,8 @@ class SdOnlyRendererStorageTests(unittest.TestCase):
                 "map_probe_diagnostics::Result result;\n  " + gate,
                 "map_probe_diagnostics::Result result;\n  if (false)"),
             "root switch loads fonts and indexes": (
-                "const std::string &folder) {\n  " + gate,
-                "const std::string &folder) {\n  if (false)"),
+                "map_font_asset::Asset *validatedFont) {\n  " + gate,
+                "map_font_asset::Asset *validatedFont) {\n  if (false)"),
             "queued storage work is admitted": (
                 "  if (!mapFilesAvailable()) return false;\n"
                 "  if (work == nullptr",
@@ -349,8 +350,16 @@ class SdOnlyMapCallerContractTests(unittest.TestCase):
                     "mapTransferHttp.configure(8080, &deviceTransferHttp);"):
             self.assertLess(bind, setup.index(use), use)
         for owner in ("ride_diagnostics::begin(", "MapTransferInstaller mapInstaller(",
-                      "mapTransferHttp.configure(", "mapView.initMap(", "initLVGL();"):
+                      "mapTransferHttp.configure(", "startUserInterface();"):
             self.assertLess(pin, setup.index(owner), owner)
+        # The interface sizes the map view and builds LVGL without map I/O.
+        interface = main[main.index("static void startUserInterface()"):
+                         main.index("void setup()")]
+        for step in ("mapView.initMap(", "initLVGL();"):
+            self.assertIn(step, interface)
+        for storage_use in ("storage.", "mapInstaller", "activateVectorMapFolder",
+                            "bleNavServer"):
+            self.assertNotIn(storage_use, interface)
         gate = setup.index("if (!storage.mapStorageAvailable()) {")
         recovery = setup.index("mapInstaller.recoverInterruptedActivation()")
         self.assertLess(gate, setup.index("} else {", gate))

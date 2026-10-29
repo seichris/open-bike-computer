@@ -92,11 +92,21 @@ Renderer probe codes are `not_run`, `ok`, `worker_stop_failed`,
 
 Map records may include the validated map ID, a 16-character content-receipt
 prefix, whether an authenticated transfer session supplied the activation, the
-probe `durationMs`, `visitedEntries`, and detected `formatVersion`. Runtime
-availability transitions include total `durationMs` and `blockLoadMs`.
+probe `durationMs`, `visitedEntries`, and detected `formatVersion`. Probe
+records (`renderer_probe`, `rollback_completed`, and runtime activation or
+rollback completion) also carry `blockLoadMs`, the part of `durationMs` spent
+reading the single probed map block; the remainder is label-font validation
+and the root switch. Runtime availability transitions include total
+`durationMs` and `blockLoadMs`.
 They never include map geometry, coordinates, transfer credentials, or a full
 content receipt. Availability is recorded only initially and when it changes,
 not once per render loop.
+
+On Waveshare boards a field-less `boot.waiting_screen` event marks when the
+waiting screen was rendered, before map recovery. Its `uptimeMs`, the boot
+`renderer_probe` duration and `boot.acceptance` separate time to the screen,
+map activation time and readiness without a serial connection; see
+`docs/firmware-startup-sequence.md`.
 
 The firmware also emits `logger.health` at lifecycle readiness and controlled
 shutdown. Its enqueue/write/drop/storage-error counters and current/maximum

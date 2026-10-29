@@ -337,6 +337,48 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("std::unique_ptr<MapBlock> blockOwner", maps)
         self.assertIn("result.folder = std::move(completedVectorMapActivation.folder)", maps)
 
+    def test_waiting_screen_precedes_map_recovery_without_moving_acceptance(self):
+        main = source("src/main.cpp")
+        setup = main[main.index("void setup()") : main.index("void loop()")]
+        storage_done = setup.index(
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);")
+        guard = "#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)\n"
+        waveshare = setup[setup.rindex(guard, 0, storage_done):]
+        # The real waiting screen is on the panel before any map recovery work.
+        # Recovery still precedes the diagnostics writer, Wi-Fi preparation,
+        # BLE and acceptance, so a map failure keeps OTA rollback and safe mode.
+        steps = (
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);",
+            "boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);",
+            "startUserInterface();",
+            "lv_screen_load(waitingScreen);",
+            "lv_refr_now(display);",
+            '"waiting_screen"',
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::UserInterface);",
+            "boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);",
+            "mapInstaller.recoverInterruptedActivation()",
+            "mapView.activateVectorMapFolderDetailed(root)",
+            "ride_diagnostics::startWriter();",
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);",
+            "Network.begin()",
+            "operationOwner()->prepareWiFi()",
+            'bleNavServer.init("BikeComputer")',
+            "!firmwareUpdateHttp.markRunningAppValid()",
+            "boot_diagnostics::markReady()",
+        )
+        positions = [waveshare.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        # One static frame: setup never runs LVGL timers or input callbacks.
+        self.assertNotIn("lv_timer_handler", setup)
+        self.assertEqual(setup.count("startUserInterface();"), 2)
+        self.assertIn("#if !defined(WAVESHARE_AMOLED_175) && "
+                      "!defined(WAVESHARE_AMOLED_206)\n", setup)
+        # Other boards keep their original late waiting-screen load.
+        self.assertEqual(setup.count("lv_screen_load(waitingScreen);"), 2)
+        late = setup.rindex("lv_screen_load(waitingScreen);")
+        self.assertTrue(setup[:late].rstrip().endswith(
+            '#else\n  log_i("Loading Waiting Screen...");'))
+
     def test_ready_reporting_follows_boot_confirmation(self):
         main = source("src/main.cpp")
         setup = main[main.index("void setup()") : main.index("void loop()")]

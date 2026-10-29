@@ -280,6 +280,115 @@ void testCursorPublishesAfterResumableCoverage() {
   assert(::rmdir((root + "/assets").c_str()) == 0);
   assert(::rmdir(root.c_str()) == 0);
 }
+
+uint32_t bitwiseCrc32(const uint8_t *data, size_t size) {
+  uint32_t crc = 0xffffffffU;
+  for (size_t index = 0; index < size; ++index) {
+    crc ^= data[index];
+    for (unsigned bit = 0; bit < 8; ++bit)
+      crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
+  }
+  return crc ^ 0xffffffffU;
+}
+
+uint32_t nibbleCrc32(const uint8_t *data, size_t size) {
+  uint32_t crc = 0xffffffffU;
+  for (size_t index = 0; index < size; ++index)
+    crc = map_poi_index::crc32Update(crc, data[index]);
+  return crc ^ 0xffffffffU;
+}
+
+void testPoiIndexCrcMatchesBitwiseReference() {
+  const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+  assert(nibbleCrc32(check, sizeof(check)) == 0xcbf43926U);
+  std::mt19937 random(7);
+  std::vector<uint8_t> bytes(4099);
+  for (uint8_t &byte : bytes) byte = static_cast<uint8_t>(random());
+  for (size_t length : {0U, 1U, 2U, 31U, 32U, 33U, 4096U, 4099U})
+    assert(nibbleCrc32(bytes.data(), length) ==
+           bitwiseCrc32(bytes.data(), length));
+}
+
+// A sorted FPI1 index of `count` single-record entries. Validation reads only
+// the index, so the referenced blocks need not exist.
+std::string poiIndex(uint32_t count) {
+  std::string entries;
+  for (uint32_t block = 0; block < count; ++block) {
+    std::string entry;
+    appendLe32(entry, block);
+    appendLe32(entry, 0);
+    appendLe32(entry, 1);
+    appendLe16(entry, 1);
+    for (int category = 1; category < 5; ++category) appendLe16(entry, 0);
+    appendLe32(entry, 112);
+    appendLe32(entry, 16);
+    appendLe16(entry, 0);
+    assert(entry.size() == 32);
+    entries += entry;
+  }
+  std::string index("FPI1", 4);
+  appendLe16(index, 32);
+  appendLe16(index, 0);
+  appendLe32(index, count);
+  appendLe32(index, crc32(entries));
+  return index + entries;
+}
+
+void testIndexValidationMatchesReaderWithoutEntries() {
+  using map_nearby_storage::Status;
+  char pattern[] = "/tmp/open-bike-nearby-index-XXXXXX";
+  const char *created = ::mkdtemp(pattern);
+  assert(created != nullptr);
+  const std::string root(created);
+  const std::string path = root + "/assets/nearby-pois.fpi";
+  MapNearbyVector<map_poi_index::Entry> entries;
+  Status status = Status::Ok;
+
+  // A legacy map without an index is unavailable, never corrupt.
+  assert(!map_nearby_storage::validateIndex(root, nullptr, nullptr, status));
+  assert(status == Status::Unavailable);
+  assert(!map_nearby_storage::readIndex(root, entries, nullptr, nullptr, status));
+  assert(status == Status::Unavailable);
+  assert(::mkdir((root + "/assets").c_str(), 0700) == 0);
+
+  // 300 entries take three 4 KiB reads; validation accepts exactly what the
+  // materializing reader accepts.
+  const std::string valid = poiIndex(300);
+  writeFile(path, valid);
+  assert(map_nearby_storage::validateIndex(root, nullptr, nullptr, status));
+  assert(status == Status::Ok);
+  assert(map_nearby_storage::readIndex(root, entries, nullptr, nullptr, status));
+  assert(status == Status::Ok && entries.size() == 300);
+  assert(entries.front().blockX == 0 && entries.back().blockX == 299);
+
+  const auto expectCorrupt = [&](const std::string &bytes) {
+    writeFile(path, bytes);
+    assert(!map_nearby_storage::validateIndex(root, nullptr, nullptr, status));
+    assert(status == Status::Corrupt);
+    assert(map_nearby_storage::invalidatesHealth(status));
+    assert(!map_nearby_storage::readIndex(root, entries, nullptr, nullptr,
+                                          status));
+    assert(status == Status::Corrupt);
+  };
+  std::string flipped = valid;
+  flipped[flipped.size() - 40] ^= 0x01; // late entry: only the CRC catches it
+  expectCorrupt(flipped);
+  expectCorrupt(valid.substr(0, valid.size() - 32));
+  std::string unsorted = poiIndex(2);
+  unsorted.replace(16, 4, unsorted.substr(48, 4)); // duplicate block order
+  expectCorrupt(unsorted);
+
+  // Cancellation is retryable and leaves health untouched.
+  writeFile(path, valid);
+  const auto cancel = [](void *) { return true; };
+  assert(!map_nearby_storage::validateIndex(root, cancel, nullptr, status));
+  assert(status == Status::Cancelled);
+  assert(!map_nearby_storage::invalidatesHealth(status));
+
+  assert(std::remove(path.c_str()) == 0);
+  assert(::rmdir((root + "/assets").c_str()) == 0);
+  assert(::rmdir(root.c_str()) == 0);
+}
 } // namespace
 
 int main() {
@@ -608,6 +717,8 @@ int main() {
            map_nearby_storage::Status::ReadFailed);
   testHighLatitudeWindowIsEvaluatedInBoundedSteps();
   testCursorPublishesAfterResumableCoverage();
+  testPoiIndexCrcMatchesBitwiseReference();
+  testIndexValidationMatchesReaderWithoutEntries();
 
   std::cout << "Nearby query geometry and bounded per-category tests passed\n";
 }
