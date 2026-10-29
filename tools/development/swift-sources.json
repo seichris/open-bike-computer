@@ -291,6 +291,8 @@
         "ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SocialRouteProvenance.swift",
         "ios-app/BikeComputerTests/OfflineRouteSaveTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteFavorites.swift",
+        "ios-app/BikeComputerTests/SavedRouteFavoriteTests.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",

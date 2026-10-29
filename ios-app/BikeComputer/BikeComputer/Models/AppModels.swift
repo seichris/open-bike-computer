@@ -176,6 +176,24 @@ final class SavedDestinationStore: ObservableObject {
         return cleaned
     }
 
+    /// Rewrites stored favorite coordinates by favorite ID, keeping each
+    /// favorite's name, order and saved-route link.
+    func replaceFavoriteCoordinates(_ coordinates: [UUID: CLLocationCoordinate2D]) {
+        guard !coordinates.isEmpty else { return }
+        let replaced = favoriteDestinations.map { favorite in
+            guard let coordinate = coordinates[favorite.id] else { return favorite }
+            return SavedDestination(
+                id: favorite.id,
+                name: favorite.name,
+                coordinate: coordinate,
+                savedRouteID: favorite.savedRouteID
+            )
+        }
+        guard replaced != favoriteDestinations else { return }
+        favoriteDestinations = replaced
+        persist()
+    }
+
     @discardableResult
     func removeFavorite(_ destination: SavedDestination) -> Bool {
         let previousCount = favoriteDestinations.count

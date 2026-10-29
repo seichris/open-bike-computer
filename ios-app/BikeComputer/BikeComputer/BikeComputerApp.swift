@@ -208,6 +208,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 )
             }
             .store(in: &cancellables)
+        // Favorites once starred from a saved route stored its WGS-84
+        // destination; move them into the MapKit space every reader expects.
+        routeLibrary.$routes
+            .sink { [weak destinationStore] routes in
+                guard let destinationStore else { return }
+                destinationStore.replaceFavoriteCoordinates(
+                    SavedRouteFavoritePolicy.legacyCoordinateRepairs(
+                        favorites: destinationStore.favoriteDestinations,
+                        routes: routes
+                    )
+                )
+            }
+            .store(in: &cancellables)
         cyclingSensorDetectionCoordinator.bind(
             to: workoutSessionCoordinator.store,
             watchObservations: watchConnectivityCoordinator
