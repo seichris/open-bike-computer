@@ -133,20 +133,51 @@ def install(args):
         key = _entry_members(archive)
         destination = root / key
         if os.path.lexists(destination):
-            return outputs({"installed": "false", "core-input-key": key})
+            return outputs({"installed": "false", "request-key": key})
         archive.extractall(root, filter="data")
     if {child.name for child in destination.iterdir()} != ENTRY_FILES:
         raise SystemExit("core entry is incomplete")
     _seal(destination)
-    return outputs({"installed": "true", "core-input-key": key})
+    return outputs({"installed": "true", "request-key": key})
+
+
+def _published_entry(root: Path, core_input_key: str) -> Path:
+    """Return the shared entry that the build with this core input key published.
+
+    ``build_firmware.py`` names a shared entry by its request key, which a new
+    worktree can compute before generated SDK sidecars exist. Only the entry's
+    ``transport.json`` records the attested build's core input key.
+    """
+    if root.is_symlink() or not root.is_dir():
+        raise SystemExit("verified core entry is missing or incomplete")
+    matches = []
+    for entry in sorted(root.iterdir()):
+        if not KEY_PATTERN.fullmatch(entry.name):
+            continue  # The publisher's lock and temporary directories.
+        metadata = entry / "transport.json"
+        if (
+            entry.is_symlink() or not entry.is_dir() or {child.name for child in entry.iterdir()} != ENTRY_FILES
+            or metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size > 1024 * 1024
+        ):
+            raise SystemExit(f"shared core entry is incomplete: {entry.name}")
+        try:
+            transport = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            transport = None
+        if not isinstance(transport, dict) or transport.get("requestKey") != entry.name:
+            raise SystemExit(f"shared core entry has invalid transport metadata: {entry.name}")
+        if transport.get("coreInputKey") == core_input_key:
+            matches.append(entry)
+    if len(matches) != 1:
+        raise SystemExit("verified core entry is missing or incomplete" if not matches
+                         else "several shared core entries record this core input key")
+    return matches[0]
 
 
 def pack(args):
     if not KEY_PATTERN.fullmatch(args.key):
         raise SystemExit("invalid core input key")
-    entry = Path(args.root) / args.key
-    if entry.is_symlink() or not entry.is_dir() or {child.name for child in entry.iterdir()} != ENTRY_FILES:
-        raise SystemExit("verified core entry is missing or incomplete")
+    entry = _published_entry(Path(args.root), args.key)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     # Store modes only: the receiving runner owns whatever it extracts.
@@ -154,8 +185,9 @@ def pack(args):
         for path in sorted(entry.rglob("*")):
             if path.is_symlink() or not (path.is_dir() or path.is_file()):
                 raise SystemExit(f"core entry contains an unsupported file: {path}")
-        archive.add(entry, arcname=args.key, recursive=True)
-    return outputs({"archive": str(output), "bytes": output.stat().st_size})
+        # Keep the request-key name: consumers look the entry up by request key.
+        archive.add(entry, arcname=entry.name, recursive=True)
+    return outputs({"archive": str(output), "bytes": output.stat().st_size, "request-key": entry.name})
 
 
 def identity(args):
@@ -185,9 +217,9 @@ def main(argv=None):
     install_parser.add_argument("--archive", required=True)
     install_parser.add_argument("--root", required=True, help="cores-v1/<environment> directory")
     install_parser.set_defaults(run=install)
-    pack_parser = commands.add_parser("pack", help="archive one verified core entry for upload")
+    pack_parser = commands.add_parser("pack", help="archive the verified core entry an attested build published")
     pack_parser.add_argument("--root", required=True)
-    pack_parser.add_argument("--key", required=True)
+    pack_parser.add_argument("--key", required=True, help="core input key from the attested build manifest")
     pack_parser.add_argument("--output", required=True)
     pack_parser.set_defaults(run=pack)
     identity_parser = commands.add_parser("identity", help="read the core identity of the attested build")
