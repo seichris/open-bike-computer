@@ -372,11 +372,11 @@ struct NavigationRuntimeV1 {
             let nearest = candidates
                 .filter { abs($0.crossTrackDistanceMeters - closest) < 0.001 }
                 .min { $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters }
-            // A loop or out-and-back passes here more than once. Without
-            // movement evidence a new ride starts on the earliest plausible
-            // pass, never at a later pass such as the loop's own finish.
-            // Neighboring segments of one pass stay within twice the band.
+            // A loop or out-and-back passes its own start again later, often
+            // as its finish. A ride started at the start begins there instead
+            // of on that later pass; anywhere else the nearest pass still wins.
             if let nearest, let earliest,
+               earliest.distanceAlongRouteMeters <= ambiguityTolerance,
                nearest.distanceAlongRouteMeters - earliest.distanceAlongRouteMeters >
                    ambiguityTolerance * 2 {
                 return earliest
@@ -391,18 +391,26 @@ struct NavigationRuntimeV1 {
             }
             return lhsDelta < rhsDelta
         }
-        // After an out-and-back turnaround the outbound and return passes are
-        // about equally far from the last progress. Progress never decreases,
-        // so choosing the outbound pass would freeze it at the turnaround.
-        // Beyond the band behind, prefer a pass that is no farther ahead.
+        // Steps only advance at their endpoints, so a candidate more than the
+        // band before the current step lies on a pass the rider completed. On
+        // an out-and-back that is the outbound street during the return, and
+        // progress never decreases, so it would freeze guidance at the
+        // turnaround. Then prefer the pass ahead when it is no farther, with
+        // room for a turnaround anywhere inside the stop's arrival band.
         guard let closestProgress else { return nil }
+        let currentStepStart = cumulativeDistances[
+            route.steps[currentStepIndex].geometryStartIndex
+        ]
+        guard closestProgress.distanceAlongRouteMeters <
+                currentStepStart - ambiguityTolerance else {
+            return closestProgress
+        }
         let behind = lastDistanceAlongGeometry - closestProgress.distanceAlongRouteMeters
-        guard behind > ambiguityTolerance else { return closestProgress }
         return candidates
             .filter {
                 $0.distanceAlongRouteMeters >= lastDistanceAlongGeometry &&
                     $0.distanceAlongRouteMeters - lastDistanceAlongGeometry <=
-                        behind + ambiguityTolerance
+                        behind + ambiguityTolerance * 2
             }
             .min { $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters }
             ?? closestProgress

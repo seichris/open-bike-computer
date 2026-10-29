@@ -533,7 +533,9 @@ extension OfflineRouteSaveTests {
         check(path.count == 5 && path[1] == path[3] && path[0] == path[4],
             "The out-and-back retraces the same street")
         try returnTrip.startOfflineNavigation(archive: outAndBack, initialLocation: Stops.fix(path[0], at: f.now))
-        for point in [path[0], path[1], path[2], path[2]] { ride(returnTrip, point) }
+        // The rider turns back 15 m before the lookout, inside its arrival band.
+        let turnaround = RouteCoordinateV1(latitude: path[2].latitude - 15 / 111_320, longitude: path[2].longitude)
+        for point in [path[0], path[1], turnaround, turnaround] { ride(returnTrip, point) }
         let atTurnaround = returnTrip.offlineSnapshotForTesting?.routeRemainingDistanceMeters ?? 0
         ride(returnTrip, path[3])
         check(returnTrip.isNavigating &&
