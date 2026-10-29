@@ -132,7 +132,8 @@ def cache_observation(manifest, previous=None):
 
 
 def firmware(project, environment, root, previous=None):
-    if not re.fullmatch(r'WAVESHARE_AMOLED_(175|206)(_[A-Z_]+)?', environment):
+    if not re.fullmatch(r'(WAVESHARE_AMOLED_(175|206)|WAVESHARE_EPAPER_397)(_[A-Z_]+)?',
+                        environment):
         raise ValueError('invalid firmware environment')
     manifest_path = project / '.pio/open-bike-build/builds' / environment / 'current.json'
     manifest_digest = sha(manifest_path)
