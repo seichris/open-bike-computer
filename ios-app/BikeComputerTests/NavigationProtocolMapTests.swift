@@ -21,6 +21,54 @@ private extension Data {
     }
 }
 
+private final class MapLibraryCommandTestBLEManager: BLEManager {
+    var epoch: UInt64 = 1
+    var commandID = ""
+    var commandIsValid: (() -> Bool)?
+    var failWrite: (() -> Void)?
+    var finishWrite: (() -> Void)?
+    var onQueue: (() -> Void)?
+    var onStatus: (() -> Void)?
+    var statusRequests = 0
+    var acceptsCommand = true
+
+    override var activeDeviceID: String? {
+        get { "map-library-test-bike" }
+        set {}
+    }
+    override var transferConnectionEpoch: UInt64 { epoch }
+    override func centralManagerDidUpdateState(_ central: CBCentralManager) {}
+    override func requestDeviceMapLibrary(
+        _ action: String = "refresh", map: DeviceInstalledMap? = nil,
+        requestID: String? = nil, isStillValid: (() -> Bool)? = nil,
+        onWriteFailure: (() -> Void)? = nil, onWriteSuccess: (() -> Void)? = nil
+    ) -> Bool {
+        commandID = requestID ?? ""
+        commandIsValid = isStillValid
+        failWrite = onWriteFailure
+        finishWrite = onWriteSuccess
+        onQueue?()
+        return acceptsCommand
+    }
+    override func requestMapTransferStatus() -> Bool {
+        statusRequests += 1
+        onStatus?()
+        return true
+    }
+    func publish(maps: [DeviceInstalledMap], selected: String,
+                 command: String, busy: Bool = false, error: String? = nil) {
+        let library = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: false, busy: busy, revision: UInt32(statusRequests + 1),
+            error: "", selectedSessionID: selected, maps: maps,
+            commandID: command, commandError: error)
+        applyAuthenticatedMapTransferStatus(MapTransferDeviceStatus(
+            mapLibrary: library, hasMapLibrary: true, enabled: false,
+            activeMapId: maps.first?.mapID, activeSessionId: selected,
+            activation: nil, protocols: nil, streamFormatVersions: nil,
+            streamTrust: nil, firmwareVersion: nil, firmwareBuild: nil, firmwareGitSha: nil))
+    }
+}
+
 private final class MapOperationRecoveryTestBLEManager: BLEManager {
     var recoveryDeviceID: String?
     var recoveryEpoch: UInt64 = 0
@@ -10516,6 +10564,97 @@ extension NavigationProtocolTests {
         )
         assert(disconnectedEndingPair.transmissions.first?.prioritized == true,
                "ending freshness loss uses the priority lane")
+    }
+
+    static func testDeviceMapLibraryCommandDelivery() async {
+        let map = DeviceInstalledMap(sessionID: "saved-map", mapID: "shanghai",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64),
+            displayName: "Shanghai", payloadBytes: 100, boundsE7: nil)
+        let ble = MapLibraryCommandTestBLEManager()
+        ble.onQueue = { [weak ble] in ble?.failWrite?() }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map)
+            assert(false, "an ATT rejection must fail selection")
+        } catch {
+            assert(error.localizedDescription.contains("Bluetooth map command failed"),
+                   "transport rejection has an actionable error")
+        }
+        assert(ProcessInfo.processInfo.systemUptime - started < 1,
+               "a rejected write does not wait for the ten-minute activation timeout")
+        assert(ble.statusRequests == 0 && ble.commandIsValid?() == false,
+               "failed/finished commands cannot poll or dispatch later")
+
+        // Retry is an explicit new operation. ATT success and a stale selected
+        // map do not settle it; only its renderer-confirmed inventory does.
+        ble.onQueue = { [weak ble] in
+            ble?.finishWrite?()
+            ble?.publish(maps: [map], selected: map.sessionID, command: "old-command")
+        }
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [map], selected: map.sessionID, command: ble.commandID)
+        }
+        do { try await ble.performDeviceMapLibraryCommand("select", map: map) }
+        catch { assert(false, "fresh matching inventory must confirm selection: \(error)") }
+        assert(ble.statusRequests == 1 && ble.commandIsValid?() == false,
+               "stale status was ignored and the confirmed operation is no longer dispatchable")
+
+        ble.onStatus = { [weak ble] in ble?.epoch += 1 }
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map)
+            assert(false, "another connection cannot confirm this command")
+        } catch {
+            assert(error.localizedDescription.contains("connection changed"), "connection loss is explicit")
+        }
+
+        ble.onQueue = nil
+        ble.onStatus = nil
+        let cancelled = Task { try await ble.performDeviceMapLibraryCommand("select", map: map) }
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assert(ble.commandIsValid?() == true, "queued command remains scoped to this operation")
+        cancelled.cancel()
+        do { try await cancelled.value; assert(false, "cancelled selection must stop") }
+        catch { assert(error is CancellationError, "task cancellation remains cancellation") }
+        assert(ble.commandIsValid?() == false, "cancellation invalidates the unsent command")
+
+        ble.onQueue = { [weak ble] in ble?.finishWrite?() }
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [map], selected: map.sessionID, command: ble.commandID, busy: true)
+        }
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map, timeoutSeconds: 0.15)
+            assert(false, "busy inventory is not renderer confirmation")
+        } catch { assert(error.localizedDescription.contains("not confirmed"), "unconfirmed stays unconfirmed") }
+
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [], selected: "", command: ble.commandID)
+        }
+        do { try await ble.performDeviceMapLibraryCommand("remove", map: map) }
+        catch { assert(false, "removal uses the same confirmation contract: \(error)") }
+
+        let suite = "map-selection-failure-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = OfflineMapManager(defaults: defaults)
+        ble.onQueue = { [weak ble] in ble?.failWrite?() }
+        manager.selectInstalledMap(map, bleManager: ble)
+        while manager.isDeviceTransferBusy { await Task.yield() }
+        assert(manager.errorMessage?.contains("Bluetooth map command failed") == true,
+               "the device-only map row surfaces the failed command")
+        assert(manager.statusMessage.isEmpty, "failed selection clears its pending status")
+
+        let previousCommand = ble.commandID
+        manager.removeInstalledMap(map, bleManager: ble)
+        ble.epoch += 1 // reconnect before the manager's task gets to run
+        while manager.isDeviceTransferBusy { await Task.yield() }
+        assertEqual(ble.commandID, previousCommand, "a queued UI action cannot retarget another connection")
+        assert(manager.errorMessage?.contains("connection changed") == true,
+               "a pre-dispatch connection change is visible")
     }
 
     static func testDeviceMapLibrary() {

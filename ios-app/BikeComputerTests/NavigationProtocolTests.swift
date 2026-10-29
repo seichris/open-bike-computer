@@ -1201,6 +1201,7 @@ struct NavigationProtocolTests {
         testMapActivationReconciliationMatrix()
         await testMapActivationConfirmationOrchestration()
         testDeviceMapLibrary()
+        await testDeviceMapLibraryCommandDelivery()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()

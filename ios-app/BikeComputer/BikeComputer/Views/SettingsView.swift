@@ -1256,7 +1256,7 @@ private struct SavedMapsSettingsSection: View {
             if let map = mapToRemove {
                 Button("Remove \(map.name)", role: .destructive) {
                     if removalDeviceID == bleManager.activeDeviceID && removalEpoch == bleManager.transferConnectionEpoch {
-                        _ = bleManager.requestDeviceMapLibrary("remove", map: map)
+                        manager.removeInstalledMap(map, bleManager: bleManager)
                     }
                     mapToRemove = nil
                 }
@@ -1780,7 +1780,7 @@ private struct SavedMapRow: View {
                     Button {
                         finishRenaming()
                         focusedPackFilename = nil
-                        _ = bleManager.requestDeviceMapLibrary("select", map: installedDeviceMap)
+                        manager.selectInstalledMap(installedDeviceMap, bleManager: bleManager)
                     } label: {
                         Image(systemName: "arrow.up.circle")
                             .frame(width: 32, height: 32)

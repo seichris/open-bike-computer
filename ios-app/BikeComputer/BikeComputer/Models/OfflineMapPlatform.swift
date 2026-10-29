@@ -1322,6 +1322,7 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case mapStreamCompatibilityRejected(MapInstallProtocolRejection)
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
+    case deviceMapLibraryCommandFailed(String)
     case transferWiFiJoinFailed(String, String)
     case transferServerProbeFailed(String, String)
     case invalidPack(String)
@@ -1378,6 +1379,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
             return "Map activation failed: \(message)"
+        case .deviceMapLibraryCommandFailed(let message):
+            return message
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
         case .transferServerProbeFailed(let ssid, let message):

@@ -1,6 +1,7 @@
 # Watch workout companion release notes
 
-Release candidate: **1.11 (32)**. This build is prepared for the
+Release candidate: **1.11 (33)**. This build includes the saved-map selection
+transport and confirmation fix and is prepared for the
 [build-105 map and storage qualification](2026-10-29-build105-candidate.md);
 App Store submission remains a separate gate.
 Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated

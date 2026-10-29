@@ -1682,9 +1682,24 @@ sendWireNotification(NimBLECharacteristic *characteristic,
     return TransportResult::Drop;
   }
 
+  if (!ble_notification_dispatch_policy::canAllocateNotification(
+          os_msys_num_free())) {
+    xSemaphoreGive(notificationTransportMutex);
+    return TransportResult::Retry;
+  }
   os_mbuf *payload =
       ble_hs_mbuf_from_flat(data, static_cast<uint16_t>(length));
   if (payload == nullptr) {
+    xSemaphoreGive(notificationTransportMutex);
+    return TransportResult::Retry;
+  }
+
+  // Recheck after allocation: a large frame may consume a chain, and RX can
+  // allocate concurrently. Keep the exact authenticated frame in our queue
+  // until the host has room, without starving acknowledged control writes.
+  if (!ble_notification_dispatch_policy::canDispatchNotification(
+          os_msys_num_free())) {
+    os_mbuf_free_chain(payload);
     xSemaphoreGive(notificationTransportMutex);
     return TransportResult::Retry;
   }

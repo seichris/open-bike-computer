@@ -2836,6 +2836,63 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func selectInstalledMap(_ map: DeviceInstalledMap, bleManager: BLEManager) {
+        startInstalledMapAction("select", map: map, bleManager: bleManager)
+    }
+
+    func removeInstalledMap(_ map: DeviceInstalledMap, bleManager: BLEManager) {
+        startInstalledMapAction("remove", map: map, bleManager: bleManager)
+    }
+
+    private func startInstalledMapAction(
+        _ action: String, map: DeviceInstalledMap, bleManager: BLEManager
+    ) {
+        let deviceID = bleManager.activeDeviceID
+        let epoch = bleManager.transferConnectionEpoch
+        startDeviceTransfer { manager in
+            try await manager.performInstalledMapAction(action, map: map, bleManager: bleManager,
+                deviceID: deviceID, connectionEpoch: epoch)
+        }
+    }
+
+    private func performInstalledMapAction(
+        _ action: String, map: DeviceInstalledMap, bleManager: BLEManager,
+        deviceID: String?, connectionEpoch: UInt64
+    ) async throws {
+        guard deviceID == bleManager.activeDeviceID,
+              connectionEpoch == bleManager.transferConnectionEpoch else {
+            throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The connection changed before the map action started. Reconnect and try again.")
+        }
+        let pending = try deviceMapOperationStore.records().contains {
+            $0.deviceID == deviceID && $0.blocksNewTransfer(
+                connectionEpoch: connectionEpoch,
+                processID: DeviceMapOperationStore.observationProcessID)
+        }
+        guard !hasActiveBackgroundUpload, !pending else {
+            throw OfflineMapPlatformError.backgroundMapUploadInProgress
+        }
+        if action == "select", bleManager.hasFreshMapTransferStatus,
+           let library = bleManager.deviceMapLibrary, library.isComplete,
+           library.selectedSessionID == map.sessionID,
+           library.installed(mapID: map.mapID, manifestReceipt: map.manifestReceipt,
+                             signedManifestReceipt: map.signedManifestReceipt) == map {
+            statusMessage = "map already in use"
+            transferProgress = 1
+            return
+        }
+        statusMessage = action == "select" ? "selecting installed map" : "removing installed map"
+        transferProgress = 0
+        activationProgress = nil
+        do {
+            try await bleManager.performDeviceMapLibraryCommand(action, map: map)
+            statusMessage = action == "select" ? "map selected" : "map removed from SD card"
+            transferProgress = 1
+        } catch {
+            statusMessage = ""
+            throw error
+        }
+    }
+
     func installedDeviceMap(for packURL: URL, library: DeviceMapLibrary?) -> DeviceInstalledMap? {
         guard let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
               let artifact = metadata.primaryArtifact,
@@ -6495,34 +6552,9 @@ final class OfflineMapManager: ObservableObject {
             if let installed = library.installed(mapID: prepared.mapID,
                 manifestReceipt: prepared.artifact.manifestReceipt,
                 signedManifestReceipt: prepared.artifact.signedManifestReceipt) {
-                let pending = try deviceMapOperationStore.records().contains {
-                    $0.deviceID == transferDeviceID && $0.blocksNewTransfer(
-                        connectionEpoch: transferEpoch, processID: DeviceMapOperationStore.observationProcessID)
-                }
-                guard !pending else { throw OfflineMapPlatformError.backgroundMapUploadInProgress }
-                if library.selectedSessionID == installed.sessionID {
-                    statusMessage = "map already in use"; transferProgress = 1; return
-                }
-                guard bleManager.requestDeviceMapLibrary("select", map: installed) else {
-                    throw OfflineMapPlatformError.invalidPack("The Bike Computer is busy. Try selecting the map again.")
-                }
-                let requestID = bleManager.lastMapLibraryRequestID
-                statusMessage = "selecting installed map"
-                for attempt in 0..<1200 {
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                    guard transferDeviceID == bleManager.activeDeviceID,
-                          transferEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
-                    if let current = bleManager.deviceMapLibrary, current.commandID == requestID {
-                        if let error = current.commandError, !error.isEmpty {
-                            throw OfflineMapPlatformError.mapActivationFailed(error)
-                        }
-                        if current.isComplete && current.selectedSessionID == installed.sessionID {
-                            statusMessage = "map selected"; transferProgress = 1; return
-                        }
-                    }
-                    if attempt % 4 == 0 { bleManager.requestMapTransferStatus() }
-                }
-                throw OfflineMapPlatformError.mapActivationFailed("Map selection was not confirmed. Reconnect to the Bike Computer and check its active map.")
+                try await performInstalledMapAction("select", map: installed, bleManager: bleManager,
+                    deviceID: transferDeviceID, connectionEpoch: transferEpoch)
+                return
             }
         }
 
