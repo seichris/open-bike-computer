@@ -256,12 +256,12 @@ production partition table, and legacy devices that update over the air run the
 new internal-FFat ownership policy on their unchanged dual-3-MiB table. The
 per-board gates are listed in
 [partition layouts](partition-layout-migration.md#physical-qualification-gates-each-board-separately);
-none had run on hardware when the change merged. Before publishing that
-release, pass the production-path gates on both boards: FFat, OTA on the new
-layout, true cold boot and the legacy-device update. Alternatively, the
-maintainer may record acceptance of the residual risk. The signed migration
-package stays unadmitted, with no website catalog entry, until every gate passes
-with that release's exact bytes.
+none had run on hardware when the change merged. That release must not be
+tagged or published until the production-path gates pass on both boards: FFat,
+OTA on the new layout, true cold boot and the legacy-device update. Accepting
+residual risk to merge the change does not cover publishing it. The signed
+migration package stays unadmitted, with no website catalog entry, until every
+gate passes with that release's exact bytes.
 
 ## Release outputs
 
