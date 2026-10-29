@@ -7052,6 +7052,22 @@ extension NavigationProtocolTests {
                         .imageExceedsDeviceSlot(imageBytes: current, slotBytes: current),
                         "an oversized image is rejected before any write")
         }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .slot(current))
+        } catch {
+            assert(false, "a migrated device accepts an image above 3 MiB: \(error)")
+        }
+        for (code, expected) in [(nil, "inactive_ota_partition_missing"),
+                                 ("running_partition_missing", "running_partition_missing")] as [(String?, String)] {
+            do {
+                try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .ineligible,
+                                                           eligibilityCode: code)
+                assert(false, "an ineligible device is rejected")
+            } catch {
+                assertEqual(error as? FirmwareUpdateError, .otaIneligible(expected),
+                            "ineligibility is reported as such, never as a needed migration")
+            }
+        }
     }
 
     @MainActor
@@ -7062,25 +7078,27 @@ extension NavigationProtocolTests {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
         let base = "https://firmware.invalid/firmware/WAVESHARE_AMOLED_175"
-        func signed(build: Int, size: Int) -> Data {
+        func signed(build: Int, size: Int, updater: Int = 1,
+                    signer: P256.Signing.PrivateKey? = nil) -> Data {
             var manifest = FirmwareReleaseManifest(
                 schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.\(build)", build: build,
                 gitSha: String(repeating: "c", count: 40), size: size,
                 sha256: String(repeating: "d", count: 64),
                 url: URL(string: "https://firmware.invalid/\(build).bin")!,
-                minUpdaterProtocol: 1, signature: nil)
+                minUpdaterProtocol: updater, signature: nil)
             let payload = Data(FirmwareManifestSignatureVerifier.canonicalPayload(for: manifest).utf8)
             manifest = FirmwareReleaseManifest(
                 schemaVersion: manifest.schemaVersion, target: manifest.target, version: manifest.version,
                 build: manifest.build, gitSha: manifest.gitSha, size: manifest.size, sha256: manifest.sha256,
                 url: manifest.url, minUpdaterProtocol: manifest.minUpdaterProtocol,
-                signature: try! key.signature(for: payload).derRepresentation.base64EncodedString())
+                signature: try! (signer ?? key).signature(for: payload).derRepresentation.base64EncodedString())
             return try! JSONEncoder().encode(manifest)
         }
         let legacy = signed(build: 110, size: 3_000_000)
         let migrated = signed(build: 120, size: 3_500_000)
         struct Case { let name: String; let maxImageBytes: Int?; let published: [String: Data]
-                      let build: Int?; let requests: [String]; let notice: Int? }
+                      let build: Int?; let requests: [String]; let notice: Int?
+                      var failure: FirmwareUpdateError? = nil; var serverErrors: Set<String> = [] }
         let cases = [
             Case(name: "migrated device", maxImageBytes: 4_194_304,
                  published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
@@ -7099,7 +7117,28 @@ extension NavigationProtocolTests {
                  build: 110, requests: ["/manifest.json"], notice: nil),
             Case(name: "oversized legacy channel", maxImageBytes: 3_145_728,
                  published: ["/manifest.json": migrated],
-                 build: nil, requests: ["/manifest.json"], notice: nil)
+                 build: nil, requests: ["/manifest.json"], notice: nil,
+                 failure: .invalidManifest),
+            // Only "not published" falls back; every other dual-4-MiB failure
+            // is reported instead of silently serving the legacy build.
+            Case(name: "dual-4-MiB release needs a newer app", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000, updater: 2),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .unsupportedUpdaterProtocol),
+            Case(name: "mis-signed dual-4-MiB release", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000,
+                                                             signer: P256.Signing.PrivateKey()),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .invalidManifestSignature),
+            Case(name: "dual-4-MiB channel server error", maxImageBytes: 4_194_304,
+                 published: ["/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 serverErrors: ["/dual4m/manifest.json"]),
+            Case(name: "no channel published", maxImageBytes: 4_194_304, published: [:],
+                 build: nil, requests: ["/dual4m/manifest.json", "/manifest.json"], notice: nil,
+                 failure: .notPublished)
         ]
         for testCase in cases {
             let suite = "firmware-channel-test.\(UUID().uuidString)"
@@ -7110,7 +7149,8 @@ extension NavigationProtocolTests {
                 let path = String(request.url!.absoluteString.dropFirst(base.count))
                 requests.append(path)
                 let body = testCase.published[path]
-                return (HTTPURLResponse(url: request.url!, statusCode: body == nil ? 404 : 200,
+                let status = testCase.serverErrors.contains(path) ? 500 : body == nil ? 404 : 200
+                return (HTTPURLResponse(url: request.url!, statusCode: status,
                                         httpVersion: nil, headerFields: nil)!, body ?? Data())
             }
             let manager = FirmwareUpdateManager(defaults: defaults, session: session)
@@ -7127,6 +7167,9 @@ extension NavigationProtocolTests {
                 assertEqual(manifest.build, testCase.build ?? -1, "\(testCase.name) selects its channel")
             } catch {
                 assert(testCase.build == nil, "\(testCase.name) fetch failed: \(error)")
+                if let failure = testCase.failure {
+                    assertEqual(error as? FirmwareUpdateError, failure, "\(testCase.name) reports its cause")
+                }
             }
             assertEqual(requests, testCase.requests, "\(testCase.name) requests only fitting channels")
             assertEqual(manager.layoutMigrationNotice?.build, testCase.notice,

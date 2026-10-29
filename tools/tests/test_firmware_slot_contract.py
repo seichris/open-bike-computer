@@ -48,6 +48,9 @@ class FirmwareSlotContractTests(unittest.TestCase):
         http_fit = install.index("try Self.requireImageFits(manifest, capacity: FirmwareSlotLayout.capacity(")
         self.assertLess(status, http_fit)
         self.assertLess(http_fit, install.index("client.begin(manifest: manifest"))
+        # A retained earlier result is acknowledged regardless of this image.
+        self.assertLess(install.index("client.acknowledge("), http_fit)
+        self.assertIn("eligibilityCode: initialDeviceStatus.eligibilityCode", install)
 
 
 if __name__ == "__main__":
