@@ -1072,6 +1072,26 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 )
             self.assertTrue(defaults.exists())
 
+    def test_restores_exact_generated_linker_script_from_attested_core(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n"
+            )
+            defaults = project / "sdkconfig.defaults"
+            defaults.write_text(GENERATED_CONFIG)
+            with self.fake_core(project) as core:
+                script = core / "packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/sections.ld"
+                generated = "_ext_ram_bss_start = .; _ext_ram_bss_end = .;\n"
+                script.write_text(generated)
+                record_generated_sdkconfig_defaults(project, "WAVESHARE_AMOLED_175")
+                script.write_text("stale stock linker layout\n")
+                self.assertEqual(
+                    prepare_generated_sdkconfigs(project, "WAVESHARE_AMOLED_175"),
+                    (defaults,),
+                )
+                self.assertEqual(script.read_text(), generated)
+
     def test_invalidates_cache_after_compiler_or_runtime_change(self) -> None:
         for relative in (
             "packages/tool-esptoolpy/esptool.py",

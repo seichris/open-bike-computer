@@ -61,6 +61,16 @@ public:
     admission_.fetch_sub(1, std::memory_order_release);
   }
 
+  // Raw POSIX descriptors share the same bounded lifetime. Their slot holds a
+  // tagged handle with the low bit set, which no word-aligned FILE can equal.
+  void finishOpenDescriptor(size_t index, int descriptor) {
+    finishOpen(index, descriptor < 0 ? nullptr : descriptorHandle(descriptor));
+  }
+
+  size_t beginCloseDescriptor(int descriptor) {
+    return descriptor < 0 ? kInvalid : beginClose(descriptorHandle(descriptor));
+  }
+
   void closeAdmission() { admission_.fetch_or(kClosed, std::memory_order_acq_rel); }
   bool quiescent() const {
     return admission_.load(std::memory_order_acquire) == kClosed &&
@@ -68,6 +78,11 @@ public:
   }
 
 private:
+  static FILE *descriptorHandle(int descriptor) {
+    return reinterpret_cast<FILE *>(
+        (static_cast<uintptr_t>(static_cast<unsigned>(descriptor)) << 1) | 1U);
+  }
+
   enum : uint8_t { Empty, Opening, Open, Closing };
   static constexpr uint32_t kClosed = uint32_t{1} << 31;
   static constexpr uint32_t kCountMask = kClosed - 1;

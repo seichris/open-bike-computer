@@ -26,9 +26,10 @@ struct FirmwarePartitionSnapshot {
   esp_ota_img_states_t runningState = ESP_OTA_IMG_UNDEFINED;
 };
 
-// Serializes Wi-Fi driver changes, OTA flash writes, and durable map activation
-// on one internal-RAM stack. The HTTPS/TLS worker can live in PSRAM without
-// calling a cache-disabling operation from its own stack.
+// Serializes Wi-Fi driver changes, OTA flash writes, durable map activation and
+// handler reads of flash-backed storage (FFat) on one internal-RAM stack. The
+// HTTPS/TLS worker can live in PSRAM without calling a cache-disabling
+// operation from its own stack.
 class DeviceOperationOwner : public device_transfer::NetworkOperationOwner {
 public:
   static constexpr std::size_t kMaximumWriteBytes = 2048;
@@ -80,6 +81,7 @@ public:
   using MapOperation = void (*)(void *, const char *, bool);
   esp_err_t runMapActivation(MapOperation operation, void *context,
                              const std::string &sessionId, bool automaticExit, bool *issued = nullptr);
+  bool runOnInternalStack(void (*call)(void *), void *context) override;
 
 private:
   enum class Operation : uint8_t {
@@ -102,6 +104,7 @@ private:
     StopAccessPoint,
     StopWiFi,
     MapActivation,
+    InternalStackCall,
     Quiesce,
   };
 
@@ -114,6 +117,8 @@ private:
     bool wifiOff = false;
     MapOperation mapOperation = nullptr;
     void *mapContext = nullptr;
+    void (*internalStackCall)(void *) = nullptr;
+    void *internalStackContext = nullptr;
     bool automaticExit = false;
     receipt::Record firmwareReceipt{};
     uint32_t receiptRevision = 0;

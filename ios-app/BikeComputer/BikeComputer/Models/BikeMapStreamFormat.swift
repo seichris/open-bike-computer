@@ -97,6 +97,14 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
         return combined.contains(keyID: keyID) ? combined : nil
     }
 
+    /// The keys whose exact `keyId=SHA256(X9.63)` capability is listed, such as
+    /// a bike's reported `streamTrust`.
+    func restricted(to capabilities: Set<String>) -> Self {
+        Self(publicKeysByID: publicKeysByID.filter { keyID, _ in
+            capability(for: keyID).map(capabilities.contains) ?? false
+        })
+    }
+
     var isEmpty: Bool { publicKeysByID.isEmpty }
 
 }
@@ -155,6 +163,9 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSHA: String?
     let readerRequirements: OfflineMapReaderRequirements?
+    /// Durable compatibility contract declared by the signed manifest; nil
+    /// marks a map outside the contract. Delivery metadata never sets it.
+    let compatibilityContract: Int?
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
@@ -180,6 +191,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         requiredFirmwareBuild: UInt32?,
         requiredFirmwareGitSHA: String?,
         readerRequirements: OfflineMapReaderRequirements?,
+        compatibilityContract: Int?,
         fileCount: Int,
         payloadBytes: Int64,
         rendererFormatVersion: Int,
@@ -204,6 +216,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.requiredFirmwareBuild = requiredFirmwareBuild
         self.requiredFirmwareGitSHA = requiredFirmwareGitSHA
         self.readerRequirements = readerRequirements
+        self.compatibilityContract = compatibilityContract
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
@@ -698,6 +711,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let blocks: [[Int]]
         }
 
+        /// Durable map contract marker (`{"contract": N}`). Readers ignore
+        /// unknown keys in it; the validated number is what binds.
+        struct Compatibility: Decodable {
+            let contract: Int
+        }
+
         struct File: Decodable {
             let path: String
             let bytes: Int64
@@ -715,6 +734,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let pois: POIs?
         let layers: Layers?
         let nearbyCoverage: NearbyCoverage?
+        let compatibility: Compatibility?
     }
 
     static func validate(
@@ -1018,6 +1038,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             requiredFirmwareBuild: artifact.requiredFirmwareBuild,
             requiredFirmwareGitSHA: artifact.requiredFirmwareGitSha,
             readerRequirements: verifiedReaderRequirements,
+            compatibilityContract: manifest.compatibility?.contract,
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
             rendererFormatVersion: manifest.target.formatVersion,
@@ -1095,6 +1116,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
         }
         guard manifest.schemaVersion == 1 else {
             throw BikeMapStreamFormatError.invalidManifest("schema version is unsupported")
+        }
+        if let compatibility = manifest.compatibility,
+           !(1...255).contains(compatibility.contract) {
+            throw BikeMapStreamFormatError.invalidManifest(
+                "compatibility contract is invalid"
+            )
         }
         guard isSafeMapID(manifest.mapId), manifest.mapId == expectedMapID else {
             throw BikeMapStreamFormatError.invalidManifest("map ID does not match")

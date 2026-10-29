@@ -280,6 +280,29 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
         }
     }
 
+    /// The signers that choose which catalog copy to download and keep. When
+    /// the connected bike reports `streamTrust`, only copies it trusts are
+    /// preferred, so Bicino Dev takes the production copy for stock firmware.
+    /// Without a report, or when the bike trusts none of the copies, the app's
+    /// own signers decide as before. Availability never changes: this only
+    /// narrows when a downloadable copy remains.
+    static func selectionTrustStore(
+        for map: OfflineMapCatalogMap,
+        channel: String,
+        trustStore: BikeMapStreamTrustStore,
+        deviceStreamTrust: [String]?,
+        readerCapabilities: OfflineMapReaderCapabilities = .current
+    ) -> BikeMapStreamTrustStore {
+        guard let deviceStreamTrust else { return trustStore }
+        let bikeTrustStore = trustStore.restricted(to: Set(deviceStreamTrust))
+        return preferredCompatibleArtifacts(
+            for: map,
+            channel: channel,
+            trustStore: bikeTrustStore,
+            readerCapabilities: readerCapabilities
+        ).isEmpty ? trustStore : bikeTrustStore
+    }
+
     static func availability(
         for preview: OfflineMapSharePreview,
         channel: String

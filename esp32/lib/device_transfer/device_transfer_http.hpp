@@ -116,6 +116,9 @@ public:
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
   void setStatusChangedCallback(StatusChangedCallback callback);
   void setNetworkOperationOwner(NetworkOperationOwner *owner);
+  // Runs one bounded handler call on the network owner's internal-RAM stack.
+  // This worker's stack may be PSRAM, where flash-backed storage must not run.
+  bool runOnInternalStack(void (*call)(void *), void *context);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
   bool setPreferredNetwork(const LanCredentials &credentials);

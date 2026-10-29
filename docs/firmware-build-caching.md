@@ -28,6 +28,14 @@ core entries. Publication is atomic and serialized per environment. A dirty
 build may consume an entry but cannot publish one. Corrupt shared entries stop
 the build; they are never silently used or overwritten.
 
+The custom SDK export retains ESP-IDF's complete generated `sections.ld` beside
+its matching `sdkconfig.h` and archives. Recursive Arduino builds copy that
+script unchanged into their linker search path; they must not reconstruct it
+from the stock SDK's layout. External-BSS configurations reject scripts missing
+either boundary. The transform and prebuild sources already participate in the
+core key, and the exported script is covered by the package-tree attestation
+and normal private/shared core transport.
+
 The receiving worktree restores its own mutable tools and packages. Absolute
 symlinks are rebased by the existing archive extractor; UTF-8 launchers and
 configuration referring to the producer are rebased to the receiving project.

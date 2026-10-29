@@ -1,6 +1,9 @@
 # Watch workout companion release notes
 
-Release candidate: **1.10 (29)**. App Store version 1.9 is already distributed.
+Release candidate: **1.11 (33)**. This build includes the saved-map selection
+transport and confirmation fix and is prepared for the
+[build-105 map and storage qualification](2026-10-29-build105-candidate.md);
+App Store submission remains a separate gate.
 Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated
 app-family icon (dark for production, light for Dev), and production no longer declares background audio for
 the development-firmware-only World Radio feature. Debug keeps background audio.

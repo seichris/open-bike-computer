@@ -1,0 +1,5 @@
+# Map reader capabilities in the authenticated map transfer status ("mapReader").
+# Firmware must report exactly these bytes for each profile family. The iPhone
+# decodes the same lines to decide installability without a firmware identity.
+production {"schemaVersion":1,"streamFormats":[{"format":"bike-map-stream-v1","manifestSchemaVersions":[1]}],"renderers":[{"renderer":"esp32-fmb","formatVersions":[1,2,3,4],"features":["3d-buildings","contours","street-labels"]}]}
+map_pois {"schemaVersion":1,"streamFormats":[{"format":"bike-map-stream-v1","manifestSchemaVersions":[1]}],"renderers":[{"renderer":"esp32-fmb","formatVersions":[1,2,3,4,5],"features":["3d-buildings","contours","map-pois","street-labels"]}]}

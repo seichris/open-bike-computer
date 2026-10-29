@@ -116,10 +116,12 @@ One rule governs every producer and consumer, independent of renderer format:
   it only with the contours feature. The catalog accepts and grants exactly one
   live companion per contour stream and none otherwise, and gates contour
   promotion on the same layer (target-5 POI maps remain outside production
-  promotion). Before a contour map from a direct job or the catalog is saved
-  (and so before it can be shown or sent to the device), the iPhone verifies the
-  companion's delivery record against the signed stream and content receipt,
-  then its bytes and SQLite content.
+  promotion). A contour stream is granted, and shown as downloadable by the
+  iPhone, only from a delivery tier that has exactly one live companion; a tier
+  without one yields to the next tier's pair. Before a contour map from a
+  direct job or the catalog is saved (and so before it can be shown or sent to
+  the device), the iPhone verifies the companion's delivery record against the
+  signed stream and content receipt, then its bytes and SQLite content.
 - **Saved state.** Saved map metadata records the exact companion receipt it
   was activated with; later catalog attachment cannot re-key it. The companion
   association file binds the companion to the exact saved stream. The saved map

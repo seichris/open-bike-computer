@@ -9,6 +9,8 @@
 
 #include <Arduino.h>
 #include <dirent.h>
+#include <esp_memory_utils.h>
+#include <fcntl.h>
 #include <mbedtls/sha256.h>
 #include <sys/stat.h>
 
@@ -94,19 +96,49 @@ bool requestStillAuthorized(
   return modeMatches;
 }
 
+// Diagnostics normally stream from removable SD on this PSRAM-stack worker.
+// When FFat backs /sdcard, each file-system step instead runs on the transfer
+// owner's internal stack (see http_policy::storageCallPlacement).
+bool runStorageCall(device_transfer::HttpTransferServer *server,
+                    void (*call)(void *), void *context) {
+  uint32_t stackMarker = 0;
+  return http_policy::runStorageCall(
+      storage.hasInternalFallbackMounted(), esp_ptr_internal(&stackMarker),
+      [server](void (*dispatched)(void *), void *dispatchedContext) {
+        return server != nullptr &&
+               server->runOnInternalStack(dispatched, dispatchedContext);
+      },
+      call, context);
+}
+
+template <typename Step>
+bool runStorage(device_transfer::HttpTransferServer *server, Step &step) {
+  return runStorageCall(
+      server, [](void *context) { (*static_cast<Step *>(context))(); }, &step);
+}
+
+// Exports read through raw descriptors, like the recorder that writes them:
+// fopen() aborts when newlib cannot allocate its stream lock from internal RAM.
+int closeFile(device_transfer::HttpTransferServer *server, int file) {
+  int result = -1;
+  auto closeStep = [&] { result = storage.closeDescriptor(file); };
+  return runStorage(server, closeStep) ? result : -1;
+}
+
 bool sha256File(const char *path, std::string &out, uint32_t &bytes,
                 uint32_t expectedBytes,
                 device_transfer::TransferClient &client,
                 device_transfer::HttpTransferServer *server,
                 const device_transfer::HttpRequest &request) {
-  FILE *file = storage.open(path, "rb");
-  if (file == nullptr)
+  int file = -1;
+  auto openStep = [&] { file = storage.openDescriptor(path, O_RDONLY); };
+  if (!runStorage(server, openStep) || file < 0)
     return false;
   mbedtls_sha256_context context;
   mbedtls_sha256_init(&context);
   if (mbedtls_sha256_starts(&context, 0) != 0) {
     mbedtls_sha256_free(&context);
-    storage.close(file);
+    closeFile(server, file);
     return false;
   }
   uint8_t buffer[4096];
@@ -114,7 +146,7 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   uint32_t lastResponseProgressBytes = 0;
   bool ok = true;
   // The index already snapshots the closed file's exact stat size. Read only
-  // those bytes instead of issuing one extra fread past EOF. Some embedded
+  // those bytes instead of issuing one extra read past EOF. Some embedded
   // FAT/VFS paths report that probe as an I/O error even after all requested
   // bytes were returned, which used to abort the response immediately after
   // its final progress byte and before the chunk digest was emitted.
@@ -124,13 +156,17 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
       break;
     }
     const size_t remaining = expectedBytes - bytes;
-    const size_t count =
-        storage.read(file, buffer, std::min<std::size_t>(remaining,
-                                                        sizeof(buffer)));
-    if (count == 0) {
+    StorageReadEvidence read;
+    read.error = true; // Kept only when the read step could not run.
+    auto readStep = [&] {
+      read = storage.readDescriptor(
+          file, buffer, std::min<std::size_t>(remaining, sizeof(buffer)));
+    };
+    if (!runStorage(server, readStep) || read.error || read.returned == 0) {
       ok = false;
       break;
     }
+    const size_t count = read.returned;
     if (mbedtls_sha256_update(&context, buffer, count) != 0) {
       ok = false;
       break;
@@ -150,7 +186,7 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   if (ok)
     ok = mbedtls_sha256_finish(&context, digest) == 0;
   mbedtls_sha256_free(&context);
-  if (storage.close(file) != 0)
+  if (closeFile(server, file) != 0)
     ok = false;
   if (!ok)
     return false;
@@ -413,13 +449,16 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
     client.stop();
     return false;
   }
-  FILE *file = storage.open(chunk.path.c_str(), "rb");
-  if (file == nullptr)
+  int file = -1;
+  auto openStep = [&] {
+    file = storage.openDescriptor(chunk.path.c_str(), O_RDONLY);
+  };
+  if (!runStorage(server, openStep) || file < 0)
     return device_transfer::sendHttpError(client, 404, "chunk_missing",
                                           "diagnostic chunk is unavailable");
   if (!device_transfer::sendHttpHead(client, 200, chunk.bytes, "application/x-ndjson")) {
     client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Header);
-    storage.close(file);
+    closeFile(server, file);
     return false;
   }
   uint8_t buffer[4096];
@@ -428,29 +467,35 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
     if (!requestStillAuthorized(server, request)) {
       client.noteFailure(device_transfer::TransferFailureReason::Authorization);
       client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::AuthorizationDuringBody);
-      storage.close(file);
+      closeFile(server, file);
       client.stop();
       return false;
     }
     const size_t remaining = chunk.bytes - sent;
-    const StorageReadEvidence read = storage.readWithEvidence(
-        file, buffer, std::min(remaining, sizeof(buffer)));
+    const size_t requested = std::min(remaining, sizeof(buffer));
+    StorageReadEvidence read;
+    read.requested = requested;
+    read.error = true; // Kept only when the read step could not run.
+    auto readStep = [&] {
+      read = storage.readDescriptor(file, buffer, requested);
+    };
+    (void)runStorage(server, readStep);
     const size_t count = read.returned;
     if (device_transfer::failure_policy::fileReadFailed(count, read.error)) {
       client.noteFileRead(read.requested, count, read.errorNumber,
                           read.error, read.eof);
       client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Read);
-      storage.close(file);
+      closeFile(server, file);
       return false;
     }
     if (!device_transfer::writeHttpBytes(client, buffer, count)) {
       client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Write);
-      storage.close(file);
+      closeFile(server, file);
       return false;
     }
     sent += static_cast<uint32_t>(count);
   }
-  const int closeResult = storage.close(file);
+  const int closeResult = closeFile(server, file);
   if (sent != chunk.bytes || closeResult != 0) {
     client.noteFailure(device_transfer::TransferFailureReason::FileRead);
     client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Close);
@@ -530,7 +575,10 @@ bool RideDiagnosticsHttp::handleRequest(
   }
   if (route.kind == http_policy::RouteKind::Index) {
     beginTransferSnapshotLease();
-    const ChunkIndex index = listChunks(server_, request);
+    ChunkIndex index;
+    auto listStep = [&] { index = listChunks(server_, request); };
+    if (!runStorage(server_, listStep))
+      index.readable = false;
     if (!requestStillAuthorized(server_, request)) {
       endTransferSnapshotLease();
       client.stop();
@@ -551,7 +599,11 @@ bool RideDiagnosticsHttp::handleRequest(
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
     Chunk chunk;
-    if (!resolveClosedChunk(route.boot, route.chunk, chunk))
+    bool resolved = false;
+    auto resolveStep = [&] {
+      resolved = resolveClosedChunk(route.boot, route.chunk, chunk);
+    };
+    if (!runStorage(server_, resolveStep) || !resolved)
       return device_transfer::sendHttpError(client, 404, "chunk_unavailable",
                                             "diagnostic chunk is unavailable");
     return sendFile(client, chunk, server_, request);

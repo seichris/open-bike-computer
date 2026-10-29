@@ -1084,6 +1084,7 @@ struct NavigationProtocolTests {
         testBikeMapPOIIndexValidation()
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
+        MapCompatibilityContractTests.run()
         testSavedMapArtifactMetadataRoundTrip()
         testSavedMapRendererCompatibilityPolicy()
         testBackgroundMapUploadRestorationState()
@@ -1200,6 +1201,7 @@ struct NavigationProtocolTests {
         testMapActivationReconciliationMatrix()
         await testMapActivationConfirmationOrchestration()
         testDeviceMapLibrary()
+        await testDeviceMapLibraryCommandDelivery()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
@@ -9078,7 +9080,7 @@ struct NavigationProtocolTests {
             didLoadPreview,
             "a valid share reaches the explicit claim confirmation"
         )
-        manager.claimPendingShare()
+        manager.claimPendingShare(deviceStreamTrust: nil)
         let didFinish = await waitForMapTaskCompletion(manager)
         assert(
             didFinish,

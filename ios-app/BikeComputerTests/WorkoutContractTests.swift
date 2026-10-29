@@ -8608,7 +8608,7 @@ private struct WorkoutContractTestSuite {
                 "guard!isOnlyCheckingForServerMapselse{returnfalse}"
             )
                 && compactContent.contains(
-                    "offlineMapManager.isServerRecoveryCheckPending&&offlineMapManager.currentJob==nil&&offlineMapManager.downloadedPackURL==nil&&offlineMapManager.errorMessage==nil"
+                    "offlineMapManager.isCheckingForServerMaps&&!offlineMapManager.hasPendingDeviceActivation&&!offlineMapManager.isDeviceTransferBusy&&!offlineMapManager.hasActiveBackgroundUpload&&offlineMapManager.errorMessage==nil"
                 ),
             "the passive offline-map recovery scan must not flash a startup status chip"
         )

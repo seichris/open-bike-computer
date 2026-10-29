@@ -10,6 +10,110 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MapOperationStackTests(unittest.TestCase):
+    def test_map_descriptors_fail_without_stream_locks(self):
+        # Execute the production byte-file adapter with only syscall boundaries
+        # faulted. Existing font/Nearby/transfer suites cover its actual callers.
+        helper = (ROOT / 'lib/utils/src/descriptor_file.hpp').read_text()
+        for name in ('open', 'read', 'write', 'close'):
+            helper = helper.replace('::' + name + '(', '::fault_' + name + '(')
+        helper = helper.replace('#pragma once', '')
+        files = (ROOT / 'lib/map_transfer/map_file_io.hpp').read_text()
+        files = files.replace('#pragma once', '').replace(
+            '#include "../utils/src/descriptor_file.hpp"', '')
+        harness = r"""
+#include <cassert>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <fcntl.h>
+#include <string>
+#include <unistd.h>
+#include <utility>
+static int live=0, opens=0, closes=0, failOpen=0, failRead=0, failWrite=0, failClose=0;
+static bool shortIo=false, interruptRead=false, interruptWrite=false;
+static int lastFd=-1;
+int fault_open(const char *path,int flags,int mode) {
+  ++opens;
+  if(failOpen) { --failOpen; errno=ENOMEM; return -1; }
+  int fd=::open(path,flags,mode); if(fd>=0) { ++live; lastFd=fd; } return fd;
+}
+ssize_t fault_read(int fd,void *p,size_t n) {
+  if(interruptRead) { interruptRead=false; errno=EINTR; return -1; }
+  if(failRead && --failRead==0) { errno=EIO; return -1; }
+  return ::read(fd,p,shortIo && n>2 ? 2:n);
+}
+ssize_t fault_write(int fd,const void *p,size_t n) {
+  if(interruptWrite) { interruptWrite=false; errno=EINTR; return -1; }
+  if(failWrite && --failWrite==0) { errno=ENOMEM; return -1; }
+  return ::write(fd,p,shortIo && n>2 ? 2:n);
+}
+int fault_close(int fd) {
+  int result=::close(fd); ++closes; --live;
+  if(failClose) { --failClose; errno=EIO; return -1; }
+  return result;
+}
+// Headers have been loaded before poisoning; any production stdio open fails.
+#pragma GCC poison fopen freopen fdopen
+// PRODUCTION
+int main(int argc,char **argv) {
+  assert(argc==2); std::string path=std::string(argv[1])+"/map.bin";
+  using namespace map_transfer;
+  failOpen=1; { MapReadFile f(path); assert(!f.good() && !f.eof()); }
+  failOpen=1; { MapWriteFile f(path); assert(f.fail()); }
+  assert(live==0 && closes==0);
+  shortIo=true; interruptWrite=true;
+  { MapWriteFile f(path); f.write("abcdef",6); f.flush(); f.close(); assert(f.good()); }
+  interruptRead=true;
+  { MapReadFile f(path); char b[6]{}; f.read(b,6);
+    assert(f.good() && f.gcount()==6 && std::string(b,6)=="abcdef"); }
+  failRead=2;
+  { MapReadFile f(path); char b[6]{}; f.read(b,6);
+    assert(!f.good() && !f.eof() && f.gcount()==2); }
+  failWrite=2;
+  { MapWriteFile f(path); f.write("abcdef",6); assert(f.fail());
+    f.close(); assert(f.fail()); }
+  { MapReadFile f(path); std::string text; assert(f.readAll(text,2) && text=="ab"); }
+  failClose=1;
+  { MapWriteFile f(path); f.write("x",1); f.close(); assert(f.fail()); }
+  assert(live==0);
+  // Moved owners and exception unwinding retire each fd exactly once.
+  try { descriptor_file::File f(path.c_str(),O_RDONLY);
+    descriptor_file::File moved(std::move(f)); assert(!f && moved);
+    throw 1;
+  } catch(int) {}
+  assert(live==0 && ::fcntl(lastFd,F_GETFD)==-1 && errno==EBADF);
+  // Zero is a valid descriptor, not the empty-owner sentinel.
+  const int savedStdin=::dup(STDIN_FILENO); assert(savedStdin>=0);
+  assert(::close(STDIN_FILENO)==0);
+  { descriptor_file::File zero(path.c_str(),O_RDONLY);
+    assert(zero && zero.get()==0);
+    descriptor_file::File moved; moved=std::move(zero);
+    assert(!zero && moved.get()==0); assert(moved.close()==0); }
+  assert(live==0 && ::dup2(savedStdin,STDIN_FILENO)==STDIN_FILENO);
+  ::close(savedStdin);
+  assert(opens-closes==2); // exactly the two ENOMEM opens created no handle
+  ::unlink(path.c_str());
+}
+""".replace('// PRODUCTION', helper + '\n' + files)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source, executable = directory / 'fault.cpp', directory / 'fault'
+            source.write_text(harness)
+            subprocess.run(['g++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                            str(source), '-o', str(executable)], check=True)
+            subprocess.run([str(executable), str(directory)], check=True)
+        # Pin the active call sites so a new stdio lock cannot bypass the
+        # checked adapter while the isolated fault test still passes.
+        for relative in ('map_transfer/map_file_io.hpp',
+                         'map_transfer/map_operation_journal.cpp',
+                         'map_transfer/map_transfer.cpp',
+                         'maps/src/mapFontAsset.cpp', 'maps/src/mapNearbyStorage.hpp'):
+            code = (ROOT / 'lib' / relative).read_text()
+            import re
+            code = re.sub(r'//[^\n]*', '', code)
+            self.assertIsNone(re.search(r'\b(?:fopen|freopen|fdopen)\s*\(', code), relative)
+
     def test_psram_workspace_exhaustion_preserves_selection_and_recovery_evidence(self):
         compiler = shutil.which('g++')
         self.assertIsNotNone(compiler)

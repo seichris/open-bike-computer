@@ -4,19 +4,42 @@
 
 namespace waveshare_board::touch_sampling_policy {
 
-// CST9217 INT is a transient hint rather than a persistent touch level on the
-// tested 1.75-inch board. When idle fallback is enabled, the caller's existing
-// cadence and failure backoff remain authoritative even if INT is high. A
-// board with a reliable interrupt may disable fallback and still sample active
-// gestures, a newly latched interrupt, and the short post-touch window.
-constexpr bool shouldAttemptRead(bool allowIdleFallback,
-                                 bool interruptActive, bool touchPressed,
-                                 bool interruptPending, uint32_t nowMs,
-                                 uint32_t fastPollUntilMs) {
-  const bool fastPollActive =
-      static_cast<int32_t>(fastPollUntilMs - nowMs) > 0;
-  return allowIdleFallback || interruptActive || touchPressed ||
-         interruptPending || fastPollActive;
-}
+// A short INT pulse is remembered by the caller's generation latch. Keep a
+// bounded follow-up window after that event (including a failed first read),
+// and keep sampling an active gesture even when INT has returned high. A fully
+// idle controller is not polled without evidence of touch activity. A valid,
+// acknowledged release completes that activity and closes its follow-up window.
+// Cadence, failure backoff and the one immediate attempt per new edge remain
+// the caller's responsibility.
+class ReadWindow {
+public:
+  void arm(uint32_t nowMs, uint32_t durationMs) {
+    startedMs_ = nowMs;
+    durationMs_ = durationMs;
+    armed_ = true;
+  }
+
+  // This is not an error/no-frame response: those still need bounded retries.
+  // The caller's independent interrupt-generation latch is never consumed here.
+  void confirmRelease() { armed_ = false; }
+
+  bool active(uint32_t nowMs) {
+    if (armed_ && nowMs - startedMs_ >= durationMs_) {
+      armed_ = false;
+    }
+    return armed_;
+  }
+
+  bool shouldAttemptRead(bool interruptActive, bool touchPressed,
+                         bool interruptPending, uint32_t nowMs) {
+    const bool windowActive = active(nowMs);
+    return interruptActive || touchPressed || interruptPending || windowActive;
+  }
+
+private:
+  bool armed_ = false;
+  uint32_t startedMs_ = 0;
+  uint32_t durationMs_ = 0;
+};
 
 } // namespace waveshare_board::touch_sampling_policy
