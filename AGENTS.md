@@ -6,6 +6,8 @@ Read [REVIEW.md](REVIEW.md) before reviewing or publishing a change. It defines
 the three-pass review limit, delta re-review, finding ledger, and risk/evidence
 handoff. Preserve the round count across sessions and stop early when clean.
 
+- Before merging, wait for PR-Agent's `/review` and `/improve` on the current PR head and read summary + inline feedback. Validate findings, fix valid issues, and explain dismissals/deferrals; missing, stale, failed or partial runs remain unresolved. Preserve existing review limits and merge gates.
+
 ## Repository map
 
 - `esp32/`: PlatformIO/Arduino firmware for the Waveshare 1.75-inch and
