@@ -43,6 +43,10 @@
 		580380010000000000000003 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 580380020000000000000003 /* GoogleSignIn */; };
 		57A00C092F00000100000001 /* DiagnosticsSchema.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */; };
 		57A00C0B2F00000100000001 /* DiagnosticsCapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */; };
+		A57A25110000000100000001 /* PhoneWorkoutRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57A25100000000100000001 /* PhoneWorkoutRecorder.swift */; };
+		A57A25110100000100000001 /* WorkoutRecordingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57A25100100000100000001 /* WorkoutRecordingStore.swift */; };
+		A57A25110200000100000001 /* WorkoutSessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57A25100200000100000001 /* WorkoutSessionCoordinator.swift */; };
+		A57A25110300000100000001 /* PhoneWorkoutRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A57A25100300000100000001 /* PhoneWorkoutRecorderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -142,6 +146,10 @@
 		57A00C022F00000100000001 /* RideDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/RideDiagnosticsTests.swift; sourceTree = "<group>"; };
 		57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsSchema.generated.swift; sourceTree = "<group>"; };
 		57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsCapturePolicy.swift; sourceTree = "<group>"; };
+		A57A25100000000100000001 /* PhoneWorkoutRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/PhoneWorkoutRecorder.swift; sourceTree = "<group>"; };
+		A57A25100100000100000001 /* WorkoutRecordingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutRecordingStore.swift; sourceTree = "<group>"; };
+		A57A25100200000100000001 /* WorkoutSessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/WorkoutSessionCoordinator.swift; sourceTree = "<group>"; };
+		A57A25100300000100000001 /* PhoneWorkoutRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/PhoneWorkoutRecorderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -302,6 +310,10 @@
 				57A003072F00000100000001 /* WatchLocationService.swift */,
 				57A004002F00000100000001 /* WorkoutMirrorManager.swift */,
 				57A004012F00000100000001 /* WorkoutMetricsStore.swift */,
+				A57A25100000000100000001 /* PhoneWorkoutRecorder.swift */,
+				A57A25100100000100000001 /* WorkoutRecordingStore.swift */,
+				A57A25100200000100000001 /* WorkoutSessionCoordinator.swift */,
+				A57A25100300000100000001 /* PhoneWorkoutRecorderTests.swift */,
 				57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */,
 				57A006002F00000100000001 /* WorkoutWatchAvailabilityMonitor.swift */,
 				57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */,
@@ -615,6 +627,10 @@
 				57A002012F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
 				57A004032F00000100000001 /* WorkoutMirrorManager.swift in Sources */,
 				57A004042F00000100000001 /* WorkoutMetricsStore.swift in Sources */,
+				A57A25110000000100000001 /* PhoneWorkoutRecorder.swift in Sources */,
+				A57A25110100000100000001 /* WorkoutRecordingStore.swift in Sources */,
+				A57A25110200000100000001 /* WorkoutSessionCoordinator.swift in Sources */,
+				A57A25110300000100000001 /* PhoneWorkoutRecorderTests.swift in Sources */,
 				57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */,
 				57A006012F00000100000001 /* WorkoutWatchAvailabilityMonitor.swift in Sources */,
 				57A00A012F00000100000001 /* RideDetectionSettingsStore.swift in Sources */,

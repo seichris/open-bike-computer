@@ -454,6 +454,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         WatchSegmentEventOperation?
     private let injectedEndCollectionOperation:
         (@MainActor (HKLiveWorkoutBuilder, Date) async throws -> Void)?
+    private let finishWorkoutCallback: @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void
     private let injectedFinishWorkoutOperation:
         (@MainActor (HKLiveWorkoutBuilder) async throws -> Void)?
     private let segmentNow: @MainActor () -> Date
@@ -522,6 +523,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         sequence: UInt64,
         context: WorkoutControlContextV1?
     )?
+    private struct RideTransitionWriteContext {
+        let sessionID: UUID
+        let builder: HKLiveWorkoutBuilder
+        let revision: UInt64
+    }
+    private var rideTransitionWriteRevision: UInt64 = 0
+
     private var pendingAutomaticStartAnnotation: WorkoutControlContextV1?
     private var pendingAutomaticTransitionAnnotation:
         WorkoutControlContextV1?
@@ -677,6 +685,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 = nil,
         finishWorkoutOperation:
             (@MainActor (HKLiveWorkoutBuilder) async throws -> Void)? = nil,
+        finishWorkoutCallback: @escaping @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void = { builder, completion in
+            builder.finishWorkout(completion: completion)
+        },
         segmentNow: @MainActor @escaping () -> Date = Date.init,
         segmentWriteTimeout: TimeInterval = 10,
         mirrorStartOperation: WatchMirrorStartOperation? = nil,
@@ -736,6 +747,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             rideTransitionEventOperation
         self.injectedEndCollectionOperation = endCollectionOperation
         self.injectedFinishWorkoutOperation = finishWorkoutOperation
+        self.finishWorkoutCallback = finishWorkoutCallback
         self.segmentNow = segmentNow
         self.segmentWriteTimeout = segmentWriteTimeout.isFinite
             ? min(max(0.01, segmentWriteTimeout), 60)
@@ -773,12 +785,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     workoutStart: workoutStart
                 )
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self, builder === recoveredSaveRuntimeAdapter.builder else { return }
                     await restoreRideTransition(
                         from: recoveredSaveRuntimeAdapter.builder,
                         sessionState: recoveredSaveRuntimeAdapter.sessionState(),
                         workoutStart: workoutStart
                     )
+                    guard builder === recoveredSaveRuntimeAdapter.builder else { return }
                     publishSnapshotImmediately()
                 }
             }
@@ -2179,6 +2192,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             endMirrorShutdownSession(failedSession)
         }
         resetMirrorTransport()
+        resetRideTransitionWrites()
         session = nil
         identity = nil
         try? recoveryStore.clear()
@@ -2387,6 +2401,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             sessionState: recoveredState,
             workoutStart: recoveredIdentity.startDate
         )
+        guard session === recoveredSession, builder === recoveredBuilder,
+              identity?.sessionID == recoveredIdentity.sessionID else { return .failed }
         isBuilderReadyForFinalization = true
         isIdentityMetadataRetryPending = false
         isTerminalPublicationPending = false
@@ -3784,6 +3800,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             session?.end()
         }
         resetMirrorTransport()
+        resetRideTransitionWrites()
         session = nil
         builder = nil
         authoritativeFinalizationEndDate = nil
@@ -3822,6 +3839,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         discardFinalizationRetryTask = nil
         discardFinalizationRetryAttemptCount = 0
         resetMirrorTransport()
+        resetRideTransitionWrites()
         session = nil
         builder = nil
         identity = nil
@@ -4391,6 +4409,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         guard sessionState == .running || sessionState == .paused else {
             return
         }
+        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
         let paused = sessionState == .paused
         let expectedTransitions: Set<String> = paused
             ? ["pause"]
@@ -4503,6 +4522,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 to: builder,
                 injectedOperation: injectedRideTransitionEventOperation
             )
+            guard isCurrentRideTransitionWrite(writeContext) else { return }
             guard outcome == .success else {
                 lastErrorCode = .sessionFailed
                 return
@@ -5180,8 +5200,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     func configureMirrorRuntimeForTesting(
         session: HKWorkoutSession,
         identity: WatchWorkoutRecoveryStore.Identity,
-        state: WorkoutSessionStateV1
+        state: WorkoutSessionStateV1,
+        builder: HKLiveWorkoutBuilder? = nil
     ) {
+        if let builder { self.builder = builder }
         resetMirrorTransport()
         self.session = session
         adoptRecoveredIdentityForRuntime(identity)
@@ -5296,6 +5318,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func adoptRecoveredIdentityForRuntime(
         _ recoveredIdentity: WatchWorkoutRecoveryStore.Identity
     ) {
+        if identity?.sessionID != recoveredIdentity.sessionID { resetRideTransitionWrites() }
         identity = recoveredIdentity
         if heartRateZoneRuntimeSessionID != recoveredIdentity.sessionID {
             nativeZoneLiveState.reset()
@@ -5863,6 +5886,33 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
+    private func beginRideTransitionWrite(
+        to builder: HKLiveWorkoutBuilder
+    ) -> RideTransitionWriteContext? {
+        guard self.builder === builder, let identity,
+              recoveryStore.recoveredIdentity?.sessionID == identity.sessionID else { return nil }
+        rideTransitionWriteRevision &+= 1
+        return RideTransitionWriteContext(sessionID: identity.sessionID,
+            builder: builder, revision: rideTransitionWriteRevision)
+    }
+
+    private func ownsRideTransitionRuntime(_ context: RideTransitionWriteContext) -> Bool {
+        builder === context.builder && identity?.sessionID == context.sessionID
+            && recoveryStore.recoveredIdentity?.sessionID == context.sessionID
+    }
+
+    private func isCurrentRideTransitionWrite(_ context: RideTransitionWriteContext) -> Bool {
+        ownsRideTransitionRuntime(context) && rideTransitionWriteRevision == context.revision
+    }
+
+    private func resetRideTransitionWrites() {
+        rideTransitionWriteRevision &+= 1
+        pendingAutomaticStartAnnotation = nil
+        pendingAutomaticTransitionAnnotation = nil
+        pendingSystemTransitionEvent = nil
+        clearManualTransitionOverride()
+    }
+
     @discardableResult
     private func confirmRideTransition(
         paused: Bool,
@@ -5890,11 +5940,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             hasConfirmedSystemRequest: systemEvent != nil
         )
         let profileVersion = automaticContext?.detectorProfileVersion
+        // A duplicate automatic retry must not supersede the write it awaits.
+        // A rider request can supersede that automatic write immediately.
+        if automaticContext != nil, pendingAutomaticTransitionAnnotation != nil { return false }
+        guard let currentBuilder = builder else {
+            lastErrorCode = .sessionFailed
+            return false
+        }
+        guard let writeContext = beginRideTransitionWrite(to: currentBuilder) else { return false }
 
         if let automaticContext {
-            guard pendingAutomaticTransitionAnnotation == nil else {
-                return false
-            }
             let transition = paused ? "pause" : "resume"
             if !containsRideTransitionMarker(
                 context: automaticContext,
@@ -5911,12 +5966,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     at: date
                 )
                 pendingAutomaticTransitionAnnotation = automaticContext
+                defer {
+                    if ownsRideTransitionRuntime(writeContext),
+                       pendingAutomaticTransitionAnnotation == automaticContext {
+                        pendingAutomaticTransitionAnnotation = nil
+                    }
+                }
                 let outcome = await Self.segmentEventWriteOutcome(
                     event,
                     to: builder,
                     injectedOperation:
                         injectedRideTransitionEventOperation
                 )
+                guard isCurrentRideTransitionWrite(writeContext) else { return false }
                 guard pendingAutomaticTransitionAnnotation
                         == automaticContext else {
                     return false
@@ -5952,6 +6014,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 to: builder,
                 injectedOperation: injectedRideTransitionEventOperation
             )
+            guard isCurrentRideTransitionWrite(writeContext) else { return false }
             guard outcome == .success else {
                 lastErrorCode = .sessionFailed
                 clearManualTransitionOverride()
@@ -6069,6 +6132,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             publishSnapshotImmediately()
             return
         }
+        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
         let event = makeRideTransitionMarker(
             paused: false,
             origin: .automatic,
@@ -6079,12 +6143,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         pendingAutomaticStartAnnotation = context
         Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                if ownsRideTransitionRuntime(writeContext), pendingAutomaticStartAnnotation == context {
+                    pendingAutomaticStartAnnotation = nil
+                }
+            }
+            guard isCurrentRideTransitionWrite(writeContext) else { return }
             let outcome = await Self.segmentEventWriteOutcome(
                 event,
                 to: builder,
                 injectedOperation:
                     self.injectedRideTransitionEventOperation
             )
+            guard isCurrentRideTransitionWrite(writeContext) else { return }
             guard pendingAutomaticStartAnnotation == context else {
                 return
             }
@@ -6129,7 +6200,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         context: WorkoutControlContextV1,
         at date: Date
     ) async -> Bool {
-        guard let builder else { return false }
+        guard let builder, let writeContext = beginRideTransitionWrite(to: builder) else { return false }
         if !containsRideTransitionMarker(
             context: context,
             transition: "start"
@@ -6146,6 +6217,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 to: builder,
                 injectedOperation: injectedRideTransitionEventOperation
             )
+            guard isCurrentRideTransitionWrite(writeContext) else { return false }
             guard outcome == .success else {
                 lastErrorCode = .sessionFailed
                 return false
@@ -6169,6 +6241,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             lastErrorCode = .sessionFailed
             return
         }
+        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
         let event = makeRideTransitionMarker(
             paused: false,
             origin: .manual,
@@ -6181,6 +6254,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             to: builder,
             injectedOperation: injectedRideTransitionEventOperation
         )
+        guard isCurrentRideTransitionWrite(writeContext) else { return }
         guard outcome == .success else {
             lastErrorCode = .sessionFailed
             return
@@ -6204,7 +6278,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         at transitionDate: Date
     ) {
         guard suppliedConfigurationStartOriginPending,
-              suppliedConfigurationStartOriginTask == nil else { return }
+              suppliedConfigurationStartOriginTask == nil,
+              let originalBuilder = builder, let sessionID = identity?.sessionID else { return }
         suppliedConfigurationStartOriginTask = Task { @MainActor [weak self] in
             do {
                 // The iPhone's RAUT decision remains live for 30 seconds.
@@ -6215,12 +6290,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 return
             }
             guard let self,
+                  builder === originalBuilder, identity?.sessionID == sessionID,
                   suppliedConfigurationStartOriginPending,
                   lifecycle.state == .running,
                   identity?.lastTransitionOrigin == nil else { return }
             suppliedConfigurationStartOriginPending = false
             suppliedConfigurationStartOriginTask = nil
             await confirmUnknownStart(at: transitionDate)
+            guard builder === originalBuilder, identity?.sessionID == sessionID else { return }
             publishSnapshotImmediately()
         }
     }
@@ -6230,6 +6307,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             lastErrorCode = .sessionFailed
             return
         }
+        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
         let event = makeRideTransitionMarker(
             paused: false,
             origin: .unknown,
@@ -6242,6 +6320,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             to: builder,
             injectedOperation: injectedRideTransitionEventOperation
         )
+        guard isCurrentRideTransitionWrite(writeContext) else { return }
         guard outcome == .success else {
             lastErrorCode = .sessionFailed
             return
@@ -6418,12 +6497,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, identity?.sessionID == envelope.sessionID else { return }
             let didConfirm = await confirmRideTransition(
                 paused: control == .pause,
                 at: date,
                 remoteContext: context
             )
+            guard identity?.sessionID == envelope.sessionID else { return }
             publishSnapshotImmediately()
             if didConfirm {
                 publishPendingRemoteStateAcknowledgementIfConfirmed()
@@ -6489,6 +6569,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             lastErrorCode = .sessionFailed
             return
         }
+        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
         let marker = makeRideTransitionMarker(
             paused: event.paused,
             origin: .system,
@@ -6500,6 +6581,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             to: builder,
             injectedOperation: injectedRideTransitionEventOperation
         )
+        guard isCurrentRideTransitionWrite(writeContext) else { return }
         guard outcome == .success else {
             lastErrorCode = .sessionFailed
             return
@@ -6535,8 +6617,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 lastErrorCode = .sessionFailed
                 return
             }
+            guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
+            let paused = lifecycle.state == .paused
             let event = makeRideTransitionMarker(
-                paused: lifecycle.state == .paused,
+                paused: paused,
                 origin: .manual,
                 context: nil,
                 at: date
@@ -6546,6 +6630,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 to: builder,
                 injectedOperation: injectedRideTransitionEventOperation
             )
+            guard isCurrentRideTransitionWrite(writeContext) else { return }
             guard outcome == .success else {
                 lastErrorCode = .sessionFailed
                 return
@@ -6553,7 +6638,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             do {
                 try recoveryStore.confirmRideTransition(
                     origin: .manual,
-                    paused: lifecycle.state == .paused,
+                    paused: paused,
                     at: date,
                     detectorProfileVersion: identity?.detectorProfileVersion
                 )
@@ -7220,17 +7305,15 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             try await injectedFinishWorkoutOperation(builder)
             return
         }
-        let workout: HKWorkout = try await withCheckedThrowingContinuation { continuation in
-            builder.finishWorkout { workout, error in
+        let workout: HKWorkout? = try await withCheckedThrowingContinuation { continuation in
+            finishWorkoutCallback(builder) { workout, error in
                 switch WorkoutFinishCallbackPolicy.outcome(
                     workoutReturned: workout != nil,
                     errorReturned: error != nil
                 ) {
                 case .saved:
-                    guard let workout else {
-                        continuation.resume(throwing: WorkoutFinalizationError.finishWorkoutFailed)
-                        return
-                    }
+                    // A nil object with no error is authoritative success
+                    // while HealthKit data is unavailable on a locked device.
                     continuation.resume(returning: workout)
                 case .failed:
                     guard let error else {
@@ -7245,7 +7328,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         // The continuation resumes on MainActor. An old builder must never
         // populate a later ride's final zone summary.
-        if self.builder === builder {
+        if self.builder === builder, let workout {
             finishedWorkoutNativeZones = nativeZones(from: workout)
         }
     }
@@ -7390,105 +7473,114 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
         date: Date
     ) {
         Task { @MainActor [weak self] in
-            guard let self, workoutSession === session else { return }
-            if let terminalCleanupSessionID,
-               let terminalCleanupDisposition,
-               let terminalBuilder = builder {
-                handleTerminalTombstoneSessionState(
-                    toState,
-                    transitionDate: date,
-                    disposition: terminalCleanupDisposition,
-                    adapter: WatchTerminalSessionCleanupAdapter(
-                        stopSession: { transitionDate in
-                            workoutSession.stopActivity(with: transitionDate)
-                        },
-                        completeSession: { [weak self] disposition in
-                            self?.completeTerminalTombstoneSessionCleanup(
-                                workoutSession,
-                                builder: terminalBuilder,
-                                sessionID: terminalCleanupSessionID,
-                                disposition: disposition
-                            )
-                        }
-                    )
-                )
-                return
-            }
-            switch toState {
-            case .running:
-                switch WorkoutRunningCallbackPolicy.action(for: lifecycle.state) {
-                case .enterRunning:
-                    let resumedFromPause = fromState == .paused
-                    let automaticContext = resumedFromPause
-                        ? pendingRemoteStateAcknowledgement?.context
-                        : nil
-                    _ = lifecycle.apply(.sessionRunning)
-                    routeRecorder.setPaused(false, at: date)
-                    startPeriodicSnapshots()
-                    let didConfirmTransition: Bool
-                    if fromState == .paused {
-                        didConfirmTransition = await confirmRideTransition(
-                            paused: false,
-                            at: date,
-                            remoteContext: automaticContext
+            await self?.applySessionState(workoutSession, to: toState, from: fromState, date: date)
+        }
+    }
+
+    func applySessionState(
+        _ workoutSession: HKWorkoutSession, to toState: HKWorkoutSessionState,
+        from fromState: HKWorkoutSessionState, date: Date
+    ) async {
+        guard workoutSession === session else { return }
+        if let terminalCleanupSessionID,
+           let terminalCleanupDisposition,
+           let terminalBuilder = builder {
+            handleTerminalTombstoneSessionState(
+                toState,
+                transitionDate: date,
+                disposition: terminalCleanupDisposition,
+                adapter: WatchTerminalSessionCleanupAdapter(
+                    stopSession: { transitionDate in
+                        workoutSession.stopActivity(with: transitionDate)
+                    },
+                    completeSession: { [weak self] disposition in
+                        self?.completeTerminalTombstoneSessionCleanup(
+                            workoutSession,
+                            builder: terminalBuilder,
+                            sessionID: terminalCleanupSessionID,
+                            disposition: disposition
                         )
-                    } else {
-                        if let context = activeLaunchAutomaticStartContext {
-                            didConfirmTransition =
-                                await confirmLaunchAutomaticStart(
-                                    context: context,
-                                    at: date
-                                )
-                        } else if localStartOriginPending {
-                            await confirmManualStart(at: date)
-                            didConfirmTransition = true
-                        } else {
-                            scheduleSuppliedConfigurationUnknownStart(at: date)
-                            didConfirmTransition = true
-                        }
                     }
-                    publishSnapshotImmediately()
-                    if didConfirmTransition {
-                        publishPendingRemoteStateAcknowledgementIfConfirmed()
-                    }
-                case .stopSession:
-                    stopSessionForFinalization(
-                        workoutSession,
-                        at: authoritativeFinalizationEndDate ?? date
-                    )
-                case .ignore:
-                    break
-                }
-            case .paused:
-                if lifecycle.state == .ending {
-                    stopSessionForFinalization(
-                        workoutSession,
-                        at: authoritativeFinalizationEndDate ?? date
-                    )
-                    return
-                }
-                let automaticContext =
-                    pendingRemoteStateAcknowledgement?.context
-                _ = lifecycle.apply(.sessionPaused)
-                routeRecorder.setPaused(true, at: date)
-                let didConfirmTransition = await confirmRideTransition(
-                    paused: true,
-                    at: date,
-                    remoteContext: automaticContext
                 )
+            )
+            return
+        }
+        switch toState {
+        case .running:
+            switch WorkoutRunningCallbackPolicy.action(for: lifecycle.state) {
+            case .enterRunning:
+                let resumedFromPause = fromState == .paused
+                let automaticContext = resumedFromPause
+                    ? pendingRemoteStateAcknowledgement?.context
+                    : nil
+                _ = lifecycle.apply(.sessionRunning)
+                routeRecorder.setPaused(false, at: date)
+                startPeriodicSnapshots()
+                let didConfirmTransition: Bool
+                if fromState == .paused {
+                    didConfirmTransition = await confirmRideTransition(
+                        paused: false,
+                        at: date,
+                        remoteContext: automaticContext
+                    )
+                } else {
+                    if let context = activeLaunchAutomaticStartContext {
+                        didConfirmTransition =
+                            await confirmLaunchAutomaticStart(
+                                context: context,
+                                at: date
+                            )
+                    } else if localStartOriginPending {
+                        await confirmManualStart(at: date)
+                        didConfirmTransition = true
+                    } else {
+                        scheduleSuppliedConfigurationUnknownStart(at: date)
+                        didConfirmTransition = true
+                    }
+                }
+                guard session === workoutSession else { return }
                 publishSnapshotImmediately()
                 if didConfirmTransition {
                     publishPendingRemoteStateAcknowledgementIfConfirmed()
                 }
-            case .stopped, .ended:
-                handleSessionReadyForFinalization(
-                    at: workoutSession.endDate ?? date
+            case .stopSession:
+                stopSessionForFinalization(
+                    workoutSession,
+                    at: authoritativeFinalizationEndDate ?? date
                 )
-            case .notStarted, .prepared:
-                break
-            @unknown default:
+            case .ignore:
                 break
             }
+        case .paused:
+            if lifecycle.state == .ending {
+                stopSessionForFinalization(
+                    workoutSession,
+                    at: authoritativeFinalizationEndDate ?? date
+                )
+                return
+            }
+            let automaticContext =
+                pendingRemoteStateAcknowledgement?.context
+            _ = lifecycle.apply(.sessionPaused)
+            routeRecorder.setPaused(true, at: date)
+            let didConfirmTransition = await confirmRideTransition(
+                paused: true,
+                at: date,
+                remoteContext: automaticContext
+            )
+            guard session === workoutSession else { return }
+            publishSnapshotImmediately()
+            if didConfirmTransition {
+                publishPendingRemoteStateAcknowledgementIfConfirmed()
+            }
+        case .stopped, .ended:
+            handleSessionReadyForFinalization(
+                at: workoutSession.endDate ?? date
+            )
+        case .notStarted, .prepared:
+            break
+        @unknown default:
+            break
         }
     }
 
@@ -7647,6 +7739,7 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
                 await noteManualPauseOrResumeRequest(
                     at: request.dateInterval.start
                 )
+                guard builder === workoutBuilder else { return }
             }
             if let event = workoutBuilder.workoutEvents
                 .filter({
@@ -7664,6 +7757,7 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
                     )
                 )
             }
+            guard builder === workoutBuilder else { return }
             scheduleCoalescedSnapshot()
         }
     }
