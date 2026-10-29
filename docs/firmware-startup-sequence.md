@@ -18,6 +18,12 @@ original order because their splash screen preloads the recovered map.
 The waiting screen stays static while recovery runs. BLE starts after recovery,
 so a phone can connect only then.
 
+Device ownership is loaded with BLE, after that first frame. The screen
+therefore starts from the same fail-closed claimed state BLE uses when
+ownership storage is unavailable: "Waiting for iPhone". An owned device never
+shows the add-device Welcome. An unclaimed device switches to Welcome when BLE
+reports its ownership on the first `loop()` pass.
+
 ## Why the screen moved
 
 Retained device diagnostics from 2026-10-25 to 2026-10-29 showed that time to

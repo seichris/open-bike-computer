@@ -368,6 +368,13 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         )
         positions = [waveshare.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
+        # That frame precedes BLE's ownership load, so the screen starts from
+        # the fail-closed claimed state, never the add-device Welcome.
+        waiting = source("lib/gui/src/waitingScr.cpp")
+        create = waiting[waiting.index("void createWaitingScr()"):
+                         waiting.index("void updateWaitingOwnershipStatus(")]
+        self.assertIn("ownershipUnknownSnapshot()", create)
+        self.assertNotIn("applyPhase(Phase::Welcome", create)
         # One static frame: setup never runs LVGL timers or input callbacks.
         self.assertNotIn("lv_timer_handler", setup)
         self.assertEqual(setup.count("startUserInterface();"), 2)

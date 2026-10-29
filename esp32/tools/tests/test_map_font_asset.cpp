@@ -3,10 +3,22 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 #include <vector>
+
+// Concurrent worktree checks must not share one fixed font path.
+static std::string temporaryFontPath(const char *name) {
+  const char *directory = std::getenv("TMPDIR");
+  std::string path =
+      directory != nullptr && *directory != '\0' ? directory : "/tmp";
+  if (path.back() != '/')
+    path += '/';
+  return path + name + "-" + std::to_string(::getpid()) + ".fma";
+}
 
 static void append16(std::vector<uint8_t> &data, uint16_t value) {
   data.push_back(static_cast<uint8_t>(value));
@@ -112,7 +124,7 @@ static std::vector<uint8_t> multiBatchFixture(uint16_t glyphs) {
 static void testGlyphIndexIsReadAcrossBatchBoundaries() {
   // 700 glyphs = 2,100 records: four full 512-record batches plus 52.
   constexpr uint16_t kGlyphs = 700;
-  const std::string path = "/tmp/open-bike-computer-map-font-batches.fma";
+  const std::string path = temporaryFontPath("open-bike-computer-map-font-batches");
   const auto data = multiBatchFixture(kGlyphs);
   {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -158,7 +170,7 @@ static void testGlyphIndexIsReadAcrossBatchBoundaries() {
 
 int main() {
   testGlyphIndexIsReadAcrossBatchBoundaries();
-  const std::string path = "/tmp/open-bike-computer-map-font-test.fma";
+  const std::string path = temporaryFontPath("open-bike-computer-map-font-test");
   const auto data = fixture();
   {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);

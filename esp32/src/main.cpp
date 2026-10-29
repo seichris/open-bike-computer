@@ -564,8 +564,9 @@ static void recordMapDiagnostic(
           : "none";
   const bool sessionPresent =
       identity != nullptr && identity->sessionPresent;
-  // Fits a 64-byte map id, the longest codes and every probe metric.
-  char fields[384] = {};
+  // The recorder rejects fields of 320 bytes or more; overflow below becomes
+  // an explicit diagnostic_fields_too_large record instead.
+  char fields[320] = {};
   const int prefixLength = snprintf(
       fields, sizeof(fields),
       "{\"mapPhase\":\"%s\",\"result\":\"%s\",\"code\":\"%s\","

@@ -14,6 +14,19 @@ int main() {
   static_assert(bicino_visual_style::NAVIGATION_BLUE_RGB565 == 0x045F);
 
   static_assert(pre_connection_presentation::resolve({}) == Phase::Welcome);
+  // Before BLE loads ownership the screen fails closed to "Waiting for
+  // iPhone": no connection, authentication or pairing is claimed, and the
+  // add-device Welcome is never the unknown-ownership presentation.
+  constexpr Snapshot unknown =
+      pre_connection_presentation::ownershipUnknownSnapshot();
+  static_assert(unknown.claimed && !unknown.connected &&
+                !unknown.authenticated && !unknown.pairingActive &&
+                !unknown.pairingConfirmedOnDevice && unknown.pairingCode == 0);
+  static_assert(pre_connection_presentation::resolve(unknown) ==
+                Phase::WaitingForIPhone);
+  static_assert(pre_connection_presentation::content(
+                    pre_connection_presentation::resolve(unknown)).group !=
+                pre_connection_presentation::Group::Welcome);
   static_assert(pre_connection_presentation::resolve(
                     {false, true, false, false, false, 0}) ==
                 Phase::Connecting);

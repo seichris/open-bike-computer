@@ -309,13 +309,13 @@ void testPoiIndexCrcMatchesBitwiseReference() {
            bitwiseCrc32(bytes.data(), length));
 }
 
-// A sorted FPI1 index of `count` single-record entries. Validation reads only
-// the index, so the referenced blocks need not exist.
-std::string poiIndex(uint32_t count) {
+// An FPI1 index of single-record entries at the given block columns, with a
+// correct CRC. Validation reads only the index, so blocks need not exist.
+std::string poiIndex(const std::vector<int32_t> &blocks) {
   std::string entries;
-  for (uint32_t block = 0; block < count; ++block) {
+  for (int32_t block : blocks) {
     std::string entry;
-    appendLe32(entry, block);
+    appendLe32(entry, static_cast<uint32_t>(block));
     appendLe32(entry, 0);
     appendLe32(entry, 1);
     appendLe16(entry, 1);
@@ -329,9 +329,16 @@ std::string poiIndex(uint32_t count) {
   std::string index("FPI1", 4);
   appendLe16(index, 32);
   appendLe16(index, 0);
-  appendLe32(index, count);
+  appendLe32(index, static_cast<uint32_t>(blocks.size()));
   appendLe32(index, crc32(entries));
   return index + entries;
+}
+
+std::string poiIndex(uint32_t count) {
+  std::vector<int32_t> blocks;
+  for (uint32_t block = 0; block < count; ++block)
+    blocks.push_back(static_cast<int32_t>(block));
+  return poiIndex(blocks);
 }
 
 void testIndexValidationMatchesReaderWithoutEntries() {
@@ -374,9 +381,10 @@ void testIndexValidationMatchesReaderWithoutEntries() {
   flipped[flipped.size() - 40] ^= 0x01; // late entry: only the CRC catches it
   expectCorrupt(flipped);
   expectCorrupt(valid.substr(0, valid.size() - 32));
-  std::string unsorted = poiIndex(2);
-  unsorted.replace(16, 4, unsorted.substr(48, 4)); // duplicate block order
-  expectCorrupt(unsorted);
+  // Out-of-order and duplicate blocks carry correct CRCs here, so only the
+  // ordering check can reject them.
+  expectCorrupt(poiIndex(std::vector<int32_t>{1, 0}));
+  expectCorrupt(poiIndex(std::vector<int32_t>{3, 3}));
 
   // Cancellation is retryable and leaves health untouched.
   writeFile(path, valid);
