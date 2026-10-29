@@ -67,7 +67,8 @@ def published_manifests(repository):
             raw[target] = data
         if pair[0] != pair[1]:
             raise ValueError("published target build numbers disagree")
-        releases.append({"tag": release["tag_name"], "build": pair[0], "manifests": raw})
+        releases.append({"tag": release["tag_name"], "build": pair[0], "manifests": raw,
+                         "immutable": release.get("immutable") is True})
     return releases
 
 

@@ -22,8 +22,9 @@ def release(build, sizes):
     return {target: manifest(target, build, size) for target, size in zip(TARGETS, sizes)}
 
 
-def history(*releases):
-    return [{"tag": f"v{build}", "build": build, "manifests": release(build, sizes)}
+def history(*releases, immutable=True):
+    return [{"tag": f"v{build}", "build": build, "manifests": release(build, sizes),
+             "immutable": immutable}
             for build, sizes in releases]
 
 
@@ -72,6 +73,10 @@ class OtaChannelTests(unittest.TestCase):
         for live in (unpublished, too_large):
             with self.assertRaisesRegex(ValueError, "recover it explicitly"):
                 channels.channel_manifests(oversized, published, maximum_build=120, live_legacy=live)
+        mutable = history((111, (3_000_000, 3_000_000)), immutable=False)
+        with self.assertRaisesRegex(ValueError, "recover it explicitly"):
+            channels.channel_manifests(oversized, mutable, maximum_build=120,
+                                       live_legacy=mutable[0]["manifests"])
         with self.assertRaisesRegex(ValueError, "required"):
             channels.channel_manifests(oversized, published, maximum_build=120)
         with self.assertRaisesRegex(ValueError, "required"):

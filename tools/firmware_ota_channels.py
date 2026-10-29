@@ -83,6 +83,7 @@ def channel_manifests(release: dict[str, bytes], history: list[dict] | None,
             published = [
                 record for record in history
                 if record["manifests"].get(target) == live and record["build"] <= maximum_build
+                and record.get("immutable") is True
             ]
             if not published or not fits(manifest_fields(live, target), LEGACY):
                 raise ValueError(

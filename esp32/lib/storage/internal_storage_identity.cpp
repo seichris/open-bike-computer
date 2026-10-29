@@ -5,6 +5,13 @@
 #include <esp_memory_utils.h>
 #include <esp_partition.h>
 #include <nvs.h>
+#include <sdkconfig.h>
+
+#ifndef CONFIG_WL_SECTOR_SIZE
+#error "FFat ownership checks need the wear-levelling sector size"
+#endif
+static_assert(CONFIG_WL_SECTOR_SIZE == wear_levelling_state::kSectorBytes,
+              "wear_levelling_state.hpp reads 4096-byte wear-levelling sectors");
 
 namespace internal_storage {
 namespace {
@@ -68,8 +75,9 @@ Assessment assess(const char *label) {
   result.erased = fullyErased(partition);
   result.wearLevellingValid =
       !result.erased && wearLevellingStateValid(partition);
-  // A missing or unreadable record is Absent: it permits a mount attempt but
-  // never a format of non-erased bytes.
+  // A missing or unreadable record is Absent: a non-erased volume is then
+  // mounted (and reformatted after a failed mount) only when its
+  // wear-levelling state is valid at this exact geometry.
   nvs_handle_t handle;
   if (nvs_open(kNamespace, NVS_READONLY, &handle) == ESP_OK) {
     uint64_t stored = 0;

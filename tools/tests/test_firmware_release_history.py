@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from firmware_release_history import validate_build, published_builds, TARGETS
+from firmware_release_history import validate_build, published_builds, published_manifests, TARGETS
 
 
 class FirmwareReleaseHistoryTests(unittest.TestCase):
@@ -21,7 +21,8 @@ class FirmwareReleaseHistoryTests(unittest.TestCase):
             bodies[url] = data
             assets.append({"name": f"{target}.manifest.json", "browser_download_url": url,
                            "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
-        pages = [[{"tag_name": "runtime", "assets": []}], [{"tag_name": "v1.0.0", "assets": assets}]]
+        pages = [[{"tag_name": "runtime", "assets": []}],
+                 [{"tag_name": "v1.0.0", "assets": assets, "immutable": True}]]
 
         def download(url, **kwargs):
             stream = io.BytesIO(bodies[url])
@@ -32,6 +33,9 @@ class FirmwareReleaseHistoryTests(unittest.TestCase):
              patch("firmware_release_history.urllib.request.urlopen", side_effect=download):
             self.assertEqual(published_builds(repository), [93])
             self.assertIn("--paginate", command.call_args.args[0])
+            [record] = published_manifests(repository)
+            self.assertTrue(record["immutable"])
+            self.assertEqual(record["manifests"][TARGETS[0]], bodies[assets[0]["browser_download_url"]])
             bodies[assets[0]["browser_download_url"]] += b" "
             with self.assertRaisesRegex(ValueError, "asset digest"):
                 published_builds(repository)

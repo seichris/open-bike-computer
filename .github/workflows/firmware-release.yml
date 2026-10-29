@@ -291,8 +291,9 @@ jobs:
               --output-dir "${release_assets}"
           done
           # Devices keep their installed partition table after OTA. Stage the
-          # dual-4-MiB channel and a legacy channel that keeps the newest
-          # release still fitting dual-3-MiB slots with the 64 KiB reserve.
+          # dual-4-MiB channel and a legacy channel: this release when it fits
+          # dual-3-MiB slots with the 64 KiB reserve, otherwise the verified
+          # live legacy manifest.
           python tools/firmware_ota_channels.py \
             --repository "${GITHUB_REPOSITORY}" \
             --release-assets "${release_assets}" \
