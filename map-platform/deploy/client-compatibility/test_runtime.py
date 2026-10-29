@@ -19,16 +19,14 @@ class ClientCompatibilityRuntimeTests(unittest.TestCase):
         self.assertEqual(after["map-platform/backend/map_platform/api.py"], before["map-platform/backend/map_platform/api.py"])
         self.assertEqual(after["map-platform/backend/map_platform/map_stream_rollout.py"], before["map-platform/backend/map_platform/map_stream_rollout.py"])
 
-    def test_exact_app_upgrade_preserves_client_and_artifact_gates(self):
+    def test_durable_maps_keep_trust_and_producer_gates_across_client_upgrades(self):
         from map_platform.map_stream_rollout import (
-            MapStreamRolloutPolicy,
-            load_approved_promotions,
+            MapStreamRolloutPolicy, load_approved_promotions,
         )
-
         approvals = load_approved_promotions(
             Path("/app/map-platform/config/map-stream-rollout-approvals.json")
         )
-        active = approvals["msr-20261022-worker-social-ios28"]
+        active = approvals["msr-20261029-durable-contract1"]
         environment = {
             "MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE": "all",
             "MAP_PLATFORM_MAP_STREAM_PROMOTION_ID": active.promotion_id,
@@ -41,32 +39,47 @@ class ClientCompatibilityRuntimeTests(unittest.TestCase):
                 trusted_signing_keys=dict(active.approved_signing_keys),
                 current_requirements_sha256=active.requirements_sha256,
             )
-        self.assertEqual({item[0] for item in policy.approved_ios_identities}, {"24", "25", "28", "29", "30"})
-        installation = "inst_v2_00000000000000000000000000000001"
+        installation = "inst_v2_" + "0" * 32
         key_id, key_hash = next(iter(active.approved_signing_keys))
 
         def allowed(identity, *, producer=active.producer_build_sha256,
                     worker=active.worker_image_digest, trust=active.approved_signing_keys):
             return policy.allows_artifact(
-                installation, key_id, key_hash, producer, worker, trust, *identity
+                installation, key_id, key_hash, producer, worker, trust, *identity,
+                compatibility_contract=1,
             )
 
-        for identity in policy.approved_ios_identities:
+        for identity in ((active.ios_build, active.ios_git_sha, active.ios_build_sha256),
+                         ("33", "a" * 40, "b" * 64), ("999", "c" * 40, "d" * 64),
+                         (None, None, None)):
             self.assertTrue(allowed(identity))
-            response = policy.artifact_identity_requirements(*identity)
-            self.assertEqual(response["requiredIosBuild"], identity[0])
-            self.assertEqual(response["requiredIosGitSha"], identity[1])
-            self.assertEqual(response["requiredIosBuildSha256"], identity[2])
-            self.assertEqual(response["requiredFirmwareBuild"], active.firmware_build)
+            self.assertEqual(policy.artifact_delivery_requirements(
+                *identity, compatibility_contract=1), {})
             self.assertFalse(allowed(identity, producer="0" * 64))
             self.assertFalse(allowed(identity, worker="sha256:" + "0" * 64))
             self.assertFalse(allowed(identity, trust=frozenset()))
-        upgraded = next(identity for identity in policy.approved_ios_identities if identity[0] == "30")
-        for identity in (("31", *upgraded[1:]), ("30", "0" * 40, upgraded[2]),
-                         ("30", upgraded[1], "0" * 64), (None, None, None)):
-            self.assertFalse(allowed(identity))
-            with self.assertRaises(ValueError):
-                policy.artifact_identity_requirements(*identity)
+        # Legacy maps retain an explicit build-104 anchor. No old approval is removed.
+        self.assertEqual(policy.artifact_delivery_requirements()["requiredFirmwareBuild"], 104)
+        self.assertIn("msr-20261026-worker-social-ios30", approvals)
+        previous = approvals["msr-20261026-worker-social-ios30"]
+        identities = {(p.ios_build, p.ios_git_sha, p.ios_build_sha256)
+                      for p in approvals.values()
+                      if p.producer_build_sha256 == previous.producer_build_sha256
+                      and p.worker_image_digest == previous.worker_image_digest}
+        self.assertTrue({"24", "25", "28", "29", "30"}.issubset({i[0] for i in identities}))
+        for identity in identities:
+            # Retained approvals preserve durable artifacts from past producers.
+            self.assertTrue(allowed(identity, producer=previous.producer_build_sha256,
+                                    worker=previous.worker_image_digest))
+            # Unmarked historical maps are outside the requested durable baseline.
+            self.assertFalse(policy.allows_artifact(
+                installation, key_id, key_hash, previous.producer_build_sha256,
+                previous.worker_image_digest, previous.approved_signing_keys,
+                *identity))
+        self.assertFalse(policy.allows_artifact(
+            "invalid-installation", key_id, key_hash, active.producer_build_sha256,
+            active.worker_image_digest, active.approved_signing_keys,
+            "33", "a" * 40, "b" * 64, compatibility_contract=1))
 
     def test_generation_commands_and_inline_workers_are_rejected(self):
         guard = "/opt/bicino-client-compatibility/role_guard.py"
