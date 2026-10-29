@@ -1257,25 +1257,41 @@ extension NavigationProtocolTests {
         assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
         let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
         let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0x11, 0, 4])
-        for records in [screenMetadata + epaperFeature + epaperMetadata,
-                        epaperMetadata + screenMetadata + epaperFeature,
-                        epaperFeature + epaperMetadata + screenMetadata] {
+        let tlvOrders: [Data] = [
+            screenMetadata + epaperFeature + epaperMetadata,
+            epaperMetadata + screenMetadata + epaperFeature,
+            epaperFeature + epaperMetadata + screenMetadata,
+        ]
+        for records in tlvOrders {
             assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + records),
                    "screen configuration and e-paper metadata coexist in any TLV order")
             assert(manager.hasReceivedDeviceCapabilities && manager.supportsScreenConfiguration &&
                    manager.isEPaperDevice && !manager.supportsContinuousCamera,
                    "screen capabilities retain the independent display restrictions")
         }
-        let malformedDisplays = [
-            // Retired experimental encoding: bit 31 is terrain and TLV 3 is the extended word.
-            Data("CAP2".utf8) + Data([1, 0, 0, 0, 0x80, 3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0]),
-            epaperHeader + epaperFeature, // Feature requires its record.
-            cap2 + epaperMetadata, // Record requires its feature.
-            Data(epaperCapabilities.dropLast()),
-            epaperCapabilities + epaperMetadata, // Duplicate.
-            epaperHeader + epaperFeature + Data([4, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0]), // Version.
-            epaperHeader + epaperFeature + Data([4, 8, 1, 2, 1, 0, 0, 0x20, 3, 0]), // Zero width.
-            epaperHeader + epaperFeature + Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1]) // Brightness.
+        // Small typed parts keep the Swift type checker linear.
+        let displayPrefix: Data = epaperHeader + epaperFeature
+        // Retired experimental encoding: bit 31 is terrain and TLV 3 is the extended word.
+        let retiredEncoding: Data = Data("CAP2".utf8) +
+            Data([1, 0, 0, 0, 0x80, 3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let wrongVersion: Data = displayPrefix +
+            Data([4, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let zeroWidth: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0, 0, 0x20, 3, 0] as [UInt8])
+        let brightness: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1] as [UInt8])
+        let recordWithoutFeature: Data = cap2 + epaperMetadata
+        let truncated = Data(epaperCapabilities.dropLast())
+        let duplicate: Data = epaperCapabilities + epaperMetadata
+        let malformedDisplays: [Data] = [
+            retiredEncoding,
+            displayPrefix, // Feature requires its record.
+            recordWithoutFeature,
+            truncated,
+            duplicate,
+            wrongVersion,
+            zeroWidth,
+            brightness,
         ]
         for packet in malformedDisplays {
             assert(manager.handleDeviceCapabilitiesNotification(packet), "bad display record is consumed")

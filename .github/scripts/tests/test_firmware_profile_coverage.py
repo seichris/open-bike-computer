@@ -52,8 +52,12 @@ def check_condition_inputs(source):
         expression = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"', '', expression, flags=re.S)
         return set(re.findall(r'\b[A-Za-z_][A-Za-z_0-9]*\b', expression)) - {'defined', 'true', 'false'}
 
+    # The manually selected e-paper family defines its board macro; AMOLED
+    # coverage below still evaluates only AMOLED profiles, where it is absent.
     known = {re.match(r'-D([A-Za-z_][A-Za-z_0-9]*)', flag)[1]
-             for profile in changed_components.select_firmware_targets('all') for flag in flags(profile)}
+             for hardware in ('all', '397')
+             for profile in changed_components.select_firmware_targets(hardware)
+             for flag in flags(profile)}
     known |= {d.split('=')[0] for d in PLATFORM_DEFINES} | UNDEFINED_IN_REGULAR_PROFILES
     local = {}
     for name, parameters, body in re.findall(r'^\s*#\s*define\s+([A-Za-z_][A-Za-z_0-9]*)(\([^\n]*?\))?([^\n]*)', logical, re.M):

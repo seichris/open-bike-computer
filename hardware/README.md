@@ -38,10 +38,11 @@ link different revisions.
 
 ### ESP32-S3-ePaper-3.97
 
-Status: experimental firmware and companion support; the core panel, BLE, SD
-map and button paths have physical evidence. Sensor, sleep, long-run and
-production publication qualification remain gated. See the
-[board implementation and qualification notes](waveshare-epaper-397.md).
+Status: experimental firmware and companion support. Earlier images proved the
+core panel, BLE, SD map and button paths on one unit; the current source,
+including the 2026-10-29 merge with `main`, has not been flashed. Refresh,
+sensor, sleep, long-run and production publication qualification remain gated.
+See the [board implementation and qualification notes](waveshare-epaper-397.md).
 
 - [Implementation plan](../docs/plans/waveshare-epaper-397-firmware-implementation-plan.md)
 - [Official board documentation](https://docs.waveshare.com/ESP32-S3-ePaper-3.97)

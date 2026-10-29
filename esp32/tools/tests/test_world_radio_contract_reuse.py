@@ -35,10 +35,14 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         self.assertEqual(radio, {"bit": 27, "minimum_client_version": 25})
         self.assertGreaterEqual(contract["capabilities"]["current_client_version"],
                                 radio["minimum_client_version"])
+        # Board metadata lives in the extended word: first-word bit 31 is terrain
+        # and TLV type 3 is the extended feature word.
+        self.assertNotIn("board_display_metadata", contract["capabilities"]["features"])
         self.assertEqual(
-            contract["capabilities"]["features"]["board_display_metadata"],
-            {"bit": 31, "minimum_client_version": 29},
+            contract["capabilities"]["extended_features"]["board_display_metadata"],
+            {"bit": 4, "minimum_client_version": 34},
         )
+        self.assertEqual(contract["board_display_metadata"]["tlv_type"], 4)
 
     def test_ble_protocol_extended_feature_examples_match_contract(self):
         # docs/ble-protocol.md is the cross-device source of truth. Keep its CAP2
@@ -64,6 +68,19 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         self.assertIn(
             f"Extended bit `{features['map_pois']['bit']}` reports the\n"
             "target-5/FMB6 POI reader", document)
+        # The e-paper example carries the extended word, then the display record.
+        board = generator.load_contract()["board_display_metadata"]
+        match = re.search(
+            r"Monochrome e-paper, 480 x 800 portrait, buttons only, extended bit "
+            r"(\d+) and TLV type (\d+):\n((?:[0-9a-f]{2} ?)+)\n", document)
+        self.assertIsNotNone(match)
+        display = features["board_display_metadata"]["bit"]
+        self.assertEqual(int(match.group(1)), display)
+        self.assertEqual(int(match.group(2)), board["tlv_type"])
+        payload = bytes.fromhex(match.group(3))
+        self.assertEqual(payload[-10:-8], bytes([board["tlv_type"], board["payload_bytes"]]))
+        self.assertEqual(payload[-16:-14], bytes([3, 4]))
+        self.assertEqual(int.from_bytes(payload[-14:-10], "little"), 1 << display)
 
     def test_invalid_screen_assignments_fail_closed(self):
         for values in ({"map": 0, "radio": 0}, {"map": -1}, {"map": 8},

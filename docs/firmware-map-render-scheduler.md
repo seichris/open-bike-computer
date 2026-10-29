@@ -242,9 +242,10 @@ content revisions. Screen/layout, map/style/zoom, route-session, pairing,
 history-loss, and display-recovery changes remain hard context fences and must
 request a successor composition.
 
-Course-up presentation uses a circular 1.5-second time filter only in the
-3.97-inch build. Rotation holds below 4 km/h and resumes at or above 6 km/h;
-raw GPS and BLE protocol values remain unchanged. Each base request records the
+The 3.97-inch build presents north-up only: course-up settings are normalized
+away at every entry point. Its circular 1.5-second heading filter (hold below
+4 km/h, resume at or above 6 km/h) is retained for a future qualified course-up
+mode; raw GPS and BLE protocol values remain unchanged. Each base request records the
 captured GPS and camera sequence. LVGL composition carries those identities
 through the one-bit mailbox, and the display status adopts them only when the
 frame is already visible or its SSD1677 waveform succeeds. Diagnostic profiles
