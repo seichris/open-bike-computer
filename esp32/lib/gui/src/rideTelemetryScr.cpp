@@ -20,6 +20,7 @@
 #include "../../ride_automation/ride_automation_runtime.hpp"
 #include "../../utils/src/startup_constructed.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -622,36 +623,47 @@ void updateConfigurableSlots(
     }
     lv_obj_clear_flag(slot.labels.value, LV_OBJ_FLAG_HIDDEN);
 #ifdef WAVESHARE_EPAPER_397
-    auto value = ride_telemetry_layout::configurableValueRect(rideLayout, index);
+    const auto cell = ride_telemetry_layout::configurableValueRect(rideLayout, index);
     const bool heart = widget.kind == ride_stats_widget::PresentationKind::HeartWithValue;
     const auto heartSize = ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth);
     const auto heartGap = ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
+    const int32_t heartBlock = heart ? heartSize + heartGap : 0;
+    const auto role = epaper_ride_stats::isZoneRange(layout.slots[index])
+        ? ride_metric_typography::Role::Zone
+        : index == 0 ? ride_metric_typography::Role::Hero : metricFontRole();
+    const char *format = epaper_ride_stats::maximumFormat(layout.slots[index], model);
+    const auto *font = ride_metric_typography::fontForText(
+        format, cell.width - heartBlock - 4 - (widget.isAltitude ? 8 : 0),
+        cell.height, role);
+    // One box fits the widest supported format. Centre it, with the altitude
+    // sign column and heart icon, under the centred title. Every position
+    // depends only on the widget and its font, never on the live value.
+    const int32_t signWidth =
+        widget.isAltitude && font ? lv_text_get_width("-", 1, font, 0) : 0;
+    const int32_t signBlock = signWidth ? signWidth + 8 : 0;
+    const char *digits = widget.isAltitude && format[0] == '-' ? format + 1 : format;
+    int32_t valueWidth = cell.width - heartBlock - signBlock;
+    if (font)
+      valueWidth = std::min<int32_t>(
+          valueWidth, lv_text_get_width(digits, std::strlen(digits), font, 0) + 4);
+    const int32_t left =
+        cell.x + std::max<int32_t>(0, (cell.width - signBlock - valueWidth - heartBlock) / 2);
+    const ride_telemetry_layout::Rect value{left + signBlock, cell.y, valueWidth, cell.height};
     if (heart) {
-      value.width -= heartSize + heartGap;
       lv_obj_set_pos(slot.heart, value.right() + heartGap,
                       value.y + (value.height - heartSize) / 2);
       lv_obj_set_size(slot.heart, heartSize, heartSize);
       if (widget.available) lv_obj_clear_flag(slot.heart, LV_OBJ_FLAG_HIDDEN);
     }
-    const auto role = epaper_ride_stats::isZoneRange(layout.slots[index])
-        ? ride_metric_typography::Role::Zone
-        : index == 0 ? ride_metric_typography::Role::Hero : metricFontRole();
-    const auto *font = ride_metric_typography::fontForText(
-        epaper_ride_stats::maximumFormat(layout.slots[index], model),
-        value.width - 4 - (widget.isAltitude ? 8 : 0), value.height, role);
     const char *text = widget.value.data();
-    if (widget.isAltitude && font) {
+    if (signBlock) {
       // Reserve a sign column even when the value is positive or unavailable.
       // Neither the sign nor the digits move when crossing zero.
-      const int32_t signWidth = lv_text_get_width("-", 1, font, 0);
-      const ride_telemetry_layout::Rect signRect{
-          value.x, value.y, signWidth, value.height};
+      const ride_telemetry_layout::Rect signRect{left, cell.y, signWidth, cell.height};
       const bool negative = widget.available && text[0] == '-' && text[1] != '-';
       applyMetricText(slot.sign, negative ? "-" : "", signRect, font,
                       LV_TEXT_ALIGN_LEFT);
       lv_obj_clear_flag(slot.sign, LV_OBJ_FLAG_HIDDEN);
-      value.x += signWidth + 8;
-      value.width -= signWidth + 8;
       if (negative) ++text;
     }
     // Unexpected/unsupported values fail closed; never silently clip or

@@ -24,27 +24,30 @@ inline Widget resolvedWidget(Widget widget, const Model &model) {
   return Widget::Empty;
 }
 
-// Font selection depends on the widget's complete supported format, never on
-// the current sample, availability, or the neighbour's string. Digits have
-// equal advances in rideMetricTypography. Include the sign/decimal/colon
-// vocabulary so fonts without those glyphs cannot be selected.
+// Font selection depends on the widget's widest supported display format,
+// never on the current sample, availability, or the neighbour's string.
+// Digits have equal advances in rideMetricTypography, so these strings fix
+// each cell's font and box for the whole ride. They cover real riding ranges,
+// not the wire maxima: sizing for 4294967295 would shrink a ride clock to an
+// unreadable font. A longer value still renders when it fits the box; one
+// that does not fails closed to "--" instead of resizing the cell.
 inline const char *maximumFormat(Widget widget, const Model &model) {
   switch (resolvedWidget(widget, model)) {
   case Widget::Speed:
   case Widget::AverageSpeed:
-  case Widget::MaximumSpeed: return "429496729.5";
-  case Widget::Cadence:
-  case Widget::Calories: return "6553.5";
+  case Widget::MaximumSpeed:
+  case Widget::Cadence: return "999.9";
+  case Widget::Calories: return "6553.5"; // Wire maximum in tenths.
   case Widget::HeartRate:
-  case Widget::AverageHeartRate:
-  case Widget::Power: return "65535";
-  case Widget::Altitude: return "-32768";
+  case Widget::AverageHeartRate: return "999";
+  case Widget::Power: return "9999";
+  case Widget::Altitude: return "-9999";
   case Widget::Distance:
-  case Widget::RouteRemaining: return "4294967.3";
+  case Widget::RouteRemaining: return "9999.9";
   case Widget::MovingTime:
   case Widget::ElapsedTime:
   case Widget::HeartRateZoneTime:
-  case Widget::PowerZoneTime: return "1193046:28:15";
+  case Widget::PowerZoneTime: return "99:59:59";
   case Widget::HeartRateZoneRange:
   case Widget::PowerZoneRange: return "-8.8888e+38--8.8888e+38";
   default: return "--";

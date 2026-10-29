@@ -3,6 +3,7 @@
 #define RIDE_STATS_PREVIEW_NO_MAIN
 #include "../ride_stats_preview/emit_preview.cpp"
 #include <climits>
+#include <cstdlib>
 #include <vector>
 
 struct Cell {
@@ -73,17 +74,19 @@ static void transitions() {
   render(model);
   const auto speedCell = cell(speed);
   const auto decimalX = glyphX(speed, '.');
-  for (uint32_t value : {100U, 999U, 1000U, UINT32_MAX}) {
+  for (uint32_t value : {100U, 999U, 1000U, 9999U}) {
     model.speedTenthsKmh = {true, value}; render(model);
     assert(cell(speed) == speedCell && glyphX(speed, '.') == decimalX);
   }
+  model.speedTenthsKmh = {true, UINT32_MAX}; render(model);
+  assert(cell(speed) == speedCell && std::string(lv_label_get_text(speed)) == "--");
   model.speedTenthsKmh.available = false; render(model);
   assert(cell(speed) == speedCell && std::string(lv_label_get_text(speed)) == "--");
 
   auto &heart = configurableSlots[1];
   model.currentHeartRateBpm = {true, 99}; render(model);
   const auto heartValue = cell(heart.labels.value), heartIcon = cell(heart.heart);
-  for (uint16_t value : {100, 9, 0, 65535}) {
+  for (uint16_t value : {100, 9, 0, 999}) {
     model.currentHeartRateBpm = {true, value}; render(model);
     assert(cell(heart.labels.value) == heartValue && cell(heart.heart) == heartIcon);
     assert(!lv_obj_has_flag(heart.heart, LV_OBJ_FLAG_HIDDEN));
@@ -95,7 +98,7 @@ static void transitions() {
   auto &altitude = configurableSlots[6];
   model.altitudeMeters = {true, 9}; render(model);
   const auto altitudeValue = cell(altitude.labels.value), sign = cell(altitude.sign);
-  for (int16_t value : {10, 99, 100, -1, -10, -32768, 32767, 0}) {
+  for (int16_t value : {10, 99, 100, -1, -10, -9999, 9999, 8848, -430, 0}) {
     model.altitudeMeters = {true, value}; render(model);
     assert(cell(altitude.labels.value) == altitudeValue && cell(altitude.sign) == sign);
     assert(std::string(lv_label_get_text(altitude.sign)) == (value < 0 ? "-" : ""));
@@ -108,7 +111,7 @@ static void transitions() {
   model.wallElapsedSeconds = {true, 3599}; render(model);
   const auto altitudePixels = pixels(rideLayout.metrics[5]);
   const auto timeCell = cell(configurableSlots[5].labels.value);
-  for (uint32_t elapsed : {3600U, 35999U, 36000U, UINT32_MAX}) {
+  for (uint32_t elapsed : {3600U, 35999U, 36000U, 359999U, UINT32_MAX}) {
     model.wallElapsedSeconds = {true, elapsed}; render(model);
     assert(cell(configurableSlots[5].labels.value) == timeCell);
     assert(cell(altitude.labels.value) == altitudeValue);
@@ -119,14 +122,49 @@ static void transitions() {
   model.distanceMeters = {true, 999}; render(model);
   const auto distanceCell = cell(distance.labels.value);
   const auto distanceDecimal = glyphX(distance.labels.value, '.');
-  for (const auto &example : std::array<std::pair<uint32_t, const char *>, 6>{{
+  for (const auto &example : std::array<std::pair<uint32_t, const char *>, 7>{{
       {999,"1.0"}, {1000,"1.0"}, {9949,"9.9"}, {9950,"10.0"},
-      {10000,"10.0"}, {UINT32_MAX,"4294967.3"}}}) {
+      {10000,"10.0"}, {9999949,"9999.9"}, {UINT32_MAX,"--"}}}) {
     model.distanceMeters = {true, example.first}; render(model);
     assert(std::string(lv_label_get_text(distance.labels.value)) == example.second);
     assert(cell(distance.labels.value) == distanceCell);
-    assert(glyphX(distance.labels.value, '.') == distanceDecimal);
+    if (example.second[0] != '-')
+      assert(glyphX(distance.labels.value, '.') == distanceDecimal);
     assert(std::string(lv_label_get_text(distance.labels.title)) == "Distance km");
+  }
+}
+
+static void readableCentredCells() {
+  previewLayout.slots = {Widget::Speed, Widget::HeartRate, Widget::Distance,
+      Widget::MovingTime, Widget::ElapsedTime, Widget::Power, Widget::Altitude};
+  auto model = sampleModel();
+  model.elapsedSeconds = {true, 359999};
+  model.wallElapsedSeconds = {true, 359999};
+  render(model);
+  // Sized for 999.9 km/h, the hero keeps the dedicated speed font. The old
+  // wire-maximum formats forced 64 px here, 24 px clocks and 38 px distance.
+  const auto lineHeight = [](std::size_t slot) {
+    return lv_obj_get_style_text_font(configurableSlots[slot].labels.value,
+                                      LV_PART_MAIN)->line_height;
+  };
+  assert(lineHeight(0) == ride_speed_font_84.line_height);
+  for (std::size_t i : {3U, 4U}) {
+    assert(std::string(lv_label_get_text(configurableSlots[i].labels.value)) == "99:59:59");
+    assert(lineHeight(i) >= lv_font_montserrat_48.line_height);
+  }
+  assert(lineHeight(2) >= ride_value_font_56.line_height);
+  for (std::size_t i = 0; i < configurableSlots.size(); ++i) {
+    const auto rect = ride_telemetry_layout::configurableValueRect(rideLayout, i);
+    auto *value = configurableSlots[i].labels.value;
+    int32_t left = lv_obj_get_x(value);
+    int32_t right = left + lv_obj_get_width(value);
+    if (!lv_obj_has_flag(configurableSlots[i].heart, LV_OBJ_FLAG_HIDDEN))
+      right = lv_obj_get_x(configurableSlots[i].heart) +
+              lv_obj_get_width(configurableSlots[i].heart);
+    if (!lv_obj_has_flag(configurableSlots[i].sign, LV_OBJ_FLAG_HIDDEN))
+      left = lv_obj_get_x(configurableSlots[i].sign);
+    // The fixed group is centred in its cell to within one pixel of rounding.
+    assert(std::abs((left - rect.x) - (rect.right() - right)) <= 1);
   }
 }
 
@@ -163,7 +201,14 @@ static void allSlotsAndWidgets() {
         const auto expected = epaper_ride_stats::make(widget, model);
         const char *text = expected.value.data();
         if (expected.isAltitude && expected.available && text[0] == '-') ++text;
-        assert(std::string(lv_label_get_text(configurableSlots[i].labels.value)) == text);
+        auto *label = configurableSlots[i].labels.value;
+        const auto *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+        const bool fits = ride_metric_typography::supportsText(font, text) &&
+            lv_text_get_width(text, std::strlen(text), font, 0) <=
+                lv_obj_get_width(label) - 4;
+        assert(std::string(lv_label_get_text(label)) == (fits ? text : "--"));
+        // Ordinary rides never reach the fail-closed path.
+        if (model.speedTenthsKmh.value != UINT32_MAX) assert(fits);
       }
     }
   }
@@ -182,6 +227,7 @@ int main(int argc, char **argv) {
   lv_obj_clear_flag(ridePage, LV_OBJ_FLAG_SCROLLABLE);
   for (std::size_t i = 0; i < 7; ++i) createConfigurableSlot(i);
   transitions();
+  readableCentredCells();
   allSlotsAndWidgets();
   // Optional inspection artifact, using the exact tested production renderer.
   if (argc == 2) {
