@@ -4,6 +4,7 @@
 
 - [BLE protocol](ble-protocol.md)
 - [Map-stream format v1](map-stream-format-v1.md)
+- [Durable map compatibility](map-compatibility-contract.md)
 
 ## Guides and operations
 

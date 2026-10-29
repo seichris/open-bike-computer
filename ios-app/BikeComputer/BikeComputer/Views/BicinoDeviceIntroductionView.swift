@@ -271,7 +271,7 @@ struct BicinoDeviceIntroductionView: View {
         case .needsMap:
             return "Download the current area in the Bicino app before you ride."
         case .needsSDCard:
-            return "Insert a microSD card before downloading an offline map."
+            return "Insert a microSD card, then restart Bicino before downloading an offline map."
         }
     }
 }

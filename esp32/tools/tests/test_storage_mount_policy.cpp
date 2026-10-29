@@ -4,24 +4,25 @@
 #include <iostream>
 
 int main() {
-  using storage_mount_policy::shouldAttemptAutomaticRemovableRetry;
-  using storage_mount_policy::shouldAttemptDiagnosticsRemovableRetry;
-  using storage_mount_policy::shouldRestoreFallbackAfterFailedRetry;
+  using storage_mount_policy::mayChangeMount;
+  using storage_mount_policy::removableHoldsMaps;
+  using storage_mount_policy::shouldReprobeDiagnostics;
 
-  assert(shouldAttemptAutomaticRemovableRetry(false, false));
-  assert(!shouldAttemptAutomaticRemovableRetry(true, false));
-  assert(!shouldAttemptAutomaticRemovableRetry(false, true));
-  assert(!shouldAttemptAutomaticRemovableRetry(true, true));
+  // Maps live only on removable SD. FFat and an unmounted boot hold none.
+  static_assert(removableHoldsMaps(true, false));
+  static_assert(!removableHoldsMaps(false, true));
+  static_assert(!removableHoldsMaps(false, false));
+  static_assert(!removableHoldsMaps(true, true));
 
-  assert(shouldAttemptDiagnosticsRemovableRetry(false, false));
-  assert(!shouldAttemptDiagnosticsRemovableRetry(false, true));
-  assert(!shouldAttemptDiagnosticsRemovableRetry(true, false));
-  assert(!shouldAttemptDiagnosticsRemovableRetry(true, true));
+  // Setup may mount; once the backend is pinned nothing may change it.
+  static_assert(mayChangeMount(false));
+  static_assert(!mayChangeMount(true));
 
-  assert(!shouldRestoreFallbackAfterFailedRetry(false, false));
-  assert(shouldRestoreFallbackAfterFailedRetry(true, false));
-  assert(shouldRestoreFallbackAfterFailedRetry(false, true));
-  assert(shouldRestoreFallbackAfterFailedRetry(true, true));
+  // A recorder fault re-probes the mounted backend and never mounts another.
+  assert(shouldReprobeDiagnostics(false, true));
+  assert(!shouldReprobeDiagnostics(false, false));
+  assert(!shouldReprobeDiagnostics(true, true));
+  assert(!shouldReprobeDiagnostics(true, false));
 
   std::cout << "storage mount policy tests passed\n";
   return 0;

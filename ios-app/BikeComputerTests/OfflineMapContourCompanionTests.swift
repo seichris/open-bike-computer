@@ -15,6 +15,101 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { fail(message) }
 }
 
+/// The contour map of the frozen durable-map corpus
+/// (map-platform/backend/tests/fixtures/map-compatibility-v1): a development
+/// and a production copy signed by different keys, each with its companion.
+private struct CompatibilityCorpusContours {
+    static let directory = "map-platform/backend/tests/fixtures/map-compatibility-v1/"
+    /// Bicino Dev trusts every corpus signer.
+    let appTrust: BikeMapStreamTrustStore
+    /// The `streamTrust` that production and ordinary firmware report.
+    let productionSigners: [String]
+    let map: OfflineMapCatalogMap
+    let payloads: [String: Data]
+
+    static func load() -> Self {
+        func file(_ name: String) -> Data {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: directory + name)) else {
+                fail("compatibility corpus has \(name)")
+            }
+            return data
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: file("corpus.json")) as? [String: Any],
+              let signers = root["signers"] as? [[String: String]],
+              let entry = (root["maps"] as? [[String: Any]])?.first(where: {
+                  $0["id"] as? String == "topographic-contours-v1"
+              }),
+              let mapID = entry["mapId"] as? String,
+              let companionFile = entry["companionFile"] as? String,
+              let development = entry["development"] as? [String: Any],
+              let production = (entry["production"] as? [[String: Any]])?.first(where: {
+                  $0["variant"] as? String == "production"
+              }),
+              let publication = development["publication"] as? [String: Any] else {
+            fail("compatibility corpus contour map decodes")
+        }
+        var keys: [String: Data] = [:]
+        for signer in signers {
+            guard let keyID = signer["keyId"],
+                  let key = signer["publicKeyX963Hex"].flatMap(Data.init(ownershipHex:)) else {
+                fail("compatibility corpus signer decodes")
+            }
+            keys[keyID] = key
+        }
+        let appTrust = BikeMapStreamTrustStore(publicKeysByID: keys)
+        let companion = file(companionFile)
+        var artifacts: [[String: Any]] = []
+        var payloads: [String: Data] = [:]
+        for variant in [development, production] {
+            guard let name = variant["file"] as? String,
+                  let list = (variant["publication"] as? [String: Any])?["artifacts"] as? [[String: Any]] else {
+                fail("compatibility corpus publication decodes")
+            }
+            for artifact in list where artifact["format"] as? String != OfflineMapArtifact.storedZipFormat {
+                guard let sha256 = artifact["sha256"] as? String else {
+                    fail("compatibility corpus artifact has a digest")
+                }
+                artifacts.append(artifact)
+                payloads[sha256] = artifact["format"] as? String == OfflineMapArtifact.bikeMapStreamFormat
+                    ? file(name) : companion
+            }
+        }
+        let map: [String: Any] = [
+            "mapEntryId": publication["mapEntryId"] as Any,
+            "mapId": mapID,
+            "contentReceipt": publication["contentReceipt"] as Any,
+            "alias": "Durable contours",
+            "aliasSource": "generated",
+            "aliasRevision": 1,
+            "canonicalName": publication["canonicalName"] as Any,
+            "originChannel": "development",
+            "renderer": publication["renderer"] as Any,
+            "rendererFormatVersion": publication["rendererFormatVersion"] as Any,
+            "features": publication["features"] as Any,
+            "deliveryState": "production",
+            "addedAt": "2026-10-26T00:00:00Z",
+            "updatedAt": "2026-10-26T00:00:00Z",
+            "artifacts": artifacts,
+        ]
+        guard let decoded = try? JSONDecoder().decode(
+            OfflineMapCatalogMap.self,
+            from: JSONSerialization.data(withJSONObject: map)
+        ) else {
+            fail("compatibility corpus library map decodes")
+        }
+        return Self(
+            appTrust: appTrust,
+            productionSigners: signers
+                .filter { $0["channel"] == "production" }
+                .compactMap { $0["keyId"] }
+                .sorted()
+                .compactMap(appTrust.capability(for:)),
+            map: decoded,
+            payloads: payloads
+        )
+    }
+}
+
 final class ContourCompanionURLProtocol: URLProtocol {
     typealias Handler = (URLRequest) -> (Int, Data)
     nonisolated(unsafe) private static var handler: Handler?
@@ -55,6 +150,22 @@ final class ContourCompanionURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// URLSession hands protocol classes a request body as a stream.
+    static func bodyData(from request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
 }
 
 @MainActor
@@ -120,6 +231,7 @@ struct ContourScenario {
     func manager(
         fixture: ContourFixture,
         payloads: [String: Data]? = nil,
+        trustStore: BikeMapStreamTrustStore? = nil,
         metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
             try SavedMapArtifactMetadataStore.save(metadata, for: url)
         }
@@ -129,7 +241,7 @@ struct ContourScenario {
             defaults: defaults,
             mapPlatformSession: session,
             cacheDirectory: cache,
-            mapStreamTrustStore: fixture.trustStore,
+            mapStreamTrustStore: trustStore ?? fixture.trustStore,
             catalogAppIdentity: Self.appIdentity,
             catalogHost: OfflineMapCatalogConfig.developmentHost,
             catalogClient: try! OfflineMapCatalogClient(
@@ -212,6 +324,15 @@ struct ContourScenario {
         stream: OfflineMapCatalogArtifact,
         companion: OfflineMapCatalogArtifact?
     ) {
+        serveCatalogGrants(map: map) { _ in (stream, companion) }
+    }
+
+    /// Serves each catalog grant that `choose` picks from the request's
+    /// accepted `keyId=keySha256` signers; nil answers like the Worker's 409.
+    func serveCatalogGrants(
+        map: OfflineMapCatalogMap,
+        choose: @escaping ([String]) -> (OfflineMapCatalogArtifact, OfflineMapCatalogArtifact?)?
+    ) {
         let libraryID = "lib_v1_" + String(repeating: "L", count: 43)
         ContourCompanionURLProtocol.configure { request in
             if request.url?.path == "/v1/libraries/bootstrap" {
@@ -220,8 +341,17 @@ struct ContourScenario {
                     "credential": "cat_v1_" + String(repeating: "K", count: 43),
                 ]))
             }
-            guard request.url?.path == "/v1/library/maps/\(map.mapEntryId)/download-grants" else {
+            guard request.url?.path == "/v1/library/maps/\(map.mapEntryId)/download-grants",
+                  let body = try? JSONSerialization.jsonObject(
+                    with: ContourCompanionURLProtocol.bodyData(from: request)
+                  ) as? [String: Any],
+                  let accepted = body["acceptedSigners"] as? [[String: String]] else {
                 return (404, Data())
+            }
+            guard let (stream, companion) = choose(accepted.map {
+                "\($0["keyId"] ?? "")=\($0["keySha256"] ?? "")"
+            }) else {
+                return (409, Data(#"{"error":"no compatible artifact is available"}"#.utf8))
             }
             var grant: [String: Any] = [
                 "downloadURL": "https://\(OfflineMapCatalogConfig.developmentHost)/v1/downloads/stream",
@@ -333,6 +463,10 @@ struct OfflineMapContourCompanionTests {
         testInterruptedCompanionReplacementRecovery(fixture)
         await testCatalogDeliversCombinedCompanion(fixture)
         await testCatalogRejectsInconsistentCompanionGrants(fixture)
+        await testCatalogDownloadFollowsBikeTrust(fixture)
+        testCatalogCompanionTierFallback(fixture)
+        testSupersededLibraryCopyPolicy()
+        await testLibraryUpdateReplacesAttachedDirectJobCopy(fixture)
         await testUnsupportedSavedContourContractIsExplicit(fixture)
         print("Offline map contour companion tests passed")
     }
@@ -697,7 +831,7 @@ struct OfflineMapContourCompanionTests {
             scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
             let manager = scenario.manager(fixture: fixture)
             check(manager.catalogAvailability(for: map).canDownload, "\(variant) catalog map is downloadable")
-            manager.downloadCatalogMap(map)
+            manager.downloadCatalogMap(map, deviceStreamTrust: nil)
             let finished = await waitForIdle(manager)
             check(finished, "\(variant) catalog download finishes")
             check(manager.errorMessage == nil, "\(variant) catalog map downloads: \(manager.errorMessage ?? "")")
@@ -741,7 +875,7 @@ struct OfflineMapContourCompanionTests {
             let stream = map.artifacts.first { $0.platformArtifact.isBikeMapStream }!
             scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
             let manager = scenario.manager(fixture: fixture)
-            manager.downloadCatalogMap(map)
+            manager.downloadCatalogMap(map, deviceStreamTrust: nil)
             let finished = await waitForIdle(manager)
             check(finished, "\(name) catalog grant finishes")
             check(
@@ -750,6 +884,455 @@ struct OfflineMapContourCompanionTests {
             )
             check(manager.cachedPackURLs.isEmpty, "\(name) catalog grant saves no map")
             check(scenario.savedCompanionFiles.isEmpty, "\(name) catalog grant saves no companion")
+        }
+    }
+
+    /// Bicino Dev trusts development and production signers; production and
+    /// ordinary firmware only production ones. The grant asks only for signers
+    /// the connected bike trusts while the library has such a copy, so Bicino
+    /// Dev saves the production copy and its companion for stock firmware.
+    /// While no bike reports, the saved copy is judged and updated for the
+    /// bike it was chosen for.
+    @MainActor
+    static func testCatalogDownloadFollowsBikeTrust(_ fixture: ContourFixture) async {
+        let corpus = CompatibilityCorpusContours.load()
+        func stream(_ tier: String) -> OfflineMapCatalogArtifact {
+            corpus.map.artifacts.first { $0.platformArtifact.isBikeMapStream && $0.deliveryTier == tier }!
+        }
+        func companion(_ tier: String) -> OfflineMapCatalogArtifact? {
+            corpus.map.artifacts.first { $0.platformArtifact.isTopographyCompanion && $0.deliveryTier == tier }
+        }
+        let everySigner = corpus.appTrust.capabilityHeaderValue?
+            .split(separator: ",").map(String.init) ?? []
+        // Whether Saved Maps offers an update with no bike, a stock bike and a
+        // bike that trusts the development key connected.
+        let cases: [(
+            bike: String, trust: [String]?, requested: [String], tier: String,
+            refresh: (none: Bool, stock: Bool, development: Bool)
+        )] = [
+            ("unreported", nil, everySigner, "development", (false, true, false)),
+            ("development", everySigner, everySigner, "development", (false, true, false)),
+            ("stock", corpus.productionSigners, corpus.productionSigners, "production",
+             (false, false, true)),
+        ]
+        for item in cases {
+            let scenario = ContourScenario(
+                "bike-trust-\(item.bike)",
+                serverURL: OfflineMapServiceConfig.developmentServerURLString
+            )
+            defer { scenario.cleanup() }
+            var requests: [[String]] = []
+            // As the Worker does: development first, then production, taking
+            // the first copy whose signer the request accepts.
+            scenario.serveCatalogGrants(map: corpus.map) { accepted in
+                requests.append(accepted)
+                guard let tier = ["development", "production"].first(where: { tier in
+                    let candidate = stream(tier)
+                    return accepted.contains(
+                        "\(candidate.signatureKeyId ?? "")=\(candidate.signatureKeySha256 ?? "")"
+                    )
+                }) else {
+                    return nil
+                }
+                return (stream(tier), companion(tier))
+            }
+            let manager = scenario.manager(
+                fixture: fixture,
+                payloads: corpus.payloads,
+                trustStore: corpus.appTrust
+            )
+            manager.downloadCatalogMap(corpus.map, deviceStreamTrust: item.trust)
+            let finished = await waitForIdle(manager)
+            check(finished, "\(item.bike) bike: catalog download finishes")
+            check(manager.errorMessage == nil,
+                  "\(item.bike) bike: catalog map downloads: \(manager.errorMessage ?? "")")
+            check(requests == [item.requested],
+                  "\(item.bike) bike: grant requests \(item.requested), not \(requests)")
+            guard let packURL = manager.downloadedPackURL,
+                  let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+                  let association = scenario.savedCompanion(associationID: corpus.map.mapEntryId) else {
+                fail("\(item.bike) bike: catalog map and companion are saved")
+            }
+            check(metadata.primaryArtifact?.sha256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: saves the \(item.tier) copy")
+            check(association.streamArtifactSHA256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: companion is bound to the \(item.tier) copy")
+            guard let row = manager.savedMapListItems(activeDeviceMap: nil).first(where: {
+                $0.catalogMap?.mapEntryId == corpus.map.mapEntryId
+            }) else {
+                fail("\(item.bike) bike: the saved copy is a library row")
+            }
+            check(manager.catalogArtifactNeedsRefresh(for: row, deviceStreamTrust: nil) ==
+                    item.refresh.none,
+                  "\(item.bike) bike: update offer with no bike connected")
+            check(manager.catalogArtifactNeedsRefresh(
+                    for: row, deviceStreamTrust: corpus.productionSigners
+                  ) == item.refresh.stock,
+                  "\(item.bike) bike: update offer on stock firmware")
+            check(manager.catalogArtifactNeedsRefresh(for: row, deviceStreamTrust: everySigner) ==
+                    item.refresh.development,
+                  "\(item.bike) bike: update offer on development firmware")
+
+            // An update with no bike connected keeps choosing for that bike.
+            manager.downloadCatalogMap(corpus.map, deviceStreamTrust: nil)
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, manager.isBusy || ContourCompanionURLProtocol.requestPaths
+                .filter({ $0.hasSuffix("/download-grants") }).count < 2 {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            check(manager.errorMessage == nil,
+                  "\(item.bike) bike: update downloads: \(manager.errorMessage ?? "")")
+            check(requests == [item.requested, item.requested],
+                  "\(item.bike) bike: update requests \(item.requested) again: \(requests)")
+            check(manager.downloadedPackURL.flatMap(SavedMapArtifactMetadataStore.load(for:))?
+                    .primaryArtifact?.sha256 == stream(item.tier).sha256,
+                  "\(item.bike) bike: update keeps the \(item.tier) copy")
+        }
+
+        // A grant outside the signers the bike trusts is refused before download.
+        let scenario = ContourScenario(
+            "bike-trust-refused",
+            serverURL: OfflineMapServiceConfig.developmentServerURLString
+        )
+        defer { scenario.cleanup() }
+        scenario.serveCatalogGrant(
+            map: corpus.map,
+            stream: stream("development"),
+            companion: companion("development")
+        )
+        let manager = scenario.manager(
+            fixture: fixture,
+            payloads: corpus.payloads,
+            trustStore: corpus.appTrust
+        )
+        manager.downloadCatalogMap(corpus.map, deviceStreamTrust: corpus.productionSigners)
+        let finished = await waitForIdle(manager)
+        check(finished, "an untrusted grant finishes")
+        check(
+            manager.errorMessage?.contains(
+                OfflineMapCatalogError.missingCompatibleArtifact.errorDescription!
+            ) == true,
+            "a grant the bike cannot install is refused: \(manager.errorMessage ?? "no error")"
+        )
+        check(manager.cachedPackURLs.isEmpty, "an untrusted grant saves no map")
+        check(scenario.savedCompanionFiles.isEmpty, "an untrusted grant saves no companion")
+    }
+
+    /// A contour stream is downloadable only with the single companion of its
+    /// own tier, so a tier without one yields to the next tier's pair. The
+    /// catalog grant picks the same pair (map-platform/catalog/test/
+    /// catalog.test.ts, "grants the next tier's pair when a tier has no single
+    /// companion").
+    static func testCatalogCompanionTierFallback(_ fixture: ContourFixture) {
+        let source = fixture.catalogMap("combined")
+        func replacing(
+            _ artifact: OfflineMapCatalogArtifact,
+            _ changes: [String: Any]
+        ) -> OfflineMapCatalogArtifact {
+            var value = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(artifact)
+            ) as! [String: Any]
+            value.merge(changes) { $1 }
+            return try! JSONDecoder().decode(
+                OfflineMapCatalogArtifact.self,
+                from: JSONSerialization.data(withJSONObject: value)
+            )
+        }
+        func library(_ artifacts: [OfflineMapCatalogArtifact]) -> OfflineMapCatalogMap {
+            var value = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(source)
+            ) as! [String: Any]
+            value["deliveryState"] = "production"
+            value["artifacts"] = try! JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(artifacts)
+            )
+            return try! JSONDecoder().decode(
+                OfflineMapCatalogMap.self,
+                from: JSONSerialization.data(withJSONObject: value)
+            )
+        }
+        let stream = source.artifacts.first { $0.platformArtifact.isBikeMapStream }!
+        let companion = source.artifacts.first { $0.platformArtifact.isTopographyCompanion }!
+        // The production pair, as catalog promotion publishes it.
+        let promotedStream = replacing(stream, [
+            "artifactId": "artifact_v1_" + String(repeating: "P", count: 43),
+            "deliveryTier": "production",
+            "sha256": String(repeating: "a", count: 64),
+            "objectKey": stream.objectKey + ".promoted",
+        ])
+        let promotedCompanion = replacing(companion, [
+            "artifactId": "artifact_v1_" + String(repeating: "Q", count: 43),
+            "deliveryTier": "production",
+            "objectKey": companion.objectKey.replacingOccurrences(
+                of: "/topography-ios-v1/",
+                with: "/topography-ios-v1/production/"
+            ),
+        ])
+        let rivalSHA256 = String(repeating: "4", count: 64)
+        let rivalCompanion = replacing(companion, [
+            "artifactId": "artifact_v1_" + String(repeating: "R", count: 43),
+            "sha256": rivalSHA256,
+            "objectKey": companion.objectKey.replacingOccurrences(
+                of: companion.sha256,
+                with: rivalSHA256
+            ),
+        ])
+
+        func expectSelection(
+            _ artifacts: [OfflineMapCatalogArtifact],
+            channel: String = "development",
+            _ expected: (stream: OfflineMapCatalogArtifact, companion: OfflineMapCatalogArtifact)?,
+            _ message: String
+        ) {
+            let map = library(artifacts)
+            let availability = OfflineMapCatalogAvailabilityPolicy.availability(
+                for: map, channel: channel, trustStore: fixture.trustStore
+            )
+            guard let expected else {
+                check(!availability.canDownload, "\(message): not downloadable (\(availability))")
+                return
+            }
+            check(availability == .available, "\(message): downloadable (\(availability))")
+            for candidate in [stream, promotedStream] {
+                check(
+                    OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
+                        localArtifactSHA256s: [candidate.sha256], map: map,
+                        channel: channel, trustStore: fixture.trustStore
+                    ) == (candidate.artifactId != expected.stream.artifactId),
+                    "\(message): selects the \(expected.stream.deliveryTier) stream"
+                )
+            }
+            // The download accepts only a grant that carries this companion.
+            check(
+                OfflineMapTopographyCompanionPolicy.compatibleCompanion(
+                    for: map, deliveryTier: expected.stream.deliveryTier
+                )?.artifactId == expected.companion.artifactId,
+                "\(message): pairs the \(expected.stream.deliveryTier) companion"
+            )
+        }
+
+        expectSelection(
+            [stream, companion, promotedStream, promotedCompanion],
+            (stream, companion),
+            "both pairs"
+        )
+        expectSelection(
+            [stream, promotedStream, promotedCompanion],
+            (promotedStream, promotedCompanion),
+            "missing development companion"
+        )
+        expectSelection(
+            [stream, companion, rivalCompanion, promotedStream, promotedCompanion],
+            (promotedStream, promotedCompanion),
+            "ambiguous development companion"
+        )
+        expectSelection([stream, promotedStream], nil, "no companion in any tier")
+        expectSelection(
+            [stream, companion, promotedStream, promotedCompanion],
+            channel: "production",
+            (promotedStream, promotedCompanion),
+            "Bicino with the production pair"
+        )
+        expectSelection(
+            [stream, companion, promotedStream],
+            channel: "production",
+            nil,
+            "Bicino without a production companion"
+        )
+    }
+
+    /// Only another saved copy of the same library entry is superseded, and a
+    /// copy that anything still uses stays.
+    static func testSupersededLibraryCopyPolicy() {
+        func record(_ filename: String, entry: String?) -> SavedMapLocalRecord {
+            SavedMapLocalRecord(
+                packURL: URL(fileURLWithPath: "/maps/\(filename)"),
+                mapID: "map",
+                acceptedSessionIDs: [],
+                displayName: filename,
+                catalogMapEntryID: entry
+            )
+        }
+        let jobCopy = record("map.bmap", entry: "entry")
+        let records = [
+            record("catalog-entry.bmap", entry: "entry"),
+            jobCopy,
+            record("other.bmap", entry: "other"),
+            record("unattached.bmap", entry: nil),
+        ]
+        func retirable(_ usage: SupersededLibraryCopyPolicy.Usage) -> [URL] {
+            SupersededLibraryCopyPolicy.retirableCopies(
+                of: "entry",
+                keeping: URL(fileURLWithPath: "/maps/./catalog-entry.bmap"),
+                in: records,
+                usage: usage
+            )
+        }
+        func usage(
+            transferRunning: Bool = false,
+            operationFilenames: Set<String> = [],
+            pausedUploadFilenames: Set<String> = [],
+            pendingInstallFilename: String? = nil,
+            lastTransferFilename: String? = nil,
+            lastTransferOutcome: String = ""
+        ) -> SupersededLibraryCopyPolicy.Usage {
+            SupersededLibraryCopyPolicy.Usage(
+                transferRunning: transferRunning,
+                operationFilenames: operationFilenames,
+                pausedUploadFilenames: pausedUploadFilenames,
+                pendingInstallFilename: pendingInstallFilename,
+                lastTransferFilename: lastTransferFilename,
+                lastTransferOutcome: lastTransferOutcome
+            )
+        }
+        check(retirable(usage()) == [jobCopy.packURL],
+              "only the entry's other copy is superseded: \(retirable(usage()))")
+        check(retirable(usage(transferRunning: true)).isEmpty,
+              "nothing is removed while a transfer runs")
+        check(retirable(usage(operationFilenames: ["map.bmap"])).isEmpty,
+              "an unfinished device operation keeps its copy")
+        check(retirable(usage(pausedUploadFilenames: ["map.bmap"])).isEmpty,
+              "a paused upload keeps its copy")
+        check(retirable(usage(pendingInstallFilename: "map.bmap")).isEmpty,
+              "a direct job waiting to install keeps its copy")
+        for outcome in ["preparing", "uploading", "activating", "unconfirmed", "a-later-state"] {
+            check(retirable(usage(lastTransferFilename: "map.bmap", lastTransferOutcome: outcome)).isEmpty,
+                  "the last transfer keeps its copy while \(outcome)")
+            check(retirable(usage(lastTransferFilename: "other.bmap", lastTransferOutcome: outcome)) ==
+                    [jobCopy.packURL],
+                  "another file's \(outcome) transfer does not keep this copy")
+        }
+        for outcome in ["", "installed", "failed", "cancelled", "unknown"] {
+            check(retirable(usage(lastTransferFilename: "map.bmap", lastTransferOutcome: outcome)) ==
+                    [jobCopy.packURL],
+                  "a settled '\(outcome)' transfer no longer keeps its copy")
+        }
+    }
+
+    /// Updating a direct-job map from its library entry leaves one saved copy:
+    /// the library download replaces the attached direct-job file and its
+    /// companion, unless an activation, a device install or a device
+    /// operation still uses it.
+    @MainActor
+    static func testLibraryUpdateReplacesAttachedDirectJobCopy(_ fixture: ContourFixture) async {
+        let map = fixture.catalogMap("combined")
+        let stream = map.artifacts.first { $0.platformArtifact.isBikeMapStream }!
+        let companion = map.artifacts.first { $0.platformArtifact.isTopographyCompanion }!
+        let jobID = fixture.string("combined_job_id")
+        for state in ["idle", "awaiting activation", "pending install", "device operation"] {
+            let kept = state != "idle"
+            let scenario = ContourScenario("library-update-\(state.replacingOccurrences(of: " ", with: "-"))")
+            defer { scenario.cleanup() }
+            let operationStoreURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("library-update-operations-\(UUID().uuidString).json")
+            defer { try? FileManager.default.removeItem(at: operationStoreURL) }
+            let operationStore = DeviceMapOperationStore(url: operationStoreURL)
+            let jobManager = await runDirectJob(
+                scenario,
+                fixture: fixture,
+                variant: "combined",
+                artifacts: fixture.artifacts("combined")
+            )
+            guard let jobCopy = jobManager.downloadedPackURL,
+                  var metadata = SavedMapArtifactMetadataStore.load(for: jobCopy) else {
+                fail("\(state): the direct job is saved")
+            }
+            // As inventory sync records the job's library entry.
+            metadata.catalogMapEntryID = map.mapEntryId
+            metadata.catalogSyncState = "synced"
+            try! SavedMapArtifactMetadataStore.save(metadata, for: jobCopy)
+            if state == "awaiting activation" {
+                // The job copy was uploaded to the bike before a relaunch, and
+                // its activation is not confirmed yet.
+                let sessionID = "session-awaiting-activation"
+                let descriptor = BackgroundMapUploadDescriptor(
+                    mapID: map.mapId,
+                    sessionID: sessionID,
+                    protocolVersion: 2,
+                    streamFormatVersion: 1,
+                    artifactFilename: jobCopy.lastPathComponent
+                )
+                BackgroundMapUploadStateStore.markStarted(
+                    taskID: 7, descriptor: descriptor, defaults: scenario.defaults
+                )
+                BackgroundMapUploadStateStore.markCompleted(
+                    taskID: 7, succeeded: true, errorCode: nil, defaults: scenario.defaults
+                )
+                scenario.defaults.set(map.mapId, forKey: "offlineMap.lastTransfer.mapId")
+                scenario.defaults.set("activating", forKey: "offlineMap.lastTransfer.outcome")
+                scenario.defaults.set(sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+                scenario.defaults.set(
+                    jobCopy.lastPathComponent,
+                    forKey: "offlineMap.lastTransfer.artifactFilename"
+                )
+            } else if state == "pending install" {
+                // The job was created to install on the bike, which has not
+                // accepted it yet; the job stays active until it does.
+                OfflineMapJobPersistence.save(
+                    jobId: jobID,
+                    installOnDevice: true,
+                    serverURLString: scenario.serverURL,
+                    defaults: scenario.defaults
+                )
+                OfflineMapJobPersistence.markPackDownloaded(
+                    jobId: jobID, mapId: map.mapId, defaults: scenario.defaults
+                )
+            } else if state == "device operation" {
+                // A durable device install of the job copy has not finished.
+                let digest = String(repeating: "a", count: 64)
+                try! operationStore.save(DeviceMapOperationRecord(
+                    schemaVersion: 1, deviceID: "device-1", operationID: UUID(),
+                    sessionID: "session-operation", mapID: map.mapId,
+                    manifestReceipt: digest, signedManifestReceipt: digest,
+                    streamSHA256: digest, streamBytes: 10,
+                    artifactFilename: jobCopy.lastPathComponent, appNamespace: "tests",
+                    createdAt: Date(), connectionEpoch: 1, observation: "in_progress",
+                    cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil
+                ))
+            }
+            // Relaunch on the development generation server, whose catalog
+            // channel downloads this development-tier library entry.
+            scenario.defaults.set(
+                OfflineMapServiceConfig.developmentServerURLString,
+                forKey: "offlineMap.serverURL"
+            )
+            scenario.serveCatalogGrant(map: map, stream: stream, companion: companion)
+            let manager = scenario.manager(fixture: fixture)
+            manager.useMapOperationStoreForTesting(operationStore)
+            check(manager.isAwaitingMapActivationConfirmation(jobCopy) == (state == "awaiting activation"),
+                  "\(state): activation state of the job copy")
+            check(manager.hasDownloadedPendingDeviceInstall == (state == "pending install"),
+                  "\(state): pending device install before the update")
+            manager.downloadCatalogMap(map, deviceStreamTrust: nil)
+            let finished = await waitForIdle(manager)
+            check(finished, "\(state): library update finishes")
+            check(manager.errorMessage == nil,
+                  "\(state): library update downloads: \(manager.errorMessage ?? "")")
+            guard let libraryCopy = manager.downloadedPackURL,
+                  libraryCopy != jobCopy else {
+                fail("\(state): the library copy is saved")
+            }
+            check(FileManager.default.fileExists(atPath: jobCopy.path) == kept,
+                  "\(state): the direct-job copy is replaced only when nothing uses it")
+            check(manager.hasDownloadedPendingDeviceInstall == (state == "pending install"),
+                  "\(state): a pending device install survives the update")
+            let entryRows = manager.savedMapListItems(activeDeviceMap: nil).filter {
+                $0.localRecord?.catalogMapEntryID == map.mapEntryId
+            }
+            check(entryRows.count == (kept ? 2 : 1),
+                  "\(state): Saved Maps rows for the entry: \(entryRows.map(\.id))")
+            check(entryRows.contains {
+                    $0.packURL?.standardizedFileURL.path == libraryCopy.standardizedFileURL.path &&
+                        $0.catalogMap != nil
+                  },
+                  "\(state): the library copy is the library row: " +
+                    "\(entryRows.map { "\($0.id) library=\($0.catalogMap != nil)" }), " +
+                    "saved \(libraryCopy.path)")
+            let jobCompanion = "topography-job_v1_\(jobID).btopo"
+            check(scenario.savedCompanionFiles.contains(jobCompanion) == kept,
+                  "\(state): the job companion goes with its map: \(scenario.savedCompanionFiles)")
+            expectReady(manager, associationID: map.mapEntryId, stream: stream.sha256,
+                        "\(state): the library copy keeps its own companion")
         }
     }
 

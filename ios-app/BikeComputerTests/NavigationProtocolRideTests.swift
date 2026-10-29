@@ -6993,6 +6993,9 @@ extension NavigationProtocolTests {
            case .deviceSDCardUnavailable? = error as? OfflineMapPlatformError {} else {
             assert(false, "a fresh entry rejection keeps its classified error: \(String(describing: outcome))")
         }
+        let guidance = OfflineMapPlatformError.deviceSDCardUnavailable.errorDescription ?? ""
+        assert(guidance.contains("restart"),
+               "the device adopts a card only at startup, so the rider is told to restart: \(guidance)")
         assert(elapsed < MapTransferStartupPolicy.timeout / 2,
                "a fresh entry rejection ends startup without waiting for the readiness deadline (\(elapsed) s)")
     }

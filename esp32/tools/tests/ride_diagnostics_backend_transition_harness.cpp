@@ -8,8 +8,10 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <unistd.h>
 namespace fs=std::filesystem;
 using namespace ride_diagnostics;
 using queue_policy::DropReason;
@@ -21,14 +23,14 @@ struct StorageMock {
  bool getDiagnosticsSdLoaded() const { return loaded; }
  bool mkdir(const char *path) { return fs::create_directories(path); }
  uint64_t size(const char *path) { return fs::exists(path)?fs::file_size(path):0; }
- FILE *open(const char *path,const char *mode) { return std::fopen(path,mode); }
+ int openDescriptor(const char *path,int flags) { return ::open(path,flags,0644); }
 } object;
 StorageMock *storage=&object;
 const char *diagnosticsRoot() { return storage->root.c_str(); }
 std::atomic<unsigned> bootSequence{1},activeChunkSnapshot{2};
 std::atomic<bool> persistentBootSequenceReady{false};
 unsigned runtimeBootSequence=1, activeChunk=2, activeFileBytes=0;
-FILE *activeFile=nullptr;
+int activeDescriptor=-1;
 constexpr unsigned kMaximumRetainedFiles=256;
 char activePath[192]{};
 int activeHash{}; bool activeHashValid=false;
@@ -96,10 +98,10 @@ int main(int argc,char **argv) {
  writerPauseIteration(); assert(closeCalls==1);
  assert(::isClosedChunk(10,1));
  assert(openActiveFile()); assert(activeFileBytes==0);
- std::fputs("new-evidence",activeFile); std::fclose(activeFile); activeFile=nullptr;
+ assert(::write(activeDescriptor,"new-evidence",12)==12); ::close(activeDescriptor); activeDescriptor=-1;
  assert(fs::file_size(old)==oldBytes);
  assert(openActiveFile()); assert(activeChunk==2 && activeFileBytes==0);
- std::fclose(activeFile); activeFile=nullptr;
+ ::close(activeDescriptor); activeDescriptor=-1;
  // No old-medium JSONL may survive into the next namespace when storage
  // was already unavailable. Account each discarded queue entry explicitly.
  storage->loaded=false; normal.events.push_back({false}); critical.events.push_back({true});

@@ -91,6 +91,26 @@ VERIFIED_COMPONENT_ARCHIVE_COPY = '''        component_dirs = sorted(
                 )
             shutil.copyfile(archive, Path(lib_dst) / destination_name)'''
 
+UPSTREAM_LINKER_EXPORT = '        _replace_move(str(Path(env_build) / "memory.ld"), str(Path(ld_dst) / "memory.ld"))'
+VERIFIED_LINKER_EXPORT = '''        # Export the script generated from this SDK configuration, before the
+        # recursive Arduino build replaces the build directory's script.
+        generated_sections = Path(env_build) / "sections.ld"
+        if generated_sections.is_symlink() or not generated_sections.is_file():
+            raise RuntimeError("custom-core generated sections.ld is missing or unsafe")
+        generated_sections_text = generated_sections.read_text(encoding="utf-8")
+        custom_config = Path(sdkconfig_h_path).read_text(encoding="utf-8")
+        if "#define CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY 1" in custom_config:
+            for boundary in ("_ext_ram_bss_start =", "_ext_ram_bss_end ="):
+                if boundary not in generated_sections_text:
+                    raise RuntimeError("custom-core sections.ld lacks external BSS boundary")
+        installed_sections = Path(mem_var) / "sections.ld"
+        if installed_sections.is_symlink():
+            raise RuntimeError("custom-core installed sections.ld is unsafe")
+        shutil.copyfile(generated_sections, installed_sections)
+        _replace_move(
+            str(Path(env_build) / "memory.ld"), str(Path(ld_dst) / "memory.ld")
+        )'''
+
 UPSTREAM_PENV_URLLIB3_REQUIREMENT = '    "urllib3": "<2",'
 CORRECTED_PENV_URLLIB3_REQUIREMENT = '    "urllib3": ">=1.26,<3",'
 
@@ -419,10 +439,37 @@ def correct_espidf_setup_text(source: str) -> str:
 def correct_espidf_text(source: str) -> str:
     """Apply every verified transform to pioarduino's ESP-IDF builder."""
     return correct_generated_project_cleanup(
-        correct_component_archive_copy(
+        correct_linker_export(correct_component_archive_copy(
             correct_espidf_setup_text(correct_nested_pio_command(source))
-        )
+        ))
     )
+
+
+def correct_linker_export(source: str) -> str:
+    return _replace_exactly_once(
+        source, UPSTREAM_LINKER_EXPORT, VERIFIED_LINKER_EXPORT,
+        "custom-core linker export",
+    )
+
+
+def custom_core_sections_text(installed_sections: Path) -> str:
+    """Use the SDK's complete generated script, never reconstruct its layout.
+
+    On initial bootstrap this is the stock script/config pair. ESP-IDF replaces
+    it at custom-core export; recursive builds and cache restores consume that
+    attested pair. The transform source participates in the core cache key.
+    """
+    config = installed_sections.parent / "include" / "sdkconfig.h"
+    for path in (installed_sections, config):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"custom-core linker input is missing or unsafe: {path}")
+    text = installed_sections.read_text(encoding="utf-8")
+    if "#define CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY 1" in config.read_text(encoding="utf-8"):
+        if any(boundary not in text for boundary in (
+            "_ext_ram_bss_start =", "_ext_ram_bss_end =",
+        )):
+            raise ValueError("custom-core sections.ld lacks external BSS boundary")
+    return text
 
 
 def correct_sections_text(sections_text: str) -> str:

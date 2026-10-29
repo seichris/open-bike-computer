@@ -2115,12 +2115,17 @@ current chunk; short, normal rides are therefore included without exposing a
 mutable tail. Acquiring the lease before the seal keeps retention enumeration
 out of the seal deadline. Because the writer serializes pruning and sealing,
 seal completion also proves that any prune which began before the lease has
-finished. The recorder root is stable
-for the complete boot. When removable SD was mounted at boot, diagnostics uses
-that mount without unmounting it beneath map/font readers. When the boot is
-already using the bounded internal FFat fallback, diagnostics exports FFat and
-does not switch to a newly inserted removable card while recorder or map file
+finished. The firmware pins the storage backend mounted at boot, so the
+recorder root is stable for the complete boot. When removable SD was mounted at
+boot, diagnostics uses that mount without unmounting it beneath map/font
+readers. When the boot is already using the bounded internal FFat fallback,
+which never holds maps, diagnostics exports FFat and does not switch to a newly
+inserted removable card while recorder file
 handles may still be open; adopting removable storage requires a reboot. FFat
+is internal flash: reading it disables the flash cache, which ESP-IDF allows
+only on an internal-RAM task stack. The TLS worker's stack stays in PSRAM, so
+FFat index scans and chunk reads run on the transfer's internal operation
+owner; removable-SD exports read directly on the worker. FFat
 uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
 while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
 [Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
@@ -2217,13 +2222,26 @@ Status responses should include:
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
   SHA from a clean source tree; dirty or unidentified builds fail closed and do
-  not advertise protocol v2. Promoted stream artifacts name the approved values
-  and iOS rejects device installation when any field differs.
+  not advertise protocol v2. Promoted stream artifacts outside the durable
+  contract name the approved values and iOS rejects their installation when any
+  field differs. Durable maps never depend on these fields; see `mapReader`.
 - `protocols`: supported map-install protocol versions. Version `2` is present
   only when SD storage is initialized and at least one production stream
   verification key is compiled into firmware. Version `1` is never advertised.
 - `streamFormatVersions`: accepted device-native stream versions when protocol
   v2 is available.
+- `mapReader`: present with protocol v2. The reader capabilities this firmware
+  installs and draws, in the same schema the app sends to the catalog:
+  `schemaVersion` 1, `streamFormats` (format plus manifest schema versions) and
+  `renderers` (`esp32-fmb` format versions and features). Every profile reports
+  targets 1-4 with `3d-buildings`, `contours` and `street-labels`; profiles with
+  the POI reader add target 5 and `map-pois`. The exact bytes are pinned in
+  `protocol/fixtures/map-reader-capabilities-v1.txt`. iOS installs a
+  [durable map](map-compatibility-contract.md) when these capabilities and
+  `streamTrust` cover it, and falls back to the renderer capability bits for
+  firmware without the field. A malformed value is ignored rather than rejecting
+  the status. Schema 1 may gain optional fields; a changed meaning needs a new
+  `schemaVersion`, which older apps ignore in favour of the capability bits.
 - `streamTrust`: exact verification capabilities compiled into the running
   profile, each encoded as `keyId=SHA256(X9.63 public key)`. Ordinary and
   production firmware advertise only the production registry. Opt-in
@@ -2232,7 +2250,12 @@ Status responses should include:
   workflows never build those profiles. iOS selects v2 only when the artifact's
   key identity matches one of these entries; a device with an older or
   rotated-out trust set rejects installation until firmware or the artifact is
-  updated.
+  updated. iOS also uses these entries to choose a shared-library copy. Among
+  the copies the app itself could download (its own signers and delivery
+  tiers), it considers only those signed by a listed entry whenever there is
+  one, and keeps its tier preference among them. A saved copy outside that
+  choice is offered as an update. Each saved copy records the entries it was
+  chosen for, and the app uses them while no bike reports its own.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
 - `transferGeneration`: nonzero boot-local authorization generation. BLE
   disconnect, exit, or mode replacement increments it so in-flight requests
@@ -2343,8 +2366,20 @@ body becomes paused and cannot queue activation after authorization is revoked.
 Protocol v2 is advertised only while the SD map namespace is mounted and
 accessible. Entering map-transfer mode and accepting a v2 body also require a
 successful writable probe. A blank mounted card creates the map namespace
-during that probe, and a removed/reinserted card is unmounted and remounted on
-the next authenticated enter request rather than requiring a device reboot.
+during that probe.
+
+Map data lives only on removable SD: blocks, terrain, map fonts, Nearby/POI
+indexes and the catalog, activation and rollback journals. When no card mounts
+at boot, the internal FFat fallback keeps diagnostics and other device files
+but is never searched for maps or used for map operations; guidance and the
+device UI continue with a "No microSD card" map state. The storage backend
+chosen at boot stays mounted until shutdown. An enter request only validates
+that card: it never unmounts, remounts or falls back to FFat. A missing,
+failed, removed or replaced card therefore returns `sd_unavailable` with a
+restart hint and is treated as absent for map transfers and diagnostics until
+the device restarts; a card inserted after boot is likewise used only after a
+restart. A card that validates but whose map namespace cannot be written
+returns `sd_unwritable` and stays in use, so a later request probes it again.
 
 After the active pointer transaction, the final step remains nonterminal until
 the main loop locates and parses a renderer block from the new root. All blocks
