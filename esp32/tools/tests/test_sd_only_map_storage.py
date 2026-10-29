@@ -287,8 +287,8 @@ class SdOnlyRendererStorageTests(unittest.TestCase):
                 "bool mapFilesAvailable() { return storage.mapStorageAvailable(); }",
                 "bool mapFilesAvailable() { return true; }"),
             "missing-block lookup opens files": (
-                "MapBlock *mblock = new MapBlock();\n  " + gate,
-                "MapBlock *mblock = new MapBlock();\n  if (false)"),
+                "MapBlock *mblock = blockOwner.get();\n  " + gate,
+                "MapBlock *mblock = blockOwner.get();\n  if (false)"),
             "directory probe walks the tree": (
                 "if (!mapFilesAvailable() || depth > 6",
                 "if (depth > 6"),
