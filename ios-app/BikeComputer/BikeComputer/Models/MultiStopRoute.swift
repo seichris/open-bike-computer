@@ -336,8 +336,9 @@ enum MultiStopRouteStitchError: LocalizedError, Equatable {
 /// give it the explicit phone-only saved scope.
 enum MultiStopRouteStitcher {
     /// MapKit snaps the end of one leg and the start of the next to the road
-    /// network independently. A wider join would invent an off-road path.
-    static let maximumJunctionGapMeters = 500.0
+    /// network independently. A join up to this length is that snapping
+    /// difference at the stop; a wider one is rejected, not drawn off-road.
+    static let maximumJunctionGapMeters = 100.0
     /// Connector vertices stay far inside the device's 16-bit delta window.
     private static let maximumConnectorStepDegrees = 0.02
 

@@ -89,11 +89,12 @@ of consecutive stops and keeps the legs only in memory while the creator is
 open. It joins them in stop order into one `apple.mapkit` route: geometry, step
 distances, ETA and instructions are kept, except that each intermediate
 arrival step is renamed "Arrive at <stop>" with a non-finishing maneuver. Joins
-wider than 500 m are rejected instead of bridged. Only the existing explicit
-save confirmation turns the joined route into a `phoneOnly` archive with
-`Apple Maps` attribution. Watch transfer stays rejected; offline navigation,
-preview, elevation and group sharing follow the saved Apple Maps rules above.
-Direct navigation search and the favorite-row planner are unchanged.
+wider than 100 m are rejected instead of bridged. Until the rider confirms the
+existing save sheet, the joined route and its prepared `phoneOnly` draft exist
+only in memory; only that confirmation stores it, with `Apple Maps`
+attribution. Watch transfer stays rejected; offline navigation, preview,
+elevation and group sharing follow the saved Apple Maps rules above. Direct
+navigation search and the favorite-row planner are unchanged.
 
 This extends the implementation policy above; it is not written Apple
 permission or a legal approval. The distribution resolution remains open.

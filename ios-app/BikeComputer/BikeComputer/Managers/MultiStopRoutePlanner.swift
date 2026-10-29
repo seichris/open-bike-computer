@@ -57,10 +57,12 @@ final class MultiStopRoutePlanner: ObservableObject {
     private var cachedLegs: [LegKey: NavigationRouteV1] = [:]
     private var cachedLegOrder: [LegKey] = []
 
+    /// Instructions are localized, so a leg is only reused in its locale.
     private struct LegKey: Hashable {
         let source: RouteCoordinateV1
         let destination: RouteCoordinateV1
         let transportType: UInt
+        let localeIdentifier: String
     }
 
     init(
@@ -132,14 +134,26 @@ final class MultiStopRoutePlanner: ObservableObject {
             ))
             return
         }
+        let localeIdentifier = Locale.current.identifier
         let legs = places.indices.dropLast().map { index in
-            cachedLegs[legKey(from: places[index], to: places[index + 1], request: request)]
+            cachedLegs[legKey(
+                from: places[index],
+                to: places[index + 1],
+                request: request,
+                localeIdentifier: localeIdentifier
+            )]
         }
-        continueCalculation(request: request, legs: legs, generation: generation)
+        continueCalculation(
+            request: request,
+            localeIdentifier: localeIdentifier,
+            legs: legs,
+            generation: generation
+        )
     }
 
     private func continueCalculation(
         request: MultiStopRouteRequest,
+        localeIdentifier: String,
         legs: [NavigationRouteV1?],
         generation: UInt
     ) {
@@ -176,7 +190,8 @@ final class MultiStopRoutePlanner: ObservableObject {
                 guard let leg = Self.preferredLeg(
                     from: routes,
                     source: source,
-                    destination: destination
+                    destination: destination,
+                    localeIdentifier: localeIdentifier
                 ) else {
                     self.state = .failed(.leg(
                         index: index,
@@ -184,10 +199,20 @@ final class MultiStopRoutePlanner: ObservableObject {
                     ))
                     return
                 }
-                self.store(leg, for: self.legKey(from: source, to: destination, request: request))
+                self.store(leg, for: self.legKey(
+                    from: source,
+                    to: destination,
+                    request: request,
+                    localeIdentifier: localeIdentifier
+                ))
                 var legs = legs
                 legs[index] = leg
-                self.continueCalculation(request: request, legs: legs, generation: generation)
+                self.continueCalculation(
+                    request: request,
+                    localeIdentifier: localeIdentifier,
+                    legs: legs,
+                    generation: generation
+                )
             }
         }
     }
@@ -229,12 +254,14 @@ final class MultiStopRoutePlanner: ObservableObject {
     private func legKey(
         from source: MultiStopRoutePlace,
         to destination: MultiStopRoutePlace,
-        request: MultiStopRouteRequest
+        request: MultiStopRouteRequest,
+        localeIdentifier: String
     ) -> LegKey {
         LegKey(
             source: source.mapCoordinate,
             destination: destination.mapCoordinate,
-            transportType: request.transportType.rawValue
+            transportType: request.transportType.rawValue,
+            localeIdentifier: localeIdentifier
         )
     }
 
@@ -252,7 +279,8 @@ final class MultiStopRoutePlanner: ObservableObject {
     private static func preferredLeg(
         from routes: [MKRoute],
         source: MultiStopRoutePlace,
-        destination: MultiStopRoutePlace
+        destination: MultiStopRoutePlace,
+        localeIdentifier: String
     ) -> NavigationRouteV1? {
         let ordered = routes.enumerated().sorted { lhs, rhs in
             if lhs.element.expectedTravelTime != rhs.element.expectedTravelTime {
@@ -270,7 +298,8 @@ final class MultiStopRoutePlanner: ObservableObject {
                     source.mapCoordinate
                 ),
                 sourceLabel: source.label,
-                destinationLabel: destination.label
+                destinationLabel: destination.label,
+                localeIdentifier: localeIdentifier
             ) {
                 return leg
             }

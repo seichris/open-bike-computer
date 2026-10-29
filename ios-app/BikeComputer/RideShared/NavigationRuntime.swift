@@ -231,7 +231,8 @@ struct NavigationRuntimeV1 {
             initialStrategy: lastDistanceAlongGeometry == nil
                 ? initialStepStrategy
                 : nil,
-            route: route
+            route: route,
+            ambiguityTolerance: ambiguityTolerance
         )
         guard let selectedProjection else {
             throw NavigationRuntimeError.noProjectableGeometry
@@ -346,13 +347,15 @@ struct NavigationRuntimeV1 {
     private func selectProjection(
         candidates: [NavigationGeometryV1.Projection],
         initialStrategy: NavigationInitialStepStrategyV1?,
-        route: NavigationRouteV1
+        route: NavigationRouteV1,
+        ambiguityTolerance: Double
     ) -> NavigationGeometryV1.Projection? {
         guard let lastDistanceAlongGeometry else {
+            let earliest = candidates.min {
+                $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters
+            }
             if initialStrategy == .first {
-                return candidates.min {
-                    $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters
-                }
+                return earliest
             }
             if case .checkpoint(let stepIndex) = initialStrategy {
                 let step = route.steps[stepIndex]
@@ -366,11 +369,21 @@ struct NavigationRuntimeV1 {
                 }
             }
             let closest = candidates.map(\.crossTrackDistanceMeters).min() ?? .infinity
-            return candidates
+            let nearest = candidates
                 .filter { abs($0.crossTrackDistanceMeters - closest) < 0.001 }
                 .min { $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters }
+            // A loop or out-and-back passes here more than once. Without
+            // movement evidence a new ride starts on the earliest plausible
+            // pass, never at a later pass such as the loop's own finish.
+            // Neighboring segments of one pass stay within twice the band.
+            if let nearest, let earliest,
+               nearest.distanceAlongRouteMeters - earliest.distanceAlongRouteMeters >
+                   ambiguityTolerance * 2 {
+                return earliest
+            }
+            return nearest
         }
-        return candidates.min { lhs, rhs in
+        let closestProgress = candidates.min { lhs, rhs in
             let lhsDelta = abs(lhs.distanceAlongRouteMeters - lastDistanceAlongGeometry)
             let rhsDelta = abs(rhs.distanceAlongRouteMeters - lastDistanceAlongGeometry)
             if lhsDelta == rhsDelta {
@@ -378,6 +391,21 @@ struct NavigationRuntimeV1 {
             }
             return lhsDelta < rhsDelta
         }
+        // After an out-and-back turnaround the outbound and return passes are
+        // about equally far from the last progress. Progress never decreases,
+        // so choosing the outbound pass would freeze it at the turnaround.
+        // Beyond the band behind, prefer a pass that is no farther ahead.
+        guard let closestProgress else { return nil }
+        let behind = lastDistanceAlongGeometry - closestProgress.distanceAlongRouteMeters
+        guard behind > ambiguityTolerance else { return closestProgress }
+        return candidates
+            .filter {
+                $0.distanceAlongRouteMeters >= lastDistanceAlongGeometry &&
+                    $0.distanceAlongRouteMeters - lastDistanceAlongGeometry <=
+                        behind + ambiguityTolerance
+            }
+            .min { $0.distanceAlongRouteMeters < $1.distanceAlongRouteMeters }
+            ?? closestProgress
     }
 
     private func candidateProjections(

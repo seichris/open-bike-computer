@@ -132,6 +132,8 @@ extension OfflineRouteSaveTests {
         try multiStopLegFailuresAndRetry()
         try multiStopJoinsAndRouteLimits()
         try multiStopSaveReloadAndOfflineNavigation()
+        try multiStopRoundTripNavigation()
+        try multiStopPlaceResolution()
         try multiStopDirectNavigationIsolation()
     }
 
@@ -487,7 +489,7 @@ extension OfflineRouteSaveTests {
             engine.currentInstruction == "Arrive at Bakery",
             "Approaching a stop announces it by name")
         check(engine.offlineSnapshotForTesting?.routeWindow.isEmpty == false,
-            "The device keeps receiving route geometry at the stop")
+            "The runtime still produces the device route window at the stop")
         ride(points[2])
         ride(points[2])
         ride(points[3])
@@ -495,7 +497,133 @@ extension OfflineRouteSaveTests {
             engine.offlineSnapshotForTesting?.instruction == "The destination is on your left",
             "Reaching a stop continues with the next leg")
         ride(points[4])
-        check(!engine.isNavigating, "Only the final destination ends navigation")
+        check(!engine.isNavigating, "Passing a stop never ends navigation; the final destination does")
+    }
+
+    /// Round trips pass the same place more than once: a loop starts and ends
+    /// at home, and an out-and-back returns along the street it came out on.
+    static func multiStopRoundTripNavigation() throws {
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let planner = f.makePlanner()
+        func savedArchive(_ places: [MultiStopRoutePlace], legs: [TestRoute]) throws -> NavigationRouteArchiveV1 {
+            let taskCount = f.factory.tasks.count
+            planner.plan(Stops.request(places))
+            for (offset, leg) in legs.enumerated() {
+                f.factory.tasks[taskCount + offset].succeed(with: [leg])
+            }
+            guard let plan = planner.readyPlan else { preconditionFailure("Expected a round-trip plan") }
+            let saved = try f.library.saveOffline(plan.draft, name: plan.route.name ?? "Round trip")
+            return try f.library.offlineArchive(for: saved.summary)
+        }
+        func ride(_ engine: NavigationEngine, _ point: RouteCoordinateV1) {
+            f.now.addTimeInterval(5)
+            _ = engine.processExternalLocation(Stops.fix(point, at: f.now))
+        }
+
+        let lookout = CLLocationCoordinate2D(latitude: 51.5020, longitude: -0.1000)
+        let outAndBack = try savedArchive([Stops.home, Stops.place("Lookout", lookout), Stops.home], legs: [
+            Stops.leg(Stops.homePoint, via: Stops.canalPoint, to: lookout,
+                turn: "Head north on High Street", travelTime: 100),
+            Stops.leg(lookout, via: Stops.canalPoint, to: Stops.homePoint,
+                turn: "Head south on High Street", travelTime: 100)
+        ])
+        let returnTrip = NavigationEngine(now: { f.now })
+        defer { returnTrip.stopNavigation() }
+        let path = outAndBack.route.points
+        check(path.count == 5 && path[1] == path[3] && path[0] == path[4],
+            "The out-and-back retraces the same street")
+        try returnTrip.startOfflineNavigation(archive: outAndBack, initialLocation: Stops.fix(path[0], at: f.now))
+        for point in [path[0], path[1], path[2], path[2]] { ride(returnTrip, point) }
+        let atTurnaround = returnTrip.offlineSnapshotForTesting?.routeRemainingDistanceMeters ?? 0
+        ride(returnTrip, path[3])
+        check(returnTrip.isNavigating &&
+            (returnTrip.offlineSnapshotForTesting?.routeRemainingDistanceMeters ?? .infinity) < atTurnaround - 50 &&
+            returnTrip.offlineSnapshotForTesting?.instruction == "Arrive at the destination",
+            "Guidance keeps progressing on the way back along the same street")
+        ride(returnTrip, path[4])
+        check(!returnTrip.isNavigating, "An out-and-back finishes when the rider is home again")
+
+        let millLane = CLLocationCoordinate2D(latitude: 51.5000, longitude: -0.0980)
+        let loop = try savedArchive([Stops.home, Stops.bakery, Stops.home], legs: [
+            Stops.homeToBakery,
+            Stops.leg(Stops.bakeryPoint, via: millLane, to: Stops.homePoint,
+                turn: "Turn right onto Mill Lane", travelTime: 120)
+        ])
+        let loopRide = NavigationEngine(now: { f.now })
+        defer { loopRide.stopNavigation() }
+        // Slightly nearer the closing street than the first one, at home.
+        let nearHome = RouteCoordinateV1(latitude: 51.500009, longitude: -0.099957)
+        try loopRide.startOfflineNavigation(archive: loop, initialLocation: Stops.fix(nearHome, at: f.now))
+        check(loopRide.isNavigating &&
+            loopRide.offlineSnapshotForTesting?.instruction == "Turn right onto Canal Street" &&
+            (loopRide.offlineSnapshotForTesting?.routeRemainingDistanceMeters ?? 0) > loop.route.distanceMeters - 20,
+            "Starting a loop at home begins the loop instead of finishing it")
+        let ring = loop.route.points
+        for point in [ring[0], ring[1], ring[2], ring[2], ring[3]] { ride(loopRide, point) }
+        check(loopRide.isNavigating, "The loop is still navigating on its last street")
+        ride(loopRide, ring[4])
+        check(!loopRide.isNavigating, "The loop finishes back at home")
+    }
+
+    static func multiStopPlaceResolution() throws {
+        final class PendingSearches {
+            var continuations: [CheckedContinuation<[MKMapItem], Error>] = []
+        }
+        func pump(timeout: TimeInterval = 2, until condition: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while !condition() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+            return condition()
+        }
+        func item(_ coordinate: CLLocationCoordinate2D) -> MKMapItem {
+            if #available(iOS 26.0, macOS 26.0, *) {
+                return MKMapItem(
+                    location: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude),
+                    address: nil
+                )
+            }
+            return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+        }
+        let pending = PendingSearches()
+        let resolver = RouteStopPlaceResolver { _ in
+            try await withCheckedThrowingContinuation { pending.continuations.append($0) }
+        }
+        var resolved: [MultiStopRoutePlace] = []
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = "Bakery"
+
+        resolver.resolve(request, id: "first", label: "Old pick", origin: .search) { resolved.append($0) }
+        check(pump { pending.continuations.count == 1 } && resolver.pendingID == "first",
+            "A picked completion is resolved before it becomes a stop")
+        resolver.resolve(request, id: "second", label: "Bakery", subtitle: "High Street", origin: .search) {
+            resolved.append($0)
+        }
+        check(pump { pending.continuations.count == 2 } && resolver.pendingID == "second",
+            "A newer pick replaces the pending one")
+        pending.continuations[0].resume(returning: [item(Stops.officePoint)])
+        _ = pump(timeout: 0.2) { false }
+        check(resolved.isEmpty && resolver.pendingID == "second", "A superseded search response never becomes a stop")
+        pending.continuations[1].resume(returning: [item(Stops.bakeryPoint)])
+        check(pump { resolved.count == 1 } &&
+            resolved[0] == MultiStopRoutePlace(label: "Bakery", subtitle: "High Street",
+                mapCoordinate: Stops.bakeryPoint, origin: .search) &&
+            resolver.pendingID == nil && resolver.errorMessage == nil,
+            "The newest pick resolves to its MapKit coordinate")
+
+        resolver.resolve(request, id: "third", label: "Nowhere", origin: .search) { resolved.append($0) }
+        check(pump { pending.continuations.count == 3 }, "A failing pick is pending")
+        pending.continuations[2].resume(throwing: MKError(.placemarkNotFound))
+        check(pump { resolver.errorMessage != nil } && resolved.count == 1 && resolver.pendingID == nil,
+            "A failed search shows an error and adds no stop")
+
+        resolver.resolve(request, id: "fourth", label: "Closed", origin: .search) { resolved.append($0) }
+        check(pump { pending.continuations.count == 4 } && resolver.errorMessage == nil,
+            "A new pick clears the previous error")
+        resolver.cancel()
+        pending.continuations[3].resume(returning: [item(Stops.homePoint)])
+        _ = pump(timeout: 0.2) { false }
+        check(resolved.count == 1 && resolver.pendingID == nil, "Leaving the search screen discards its pending pick")
     }
 
     static func multiStopDirectNavigationIsolation() throws {

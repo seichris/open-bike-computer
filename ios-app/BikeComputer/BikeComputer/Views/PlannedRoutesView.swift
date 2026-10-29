@@ -88,7 +88,7 @@ struct SavedRoutesSettingsSection: View {
         } header: {
             Text("Saved Routes")
         } footer: {
-            Text("Create a route with stops along the way, or preview a saved route. Watch-supported routes are queued automatically.")
+            Text("Create a route or preview a saved route. Watch-supported routes are queued automatically.")
         }
         .alert(
             "Saved Route Error",

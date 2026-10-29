@@ -171,7 +171,7 @@ struct RouteCreatorView: View {
                 .accessibilityLabel(editMode == .active ? "Done Reordering" : "Reorder or Remove Stops")
             }
         } footer: {
-            Text("Stops are visited in order. Tap Edit to reorder or remove them, or swipe a stop to remove it. Up to \(MultiStopRouteDraft.maximumStops) stops.")
+            Text("Stops are visited in order. Tap Edit to reorder or remove them, or swipe a stop to remove it. Add up to \(MultiStopRouteDraft.maximumStops - MultiStopRouteDraft.minimumStops) stops between the start and destination.")
         }
     }
 
@@ -261,8 +261,11 @@ struct RouteCreatorView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label(failure.message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
-                Button("Try Again") { planner.retry() }
-                    .accessibilityIdentifier("retryCreatedRoute")
+                // Joining or size failures need different stops, not a retry.
+                if failure.legIndex != nil {
+                    Button("Try Again") { planner.retry() }
+                        .accessibilityIdentifier("retryCreatedRoute")
+                }
             }
             .accessibilityIdentifier("createdRouteFailure")
         } else {
