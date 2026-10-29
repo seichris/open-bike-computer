@@ -9,7 +9,10 @@ Layouts come only from esp32/partition_layouts.json. Each release may emit:
   for devices that already carry the current dual-4-MiB table;
 * ``<target>.web-migration-dual3m-dual4m.json``: the explicit, ordered and
   bounded migration recipe. It is signed ``qualificationRequired`` so the
-  website admits it only after per-target physical qualification.
+  website admits it only after per-target physical qualification;
+* ``<target>.image-identity.json``: the release image's size, SHA-256, first
+  4 KiB digest and appended-digest tail, signed under its own domain so the
+  website can recognise installed slots without reading them whole.
 
 There is no permissive or unknown-layout fallback.
 """
@@ -21,6 +24,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import struct
 import sys
 import tarfile
 
@@ -34,6 +38,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "esp32" / "tools"))
 import partition_layouts  # noqa: E402
 
 DOMAIN = b"bicino-web-flasher-v1\n"
+# Separate domain: an image identity signature can never verify as a recipe.
+IDENTITY_DOMAIN = b"bicino-image-identity-v1\n"
+IDENTITY_HEAD = 4096
+IDENTITY_TAIL = 32
 FLASH_BYTES = partition_layouts.FLASH_BYTES
 SECTOR = partition_layouts.SECTOR
 RESERVE = partition_layouts.APPLICATION_RESERVE_BYTES
@@ -188,6 +196,39 @@ def recovery_payload(descriptor: dict, images: dict[str, bytes],
     return value, assets
 
 
+def app_descriptor(image: bytes) -> dict | None:
+    """The ESP-IDF app description as the publisher reads it; informational."""
+    if len(image) < 0x120 or image[0] != 0xE9 or struct.unpack_from("<I", image, 0x20)[0] != 0xABCD5432:
+        return None
+
+    def text(offset: int, length: int) -> str:
+        raw = image[0x20 + offset:0x20 + offset + length].split(b"\0", 1)[0]
+        return "".join(chr(b) if 0x20 <= b < 0x7F else "?" for b in raw)
+
+    return {"version": text(0x10, 32), "projectName": text(0x30, 32),
+            "elfSha256": image[0xB0:0xD0].hex()}
+
+
+def identity_payload(value: dict, firmware: bytes) -> dict:
+    """Bind the exact application bytes a device may hold to this release.
+
+    The browser rules an image out of a slot from its first 4 KiB and last 32
+    bytes (the ESP appended image digest) and only then reads the whole slot.
+    """
+    if value["writes"][0]["sha256"] != digest(firmware) or len(firmware) != value["writes"][0]["length"]:
+        raise ValueError("identity image differs from the signed recovery recipe")
+    head = firmware[:IDENTITY_HEAD]
+    return {
+        "schemaVersion": 1, "artifactType": "bicino-image-identity",
+        "target": value["target"], "environment": value["environment"],
+        "version": value["version"], "build": value["build"], "gitSha": value["gitSha"],
+        "releaseTag": value["releaseTag"],
+        "image": {"size": len(firmware), "sha256": digest(firmware), "headLength": len(head),
+                  "headSha256": digest(head), "tail": firmware[-IDENTITY_TAIL:].hex()},
+        "descriptor": app_descriptor(firmware),
+    }
+
+
 def migration_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, dict[str, bytes]]:
     """Ordered dual-3-MiB to dual-4-MiB recipe; the table is the last write.
 
@@ -255,10 +296,10 @@ def release_packages(descriptor: dict, images: dict[str, bytes]) -> tuple[dict[s
     return payloads, assets
 
 
-def sign(payload: dict, scalar: str) -> dict:
+def sign(payload: dict, scalar: str, domain: bytes = DOMAIN) -> dict:
     data = canonical(payload)
     key = _private_key(scalar)
-    r, s = utils.decode_dss_signature(key.sign(DOMAIN + data, ec.ECDSA(hashes.SHA256())))
+    r, s = utils.decode_dss_signature(key.sign(domain + data, ec.ECDSA(hashes.SHA256())))
     return {"schemaVersion": 1, "keyId": "bicino-release-p256-1", "algorithm": "ES256-P1363",
             "payload": base64.b64encode(data).decode("ascii"),
             "signature": base64.b64encode(r.to_bytes(32, "big") + s.to_bytes(32, "big")).decode("ascii")}
@@ -291,11 +332,19 @@ def publish(args: argparse.Namespace) -> None:
     payloads, assets = release_packages(descriptor, images)
     if args.bundle_manifest.read_bytes() != descriptor_bytes or digest(args.bundle.read_bytes()) != archive_digest:
         raise ValueError("factory inputs changed during validation")
+    key = os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]
     for name, payload in payloads.items():
         payload["factoryDescriptorSha256"] = digest(descriptor_bytes)
         payload["factoryArchiveSha256"] = archive_digest
         payload["releaseTag"] = args.tag
-        assets[name] = canonical(sign(payload, os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]))
+        assets[name] = canonical(sign(payload, key))
+    # Every release carries the dual-4-MiB rescue, while the legacy rescue is
+    # skipped once the image outgrows a 3 MiB slot. All packages write the
+    # same application image, so the identity binds that image.
+    recovery = payloads[asset_names(args.target)["recovery"]]
+    firmware = assets[recovery["writes"][0]["asset"]]
+    assets[f"{args.target}.image-identity.json"] = canonical(
+        sign(identity_payload(recovery, firmware), key, IDENTITY_DOMAIN))
     if args.output_dir.is_symlink():
         raise ValueError("unsafe output directory")
     args.output_dir.mkdir(parents=True, exist_ok=True)
