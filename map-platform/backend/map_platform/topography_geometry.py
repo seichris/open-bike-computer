@@ -31,6 +31,7 @@ class CompiledTopography:
     intermediate_sha256: str
     sample_sha256: str
     selection_sha256: str
+    terrain_selection: dict | None = None
 
     @property
     def record_count(self) -> int:
@@ -49,6 +50,29 @@ def _lines(geometry):
     elif geometry.geom_type in {"MultiLineString", "GeometryCollection"}:
         for part in geometry.geoms:
             yield from _lines(part)
+
+
+def project_selection(selection, bounds, working_crs, corridor_width_m=0):
+    """Use the same working-CRS corridor buffer for contours and terrain."""
+    from rasterio.warp import transform as warp
+    region = shape(selection)
+    def project(source, target):
+        return lambda x, y, z=None: warp(source, target, x, y)
+    selected = transform(project("EPSG:4326", working_crs), region)
+    if region.geom_type == "LineString":
+        if (
+            isinstance(corridor_width_m, bool)
+            or not isinstance(corridor_width_m, (int, float))
+            or not math.isfinite(float(corridor_width_m))
+            or not 1 <= corridor_width_m <= 50_000
+        ):
+            raise ValueError("route requires a bounded full corridor width in metres")
+        selected = selected.buffer(corridor_width_m / 2, resolution=8)
+        if not transform(project("EPSG:4326", working_crs), box(*bounds)).covers(selected):
+            raise ValueError("contour mosaic does not cover the buffered route")
+    elif corridor_width_m:
+        raise ValueError("polygon must not have a corridor width")
+    return selected
 
 
 def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float = 0,
@@ -82,20 +106,7 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
     def project(source, target):
         return lambda x, y, z=None: warp(source, target, x, y)
 
-    selected = transform(project("EPSG:4326", working_crs), region)
-    if region.geom_type == "LineString":
-        if (
-            isinstance(corridor_width_m, bool)
-            or not isinstance(corridor_width_m, (int, float))
-            or not math.isfinite(float(corridor_width_m))
-            or not 1 <= corridor_width_m <= 50_000
-        ):
-            raise ValueError("route requires a bounded full corridor width in metres")
-        selected = selected.buffer(corridor_width_m / 2, resolution=8)
-        if not transform(project("EPSG:4326", working_crs), box(*bounds)).covers(selected):
-            raise ValueError("contour mosaic does not cover the buffered route")
-    elif corridor_width_m:
-        raise ValueError("polygon must not have a corridor width")
+    selected = project_selection(selection, bounds, working_crs, corridor_width_m)
     records: dict[tuple[int, int], set[Contour]] = {}
     total_points = 0
     input_points = 0
@@ -176,4 +187,4 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
                 "selectionSha256": selection_sha,
                 "sections": [[*key, hashlib.sha256(encode_contour_section(section)).hexdigest()]
                              for key, section in sections.items()]}
-    return CompiledTopography(sections, hashlib.sha256(canonical_bytes(identity)).hexdigest(), sample_sha, selection_sha)
+    return CompiledTopography(sections, hashlib.sha256(canonical_bytes(identity)).hexdigest(), sample_sha, selection_sha, transform(project(working_crs, "EPSG:3857"), selected).__geo_interface__)

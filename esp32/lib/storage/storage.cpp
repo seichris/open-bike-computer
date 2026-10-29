@@ -9,6 +9,8 @@
 #include "storage.hpp"
 
 #include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 #include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
 #include "waveshare_storage_migration_policy.hpp"
@@ -27,8 +29,7 @@
 #include <Wire.h>
 #include <cmath>
 #include <hal.hpp>
-#include <iomanip>
-#include <sstream>
+#include <cstdio>
 
 #define SD_OCR_SDHC_CAP (1 << 30)
 
@@ -44,6 +45,10 @@ namespace {
 
 using ride_diagnostics::transfer_policy::StoragePreparation;
 
+// No filesystem is mounted here. A map path built on this root fails with
+// ENOENT before reaching any volume, including FFat mounted at /sdcard.
+constexpr const char *kUnavailableMapRoot = "/map-storage-unavailable";
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 void endWaveshareMigrationBus();
 #endif
@@ -54,22 +59,28 @@ bool mountedDirectoryAvailable(const char *root) {
          S_ISDIR(mounted.st_mode);
 }
 
+// The recorder repeats this probe while recovering from write faults, which
+// often happen under memory pressure. It must not use stdio: fopen() creates
+// the stream's newlib lock from internal RAM and aborts when that fails.
 bool writableProbeSucceeded(const char *root) {
   char probePath[128] = {};
-  snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
-  FILE *probe = fopen(probePath, "wb");
-  if (probe == nullptr)
+  const int length =
+      snprintf(probePath, sizeof(probePath), "%s/.bicino-diag-probe", root);
+  if (length < 0 || static_cast<size_t>(length) >= sizeof(probePath))
+    return false;
+  const int probe = ::open(probePath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (probe < 0)
     return false;
   const uint8_t marker = 1;
-  const bool wrote =
-      fwrite(&marker, 1, sizeof(marker), probe) == sizeof(marker);
-  const bool flushed = wrote && fflush(probe) == 0;
-  // fclose() closes the stream even when its implicit flush reports failure,
-  // so remove the probe in every opened-file path. A failed remove is itself
-  // evidence that the backend cannot complete the export lifecycle safely.
-  const bool closed = fclose(probe) == 0;
-  const bool removed = unlink(probePath) == 0;
-  return wrote && flushed && closed && removed;
+  const bool wrote = ::write(probe, &marker, sizeof(marker)) ==
+                     static_cast<ssize_t>(sizeof(marker));
+  const bool synced = wrote && ::fsync(probe) == 0;
+  // close() releases the descriptor even when it reports failure, so remove
+  // the probe in every opened-file path. A failed remove is itself evidence
+  // that the backend cannot complete the export lifecycle safely.
+  const bool closed = ::close(probe) == 0;
+  const bool removed = ::unlink(probePath) == 0;
+  return wrote && synced && closed && removed;
 }
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
@@ -168,23 +179,105 @@ std::string formatSize(uint64_t size) {
     order++;
     formatted_size /= 1024;
   }
-  std::ostringstream oss;
-  oss << std::fixed << std::setprecision(2) << formatted_size << " "
-      << suffixes[order];
-  return oss.str();
+  char text[48];
+  std::snprintf(text, sizeof(text), "%.2f %s", formatted_size, suffixes[order]);
+  return text;
 }
 } // namespace
 
 /**
  * @brief Storage Class constructor
  */
-Storage::Storage() : isSdLoaded(false), card(nullptr) {}
+Storage::Storage() : isSdLoaded(false), card(nullptr) {
+  // Construct once before any producer can publish this Storage instance.
+  mountMutex = xSemaphoreCreateMutexStatic(&mountMutexStorage_);
+  configASSERT(mountMutex != nullptr);
+}
 
-bool Storage::ensureSdMounted(bool allowInternalFallback) {
+bool Storage::pollShutdownQuiescence() {
+  streamAdmission_.closeAdmission();
+  shutdownAdmissionClosed_.store(true, std::memory_order_release);
+  // An admitted fopen or fclose may still be blocked in the backend. Never
+  // launch unmount until its complete stream lifetime has retired.
+  if (!streamAdmission_.quiescent()) return false;
+  if (!shutdownStarted_.exchange(true, std::memory_order_acq_rel)) {
+    // xTaskCreate uses an internal stack. An unmount/cache operation must
+    // never run on the renderer's PSRAM stack or in the UI event loop.
+    if (xTaskCreate(shutdownTask, "storage_stop", 4096, this,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+      // Fail closed for this boot. No blind task-creation retries.
+      return false;
+    }
+  }
+  return shutdownComplete_.load(std::memory_order_acquire);
+}
+
+void Storage::shutdownTask(void *context) {
+  auto &self = *static_cast<Storage *>(context);
+  bool stopped = self.streamAdmission_.quiescent();
+  if (stopped)
+    stopped = self.mountMutex == nullptr ||
+        xSemaphoreTake(self.mountMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+  const bool locked = stopped && self.mountMutex != nullptr;
+  if (stopped) {
+    // Raw POSIX map/diagnostic owners already ACKed, and wrapper streams plus
+    // transient metadata/mount operations have all retired their tracked leases.
+    // Catch any buffered C stream failure before deregistering its VFS.
+    stopped = ::fflush(nullptr) == 0;
+    if (stopped) {
+      const StorageBackend backend = self.mountedBackend.load();
+      if (backend == StorageBackend::InternalFFat) {
+        FFat.end();
+      } else if (backend != StorageBackend::Unavailable) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || \
+    defined(WAVESHARE_EPAPER_397) || defined(SPI_SHARED)
+        endRemovableStorage(backend);
+#else
+        stopped = esp_vfs_fat_sdcard_unmount("/sdcard", self.card) == ESP_OK;
+#endif
+      }
+      // Arduino end() has no result. Require observable VFS removal; a
+      // still-readable mount is uncertainty, never permission to sleep.
+      if (backend != StorageBackend::Unavailable)
+        stopped = stopped && !mountedDirectoryAvailable("/sdcard");
+      if (stopped) {
+        self.isSdLoaded = false;
+        self.internalFallbackMounted = false;
+        self.mountedBackend = StorageBackend::Unavailable;
+      }
+    }
+  }
+  if (locked) xSemaphoreGive(self.mountMutex);
+  self.shutdownComplete_.store(stopped, std::memory_order_release);
+  vTaskDelete(nullptr);
+}
+
+void Storage::pinBackendForBoot() {
+  mapStorageAvailable_.store(
+      storage_mount_policy::removableHoldsMaps(isSdLoaded.load(),
+                                               internalFallbackMounted.load()),
+      std::memory_order_release);
+  backendPinned_.store(true, std::memory_order_release);
+}
+
+bool Storage::backendPinned() const {
+  return backendPinned_.load(std::memory_order_acquire);
+}
+
+bool Storage::mapStorageAvailable() const {
+  return mapStorageAvailable_.load(std::memory_order_acquire);
+}
+
+const char *Storage::mapStorageRoot() const {
+  return mapStorageAvailable() ? "/sdcard" : kUnavailableMapRoot;
+}
+
+bool Storage::ensureSdMounted() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
     return false;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
@@ -202,40 +295,15 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
     root.close();
   }
 #endif
-  if (!ready) {
-    // The FFat fallback shares /sdcard with the removable card. Retrying the
-    // removable mount would have to unmount FFat and invalidate every map/file
-    // handle in the application. Automatic diagnostics recovery therefore
-    // retries only when no fallback is active. Existing explicit callers that
-    // allow the fallback retain the historical remount-and-restore behavior.
-    if (!storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
-            isSdLoaded.load(), internalFallbackMounted.load()) &&
-        !allowInternalFallback) {
-      xSemaphoreGive(mountMutex);
-      return false;
-    }
+  // Keep this boot's volume mounted as-is. Retrying the card, unmounting it or
+  // restoring FFat at /sdcard would pull files from under the renderer, fonts
+  // and the recorder, and FFat must never stand in for map storage. A failed
+  // or removed card stays unavailable; a replacement is adopted on restart.
+  if (!ready)
     isSdLoaded = false;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
-    defined(SPI_SHARED)
-    const bool restoreInternalFallback =
-        storage_mount_policy::shouldRestoreFallbackAfterFailedRetry(
-            allowInternalFallback, internalFallbackMounted.load());
-    FFat.end();
-    endRemovableStorage(mountedBackend.load());
-    mountedBackend = StorageBackend::Unavailable;
-    delay(25);
-#endif
-    ready = initSD() == ESP_OK;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
-    if (!ready && restoreInternalFallback)
-      initSPIFFS();
-#endif
-  }
   xSemaphoreGive(mountMutex);
   return ready;
 }
-
-void Storage::markSdUnavailable() { isSdLoaded = false; }
 
 bool Storage::hasInternalFallbackMounted() const {
   return internalFallbackMounted.load();
@@ -269,34 +337,40 @@ bool Storage::storagePowerCycleRequired() const {
   return storageBackend() == StorageBackend::LegacySpiMigration;
 }
 
-bool Storage::canRetryRemovableSd() const {
-  return storage_mount_policy::shouldAttemptAutomaticRemovableRetry(
-      isSdLoaded.load(), internalFallbackMounted.load());
+uint64_t Storage::removableSdFreeBytes() const {
+  uint64_t bytes = 0;
+  return tryRemovableSdFreeBytes(bytes) ? bytes : 0;
 }
 
-uint64_t Storage::removableSdFreeBytes() const {
+bool Storage::tryRemovableSdFreeBytes(uint64_t &bytes) const {
+  bytes = 0;
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (!isSdLoaded.load())
-    return 0;
+    return false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
   const StorageBackend activeBackend = mountedBackend.load();
   const uint64_t total = removableTotalBytes(activeBackend);
   const uint64_t used = removableUsedBytes(activeBackend);
-  return total > used ? total - used : 0;
+  bytes = total > used ? total - used : 0;
 #else
   // Persistent diagnostics is enabled only on the Waveshare targets. Other
   // legacy storage backends do not expose a portable free-space query here.
-  return UINT64_MAX;
+  bytes = UINT64_MAX;
 #endif
+  return true;
 }
 
 StoragePreparation Storage::prepareDiagnosticsStorage() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return StoragePreparation::MountFailed;
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire))
+    return StoragePreparation::MountFailed;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr) {
     lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return StoragePreparation::MountFailed;
@@ -333,10 +407,15 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     return result;
   }
 
+  // Nothing is usable, and nothing may be mounted at runtime. A failed
+  // removable probe can leave an earlier successful readiness cached.
+  auto result = lastDiagnosticsMountResult.load();
+  if (ride_diagnostics::transfer_policy::storageReady(result))
+    result = StoragePreparation::MountFailed;
+  diagnosticsSdHealthy = false;
+  lastDiagnosticsMountResult = result;
   xSemaphoreGive(mountMutex);
-  if (!ensureSdMounted(false))
-    return lastDiagnosticsMountResult.load();
-  return prepareDiagnosticsStorage();
+  return result;
 }
 
 bool Storage::ensureDiagnosticsSdMounted() {
@@ -354,13 +433,14 @@ bool Storage::getDiagnosticsSdLoaded() const {
 }
 
 bool Storage::canRetryDiagnosticsSd() const {
-  if (!diagnosticsSdHealthy.load())
-    return true;
-  return storage_mount_policy::shouldAttemptDiagnosticsRemovableRetry(
-      isSdLoaded.load(), internalFallbackMounted.load());
+  return storage_mount_policy::shouldReprobeDiagnostics(
+      diagnosticsSdHealthy.load(),
+      isSdLoaded.load() || internalFallbackMounted.load());
 }
 
 uint64_t Storage::diagnosticsSdFreeBytes() const {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return 0;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (!getDiagnosticsSdLoaded())
@@ -389,6 +469,15 @@ const char *Storage::diagnosticsRootPath() const {
  * @brief Initialize removable storage with the active board backend
  */
 esp_err_t Storage::initSD() {
+  if (!storage_mount_policy::mayChangeMount(backendPinned()))
+    return ESP_ERR_INVALID_STATE;
+  return mountRemovableStorage();
+}
+
+esp_err_t Storage::mountRemovableStorage() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return ESP_FAIL;
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
@@ -746,13 +835,18 @@ esp_err_t Storage::initSD() {
  * @return esp_err_t Error code
  */
 esp_err_t Storage::initSPIFFS() {
+  if (!storage_mount_policy::mayChangeMount(backendPinned()))
+    return ESP_ERR_INVALID_STATE;
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return ESP_FAIL;
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   ESP_LOGI(TAG, "Initializing FFat as /sdcard");
 
-  // Mount FFat at "/sdcard" so the rest of the application thinks it's
-  // reading from SD Partition label "ffat" is standard for the data partition
-  // even when using FFat
+  // The FFat fallback keeps the historical /sdcard path for diagnostics and
+  // other device files. Maps use Storage::mapStorageRoot(), which never names
+  // /sdcard on an FFat boot, so no map path can reach this volume.
   if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;
@@ -794,6 +888,8 @@ esp_err_t Storage::initSPIFFS() {
  * @return SDCardInfo structure containing SD card information
  */
 SDCardInfo Storage::getSDCardInfo() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return {};
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   SDCardInfo info{};
@@ -870,9 +966,17 @@ bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
  * @return FILE* Pointer to the opened file
  */
 FILE *Storage::open(const char *path, const char *mode) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return nullptr;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  return fopen(path, mode);
+  const size_t slot = streamAdmission_.reserveOpen();
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EBUSY;
+    return nullptr;
+  }
+  FILE *file = fopen(path, mode);
+  streamAdmission_.finishOpen(slot, file);
+  return file;
 }
 
 /**
@@ -884,7 +988,100 @@ FILE *Storage::open(const char *path, const char *mode) {
 int Storage::close(FILE *file) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  return fclose(file);
+  const size_t slot = streamAdmission_.beginClose(file);
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EINVAL;
+    return EOF;
+  }
+  const int result = fclose(file);
+  // fclose retires the stream even when its final flush fails. Record that
+  // uncertainty permanently, while still allowing the caller to complete.
+  streamAdmission_.finishClose(slot, result == 0);
+  return result;
+}
+
+int Storage::openDescriptor(const char *path, int flags) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) {
+    errno = EBUSY;
+    return -1;
+  }
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  const size_t slot = streamAdmission_.reserveOpen();
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EBUSY;
+    return -1;
+  }
+  const int descriptor = ::open(path, flags, 0644);
+  streamAdmission_.finishOpenDescriptor(slot, descriptor);
+  return descriptor;
+}
+
+int Storage::closeDescriptor(int descriptor) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  const size_t slot = streamAdmission_.beginCloseDescriptor(descriptor);
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EINVAL;
+    return -1;
+  }
+  const int result = ::close(descriptor);
+  // Like fclose, close retires the descriptor even when it reports failure.
+  streamAdmission_.finishClose(slot, result == 0);
+  return result;
+}
+
+size_t Storage::writeDescriptor(int descriptor, const uint8_t *buffer,
+                                size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  if (descriptor < 0 || (buffer == nullptr && size > 0))
+    return 0;
+  size_t written = 0;
+  while (written < size) {
+    const ssize_t result =
+        ::write(descriptor, buffer + written, size - written);
+    if (result <= 0)
+      break;
+    written += static_cast<size_t>(result);
+  }
+  return written;
+}
+
+StorageReadEvidence Storage::readDescriptor(int descriptor, uint8_t *buffer,
+                                            size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  StorageReadEvidence evidence;
+  evidence.requested = size;
+  if (descriptor < 0 || (buffer == nullptr && size > 0)) {
+    evidence.error = true;
+    return evidence;
+  }
+  // Same contract as fread: fill the request unless end of file or an error
+  // stops it first.
+  while (evidence.returned < size) {
+    errno = 0;
+    const ssize_t result = ::read(descriptor, buffer + evidence.returned,
+                                  size - evidence.returned);
+    if (result < 0) {
+      evidence.error = true;
+      evidence.errorNumber = errno;
+      break;
+    }
+    if (result == 0) {
+      evidence.eof = true;
+      break;
+    }
+    evidence.returned += static_cast<size_t>(result);
+  }
+  return evidence;
+}
+
+int Storage::syncDescriptor(int descriptor) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  return descriptor < 0 ? -1 : ::fsync(descriptor);
 }
 
 /**
@@ -894,6 +1091,8 @@ int Storage::close(FILE *file) {
  * @return size_t Size of the file in bytes
  */
 size_t Storage::size(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return 0;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   struct stat st;
@@ -996,6 +1195,16 @@ int Storage::flush(FILE *file) {
   return file == nullptr ? EOF : fflush(file);
 }
 
+// fflush only drains libc. fsync commits FAT data, allocation and directory
+// size through the mounted VFS; callers must check both boundaries.
+int Storage::sync(FILE *file) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  if (file == nullptr || fflush(file) != 0) return EOF;
+  const int descriptor = fileno(file);
+  return descriptor < 0 ? EOF : fsync(descriptor);
+}
+
 /**
  * @brief Check if a file exists on the SD card
  *
@@ -1003,6 +1212,8 @@ int Storage::flush(FILE *file) {
  * @return true if the file exists, false otherwise
  */
 bool Storage::exists(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   struct stat st;
@@ -1016,6 +1227,8 @@ bool Storage::exists(const char *path) {
  * @return true if the directory was created successfully, false otherwise
  */
 bool Storage::mkdir(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::mkdir(path, 0777) == 0;
@@ -1028,6 +1241,8 @@ bool Storage::mkdir(const char *path) {
  * @return true if the file was removed successfully, false otherwise
  */
 bool Storage::remove(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::remove(path) == 0;
@@ -1040,6 +1255,8 @@ bool Storage::remove(const char *path) {
  * @return true if the directory was removed successfully, false otherwise
  */
 bool Storage::rmdir(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::rmdir(path) == 0;

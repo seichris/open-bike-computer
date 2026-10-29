@@ -53,11 +53,18 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /*Size of the memory available for `lv_malloc()` in bytes (>= 2kB)*/
-    // The full-screen map object tree plus LVGL's four-line software image
-    // blend buffer exceeds 64 KiB on the 466x466 displays. Keep enough margin
-    // for the Map + Navigation overlay without exhausting the built-in TLSF
-    // pool during display refresh.
-    #define LV_MEM_SIZE (96 * 1024U)          /*[bytes]*/
+    #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
+        // All resident screens, eight social badges and temporary glyph/image
+        // buffers share this pool. The 96 KiB pool exhausted during a map drag
+        // while drawing rider initials, trapping the UI in LV_ASSERT_MALLOC.
+        // Reserve bounded PSRAM headroom for refresh and TLSF fragmentation.
+        #define LV_MEM_SIZE (192 * 1024U)          /*[bytes]*/
+    #else
+        // Other boards keep this pool as a static internal-RAM array (no
+        // LV_MEM_POOL_ALLOC below). Do not grow it without measuring their
+        // DRAM segment and the Wi-Fi/BLE heap it would take away.
+        #define LV_MEM_SIZE (96 * 1024U)          /*[bytes]*/
+    #endif
 
     /*Size of the memory expand for `lv_malloc()` in bytes*/
     #define LV_MEM_POOL_EXPAND_SIZE 0
@@ -68,10 +75,10 @@
     #if LV_MEM_ADR == 0
         // Map and firmware transfers start a Wi-Fi AP after the complete UI
         // and BLE stack are live. Keep LVGL's fixed TLSF semantics, but put
-        // its 96 KiB backing pool in the PSRAM available on the Waveshare
-        // boards so the Wi-Fi driver retains enough contiguous internal memory.
-        #if defined(BOARD_HAS_PSRAM) &&                                                                        \
-            (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
+        // its 192 KiB backing pool in the PSRAM available on the AMOLED and
+        // e-paper boards so the Wi-Fi driver retains enough contiguous internal
+        // memory. E-paper aborted before setup() with this pool in internal RAM.
+        #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
             #define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
             #define LV_MEM_POOL_ALLOC(size) heap_caps_aligned_alloc(16, (size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         #else
@@ -345,8 +352,13 @@
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
-#define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
-#define LV_ASSERT_HANDLER while(1);   /*Halt by default*/
+// An LVGL assertion (for example LV_ASSERT_MALLOC on pool exhaustion) cannot be
+// recovered. LVGL runs in Arduino loop() on core 1, whose idle task the task
+// watchdog does not watch, so the stock `while(1);` froze the UI indefinitely.
+// abort() reaches the ESP-IDF panic handler, which prints a backtrace and
+// resets; the next boot's diagnostics then record a panic reset.
+#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>
+#define LV_ASSERT_HANDLER abort();
 
 /*-------------
  * Debug

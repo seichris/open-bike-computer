@@ -59,6 +59,28 @@ export interface TopographyCompanionRequirements {
   attributionSha256: string;
 }
 
+export const TOPOGRAPHY_COMPANION_FORMAT = "topography-ios-v1";
+
+// The map's declared contours layer is the only companion trigger: every
+// renderer that carries contours needs exactly one iPhone companion, and a
+// contour-free map has none. Clients verify the feature list against the
+// signed manifest, so this never depends on a renderer format version.
+export function hasContourLayer(features: readonly string[]): boolean {
+  return features.includes("contours");
+}
+
+export function topographyCompanionObjectKeys(
+  mapId: string,
+  mapContentReceipt: string,
+  sha256: string,
+): string[] {
+  const prefix = `maps/${mapId}/${TOPOGRAPHY_COMPANION_FORMAT}`;
+  return [
+    `${prefix}/${mapContentReceipt}/${sha256}.btopo`,
+    `${prefix}/production/${mapContentReceipt}/${sha256}.btopo`,
+  ];
+}
+
 export interface PublicationInput {
   publicationId: string;
   mapEntryId: string;
@@ -205,6 +227,31 @@ function companionRequirements(
   };
 }
 
+// Renderer profiles the map backend can publish (catalog.py renderer_features
+// and the generation profile policies). Targets 1-4 each have one feature
+// list; a target-5 POI map may add only the optional contours layer.
+const PUBLISHABLE_RENDERER = "esp32-fmb";
+const PUBLISHABLE_PROFILES: ReadonlyArray<{
+  rendererFormatVersion: number;
+  features: readonly string[];
+}> = [
+  { rendererFormatVersion: 1, features: [] },
+  { rendererFormatVersion: 2, features: ["street-labels"] },
+  { rendererFormatVersion: 3, features: ["3d-buildings", "street-labels"] },
+  {
+    rendererFormatVersion: 4,
+    features: ["3d-buildings", "contours", "street-labels"],
+  },
+  {
+    rendererFormatVersion: 5,
+    features: ["3d-buildings", "map-pois", "street-labels"],
+  },
+  {
+    rendererFormatVersion: 5,
+    features: ["3d-buildings", "contours", "map-pois", "street-labels"],
+  },
+];
+
 export function validatePublication(
   value: Record<string, unknown>,
 ): PublicationInput {
@@ -252,6 +299,17 @@ export function validatePublication(
     new Set(value.features).size !== value.features.length
   ) {
     throw new HttpError(400, "features are invalid");
+  }
+  if (
+    value.renderer !== PUBLISHABLE_RENDERER ||
+    !PUBLISHABLE_PROFILES.some(
+      (profile) =>
+        profile.rendererFormatVersion === value.rendererFormatVersion &&
+        profile.features.join("\u0000") ===
+          (value.features as string[]).join("\u0000"),
+    )
+  ) {
+    throw new HttpError(400, "renderer features are not publishable");
   }
   if (
     value.attribution === null ||
@@ -482,16 +540,21 @@ export function validatePublication(
     throw new HttpError(400, "artifact IDs are duplicated");
   }
   const topography = artifacts.filter(
-    (artifact) => artifact.format === "topography-ios-v1",
+    (artifact) => artifact.format === TOPOGRAPHY_COMPANION_FORMAT,
   );
-  if (Number(value.rendererFormatVersion) === 4) {
+  if (hasContourLayer(value.features as string[])) {
+    const companion = topography[0];
     if (
       topography.length !== 1 ||
-      topography[0].companionRequirements?.mapContentReceipt !==
+      companion.companionRequirements?.mapContentReceipt !==
         value.contentReceipt ||
-      topography[0].companionRequirements?.mapId !== value.legacyMapId ||
-      (value.features as string[]).join("\u0000") !==
-        ["3d-buildings", "contours", "street-labels"].join("\u0000")
+      companion.companionRequirements?.mapId !== value.legacyMapId ||
+      companion.filename !== `${value.legacyMapId}.btopo` ||
+      !topographyCompanionObjectKeys(
+        String(value.legacyMapId),
+        String(value.contentReceipt),
+        companion.sha256,
+      ).includes(companion.objectKey)
     ) {
       throw new HttpError(
         400,

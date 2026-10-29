@@ -648,6 +648,76 @@ class AppAttestStoreTests(unittest.TestCase):
                 app_build="101",
             )
 
+    def test_additive_assertion_extensions_preserve_identity_and_signature_checks(self):
+        cases = ["valid", "wrong-category", "wrong-build", "missing-category", "tampered",
+                 "prefixed", "prefixed-additive", "prefixed-wrong-category", "prefixed-wrong-build",
+                 "prefixed-missing-category", "prefixed-missing-version",
+                 "prefixed-tampered", "mixed", "conflicting"]
+        for index, case in enumerate(cases):
+            with self.subTest(case=case):
+                installation_id = "inst_v2_" + f"{index + 100:032x}"
+                private_key, key_id = self.enroll(installation_id)
+                payload = {
+                    "mode": "custom_bbox",
+                    "bbox": [103.46, 31.01, 103.52, 31.07],
+                    "clientInstallationId": installation_id,
+                    "clientRequestId": "additive-extension-" + case,
+                }
+                body = json.dumps(payload, separators=(",", ":")).encode()
+                challenge = self.store.issue_challenge(
+                    purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+                    installation_id=installation_id,
+                )
+                extensions = {
+                    "validationCategory": (3 if case.endswith("wrong-category") else 4).to_bytes(4, "little"),
+                    "bundleVersion": "wrong-build" if case.endswith("wrong-build") else TEST_APP_BUILD,
+                    "appleAdditionalMetadata": b"opaque-metadata",
+                }
+                if case.startswith("prefixed") or case in {"mixed", "conflicting"}:
+                    extensions["apple_validation_category_01"] = extensions.pop("validationCategory")
+                    extensions["apple_bundle_version_01"] = extensions.pop("bundleVersion")
+                if case == "missing-category":
+                    del extensions["validationCategory"]
+                elif case == "prefixed-missing-category":
+                    del extensions["apple_validation_category_01"]
+                elif case == "prefixed-missing-version":
+                    del extensions["apple_bundle_version_01"]
+                elif case == "mixed":
+                    extensions["bundleVersion"] = extensions.pop("apple_bundle_version_01")
+                elif case == "conflicting":
+                    extensions.update(validationCategory=(3).to_bytes(4, "little"), bundleVersion="other")
+                if case == "prefixed":
+                    # Match the live signed schema exactly, without additive fields.
+                    del extensions["appleAdditionalMetadata"]
+                assertion = self.assertion(
+                    private_key=private_key, challenge=challenge,
+                    installation_id=installation_id, payload=payload, body=body,
+                    counter=1, extensions=extensions, extension_data_flag=False,
+                    attested_credential_data_flag=True,
+                )
+                if case.endswith("tampered"):
+                    document = BoundedCBORDecoder(assertion).decode()
+                    document["authenticatorData"] = document["authenticatorData"].replace(
+                        b"opaque-metadata", b"forged-metadata"
+                    )
+                    assertion = encode_cbor(document)
+                def verify():
+                    return self.store.verify_map_create_assertion(
+                        installation_id=installation_id,
+                        challenge_id=challenge.challenge_id, key_id=key_id,
+                        assertion_object=assertion, request_body=body,
+                        payload=payload, app_build=TEST_APP_BUILD,
+                    )
+                if case in {"valid", "prefixed", "prefixed-additive"}:
+                    self.assertEqual(verify(), 1)
+                else:
+                    with self.assertRaises(AppAttestError) as rejected:
+                        verify()
+                    self.assertEqual(
+                        rejected.exception.code,
+                        "app_attest_invalid_signature" if case.endswith("tampered") else "app_attest_invalid_extensions",
+                    )
+
     def test_assertion_accepts_extensions_without_ed_flag(self):
         installation_id = "inst_v2_" + "f" * 32
         private_key, key_id = self.enroll(installation_id)
@@ -850,11 +920,11 @@ class AppAttestStoreTests(unittest.TestCase):
             payload=payload,
             body=body,
             counter=1,
-            extensions={"unexpected": True},
+            extensions={"unexpected": "synthetic-private-extension-value"},
             extension_data_flag=False,
         )
 
-        with self.assertRaisesRegex(AppAttestError, "extensions"):
+        with self.assertLogs("map_platform.app_attest", level="WARNING") as logs, self.assertRaisesRegex(AppAttestError, "extensions"):
             self.store.verify_map_create_assertion(
                 installation_id=installation_id,
                 challenge_id=challenge.challenge_id,
@@ -864,6 +934,9 @@ class AppAttestStoreTests(unittest.TestCase):
                 payload=payload,
                 app_build=TEST_APP_BUILD,
             )
+
+        self.assertIn("unexpected:str", " ".join(logs.output))
+        self.assertNotIn("synthetic-private-extension-value", " ".join(logs.output))
 
     def test_assertion_is_bound_to_body_challenge_and_monotonic_counter(self):
         installation_id = "inst_v2_" + "a" * 32

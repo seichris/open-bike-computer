@@ -9,7 +9,7 @@ import HealthKit
 @MainActor
 final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     enum RecorderError: Error {
-        case unavailable, identityMismatch, ambiguousFinish, emptySaveResult
+        case unavailable, identityMismatch, ambiguousFinish
     }
     nonisolated static let ownerMetadataKey = "org.bicino.recordingOwner.v1"
     nonisolated static let segmentMetadataKey = "org.bicino.phoneSegment.v1"
@@ -18,6 +18,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private(set) var record: WorkoutRecordingRecord?
     private(set) var message: String?
     private let healthStore: HKHealthStore
+    private let savedWorkoutLookup: (@MainActor (UUID) async throws -> HKWorkout?)?
+    private let finishWorkoutCallback: @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void
+    private let nativeTransitionWrite: @MainActor (HKLiveWorkoutBuilder, HKWorkoutEvent) async throws -> Void
+    private var recoveryAttachmentPending = false
     private let persistence: any WorkoutRecordingPersisting
     private let onRecoveredMirror: (HKWorkoutSession) -> Void
     private let canStartAfterAuthorization: () -> Bool
@@ -42,6 +46,12 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var recoveredRoute = false
     private var insertedRoutePoints = 0
     private var startDate: Date?
+    private var nativeTransitionTask: Task<Void, Error>?
+    private var nativeTransitionTaskID: UUID?
+    private var nativeTransitionGeneration: UInt64 = 0
+#if DEBUG
+    private var lastBuilderDebugCheckpoint: NSDictionary?
+#endif
     private var endDate: Date?
     private var lastLocation: CLLocation?
     private var latestLocation: CLLocation?
@@ -52,6 +62,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var pauseOrigin: WorkoutTransitionOrigin?
     private var lastTransitionOrigin: WorkoutTransitionOrigin?
     private var lastTransitionAt: Date?
+    // A locked-device save can succeed without returning a readable object.
+    private var saveConfirmed = false
     private var savedWorkout: HKWorkout?
 
     private struct LocationWrite {
@@ -70,10 +82,20 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         healthStore: HKHealthStore = HKHealthStore(),
         onRecoveredMirror: @escaping (HKWorkoutSession) -> Void = { _ in },
         canStartAfterAuthorization: @escaping () -> Bool = { true },
-        requestLocationAuthorization: @escaping () -> Void = {}
+        requestLocationAuthorization: @escaping () -> Void = {},
+        finishWorkoutCallback: @escaping @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void = { builder, completion in
+            builder.finishWorkout(completion: completion)
+        },
+        savedWorkoutLookup: (@MainActor (UUID) async throws -> HKWorkout?)? = nil,
+        nativeTransitionWrite: @escaping @MainActor (HKLiveWorkoutBuilder, HKWorkoutEvent) async throws -> Void = { builder, event in
+            try await builder.addWorkoutEvents([event])
+        }
     ) {
         self.persistence = persistence
         self.healthStore = healthStore
+        self.finishWorkoutCallback = finishWorkoutCallback
+        self.savedWorkoutLookup = savedWorkoutLookup
+        self.nativeTransitionWrite = nativeTransitionWrite
         self.onRecoveredMirror = onRecoveredMirror
         self.canStartAfterAuthorization = canStartAfterAuthorization
         self.requestLocationAuthorization = requestLocationAuthorization
@@ -87,6 +109,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 
     deinit {
         timer?.cancel()
+        nativeTransitionTask?.cancel()
         controlTimeout?.cancel()
         finalization?.cancel()
         flushTask?.cancel()
@@ -121,6 +144,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             self.builder = builder
             session.delegate = self
             builder.delegate = self
+            builder.shouldCollectWorkoutEvents = true
             configureDataSource(builder, configuration: configuration)
             // The same identity is used on recovery and for save reconciliation.
             // Never construct a replacement builder for an interrupted ride.
@@ -167,13 +191,39 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     /// Called before ANY new start, including on an ordinary cold launch.
     /// A missing/corrupt record is not proof that HealthKit has no primary session.
     func recover(expected: WorkoutRecordingRecord?) async throws {
-        guard session == nil else { return }
-        let recovered: HKWorkoutSession? = try await withCheckedThrowingContinuation { continuation in
-            healthStore.recoverActiveWorkoutSession { session, error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume(returning: session) }
+        if let session {
+            guard recoveryAttachmentPending else { return }
+            guard let builder, let record,
+                  expected == nil || (expected?.owner == .iphone && expected?.sessionID == record.sessionID) else {
+                throw RecorderError.identityMismatch
             }
+            try await attachRecoveredPrimarySession(session, builder: builder, record: record)
+            return
         }
+        let recovered: HKWorkoutSession?
+        do {
+            recovered = try await withCheckedThrowingContinuation { continuation in
+                healthStore.recoverActiveWorkoutSession { session, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: session) }
+                }
+            }
+        } catch {
+#if DEBUG
+            let native = error as NSError
+            NSLog("Bicino native recovery failed: HealthKit=%d code=%ld",
+                  native.domain == HKErrorDomain, native.code)
+#endif
+            throw error
+        }
+#if DEBUG
+        let matchesExpectedStart = recovered?.startDate.flatMap { nativeStart in
+            expected?.startedAt.map { abs(nativeStart.timeIntervalSince($0)) < 2 }
+        } ?? false
+        NSLog("Bicino native recovery result: type=%ld state=%ld owner=%@ startMatchesOwner=%d",
+              recovered?.type.rawValue ?? -1, recovered?.state.rawValue ?? -1,
+              expected?.owner.rawValue ?? "none", matchesExpectedStart)
+#endif
         if let recovered, recovered.type == .mirrored {
             onRecoveredMirror(recovered)
             if expected?.owner == .iphone { throw RecorderError.identityMismatch }
@@ -185,6 +235,13 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             store.beginLocalWorkout()
             startDate = expected.startedAt
             if expected.phase == .finished {
+                saveConfirmed = expected.finishedChoice == .save
+                if expected.finishedChoice == .save,
+                   let workout = try? await findSavedWorkout(id: expected.sessionID) {
+                    savedWorkout = workout
+                    startDate = workout.startDate
+                    endDate = workout.endDate
+                }
                 state = .ended
                 publish()
                 return
@@ -197,6 +254,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             // crash. Query the original identity; never re-record the workout.
             if let workout = try await findSavedWorkout(id: expected.sessionID) {
                 savedWorkout = workout
+                saveConfirmed = true
                 startDate = workout.startDate
                 endDate = workout.endDate
                 var next = expected
@@ -232,6 +290,16 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             owner: .iphone, sessionID: id, requestedAt: recovered.startDate ?? Date()
         )
         next.startedAt = recovered.startDate ?? next.startedAt
+        try await attachRecoveredPrimarySession(recovered, builder: builder, record: next)
+    }
+
+    /// Completes attachment only after the original builder's pending events
+    /// have durable receipts. Retain this same attachment when a write fails.
+    func attachRecoveredPrimarySession(
+        _ recovered: HKWorkoutSession, builder: HKLiveWorkoutBuilder,
+        record next: WorkoutRecordingRecord
+    ) async throws {
+        let id = next.sessionID
         guard let date = next.startedAt else { throw RecorderError.identityMismatch }
         try persist(next)
         self.session = recovered
@@ -242,7 +310,12 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         finishAttempted = next.saveAttempted
         recovered.delegate = self
         builder.delegate = self
+        recordBuilderDebugCheckpoint(reason: "recoveredBeforeDataSource")
         configureDataSource(builder, configuration: recovered.workoutConfiguration)
+        recoveryAttachmentPending = true
+        try await drainNativeTransitions(builder: builder, sessionID: id)
+        guard self.session === recovered, self.builder === builder,
+              record?.sessionID == id else { throw RecorderError.identityMismatch }
         store.beginLocalWorkout()
         generation = UUID()
         sequence = 0
@@ -253,10 +326,12 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         timestampGate = WorkoutRouteTimestampGate(workoutStart: Date())
         restoreSegments(builder)
         if next.phase == .finished {
+            saveConfirmed = next.finishedChoice == .save
             // A terminal tombstone must never re-enter finishWorkout.
             if next.finishedChoice == .discard { builder.discardWorkout(); routeBuilder?.discard() }
             recovered.end()
             state = .ended
+            recoveryAttachmentPending = false
             publish()
             return
         }
@@ -270,6 +345,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             state = .starting
         @unknown default: throw RecorderError.identityMismatch
         }
+        recoveryAttachmentPending = false
         publish()
         startTimer()
         if let choice = next.finishChoice {
@@ -285,8 +361,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 
     private func requestTransition(_ control: WorkoutControlV1) {
         guard let session, record?.finishChoice == nil,
-              (control == .pause && state == .running) || (control == .resume && state == .paused),
-              store.markPendingControl(control) else { return }
+              record?.pendingNativeTransitions?.isEmpty != false,
+              (control == .pause && state == .running) || (control == .resume && state == .paused) else { return }
+        store.releasePendingSegmentForLifecycleControl()
+        guard store.markPendingControl(control) else { return }
         pendingTransitionOrigin = .manual
         if control == .pause { session.pause() } else { session.resume() }
         let id = record?.sessionID
@@ -303,17 +381,19 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     func markSegment() {
+        let endedAt = Date()
         guard let builder, state == .running, record?.finishChoice == nil,
               let candidate = segments.candidate(
-                endedAt: Date(), cumulativeElapsedTime: builder.elapsedTime,
+                endedAt: endedAt, cumulativeElapsedTime: builder.elapsedTime(at: endedAt),
                 cumulativeDistanceMeters: distanceMeters,
                 cumulativeDistanceSource: .iPhoneLocation
               ), store.markPendingControl(.markSegment, sequence: sequence) else { return }
         let id = record?.sessionID
+        let segmentSequence = sequence
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let data = try JSONEncoder().encode(SegmentBoundary(
+                let metadata = try WorkoutRecordingMetadataCodec.encode(SegmentBoundary(
                     completed: candidate.completedSegment,
                     elapsed: candidate.cumulativeElapsedTime,
                     distance: candidate.cumulativeDistanceMeters
@@ -321,17 +401,17 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 let event = HKWorkoutEvent(
                     type: .segment,
                     dateInterval: DateInterval(start: candidate.completedSegment.startedAt, end: candidate.completedSegment.endedAt),
-                    metadata: [Self.segmentMetadataKey: data]
+                    metadata: [Self.segmentMetadataKey: metadata]
                 )
                 try await builder.addWorkoutEvents([event])
                 guard self.builder === builder, record?.sessionID == id else { return }
                 _ = segments.commit(candidate)
                 // A local successful HealthKit write is the acknowledgement.
-                acknowledgeSegment()
+                acknowledgeSegment(sequence: segmentSequence)
                 publish()
             } catch {
                 guard record?.sessionID == id else { return }
-                store.failPendingControl(.markSegment, error: .segmentMarkFailed)
+                acknowledgeSegment(sequence: segmentSequence, error: .segmentMarkFailed)
             }
         }
     }
@@ -339,12 +419,25 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     func finish(_ choice: WorkoutRecordingDisposition) {
         guard let record, let session, let next = record.finishing(choice),
               finalization == nil, store.presentation.pendingControl != .markSegment else { return }
+        if choice == .save,
+           record.pendingNativeTransitions?.isEmpty == false || store.presentation.pendingControl != nil {
+            message = "The workout transition is still being recorded. Wait or reopen Bicino to recover it before saving."
+            store.recordingMessage = message
+            return
+        }
         if choice == .save, !collectionStarted {
             message = "This recording has not started collecting. Wait for startup, or explicitly discard the interrupted setup."
             store.recordingMessage = message
             return
         }
-        do { try persist(next) }
+        var admitted = next
+        if choice == .discard {
+            nativeTransitionTask?.cancel()
+            nativeTransitionTask = nil
+            nativeTransitionTaskID = nil
+            admitted.pendingNativeTransitions = nil
+        }
+        do { try persist(admitted) }
         catch {
             message = "The finish choice could not be stored safely. The workout has not been stopped. Try again after unlocking iPhone."
             store.recordingMessage = message
@@ -391,7 +484,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         collectionEnded = true
                     }
                     if routeWriteFailed && !recoveredRoute && insertedRoutePoints == 0 { routeBuilder?.discard() }
-                    if savedWorkout != nil {
+                    if saveConfirmed {
                         // HealthKit already confirmed success; only the local
                         // tombstone write failed. Do not require read permission
                         // or call finishWorkout again to retry that disk write.
@@ -400,6 +493,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                             throw RecorderError.ambiguousFinish
                         }
                         savedWorkout = existing
+                        saveConfirmed = true
                     } else {
                         // Set before calling out: a failed/ambiguous completion
                         // is reconciled, not blindly retried or rebuilt.
@@ -408,6 +502,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         try persist(attempted)
                         finishAttempted = true
                         savedWorkout = try await finishWorkout(builder)
+                        saveConfirmed = true
                     }
                 }
                 try complete(choice)
@@ -418,7 +513,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 routeBuilder = nil
                 timer?.cancel()
                 timer = nil
-                publish()
+                // complete(.save) published the builder's final statistics.
+                // A locked save can return no readable workout; preserve that
+                // snapshot after releasing the only remaining metric source.
+                if choice == .discard || savedWorkout != nil { publish() }
             } catch {
                 guard self.record?.sessionID == id else { return }
                 message = "iPhone could not confirm the finish. Unlock it and retry the same finish choice. Check Apple Health before recording again."
@@ -442,6 +540,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     func resetFinished() {
+        nativeTransitionTask?.cancel()
+        nativeTransitionTask = nil
+        nativeTransitionTaskID = nil
         guard record == nil || record?.phase == .finished else { return }
         timer?.cancel(); timer = nil
         controlTimeout?.cancel(); controlTimeout = nil
@@ -450,7 +551,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         sequence = 0; generation = UUID(); token = UInt16.random(in: 1...UInt16.max)
         collectionStarted = false; collectionEnded = false; finishAttempted = false
         routeWriteFailed = false; distanceWriteFailed = false; recoveredRoute = false
-        insertedRoutePoints = 0; savedWorkout = nil
+        insertedRoutePoints = 0; savedWorkout = nil; saveConfirmed = false
+        recoveryAttachmentPending = false
         startDate = nil; endDate = nil; latestLocation = nil; lastLocation = nil
         locationQueue.reset(); segments = WorkoutSegmentAccumulator()
         timestampGate = nil; pauseOrigin = nil; lastTransitionOrigin = nil; lastTransitionAt = nil
@@ -464,11 +566,90 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     private func configureDataSource(_ builder: HKLiveWorkoutBuilder, configuration: HKWorkoutConfiguration) {
-        let source = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
+        let source = builder.dataSource
+            ?? HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
         // GPS distance is written exactly once by the pipeline below. Do not
         // simultaneously collect system-generated cycling distance samples.
         source.disableCollection(for: Self.distanceType)
-        builder.dataSource = source
+        if builder.dataSource == nil { builder.dataSource = source }
+    }
+
+    private static let nativeTransitionMetadataKey = "bicinoPhoneNativeTransitionID.v1"
+
+    private func recordNativeTransition(paused: Bool, at date: Date) async throws {
+        guard let builder, let record, !builder.shouldCollectWorkoutEvents else { return }
+        let intent = WorkoutNativeTransitionIntent(id: UUID(), paused: paused, capturedAt: date)
+        guard let next = record.addingNativeTransition(intent) else {
+            throw RecorderError.identityMismatch
+        }
+        try persist(next)
+        try await drainNativeTransitions(builder: builder, sessionID: record.sessionID)
+    }
+
+    private func drainNativeTransitions(builder: HKLiveWorkoutBuilder, sessionID: UUID) async throws {
+        if let task = nativeTransitionTask { try await task.value; return }
+        let attemptID = UUID()
+        nativeTransitionTaskID = attemptID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if nativeTransitionTaskID == attemptID {
+                    nativeTransitionTask = nil
+                    nativeTransitionTaskID = nil
+                }
+            }
+            while self.builder === builder, record?.sessionID == sessionID,
+                  record?.finishChoice != .discard,
+                  let intent = record?.pendingNativeTransitions?.first {
+                try Task.checkCancellation()
+                let type: HKWorkoutEventType = intent.paused ? .pause : .resume
+                let alreadyWritten = builder.workoutEvents.contains {
+                    $0.metadata?[Self.nativeTransitionMetadataKey] as? String == intent.id.uuidString
+                        || ($0.type == type && $0.dateInterval.start == intent.capturedAt)
+                }
+                if !alreadyWritten {
+                    try await nativeTransitionWrite(builder, HKWorkoutEvent(
+                        type: type, dateInterval: DateInterval(start: intent.capturedAt, duration: 0),
+                        metadata: [Self.nativeTransitionMetadataKey: intent.id.uuidString]
+                    ))
+                }
+                guard self.builder === builder, var next = record,
+                      next.sessionID == sessionID, next.finishChoice != .discard else { return }
+                next.pendingNativeTransitions?.removeAll { $0.id == intent.id }
+                if next.pendingNativeTransitions?.isEmpty == true { next.pendingNativeTransitions = nil }
+                try persist(next)
+            }
+        }
+        nativeTransitionTask = task
+        try await task.value
+    }
+
+    private func recordBuilderDebugCheckpoint(reason: String) {
+#if DEBUG
+        guard let builder else { return }
+        let events = builder.workoutEvents
+        let fields: [String: Any] = [
+            "schema": 1, "reason": reason, "state": state.rawValue,
+            "nativeState": session?.state.rawValue ?? -1,
+            "builderSessionState": builder.workoutSession?.state.rawValue ?? -1,
+            "builderSessionMatches": builder.workoutSession === session,
+            "hasDataSource": builder.dataSource != nil,
+            "collectsWorkoutEvents": builder.shouldCollectWorkoutEvents,
+            "collectionStarted": collectionStarted,
+            "collectionEnded": collectionEnded,
+            "hasBuilderStart": builder.startDate != nil,
+            "hasBuilderEnd": builder.endDate != nil,
+            "eventCount": events.count,
+            "pauseCount": events.filter { $0.type == .pause }.count,
+            "resumeCount": events.filter { $0.type == .resume }.count,
+        ]
+        let checkpoint = NSDictionary(dictionary: fields)
+        guard lastBuilderDebugCheckpoint != checkpoint else { return }
+        lastBuilderDebugCheckpoint = checkpoint
+        var persisted = fields
+        persisted["capturedAt"] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(persisted, forKey: "bicino.debug.phoneWorkoutBuilder.v1")
+#endif
     }
 
     private func attachRouteBuilder(_ builder: HKLiveWorkoutBuilder) {
@@ -546,7 +727,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     private func publish(error: WorkoutSafeErrorCodeV1? = nil) {
-        guard let record else { return }
+        guard let record, record.pendingNativeTransitions?.isEmpty != false else { return }
         let now = Date()
         let captured = endDate ?? now
         func metric(_ value: Double?, _ unit: WorkoutMetricUnitV1, at date: Date? = nil,
@@ -572,11 +753,16 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 speed: raw.speed >= 0 ? raw.speed : nil
             )
         }
-        let elapsed = metric(savedWorkout?.duration ?? builder?.elapsedTime, .seconds)
+        // The live property reflects the builder's collected contents and can
+        // stay unchanged after recovery. Evaluate HealthKit's pause/resume
+        // history at this snapshot's date rather than publishing a cached time
+        // with a fresh capture timestamp.
+        let elapsed = metric(savedWorkout?.duration ?? builder?.elapsedTime(at: captured), .seconds)
         let hr = metric(currentHR?.doubleValue(for: heartUnit), .beatsPerMinute, at: hrDate)
         let avgHR = metric(averageHR?.doubleValue(for: heartUnit), .beatsPerMinute)
         let kcal = metric(energy?.doubleValue(for: .kilocalorie()), .kilocalories)
-        let distance = metric(distanceMeters, .meters, source: .iPhoneLocation)
+        // Both live and saved cumulative distance come from HealthKit statistics.
+        let distance = metric(distanceMeters, .meters)
         let speed = metric(location?.speed, .metersPerSecond, at: location?.capturedAt, source: .iPhoneLocation)
         var availability: WorkoutAvailabilityMaskV1 = []
         if elapsed != nil { availability.insert(.elapsedTime) }
@@ -596,7 +782,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             terminalOutcome: record.finishedChoice.map { $0 == .save ? .saved : .discarded },
             pauseOrigin: state == .paused ? pauseOrigin : nil,
             lastTransitionOrigin: lastTransitionOrigin, lastTransitionAt: lastTransitionAt,
-            wallElapsedTime: startDate.flatMap { metric(max(0, captured.timeIntervalSince($0)), .seconds) }
+            wallElapsedTime: (state.isActive || endDate != nil)
+                ? startDate.flatMap { metric(max(0, captured.timeIntervalSince($0)), .seconds) }
+                : nil
         )
         guard sequence < UInt64.max else { return }
         sequence += 1
@@ -605,6 +793,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             transportGenerationID: generation, sequence: sequence, capturedAt: now, snapshot: snapshot
         )], receivedAt: now)
         store.recordingMessage = message
+        recordBuilderDebugCheckpoint(reason: "published")
     }
 
     private func startTimer() {
@@ -621,9 +810,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private func restoreSegments(_ builder: HKLiveWorkoutBuilder) {
         guard let startDate else { return }
         segments.reset(workoutStart: startDate)
-        let boundaries = builder.workoutEvents.compactMap { event -> SegmentBoundary? in
-            guard let data = event.metadata?[Self.segmentMetadataKey] as? Data else { return nil }
-            return try? JSONDecoder().decode(SegmentBoundary.self, from: data)
+        let boundaries = builder.workoutEvents.compactMap { event in
+            WorkoutRecordingMetadataCodec.decode(SegmentBoundary.self, from: event.metadata?[Self.segmentMetadataKey])
         }
         if let last = boundaries.max(by: { $0.completed.index < $1.completed.index }) {
             segments.restore(workoutStart: startDate, lastCompletedSegment: last.completed,
@@ -632,9 +820,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         }
     }
 
-    private func acknowledgeSegment() {
-        guard let record, let acknowledged = store.currentPendingControlSequence,
-              sequence < UInt64.max else { return }
+    private func acknowledgeSegment(sequence acknowledged: UInt64,
+                                    error: WorkoutSafeErrorCodeV1? = nil) {
+        guard let record, sequence < UInt64.max else { return }
         sequence += 1
         _ = store.ingestBatch([WorkoutEnvelopeV1(
             kind: .acknowledgement, sessionID: record.sessionID,
@@ -642,12 +830,13 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             sequence: sequence, capturedAt: Date(),
             acknowledgement: WorkoutAcknowledgementV1(
                 control: .markSegment, resultingState: state,
-                acknowledgedSequence: acknowledged
+                acknowledgedSequence: acknowledged, errorCode: error
             )
         )], receivedAt: Date())
     }
 
     private func findSavedWorkout(id: UUID) async throws -> HKWorkout? {
+        if let savedWorkoutLookup { return try await savedWorkoutLookup(id) }
         let identity = HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: [id.uuidString])
         let ownSource = HKQuery.predicateForObjects(from: HKSource.default())
         return try await withCheckedThrowingContinuation { continuation in
@@ -664,15 +853,33 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         }
     }
 
-    private func finishWorkout(_ builder: HKLiveWorkoutBuilder) async throws -> HKWorkout {
+    private func finishWorkout(_ builder: HKLiveWorkoutBuilder) async throws -> HKWorkout? {
         try await withCheckedThrowingContinuation { continuation in
-            builder.finishWorkout { workout, error in
+            finishWorkoutCallback(builder) { workout, error in
                 if let error { continuation.resume(throwing: error) }
-                else if let workout { continuation.resume(returning: workout) }
-                else { continuation.resume(throwing: RecorderError.emptySaveResult) }
+                else { continuation.resume(returning: workout) }
             }
         }
     }
+
+#if WORKOUT_CONTRACT_XCTEST
+    func configureFinalizationForTesting(session: HKWorkoutSession, record: WorkoutRecordingRecord) {
+        self.session = session
+        self.builder = session.associatedWorkoutBuilder()
+        self.record = record
+        startDate = record.startedAt
+        endDate = Date()
+        state = .ending
+        collectionStarted = true
+        collectionEnded = true
+        store.beginLocalWorkout()
+    }
+
+    func finalizeForTesting() async {
+        beginFinalization()
+        await finalization?.value
+    }
+#endif
 
     private static var distanceType: HKQuantityType { HKQuantityType(.distanceCycling) }
     private static var heartRateType: HKQuantityType { HKQuantityType(.heartRate) }
@@ -696,10 +903,28 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
             switch toState {
             case .running, .paused:
                 guard record?.finishChoice == nil else { workoutSession.stopActivity(with: endDate ?? date); return }
+                nativeTransitionGeneration &+= 1
+                let transitionGeneration = nativeTransitionGeneration
+                let origin = pendingTransitionOrigin ?? (fromState == .prepared ? .manual : .unknown)
+                pendingTransitionOrigin = nil
+                if (toState == .paused && fromState == .running)
+                    || (toState == .running && fromState == .paused) {
+                    do {
+                        try await recordNativeTransition(paused: toState == .paused, at: date)
+                    } catch {
+                        guard session === workoutSession else { return }
+                        message = "The workout transition could not be recorded. Reopen Bicino to retry this original workout before saving."
+                        store.recordingMessage = message
+                        store.failPendingControl(toState == .paused ? .pause : .resume, error: .sessionFailed)
+                        return
+                    }
+                }
+                guard session === workoutSession,
+                      nativeTransitionGeneration == transitionGeneration else { return }
                 state = toState == .running ? .running : .paused
                 lastLocation = nil
                 timestampGate?.resume(at: date)
-                lastTransitionOrigin = pendingTransitionOrigin ?? (fromState == .prepared ? .manual : .unknown)
+                lastTransitionOrigin = origin
                 lastTransitionAt = date
                 pauseOrigin = state == .paused ? lastTransitionOrigin : nil
                 pendingTransitionOrigin = nil
@@ -742,7 +967,13 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
         }
     }
 
-    nonisolated func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {}
+    nonisolated func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {
+        Task { @MainActor [weak self] in
+            guard let self, builder === workoutBuilder else { return }
+            recordBuilderDebugCheckpoint(reason: "builderEvent")
+            publish()
+        }
+    }
     nonisolated func workoutBuilder(_ workoutBuilder: HKLiveWorkoutBuilder, didCollectDataOf collectedTypes: Set<HKSampleType>) {
         Task { @MainActor [weak self] in
             guard let self, builder === workoutBuilder else { return }

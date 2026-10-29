@@ -16,7 +16,19 @@ struct CaptureBinding {
 struct IssueMarker {
   uint32_t sequence = 0;
   std::string code;
+  std::string incidentId;
 };
+
+inline bool validIncidentId(const std::string &value) {
+  if (value.size() != 36) return false;
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (value[i] != '-') return false;
+    } else if (!((value[i] >= '0' && value[i] <= '9') ||
+                 (value[i] >= 'a' && value[i] <= 'f'))) return false;
+  }
+  return true;
+}
 
 inline bool bindingRequiresChunkBoundary(
     const char *currentCaptureId, CaptureMode currentMode,
@@ -30,6 +42,29 @@ inline bool bindingRequiresChunkBoundary(
 inline bool markerSequenceCanAdvance(uint32_t previous, uint32_t next) {
   return next != 0 && next > previous;
 }
+
+// One bounded boot-local receipt for the latest accepted v2 marker. Keep it
+// across capture rebindings: a replay must never become a new capture's event.
+// v1 has no incident identity and retains its original sequence-only contract.
+struct MarkerReplayReceipt {
+  uint32_t sequence = 0;
+  char code[17]{};
+  char incident[37]{};
+
+  bool sameIncident(const char *id) const {
+    return id != nullptr && incident[0] != '\0' &&
+           std::strcmp(incident, id) == 0;
+  }
+  bool matches(uint32_t next, const char *nextCode, const char *id) const {
+    return sameIncident(id) && sequence == next &&
+           std::strcmp(code, nextCode) == 0;
+  }
+  void remember(uint32_t next, const char *nextCode, const char *id) {
+    sequence = next;
+    std::strncpy(code, nextCode, sizeof(code) - 1);
+    std::strncpy(incident, id, sizeof(incident) - 1);
+  }
+};
 
 inline uint32_t markerSequenceAfterBinding(
     const char *currentCaptureId, const char *nextCaptureId,
@@ -81,7 +116,9 @@ inline bool parseCaptureBinding(const std::string &command,
 
 inline bool parseIssueMarker(const std::string &command, IssueMarker &marker) {
   constexpr char prefix[] = "mark|1|";
-  if (command.rfind(prefix, 0) != 0 || command.size() <= sizeof(prefix))
+  marker = {};
+  const bool version2 = command.rfind("mark|2|", 0) == 0;
+  if ((!version2 && command.rfind(prefix, 0) != 0) || command.size() <= sizeof(prefix) || command.size() > 100)
     return false;
   const std::size_t sequenceEnd = command.find('|', sizeof(prefix) - 1);
   if (sequenceEnd == std::string::npos ||
@@ -91,7 +128,15 @@ inline bool parseIssueMarker(const std::string &command, IssueMarker &marker) {
           marker.sequence)) {
     return false;
   }
-  marker.code = command.substr(sequenceEnd + 1);
+  const std::size_t codeEnd = command.find('|', sequenceEnd + 1);
+  if (version2) {
+    if (codeEnd == std::string::npos) return false;
+    marker.incidentId = command.substr(codeEnd + 1);
+    if (!validIncidentId(marker.incidentId)) return false;
+    marker.code = command.substr(sequenceEnd + 1, codeEnd - sequenceEnd - 1);
+  } else {
+    marker.code = command.substr(sequenceEnd + 1);
+  }
   return !marker.code.empty() && marker.code.find('|') == std::string::npos;
 }
 

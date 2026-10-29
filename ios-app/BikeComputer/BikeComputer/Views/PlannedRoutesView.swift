@@ -44,7 +44,7 @@ struct SavedRoutesSettingsSection: View {
                 focusedRouteID = nil
                 onSaveOnlineRoute(nil)
             } label: {
-                Label("Save an Online Route", systemImage: "magnifyingglass")
+                Label("Create a Route", systemImage: "magnifyingglass")
             }
             .accessibilityIdentifier("saveOnlineRoute")
 
@@ -84,7 +84,7 @@ struct SavedRoutesSettingsSection: View {
         } header: {
             Text("Saved Routes")
         } footer: {
-            Text("Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically.")
+            Text("Create a route or preview a saved route. Watch-supported routes are queued automatically.")
         }
         .alert(
             "Saved Route Error",
@@ -243,11 +243,16 @@ struct SavedRoutesSettingsSection: View {
 
             Spacer()
 
-            Button("Choose Route") {
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
                 onSaveOnlineRoute(favorite)
+            } label: {
+                Image(systemName: "map")
+                    .frame(width: 32, height: 32)
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel("Choose a route for \(favorite.name)")
+            .accessibilityLabel("Plan a route to \(favorite.name)")
         }
         .padding(.vertical, 4)
     }
@@ -464,10 +469,7 @@ struct SavedRoutesSettingsSection: View {
     ) -> some View {
         switch status {
         case .ready:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .frame(width: 32, height: 32)
-                .accessibilityLabel("\(displayName) is saved on Apple Watch")
+            EmptyView()
         case .transferring:
             EmptyView()
         case .deleting:
@@ -490,7 +492,7 @@ struct SavedRoutesSettingsSection: View {
             finishRenaming()
             focusedRouteID = nil
             do {
-                try routeLibrary.sendToWatch(route)
+                try routeLibrary.retryWatchSync(route)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -511,8 +513,9 @@ struct SavedRoutesSettingsSection: View {
             ("Queued", "clock", .secondary)
         case .deleting:
             ("Deleting", "clock", .secondary)
-        case .rejected:
-            ("Sync failed", "exclamationmark.triangle.fill", .red)
+        case .rejected(let reason):
+            (reason == "watch_update_required" ? "Update Watch app" : "Sync failed",
+             "exclamationmark.triangle.fill", .red)
         case .localOnly, .ready:
             nil
         }

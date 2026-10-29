@@ -37,7 +37,7 @@ import {
   verifyServiceRequest,
 } from "./security";
 import type { Channel, Env } from "./types";
-import { validatePublication } from "./validation";
+import { hasContourLayer, validatePublication } from "./validation";
 
 function json(
   value: unknown,
@@ -249,10 +249,9 @@ async function shareLanding(env: Env, token: string): Promise<Response> {
   const smartAppBannerMeta = smartAppBanner
     ? `<meta name="apple-itunes-app" content="app-id=${smartAppBanner}, app-argument=${escapeHTML(shareURL)}">`
     : "";
-  const elevationNotices =
-    preview.rendererFormatVersion === 4 && preview.features.includes("contours")
-      ? topographyShareNotices()
-      : "";
+  const elevationNotices = hasContourLayer(preview.features)
+    ? topographyShareNotices()
+    : "";
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 ${smartAppBannerMeta}

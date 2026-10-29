@@ -1174,9 +1174,9 @@ private struct WorkoutContractTestSuite {
                 terminalOutcome: .saved
             )
         )
-        guard case let .forward(terminal, terminalID, terminalToken) =
+        guard case let .finish(terminal, terminalID, terminalToken) =
                 state.receive(ended) else {
-            expect(false, "an ended Watch workout remains visible on the device")
+            expect(false, "ending the workout begins device handback before Done")
             return
         }
         expect(
@@ -1185,8 +1185,38 @@ private struct WorkoutContractTestSuite {
             "terminal forwarding retains the final session identity"
         )
         expect(
+            state.receive(ended) == .ignore && state.receive(running) == .ignore,
+            "finished or delayed active snapshots cannot reacquire the device"
+        )
+        expect(
+            state.receive(nil) == .ignore && state.receive(nil) == .ignore,
+            "dismissing the summary does not reconnect just to clear the device"
+        )
+        let nextSessionID = UUID(
+            uuidString: "44444444-4444-4444-4444-444444444444"
+        )!
+        let nextWorkout = makeEnvelope(
+            sessionID: nextSessionID,
+            sessionToken: 44,
+            sequence: 1,
+            capturedAt: capturedAt.addingTimeInterval(60),
+            snapshot: WorkoutSnapshotV1(
+                state: .running,
+                startDate: capturedAt.addingTimeInterval(60)
+            )
+        )
+        guard case let .forward(_, nextID, nextToken) =
+                state.receive(nextWorkout) else {
+            expect(false, "a successor workout can acquire the device")
+            return
+        }
+        expect(
+            nextID == nextSessionID && nextToken == 44,
+            "successor forwarding preserves its own identity"
+        )
+        expect(
             state.receive(nil) == .clear && state.receive(nil) == .ignore,
-            "only the explicit summary-dismissal boundary clears the device"
+            "an active workout still clears once at an explicit idle boundary"
         )
 
         var failedState = WorkoutDeviceForwardingStateV1()
@@ -1200,7 +1230,7 @@ private struct WorkoutContractTestSuite {
                 errorCode: .sessionFailed
             )
         )
-        guard case let .forward(failure, _, token) =
+        guard case let .finish(failure, _, token) =
                 failedState.receive(failed) else {
             expect(false, "a failed direct-Watch workout is forwarded")
             return
@@ -1208,6 +1238,11 @@ private struct WorkoutContractTestSuite {
         expect(
             failure.state == .failed && token == 43,
             "failed workout state is not collapsed to idle"
+        )
+        expect(
+            failedState.receive(failed) == .ignore &&
+                failedState.receive(nil) == .ignore,
+            "a failed terminal workout also releases without waiting for Done"
         )
     }
 
@@ -6884,9 +6919,9 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             launchContext == .workoutLaunch
-                && launchDetail.contains("workout did not start")
+                && launchDetail.contains("could not confirm the start")
                 && !launchDetail.contains("workout continues on Watch"),
-            "failed Watch launch must say the workout did not start"
+            "failed Watch launch must preserve uncertainty until the Watch is checked"
         )
 
         var fatalReducer = WorkoutMirrorStateReducer()
@@ -8405,7 +8440,7 @@ private struct WorkoutContractTestSuite {
             )
                 && compactContent.contains("else{rideRoutePlanSheet}")
                 && compactContent.contains(
-                    "Label(\"Startnavigation\",systemImage:\"location.fill\")"
+                    "Label(pendingFavoriteDestination==nil?\"Startnavigation\":\"Start&SavetoFavorites\",systemImage:\"location.fill\")"
                 )
                 && compactContent.contains("coordinator.startSelectedRoute()")
                 && compactContent.contains(
@@ -8573,7 +8608,7 @@ private struct WorkoutContractTestSuite {
                 "guard!isOnlyCheckingForServerMapselse{returnfalse}"
             )
                 && compactContent.contains(
-                    "offlineMapManager.isServerRecoveryCheckPending&&offlineMapManager.currentJob==nil&&offlineMapManager.downloadedPackURL==nil&&offlineMapManager.errorMessage==nil"
+                    "offlineMapManager.isCheckingForServerMaps&&!offlineMapManager.hasPendingDeviceActivation&&!offlineMapManager.isDeviceTransferBusy&&!offlineMapManager.hasActiveBackgroundUpload&&offlineMapManager.errorMessage==nil"
                 ),
             "the passive offline-map recovery scan must not flash a startup status chip"
         )

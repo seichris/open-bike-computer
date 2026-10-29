@@ -44,6 +44,7 @@ function hex(bytes: ArrayBuffer): string {
 async function seedShareLanding(
   token: string,
   topographic = false,
+  rendererFormatVersion = topographic ? 4 : 1,
 ): Promise<void> {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const libraryID = `lib_v1_${suffix}`;
@@ -70,7 +71,7 @@ async function seedShareLanding(
       `receipt-${suffix}`,
       "Shared Shanghai map",
       "Shanghai",
-      topographic ? 4 : 1,
+      rendererFormatVersion,
       JSON.stringify(
         topographic ? ["roads", "places", "contours"] : ["roads", "places"],
       ),
@@ -183,6 +184,17 @@ describe("worker public surfaces", () => {
     expect(html).toContain("produced using Copernicus WorldDEM-30");
     expect(html).toContain("produced using Copernicus WorldDEM™-90");
     expect(html).toContain("do not incur any liability");
+  });
+
+  it("shows elevation notices for combined POI and contour shares", async () => {
+    const token = "D".repeat(43);
+    await seedShareLanding(token, true, 5);
+    const response = await worker.fetch(
+      new Request(`https://maps-share-staging.8o.vc/s/${token}`),
+      workerEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Elevation source notices");
   });
 
   it("bootstraps a bearer credential but never caches it", async () => {

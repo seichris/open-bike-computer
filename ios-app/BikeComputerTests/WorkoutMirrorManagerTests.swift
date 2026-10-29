@@ -347,6 +347,49 @@ private final class FakeRideAutomationWorkoutController:
 @available(iOS 17.0, *)
 @MainActor
 final class RideAutomationCoordinatorProductionTests: XCTestCase {
+    func testStaleConfigurationRejectionDoesNotAdvanceMatchingGeneration()
+        async throws
+    {
+        let (defaults, settingsStore) = try makeSettingsStore(
+            persistence: FakeRideDecisionPersistence())
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        let ble = FakeRideAutomationBLETransport()
+        let coordinator = RideAutomationCoordinator(
+            bleManager: ble,
+            workoutManager: FakeRideAutomationWorkoutController(),
+            settingsStore: settingsStore)
+        var sentFrames: [RideAutomationFrame] = []
+        ble.connect(deviceID: "bicino-175") { sentFrames.append($0); return true }
+        try await waitUntil("initial resynchronization") {
+            sentFrames.contains { $0.kind == .resynchronize }
+        }
+        let generation = settingsStore.generation
+        let settings = settingsStore.settings
+        // A queued older request is rejected, but the reply reports the
+        // device's current configuration, not the rejected request's generation.
+        for _ in 0..<3 {
+            ble.receive(RideAutomationFrame(
+                kind: .configurationAcknowledgement, result: .rejected,
+                rideGeneration: 7, profileVersion: 1,
+                watermarkOrConfigGeneration: generation,
+                startMode: settings.startMode,
+                autoPauseEnabled: settings.autoPauseEnabled,
+                alertMode: settings.alertMode, monotonicSeconds: 100))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(settingsStore.generation, generation)
+        XCTAssertNil(coordinator.confirmedDeviceSettings,
+                     "A rejection must not be promoted to an acknowledgement")
+        XCTAssertFalse(sentFrames.contains { $0.kind == .configuration },
+                       "Stale replies must not create an immediate retry loop")
+        acknowledgeConfiguration(on: ble, settingsStore: settingsStore,
+                                 rideGeneration: 7, monotonicSeconds: 101)
+        try await waitUntil("later accepted acknowledgement") {
+            coordinator.confirmedDeviceSettings == settings
+        }
+        XCTAssertEqual(settingsStore.generation, generation)
+    }
+
     func testPromptOutboxIsDurableBeforePublicationAndCancellationClearsIt()
         async throws
     {
@@ -764,6 +807,34 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
 @available(iOS 17.0, *)
 @MainActor
 final class WorkoutMirrorManagerProductionTests: XCTestCase {
+    func testColdNativeAttachmentRequestsSnapshotWithoutCredentials() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let manager = WorkoutMirrorManager()
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertTrue(transport.hasDelegate)
+            XCTAssertNil(manager.store.currentEnvelope)
+            XCTAssertEqual(transport.sentData,
+                [Data("bicino.workout.snapshot-request.v1".utf8)])
+            XCTAssertEqual(transport.pauseCallCount, 0)
+            XCTAssertEqual(transport.resumeCallCount, 0)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            transport.completeNext(succeeded: false)
+            await Task.yield()
+            XCTAssertNil(manager.store.presentation.pendingControl)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            let snapshot = makeSnapshotEnvelope(sequence: 20, capturedAt: Date(), state: state)
+            manager.applyRemoteEnvelopes([snapshot], receivedAt: Date(), from: transport)
+            XCTAssertEqual(manager.store.presentation.sessionID, snapshot.sessionID)
+            if state == .paused { manager.resume() } else { manager.pause() }
+            let control = try WorkoutContractCodec.decode(XCTUnwrap(transport.sentData.last))
+            XCTAssertEqual(control.sessionID, snapshot.sessionID)
+            XCTAssertEqual(control.sessionToken, snapshot.sessionToken)
+            XCTAssertEqual(control.control, state == .paused ? .resume : .pause)
+        }
+    }
+
     func testNativeTakeoverFailureDrainsAuthoritativeTerminalSnapshot() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_399_900)
         let manager = WorkoutMirrorManager(
@@ -1933,7 +2004,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             manager.store.presentation.errorCode,
             context: copyContext
         )
-        XCTAssertTrue(detail.contains("workout did not start"))
+        XCTAssertTrue(detail.contains("could not confirm the start"))
         XCTAssertFalse(detail.contains("workout continues on Watch"))
         XCTAssertEqual(
             diagnostics.events.first(where: {
@@ -1948,6 +2019,76 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(completion?.fields["outcome"], "failure")
         XCTAssertEqual(completion?.fields["result"], "applied")
         XCTAssertEqual(completion?.fields["errorCode"], "watchUnavailable")
+        XCTAssertEqual(completion?.fields["errorDomain"], "none")
+    }
+
+    func testWatchLaunchFailureRetainsOnlyBoundedPlatformErrorIdentity() async throws {
+        for domain in [HKErrorDomain, WCErrorDomain, "private-user-domain"] {
+            let probe = WatchLaunchProbe()
+            let diagnostics = WorkoutLaunchDiagnosticsProbe()
+            let manager = WorkoutMirrorManager(launchWatchApp: probe.launch)
+            manager.diagnosticsRecorder = diagnostics
+            XCTAssertTrue(manager.startOutdoorCyclingOnWatch())
+            probe.completeNext(succeeded: false, error: NSError(
+                domain: domain, code: 42, userInfo: [
+                    NSLocalizedDescriptionKey: "private-user-description",
+                    NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 57)
+                ]
+            ))
+            try await waitUntil { manager.store.presentation.connectionState == .failed }
+            let fields = try XCTUnwrap(diagnostics.events.last {
+                $0.name == "watch_launch_completed"
+            }?.fields)
+            XCTAssertEqual(fields["errorDomain"], domain == HKErrorDomain ? "healthkit"
+                : domain == WCErrorDomain ? "watch_connectivity" : "other")
+            XCTAssertEqual(fields["code"], "42")
+            XCTAssertEqual(fields["underlyingErrorDomain"], "posix")
+            XCTAssertEqual(fields["underlyingErrorCode"], "57")
+            XCTAssertFalse(fields.values.contains { $0.contains("private-user") })
+            XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
+        }
+    }
+
+    /// The probe above sees fields before the recorder's privacy allowlist.
+    /// Persist through the production recorder so a dropped key cannot pass.
+    func testWatchLaunchFailureIdentitySurvivesProductionRecorder() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-launch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultsSuite = "watch-launch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root, userDefaults: defaults)
+        let probe = WatchLaunchProbe()
+        let manager = WorkoutMirrorManager(launchWatchApp: probe.launch)
+        manager.diagnosticsRecorder = recorder
+        XCTAssertTrue(manager.startOutdoorCyclingOnWatch())
+        probe.completeNext(succeeded: false, error: NSError(
+            domain: WCErrorDomain, code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "private-user-description",
+                NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 57)
+            ]
+        ))
+        try await waitUntil { manager.store.presentation.connectionState == .failed }
+        recorder.flush()
+        let streams = try (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL } ?? [])
+            .filter { $0.pathExtension == "jsonl" }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+        let events = try streams.split(separator: "\n").map {
+            try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+        }
+        let completion = try XCTUnwrap(events.last { $0.event == "watch_launch_completed" })
+        XCTAssertEqual(completion.level, .warning)
+        XCTAssertEqual(completion.fields["outcome"], "failure")
+        XCTAssertEqual(completion.fields["errorCode"],
+                       manager.store.presentation.errorCode?.rawValue)
+        XCTAssertEqual(completion.fields["errorDomain"], "watch_connectivity")
+        XCTAssertEqual(completion.fields["code"], "7")
+        XCTAssertEqual(completion.fields["underlyingErrorDomain"], "posix")
+        XCTAssertEqual(completion.fields["underlyingErrorCode"], "57")
+        XCTAssertFalse(streams.contains("private-user"))
     }
 
     func testStaleLaunchFailureCannotCancelRetryTimeout() async throws {
@@ -2797,9 +2938,14 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
     func testProductionSegmentTimeoutAcceptsCorrelatedLateSuccess()
         async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_380)
+        let timeoutWaiter = ControlledWorkoutTimeoutWaiter()
         let manager = WorkoutMirrorManager(
             now: { now },
-            controlConfirmationTimeout: 0.02
+            controlConfirmationTimeout: 0.02,
+            controlConfirmationWait: { timeout in
+                XCTAssertEqual(timeout, 0.02)
+                try await timeoutWaiter.wait(timeout)
+            }
         )
         let transport = FakeMirroredSessionTransport()
         manager.acceptMirroredTransport(transport)
@@ -2814,7 +2960,17 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             XCTUnwrap(transport.sentData.first)
         )
 
-        try await Task.sleep(for: .milliseconds(50))
+        // A wall-clock sleep in this test does not order the separately
+        // scheduled MainActor timeout task under simulator load. Hold that
+        // task until it has registered, then release exactly its timeout.
+        try await waitUntil { timeoutWaiter.waitCallCount == 1 }
+        XCTAssertEqual(manager.store.presentation.pendingControl, .markSegment)
+        XCTAssertEqual(transport.sentData.count, 1)
+        timeoutWaiter.completeWait(at: 0)
+        try await waitUntil {
+            manager.store.presentation.pendingControl == nil &&
+                transport.sentData.count == 2
+        }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -3180,6 +3336,32 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(manager.store.presentation.sessionState, .running)
     }
 
+    func testLostSendCompletionCannotBlockTerminalChoiceAfterPauseConfirmation() async throws {
+        for discard in [false, true] {
+            let now = Date(timeIntervalSinceReferenceDate: 800_400_545)
+            let manager = WorkoutMirrorManager(now: { now }, remoteSendTimeout: 0.02)
+            let transport = FakeMirroredSessionTransport()
+            manager.acceptMirroredTransport(transport)
+            manager.applyRemoteEnvelopes(
+                [makeSnapshotEnvelope(sequence: 60, capturedAt: now, state: .running)],
+                receivedAt: now, from: transport)
+            manager.pause()
+            manager.applyNativeSessionState(.paused, at: now, from: transport)
+            if discard { manager.discard() } else { manager.endAndSave() }
+            XCTAssertEqual(transport.sentData.count, 1)
+            try await waitUntil { transport.sentData.count == 2 }
+            let terminal = try WorkoutContractCodec.decode(transport.sentData[1])
+            XCTAssertEqual(terminal.control, discard ? .discard : .endAndSave)
+            let pause = try WorkoutContractCodec.decode(transport.sentData[0])
+            XCTAssertGreaterThan(terminal.sequence, pause.sequence)
+            // The old completion must not clear the successor's semantic state.
+            transport.completeNext(succeeded: true)
+            await Task.yield()
+            XCTAssertEqual(manager.store.presentation.pendingControl,
+                           discard ? .discard : .endAndSave)
+        }
+    }
+
     func testPauseResumeTimeoutsRemainWatchUnavailable() async throws {
         for (index, scenario) in [
             (state: WorkoutSessionStateV1.running, control: WorkoutControlV1.pause),
@@ -3346,6 +3528,24 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
         XCTAssertEqual(manager.store.presentation.connectionState, .connected)
         XCTAssertNil(manager.store.presentation.errorCode)
+    }
+
+    func testRecoveredTransportSeedsItsExistingNativeState() async throws {
+        for state in [WorkoutSessionStateV1.running, .paused] {
+            let manager = WorkoutMirrorManager(watchLaunchTimeout: 0.02)
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(manager.store.presentation.connectionState, .disconnected)
+            XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
+            XCTAssertTrue(transport.hasDelegate,
+                          "Recovery keeps the live transport for a late credentialed snapshot")
+            XCTAssertEqual(transport.sentData, [WorkoutMirrorSnapshotRequest.data],
+                           "Native state permits only a state-neutral snapshot bootstrap")
+        }
     }
 
     func testHungTerminalAttemptCannotBlockOrClearSameControlRetry() async throws {
@@ -4169,7 +4369,10 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let controlEnvelope = try WorkoutContractCodec.decode(
             XCTUnwrap(transport.sentData.first)
         )
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil {
+            manager.store.presentation.pendingControl == nil &&
+                manager.store.presentation.errorCode == .terminalChoiceUnconfirmed
+        }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
@@ -4369,11 +4572,11 @@ private final class WatchLaunchProbe: @unchecked Sendable {
         completeNext(succeeded: succeeded)
     }
 
-    func completeNext(succeeded: Bool) {
+    func completeNext(succeeded: Bool, error: Error? = nil) {
         let completion = lock.withLock {
             storedCompletions.isEmpty ? nil : storedCompletions.removeFirst()
         }
-        completion?(succeeded, nil)
+        completion?(succeeded, error)
     }
 }
 
@@ -4382,6 +4585,7 @@ private final class WatchLaunchProbe: @unchecked Sendable {
 private final class FakeMirroredSessionTransport:
     WorkoutMirroredSessionTransport {
     var sessionStartDate: Date?
+    var initialSessionState: WorkoutSessionStateV1?
     private(set) var sentData: [Data] = []
     private(set) var pauseCallCount = 0
     private(set) var resumeCallCount = 0

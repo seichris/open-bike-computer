@@ -86,6 +86,19 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("previousEnabledTile", previous)
         self.assertIn("showPreviousMainScreen();", EPAPER_UI_SOURCE)
 
+    def test_pois_share_the_stable_camera_visible_crop_with_labels(self):
+        raster = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap(")
+        self.assertIn("poiGutter = context.labelGutter", raster)
+        self.assertIn("poiSurface.width = context.labelViewportWidth", raster)
+        self.assertIn("poiSurface.height = context.labelViewportHeight", raster)
+        self.assertIn("projected.x - poiGutter", raster)
+        self.assertIn("projected.y - poiGutter", raster)
+        self.assertIn("projectedMarker.x - poiGutter", raster)
+        self.assertIn("projectedMarker.y - poiGutter", raster)
+        self.assertIn("map_poi_icon::draw(poiSurface", raster)
+        labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels(")
+        self.assertIn("poiReservedRegions", labels)
+
     def test_ui_submission_path_contains_no_storage_or_raster_work(self):
         generate = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"
@@ -218,7 +231,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("xTaskCreatePinnedToCoreWithCaps", start)
         self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", start)
         self.assertNotIn("xTaskCreatePinnedToCore(", start)
-        self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
+        self.assertIn("vTaskSuspend(nullptr)", thunk)
+        reclaim = function_body(MAP_RENDERER_SOURCE, "bool Maps::reclaimRenderWorker")
+        self.assertIn("vTaskDeleteWithCaps(worker)", reclaim)
+        self.assertNotIn("vTaskDeleteWithCaps(nullptr)", thunk)
         self.assertNotIn("vTaskDelete(nullptr)", thunk)
 
     def test_round_panel_sizes_overscan_without_spending_coverage_margin(self):
@@ -233,26 +249,38 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
 
     def test_waveshare_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
+        gate = (
+            "#if defined(BOARD_HAS_PSRAM) && "
+            "(defined(WAVESHARE_AMOLED_175) || "
+            "defined(WAVESHARE_AMOLED_206) || "
+            "defined(WAVESHARE_EPAPER_397))"
+        )
         allocator = (
             "heap_caps_aligned_alloc(16, (size), "
             "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
         )
         for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
-            profile_gate = config.index("#if defined(BOARD_HAS_PSRAM)")
-            fallback = config.index("#else", profile_gate)
-            gate = config[profile_gate:fallback]
-            for profile in (
-                "WAVESHARE_AMOLED_175",
-                "WAVESHARE_AMOLED_206",
-                "WAVESHARE_EPAPER_397",
-            ):
-                self.assertIn(f"defined({profile})", gate)
-            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
+            # The enlarged pool is PSRAM-only; boards whose pool is a static
+            # internal-RAM array keep the previous size.
+            size_gate = config.index(gate)
+            size_fallback = config.index("#else", size_gate)
+            size_end = config.index("#endif", size_fallback)
+            self.assertIn("#define LV_MEM_SIZE (192 * 1024U)", config[size_gate:size_fallback])
+            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config[size_fallback:size_end])
+            self.assertEqual(config.count("#define LV_MEM_SIZE"), 2)
+            pool_gate = config.index(gate, size_end)
             self.assertIn(
-                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
+                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config[pool_gate:]
             )
-            self.assertIn(allocator, config)
+            self.assertIn(allocator, config[pool_gate:])
+            fallback = config.index("#else", pool_gate)
             self.assertIn("#undef LV_MEM_POOL_ALLOC", config[fallback:])
+
+    def test_lvgl_assertions_reset_through_the_panic_handler(self):
+        for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
+            self.assertIn("#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>", config)
+            self.assertIn("#define LV_ASSERT_HANDLER abort();", config)
+            self.assertNotIn("#define LV_ASSERT_HANDLER while(1);", config)
 
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
         publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
@@ -487,6 +515,25 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             request.index("Course-up frame deferred"),
         )
 
+    def test_render_semantics_key_on_the_zoom_actually_rendered(self):
+        # A screen profile may store zoom 0 while the renderer clamps to 1.
+        # Keying the per-tick projection check on the raw value but the request
+        # on the clamped one flipped the signature every tick, cancelling each
+        # render so the screen never published a frame.
+        clamp = "requestedZoom = map_transform::clampRuntimeZoom(requestedZoom)"
+        semantics = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::invalidateRenderSemanticsForScreen"
+        )
+        request = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn(clamp, semantics)
+        self.assertLess(semantics.index(clamp),
+                        semantics.index("projectionSignature("))
+        self.assertIn(clamp, request)
+        self.assertLess(request.index(clamp),
+                        request.index("request.zoom = requestedZoom"))
+
     def test_position_only_requests_do_not_cancel_active_render(self):
         job = (ESP32_ROOT / "lib" / "maps" / "src" / "mapRenderJob.hpp").read_text(
             encoding="utf-8"
@@ -632,7 +679,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn('"No map for this area"', MAP_RENDERER_SOURCE)
         self.assertIn('"Download a map\\nin the Bicino app"', MAP_RENDERER_SOURCE)
         self.assertIn('"No microSD card"', MAP_RENDERER_SOURCE)
-        self.assertIn('"Insert a microSD card"', MAP_RENDERER_SOURCE)
+        # One line: a second line would sit under the rider position marker.
+        self.assertIn('"Insert a microSD card and restart"', MAP_RENDERER_SOURCE)
 
     def test_initial_map_canvas_allocation_does_not_stop_control_worker(self):
         create = function_body(MAP_RENDERER_SOURCE, "void Maps::createMapScrSprites")

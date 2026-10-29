@@ -406,6 +406,32 @@ bool isValidDeviceName(const std::string &name) {
   return true;
 }
 
+bool deriveHardwareDeviceId(DeviceId &deviceId) {
+  uint8_t hardwareMac[6]{};
+  std::array<uint8_t, 32> identityDigest{};
+  static constexpr char identityDomain[] = "BikeComputer device ID v2";
+  std::array<uint8_t, sizeof(identityDomain) - 1 + sizeof(hardwareMac)>
+      identityInput{};
+  memcpy(identityInput.data(), identityDomain, sizeof(identityDomain) - 1);
+  if (esp_efuse_mac_get_default(hardwareMac) != ESP_OK) {
+    return false;
+  }
+  memcpy(identityInput.data() + sizeof(identityDomain) - 1, hardwareMac,
+         sizeof(hardwareMac));
+  if (!sha256(identityInput.data(), identityInput.size(),
+              identityDigest.data())) {
+    return false;
+  }
+
+  memcpy(deviceId.data(),identityDigest.data(),deviceId.size());
+  return true;
+}
+
+std::string hardwareDeviceIdHex() {
+  DeviceId identity{};
+  return deriveHardwareDeviceId(identity) ? hexEncode(identity.data(),identity.size()) : std::string();
+}
+
 bool DeviceOwnership::begin() {
   if (!loadOrCreateDeviceId()) {
     return false;
@@ -1594,20 +1620,8 @@ bool DeviceOwnership::loadOrCreateDeviceId() {
                                  preferences.isKey(OWNER_ID_KEY) ||
                                  preferences.isKey(OWNER_KEY_KEY) ||
                                  preferences.isKey(DEVICE_NAME_KEY);
-  uint8_t hardwareMac[6]{};
-  std::array<uint8_t, 32> identityDigest{};
-  static constexpr char identityDomain[] = "BikeComputer device ID v2";
-  std::array<uint8_t, sizeof(identityDomain) - 1 + sizeof(hardwareMac)>
-      identityInput{};
-  memcpy(identityInput.data(), identityDomain, sizeof(identityDomain) - 1);
-  if (esp_efuse_mac_get_default(hardwareMac) != ESP_OK) {
-    preferences.end();
-    return false;
-  }
-  memcpy(identityInput.data() + sizeof(identityDomain) - 1, hardwareMac,
-         sizeof(hardwareMac));
-  if (!sha256(identityInput.data(), identityInput.size(),
-              identityDigest.data())) {
+  DeviceId derivedDeviceId{};
+  if (!deriveHardwareDeviceId(derivedDeviceId)) {
     preferences.end();
     return false;
   }
@@ -1617,7 +1631,7 @@ bool DeviceOwnership::loadOrCreateDeviceId() {
       preferences.getBytesLength(DEVICE_ID_KEY) == storedDeviceId.size() &&
       preferences.getBytes(DEVICE_ID_KEY, storedDeviceId.data(),
                            storedDeviceId.size()) == storedDeviceId.size();
-  memcpy(deviceId_.data(), identityDigest.data(), deviceId_.size());
+  deviceId_ = derivedDeviceId;
   if (hasStoredDeviceId &&
       constantTimeEquals(storedDeviceId.data(), deviceId_.data(),
                          deviceId_.size())) {

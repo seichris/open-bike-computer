@@ -2,6 +2,9 @@
 
 import configparser
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -19,21 +22,101 @@ def inherited_option(section: str, option: str) -> str:
         assert current not in visited, f"cyclic PlatformIO inheritance at {current}"
         visited.add(current)
         if config.has_option(current, option):
-            return config.get(current, option)
+            return re.sub(
+                r"\$\{([^.}]+)\.([^}]+)\}",
+                lambda match: inherited_option(match[1], match[2]),
+                config.get(current, option),
+            )
         current = config.get(current, "extends", fallback="").strip()
     raise AssertionError(f"{section} does not resolve {option}")
 
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
 for section in config.sections():
-    if section.startswith("env:WAVESHARE_AMOLED_"):
+    if section.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_")):
         sdk = inherited_option(section, "custom_sdkconfig")
         assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
         assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
+        ipc_sizes = re.findall(r"^CONFIG_ESP_IPC_TASK_STACK_SIZE=(\d+)$", sdk, re.M)
+        assert ipc_sizes == ["1536"], (section, ipc_sizes)
 main_source = (project_dir / "src/main.cpp").read_text()
 main_screen_source = (project_dir / "lib/gui/src/mainScr.cpp").read_text()
 maps_source = (project_dir / "lib/maps/src/maps.cpp").read_text()
+assert '#include "ipc_stack_budget.hpp"' in main_source
+# Exercise effective SDK values, including the failing pinned-Arduino value
+# and the S3 default that leaves too little reserve on the observed crash path.
+compiler = shutil.which("c++") or shutil.which("g++")
+assert compiler, "a C++ compiler is required for the effective IPC config gate"
+with tempfile.TemporaryDirectory() as temporary:
+    stub_dir = Path(temporary)
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206",
+                  "WAVESHARE_EPAPER_397", "LEGACY_BOARD"):
+        for size in (None, 1024, 1280, 1536, 2048):
+            (stub_dir / "sdkconfig.h").write_text(
+                "" if size is None else f"#define CONFIG_ESP_IPC_TASK_STACK_SIZE {size}\n"
+            )
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", "-x", "c++",
+                 f"-D{board}", "-I", str(stub_dir), "-I", str(project_dir / "include"), "-"],
+                input='#include "ipc_stack_budget.hpp"\n', text=True, capture_output=True,
+            )
+            accepted = board == "LEGACY_BOARD" or (size is not None and size >= 1536)
+            assert (result.returncode == 0) == accepted, (board, size, result.stderr)
+            if not accepted:
+                assert "Waveshare Bluetooth IPC stack requires" in result.stderr
 lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
+
+# External BSS is used before setup(). Reject a core that only initializes
+# PSRAM later in Arduino, or silently expands the placement attribute away.
+external_bss_requirements = (
+    "CONFIG_SPIRAM_BOOT_HW_INIT", "CONFIG_SPIRAM_BOOT_INIT",
+    "CONFIG_SPIRAM_MEMTEST", "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
+)
+for environment in config.sections():
+    if environment.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_")):
+        sdkconfig = inherited_option(environment, "custom_sdkconfig")
+        for requirement in external_bss_requirements:
+            assert requirement + "=y" in sdkconfig, (environment, requirement)
+
+with tempfile.TemporaryDirectory(prefix="task-data-placement-") as temporary:
+    stub_dir = Path(temporary)
+    # Portable stand-in for the SDK attribute; the final target ELF, not this
+    # host compiler, proves external placement. Check forwarding and defaults.
+    (stub_dir / "esp_attr.h").write_text(
+        '#define EXT_RAM_BSS_ATTR __attribute__((aligned(64)))\n'
+    )
+    source = '''
+#include "task_data_placement.hpp"
+#include "startup_constructed.hpp"
+#include <cstdint>
+struct State { unsigned zero = 0; unsigned sentinel = 255; };
+static BICINO_TASK_DATA StartupConstructed<State> state;
+int main() {
+  return state.value.zero != 0 || state.value.sentinel != 255 ||
+         reinterpret_cast<std::uintptr_t>(&state) % 64 != 0;
+}
+'''
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "WAVESHARE_EPAPER_397"):
+        for missing in (None, *external_bss_requirements):
+            (stub_dir / "sdkconfig.h").write_text("".join(
+                f"#define {name} {int(name != missing)}\n"
+                for name in external_bss_requirements
+            ))
+            executable = stub_dir / "placement"
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-DESP_PLATFORM", f"-D{board}",
+                 "-I", str(stub_dir), "-I", str(project_dir / "lib/utils/src"),
+                 "-x", "c++", "-", "-o", str(executable)],
+                input=source, text=True, capture_output=True,
+            )
+            assert (result.returncode == 0) == (missing is None), (
+                board, missing, result.stderr
+            )
+            if missing is None:
+                subprocess.run([str(executable)], check=True)
+            else:
+                assert "boot-initialized external BSS" in result.stderr
+
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
 assert "SOURCE_DATE_EPOCH" in prebuild_source
@@ -44,6 +127,9 @@ assert "#define LV_FONT_MONTSERRAT_42 0" in lv_conf_source
 epaper_include_block = r"#ifdef WAVESHARE_EPAPER_397(?:(?!#endif).)*epaperNavigationPolicy\.hpp"
 assert re.search(epaper_include_block, main_screen_source, re.DOTALL)
 assert re.search(epaper_include_block, maps_source, re.DOTALL)
+# Stale #line overrides would misnumber every later AMOLED log and assertion.
+for source in (main_screen_source, maps_source):
+    assert not re.search(r"^\s*#line\b", source, re.M)
 for gui_source_path in (project_dir / "lib/gui/src").glob("*.[ch]pp"):
     assert "&lv_font_montserrat_42" not in gui_source_path.read_text(), (
         f"{gui_source_path.name} restores the unused 72 KiB Montserrat 42 asset"
@@ -61,6 +147,16 @@ assert main_source.index("std::fflush(stdout)") < main_source.index(
 assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
 waveshare_sdkconfig = config.get("waveshare_common", "custom_sdkconfig")
+qualification_sdkconfig = inherited_option(
+    "env:WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in qualification_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in qualification_sdkconfig
+assert qualification_sdkconfig == inherited_option(
+    "env:WAVESHARE_AMOLED_175_PRODUCTION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" not in inherited_option(
+    "env:WAVESHARE_AMOLED_206_PRODUCTION", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
@@ -134,6 +230,7 @@ diagnostic_profiles = {
 }
 
 # The new board shares the locked runtime, not either AMOLED electrical policy.
+assert config.get("waveshare_amoled_common", "extends") == "waveshare_common"
 epaper_base = "waveshare_epaper_397_base"
 assert config.get(epaper_base, "extends") == "waveshare_common"
 epaper_flags = config.get(epaper_base, "build_flags")
@@ -166,9 +263,24 @@ epaper_light_sleep = "env:WAVESHARE_EPAPER_397_LIGHT_SLEEP"
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in config.get(
     epaper_light_sleep, "build_flags"
 )
+# The light-sleep image restates the SDK list. It must differ from the shared
+# contract only by tickless idle and its callbacks, never by drifting behind.
 epaper_light_sleep_sdkconfig = config.get(epaper_light_sleep, "custom_sdkconfig")
-assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y" in epaper_light_sleep_sdkconfig
-assert "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y" in epaper_light_sleep_sdkconfig
+shared_sdk_lines = {
+    line.strip() for line in waveshare_sdkconfig.splitlines()
+    if line.strip() and not line.strip().startswith(";")
+}
+light_sleep_lines = {
+    line.strip() for line in epaper_light_sleep_sdkconfig.splitlines()
+    if line.strip() and not line.strip().startswith(";")
+}
+assert light_sleep_lines - shared_sdk_lines == {
+    "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
+    "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y",
+}, light_sleep_lines - shared_sdk_lines
+assert shared_sdk_lines - light_sleep_lines == {
+    "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n",
+}, shared_sdk_lines - light_sleep_lines
 assert "-DEPAPER_DISPLAY_TEST" not in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
 assert "-DPOWER_METRICS" not in config.get(
     "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
@@ -546,10 +658,14 @@ assert not raw_write_offenders, (
 release_candidate_workflow = (
     repo_root / ".github/workflows/firmware-release-candidate.yml"
 ).read_text()
-assert (
-    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
-    in release_candidate_workflow
-)
+# Production is built once in the required CI workflow. The candidate consumes
+# its checked bytes only after that workflow has completed successfully.
+canonical_ci = (repo_root / ".github/workflows/ci.yml").read_text()
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in canonical_ci
+assert "name: verified-production-${{ matrix.target }}" in canonical_ci
+assert "needs: validate" in release_candidate_workflow
+assert "name: verified-production-${{ matrix.environment }}" in release_candidate_workflow
+assert "firmware_release_candidate.py record" in release_candidate_workflow
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment in personal_profiles:
@@ -560,5 +676,19 @@ for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
     assert mapping in release_candidate_workflow
+
+isolated_poi = "env:WAVESHARE_AMOLED_175_POI_ISOLATED_LIFECYCLE_QUALIFICATION"
+assert isolated_poi.endswith("_LIFECYCLE_QUALIFICATION")  # Retain reserve gate.
+assert config.get(isolated_poi, "extends") == (
+    "env:WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION"
+)
+assert inherited_option(isolated_poi, "board_build.partitions") == "partitions.csv"
+assert "-DMAP_POIS_RUNTIME_ENABLED=1" in inherited_option(isolated_poi, "build_flags")
+for section in config.sections():
+    if section.startswith("env:"):
+        flags = inherited_option(section, "build_flags")
+        assert ("-DMAP_STREAM_QUALIFICATION_TRUST=1" in flags) == (section == isolated_poi), section
+assert isolated_poi.removeprefix("env:") not in release_candidate_workflow
+assert isolated_poi.removeprefix("env:") not in firmware_routing
 
 print("firmware production profile contracts passed")

@@ -5,6 +5,10 @@
 
 #include "i2c_bus.hpp"
 
+#if DEVICE_REMOTE_DEBUG
+#include "i2c_retry_log.hpp"
+#endif
+
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include "axp2101_register_policy.hpp"
@@ -107,9 +111,49 @@ void recoverAfterFailure() {
 }
 #endif
 
+uint32_t retryStartTime() {
+#if DEVICE_REMOTE_DEBUG
+  return millis();
+#else
+  return 0;
+#endif
+}
+
+// Called only with BusLock held, after the transaction/retries have settled.
+// No raw data or sensor values; production keeps its existing logging policy.
+void logRetryResult(uint8_t address, uint16_t reg, const char *operation,
+                    uint8_t attempts, bool recovered, uint32_t startedMs) {
+#if DEVICE_REMOTE_DEBUG
+  static RetryLogLimiter limiter;
+  const uint32_t now = millis();
+  uint32_t suppressed = 0;
+  if (!limiter.admit(address, recovered, now, suppressed)) return;
+  Serial.printf("I2C_RETRY schema=1 addr=0x%02X regKnown=%u reg=0x%04X "
+                "operation=%s outcome=%s attempts=%u failedAttempts=%u "
+                "elapsedMs=%lu suppressed=%lu\n",
+                static_cast<unsigned>(address), reg != UINT16_MAX ? 1U : 0U,
+                static_cast<unsigned>(reg), operation,
+                recovered ? "recovered" : "exhausted",
+                static_cast<unsigned>(attempts),
+                static_cast<unsigned>(attempts - (recovered ? 1 : 0)),
+                static_cast<unsigned long>(now - startedMs),
+                static_cast<unsigned long>(suppressed));
+#else
+  (void)address;
+  (void)reg;
+  (void)operation;
+  (void)attempts;
+  (void)recovered;
+  (void)startedMs;
+#endif
+}
+
 template <typename Fn>
-bool withRetries(uint8_t address, const char *label, const char *operation,
-                 uint8_t attempts, Fn &&fn) {
+bool withRetries(uint8_t address, uint16_t reg, const char *label,
+                 const char *operation, uint8_t attempts, Fn &&fn,
+                 TransactionTrace *trace = nullptr) {
+  const uint32_t traceStartedMs = trace ? millis() : 0;
+  if (trace) *trace = {};
   if (attempts == 0) {
     attempts = 1;
   }
@@ -118,15 +162,23 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
       power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) {
+    if (trace) {
+      trace->failure(TransactionPhase::Lock, 0);
+      trace->elapsedMs = millis() - traceStartedMs;
+    }
     i2cStats.failedTransactions++;
     logFailure(label, operation, address);
     return false;
   }
 
+  const uint32_t startedMs = retryStartTime();
   for (uint8_t attempt = 0; attempt < attempts; attempt++) {
+    if (trace) trace->attempts = attempt + 1;
     if (fn()) {
+      if (trace) trace->elapsedMs = millis() - traceStartedMs;
       if (attempt > 0) {
         i2cStats.recoveredTransactions++;
+        logRetryResult(address, reg, operation, attempt + 1, true, startedMs);
       }
       return true;
     }
@@ -140,6 +192,8 @@ bool withRetries(uint8_t address, const char *label, const char *operation,
     }
   }
 
+  if (trace) trace->elapsedMs = millis() - traceStartedMs;
+  logRetryResult(address, reg, operation, attempts, false, startedMs);
   logFailure(label, operation, address);
   return false;
 }
@@ -209,9 +263,13 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
     return false;
   }
 
+  const uint32_t startedMs = retryStartTime();
   for (uint8_t attempt = 0; attempt < attempts; ++attempt) {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
+      if (attempt > 0) {
+        logRetryResult(address, UINT16_MAX, "probe", attempt + 1, true, startedMs);
+      }
       return true;
     }
     i2cStats.failedTransactions++;
@@ -220,11 +278,12 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
     }
   }
 
+  logRetryResult(address, UINT16_MAX, "probe", attempts, false, startedMs);
   logFailure(label, "probe", address);
   i2cStats.missingDevices++;
   return false;
 #else
-  bool ok = withRetries(address, label, "probe", attempts, [address]() {
+  bool ok = withRetries(address, UINT16_MAX, label, "probe", attempts, [address]() {
     Wire.beginTransmission(address);
     return Wire.endTransmission() == 0;
   });
@@ -240,7 +299,7 @@ bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
   if (!writeAllowed(address, reg, 1, 1, "write8")) {
     return false;
   }
-  return withRetries(address, label, "write8", attempts,
+  return withRetries(address, reg, label, "write8", attempts,
                      [address, reg, value]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg);
@@ -258,7 +317,7 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
     return false;
   }
 
-  return withRetries(address, label, "writeBlock8", attempts,
+  return withRetries(address, reg, label, "writeBlock8", attempts,
                      [address, reg, data, len]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg);
@@ -270,18 +329,23 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
 }
 
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
-                     const char *label, uint8_t attempts) {
+                     const char *label, uint8_t attempts,
+                     TransactionTrace *trace) {
+  if (trace) *trace = {};
   if (!writeAllowed(address, reg, 2, 1, "write16")) {
     return false;
   }
-  return withRetries(address, label, "write16", attempts,
-                     [address, reg, value]() {
+  return withRetries(address, reg, label, "write16", attempts,
+                     [address, reg, value, trace]() {
                        Wire.beginTransmission(address);
                        Wire.write(static_cast<uint8_t>(reg >> 8));
                        Wire.write(static_cast<uint8_t>(reg & 0xFF));
                        Wire.write(value);
-                       return Wire.endTransmission() == 0;
-                     });
+                       const uint8_t status = Wire.endTransmission();
+                       if (trace && status != 0)
+                         trace->failure(TransactionPhase::Transmit, status);
+                       return status == 0;
+                     }, trace);
 }
 
 bool writeCommand16(uint8_t address, uint16_t command, const char *label,
@@ -289,7 +353,7 @@ bool writeCommand16(uint8_t address, uint16_t command, const char *label,
   if (!writeAllowed(address, command, 0, 2, "command16")) {
     return false;
   }
-  return withRetries(address, label, "command16", attempts,
+  return withRetries(address, command, label, "command16", attempts,
                      [address, command]() {
                        Wire.beginTransmission(address);
                        Wire.write(static_cast<uint8_t>(command >> 8));
@@ -315,7 +379,8 @@ bool ensureAxp2101PowerButtonOffLevel(
 
   bool observedInitialValue = false;
   return withRetries(
-      axp_policy::DEVICE_ADDRESS, "AXP2101", "power-button-off-level",
+      axp_policy::DEVICE_ADDRESS, axp_policy::POWER_BUTTON_CONFIG_REGISTER,
+      "AXP2101", "power-button-off-level",
       attempts, [&result, &observedInitialValue, level]() {
         Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
         Wire.write(axp_policy::POWER_BUTTON_CONFIG_REGISTER);
@@ -390,7 +455,8 @@ bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
   result = {};
   bool observedInitialValue = false;
   return withRetries(
-      axp_policy::DEVICE_ADDRESS, "AXP2101", "display-enable-only", attempts,
+      axp_policy::DEVICE_ADDRESS, axp_policy::DISPLAY_ENABLE_REGISTER_206,
+      "AXP2101", "display-enable-only", attempts,
       [&result, &observedInitialValue]() {
         Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
         Wire.write(axp_policy::DISPLAY_ENABLE_REGISTER_206);
@@ -462,7 +528,8 @@ bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
   result = {};
   bool observedInitialValues = false;
   return withRetries(
-      axp_policy::DEVICE_ADDRESS, "AXP2101", "epaper-aldo3-only", attempts,
+      axp_policy::DEVICE_ADDRESS, UINT16_MAX, "AXP2101", "epaper-aldo3-only",
+      attempts,
       [&result, &observedInitialValues]() {
         const auto readRegister = [](uint8_t reg, uint8_t &value) {
           Wire.beginTransmission(axp_policy::DEVICE_ADDRESS);
@@ -555,7 +622,7 @@ bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
 
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label, uint8_t attempts) {
-  return withRetries(address, label, "read8", attempts, [address, reg, &value]() {
+  return withRetries(address, reg, label, "read8", attempts, [address, reg, &value]() {
     Wire.beginTransmission(address);
     Wire.write(reg);
     if (Wire.endTransmission() != 0) {
@@ -577,7 +644,7 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
     return false;
   }
 
-  return withRetries(address, label, "readBlock8", attempts,
+  return withRetries(address, reg, label, "readBlock8", attempts,
                      [address, reg, data, len]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg);
@@ -634,27 +701,35 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
 }
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
-                    const char *label, uint8_t attempts) {
+                    const char *label, uint8_t attempts,
+                    TransactionTrace *trace) {
+  if (trace) *trace = {};
   if (data == nullptr || len == 0) {
     return false;
   }
 
-  return withRetries(address, label, "read16", attempts,
-                     [address, reg, data, len]() {
+  return withRetries(address, reg, label, "read16", attempts,
+                     [address, reg, data, len, trace]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg >> 8);
                        Wire.write(reg & 0xFF);
 #ifdef WAVESHARE_AMOLED_175
-                       if (Wire.endTransmission() != 0) {
+                       const uint8_t status = Wire.endTransmission();
 #else
-                       if (Wire.endTransmission(false) != 0) {
+                       const uint8_t status = Wire.endTransmission(false);
 #endif
+                       if (status != 0) {
+                         if (trace)
+                           trace->failure(TransactionPhase::Transmit, status);
                          return false;
                        }
 
                        delay(2);
-                       if (Wire.requestFrom(address, len,
-                                            static_cast<uint8_t>(true)) != len) {
+                       const uint8_t received = Wire.requestFrom(
+                           address, len, static_cast<uint8_t>(true));
+                       if (received != len) {
+                         if (trace)
+                           trace->failure(TransactionPhase::Receive, received);
                          return false;
                        }
 
@@ -662,7 +737,7 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                          data[i] = Wire.read();
                        }
                        return true;
-                     });
+                     }, trace);
 }
 
 bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
@@ -670,7 +745,7 @@ bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
   if (data == nullptr || len == 0) {
     return false;
   }
-  return withRetries(address, label, "readBytes", attempts,
+  return withRetries(address, UINT16_MAX, label, "readBytes", attempts,
                      [address, data, len]() {
                        if (Wire.requestFrom(address, len,
                                             static_cast<uint8_t>(true)) != len) {
@@ -685,4 +760,4 @@ bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206 || WAVESHARE_EPAPER_397

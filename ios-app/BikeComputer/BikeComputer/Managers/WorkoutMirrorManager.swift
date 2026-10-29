@@ -2,12 +2,14 @@ import Foundation
 import Combine
 import HealthKit
 import UIKit
+import WatchConnectivity
 
 @available(iOS 17.0, *)
 @MainActor
 protocol WorkoutMirroredSessionTransport: AnyObject {
     var healthKitSession: HKWorkoutSession? { get }
     var sessionStartDate: Date? { get }
+    var initialSessionState: WorkoutSessionStateV1? { get }
     func installDelegate(_ delegate: HKWorkoutSessionDelegate?)
     func pause()
     func resume()
@@ -15,6 +17,13 @@ protocol WorkoutMirroredSessionTransport: AnyObject {
         data: Data,
         completion: @escaping @Sendable (Bool, Error?) -> Void
     )
+}
+
+@available(iOS 17.0, *)
+extension WorkoutMirroredSessionTransport {
+    var initialSessionState: WorkoutSessionStateV1? {
+        healthKitSession.map { WorkoutMirrorManager.contractState(for: $0.state) }
+    }
 }
 
 @available(iOS 17.0, *)
@@ -114,6 +123,7 @@ final class SystemWorkoutBackgroundExecutionLease:
 /// mirrored HKWorkoutSession available on iOS 17 and later.
 @MainActor
 final class WorkoutMirrorManager: NSObject {
+    enum AttachmentOrigin: String { case mirroringHandler, nativeRecovery }
     nonisolated static let watchLaunchTimeout: TimeInterval = 15
     nonisolated static let defaultControlConfirmationTimeout: TimeInterval = 10
     nonisolated static let defaultFinalSnapshotTimeout: TimeInterval = 10
@@ -144,6 +154,11 @@ final class WorkoutMirrorManager: NSObject {
     ) -> Void
 
     private var isHandlerInstalled = false
+#if DEBUG
+    private var debugAttachmentCount = 0
+    private var debugAttachmentOrigin = AttachmentOrigin.mirroringHandler
+    private var debugCheckpointFields: NSDictionary?
+#endif
     private var mirroredSessionStorage: AnyObject?
     private var launchTimeoutTask: Task<Void, Never>?
     private var firstSnapshotTimeoutTask: Task<Void, Never>?
@@ -168,7 +183,15 @@ final class WorkoutMirrorManager: NSObject {
 
     private var controlSequencer = WorkoutControlEnvelopeSequencer()
     private var remoteQueue: [RemoteMessage] = []
-    private var remoteSendInFlight: RemoteSendAttempt?
+    private var remoteSendDeadlineTask: Task<Void, Never>?
+    private let remoteSendTimeout: TimeInterval
+    private let remoteSendWait: @MainActor @Sendable (TimeInterval) async throws -> Void
+    private var remoteSendInFlight: RemoteSendAttempt? {
+        didSet {
+            remoteSendDeadlineTask?.cancel()
+            remoteSendDeadlineTask = nil
+        }
+    }
     private var segmentStatusReplayMessage: RemoteMessage?
     private var segmentReplayAfterSendAttemptID: UUID?
 
@@ -179,6 +202,8 @@ final class WorkoutMirrorManager: NSObject {
         watchLaunchTimeout: TimeInterval = WorkoutMirrorManager.watchLaunchTimeout,
         controlConfirmationTimeout: TimeInterval =
             WorkoutMirrorManager.defaultControlConfirmationTimeout,
+        remoteSendTimeout: TimeInterval = 8,
+        remoteSendWait: (@MainActor @Sendable (TimeInterval) async throws -> Void)? = nil,
         finalSnapshotTimeout: TimeInterval =
             WorkoutMirrorManager.defaultFinalSnapshotTimeout,
         firstSnapshotWait: (@MainActor @Sendable (
@@ -201,6 +226,11 @@ final class WorkoutMirrorManager: NSObject {
             @escaping @Sendable (Bool, Error?) -> Void
         ) -> Void)? = nil
     ) {
+        self.remoteSendTimeout = remoteSendTimeout.isFinite
+            ? min(max(0.01, remoteSendTimeout), 60) : 8
+        self.remoteSendWait = remoteSendWait ?? { timeout in
+            try await Task.sleep(for: .seconds(timeout))
+        }
         self.healthStore = healthStore
         self.store = store ?? WorkoutMetricsStore(now: now)
         self.now = now
@@ -335,6 +365,11 @@ final class WorkoutMirrorManager: NSObject {
                 ]
                 if let safeError {
                     diagnosticFields["errorCode"] = safeError.rawValue
+                }
+                if !success {
+                    diagnosticFields.merge(Self.launchFailureFields(for: error)) {
+                        _, value in value
+                    }
                 }
                 manager.diagnosticsRecorder?.record(
                     level: success ? .info : .warning,
@@ -594,6 +629,7 @@ final class WorkoutMirrorManager: NSObject {
                 firstSnapshotTimeoutTask = nil
                 firstSnapshotTimeoutAttemptID = nil
             }
+            recordMirrorDebugCheckpoint(reason: "firstSnapshotTimedOut")
         }
     }
 
@@ -837,16 +873,26 @@ final class WorkoutMirrorManager: NSObject {
     }
 
     @available(iOS 17.0, *)
-    func acceptMirroredSession(_ session: HKWorkoutSession) {
+    func acceptMirroredSession(
+        _ session: HKWorkoutSession,
+        origin: AttachmentOrigin = .mirroringHandler
+    ) {
         acceptMirroredTransport(
-            HealthKitMirroredSessionTransport(session: session)
+            HealthKitMirroredSessionTransport(session: session),
+            origin: origin
         )
     }
 
     @available(iOS 17.0, *)
     func acceptMirroredTransport(
-        _ transport: any WorkoutMirroredSessionTransport
+        _ transport: any WorkoutMirroredSessionTransport,
+        origin: AttachmentOrigin = .mirroringHandler
     ) {
+#if DEBUG
+        debugAttachmentCount = min(debugAttachmentCount + 1, 65_535)
+        debugAttachmentOrigin = origin
+        debugCheckpointFields = nil
+#endif
         launchTimeoutTask?.cancel()
         launchTimeoutTask = nil
 
@@ -869,6 +915,12 @@ final class WorkoutMirrorManager: NSObject {
         currentTransportStartDate = transport.sessionStartDate
         transport.installDelegate(self)
         store.attachMirroredSession(at: now())
+        if let state = transport.initialSessionState, state.isActive {
+            // A recovered transport need not emit a new state-change callback.
+            // Preserve its native state while waiting for credentialed metrics.
+            applyNativeSessionState(state, at: now(), from: transport)
+        }
+        recordMirrorDebugCheckpoint(reason: "attached")
         if let terminalFailureDrainCode {
             // A replacement HealthKit transport belongs to the same terminal
             // takeover drain. Keep the original bound and cause rather than
@@ -889,6 +941,15 @@ final class WorkoutMirrorManager: NSObject {
         enqueueUnconfirmedSegmentReplayIfNeeded()
         if store.currentEnvelope?.snapshot?.state.isActive == true {
             enqueueSnapshotRequestIfPossible()
+        } else if pendingTerminalFailureCode == nil,
+                  store.currentEnvelope == nil,
+                  transport.initialSessionState == .running
+                    || transport.initialSessionState == .paused {
+            // A cold phone cannot build a credentialed request before its
+            // first snapshot. Signal only that this native mirror's delegate
+            // is ready. Completion never confirms a control or changes state;
+            // the existing first-snapshot timeout still bounds recovery.
+            transport.send(data: WorkoutMirrorSnapshotRequest.data) { _, _ in }
         }
         drainRemoteQueue()
     }
@@ -1119,6 +1180,24 @@ final class WorkoutMirrorManager: NSObject {
             message: message
         )
         remoteSendInFlight = attempt
+        let attachmentID = currentTransportAttachmentID
+        remoteSendDeadlineTask = Task { @MainActor [weak self, remoteSendWait, remoteSendTimeout] in
+            do { try await remoteSendWait(remoteSendTimeout) } catch { return }
+            guard !Task.isCancelled, let self,
+                  remoteSendInFlight?.id == attempt.id,
+                  currentTransportAttachmentID == attachmentID,
+                  isCurrentTransport(session) else { return }
+            // HealthKit exposes no cancellation. Retire only this local barrier;
+            // the semantic confirmation deadline still owns outcome reporting.
+            // A successor has a higher control sequence, so a late old command
+            // cannot supersede a newer manual/terminal decision on Watch.
+            remoteSendInFlight = nil
+            if segmentReplayAfterSendAttemptID == attempt.id {
+                segmentReplayAfterSendAttemptID = nil
+                enqueueUnconfirmedSegmentReplayIfNeeded()
+            }
+            drainRemoteQueue()
+        }
         if message.control == .markSegment {
             segmentStatusReplayMessage = message
         }
@@ -1234,6 +1313,8 @@ final class WorkoutMirrorManager: NSObject {
         if store.presentation.shouldAutomaticallyResetAfterDiscard {
             _ = resetTerminalPresentation()
         }
+        recordMirrorDebugCheckpoint(reason: result.latestSnapshotEnvelope == nil
+            ? "noAcceptedSnapshot" : "snapshotAccepted")
     }
 
     @available(iOS 17.0, *)
@@ -1254,6 +1335,28 @@ final class WorkoutMirrorManager: NSObject {
         }
         synchronizeControlTimeoutWithPresentation()
         synchronizeFinalSnapshotTimeoutWithPresentation()
+        recordMirrorDebugCheckpoint(reason: "nativeState")
+    }
+
+    private func recordMirrorDebugCheckpoint(reason: String) {
+#if DEBUG
+        // One bounded checkpoint, written only on changes: no identifiers,
+        // credentials, remote payloads or workout metrics.
+        var fields: [String: Any] = [
+            "schema": 1,
+            "reason": reason,
+            "attachmentCount": debugAttachmentCount,
+            "origin": debugAttachmentOrigin.rawValue,
+            "state": store.presentation.sessionState.rawValue,
+            "connection": store.presentation.connectionState.rawValue,
+            "hasCredentials": store.currentEnvelope != nil,
+            "hasTransport": mirroredSessionStorage != nil,
+        ]
+        guard debugCheckpointFields?.isEqual(to: fields) != true else { return }
+        debugCheckpointFields = fields as NSDictionary
+        fields["capturedAt"] = now().timeIntervalSince1970
+        UserDefaults.standard.set(fields, forKey: "bicino.debug.phoneWorkoutMirror.v1")
+#endif
     }
 
     @available(iOS 17.0, *)
@@ -1278,6 +1381,7 @@ final class WorkoutMirrorManager: NSObject {
             cancelTerminalFailureDrainTimeout()
         }
         synchronizeFinalSnapshotTimeoutWithPresentation()
+        recordMirrorDebugCheckpoint(reason: "disconnected")
     }
 
     @available(iOS 17.0, *)
@@ -1379,6 +1483,30 @@ final class WorkoutMirrorManager: NSObject {
         }
     }
 
+    // Keep only platform domain identifiers and numeric codes. Never retain
+    // localized descriptions, arbitrary domain strings or error userInfo.
+    private static func launchFailureFields(for error: Error?) -> [String: String] {
+        guard let error else { return ["errorDomain": "none"] }
+        let platformError = error as NSError
+        func domain(_ value: String) -> String {
+            switch value {
+            case HKErrorDomain: return "healthkit"
+            case WCErrorDomain: return "watch_connectivity"
+            case NSCocoaErrorDomain: return "cocoa"
+            case NSOSStatusErrorDomain: return "os_status"
+            case NSPOSIXErrorDomain: return "posix"
+            case NSURLErrorDomain: return "url"
+            default: return "other"
+            }
+        }
+        var fields = ["errorDomain": domain(platformError.domain), "code": String(platformError.code)]
+        if let underlying = platformError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            fields["underlyingErrorDomain"] = domain(underlying.domain)
+            fields["underlyingErrorCode"] = String(underlying.code)
+        }
+        return fields
+    }
+
     private static func safeLaunchErrorCode(
         for error: Error?
     ) -> WorkoutSafeErrorCodeV1 {
@@ -1455,11 +1583,17 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         let envelopes = data.compactMap { payload in
             try? WorkoutContractCodec.decode(payload)
         }
-        guard !envelopes.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self,
-                  isCurrentSession(workoutSession),
-                  let transport = mirroredTransport else { return }
+            guard let self else { return }
+            guard isCurrentSession(workoutSession) else {
+                recordMirrorDebugCheckpoint(reason: "ignoredOldTransport")
+                return
+            }
+            guard !envelopes.isEmpty else {
+                recordMirrorDebugCheckpoint(reason: "decodeRejected")
+                return
+            }
+            guard let transport = mirroredTransport else { return }
             applyRemoteEnvelopes(
                 envelopes,
                 receivedAt: now(),
@@ -1483,7 +1617,7 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         }
     }
 
-    nonisolated private static func contractState(
+    nonisolated fileprivate static func contractState(
         for state: HKWorkoutSessionState
     ) -> WorkoutSessionStateV1 {
         switch state {

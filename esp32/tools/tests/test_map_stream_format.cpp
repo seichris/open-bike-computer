@@ -1,9 +1,11 @@
 #include "../../lib/map_transfer/map_stream_format.hpp"
+#include "../../lib/maps/src/mapRendererFileValidator.hpp"
 #include "../../lib/map_transfer/map_stream_crypto.hpp"
 #include "../../lib/map_transfer/map_stream_parser.hpp"
 #include "../../lib/map_transfer/map_stream_sha.hpp"
 #include "../../lib/map_transfer/map_stream_trust.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
+#include "../../lib/ble_navigation/map_profile_protocol.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -681,6 +683,42 @@ int main() {
   }
 
   {
+    // These paths must remain installable after a diagnostics -> production
+    // change. Production still validates the signed bytes and ignores relief.
+    const std::string terrainManifest = R"MANIFEST({"buildings":{"classDefaultHeightCount":0,"explicitHeightCount":0,"inheritedHeightCount":0,"levelsHeightCount":0,"localMedianHeightCount":0,"recordCount":0},"files":[{"bytes":4372,"path":"VECTMAP/map/+0000+0000/0.fme","sha256":"0000000000000000000000000000000000000000000000000000000000000000"},{"bytes":1,"path":"VECTMAP/map/assets/street-labels.fma","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}],"mapId":"map","schemaVersion":1,"target":{"buildingProfileVersion":1,"formatVersion":4,"internationalFallback":"en","labelLanguages":["en"],"labelProfileVersion":1,"minFirmwareVersion":"0.0.0","renderer":"esp32-fmb","topographyProfileVersion":1},"topography":{"attributionSha256":"0000000000000000000000000000000000000000000000000000000000000000","indexIntervalM":100,"intermediateSha256":"0000000000000000000000000000000000000000000000000000000000000000","minorIntervalM":20,"noDataMillionths":0,"pointCount":0,"profileVersion":1,"qualityMode":"standard-20m-v1","recordCount":0,"sourcePolicySha256":"0000000000000000000000000000000000000000000000000000000000000000","sources":[{}]}})MANIFEST";
+    MapStreamHeader terrainHeader;
+    terrainHeader.fileCount = 2;
+    terrainHeader.payloadBytes = 4373;
+    ParsedMapStreamManifest parsedTerrain;
+    assert(parseMapStreamManifest(terrainManifest, terrainHeader, parsedTerrain));
+    map_transfer::MapTransferInstaller installer("/tmp/unused-terrain-validation");
+    map_transfer::MapManifest installedTerrain;
+    assert(installer.validateManifestText(terrainManifest, installedTerrain).ok);
+    auto truncated = terrainManifest;
+    truncated.replace(truncated.find("4372"), 4, "4371");
+    terrainHeader.payloadBytes--;
+    assert(!parseMapStreamManifest(truncated, terrainHeader, parsedTerrain));
+    assert(!installer.validateManifestText(truncated, installedTerrain).ok);
+    std::vector<uint8_t> terrain(map_terrain::BYTES, 0);
+    std::copy_n(reinterpret_cast<const uint8_t *>("FME1"), 4, terrain.begin());
+    for (size_t p = 16; p < terrain.size(); p += 4) {
+      terrain[p] = 100; terrain[p + 2] = 180;
+    }
+    uint32_t crc = 0xffffffffu;
+    for (size_t p = 16; p < terrain.size(); ++p) {
+      crc ^= terrain[p];
+      for (int bit = 0; bit < 8; ++bit)
+        crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    writeLe32(terrain, 12, crc ^ 0xffffffffu);
+    map_renderer_format::StreamValidator validator("VECTMAP/map/+0000+0000/0.fme");
+    assert(validator.feed(terrain.data(), terrain.size()) && validator.finish());
+    terrain.back() ^= 1;
+    map_renderer_format::StreamValidator corrupt("VECTMAP/map/+0000+0000/0.fme");
+    assert(!corrupt.feed(terrain.data(), terrain.size()) || !corrupt.finish());
+  }
+
+  {
     const std::string sha(64, '0');
     const std::string first = "VECTMAP/map/+0000+0000/1.fmb";
     const std::string second = "VECTMAP/map/+0000+0000/2.fmp";
@@ -727,6 +765,62 @@ int main() {
     assert(parsed.metadata.buildingProfileVersion == 1);
     assert(parsed.metadata.buildingRecordCount == 1);
     assert(parsed.metadata.buildingProvenanceCounts[0] == 1);
+    const std::string poiBlockPath = "VECTMAP/map/+000+000/0_0.fmb";
+    const std::string poiManifest =
+        std::string("{\"buildings\":{\"classDefaultHeightCount\":0,") +
+        "\"explicitHeightCount\":1,\"inheritedHeightCount\":0," +
+        "\"levelsHeightCount\":0,\"localMedianHeightCount\":0," +
+        "\"recordCount\":1},\"files\":[{\"bytes\":1,\"path\":\"" +
+        poiBlockPath + "\",\"sha256\":\"" + sha +
+        "\"},{\"bytes\":16,\"path\":\"VECTMAP/map/assets/nearby-pois.fpi\","
+        "\"sha256\":\"" + sha +
+        "\"},{\"bytes\":2,\"path\":\"VECTMAP/map/assets/street-labels.fma\"," +
+        "\"sha256\":\"" + sha +
+        "\"}],\"layers\":{\"contours\":\"not-included\"},"
+        "\"mapId\":\"map\",\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
+        "\"blocks\":[[0,0]],\"profileVersion\":1},"
+        "\"pois\":{\"bicycleServicesCount\":1," +
+        "\"gasStationsCount\":0,\"publicToiletsCount\":0,\"recordCount\":2," +
+        "\"restaurantsAndCafesCount\":1,\"shopsCount\":0}," +
+        "\"schemaVersion\":1,\"target\":{\"buildingProfileVersion\":1," +
+        "\"formatVersion\":5,\"internationalFallback\":\"en\"," +
+        "\"labelLanguages\":[\"en\"],\"labelProfileVersion\":1," +
+        "\"minFirmwareVersion\":\"0.0.0\",\"poiIndexProfileVersion\":1," +
+        "\"poiProfileVersion\":1,\"renderer\":\"esp32-fmb\"," +
+        "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]}}";
+    MapStreamHeader poiHeader = manifestHeader;
+    poiHeader.fileCount = 3;
+    poiHeader.payloadBytes = 19;
+    assert(parseMapStreamManifest(poiManifest, poiHeader, parsed));
+    assert(parsed.metadata.formatVersion == 5);
+    assert(parsed.metadata.poiProfileVersion == 1);
+    assert(parsed.metadata.poiRecordCount == 2);
+    assert(parsed.metadata.poiCategoryCounts[1] == 1);
+    assert(parsed.metadata.poiCategoryCounts[4] == 1);
+    assert(parsed.metadata.nearbyCoverageBlocks.size() == 1);
+    // Admission refuses a target 5 map unless this build has the POI reader,
+    // before any payload is written; earlier targets are unaffected.
+    assert(mapStreamTargetSupported(parsed.metadata) ==
+           (MAP_POIS_RUNTIME_ENABLED != 0));
+    map_transfer::MapManifest contourTarget;
+    contourTarget.formatVersion = 4;
+    assert(mapStreamTargetSupported(contourTarget));
+    auto missingCoverage = poiManifest;
+    const std::string coverageField =
+        "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]],"
+        "\"profileVersion\":1},";
+    const size_t coveragePosition = missingCoverage.find(coverageField);
+    assert(coveragePosition != std::string::npos);
+    missingCoverage.erase(coveragePosition, coverageField.size());
+    assert(!parseMapStreamManifest(missingCoverage, poiHeader, parsed));
+    auto mismatchedPoiSummary = poiManifest;
+    const size_t bicycleCount =
+        mismatchedPoiSummary.find("\"bicycleServicesCount\":1");
+    assert(bicycleCount != std::string::npos);
+    mismatchedPoiSummary[
+        mismatchedPoiSummary.find(':', bicycleCount) + 1U] = '0';
+    assert(!parseMapStreamManifest(mismatchedPoiSummary, poiHeader,
+                                   parsed));
     auto mismatchedBuildingSummary = buildingManifest;
     const size_t explicitCount =
         mismatchedBuildingSummary.find("\"explicitHeightCount\":1");

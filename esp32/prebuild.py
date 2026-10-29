@@ -27,7 +27,7 @@ from firmware_compile_cache import configure_metadata_identity
 from pioarduino_custom_core import (
     correct_espidf_text,
     correct_penv_setup_text,
-    correct_sections_text,
+    custom_core_sections_text,
     pioarduino_transform_source_sha256,
     verified_transform_marker_matches,
 )
@@ -81,13 +81,10 @@ def ensure_custom_core_generated_source_alias():
                 encoding="utf-8",
             )
 
-    # pioarduino copies custom-compiled archives and memory.ld back into its
-    # framework package, but it does not copy the matching sections.ld. With
-    # CONFIG_PM_ENABLE the generated script adds the esp_pm_configure literal;
-    # without it, sufficiently large variants can fail with an Xtensa
-    # "literal placed after use" relocation. Keep the installed package
-    # immutable and put a corrected script in the environment build directory,
-    # which is first on the linker's script search path.
+    # The verified custom-core export retains the complete generated sections
+    # script beside its SDK configuration and archives. Copy that exact script
+    # to the first linker search path; a hand-patched stock script cannot encode
+    # all configuration-dependent layouts (notably external BSS and PM).
     framework_libs_package = env.PioPlatform().get_package_dir(
         "framework-arduinoespressif32-libs"
     )
@@ -107,9 +104,8 @@ def ensure_custom_core_generated_source_alias():
             f"{installed_sections}"
         )
 
-    sections_text = installed_sections.read_text(encoding="utf-8")
     try:
-        sections_text = correct_sections_text(sections_text)
+        sections_text = custom_core_sections_text(installed_sections)
     except ValueError as error:
         raise RuntimeError(str(error)) from error
 

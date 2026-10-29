@@ -35,7 +35,8 @@ struct MapAppearanceTests {
         testAppearanceEquality()
         testIdempotentApplication()
         testMapPitchControlTargets()
-        testStoppedTrackingPreservesCamera()
+        testInitialCamera()
+        testUserTrackingChoicePersists()
 
         print("MapAppearanceTests passed")
     }
@@ -44,7 +45,7 @@ struct MapAppearanceTests {
         precondition(
             IPhoneMapAppearance.defaultValue == IPhoneMapAppearance(
                 baseStyle: .standard,
-                usesRealisticElevation: false
+                usesRealisticElevation: true
             )
         )
     }
@@ -136,7 +137,7 @@ struct MapAppearanceTests {
         precondition(
             standard != IPhoneMapAppearance(
                 baseStyle: .standard,
-                usesRealisticElevation: true
+                usesRealisticElevation: false
             )
         )
     }
@@ -157,13 +158,13 @@ struct MapAppearanceTests {
 
         let terrain = IPhoneMapAppearance(
             baseStyle: .standard,
-            usesRealisticElevation: true
+            usesRealisticElevation: false
         )
         coordinator.applyAppearanceIfNeeded(terrain, to: target)
         precondition(target.assignmentCount == 2)
         precondition(coordinator.lastAppliedAppearance == terrain)
         precondition(
-            target.preferredConfiguration.elevationStyle == .realistic
+            target.preferredConfiguration.elevationStyle == .flat
         )
     }
 
@@ -179,41 +180,80 @@ struct MapAppearanceTests {
         )
     }
 
-    private static func testStoppedTrackingPreservesCamera() {
+    private static func testInitialCamera() {
+        let source = MKMapCamera(
+            lookingAtCenter: CLLocationCoordinate2D(latitude: 1.3, longitude: 103.85),
+            fromDistance: 1500, pitch: 0, heading: 28
+        )
+        let initial = MapViewControlState.initialCamera(from: source)
+        precondition(abs(initial.pitch - 45) < 0.01)
+        precondition(abs(initial.centerCoordinate.latitude - source.centerCoordinate.latitude) < 0.000001)
+        precondition(abs(initial.centerCoordinate.longitude - source.centerCoordinate.longitude) < 0.000001)
+        precondition(abs(initial.centerCoordinateDistance - source.centerCoordinateDistance) < 0.01)
+        precondition(abs(initial.heading - source.heading) < 0.01)
+        let chosen2D = MapViewControlState.initialCamera(from: source, pitch: 0)
+        precondition(chosen2D.pitch == 0, "initial location centering must respect a prior 2D button choice")
+    }
+
+    private static func testUserTrackingChoicePersists() {
         precondition(
             !MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: .none,
                 desiredMode: .follow,
-                preservesStoppedTracking: true
+                preservesCurrentTracking: true
             )
         )
         precondition(
             !MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: .none,
                 desiredMode: .followWithHeading,
-                preservesStoppedTracking: true
+                preservesCurrentTracking: true
             )
         )
         precondition(
             MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: .follow,
                 desiredMode: .none,
-                preservesStoppedTracking: true
+                preservesCurrentTracking: true
             )
         )
         precondition(
-            MapTrackingPolicy.shouldApplyDesiredMode(
+            !MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: .follow,
                 desiredMode: .followWithHeading,
-                preservesStoppedTracking: true
+                preservesCurrentTracking: true
             )
         )
         precondition(
             MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: .none,
                 desiredMode: .follow,
-                preservesStoppedTracking: false
+                preservesCurrentTracking: false
             )
+        )
+        precondition(
+            !MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .followWithHeading,
+                desiredMode: .follow,
+                preservesCurrentTracking: true
+            ),
+            "browsing GPS updates preserve heading mode selected with the button"
+        )
+        precondition(
+            MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .none,
+                desiredMode: .followWithHeading,
+                preservesCurrentTracking: false
+            ),
+            "starting navigation restores heading tracking after a pan"
+        )
+        precondition(
+            MapTrackingPolicy.shouldApplyDesiredMode(
+                currentMode: .followWithHeading,
+                desiredMode: .follow,
+                preservesCurrentTracking: false
+            ),
+            "stopping navigation restores the browsing default"
         )
     }
 }

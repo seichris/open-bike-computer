@@ -1,4 +1,5 @@
 #include "mapFontAsset.hpp"
+#include "../../utils/src/descriptor_file.hpp"
 
 #include <algorithm>
 #include <array>
@@ -32,8 +33,8 @@ uint32_t le32(const uint8_t *bytes) {
          (static_cast<uint32_t>(bytes[3]) << 24U);
 }
 
-bool readExact(FILE *file, void *buffer, size_t size) {
-  return size == 0 || std::fread(buffer, 1, size, file) == size;
+bool readExact(int file, void *buffer, size_t size) {
+  return descriptor_file::readExact(file, buffer, size);
 }
 
 constexpr size_t kValidationBufferBytes = 16U * 1024U;
@@ -82,7 +83,7 @@ Asset &Asset::operator=(Asset &&other) noexcept {
   languages_ = std::move(other.languages_);
   records_ = std::move(other.records_);
   cache_ = std::move(other.cache_);
-  other.file_ = nullptr;
+  other.file_ = -1;
   other.profileFingerprint_ = 0;
   other.glyphCount_ = 0;
   other.payloadOffset_ = 0;
@@ -98,9 +99,9 @@ Asset &Asset::operator=(Asset &&other) noexcept {
 }
 
 void Asset::close() {
-  if (file_ != nullptr)
-    std::fclose(file_);
-  file_ = nullptr;
+  if (file_ >= 0)
+    ::close(file_);
+  file_ = -1;
   profileFingerprint_ = 0;
   glyphCount_ = 0;
   payloadOffset_ = 0;
@@ -131,37 +132,32 @@ bool Asset::open(const std::string &path) {
           map_font_asset_format::kMaximumFontAssetBytes)
     return false;
 
-  FILE *candidate = std::fopen(path.c_str(), "rb");
-  if (candidate == nullptr)
+  descriptor_file::File candidate(path.c_str(), O_RDONLY);
+  if (!candidate)
     return false;
 
   map_font_asset_format::StreamValidator validator;
   std::unique_ptr<uint8_t, decltype(&freeValidationBuffer)> validationBuffer(
       allocateValidationBuffer(), &freeValidationBuffer);
   if (!validationBuffer) {
-    std::fclose(candidate);
+    candidate.reset();
     return false;
   }
   bool valid = true;
   while (valid) {
-    const size_t bytes = std::fread(validationBuffer.get(), 1,
-                                    kValidationBufferBytes, candidate);
-    if (bytes != 0 && !validator.feed(validationBuffer.get(), bytes))
+    const ssize_t bytes = descriptor_file::readSome(
+        candidate.get(), validationBuffer.get(), kValidationBufferBytes);
+    if (bytes < 0) { valid = false; break; }
+    if (bytes == 0) break;
+    if (!validator.feed(validationBuffer.get(), static_cast<size_t>(bytes)))
       valid = false;
-    if (bytes < kValidationBufferBytes) {
-      if (std::ferror(candidate) != 0)
-        valid = false;
-      break;
-    }
   }
-  if (!valid || !validator.finish() || std::fseek(candidate, 0, SEEK_SET) != 0) {
-    std::fclose(candidate);
+  if (!valid || !validator.finish() || ::lseek(candidate.get(), 0, SEEK_SET) < 0)
     return false;
-  }
 
   std::array<uint8_t, 32> header{};
-  if (!readExact(candidate, header.data(), header.size())) {
-    std::fclose(candidate);
+  if (!readExact(candidate.get(), header.data(), header.size())) {
+    candidate.reset();
     return false;
   }
   const uint8_t languageCount = header[6];
@@ -173,8 +169,8 @@ bool Asset::open(const std::string &path) {
   glyphCount_ = static_cast<uint16_t>(recordCount / 3U);
 
   MapFontVector<uint8_t> languageTable(languageBytes);
-  if (!readExact(candidate, languageTable.data(), languageTable.size())) {
-    std::fclose(candidate);
+  if (!readExact(candidate.get(), languageTable.data(), languageTable.size())) {
+    candidate.reset();
     close();
     return false;
   }
@@ -182,13 +178,13 @@ bool Asset::open(const std::string &path) {
   languages_.reserve(languageCount);
   for (uint8_t index = 0; index < languageCount; ++index) {
     if (languageOffset >= languageTable.size()) {
-      std::fclose(candidate);
+      candidate.reset();
       close();
       return false;
     }
     const uint8_t length = languageTable[languageOffset++];
     if (length > languageTable.size() - languageOffset) {
-      std::fclose(candidate);
+      candidate.reset();
       close();
       return false;
     }
@@ -198,8 +194,8 @@ bool Asset::open(const std::string &path) {
     languageOffset += length;
   }
   if (languageOffset != languageTable.size() ||
-      std::fseek(candidate, static_cast<long>(faceBytes), SEEK_CUR) != 0) {
-    std::fclose(candidate);
+      ::lseek(candidate.get(), static_cast<off_t>(faceBytes), SEEK_CUR) < 0) {
+    candidate.reset();
     close();
     return false;
   }
@@ -207,8 +203,8 @@ bool Asset::open(const std::string &path) {
   records_.reserve(recordCount);
   std::array<uint8_t, 32> bytes{};
   for (uint32_t index = 0; index < recordCount; ++index) {
-    if (!readExact(candidate, bytes.data(), bytes.size())) {
-      std::fclose(candidate);
+    if (!readExact(candidate.get(), bytes.data(), bytes.size())) {
+      candidate.reset();
       close();
       return false;
     }
@@ -227,7 +223,7 @@ bool Asset::open(const std::string &path) {
     records_.push_back(record);
   }
   payloadOffset_ = 32U + languageBytes + faceBytes + indexBytes;
-  file_ = candidate;
+  file_ = candidate.release();
   return true;
 }
 
@@ -240,7 +236,7 @@ const Asset::GlyphRecord *Asset::record(uint16_t glyphId,
 }
 
 bool Asset::hasGlyph(uint16_t glyphId, uint8_t sizeId) const {
-  if (file_ == nullptr || glyphId == 0 || glyphId > glyphCount_ || sizeId > 2)
+  if (file_ < 0 || glyphId == 0 || glyphId > glyphCount_ || sizeId > 2)
     return false;
   const size_t index = (static_cast<size_t>(glyphId) - 1U) * 3U + sizeId;
   return index < records_.size() && records_[index].glyphId == glyphId &&
@@ -250,10 +246,9 @@ bool Asset::hasGlyph(uint16_t glyphId, uint8_t sizeId) const {
 bool Asset::decodeBitmap(uint32_t offset, uint32_t encodedLength,
                          size_t decodedLength,
                          MapFontVector<uint8_t> &output) {
-  if (file_ == nullptr || encodedLength == 0 ||
+  if (file_ < 0 || encodedLength == 0 ||
       offset > std::numeric_limits<uint32_t>::max() - payloadOffset_ ||
-      std::fseek(file_, static_cast<long>(payloadOffset_ + offset), SEEK_SET) !=
-          0)
+      ::lseek(file_, static_cast<off_t>(payloadOffset_ + offset), SEEK_SET) < 0)
     return false;
   MapFontVector<uint8_t> encoded(encodedLength);
   if (!readExact(file_, encoded.data(), encoded.size()))

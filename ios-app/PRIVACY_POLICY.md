@@ -1,6 +1,6 @@
 # Bicino Privacy Policy
 
-Effective date: September 16, 2026
+Effective date: October 20, 2026
 
 Bicino is a cycling navigation and workout companion. This policy
 explains what information the iPhone app, Apple Watch app, compatible bike
@@ -72,7 +72,8 @@ an online route request.
 
 Saved offline routes and coordinate-backed favorite names and coordinates are
 transferred between your paired iPhone and Watch using Apple's WatchConnectivity
-service. They remain within the paired app workflow and are not sent to the
+service. Unless you explicitly share a route or start a Group Ride as described
+below, they remain within the paired app workflow and are not sent to the
 Bicino backend. Offline route files enforce their provider retention metadata
 and are removed when they expire. You can delete a saved route from the iPhone;
 if it is currently active on Watch, deletion finishes when navigation stops.
@@ -145,6 +146,31 @@ service. This installation-linked history is used to list and recover maps,
 keep downloads consistent across retries, and show their current status; it is
 not used to analyze how people use the app.
 
+### Route elevation
+
+Bicino shows an elevation profile for a route when it can. If an imported GPX
+route contains trustworthy elevation values, the app computes the profile on
+your iPhone from those values and sends nothing. Otherwise, for an imported GPX
+route or an Apple Maps route you select or navigate, the app sends that route's coordinates and a random request
+identifier to the Bicino service with your installation credential. The service
+samples points along the route and looks up their terrain heights with its
+terrain provider, Geoapify, or with elevation data hosted by the service.
+Geoapify receives only sample coordinates from our server, not your
+installation identifier or network address. The service does not store the
+route coordinates; it may keep the resulting profile, which contains distances
+and heights but no coordinates, in memory for up to 10 minutes so a retry does
+not repeat the lookup. To enforce daily limits it keeps a usage count keyed by a
+pseudonym of your installation identifier, deleted no later than 48 hours after
+the day it counts.
+
+Strava routes are never sent for elevation. A Strava route's own GPX elevation
+values may be used on your iPhone. A saved route keeps
+its profile and any GPX elevation values in a companion file on your iPhone,
+excluded from backups and deleted with the route. The phone sends a compact
+copy of the profile and your progress along the route to a connected bike
+computer that shows elevation; it is cleared when navigation stops or Bluetooth
+disconnects.
+
 ## Installation identifier and network protection
 
 The Bicino service creates a random installation identifier and a high-entropy
@@ -169,7 +195,8 @@ connected device and is not used for tracking.
 
 We do not share personal data with advertisers or data brokers. Information may
 be processed by infrastructure providers only as needed to operate requested
-functionality, such as building and delivering an offline map. Workout and
+functionality, such as building and delivering an offline map or looking up
+terrain heights for a route elevation profile. Workout and
 HealthKit information is not sent to those providers. We require service
 providers that process information for us to use it only on our instructions
 and to provide the same or equivalent privacy protection described in this
@@ -204,3 +231,64 @@ for those records.
 For privacy questions or requests, contact:
 
 privacy@bicino.com
+
+
+## Optional Friends and Group Riding
+
+If you sign in and enable social features, we process your Bicino user ID, chosen
+name, username, sanitized profile photo, friendships, invitations, and content you
+explicitly publish. These use the same Firebase account as bicino.com. Social
+photos and routes are stored in private object storage and the social database.
+
+Starting a Group Ride from your saved GPX or Apple Maps route uploads that saved
+route to Bicino, including its coordinates, navigation instructions and labels.
+Accepted riders receive the exact route and can save a copy on their iPhones.
+The route's sharing preference also controls access outside the group. Opening a
+saved route alone does not upload it. Apple Maps routes keep their Apple Maps
+attribution and are not transferred to Watch.
+
+When you explicitly create, join, or accept an invitation to a Group Ride,
+Bicino starts sharing your live location and GPS-derived speed, distance, moving
+time, and elapsed time with the other accepted riders in that ride. Opening an
+invitation link or viewing your profile alone does not start sharing. Samples
+expire after 60 seconds without an update. Stopping sharing, leaving, blocking,
+and deletion revoke access. Sessions expire within 24 hours of their scheduled
+start. Heart rate, calories, power, cadence, and other HealthKit measurements are
+not shared with the group. Generic push notifications are optional. Social and
+Health data are not used for ads.
+
+You can also turn on live sharing separately for an accepted friend using their
+Friends-row toggle. That shares your location and the same GPS-derived speed,
+session distance, moving time and elapsed time with that friend for up to four
+hours, without creating a Group Ride or sharing a route. It is one-way: your
+friend chooses whether to share back. Turning off their toggle, removing or
+blocking them, or deleting your account stops direct sharing. Sign-out stops
+this phone's publication; opening the app again does not restart it. Old
+positions expire after 60 seconds. These toggles do not share HealthKit data.
+
+A group invitation can include a public preview showing a map snapshot of the
+route, its name, and distance. Anyone with that preview URL, including messaging
+services that fetch link previews, can view it without joining the ride. It does
+not contain live positions or the rider list. Ending the ride or revoking the
+preview stops new reads from Bicino; copies already cached by recipients or
+third-party messaging services cannot be recalled.
+
+To keep routes with their owners, the service records a one-way fingerprint of a
+route's geometry when another rider's route is shared with you, and the app notes
+the owner of routes you save from others; those copies cannot be republished as
+yours. To manage alerts safely, the app keeps a random installation identifier and
+secret on this device only, and the server keeps the identifier and a one-way
+digest of the secret with your push token.
+
+Requests that need no sign-in, such as opening a share link or confirming a
+deletion, are rate limited using a one-way digest of the requesting network
+address. These hourly counters expire within two hours and are removed by
+scheduled maintenance.
+
+Account deletion disables social access immediately and queues retryable cleanup
+of publications and photos, including Firebase account deletion. A one-way digest
+of a deletion receipt held by your app is kept for 30 days so the app can confirm
+the deletion if its response was lost; it contains no profile or location data. Saved copies on
+another person's device cannot be recalled. Your private Apple Health workouts
+and local route library are not deleted. See the social operations document for
+retention and backup handling before enabling a deployment.

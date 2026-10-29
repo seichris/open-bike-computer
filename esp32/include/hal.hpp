@@ -210,7 +210,9 @@ constexpr uint8_t TCH_I2C_INT = GPIO_NUM_38;
 constexpr uint8_t TCH_I2C_RST = GPIO_NUM_9;
 constexpr uint8_t TCH_I2C_ADDR = 0x38; // FT3168 Address
 #else
-constexpr uint8_t TCH_I2C_INT = GPIO_NUM_21;
+// Vendor schematic: TP_INT is GPIO11. GPIO21 is the QMI8658 INT2 net;
+// using it here silently loses touch events when idle polling is disabled.
+constexpr uint8_t TCH_I2C_INT = GPIO_NUM_11;
 // NOTE: Touch Reset is controlled by TCA9554 I/O Expander (0x20), NOT a GPIO!
 // Do NOT use GPIO 20 - it is USB D+ and will break serial monitor.
 constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)

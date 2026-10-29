@@ -1,5 +1,11 @@
 # Agent Notes (open-bike-computer)
 
+## Review policy
+
+Read [REVIEW.md](REVIEW.md) before reviewing or publishing a change. It defines
+the three-pass review limit, delta re-review, finding ledger, and risk/evidence
+handoff. Preserve the round count across sessions and stop early when clean.
+
 ## Repository map
 
 - `esp32/`: PlatformIO/Arduino firmware for the Waveshare 1.75-inch and
@@ -24,6 +30,13 @@
 
 ## Quick commands
 
+Prepare a new worktree with `tools/dev-setup` (the Codex app and Claude Code run
+it automatically) and run Python-dependent commands through `tools/dev-env`,
+for example `tools/dev-env tools/dev-check --plan`. Map backend checks use a
+separate environment: `tools/dev-setup --map-backend`, then
+`tools/dev-env --map-backend tools/dev-check --suite map`. See
+`docs/development-checks.md` for shared and worktree-private paths.
+
 Start validation with `tools/dev-check --plan`, then `tools/dev-check` for
 affected fast checks. Use `--suite ios --level full` or
 `--suite firmware --level full --board 175` for explicit build validation after
@@ -35,6 +48,14 @@ Ordinary full builds accept uncommitted edits and reuse isolated local iOS
 DerivedData. Use `--fresh --evidence` for clean-source app qualification;
 `--evidence` explicitly retains exact-build symbols. CI keeps strict evidence
 requirements. Never describe a dirty local build as clean-commit validation.
+
+On the configured trusted Mac, clean successful `tools/dev-check` runs automatically
+publish signed iOS helper/simulator results for PR CI. Run checks after the final
+commit and before pushing to make them available to CI. Dirty runs remain useful
+local validation but cannot be reused. CI verifies the PR head, actual merge tree,
+commands and live toolchain; every mismatch runs hosted tests. See
+`docs/local-ci-results.md` for trust, setup and fallback behavior. Do not use these
+receipts to replace firmware, app-build symbols, release or physical acceptance.
 
 ### ESP32 firmware
 
@@ -280,9 +301,22 @@ for that stronger claim.
 
 ### GitHub firmware CI
 
-Automatic pull-request and `main` CI intentionally build only the 1.75-inch
-ordinary and production firmware profiles. The aggregate gate therefore does
-not prove that 2.06-inch firmware compiles.
+PRs and merge groups select affected checks behind `CI Gate`; the same CI does
+not run again on a main push. Drafts retain fast checks. Production-path firmware
+libraries retain production and lifecycle qualification; renderer/debug/radio
+inputs also select their distinct profiles. Common board, runtime and configuration
+changes qualify both 175 and 206 with all four regular profiles. Unknown libraries
+retain the full selected hardware matrix. A 206-specific path cannot select only
+175. Explicit manual hardware selection and release CI retain every regular profile.
+Image reserve, debug-route exclusions, factory packaging and lifecycle assertions
+remain mandatory. Zone fixtures run once with both board definitions under CI Gate.
+
+Scheduled diagnostics skip only when relevant trees are unchanged since a successful
+comparable diagnostic run. Missing comparison evidence runs the sweep. Manual hardware
+qualification runs all diagnostic profiles. Release candidates reuse the same-run
+production factory artifacts already validated by CI, and CI owns remote-debug
+qualification once per board. Signing, source/profile/hash checks and physical release
+acceptance remain separate. See `docs/development-checks.md` for the scope table.
 
 When the user explicitly asks in a Codex task to run 2.06 CI, dispatch the
 manual firmware scope for the current branch and wait for the exact run:
@@ -308,12 +342,8 @@ done
 gh run watch "$run_id" --exit-status
 ```
 
-Use `firmware_hardware=all` only when the user requests both boards or when a
-release/full-qualification workflow requires them. A manual 2.06 CI run builds
-both `WAVESHARE_AMOLED_206` and `WAVESHARE_AMOLED_206_PRODUCTION`; it does not
-flash or otherwise touch a physical device. Report 2.06 validation only after
-the dispatched run completes successfully. Tagged firmware releases always
-request `all` and continue to qualify both board families.
+Manual scopes build all four regular profiles for the selected board. Report success
+only after the exact dispatched run completes; this never flashes a device.
 
 ### Firmware release and factory-image qualification
 
@@ -486,3 +516,16 @@ here. When changing BLE services, characteristics, framing, or payloads, update
 the firmware implementation under `esp32/lib/ble_navigation/`, the iOS
 implementation in `BLEManager.swift` and `NavigationProtocol.swift`, the
 relevant host/Swift tests, and the protocol document in the same change.
+
+## Diagnostics collection and Codex handoff
+
+Use `.agents/skills/bicino-diagnostics/SKILL.md` and `docs/diagnostics-v2.md`.
+`tools/bicino diag doctor --json` is nonmutating and never probes a serial port.
+For a retained capture, verify sources, the frozen acquisition inventory, actual
+chunk hashes, drop/gap counters and build identities before interpreting events.
+For remote capture, inspect fresh capabilities and distinguish queued requests,
+phone acceptance, device policy application and durable delivery. Never export
+pairing credentials or assume a compiled-out provider exists. Live observations
+are explicitly nondurable; keep the retained raw evidence for reproducible
+findings. Do not change partition layouts or release/physical qualification gates
+merely to get a diagnostics build to pass.

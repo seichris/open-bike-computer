@@ -47,6 +47,7 @@ extern lv_obj_t *navTile;
 extern lv_obj_t *rideStatsTile;
 extern lv_obj_t *batteryStatusTile;
 extern lv_obj_t *worldRadioTile;
+extern lv_obj_t *elevationTile;
 extern lv_obj_t *mapTile;
 extern lv_obj_t *satTrackTile;
 extern lv_obj_t *tilesScreen;

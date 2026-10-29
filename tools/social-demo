@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""Three synthetic riders, confined to Bicino's development social service.
+
+The operator wrapper copies this program into the existing Dev API container.
+Firebase credentials and short-lived test tokens never leave that container.
+"""
+from __future__ import annotations
+import argparse
+import base64
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+import tempfile
+import uuid
+
+PROJECT = 'bicino-dev'
+ORIGIN = 'https://maps-dev.8o.vc/v1/social'
+CONTAINER = 'bicino-social-dev-social-api-1'
+REMOTE_ROOT = '/opt/bicino-social-dev/demo-friends'
+PROGRAM = '/tmp/bicino-social-demo.py'
+CONFIG = '/tmp/bicino-social-demo-config.json'
+STATUS = '/tmp/bicino-social-demo-status.json'
+PID = '/tmp/bicino-social-demo.pid'
+STOPPED = False
+class DemoError(Exception):
+    pass
+
+
+def safe_error(error):
+    text = str(error)
+    return text if isinstance(error, DemoError) and re.fullmatch(r'[a-zA-Z0-9_: -]{1,140}', text) else type(error).__name__
+
+
+RIDERS = (('ava', 'Demo Ava', 5.5), ('ben', 'Demo Ben', 3.7), ('cleo', 'Demo Cleo', 0.0))
+EMOJIS = {'ava': '🚴', 'ben': '🚴‍♂️', 'cleo': '🚴‍♀️'}
+
+
+def render_avatars():
+    """Render system emoji on the operator's Mac; no font/image bundle is shipped."""
+    if sys.platform != 'darwin': raise DemoError('Emoji avatars require the Mac operator')
+    program = r'''
+import AppKit
+import Foundation
+let entries: [(String, String, NSColor)] = [
+    ("ava", "🚴", NSColor(red: 1, green: 0.94, blue: 0.73, alpha: 1)),
+    ("ben", "🚴‍♂️", NSColor(red: 0.87, green: 0.94, blue: 1, alpha: 1)),
+    ("cleo", "🚴‍♀️", NSColor(red: 0.85, green: 0.96, blue: 0.86, alpha: 1))
+]
+guard let font = NSFont(name: "AppleColorEmoji", size: 168) else { exit(1) }
+var output: [String: String] = [:]
+for (slug, emoji, background) in entries {
+    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+        let context = NSGraphicsContext(bitmapImageRep: bitmap) else { exit(1) }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    background.setFill(); NSBezierPath(rect: NSRect(x: 0, y: 0, width: 256, height: 256)).fill()
+    let text = NSAttributedString(string: emoji, attributes: [.font: font])
+    let size = text.size()
+    text.draw(at: NSPoint(x: (256-size.width)/2, y: (256-size.height)/2))
+    context.flushGraphics(); NSGraphicsContext.restoreGraphicsState()
+    guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
+    output[slug] = data.base64EncodedString()
+}
+print(String(data: try JSONSerialization.data(withJSONObject: output), encoding: .utf8)!)
+'''
+    with tempfile.TemporaryDirectory(prefix='bicino-demo-emoji-') as temporary:
+        result = subprocess.run(['xcrun', 'swift', '-module-cache-path', temporary, '-'],
+                                input=program.encode(), capture_output=True)
+    if result.returncode: raise DemoError('Could not render system emoji avatars')
+    images = json.loads(result.stdout)
+    if set(images) != set(EMOJIS): raise DemoError('Invalid rendered avatars')
+    return images
+
+
+def identity(target, slug):
+    if not re.fullmatch(r'[a-z][a-z0-9_]{2,29}', target) or slug not in {r[0] for r in RIDERS}:
+        raise DemoError('Invalid demo target or rider')
+    suffix = hashlib.sha256(target.encode()).hexdigest()[:12]
+    return f'bicino-dev-demo-{suffix}-{slug}', f'demo_{slug}_{suffix}'
+
+
+def sample(slug, elapsed, captured_at, sequence, epoch, target_id):
+    """A small public Shanghai loop; Cleo deliberately stops updating for 90 s."""
+    index = [r[0] for r in RIDERS].index(slug)
+    speed = RIDERS[index][2]
+    if slug == 'cleo' and 20 <= elapsed % 150 < 110:
+        return None
+    angle = elapsed * speed / 260 + index * 0.8
+    latitude = 31.2355 + 0.0023 * math.sin(angle)
+    longitude = 121.4475 + 0.0027 * math.cos(angle)
+    return {'latitude': latitude, 'longitude': longitude, 'horizontalAccuracy': 5,
+            'capturedAt': captured_at, 'sequence': sequence, 'epochs': {target_id: epoch},
+            'course': (90-math.degrees(angle)) % 360, 'speed': speed,
+            'distanceMeters': max(0, elapsed)*speed,
+            'movingSeconds': max(0, elapsed) if speed else 0, 'elapsedSeconds': max(0, elapsed)}
+
+
+def guard_environment(environment):
+    if environment.get('BICINO_SOCIAL_ENVIRONMENT') != 'development' or environment.get('BICINO_FIREBASE_PROJECT_ID') != PROJECT:
+        raise DemoError('Demo riders require the development container and bicino-dev project')
+
+
+def atomic_json(path, value):
+    path = Path(path); temporary = path.with_suffix('.new')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as stream: json.dump(value, stream, indent=2)
+    os.replace(temporary, path)
+
+
+class DemoAccount:
+    def __init__(self, client, firebase_app, config, slug, name):
+        self.client, self.firebase_app, self.config = client, firebase_app, config
+        self.uid, self.username = identity(config['target'], slug)
+        self.slug, self.name = slug, name
+        self.token, self.token_deadline = None, 0
+        self.profile_id, self.epoch, self.sequence = None, None, 0
+
+    def authenticate(self):
+        from firebase_admin import auth
+        # Only explicitly owned test UIDs can be minted. Never mint for the user.
+        expected, _ = identity(self.config['target'], self.slug)
+        if self.uid != expected: raise DemoError('Demo UID mismatch')
+        if self.token and time.monotonic() < self.token_deadline: return
+        custom = auth.create_custom_token(self.uid, app=self.firebase_app).decode()
+        response = self.client.post('https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken',
+                                    params={'key': self.config['apiKey']}, json={'token': custom, 'returnSecureToken': True})
+        if response.status_code != 200: raise DemoError('Development test-token exchange failed')
+        value = response.json()
+        claims = auth.verify_id_token(value['idToken'], app=self.firebase_app)
+        if claims.get('uid') != self.uid or claims.get('aud') != PROJECT: raise DemoError('Test identity mismatch')
+        self.token = value['idToken']; self.token_deadline = time.monotonic()+min(3000, int(value['expiresIn'])-60)
+
+    def call(self, method, path, body=None, *, content=None, params=None):
+        self.authenticate()
+        if not path.startswith('/') or '..' in path: raise DemoError('Invalid API path')
+        headers = {'Authorization': 'Bearer '+self.token, 'Idempotency-Key': str(uuid.uuid4())}
+        payload = {'json': body} if content is None else {'content': content}
+        if content is not None: headers['Content-Type'] = 'image/png'
+        response = self.client.request(method, ORIGIN+path, params=params, headers=headers, **payload)
+        if response.status_code >= 300:
+            try: code = response.json().get('code', 'request_failed')
+            except ValueError: code = 'request_failed'
+            # Never retain provider bodies, tokens, positions or real rider stats.
+            raise DemoError(f'{response.status_code}:{code}')
+        return response.json()
+
+    def ensure_profile(self):
+        from firebase_admin import auth
+        try: user = auth.get_user(self.uid, app=self.firebase_app)
+        except auth.UserNotFoundError:
+            # Custom sign-in creates this fixed synthetic UID through the normal
+            # Auth client endpoint. The runtime role need not gain user-create IAM.
+            self.authenticate()
+            user = auth.get_user(self.uid, app=self.firebase_app)
+        if user.display_name not in (None, self.name) or user.email or user.provider_data:
+            raise DemoError('Existing UID is not the expected synthetic rider')
+        profile = self.call('GET', '/me')
+        if profile.get('username') not in (None, self.username):
+            raise DemoError('Existing social profile is not the expected synthetic rider')
+        if profile.get('username') != self.username or profile['displayName'] != self.name:
+            profile = self.call('PATCH', '/me', {'version': profile['version'], 'username': self.username,
+                'displayName': self.name, 'privacy': {'notifications': False, 'friendNotifications': False, 'rideNotifications': False}})
+        self.profile_id = profile['id']
+        return profile
+
+    def ensure_avatar(self, profile, replace=False):
+        if profile.get('avatarID') and not replace: return profile, 'retained'
+        data = Path(f'/tmp/bicino-social-demo-avatar-{self.slug}.png').read_bytes()
+        if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) > 512000:
+            raise DemoError('Invalid demo avatar')
+        return self.call('PUT', '/me/avatar', content=data, params={'version': profile['version']}), 'uploaded'
+
+    def change_consent(self, target_id, enabled):
+        path = f'/friend-sharing/{target_id}/consent'
+        current = self.call('GET', path)
+        result = self.call('POST', path, {'epoch': current['epoch'], 'location': enabled, 'stats': enabled})
+        self.epoch = result['epoch'] if enabled and result['sharing'] else None
+        self.sequence = 0
+        return result
+
+
+def run_inside(args):
+    guard_environment(os.environ)
+    config = json.loads(Path(CONFIG).read_text())
+    if config.get('project') != PROJECT or config.get('origin') != ORIGIN: raise DemoError('Wrong demo environment')
+    identity(config['target'], 'ava')
+    if args.action == 'status':
+        status = json.loads(Path(STATUS).read_text()) if Path(STATUS).exists() else {'running': False}
+        status['processAlive'] = process_alive()
+        print(json.dumps(status)); return
+    if args.action == 'stop':
+        if process_alive():
+            os.kill(int(Path(PID).read_text()), signal.SIGTERM)
+            for _ in range(100):
+                if not process_alive(): break
+                time.sleep(0.1)
+        print(json.dumps({'processAlive': process_alive()})); return
+    if args.action == 'seed' and process_alive(): raise DemoError('Stop the simulator before reseeding')
+    import firebase_admin
+    import httpx
+    app = firebase_admin.initialize_app(options={'projectId': PROJECT, 'httpTimeout': 8}, name='bicino-demo-riders')
+    # Check the credential project as well as the app's declared project.
+    credential = app.credential.get_credential()
+    if app.project_id != PROJECT or getattr(credential, 'project_id', None) != PROJECT:
+        raise DemoError('Firebase credential must belong to bicino-dev')
+    with httpx.Client(timeout=10, follow_redirects=False) as client:
+        accounts = [DemoAccount(client, app, config, slug, name) for slug, name, _ in RIDERS]
+        profiles = [account.ensure_profile() for account in accounts]
+        target = accounts[0].call('GET', '/profiles/by-username/'+config['target'])
+        if target['username'] != config['target'] or target['id'] in {p['id'] for p in profiles}:
+            raise DemoError('Invalid target rider')
+        if args.action == 'avatars':
+            results = []
+            for account, profile in zip(accounts, profiles):
+                profile, outcome = account.ensure_avatar(profile, replace=args.replace)
+                result = {'displayName': account.name, 'avatarStatus': outcome, 'avatarID': profile['avatarID']}
+                if outcome == 'uploaded': result['emoji'] = EMOJIS[account.slug]
+                results.append(result)
+            print(json.dumps({'riders': results})); return
+        if args.action == 'seed':
+            requests = [account.call('POST', '/friend-requests', {'profileID': target['id']}) for account in accounts]
+            result = {'running': False, 'targetUsername': config['target'], 'riders': [
+                {'displayName': profile['displayName'], 'username': profile['username'], 'profileID': profile['id'], 'friendship': request['status']}
+                for profile, request in zip(profiles, requests)]}
+            atomic_json(STATUS, result); print(json.dumps(result)); return
+        if process_alive(): raise DemoError('A demo simulator is already running')
+        Path(PID).write_text(str(os.getpid())); os.chmod(PID, 0o600)
+        def stop_signal(_signum, _frame):
+            global STOPPED
+            STOPPED = True
+        signal.signal(signal.SIGTERM, stop_signal); signal.signal(signal.SIGINT, stop_signal)
+        started = time.monotonic()
+        outcomes = {}
+        try:
+            while not STOPPED and time.monotonic()-started < args.duration:
+                elapsed = time.monotonic()-started
+                for account in accounts:
+                    if STOPPED: break
+                    state = {'username': account.username, 'displayName': account.name}
+                    try:
+                        if account.epoch is None:
+                            account.change_consent(target['id'], True)
+                        fix = sample(account.slug, elapsed, time.time(), account.sequence, account.epoch, target['id'])
+                        if fix:
+                            account.sequence += 1  # Never reuse a sequence after a lost reply.
+                            reply = account.call('POST', '/friend-sharing/state', fix)
+                            if target['id'] not in reply['accepted']:
+                                account.epoch = None
+                                raise DemoError('sharing_revoked')
+                        incoming = account.call('GET', '/friend-sharing')['riders']
+                        own = next((r for r in incoming if r['profile']['id'] == target['id']), None)
+                        state.update(publishing=fix is not None, seesYourSharing=own is not None,
+                                     receivesStats=own is not None and 'distanceMeters' in own,
+                                     scenario='intermittent' if account.slug == 'cleo' else 'moving')
+                    except Exception as error:
+                        # Only our bounded error codes, never provider payloads/URLs.
+                        state['error'] = safe_error(error)
+                    outcomes[account.slug] = state
+                atomic_json(STATUS, {'running': True, 'pid': os.getpid(), 'targetUsername': config['target'],
+                    'elapsedSeconds': int(elapsed), 'remainingSeconds': max(0, int(args.duration-elapsed)), 'riders': list(outcomes.values())})
+                for _ in range(30):
+                    if STOPPED: break
+                    time.sleep(0.1)
+        finally:
+            for account in accounts:
+                if account.epoch:
+                    try: account.change_consent(target['id'], False)
+                    except Exception: pass
+            Path(PID).unlink(missing_ok=True)
+            atomic_json(STATUS, {'running': False, 'targetUsername': config['target'], 'riders': list(outcomes.values())})
+
+
+def process_alive():
+    try:
+        pid = int(Path(PID).read_text())
+        command = Path(f'/proc/{pid}/cmdline').read_bytes()
+        return PROGRAM.encode() in command and b'--inside-container' in command and b'run' in command
+    except (OSError, ValueError): return False
+
+
+def operate(args):
+    source = Path(__file__).read_text()
+    payload = {'action': args.action, 'duration': args.duration, 'program': source, 'replace': args.replace}
+    if args.action == 'avatars': payload['avatars'] = render_avatars()
+    if args.action == 'seed':
+        if not args.xcconfig or not args.target: raise DemoError('seed requires --xcconfig and --target')
+        values = {}
+        for line in Path(args.xcconfig).read_text().splitlines():
+            if '=' in line and not line.lstrip().startswith('//'):
+                key, value = line.split('=', 1); values[key.strip()] = value.strip().strip('"')
+        if values.get('BICINO_FIREBASE_PROJECT_ID') != PROJECT: raise DemoError('Use the Bicino Dev xcconfig')
+        key = values.get('BICINO_FIREBASE_API_KEY', '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{20,100}', key): raise DemoError('Missing public Dev client API key')
+        target = args.target.lstrip('@').lower(); identity(target, 'ava')
+        payload['config'] = {'project': PROJECT, 'origin': ORIGIN, 'apiKey': key, 'target': target}
+    bootstrap = '''import base64,json,os,pathlib,subprocess,sys
+p=json.loads(sys.stdin.read())
+root=pathlib.Path("/opt/bicino-social-dev/demo-friends");root.mkdir(mode=0o700,exist_ok=True)
+def write(path,text):
+ fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+ with os.fdopen(fd,"w") as f:f.write(text)
+program=root/"simulator.py";config=root/"config.json"
+write(program,p["program"])
+if "config" in p:write(config,json.dumps(p["config"]))
+if not config.exists():raise SystemExit("Run seed first")
+for src,dst in [(program,"/tmp/bicino-social-demo.py"),(config,"/tmp/bicino-social-demo-config.json")]:
+ subprocess.run(["docker","cp",str(src),"bicino-social-dev-social-api-1:"+dst],check=True,capture_output=True)
+if "avatars" in p:
+ if set(p["avatars"])!={"ava","ben","cleo"}:raise SystemExit("Invalid demo avatar set")
+ for slug,value in p["avatars"].items():
+  data=base64.b64decode(value,validate=True)
+  if len(data)>512000 or not data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):raise SystemExit("Invalid demo avatar")
+  path=root/("avatar-"+slug+".png")
+  fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+  with os.fdopen(fd,"wb") as f:f.write(data)
+  subprocess.run(["docker","cp",str(path),"bicino-social-dev-social-api-1:/tmp/bicino-social-demo-avatar-"+slug+".png"],check=True,capture_output=True)
+cmd=["docker","exec","--user","0","bicino-social-dev-social-api-1","python","/tmp/bicino-social-demo.py","--inside-container",p["action"]]
+if p.get("replace") is True:
+ if p["action"]!="avatars":raise SystemExit("Replacement requires avatars")
+ cmd.append("--replace")
+if p["action"]=="run":
+ current=json.loads(subprocess.check_output(cmd[:-1]+["status"]))
+ if current.get("processAlive"):
+  print(json.dumps(current));raise SystemExit(0)
+ # Fixed shell text; duration is a validated integer and no user text enters shell code.
+ command="exec python /tmp/bicino-social-demo.py --inside-container run --duration "+str(int(p["duration"]))+" > /tmp/bicino-social-demo.log 2>&1"
+ subprocess.run(["docker","exec","-d","--user","0","bicino-social-dev-social-api-1","sh","-c",command],check=True)
+ print(json.dumps({"started":True,"durationSeconds":p["duration"]}))
+else:subprocess.run(cmd,check=True)
+'''
+    command = 'python3 -c ' + __import__('shlex').quote(bootstrap)
+    result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', args.ssh_host, command],
+                            input=json.dumps(payload).encode())
+    if result.returncode: raise SystemExit(result.returncode)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--inside-container', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('action', choices=['seed', 'avatars', 'run', 'status', 'stop'])
+    parser.add_argument('--replace', action='store_true', help='Replace existing synthetic rider pictures with the current emoji set (avatars only)')
+    parser.add_argument('--target', help='Your Dev username, for seed')
+    parser.add_argument('--xcconfig', help='Bicino Dev native client configuration, for seed')
+    parser.add_argument('--duration', type=int, default=3600, help='Simulation seconds, at most four hours (default: one hour)')
+    parser.add_argument('--ssh-host', default='cool-ts', help='Existing development server SSH alias')
+    args = parser.parse_args()
+    if args.replace and args.action != 'avatars': parser.error('--replace requires avatars')
+    if not 30 <= args.duration <= 4*3600: parser.error('duration must be between 30 and 14400 seconds')
+    try:
+        run_inside(args) if args.inside_container else operate(args)
+    except Exception as error:
+        # Keep tokens and provider response bodies out of terminal output.
+        message = safe_error(error)
+        if args.inside_container and args.action == 'run' and not process_alive():
+            atomic_json(STATUS, {'running': False, 'error': message})
+        print('social-demo: '+message, file=sys.stderr); raise SystemExit(1)
+
+
+if __name__ == '__main__': main()

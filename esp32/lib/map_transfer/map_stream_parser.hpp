@@ -126,6 +126,8 @@ bool mapStreamFileView(const ParsedMapStreamManifest &manifest,
                        MapStreamFileView &file);
 bool mapStreamFirmwareCompatible(const std::string &currentVersion,
                                  const std::string &minimumVersion);
+// Whether this build can present a map of the manifest's renderer target.
+bool mapStreamTargetSupported(const MapManifest &manifest);
 
 struct MapStreamParserOptions {
   uint64_t expectedContentBytes = std::numeric_limits<uint64_t>::max();
@@ -149,6 +151,9 @@ public:
   operator=(const MapStreamIncrementalParser &) = delete;
 
   bool feed(const uint8_t *data, size_t size);
+  // Does not invoke onComplete or write boot-eligible metadata.
+  bool readyToFinish() const;
+  void abort(MapStreamParserError error = MapStreamParserError::Truncated);
   bool finish();
   bool complete() const;
   bool failed() const;

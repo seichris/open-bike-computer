@@ -1,8 +1,12 @@
 # Watch workout companion release notes
 
-Release candidate: **1.9 (24)**. App Store version 1.8 is already distributed,
-and App Store Connect already contains builds through 22, so the build number
-advances for this release candidate.
+Release candidate: **1.11 (33)**. This build includes the saved-map selection
+transport and confirmation fix and is prepared for the
+[build-105 map and storage qualification](2026-10-29-build105-candidate.md);
+App Store submission remains a separate gate.
+Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated
+app-family icon (dark for production, light for Dev), and production no longer declares background audio for
+the development-firmware-only World Radio feature. Debug keeps background audio.
 
 ## App Store What's New
 
@@ -11,6 +15,8 @@ Download offline maps more reliably on your Bicino.
 - Recover automatically if the app's map-security credential becomes
   unavailable.
 - Retry map creation after securely restoring that credential.
+- Resume interrupted map downloads and recover pending downloads after reopening
+  the app.
 
 ## App Review notes
 

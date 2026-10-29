@@ -147,15 +147,17 @@ final class WatchConnectivityCoordinator: NSObject {
     func recordTransportDiagnostic(
         _ event: WatchBLETransportDiagnosticEventV1
     ) {
-        let existing = defaults.data(
-            forKey: pendingTransportDiagnosticsKey
-        ).flatMap {
-            WatchBLETransportDiagnosticBatchV1.decode($0)?.events
-        } ?? []
-        let batch = WatchBLETransportDiagnosticBatchV1(
-            events: existing + [event]
-        )
+        let pending = defaults.data(forKey: pendingTransportDiagnosticsKey)
+            .flatMap { WatchBLETransportDiagnosticBatchV1.decode($0) }
+        let producerKey = "watch.transport-diagnostics.producer.v1"
+        let producer = defaults.string(forKey: producerKey).flatMap(UUID.init(uuidString:)) ?? UUID()
+        defaults.set(producer.uuidString, forKey: producerKey)
+        let lossKey = "watch.transport-diagnostics.dropped.v1"
+        let prior = max(defaults.integer(forKey: lossKey), pending?.droppedEventCount ?? 0)
+        let batch = WatchBLETransportDiagnosticBatchV1(events: (pending?.events ?? []) + [event],
+            producerID: producer, droppedEventCount: prior)
         if let data = try? batch.encoded() {
+            defaults.set(batch.droppedEventCount ?? prior, forKey: lossKey)
             defaults.set(data, forKey: pendingTransportDiagnosticsKey)
         }
         guard let session else { return }
@@ -231,6 +233,7 @@ final class WatchConnectivityCoordinator: NSObject {
         onDirectRidePreparationAvailabilityChanged?()
         cyclingSensorPublisher.flush()
         if let session {
+            flushPendingDirectRideReleases(using: session)
             flushPendingTransportDiagnostics(using: session)
         }
     }
@@ -266,10 +269,24 @@ final class WatchConnectivityCoordinator: NSObject {
         let inFlight = defaults.array(
             forKey: inFlightDirectRideReleaseKey
         ) as? [Data] ?? []
-        guard inFlight.isEmpty else { return }
         let pending = defaults.array(
             forKey: pendingDirectRideReleaseKey
         ) as? [Data] ?? []
+        // Retry the interactive path when reachability returns, including
+        // releases already owned by WatchConnectivity's durable transfer.
+        for payload in WatchDirectRidePreparationPolicyV1
+            .interactiveReleasePayloads(
+                pending: pending,
+                inFlight: inFlight,
+                activated: session.activationState == .activated,
+                reachable: session.isReachable
+            ) {
+            // Neither a lost reply nor a failed attempt removes the durable
+            // transfer. Duplicate releases use the phone's existing fences.
+            session.sendMessageData(payload, replyHandler: { _ in },
+                                    errorHandler: { _ in })
+        }
+        guard inFlight.isEmpty else { return }
         guard !pending.isEmpty else { return }
         defaults.set(pending, forKey: inFlightDirectRideReleaseKey)
         defaults.removeObject(forKey: pendingDirectRideReleaseKey)
@@ -401,19 +418,22 @@ final class WatchConnectivityCoordinator: NSObject {
     private func mergePendingTransportDiagnostics(_ data: Data) {
         guard let incoming = WatchBLETransportDiagnosticBatchV1.decode(data)
         else { return }
-        let pending = defaults.data(
-            forKey: pendingTransportDiagnosticsKey
-        ).flatMap {
-            WatchBLETransportDiagnosticBatchV1.decode($0)?.events
-        } ?? []
+        let pending = defaults.data(forKey: pendingTransportDiagnosticsKey)
+            .flatMap { WatchBLETransportDiagnosticBatchV1.decode($0) }
+        let producerKey = "watch.transport-diagnostics.producer.v1"
+        let producer = defaults.string(forKey: producerKey).flatMap(UUID.init(uuidString:)) ?? UUID()
+        defaults.set(producer.uuidString, forKey: producerKey)
+        let lossKey = "watch.transport-diagnostics.dropped.v1"
+        let prior = max(defaults.integer(forKey: lossKey),
+            max(pending?.droppedEventCount ?? 0, incoming.producerID == producer ? incoming.droppedEventCount ?? 0 : 0))
         var seen = Set<String>()
-        let merged = (incoming.events + pending).filter { event in
-            seen.insert("\(event.attemptID.uuidString):\(event.sequence)")
-                .inserted
+        let merged = (incoming.events + (pending?.events ?? [])).filter { event in
+            seen.insert("\(event.attemptID.uuidString):\(event.sequence)").inserted
         }
-        guard let encoded = try? WatchBLETransportDiagnosticBatchV1(
-            events: merged
-        ).encoded() else { return }
+        let batch = WatchBLETransportDiagnosticBatchV1(events: merged, producerID: producer,
+            droppedEventCount: prior)
+        guard let encoded = try? batch.encoded() else { return }
+        defaults.set(batch.droppedEventCount ?? prior, forKey: lossKey)
         defaults.set(encoded, forKey: pendingTransportDiagnosticsKey)
     }
 
@@ -431,6 +451,8 @@ final class WatchConnectivityCoordinator: NSObject {
         ), let data = try? metadata.encoded() else { return }
         var merged = session.applicationContext
         merged[WatchDeviceMetadataV1.applicationContextKey] = data
+        merged[WatchRouteSyncMessageV1.supportedSchemaContextKey] = 2
+        merged[WatchControllerRevocationReceiptV1.supportedContextKey] = 1
         if let workoutHealthSetupSnapshot,
            let healthData = try? workoutHealthSetupSnapshot.encoded() {
             merged[WorkoutHealthSetupSnapshotV1.applicationContextKey] =
@@ -455,6 +477,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let data else {
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: "file_read"
             )
@@ -462,6 +485,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard request.encodedByteCount == data.count else {
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: "byte_count"
             )
@@ -477,23 +501,26 @@ final class WatchConnectivityCoordinator: NSObject {
             guard archive.deleteAfter == request.deleteAfter else {
                 return routeAcknowledgement(
                     request.identity,
+                    deliveryOperation: request.deliveryOperation,
                     status: .rejected,
                     error: "retention_mismatch"
                 )
             }
             let result = try routeLibrary.install(
                 data,
-                expectedIdentity: request.identity
+                expectedIdentity: request.identity,
+                deliveryOperation: request.deliveryOperation
             )
             for evictedIdentity in result.evictedIdentities {
                 acknowledge(evictedIdentity, status: .evicted)
             }
-            return routeAcknowledgement(request.identity, status: .ready)
+            return routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .ready)
         } catch {
             let code = Self.errorCode(for: error)
             routeLibrary.reportSyncError(code)
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: code
             )
@@ -515,6 +542,7 @@ final class WatchConnectivityCoordinator: NSObject {
         case .failure(let error):
             routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: error.rawValue
             )
@@ -528,7 +556,17 @@ final class WatchConnectivityCoordinator: NSObject {
         if let payload = userInfo[
             WatchControllerTransportV1.userInfoPayloadKey
         ] as? Data {
-            _ = receiveControllerRequest(payload)
+            let result = receiveControllerRequest(payload)
+            if let request = try? WatchControllerRequestV1.decode(payload),
+               request.operation == .revoke,
+               let response = try? WatchControllerResponseV1.decode(result),
+               let receipt = try? WatchControllerRevocationReceiptV1(
+                   request: request, response: response).encoded(),
+               let session, session.activationState == .activated {
+                session.transferUserInfo([
+                    WatchControllerRevocationReceiptV1.userInfoPayloadKey: receipt
+                ])
+            }
             return
         }
         guard let request = WatchRouteSyncMessageV1(propertyList: userInfo),
@@ -536,15 +574,15 @@ final class WatchConnectivityCoordinator: NSObject {
             return
         }
         do {
-            try routeLibrary.delete(request.identity)
-            acknowledge(request.identity, status: .deleted)
+            try routeLibrary.delete(request.identity, deliveryOperation: request.deliveryOperation)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .deleted))
         } catch NavigationRouteFileStoreError.notFound {
             // Deletion is idempotent: the requested exact revision is absent.
-            acknowledge(request.identity, status: .deleted)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .deleted))
         } catch {
             let code = Self.errorCode(for: error)
             routeLibrary.reportSyncError(code)
-            acknowledge(request.identity, status: .rejected, error: code)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .rejected, error: code))
         }
     }
 
@@ -643,6 +681,7 @@ final class WatchConnectivityCoordinator: NSObject {
     ) {
         acknowledge(routeAcknowledgement(
             identity,
+            deliveryOperation: routeLibrary.operationToken(for: identity),
             status: status,
             error: error
         ))
@@ -656,6 +695,7 @@ final class WatchConnectivityCoordinator: NSObject {
 
     private func routeAcknowledgement(
         _ identity: WatchRouteIdentityV1,
+        deliveryOperation: WatchRouteOperationV2? = nil,
         status: WatchRouteSyncStatusV1,
         error: String? = nil
     ) -> WatchRouteSyncMessageV1 {
@@ -663,12 +703,17 @@ final class WatchConnectivityCoordinator: NSObject {
             operation: .acknowledge,
             identity: identity,
             status: status,
-            errorCode: error
+            errorCode: error,
+            deliveryOperation: deliveryOperation
         )
     }
 
     private static func errorCode(for error: Error) -> String {
         switch error {
+        case WatchRouteOperationJournalV2.Failure.staleOperation:
+            "stale_operation"
+        case WatchRouteOperationJournalV2.Failure.conflict:
+            "operation_conflict"
         case WatchRouteLibraryError.metadataMismatch:
             "metadata_mismatch"
         case NavigationRouteFileStoreError.capacityExceeded:

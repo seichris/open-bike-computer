@@ -10,6 +10,13 @@ nonisolated final class WorkoutWeakReference<Object: AnyObject>: @unchecked Send
     }
 }
 
+/// State-neutral bootstrap on the system-provided HealthKit mirror only.
+/// A relaunched phone has no custom envelope credentials yet. This request
+/// asks the existing primary session to publish them; it cannot control it.
+nonisolated enum WorkoutMirrorSnapshotRequest {
+    static let data = Data("bicino.workout.snapshot-request.v1".utf8)
+}
+
 /// Produces iPhone-to-Watch controls in the same monotonic sequence space used
 /// by the current Watch snapshot. Basing every control on the newest received
 /// Watch sequence makes a newly launched iPhone process advance beyond the
@@ -243,7 +250,7 @@ nonisolated enum WorkoutErrorCopyV1 {
             case .activeWorkout:
                 return "Keep your paired Apple Watch nearby, unlocked, and wearing Bicino. A current workout continues on Watch."
             case .workoutLaunch:
-                return "Bicino could not reach Apple Watch, so the workout did not start. Open Bicino on Watch and try again."
+                return "Bicino could not confirm the start on Apple Watch. Open Bicino on Watch and check whether a workout is running before retrying or choosing iPhone."
             case .general:
                 return "Bicino could not communicate with Apple Watch. Check Bicino on Watch and verify the workout state."
             }

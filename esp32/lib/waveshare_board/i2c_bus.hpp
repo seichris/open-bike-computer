@@ -8,6 +8,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include <Arduino.h>
+#include "i2c_transaction_trace.hpp"
 
 namespace waveshare_board::i2c {
 
@@ -34,7 +35,8 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t len, const char *label = nullptr,
                          uint8_t attempts = 2);
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
-                     const char *label = nullptr, uint8_t attempts = 2);
+                     const char *label = nullptr, uint8_t attempts = 2,
+                     TransactionTrace *trace = nullptr);
 // Command-oriented sensors such as SHTC3 use a two-byte command followed by a
 // separate response with no register address. AXP2101 command writes remain
 // blocked on the e-paper board by the same write-policy boundary.
@@ -95,10 +97,11 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
                             uint8_t len);
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
-                    const char *label = nullptr, uint8_t attempts = 3);
+                    const char *label = nullptr, uint8_t attempts = 3,
+                    TransactionTrace *trace = nullptr);
 bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
                const char *label = nullptr, uint8_t attempts = 3);
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
+#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206 || WAVESHARE_EPAPER_397

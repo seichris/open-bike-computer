@@ -21,11 +21,11 @@ class PromotionRuntimeTests(unittest.TestCase):
         from map_platform.cli import _pipeline_producer_identity
         build, image = _pipeline_producer_identity(
             Path("/app"),
-            "ghcr.io/seichris/open-bike-computer-map-platform@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8",
+            "ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9",
             required=True,
         )
-        self.assertEqual(len(build), 64)
-        self.assertEqual(image, "sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8")
+        self.assertEqual(build, "fabfedc35cbb2443b442d2b64753e438c40559b1eac0c98db6d3f675e9cd3d9f")
+        self.assertEqual(image, "sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9")
 
     def test_real_cli_reaches_promotion_with_isolated_data_root(self):
         from map_platform.cli import main
@@ -35,7 +35,7 @@ class PromotionRuntimeTests(unittest.TestCase):
             "MAP_PLATFORM_CATALOG_SERVICE_KEY_ID": "test-production",
             "MAP_PLATFORM_CATALOG_SERVICE_SECRET": "s" * 48,
             "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
-            "MAP_PLATFORM_WORKER_IMAGE_REFERENCE": "ghcr.io/seichris/open-bike-computer-map-platform@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8",
+            "MAP_PLATFORM_WORKER_IMAGE_REFERENCE": "ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9",
         }), patch("map_platform.map_signing.load_map_artifact_signer_from_environment", return_value=object()), patch("map_platform.cli.create_artifact_store_from_environment", return_value=object()), patch("map_platform.catalog_promotion.promote_catalog_map", return_value={}) as promote:
             with patch("sys.argv", ["map-platform", "--repo-root", "/app", "--data-root", root, "promote-catalog-map", "map_v1_" + "a" * 43]):
                 self.assertEqual(main(), 0)

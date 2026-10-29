@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "../maps/src/mapNearbyCoverage.hpp"
+
 namespace map_transfer {
 
 struct ManifestFile {
@@ -20,6 +22,7 @@ struct MapPresentationMetadata {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
 };
 
 struct MapPresentationRevision {
@@ -34,6 +37,7 @@ struct MapManifest {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::string renderer;
   uint32_t formatVersion = 0;
   uint32_t labelProfileVersion = 0;
@@ -43,6 +47,12 @@ struct MapManifest {
   uint32_t topographyProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  std::vector<std::string> requestedFeatures;
+  bool contoursIncluded = false;
+  uint32_t poiRecordCount = 0;
+  uint32_t poiCategoryCounts[5] = {0, 0, 0, 0, 0};
   uint32_t contourRecordCount = 0;
   uint32_t contourPointCount = 0;
   uint32_t contourMinorIntervalM = 0;
@@ -79,6 +89,11 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  uint32_t poiRecordCount = 0;
+  bool contoursIncluded = false;
+  std::string poiIndexSha256;
   uint32_t topographyProfileVersion = 0;
   std::string topographyQualityMode;
   uint32_t contourMinorIntervalM = 0;
@@ -104,6 +119,7 @@ struct ActiveMapSelection {
 };
 
 struct ReadyStreamMap {
+  std::string operationID;
   std::string sessionId;
   std::string mapId;
   std::string root;
@@ -112,6 +128,21 @@ struct ReadyStreamMap {
   uint32_t fileCount = 0;
   uint64_t payloadBytes = 0;
 };
+
+// A completed installation, independently of the current renderer selection.
+// The bound keeps authenticated BLE inventory snapshots below the chunk limit.
+constexpr size_t kMaximumLibraryMaps = 32;
+struct InstalledMap {
+  std::string sessionId, mapId, root, manifestReceipt, signedManifestReceipt;
+  MapPresentationMetadata presentation;
+  uint64_t payloadBytes = 0;
+  bool available = true;
+  bool contains(int32_t latitudeE7, int32_t longitudeE7) const;
+};
+uint64_t libraryPositionBlockKey(int32_t latitudeE7, int32_t longitudeE7);
+const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
+    const std::string &currentRoot, int32_t latitudeE7, int32_t longitudeE7,
+    const std::vector<std::string> &rejectedSessions = {});
 
 class Sha256Hasher {
 public:
@@ -146,6 +177,8 @@ struct MapActivationSnapshot {
   uint8_t progress = 0;
   std::string errorCode;
   std::string errorMessage;
+  std::array<char, 64> ownerRecoveryCode{};
+  std::array<char, 64> terminalCode{};
 };
 
 class MapActivationState {
@@ -156,9 +189,12 @@ public:
   void updateProgress(const ActivationProgress &progress);
   void finish(std::string status, std::string mapId,
               std::string errorCode, std::string errorMessage);
+  void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
+  const std::array<char, 64> &ownerRecoveryCode() const { return state_.ownerRecoveryCode; }
+  const std::array<char, 64> &terminalCode() const { return state_.terminalCode; }
 
 private:
   MapActivationSnapshot state_;
@@ -166,8 +202,24 @@ private:
 
 class MapTransferInstaller {
 public:
-  explicit MapTransferInstaller(std::string storageRoot = "/sdcard");
+  // Firmware passes Storage::mapStorageRoot(): removable SD only, never FFat.
+  explicit MapTransferInstaller(std::string storageRoot);
   virtual ~MapTransferInstaller() = default;
+  InstallStatus readReadyStreamMap(const std::string &sessionId,
+                                   ReadyStreamMap &ready) const;
+  InstallStatus readPreparedOperation(const std::string &sessionId,
+                                      ReadyStreamMap &prepared) const;
+  InstallStatus cancelOperationStaging(const std::string &sessionId,
+                                       const std::string &operationID) const;
+  InstallStatus finalizeOperation(const std::string &sessionId,
+                                  const std::string &operationID) const;
+  InstallStatus promotePreparedOperation(const std::string &sessionId,
+                                         const std::string &operationID) const;
+  void setOperationDeviceID(std::string device) { operationDeviceID_ = std::move(device); }
+  using StorageProgressCallback = void (*)(void *);
+  void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
+    storageProgressCallback_ = callback; storageProgressContext_ = context;
+  }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -192,11 +244,14 @@ public:
   activateStagedMap(const std::string &sessionId, const MapManifest &manifest,
                     const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus recoverInterruptedActivation() const;
+  using ActivationRecoveryCallback = void (*)(void *, const char *);
   InstallStatus activateReadyStreamMap(
       const std::string &sessionId,
-      const ActivationProgressCallback &onProgress = {}) const;
+      const ActivationProgressCallback &onProgress = {},
+      ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   InstallStatus recoverPendingStreamActivation(
-      const ActivationProgressCallback &onProgress = {}) const;
+      const ActivationProgressCallback &onProgress = {},
+      ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.
@@ -212,6 +267,26 @@ public:
       const ActiveMapSelection &selection,
       MapPresentationRevision &revision) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  InstallStatus readInstalledMap(const std::string &sessionId, InstalledMap &map, bool requirePayload = true) const;
+  InstallStatus readMapLibrary(std::vector<InstalledMap> &maps) const;
+  bool mapRootHasBlock(const std::string &root, int32_t latitudeE7, int32_t longitudeE7) const;
+  bool installedMapCovers(const InstalledMap &map, int32_t latitudeE7, int32_t longitudeE7) const;
+  InstallStatus selectInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  InstallStatus removeInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  bool automaticMapSelection() const;
+  bool setAutomaticMapSelection(bool enabled) const;
+  // A manual Use journals its exact target before the canonical pointer moves.
+  // Reconciliation pins manual selection only when that pointer survived
+  // (renderer rollback/recovery included); otherwise the journal is dropped and
+  // the previous automatic/manual policy remains untouched.
+  bool writeManualSelectionIntent(const std::string &sessionId,
+                                  const std::string &root,
+                                  const std::string &receipt) const;
+  bool manualSelectionIntentPending() const;
+  bool discardManualSelectionIntent() const;
+  InstallStatus reconcileManualSelectionIntent() const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(
       const std::string &sessionId) const;
@@ -230,11 +305,41 @@ public:
   std::string stagedArchivePath(const std::string &sessionId) const;
 
 protected:
+  virtual int renameStoragePath(const char *from, const char *to) const;
+  // Exact mutation boundary seam for crash qualification. Production is a
+  // no-op; host faults can interrupt before or after the real IO operation.
+  virtual void storageMutationBoundary(const char *operation,
+                                       const std::string &path,
+                                       bool after) const {
+    (void)operation; (void)path; (void)after;
+  }
   virtual bool writeTextFileAtomic(const std::string &path,
                                    const std::string &text) const;
 
 private:
+  // These phases run on the fixed internal owner stack. Keep the selection
+  // locals out of recovery and unwind pending resolution before activation.
+  __attribute__((noinline)) InstallStatus recoverStreamSelection() const;
+  __attribute__((noinline)) InstallStatus selectReadyStreamMap(
+      const std::string &sessionId, const ActivationProgressCallback &onProgress,
+      bool &needsSelectionRecovery) const;
+  __attribute__((noinline)) InstallStatus resolvePendingStreamActivation(
+      std::string &sessionId) const;
+  __attribute__((noinline)) InstallStatus recoverActiveSelection() const;
+  __attribute__((noinline)) InstallStatus recoverTerminalSelection() const;
+  __attribute__((noinline)) InstallStatus dispatchActivationRecovery(const std::string &transaction) const;
+  bool journalNeedsOwner(const std::string &transaction) const;
+  bool journalVersionsNeedOwner() const;
+  bool quarantineTransaction(const std::string &path, const std::string &bytes,
+                             const std::string &operationID) const;
+  bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
+  InstallStatus readStreamMapMetadata(const std::string &sessionId,
+                                      ReadyStreamMap &ready, bool prepared,
+                                      std::string *validatedMarker = nullptr) const;
   std::string storageRoot_;
+  std::string operationDeviceID_;
+  StorageProgressCallback storageProgressCallback_ = nullptr;
+  void *storageProgressContext_ = nullptr;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
@@ -251,6 +356,7 @@ private:
   bool copyTree(const std::string &from, const std::string &to) const;
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
+
   std::string verificationPath(const std::string &sessionId,
                                const ManifestFile &file) const;
   bool publishStagedFiles(const std::string &sessionId,
@@ -267,13 +373,20 @@ private:
                                   const MapManifest &manifest) const;
   bool installedMapContentsMatch(const std::string &root,
                                  const MapManifest &manifest) const;
-  bool writeActiveMap(const ActiveMapSelection &selection) const;
-  InstallStatus readReadyStreamMap(const std::string &sessionId,
-                                   ReadyStreamMap &ready) const;
-  InstallStatus
+  __attribute__((noinline)) bool writeActiveMap(const ActiveMapSelection &selection) const;
+  __attribute__((noinline)) bool writeCanonicalActiveMap(const ActiveMapSelection &selection) const;
+  InstallStatus parseActiveMapText(const std::string &text, ActiveMapSelection &selection) const;
+  __attribute__((noinline)) bool persistPredecessorAnchor(const ActiveMapSelection &incoming) const;
+  InstallStatus recoverSelectionAnchor() const;
+  bool selectionAnchorProtectsRoot(const std::string &root) const;
+  __attribute__((noinline)) bool anchorSelectionVerified(const ActiveMapSelection &selection) const;
+  __attribute__((noinline)) InstallStatus
   recoverStreamActivationTransaction(const std::string &transaction) const;
+  __attribute__((noinline)) InstallStatus recoverLegacyActivationTransaction(
+      const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;
   bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
+  bool restoreRetainedLibraryVersion(const std::string &sessionId) const;
   bool rollbackRootMatches(const std::string &root, const std::string &mapId,
                            const std::string &manifestReceipt,
                            const std::string &signedManifestReceipt) const;

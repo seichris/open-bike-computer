@@ -109,6 +109,13 @@ that design.
 
 ## Isolation contract for the AMOLED targets
 
+> Retired when PR #442 merged current `main` (2026-10-29). The artifact
+> equivalence job only ran for pull requests based on
+> `feature/waveshare-epaper-397`, and its `#line` overrides no longer matched
+> `main`. Merging into `main` intentionally changes shared AMOLED bytes (board
+> metadata, client version 34), so ordinary per-board CI now owns AMOLED
+> qualification. The text below is the historical stacked-branch contract.
+
 All new policy behavior must be unavailable unless `WAVESHARE_EPAPER_397` is
 defined.
 

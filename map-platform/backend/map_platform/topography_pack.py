@@ -6,15 +6,21 @@ The output receipt is written last; incomplete output is never a ready pack.
 from __future__ import annotations
 
 import hashlib
+import base64
+from .terrain import validate_grid, clip_grid, prepare_selection, ALGORITHM
 import os
 import re
+import struct
 import tempfile
 from pathlib import Path
 from typing import Callable
 
-from .map_artifact_validation import validate_fma1, validate_fmb5
+from .map_artifact_validation import validate_fma1, validate_fmb5, validate_fmb6
 from .reuse import MapBlock, block_from_pack_path
-from .topography_artifacts import TOPOGRAPHY_PROFILE_VERSION, ContourSection, empty_fmb5, upgrade_fmb4
+from .topography_artifacts import (
+    TOPOGRAPHY_PROFILE_VERSION, ContourSection, empty_fmb5, upgrade_fmb4,
+    empty_fmb6, replace_fmb6_contours,
+)
 from .topography_cache import _sync_directory
 from .topography_companion import write_companion
 from .topography_geometry import CompiledTopography, MAX_BLOCKS
@@ -23,7 +29,14 @@ from .topography_pipeline import canonical_bytes
 
 def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
                               compiled: CompiledTopography, sample: dict, attribution: bytes,
-                              *, cancel: Callable[[], None] = lambda: None) -> dict:
+                              *, cancel: Callable[[], None] = lambda: None,
+                              renderer_format_version: int = 4,
+                              output_blocks: set[tuple[int, int]] | None = None) -> dict:
+    if type(renderer_format_version) is not int or renderer_format_version not in {4, 5}:
+        raise ValueError("unsupported contour map target")
+    combined = renderer_format_version == 5
+    if output_blocks is not None and (not combined or not output_blocks):
+        raise ValueError("output blocks require a nonempty combined POI target")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", map_id):
         raise ValueError("invalid topographic map ID")
     if output.exists() or output.is_symlink():
@@ -53,7 +66,32 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         if key is None or (key.x, key.y) in blocks:
             raise ValueError("invalid or duplicate vector block path")
         blocks[key.x, key.y] = path
-    keys = sorted(set(blocks) | set(compiled.sections))
+    if output_blocks is not None and not set(blocks).issubset(output_blocks):
+        raise ValueError("vector blocks lie outside the target-5 output blocks")
+    terrain_grids = {}
+    encoded_grids = sample.get("terrainGrids", [])
+    if not isinstance(encoded_grids, list) or len(encoded_grids) > MAX_BLOCKS:
+        raise ValueError("terrain grid count exceeds bound")
+    if encoded_grids and sample.get("terrainAlgorithm") != ALGORITHM:
+        raise ValueError("unsupported terrain algorithm")
+    terrain_selection = prepare_selection(compiled.terrain_selection) if compiled.terrain_selection else None
+    for encoded in encoded_grids:
+        cancel()
+        if not isinstance(encoded, str) or len(encoded) > 6000:
+            raise ValueError("terrain grid encoding exceeds bound")
+        data = base64.b64decode(encoded, validate=True)
+        key = validate_grid(data)
+        if key in terrain_grids:
+            raise ValueError("duplicate terrain grid")
+        clipped = clip_grid(data, terrain_selection, cancel) if terrain_selection is not None else data
+        if any(height != -32768 for height, _, _ in struct.iter_unpack("<hBB", clipped[16:])):
+            terrain_grids[key] = clipped
+    # Device coverage is clipped by the same selection as vector/contour data.
+    keys = sorted(set(blocks) | set(compiled.sections) | set(terrain_grids))
+    if output_blocks is not None:
+        # Signed Nearby coverage bounds every device block. Contours beyond it
+        # remain only in the iPhone companion; terrain grids follow ``keys``.
+        keys = [key for key in keys if key in output_blocks]
     if not keys or len(keys) > MAX_BLOCKS:
         raise ValueError("topographic map exceeds block budget or has no device coverage")
     empty = ContourSection(sample["minorIntervalM"], sample["indexIntervalM"], ())
@@ -69,13 +107,20 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         for bx, by in keys:
             cancel()
             section = compiled.sections.get((bx, by), empty)
-            data = upgrade_fmb4(blocks[bx, by], section) if (bx, by) in blocks else empty_fmb5(profile.profile_fingerprint, section)
+            upgrade = replace_fmb6_contours if combined else upgrade_fmb4
+            empty_block = empty_fmb6 if combined else empty_fmb5
+            data = upgrade(blocks[bx, by], section) if (bx, by) in blocks else empty_block(profile.profile_fingerprint, section)
             block = MapBlock(bx, by)
             relative = f"VECTMAP/{map_id}/{block.folder_name}/{bx & 15}_{by & 15}.fmb"
             destination = device / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-            metadata = validate_fmb5(destination)
+            if (bx, by) in terrain_grids:
+                terrain_data = terrain_grids[bx, by]
+                terrain_relative = relative[:-4] + ".fme"
+                (device / terrain_relative).write_bytes(terrain_data)
+                files.append({"path": terrain_relative, "bytes": len(terrain_data), "sha256": hashlib.sha256(terrain_data).hexdigest()})
+            metadata = (validate_fmb6 if combined else validate_fmb5)(destination)
             if (metadata.profile_fingerprint != profile.profile_fingerprint
                     or metadata.maximum_glyph_id > profile.glyph_count
                     or metadata.maximum_language_id > profile.language_count):
@@ -86,14 +131,20 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
             files.append({"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
         font_data = font_output.read_bytes()
         files.append({"path": font_output.relative_to(device).as_posix(), "bytes": len(font_data), "sha256": hashlib.sha256(font_data).hexdigest()})
+        if combined:
+            from .poi_index import build_index, index_path
+            index_bytes = build_index(device, map_id, files, cancel=cancel)
+            relative_index = index_path(map_id)
+            (device / relative_index).write_bytes(index_bytes)
+            files.append({"path": relative_index, "bytes": len(index_bytes), "sha256": hashlib.sha256(index_bytes).hexdigest()})
         notice_sha = hashlib.sha256(attribution).hexdigest()
         companion = staged / f"{map_id}.btopo"
         companion_metadata = write_companion(companion, compiled, map_id=map_id,
                                             source_policy_sha256=sample["sourcePolicySha256"],
-                                            attribution_sha256=notice_sha, bounds_e7=sample["boundsE7"], cancel=cancel)
+                                            attribution_sha256=notice_sha, bounds_e7=sample["boundsE7"], cancel=cancel, terrain_grids={k:v for k,v in terrain_grids.items() if k in keys} if "terrainGrids" in sample else None)
         (staged / "ATTRIBUTION.txt").write_bytes(attribution)
         receipt = {"schemaVersion": 1, "kind": "bicino-topography-development-pair-v1", "productionEligible": False,
-                   "mapId": map_id, "rendererFormatVersion": 4, "blockFormatVersion": 5,
+                   "mapId": map_id, "rendererFormatVersion": renderer_format_version, "blockFormatVersion": renderer_format_version + 1,
                    "profileVersion": TOPOGRAPHY_PROFILE_VERSION, "sourcePolicySha256": sample["sourcePolicySha256"],
                    "sampleSha256": sample_sha, "selectionSha256": compiled.selection_sha256,
                    "intermediateSha256": compiled.intermediate_sha256, "attributionSha256": notice_sha,

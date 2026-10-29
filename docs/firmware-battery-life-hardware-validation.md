@@ -66,6 +66,14 @@ regression. Tap wake still failed because the ordinary profile trusted the
 missed GPIO edge and did not consult the CST9217's asserted INT line. The
 candidate at `07d8b2c8c19325a63fdacf628b0f1004801d3690` promoted that
 held-low fallback to every 1.75-inch profile, but physical retest still failed.
+**October 28 correction:** the retained vendor schematic identifies GPIO11 as
+`TP_INT`; GPIO21 is `QMI_INT2`. The historical observations below remain valid,
+but interpreting GPIO21 as the touch interrupt was incorrect. Prior acceptance
+covered the polling fallback, not GPIO21 touch wake. Candidate `6973dfd0`
+removed idle polling and failed wake plus active touch with zero IRQ/read counts.
+The GPIO11 correction needs new ordinary/light-sleep physical acceptance; do not
+reuse the older GPIO21 wake claims for it.
+
 A diagnostic capture then established that GPIO21 remained `HIGH` even while
 the ordinary profile decoded valid press/release frames. Those frames were
 delivered to LVGL while dimmed but were not counted by the inactivity policy;

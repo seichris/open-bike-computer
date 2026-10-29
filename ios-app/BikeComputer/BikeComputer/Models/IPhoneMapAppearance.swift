@@ -41,7 +41,7 @@ struct IPhoneMapAppearance: Equatable {
         "iphoneMapAppearance.realisticElevation.v1"
     static let defaultValue = Self(
         baseStyle: .standard,
-        usesRealisticElevation: false
+        usesRealisticElevation: true
     )
 
     let baseStyle: IPhoneMapBaseStyle

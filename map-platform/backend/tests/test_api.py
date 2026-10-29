@@ -1665,7 +1665,10 @@ class MapJobRunAPITests(unittest.TestCase):
         installation = self.issue_installation(self.client)
         installation_id = installation["clientInstallationId"]
         installation_token = installation["clientInstallationToken"]
-        installation_headers = {"X-Installation-Token": installation_token}
+        installation_headers = {
+            "X-Installation-Token": installation_token,
+            "X-Map-Stream-Reader-Contract": "1",
+        }
         response = self.app_attest.post_map_job(
             self.client,
             credential=installation,
@@ -1741,11 +1744,8 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(signed.status_code, 200)
         self.assertEqual(signed.json()["signedManifestReceipt"], receipt)
         self.assertEqual(signed.json()["sha256"], sha256)
-        self.assertEqual(signed.json()["requiredIosBuild"], "100")
-        self.assertEqual(signed.json()["requiredIosGitSha"], self.ios_git_sha)
-        self.assertEqual(
-            signed.json()["requiredIosBuildSha256"], self.ios_build_sha256
-        )
+        for field in ("requiredIosBuild", "requiredIosGitSha", "requiredIosBuildSha256"):
+            self.assertNotIn(field, signed.json())
         self.assertEqual(signed.json()["requiredFirmwareVersion"], "0.3.0")
         self.assertEqual(signed.json()["requiredFirmwareBuild"], 42)
         self.assertEqual(signed.json()["requiredFirmwareGitSha"], "7" * 40)
@@ -1805,10 +1805,109 @@ class MapJobRunAPITests(unittest.TestCase):
             headers=installation_headers,
         )
         self.assertEqual(wrong_identity.status_code, 404)
-        self.assertEqual(wrong_app_build.status_code, 404)
-        self.assertEqual(wrong_app_binary.status_code, 404)
+        self.assertEqual(wrong_app_build.status_code, 200)
+        self.assertEqual(wrong_app_binary.status_code, 200)
+        for refreshed in (wrong_app_build, wrong_app_binary):
+            self.assertEqual(refreshed.json()["sha256"], sha256)
+            self.assertEqual(self.client.get(refreshed.json()["url"]).content, source.read_bytes())
+            self.assertNotIn("requiredIosBuild", refreshed.json())
         self.assertEqual(other_installation.status_code, 401)
         self.assertEqual(missing_identity.status_code, 400)
+        legacy = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={"clientInstallationId": installation_id, "jobId": job_id,
+                    "signedManifestReceipt": receipt},
+            headers={"X-Installation-Token": installation_token},
+        )
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(legacy.json()["requiredIosBuild"], "100")
+        unsupported_reader = self.client.post(
+            "/v1/map-packs/map-artifact/artifacts/bike-map-stream-v1/download-url",
+            params={"clientInstallationId": installation_id, "jobId": job_id,
+                    "signedManifestReceipt": receipt},
+            headers={**installation_headers, "X-Map-Stream-Reader-Contract": "2"},
+        )
+        self.assertEqual(unsupported_reader.status_code, 422)
+
+    def test_durable_maps_are_delivered_without_a_firmware_identity(self):
+        installation = self.issue_installation(self.client)
+        installation_id = installation["clientInstallationId"]
+        headers = {
+            "X-Installation-Token": installation["clientInstallationToken"],
+            "X-Map-Stream-Reader-Contract": "1",
+        }
+        response = self.app_attest.post_map_job(
+            self.client,
+            credential=installation,
+            payload={
+                "mode": "custom_bbox",
+                "bbox": [103.75, 1.24, 103.93, 1.37],
+                "clientInstallationId": installation_id,
+                "clientRequestId": "request-durable-delivery",
+            },
+            headers=headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        job_id = response.json()["jobId"]
+        source = Path(self.tmp.name) / "durable.bmap"
+        source.write_bytes(b"durable-bike-map-stream")
+        sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        receipt = "6" * 64
+        object_key = (
+            "maps/map-durable/bike-map-stream-v1/map-prod-1/"
+            f"{self.trust_key_sha256}/{'6' * 64}/{'8' * 64}/{receipt}.bmap"
+        )
+        self.client.app.state.artifact_store.put(
+            source, object_key, sha256=sha256,
+            media_type="application/vnd.openbikecomputer.map-stream",
+        )
+        stream = {
+            "format": "bike-map-stream-v1",
+            "mediaType": "application/vnd.openbikecomputer.map-stream",
+            "filename": "map-durable.bmap",
+            "objectKey": object_key,
+            "bytes": source.stat().st_size,
+            "sha256": sha256,
+            "manifestReceipt": "3" * 64,
+            "signedManifestReceipt": receipt,
+            "signatureKeyId": "map-prod-1",
+            "signatureKeySha256": self.trust_key_sha256,
+            "producerBuildSha256": "6" * 64,
+            "producerImageDigest": self.worker_image_digest,
+        }
+        firmware_fields = (
+            "requiredFirmwareVersion", "requiredFirmwareBuild", "requiredFirmwareGitSha",
+        )
+        for contract, expects_firmware in ((1, False), (None, True)):
+            with self.subTest(compatibility_contract=contract):
+                self.update_job(
+                    job_id, status="ready", mapId="map-durable", artifacts=[stream],
+                    artifactMetrics=(
+                        {"compatibilityContract": contract} if contract is not None else None
+                    ),
+                )
+                listed = self.client.get(
+                    f"/v1/map-jobs/{job_id}",
+                    params={"clientInstallationId": installation_id},
+                    headers=headers,
+                )
+                refreshed = self.client.post(
+                    "/v1/map-packs/map-durable/artifacts/bike-map-stream-v1/download-url",
+                    params={"clientInstallationId": installation_id, "jobId": job_id,
+                            "signedManifestReceipt": receipt},
+                    headers=headers,
+                )
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(refreshed.status_code, 200)
+                listed_stream = listed.json()["artifacts"][0]
+                self.assertEqual(listed_stream["sha256"], sha256)
+                self.assertNotIn("compatibilityContract", listed.json())
+                for field in firmware_fields:
+                    self.assertEqual(field in listed_stream, expects_firmware)
+                    self.assertEqual(field in refreshed.json(), expects_firmware)
+                self.assertEqual(
+                    self.client.get(refreshed.json()["url"]).content, source.read_bytes()
+                )
 
     def test_stream_artifacts_are_hidden_outside_the_rollout_cohort(self):
         allowed = self.issue_installation(self.client)

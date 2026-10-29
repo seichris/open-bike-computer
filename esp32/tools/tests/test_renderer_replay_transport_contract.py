@@ -16,14 +16,17 @@ class RendererReplayTransportContractTests(unittest.TestCase):
             r"GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE \| NIMBLE_PROPERTY::WRITE_NR\);"
             # Maintenance rejects both write modes; normal riding still uses
             # the same authenticated GPS callback for both modes.
-            r"\s*if \(maintenanceBoot\) \{\s*pGPSCharacteristic->setCallbacks\(\s*"
-            r"new MyMaintenanceRejectedCharacteristicCallbacks\(\)\);\s*\} else \{"
+            r"\s*if \(maintenanceBoot\) \{"
+            r"\s*pGPSCharacteristic->setCallbacks\(\s*"
+            r"new MyMaintenanceRejectedCharacteristicCallbacks\(\)\);"
+            r"\s*\} else \{"
             r"\s*pGPSCharacteristic->setCallbacks\(new MyGPSCharacteristicCallbacks\(\)\);"
+            r"\s*\}"
         ))
         callback = BLE.split("class MyGPSCharacteristicCallbacks", 1)[1].split(
             "class ", 1
         )[0]
-        self.assertLess(callback.index("unwrapOwnerAuthenticatedPayload"),
+        self.assertLess(callback.index("decodeProtectedCommand"),
                         callback.index("dispatchReplaySample"))
         self.assertLess(callback.index("bleSessionSupportsRendererBenchmarkSample"),
                         callback.index("dispatchReplaySample"))

@@ -57,6 +57,50 @@ int main() {
   assert(queueHead == protectedFrames.size());
   assert(queuedFrames == 0);
 
+  // Saturate the controller while status notifications are queued. Incoming
+  // prepared writes still need RX, retained fragments and a response; accepting
+  // every notification until allocation fails used to leave zero for them.
+  int freeBuffers = 12;
+  const std::vector<int> statusFrames = {50, 51, 52, 53, 54, 55, 56, 57};
+  std::vector<int> delivered;
+  size_t head = 0;
+  auto attempt = [&](int buffersForPayload) {
+    TransportResult result = TransportResult::Retry;
+    if (ble_notification_dispatch_policy::canAllocateNotification(freeBuffers)) {
+      freeBuffers -= buffersForPayload;
+      if (ble_notification_dispatch_policy::canDispatchNotification(freeBuffers)) {
+        delivered.push_back(statusFrames[head]);
+        result = TransportResult::Sent;
+      } else {
+        freeBuffers += buffersForPayload; // release the entire unsent chain
+      }
+    }
+    const auto decision = ble_notification_dispatch_policy::decideAfterAttempt(
+        result, statusFrames.size() - head);
+    if (decision.consumeHead) ++head;
+    return result;
+  };
+  for (int i = 0; i < 100; ++i) attempt(1);
+  assert(head == 6 && freeBuffers == 6);
+  // A complete long command can occupy four buffers while notifications wait.
+  freeBuffers -= 4;
+  assert(attempt(1) == TransportResult::Retry);
+  assert(head == 6 && freeBuffers == 2);
+  freeBuffers += 4;
+  // One TX completion is not enough for a two-buffer payload. Nothing leaks
+  // and its authentication sequence remains at the same queue head.
+  ++freeBuffers;
+  assert(attempt(2) == TransportResult::Retry);
+  assert(head == 6 && freeBuffers == 7);
+  ++freeBuffers;
+  assert(attempt(2) == TransportResult::Sent);
+  assert(head == 7 && freeBuffers == 6);
+  ++freeBuffers;
+  assert(attempt(1) == TransportResult::Sent);
+  assert(delivered == statusFrames);
+  assert(!ble_notification_dispatch_policy::canAllocateNotification(0));
+  assert(!ble_notification_dispatch_policy::canDispatchNotification(0));
+
   std::string statusBody = "{\"status\":\"idle\"";
   map_transfer_status_protocol::ActiveMapPresentation presentation;
   presentation.displayName = "Chris's \"Bike\"";

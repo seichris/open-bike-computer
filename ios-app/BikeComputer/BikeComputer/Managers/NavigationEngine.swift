@@ -11,6 +11,23 @@ import Combine
 import MapKit
 import CoreLocation
 
+/// Active route geometry for elevation consumers. Saved routes carry their
+/// archive content hash; MapKit routes and reroutes do not.
+struct NavigationElevationRouteV1: Equatable {
+    let route: NavigationRouteV1
+    let contentHash: String?
+    let navigationGeneration: UInt32
+}
+
+/// Loop/crossing-safe along-route progress from the shared runtime matcher.
+struct NavigationElevationProgressV1: Equatable {
+    let navigationGeneration: UInt32
+    let routeID: UUID
+    let revision: UInt32
+    let distanceAlongGeometryMeters: Double
+    let onRoute: Bool
+}
+
 @MainActor
 class NavigationEngine: NSObject, ObservableObject {
     
@@ -24,6 +41,8 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published var routeRemainingDistance: CLLocationDistance?
     @Published var routeRemainingTime: TimeInterval?
     @Published var expectedArrivalDate: Date?
+    @Published private(set) var elevationRoute: NavigationElevationRouteV1?
+    @Published private(set) var elevationProgress: NavigationElevationProgressV1?
     
     // MARK: - Private Properties
     private var currentRoute: NavigationRouteV1?
@@ -54,6 +73,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var courseResolver = NavigationCourseResolver()
     private var rideStartDate: Date?
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
+    static let minimumRideDistanceIncrementMeters: CLLocationDistance = 5
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
     private var rideTelemetryTimer: Timer?
@@ -254,6 +274,12 @@ class NavigationEngine: NSObject, ObservableObject {
         offlineDeleteAfter = deleteAfter
         usesOfflineArchive = mode == .offline
         currentRoute = sharedRoute
+        elevationProgress = nil
+        elevationRoute = NavigationElevationRouteV1(
+            route: sharedRoute,
+            contentHash: contentHash,
+            navigationGeneration: runtime.generation
+        )
         cacheRouteCoordinates(from: sharedRoute)
         currentStepIndex = 0
         currentInstruction = sharedRoute.steps[0].instruction
@@ -344,6 +370,13 @@ class NavigationEngine: NSObject, ObservableObject {
             return
         }
         currentRoute = sharedRoute
+        // A reroute is a different geometry: its profile is resolved anew.
+        elevationProgress = nil
+        elevationRoute = NavigationElevationRouteV1(
+            route: sharedRoute,
+            contentHash: nil,
+            navigationGeneration: navigationRuntime.generation
+        )
         cacheRouteCoordinates(from: sharedRoute)
         cancelInitialGPSRetries()
         navigationEpoch &+= 1
@@ -406,6 +439,8 @@ class NavigationEngine: NSObject, ObservableObject {
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
+        elevationRoute = nil
+        elevationProgress = nil
         routeCoordinatesCache.removeAll(keepingCapacity: false)
         routeProgressMatcher.reset()
         currentStepIndex = 0
@@ -624,6 +659,16 @@ class NavigationEngine: NSObject, ObservableObject {
             stopNavigation()
             return
         }
+        if let along = runtimeSnapshot.distanceAlongGeometryMeters {
+            let progress = NavigationElevationProgressV1(
+                navigationGeneration: runtimeSnapshot.navigationGeneration,
+                routeID: runtimeSnapshot.routeID,
+                revision: runtimeSnapshot.revision,
+                distanceAlongGeometryMeters: along,
+                onRoute: runtimeSnapshot.offRouteDistanceMeters == nil
+            )
+            if progress != elevationProgress { elevationProgress = progress }
+        }
         if runtimeSnapshot.currentStepIndex != currentStepIndex {
             currentStepIndex = runtimeSnapshot.currentStepIndex
             print("Advanced to step \(currentStepIndex)")
@@ -773,13 +818,20 @@ class NavigationEngine: NSObject, ObservableObject {
             rideStartDate = now()
         }
 
+        // Count from the last counted point, like the former 5 m Core Location
+        // filter. The stream now reports every stationary fix for its stall
+        // watchdog; jitter around a stop must not become ride distance.
         if let lastRideLocation {
             let distanceIncrement = gpsLocation.distance(from: lastRideLocation)
-            if distanceIncrement >= 0 && distanceIncrement < 100 {
-                rideDistanceMeters += distanceIncrement
+            if distanceIncrement >= Self.minimumRideDistanceIncrementMeters {
+                if distanceIncrement < 100 {
+                    rideDistanceMeters += distanceIncrement
+                }
+                self.lastRideLocation = gpsLocation
             }
+        } else {
+            lastRideLocation = gpsLocation
         }
-        lastRideLocation = gpsLocation
 
         if isNavigating, let route = currentRoute, routeLocation != nil,
            let runtimeSnapshot = navigationRuntime.snapshot {

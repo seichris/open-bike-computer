@@ -8,10 +8,12 @@
 #include "../../lib/board_input/button_policy.hpp"
 #include "../../lib/ble_navigation/ownership_button_policy.hpp"
 #include "../../lib/ble_navigation/device_capabilities_protocol.hpp"
+#include "../../lib/ble_navigation/map_profile_protocol.hpp"
 #include "../../lib/gui/src/waitingScreenLayout.hpp"
 #include "../../lib/gui/src/preConnectionPresentation.hpp"
 #include "../../lib/ble_navigation/screen_configuration.hpp"
 #include <cassert>
+#include <cstring>
 #include <array>
 #include <vector>
 #include <iostream>
@@ -233,21 +235,73 @@ int main() {
   assert(mapProfile.rotationMode == 1); // Stored preferences are not mutated.
 
   using namespace device_capabilities_protocol;
+  namespace generated = ride_ble_protocol_generated;
   const uint8_t metadata[] = {1, 2, 1, 0xE0, 1, 0x20, 3, 0};
   const uint8_t power[] = {1, 2, 50};
+  const uint32_t displayFeature = generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE;
   uint8_t response[CAP2_MAX_BYTES]{};
   assert(encodeCap2(0, power, true, response, sizeof(response)) == 14);
-  assert(encodeCap2(0, power, true, response, sizeof(response), nullptr, 0, metadata) == 24);
-  assert(response[14] == 3 && response[15] == 8 && response[19] == 0xE0);
-  assert(encodeCap2(0, nullptr, false, response, 18, nullptr, 0, metadata) == 0);
+  // The display record is TLV 4, after the extended feature word (bit 4).
+  assert(encodeCap2(0, power, true, response, sizeof(response), nullptr, 0,
+                    displayFeature, metadata) == 30);
+  assert(response[14] == 3 && response[15] == 4 && response[16] == 0x10);
+  assert(response[20] == 4 && response[21] == 8 && response[25] == 0xE0);
+  assert(encodeCap2(0, nullptr, false, response, 24, nullptr, 0, displayFeature,
+                    metadata) == 0);
   const uint8_t screens[SCREEN_CONFIGURATION_TLV_BYTES] = {2, 14, 1};
-  static_assert(CAP2_MAX_BYTES == 40);
-  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE == (1UL << 31));
-  static_assert(ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 29);
-  assert(encodeCap2(0, power, true, response, sizeof(response), screens, sizeof(screens), metadata) == 40);
+  static_assert(CAP2_MAX_BYTES == 46);
+  static_assert(generated::BOARD_DISPLAY_TLV_TYPE == 4);
+  static_assert(displayFeature == (1UL << 4));
+  static_assert(generated::EXTENDED_BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 34);
+  // Retired experimental allocations: bit 31 is terrain, TLV 3 the extended word.
+  static_assert(generated::TERRAIN_EXPERIMENTS_FEATURE == (1UL << 31));
+  static_assert(generated::EXTENDED_FEATURE_TLV_TYPE == 3);
+  assert(encodeCap2(0, power, true, response, sizeof(response), screens,
+                    sizeof(screens), displayFeature, metadata) == 46);
   assert(std::memcmp(response + 14, screens, sizeof(screens)) == 0);
-  assert(response[30] == 3 && response[31] == 8);
-  assert(std::memcmp(response + 32, metadata, sizeof(metadata)) == 0);
-  assert(encodeCap2(0, power, true, response, 39, screens, sizeof(screens), metadata) == 0);
+  assert(response[30] == 3 && response[31] == 4 && response[32] == 0x10);
+  assert(response[36] == 4 && response[37] == 8);
+  assert(std::memcmp(response + 38, metadata, sizeof(metadata)) == 0);
+  assert(encodeCap2(0, power, true, response, 45, screens, sizeof(screens),
+                    displayFeature, metadata) == 0);
+  // A screen TLV larger than its contract cannot overrun the fixed response.
+  uint8_t oversized[SCREEN_CONFIGURATION_TLV_BYTES + 1]{};
+  assert(encodeCap2(0, power, true, response, sizeof(response), oversized,
+                    sizeof(oversized)) == 0);
+
+  // Reader capabilities stay (durable maps install); presentation does not.
+  constexpr uint32_t reader = generated::STREET_LABELS_FEATURE |
+                              generated::OSM_3D_BUILDINGS_FEATURE |
+                              generated::TOPOGRAPHIC_CONTOURS_FEATURE;
+  static_assert((epaper_policy::UNSUPPORTED_FEATURES & reader) == 0);
+  static_assert((epaper_policy::UNSUPPORTED_FEATURES &
+                 (generated::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
+                  generated::BIRDS_EYE_PERSPECTIVE_FEATURE |
+                  generated::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
+                  generated::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                  generated::AUTOMATIC_DISPLAY_OFF_FEATURE |
+                  generated::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE |
+                  generated::TERRAIN_EXPERIMENTS_FEATURE)) ==
+                (generated::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
+                 generated::BIRDS_EYE_PERSPECTIVE_FEATURE |
+                 generated::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
+                 generated::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                 generated::AUTOMATIC_DISPLAY_OFF_FEATURE |
+                 generated::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE |
+                 generated::TERRAIN_EXPERIMENTS_FEATURE));
+  static_assert(epaper_policy::UNSUPPORTED_EXTENDED_FEATURES ==
+                generated::EXTENDED_MAP_POIS_FEATURE);
+  static_assert((epaper_policy::SUPPORTED_EXTENDED_FEATURES & displayFeature) != 0);
+  // Every entry point normalizes stored or written visibility the same way.
+  using map_profile_protocol::VISIBILITY_CONTOURS;
+  using map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
+  using map_profile_protocol::VISIBILITY_POI_MASK;
+  static_assert((map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK &
+                 (VISIBILITY_CONTOURS | TERRAIN_EXPERIMENT_MASK | VISIBILITY_POI_MASK)) == 0);
+  const uint32_t requested = map_profile_protocol::VISIBILITY_BUILDINGS |
+      map_profile_protocol::VISIBILITY_EXTENDED_MARKER | VISIBILITY_CONTOURS |
+      TERRAIN_EXPERIMENT_MASK | VISIBILITY_POI_MASK;
+  assert(map_profile_protocol::normalizedFeatureVisibilityMask(requested) ==
+         map_profile_protocol::VISIBILITY_BUILDINGS);
   std::cout << "e-paper raster, transport, mailbox, recovery, input and capability tests passed\n";
 }

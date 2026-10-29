@@ -47,6 +47,32 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .durable
     )
 
+    /// Explicit saved-route sharing policy requested by the maintainer, 2026-10-22.
+    /// Preserve Apple attribution and phoneOnly scope; active MapKit responses and
+    /// Strava archives remain ineligible. This is not an Apple license attestation.
+    static func allowsSocialSharing(_ metadata: RouteProviderMetadataV1) -> Bool {
+        metadata == importedGPX || metadata == mapKitSavedOnPhone
+    }
+
+    /// Whether this route's geometry may be sent to the Bicino route elevation
+    /// service, which forwards sample points to its hosted terrain provider.
+    /// The maintainer enabled active and saved Apple Maps routes on 2026-10-23.
+    /// Preserve the route's provenance in the request. Strava API routes use
+    /// their own GPX elevations on the phone.
+    static func allowsRouteElevationService(
+        _ metadata: RouteProviderMetadataV1
+    ) -> Bool {
+        routeElevationServiceSource(metadata) != nil
+    }
+
+    static func routeElevationServiceSource(
+        _ metadata: RouteProviderMetadataV1
+    ) -> String? {
+        if metadata == importedGPX { return "gpx" }
+        if metadata == mapKit || metadata == mapKitSavedOnPhone { return "mapkit" }
+        return nil
+    }
+
     static func hasConsistentKnownPolicy(
         _ metadata: RouteProviderMetadataV1
     ) -> Bool {

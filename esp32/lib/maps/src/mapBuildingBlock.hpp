@@ -57,7 +57,7 @@ struct Block {
   size_t decodedBytes() const;
 };
 
-// Decodes FMB v4 section type 4 after the strict block validator succeeds.
+// Decodes the FMB v4 section type 4 from FMB v4 or v5 after strict validation.
 // Older FMB versions are valid and produce an empty block.
 bool decode(const uint8_t *data, size_t size, Block &output,
             std::string *error = nullptr);

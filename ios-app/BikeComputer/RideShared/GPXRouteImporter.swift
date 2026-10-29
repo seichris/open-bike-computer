@@ -74,6 +74,16 @@ enum GPXRouteImportSourceV1: Equatable {
     }
 }
 
+/// An imported route plus its per-vertex `<ele>` values, aligned with
+/// `archive.route.points`. Elevations stay outside the route contract so the
+/// archive hash and older iPhone/Watch decoders are unchanged.
+struct GPXRouteImportV1: Equatable {
+    let archive: NavigationRouteArchiveV1
+    /// `nil` when the file has no `<ele>` at all. Values are raw metres as
+    /// written; trust is decided separately before they become a profile.
+    let vertexElevations: [Double?]?
+}
+
 enum GPXRouteImporterV1 {
     nonisolated static let maximumInputBytes = 4 * 1_024 * 1_024
 
@@ -84,14 +94,14 @@ enum GPXRouteImporterV1 {
         createdAt: Date = Date(),
         localeIdentifier: String = Locale.current.identifier
     ) throws -> NavigationRouteArchiveV1 {
-        try archive(
+        try importRoute(
             data: data,
             fallbackName: fallbackName,
             routeID: routeID,
             revision: 1,
             source: .local(createdAt: createdAt),
             localeIdentifier: localeIdentifier
-        )
+        ).archive
     }
 
     static func archive(
@@ -102,6 +112,24 @@ enum GPXRouteImporterV1 {
         source importSource: GPXRouteImportSourceV1,
         localeIdentifier: String = Locale.current.identifier
     ) throws -> NavigationRouteArchiveV1 {
+        try importRoute(
+            data: data,
+            fallbackName: fallbackName,
+            routeID: routeID,
+            revision: revision,
+            source: importSource,
+            localeIdentifier: localeIdentifier
+        ).archive
+    }
+
+    static func importRoute(
+        data: Data,
+        fallbackName: String,
+        routeID: UUID = UUID(),
+        revision: UInt32 = 1,
+        source importSource: GPXRouteImportSourceV1,
+        localeIdentifier: String = Locale.current.identifier
+    ) throws -> GPXRouteImportV1 {
         guard !data.isEmpty, data.count <= maximumInputBytes else {
             throw GPXRouteImporterError.fileTooLarge
         }
@@ -136,6 +164,7 @@ enum GPXRouteImporterV1 {
 
         let pointsWithNames = deduplicated(selected.points)
         let points = pointsWithNames.map(\.coordinate)
+        let elevations = pointsWithNames.map(\.elevation)
         guard points.count <= NavigationRouteLimitsV1.production.maximumPoints
         else { throw GPXRouteImporterError.tooManyPoints }
         guard let bounds = RouteBoundsV1.enclosing(points) else {
@@ -186,11 +215,15 @@ enum GPXRouteImporterV1 {
             normalizationVersion: 1
         )
         do {
-            return try NavigationRouteArchiveV1.create(
+            let archive = try NavigationRouteArchiveV1.create(
                 route: route,
                 createdAt: importSource.createdAt,
                 deleteAfter: importSource.deleteAfter,
                 purpose: .offlineNavigation
+            )
+            return GPXRouteImportV1(
+                archive: archive,
+                vertexElevations: elevations.contains { $0 != nil } ? elevations : nil
             )
         } catch {
             throw GPXRouteImporterError.invalidRoute
@@ -258,9 +291,12 @@ enum GPXRouteImporterV1 {
     private static func deduplicated(_ points: [GPXPoint]) -> [GPXPoint] {
         points.reduce(into: []) { result, point in
             if result.last?.coordinate == point.coordinate {
-                if result[result.count - 1].name == nil, point.name != nil {
+                let kept = result[result.count - 1]
+                if kept.name == nil, point.name != nil {
                     result[result.count - 1] = point
                 }
+                // A repeated coordinate keeps the first recorded height.
+                result[result.count - 1].elevation = kept.elevation ?? point.elevation
             } else {
                 result.append(point)
             }
@@ -286,6 +322,7 @@ enum GPXRouteImporterV1 {
 private struct GPXPoint {
     let coordinate: RouteCoordinateV1
     var name: String?
+    var elevation: Double? = nil
 }
 
 private struct GPXSelection {
@@ -302,7 +339,7 @@ private final class GPXCollector: NSObject, XMLParserDelegate {
     private var currentRoutePoints: [GPXPoint]?
     private var currentRouteName: String?
     private var currentTrackName: String?
-    private var currentTrackSegment: [RouteCoordinateV1]?
+    private var currentTrackSegment: [GPXPoint]?
     private var capturedText = ""
     private var pointCount = 0
 
@@ -322,7 +359,7 @@ private final class GPXCollector: NSObject, XMLParserDelegate {
         } else if elementName == "trkseg" {
             currentTrackSegment = []
         }
-        if elementName == "name" {
+        if elementName == "name" || elementName == "ele" {
             capturedText = ""
         }
         guard elementName == "rtept" || elementName == "trkpt" else {
@@ -355,13 +392,16 @@ private final class GPXCollector: NSObject, XMLParserDelegate {
                 name: nil
             ))
         } else {
-            currentTrackSegment?.append(coordinate)
+            currentTrackSegment?.append(GPXPoint(coordinate: coordinate, name: nil))
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        guard elements.last == "name" else { return }
-        capturedText.append(string)
+        if elements.last == "name" {
+            capturedText.append(string)
+        } else if elements.last == "ele", capturedText.utf8.count < 64 {
+            capturedText.append(string)
+        }
     }
 
     func parser(
@@ -388,7 +428,27 @@ private final class GPXCollector: NSObject, XMLParserDelegate {
         qualifiedName qName: String?
     ) {
         let parent = elements.dropLast().last
-        if elementName == "name" {
+        if elementName == "ele" {
+            // GPX 1.1 <ele> is metres. Unparseable or non-finite text is missing.
+            // Decimetre precision matches the saved sidecar exactly.
+            let text = capturedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let parsed = Double(text), parsed.isFinite, abs(parsed) <= 100_000 {
+                let value = (parsed * 10).rounded(.toNearestOrAwayFromZero) / 10
+                switch parent {
+                case "rtept":
+                    if let index = currentRoutePoints?.indices.last {
+                        currentRoutePoints?[index].elevation = value
+                    }
+                case "trkpt":
+                    if let index = currentTrackSegment?.indices.last {
+                        currentTrackSegment?[index].elevation = value
+                    }
+                default:
+                    break
+                }
+            }
+            capturedText = ""
+        } else if elementName == "name" {
             let value = String(capturedText.trimmingCharacters(
                 in: .whitespacesAndNewlines
             ).prefix(200))
@@ -416,9 +476,7 @@ private final class GPXCollector: NSObject, XMLParserDelegate {
             currentRouteName = nil
         } else if elementName == "trkseg", let currentTrackSegment {
             trackSelections.append(GPXSelection(
-                points: currentTrackSegment.map {
-                    GPXPoint(coordinate: $0, name: nil)
-                },
+                points: currentTrackSegment,
                 name: currentTrackName
             ))
             self.currentTrackSegment = nil

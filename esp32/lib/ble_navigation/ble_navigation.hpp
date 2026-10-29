@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ride_command_admission.hpp"
+
 /**
  * @file ble_navigation.hpp
  * @brief BLE navigation server for iOS app communication
@@ -23,6 +25,7 @@
 #include "ride_ble_protocol.generated.hpp"
 #include "../world_radio/world_radio_protocol.hpp"
 #include "../world_radio/world_radio_config.hpp"
+#include "../route_elevation/route_elevation_config.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -70,15 +73,24 @@ enum DeviceScreenSetting : uint8_t {
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus),
   DEVICE_SCREEN_WORLD_RADIO =
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio),
+  DEVICE_SCREEN_ELEVATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Elevation),
+  DEVICE_SCREEN_NEARBY =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Nearby),
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
     (1 << DEVICE_SCREEN_BATTERY_STATUS) |
-    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0);
+    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0) |
+    (route_elevation_config::ENABLED ? (1 << DEVICE_SCREEN_ELEVATION) : 0) |
+    (map_profile_protocol::POIS_RUNTIME_ENABLED ? (1 << DEVICE_SCREEN_NEARBY)
+                                                : 0);
+// Extension screens are opt-in: existing riders keep their current cycle.
 static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
-    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
+    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO) &
+    ~(1 << DEVICE_SCREEN_ELEVATION) & ~(1 << DEVICE_SCREEN_NEARBY);
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;
@@ -106,6 +118,8 @@ static constexpr uint32_t MAP_VISIBILITY_TRACKS =
     map_profile_protocol::VISIBILITY_TRACKS;
 static constexpr uint32_t MAP_VISIBILITY_EXTENDED_MARKER =
     map_profile_protocol::VISIBILITY_EXTENDED_MARKER;
+static constexpr uint32_t MAP_VISIBILITY_POI_MASK =
+    map_profile_protocol::VISIBILITY_POI_MASK;
 static constexpr uint32_t MAP_VISIBILITY_EXTENDED_FEATURE_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK;
 static constexpr uint32_t MAP_VISIBILITY_OVERLAY_MASK =
@@ -122,7 +136,7 @@ struct ScreenMapRenderSettings {
   uint8_t streetLineWidth = map_profile_protocol::DEFAULT_STREET_WIDTH;
   uint8_t positionMarkerScale = 2;  // 1-5: Current-position marker scale
   uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
-  uint32_t visibilityMask = MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+  uint32_t visibilityMask = map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK;
   uint8_t labelDensity = map_profile_protocol::DEFAULT_LABEL_DENSITY;
   uint8_t labelLanguageMode =
       map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE;
@@ -155,6 +169,8 @@ struct MapRenderSettings {
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t mapNavigationRotationMode = 1;
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
+  // Setting 39: one friend-marker size for every map screen, percent 100-300.
+  uint16_t friendMarkerScalePercent = 100;
   uint8_t enabledScreensMask =
       DEVICE_SCREEN_DEFAULT_MASK; // Bits follow DeviceScreenSetting
   uint8_t defaultScreen =
@@ -273,10 +289,16 @@ public:
   /** True when the current BLE connection completed owner authentication. */
   bool isAuthenticated() const;
 
+  // Callback runs under the ownership lock; it must defer transport responses
+  // and flash writes until the lock is released.
+  bool applyAuthorizedRideCommand(ride_command_admission::Authorization admitted,
+                                  bool (*apply)(void *), void *context);
+
   /**
    * @brief Process any pending BLE events (call from main loop)
    */
   void process();
+  bool pollShutdownQuiescence();
 
   /** Queue a fresh map-status snapshot after the renderer learns whether the
    * current location is covered by the active map. */
@@ -310,7 +332,10 @@ public:
   WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
   bool requestWorldRadio(const world_radio_protocol::Request &request);
   bool canRequestWorldRadio() const;
-  bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
+  /** True while an authenticated owner session negotiated route elevation profiles. */
+  bool routeElevationSessionActive() const;
+  bool notifyRideAutomationFrame(const uint8_t *data, size_t length,
+      ride_command_admission::Authorization expected = {});
 
   BLEDebugStats getDebugStats() const;
 

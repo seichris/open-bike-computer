@@ -677,6 +677,32 @@ struct RideBLEMotionDispatch: Equatable, Sendable {
         self.enqueuedUptime = enqueuedUptime
     }
 
+    /// Compare producer identity, not changing flags or the age at dispatch.
+    /// Use the same wrapping serial order as the firmware motion reducer.
+    func isNewer(than previous: Self?) -> Bool {
+        guard let incoming = identity else { return false }
+        guard let current = previous?.identity,
+              incoming.token == current.token else { return true }
+        if incoming.epoch != current.epoch {
+            let delta = incoming.epoch &- current.epoch
+            return delta < 0x8000
+        }
+        let delta = incoming.sequence &- current.sequence
+        return delta != 0 && delta < 0x8000_0000
+    }
+
+    private var identity: (token: UInt16, epoch: UInt16, sequence: UInt32)? {
+        guard frame.count == 16, frame.first == 4 else { return nil }
+        let bytes = [UInt8](frame)
+        let token = UInt16(bytes[2]) | UInt16(bytes[3]) << 8
+        let epoch = UInt16(bytes[14]) | UInt16(bytes[15]) << 8
+        let sequence = (0..<4).reduce(UInt32(0)) {
+            $0 | UInt32(bytes[4 + $1]) << ($1 * 8)
+        }
+        guard token != 0, epoch != 0, sequence != 0 else { return nil }
+        return (token, epoch, sequence)
+    }
+
     func payload(at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Data? {
         guard frame.count == 16, frame.first == 4,
               uptime.isFinite, enqueuedUptime.isFinite, uptime >= enqueuedUptime else { return nil }
@@ -770,6 +796,10 @@ struct WatchBLETransportDiagnosticEventV1: Codable, Equatable, Sendable {
     let rejectedGroups: Int
     let uptimeMs: Int
     let latencyMs: Int?
+    // Optional additions keep queued V1 batches from older apps decodable.
+    // This is a process epoch, not the persistent producer identity or a ride.
+    var originUnixTimeMs: Int64? = nil
+    var originProcessID: UUID? = nil
 }
 
 struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
@@ -779,9 +809,15 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
 
     let schema: Int
     let events: [WatchBLETransportDiagnosticEventV1]
+    let producerID: UUID?
+    let droppedEventCount: Int?
 
-    init(events: [WatchBLETransportDiagnosticEventV1]) {
+    init(events: [WatchBLETransportDiagnosticEventV1], producerID: UUID? = nil, droppedEventCount: Int = 0) {
         schema = Self.schemaVersion
+        self.producerID = producerID
+        let limit = Int(clamping: UInt32.max)
+        let removed = min(limit, max(0, events.count - Self.maximumEvents))
+        self.droppedEventCount = min(max(0, droppedEventCount), limit - removed) + removed
         self.events = Array(events.suffix(Self.maximumEvents))
     }
 
@@ -793,6 +829,7 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
         guard data.count <= 64 * 1024,
               let batch = try? JSONDecoder().decode(Self.self, from: data),
               batch.schema == Self.schemaVersion,
+              batch.droppedEventCount.map({ (0...Int(clamping: UInt32.max)).contains($0) }) ?? true,
               !batch.events.isEmpty,
               batch.events.count <= maximumEvents,
               batch.events.allSatisfy({ event in
@@ -812,6 +849,7 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
                       event.replacedGroups >= 0 &&
                       event.rejectedGroups >= 0 &&
                       event.uptimeMs >= 0 &&
+                      (event.originUnixTimeMs.map { $0 >= 0 && $0 <= 32_503_680_000_000 } ?? true) &&
                       (event.latencyMs.map { $0 >= 0 } ?? true) &&
                       event.phase.utf8.count <= 24 &&
                       (event.reason?.utf8.count ?? 0) <= 48
@@ -1098,9 +1136,12 @@ struct WatchBLEOutboundQueueV1: Equatable {
 }
 
 enum WatchRidePacketEncoderV1 {
+    /// Exact maneuver packet firmware accepts as the navigation-clear member.
+    static let navigationIdlePacket = "1|0|Navigation idle"
+
     static func maneuver(_ snapshot: NavigationSnapshotV1?) -> Data {
         guard let snapshot else {
-            return Data("1|0|Navigation idle".utf8)
+            return Data(navigationIdlePacket.utf8)
         }
         let distance = min(
             max(Int(snapshot.distanceToManeuverMeters.rounded()), 0),

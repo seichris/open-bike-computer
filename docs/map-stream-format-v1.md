@@ -65,13 +65,27 @@ SHA-256. Renderer target `esp32-fmb` format `1` accepts `.fmb` and legacy
 `.fmp` blocks and forbids font assets. Format `2` accepts FMB v3 blocks plus
 exactly one `VECTMAP/<mapId>/assets/street-labels.fma`, and forbids `.fmp`.
 Format `3` accepts FMB v4 blocks plus exactly one matching FMA1 asset and also
-forbids `.fmp`. Targets 2 and 3 bind `labelProfileVersion`, ordered
-`labelLanguages`, and `internationalFallback`. Target 3 additionally binds
+forbids `.fmp`. Format `4`, the topography experiment, accepts FMB v5 blocks
+plus exactly one matching FMA1 asset, forbids `.fmp`, and requires the
+top-level `topography` contour summary. Format `5`, map POIs and Nearby, accepts
+FMB v6 blocks plus exactly one matching FMA1 asset and exactly one
+`VECTMAP/<mapId>/assets/nearby-pois.fpi` POI index, and forbids `.fmp`. Targets
+2 through 5 bind `labelProfileVersion`, ordered `labelLanguages`, and
+`internationalFallback`. Targets 3 through 5 additionally bind
 `buildingProfileVersion: 1` and the top-level `buildings` object containing
 `recordCount`, `explicitHeightCount`, `levelsHeightCount`,
 `inheritedHeightCount`, `localMedianHeightCount`, and
 `classDefaultHeightCount`. The five provenance counts must sum exactly to the
-record count. Payload order is exactly manifest file order.
+record count. Target 5 also binds `poiProfileVersion: 1`,
+`poiIndexProfileVersion: 1`, a top-level `pois` object containing
+`recordCount`, `shopsCount`, `restaurantsAndCafesCount`,
+`publicToiletsCount`, `gasStationsCount`, and `bicycleServicesCount`, a
+`layers` object whose `contours` is `included` or `not-included`, and the
+`nearbyCoverage` block list. The five category counts must sum exactly to the
+POI record count, and target 5 requires the `topography` summary exactly when
+its contours are included. Firmware built without the POI reader refuses a
+target 5 stream before writing its payload. Payload order is exactly manifest
+file order.
 Production manifests also include a `producer` object containing the immutable
 64-character lowercase `buildSha256` derived inside the worker-image build from
 the exact worker/pipeline sources, dependency inventories, and native
@@ -82,6 +96,15 @@ digest comes from the digest-pinned image reference used to start that worker;
 neither is accepted from an artifact caller. The signing-key fingerprint
 stays in the key-specific artifact identity described below, so a pure key
 rotation preserves `manifestReceipt` while changing `signedManifestReceipt`.
+Maps created from the durable baseline also carry the top-level
+`compatibility` object, `{"contract": 1}`, inside the signed manifest. It marks
+the map as covered by [durable map compatibility](map-compatibility-contract.md)
+contract v1; a manifest without it is outside the contract. The producer stamps
+it only for a registered profile that its channel may publish. The contract
+number is an integer from 1 to 255. The iPhone validates that range, ignores
+unknown keys in the object and treats any valid number as durable, so the
+renderer target, features and signer remain the only read gates. Firmware
+already skips unknown top-level keys.
 `mapId`, the directory below it, and the filename (including extension) are each
 1...64 ASCII bytes. With the literal `VECTMAP` prefix and separators, the exact
 maximum relative path is therefore 202 bytes. Readers must enforce both the
@@ -149,11 +172,12 @@ The exact object key is
 iOS requires those values, the content-addressed object key, the actual trusted
 public key, and the signed manifest producer object to agree before upload. The
 rollout API uses the same key material, producer build identity, and image
-digest to exclude artifacts outside an approved hardware candidate. Every
-stream response binds the requesting app's numeric build, full clean git SHA,
-and generated component SHA-256; promoted responses additionally bind the
-required firmware version, bounded build number, and full clean firmware git
-SHA. Any mismatch stays on the retained ZIP path.
+digest to exclude artifacts outside an approved hardware candidate; a durable
+map stays available while any recorded approval covers its producer and a
+still-trusted signer. Requester app fields are audit context only. Promoted
+responses for pre-baseline maps additionally carry the approval's required
+firmware version, build number and git SHA; durable maps never do, and iOS
+checks the device's reported reader capabilities instead.
 
 ## Required Failure Behavior
 
@@ -165,8 +189,9 @@ Readers fail closed on:
 - malformed, unsupported, or non-canonical signature envelope;
 - unknown/revoked key ID or invalid signature;
 - unsafe, duplicate, missing, or reordered manifest paths;
-- a renderer target/file composition mismatch, missing target-2/3 profile,
-  invalid target-3 building summary, or FMB/FMA profile/reference mismatch;
+- a renderer target/file composition mismatch, missing target-2/3/4/5 profile,
+  invalid building, topography or target-5 POI summary, or FMB/FMA
+  profile/reference mismatch;
 - file-count or payload-size mismatch;
 - per-file hash mismatch;
 - truncation or trailing bytes.

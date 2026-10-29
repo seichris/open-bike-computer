@@ -68,6 +68,7 @@ bool persistedStartSuppression = false;
 struct InboundTransportFrame {
   ride_automation_protocol::Frame frame;
   uint32_t receivedAtMs = 0;
+  ride_command_admission::Authorization authorization{};
 };
 
 QueueHandle_t inboundTransportQueue = nullptr;
@@ -255,10 +256,11 @@ bool persistConfiguration(const ride_automation::Settings &settings,
                                 verified);
 }
 
-bool sendTransportFrame(const ride_automation_protocol::Frame &frame) {
+bool sendTransportFrame(const ride_automation_protocol::Frame &frame,
+                        ride_command_admission::Authorization expected = {}) {
   uint8_t bytes[ride_automation_protocol::FRAME_SIZE]{};
   return ride_automation_protocol::encode(frame, bytes, sizeof(bytes)) &&
-         bleNavServer.notifyRideAutomationFrame(bytes, sizeof(bytes));
+         bleNavServer.notifyRideAutomationFrame(bytes, sizeof(bytes), expected);
 }
 
 bool queueTransportFrame(const ride_automation_protocol::Frame &frame,
@@ -504,8 +506,61 @@ bool matchesOutstandingResponse(
       hasOutstandingDecision, outstandingDecision, frame);
 }
 
-bool processInboundTransportFrame(
+// Flash writes never run under the ownership lock: BLE host callbacks wait at
+// most 100 ms (0 ms inside NimBLE callbacks) for it, and an NVS page erase can
+// exceed that. Authorization and in-memory application happen under the lock;
+// this single queue consumer then persists and acknowledges the same command
+// before it dequeues the next one, so command order is unchanged.
+struct DeferredFlashEffects {
+  bool persistStartSuppression = false;
+  bool configurationAcknowledgement = false;
+  bool hasConfigurationCandidate = false;
+  ride_automation::Settings configurationSettings{};
+  uint8_t configurationAlertMode = 0;
+  uint32_t configurationGeneration = 0;
+};
+
+void snoozeStartDeferringPersistence(uint32_t nowMs,
+                                     DeferredFlashEffects &deferred) {
+  runtime.policy().snoozeStart(nowMs);
+  deferred.persistStartSuppression = true;
+}
+
+void commitDeferredConfiguration(const DeferredFlashEffects &deferred) {
+  if (!deferred.hasConfigurationCandidate ||
+      !persistConfiguration(deferred.configurationSettings,
+                            deferred.configurationAlertMode,
+                            deferred.configurationGeneration))
+    return;
+  configuredSettings = deferred.configurationSettings;
+  configuredAlertMode = deferred.configurationAlertMode;
+  configGeneration = deferred.configurationGeneration;
+}
+
+ride_automation_protocol::Frame configurationAcknowledgement(
     const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs) {
+  ride_automation_protocol::Frame response;
+  response.kind =
+      ride_automation_protocol::Kind::ConfigurationAcknowledgement;
+  response.result =
+      frame.rideGeneration == rideGeneration &&
+              frame.watermarkOrConfigGeneration == configGeneration
+          ? ride_automation_protocol::Result::Accepted
+          : ride_automation_protocol::Result::Rejected;
+  response.rideGeneration = rideGeneration;
+  response.profileVersion = ride_automation::kRideDetectionProfile.version;
+  response.watermarkOrConfigGeneration = configGeneration;
+  response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
+  response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
+  response.alertMode = configuredAlertMode;
+  response.monotonicSeconds = receivedAtMs / 1'000;
+  return response;
+}
+
+template <typename SendResponse>
+bool processInboundTransportFrame(
+    const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs,
+    DeferredFlashEffects &deferred, SendResponse sendResponse) {
   if (ride_automation_protocol::isDuplicateOrOutOfOrderInbound(
           hasInboundFrame, lastInboundFrame, frame)) {
     return false;
@@ -530,7 +585,7 @@ bool processInboundTransportFrame(
       }
       if (!accepted) {
         showTransportError(frame.result, receivedAtMs);
-        snoozeStartAndPersist(receivedAtMs);
+        snoozeStartDeferringPersistence(receivedAtMs, deferred);
         hasOutstandingDecision = false;
         decisionAcknowledged = false;
         promptAccepted = false;
@@ -568,7 +623,7 @@ bool processInboundTransportFrame(
       if (frame.kind == ride_automation_protocol::Kind::Confirmation &&
           outstandingDecision.transition ==
               ride_automation_protocol::Transition::Start) {
-        snoozeStartAndPersist(receivedAtMs);
+        snoozeStartDeferringPersistence(receivedAtMs, deferred);
       } else {
         runtime.policy().rejectPending(receivedAtMs);
       }
@@ -604,7 +659,7 @@ bool processInboundTransportFrame(
     promptResponded = true;
     promptAccepted = resolution.accepted;
     if (resolution.shouldSnooze)
-      snoozeStartAndPersist(receivedAtMs);
+      snoozeStartDeferringPersistence(receivedAtMs, deferred);
 
     ride_automation_protocol::Frame response = frame;
     response.kind = ride_automation_protocol::Kind::Acknowledgement;
@@ -612,7 +667,7 @@ bool processInboundTransportFrame(
     response.acknowledgedKind = static_cast<uint8_t>(
         ride_automation_protocol::Kind::PromptResponse);
     response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    sendResponse(response);
   }
 
   const bool configurationTargetsCurrentBoot =
@@ -626,31 +681,15 @@ bool processInboundTransportFrame(
     candidateSettings.startMode = normalizedStartMode(
         static_cast<ride_automation::StartMode>(frame.startMode));
     candidateSettings.autoPauseEnabled = frame.autoPauseEnabled;
-    if (persistConfiguration(candidateSettings, frame.alertMode,
-                             frame.watermarkOrConfigGeneration)) {
-      configuredSettings = candidateSettings;
-      configuredAlertMode = frame.alertMode;
-      configGeneration = frame.watermarkOrConfigGeneration;
-    }
+    deferred.hasConfigurationCandidate = true;
+    deferred.configurationSettings = candidateSettings;
+    deferred.configurationAlertMode = frame.alertMode;
+    deferred.configurationGeneration = frame.watermarkOrConfigGeneration;
   }
   if (frame.kind == ride_automation_protocol::Kind::Configuration) {
-    ride_automation_protocol::Frame response;
-    response.kind =
-        ride_automation_protocol::Kind::ConfigurationAcknowledgement;
-    response.result =
-        configurationTargetsCurrentBoot &&
-                frame.watermarkOrConfigGeneration == configGeneration
-            ? ride_automation_protocol::Result::Accepted
-            : ride_automation_protocol::Result::Rejected;
-    response.rideGeneration = rideGeneration;
-    response.profileVersion =
-        ride_automation::kRideDetectionProfile.version;
-    response.watermarkOrConfigGeneration = configGeneration;
-    response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
-    response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
-    response.alertMode = configuredAlertMode;
-    response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    // The acknowledgement reports the persisted result, so it is built after
+    // commitDeferredConfiguration() outside the ownership lock.
+    deferred.configurationAcknowledgement = true;
   } else if (frame.kind == ride_automation_protocol::Kind::Resynchronize) {
     ride_automation_protocol::Frame response;
     response.kind = ride_automation_protocol::Kind::Resynchronize;
@@ -664,7 +703,7 @@ bool processInboundTransportFrame(
     response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
     response.alertMode = configuredAlertMode;
     response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    sendResponse(response);
   }
 
   lastInboundFrame = frame;
@@ -733,12 +772,37 @@ void processFirmwareShadow(uint32_t nowMs) {
   InboundTransportFrame inbound;
   while (inboundTransportQueue != nullptr &&
          xQueueReceive(inboundTransportQueue, &inbound, 0) == pdTRUE) {
-#if defined(RIDE_AUTOMATION_TRACE)
-    if (!processInboundTransportFrame(inbound.frame, inbound.receivedAtMs))
-      Serial.println("BLE Ride Automation: rejected queued frame");
-#else
-    (void)processInboundTransportFrame(inbound.frame, inbound.receivedAtMs);
-#endif
+    struct Application {
+      InboundTransportFrame inbound;
+      DeferredFlashEffects deferred{};
+      ride_automation_protocol::Frame response{};
+      bool hasResponse = false;
+    } application{inbound};
+    const bool applied = bleNavServer.applyAuthorizedRideCommand(
+        inbound.authorization, [](void *context) {
+          auto &value = *static_cast<Application *>(context);
+          return processInboundTransportFrame(
+              value.inbound.frame, value.inbound.receivedAtMs, value.deferred,
+              [&value](const ride_automation_protocol::Frame &response) {
+                value.response = response;
+                value.hasResponse = true;
+              });
+        }, &application);
+    if (!applied)
+      continue;
+    // Flash I/O follows the authorized apply after the lock is released.
+    if (application.deferred.persistStartSuppression)
+      persistStartSuppression(true);
+    if (application.deferred.configurationAcknowledgement) {
+      commitDeferredConfiguration(application.deferred);
+      application.response =
+          configurationAcknowledgement(inbound.frame, inbound.receivedAtMs);
+      application.hasResponse = true;
+    }
+    // Notify only after releasing ownership; notification encryption acquires
+    // the same lock. A lost response is recovered by the protocol retry.
+    if (application.hasResponse)
+      sendTransportFrame(application.response, inbound.authorization);
   }
   if (traceInitialized && nowMs - lastTraceMs < 1'000)
     return;
@@ -1029,13 +1093,14 @@ void processFirmwareShadow(uint32_t nowMs) {
 }
 
 bool ingestTransportFrame(const uint8_t *data, std::size_t length,
-                          uint32_t receivedAtMs) {
+                          uint32_t receivedAtMs,
+                          ride_command_admission::Authorization authorization) {
   ride_automation_protocol::Frame frame;
   if (!ride_automation_protocol::decode(data, length, frame))
     return false;
   if (inboundTransportQueue == nullptr)
     return false;
-  const InboundTransportFrame inbound{frame, receivedAtMs};
+  const InboundTransportFrame inbound{frame, receivedAtMs, authorization};
   return xQueueSend(inboundTransportQueue, &inbound, 0) == pdTRUE;
 }
 
@@ -1180,7 +1245,8 @@ namespace ride_automation_runtime {
 void setCyclingMotionSource(const ride_automation::CyclingMotionSource *) {}
 void beginFirmwareShadow() {}
 void processFirmwareShadow(uint32_t) {}
-bool ingestTransportFrame(const uint8_t *, std::size_t, uint32_t) {
+bool ingestTransportFrame(const uint8_t *, std::size_t, uint32_t,
+                          ride_command_admission::Authorization) {
   return false;
 }
 UiSnapshot uiSnapshot(uint32_t) { return {}; }

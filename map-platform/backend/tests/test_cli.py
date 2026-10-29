@@ -294,6 +294,7 @@ class MaintenanceTests(unittest.TestCase):
             "skippedLeasedNamespaces": 0,
         },
     )
+    @patch("map_platform.cli.purge_expired_route_elevation_credits", return_value=4)
     @patch("map_platform.cli.purge_expired_rate_limits", return_value=3)
     @patch("map_platform.cli.cleanup_work_dirs", return_value=2)
     @patch("map_platform.cli.expire_ready_jobs", return_value=1)
@@ -302,6 +303,7 @@ class MaintenanceTests(unittest.TestCase):
         expire_ready_jobs,
         cleanup_work_dirs,
         purge_expired_rate_limits,
+        purge_expired_route_elevation_credits,
         prune_building_block_cache,
     ):
         store = Mock()
@@ -321,6 +323,7 @@ class MaintenanceTests(unittest.TestCase):
                 "expired": 1,
                 "removedWorkDirs": 2,
                 "removedRateLimits": 3,
+                "removedRouteElevationCredits": 4,
                 "catalogMutationCallBudget": 15,
                 "catalogPublications": {
                     "attempted": 0,

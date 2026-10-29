@@ -197,11 +197,12 @@ To start a session:
 3. Keep **Prefer Local Wi-Fi** enabled and enter a 2.4 GHz Wi-Fi network, or
    disable it to use the device hotspot directly.
 4. Tap **Start Remote Debugging** and follow the displayed connection details.
-5. Tap **Copy Browser URL** and open it in Brave. Keep the iPhone connected over
-   BLE for the entire session.
+5. Tap **Open Secure Debug Console**. Keep the iPhone connected over BLE for the
+   entire session. The app validates the BLE-delivered certificate pin and injects
+   the token into a nonpersistent in-app web view; it does not export a token URL.
 
-The copied URL contains a temporary authentication token. Do not include it,
-network credentials, or the device-hotspot password in logs or screenshots.
+Never include tokens, network credentials, or the device-hotspot password in
+logs or screenshots.
 Select **End Debug Session** when finished.
 
 See [Remote device debugging](docs/remote-device-debugging.md) for the security

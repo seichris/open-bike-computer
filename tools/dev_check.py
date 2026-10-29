@@ -20,6 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "tools/development/checks.json"
+_local_spec = importlib.util.spec_from_file_location("local_results", ROOT / "tools/development/local_results.py")
+local_results = importlib.util.module_from_spec(_local_spec)
+_local_spec.loader.exec_module(local_results)
 
 
 def git(*arguments):
@@ -48,8 +51,8 @@ def source_identity():
 
 def changed_paths(base):
     merge_base = git("merge-base", "HEAD", base)
-    commands = (["diff", "--name-only", "-z", merge_base, "HEAD"],
-                ["diff", "--name-only", "-z", "HEAD"],
+    commands = (["diff", "--no-renames", "--name-only", "-z", merge_base, "HEAD"],
+                ["diff", "--no-renames", "--name-only", "-z", "HEAD"],
                 ["ls-files", "-o", "--exclude-standard", "-z"])
     return sorted({os.fsdecode(p) for command in commands
                    for p in subprocess.check_output(["git", *command], cwd=ROOT).split(b"\0") if p})
@@ -108,19 +111,26 @@ def run_checks(checks, report_path, **options):
 
 
 def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selection=None, skipped=None,
-                evidence=False, fresh=False):
+                evidence=False, fresh=False, reuse_local=False):
     before = source_identity()
     results = []
-    report = {"schema": 1, "source": before, "base": base, "host": platform.system(),
+    report = {"schema": 2, "source": before, "base": base, "host": platform.system(),
               "architecture": platform.machine(), "python": sys.executable, "pythonVersion": sys.version,
               "board": board, "planOnly": plan, "selection": selection, "checks": results,
               "skippedChecks": skipped or [], "evidenceRequested": evidence, "freshBuildRequested": fresh}
+    local = local_results.Session(checks, before, reuse=reuse_local, plan=plan,
+                                  board=board, evidence=evidence, fresh=fresh)
+    if reuse_local or local.key:
+        report["localResults"] = {"decision": local.reason, "eligibleChecks": sorted(local.contracts),
+                                  "toolchains": {"simulator" if k else "host": v
+                                                 for k, v in local.fingerprints.items()}}
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     def save():
         temporary = report_path.with_name(report_path.name + ".tmp")
         temporary.write_text(json.dumps(report, indent=2) + "\n")
         temporary.replace(report_path)
+        local.write_metrics(report_path.with_name(report_path.stem + "-reuse-metrics.json"))
 
     # Find every prerequisite problem before starting expensive checks.
     readiness = {check["id"]: prerequisites(check) for check in checks}
@@ -132,18 +142,33 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
             reasons.append("select the identified board with --board 175 or --board 206")
         entry = {"id": check["id"], "name": check["name"], "status": "blocked" if reasons else "planned",
                  "reasons": reasons, "durationMs": 0}
+        observation = local.observation(check, "blocked" if reasons else "planned" if plan else None)
         results.append(entry)
         save()
         if reasons or plan:
             print(f'{entry["status"].upper()}: {check["name"]}' + (" — " + "; ".join(reasons) if reasons else ""), flush=True)
             continue
+        if reuse_local:
+            reused, reason = local.try_reuse(check, report_path, observation)
+            entry["localReuseDecision"] = reason
+            if reused:
+                entry.update(reused)
+                save()
+                print(f'REUSED: {check["name"]} (verified signed local result)', flush=True)
+                continue
+            print(f'HOSTED: {check["name"]} — {reason}', flush=True)
         print(f'RUN: {check["name"]}', flush=True)
+        entry["startedAt"] = int(time.time())
+        entry["execution"] = "hosted" if os.environ.get("GITHUB_ACTIONS") else "local"
         started = time.monotonic()
         log = report_path.parent / (report_path.stem + "-logs") / (check["id"] + ".log")
         log.parent.mkdir(parents=True, exist_ok=True)
         entry["log"] = str(log)
         with tempfile.TemporaryDirectory(prefix="bicino-check-") as temporary:
-            environment = os.environ.copy()
+            # A policy/network/toolchain miss must not restore test filters or
+            # compiler overrides that the reusable execution profile removes.
+            normalized = check["id"] in local.contracts or (reuse_local and local_results.eligible(check))
+            environment = local_results.environment() if normalized else os.environ.copy()
             environment.update({"TMPDIR": temporary + "/", "CLANG_MODULE_CACHE_PATH": temporary + "/clang-modules",
                                 "SWIFT_MODULE_CACHE_PATH": temporary + "/swift-modules",
                                 "DEV_CHECK_ARTIFACTS": str(report_path.parent),
@@ -184,6 +209,8 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
                             os.killpg(child.pid, signal.SIGKILL)
                             child.wait()
         entry["durationMs"] = round((time.monotonic() - started) * 1000)
+        local.record_execution(observation, entry["durationMs"])
+        entry["completedAt"] = int(time.time())
         save()
         print(f'{entry["status"].upper()}: {check["name"]} ({entry["durationMs"]/1000:.1f}s)', flush=True)
         if entry["status"] != "passed":
@@ -196,6 +223,7 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
     if before != after:
         report["sourceAfter"] = after
         print("FAILED: source changed during checks; report cannot attest the final source", flush=True)
+    local.finish(report)
     save()
     print(f'Report: {report_path}', flush=True)
     return 0 if plan or report["status"] == "passed" else 1
@@ -215,13 +243,19 @@ def main(argv=None):
                                  os.environ.get("BICINO_COLLECT_BUILD_EVIDENCE") == "1"),
                         help="require clean source and retain exact-build symbols")
     parser.add_argument("--fresh", action="store_true", help="use fresh disposable iOS build state")
+    parser.add_argument("--reuse-local", action="store_true",
+                        help="verify signed local results in PR CI; run checks on every miss")
     args = parser.parse_args(argv)
     registry = json.loads(REGISTRY.read_text())
     checks = registry["checks"]
     ids = {c["id"] for c in checks}
     if set(args.check) - ids:
         parser.error("unknown checks: " + ", ".join(sorted(set(args.check) - ids)))
-    selected_components = components(changed_paths(args.base), args.base) if args.suite == "auto" and not args.check else set()
+    automatic_paths = changed_paths(args.base) if args.suite == "auto" and not args.check else None
+    try:
+        selected_components = components(automatic_paths, args.base) if automatic_paths is not None else set()
+    except ValueError as error:
+        parser.error(str(error))
     if args.suite == "auto" and not args.check:
         selected_components.add("development")
     suites = {"firmware": {"firmware_host", "firmware_build"}, "ios": {"ios", "ios_native"},
@@ -232,10 +266,15 @@ def main(argv=None):
         selected_components |= suites.get(args.suite, set())
         selected = [c for c in checks if (args.suite == "all" or c["component"] in selected_components)
                     and (args.level == "full" or c.get("level", "fast") == "fast")]
+        if automatic_paths is not None:
+            import ci_scopes
+            narrow = ci_scopes.shared_fast_checks(automatic_paths)
+            if narrow is not None:
+                selected = [c for c in selected if c['component'] == 'development' or c['id'] in narrow]
     path = args.report or Path(git("rev-parse", "--git-path", "development-checks")) / str(uuid.uuid4()) / "results.json"
     try:
         return run_checks(selected, path.resolve(), plan=args.plan, board=args.board, base=args.base,
-            evidence=args.evidence, fresh=args.fresh,
+            evidence=args.evidence, fresh=args.fresh, reuse_local=args.reuse_local,
             selection={"suite": args.suite, "level": args.level, "explicitChecks": args.check},
             skipped=[{"id": c["id"], "status": "skipped", "reason": "outside the requested component/check/level selection"}
                      for c in checks if c not in selected])

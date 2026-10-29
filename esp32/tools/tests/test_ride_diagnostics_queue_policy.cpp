@@ -38,6 +38,13 @@ int main() {
   assert(ride_diagnostics::retention_policy::snapshotLeaseActive(100, 200));
   assert(!ride_diagnostics::retention_policy::snapshotLeaseActive(200, 200));
   assert(!ride_diagnostics::retention_policy::snapshotLeaseActive(100, 0));
+  using ride_diagnostics::retention_policy::maintenanceMustYield;
+  assert(!maintenanceMustYield(100, 0, false));
+  assert(maintenanceMustYield(100, 0, true));
+  assert(maintenanceMustYield(100, 200, false));
+  assert(!maintenanceMustYield(200, 200, false));
+  assert(maintenanceMustYield(200, 200, true));
+  assert(maintenanceMustYield(0xfffffff0U, 0x20U, false));
   assert(ride_diagnostics::retention_policy::snapshotLeaseActive(
       0xfffffff0U, 0x00000020U));
   assert(!ride_diagnostics::retention_policy::snapshotLeaseActive(

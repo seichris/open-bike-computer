@@ -8,6 +8,7 @@ namespace ride_diagnostics::http_policy {
 enum class RouteKind : uint8_t {
   Unknown = 0,
   Status,
+  Policy,
   Index,
   Chunk,
   ActiveTail,
@@ -43,12 +44,25 @@ inline Route parseRoute(const std::string &method, const std::string &path,
     return {};
   const std::string relative = path.substr(prefix.size());
   if (method == "GET") {
+    if (relative == "capabilities" || relative == "policy")
+      return {RouteKind::Policy};
     if (relative == "status")
       return {RouteKind::Status};
     if (relative == "index")
       return {RouteKind::Index};
     if (relative == "active-tail")
       return {RouteKind::ActiveTail};
+    if (relative.rfind("active-tail/", 0) == 0) {
+      const std::string identity = relative.substr(12);
+      const std::size_t slash = identity.find('/');
+      Route route{RouteKind::ActiveTail};
+      if (slash == std::string::npos || identity.find('/', slash + 1) != std::string::npos ||
+          !parsePositiveUnsigned(identity.substr(0, slash), route.boot)) return {};
+      const std::string after = identity.substr(slash + 1);
+      if (after == "0") route.chunk = 0;
+      else if (!parsePositiveUnsigned(after, route.chunk)) return {};
+      return route;
+    }
     constexpr char chunkPrefix[] = "chunks/";
     if (relative.rfind(chunkPrefix, 0) == 0) {
       const std::string identity = relative.substr(sizeof(chunkPrefix) - 1);
@@ -68,6 +82,36 @@ inline Route parseRoute(const std::string &method, const std::string &path,
     return {RouteKind::Exit};
   }
   return {};
+}
+
+// The FFat fallback is a FAT volume in the ESP32's own flash. Reading it
+// disables the flash cache, which ESP-IDF permits only while the calling
+// task's stack is in internal RAM. Removable SD reads leave the cache enabled,
+// so they may run on the transfer worker's PSRAM stack.
+enum class StorageCallPlacement : uint8_t {
+  Direct,
+  InternalStack,
+};
+
+constexpr StorageCallPlacement storageCallPlacement(bool internalFlashBackend,
+                                                    bool callerStackInternal) {
+  return internalFlashBackend && !callerStackInternal
+             ? StorageCallPlacement::InternalStack
+             : StorageCallPlacement::Direct;
+}
+
+// Runs one bounded file-system call. A call that would read internal flash from
+// a PSRAM stack is handed to `dispatch`, which must run it to completion on an
+// internal-RAM stack. A refused dispatch skips the call and returns false.
+template <typename Dispatch>
+bool runStorageCall(bool internalFlashBackend, bool callerStackInternal,
+                    Dispatch &&dispatch, void (*call)(void *), void *context) {
+  if (storageCallPlacement(internalFlashBackend, callerStackInternal) ==
+      StorageCallPlacement::Direct) {
+    call(context);
+    return true;
+  }
+  return dispatch(call, context);
 }
 
 } // namespace ride_diagnostics::http_policy

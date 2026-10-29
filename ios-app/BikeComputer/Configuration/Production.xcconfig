@@ -18,3 +18,13 @@ BICINO_MAP_R2_DOWNLOAD_HOST = 5834cd65d5f197557149dbc10074d37f.r2.cloudflarestor
 // Production builds intentionally never add a development signing key.
 BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID =
 BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX =
+
+// Public Firebase client configuration; account credentials stay in the app-private Keychain.
+BICINO_FIREBASE_APP_ID = 1:578330303218:ios:fcc893df60771bd1d60e6b
+BICINO_FIREBASE_SENDER_ID = 578330303218
+BICINO_FIREBASE_API_KEY = AIzaSyAt1IoeVRCF8lGTO5tkXfKyaXXAnMFrtFw
+BICINO_FIREBASE_PROJECT_ID = bicino-prod
+BICINO_GOOGLE_CLIENT_ID = 578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi.apps.googleusercontent.com
+BICINO_GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi
+
+BICINO_APNS_ENVIRONMENT = production

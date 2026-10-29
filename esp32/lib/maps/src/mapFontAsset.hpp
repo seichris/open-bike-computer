@@ -62,8 +62,8 @@ public:
 
   bool open(const std::string &path);
   void close();
-  bool isOpen() const { return file_ != nullptr; }
-  bool healthy() const { return file_ != nullptr && !runtimeUnhealthy_; }
+  bool isOpen() const { return file_ >= 0; }
+  bool healthy() const { return file_ >= 0 && !runtimeUnhealthy_; }
   RuntimeError runtimeError() const { return runtimeError_; }
   uint8_t consecutiveFailures() const { return consecutiveFailures_; }
   uint32_t profileFingerprint() const { return profileFingerprint_; }
@@ -103,7 +103,7 @@ private:
     MapFontVector<uint8_t> distance;
   };
 
-  FILE *file_ = nullptr;
+  int file_ = -1;
   uint32_t profileFingerprint_ = 0;
   uint16_t glyphCount_ = 0;
   uint32_t payloadOffset_ = 0;

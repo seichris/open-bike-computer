@@ -17,6 +17,31 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_pinned_social_renderer_inputs_select_its_build_job(self):
+        for path in changed_components.FIRMWARE_RENDER_TEST_PATHS:
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
+                self.assertFalse(selected["ios"])
+
+    def test_diagnostics_registry_selects_all_producers_and_consumers(self) -> None:
+        for path in ("protocol/diagnostics/registry-v2.json",
+                     "tools/generate_diagnostics_contract.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": True, "firmware_host": True, "ios": True,
+                    "map_backend": False, "osm": False,
+                })
+
+    def test_diagnostics_cli_and_broker_select_host_tests(self) -> None:
+        for path in ("tools/bicino", "tools/bicino_diagnostics/broker.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": False, "firmware_host": True, "ios": False,
+                    "map_backend": False, "osm": False,
+                })
+
     def test_evidence_and_scenario_tools_select_their_consumers(self):
         for path in ("tools/build_evidence.py", "tools/build-and-record-firmware"):
             result = changed_components.classify_paths([path])
@@ -64,9 +89,34 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(all(changed_components.classify_paths([changed_components.CHECK_REGISTRY]).values()))
         self.assertTrue(changed_components.native_ios_required([changed_components.CHECK_REGISTRY]))
 
+    def test_development_environment_entry_points_select_all_components(self):
+        for path in ("tools/dev-setup", "tools/dev-env", "tools/development/environment.py"):
+            with self.subTest(path=path):
+                self.assertTrue(all(changed_components.classify_paths([path]).values()))
+                self.assertTrue(changed_components.native_ios_required([path]))
+
     def test_development_unit_tests_do_not_select_product_builds(self):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
+
+    def test_unclassified_shared_inputs_stop_before_product_jobs(self):
+        for path in ('protocol/new-contract.json', 'tools/new-validator.py',
+                     '.github/workflows/new-validation.yml'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'explicit consumer mapping'):
+                changed_components.classify_paths([path])
+        for path in ('.github/scripts/tests/test_ci_scopes.py', 'tools/README.md'):
+            self.assertFalse(any(changed_components.classify_paths([path]).values()))
+
+    def test_known_shared_inputs_select_only_executable_consumers(self):
+        for path in ('tools/firmware_release_history.py', 'tools/verify_firmware_boot_acceptance.py'):
+            selection = changed_components.classify_paths([path])
+            self.assertEqual([c for c, enabled in selection.items() if enabled], ['firmware_host'])
+            self.assertFalse(changed_components.native_ios_required([path]))
+        path = 'protocol/fixtures/workout-zones-v1.json'
+        self.assertEqual([c for c, v in changed_components.classify_paths([path]).items() if v], ['ios'])
+        self.assertFalse(changed_components.native_ios_required([path]))
+        selection = changed_components.classify_paths(['tools/ride_stats_preview/emit_preview.cpp'])
+        self.assertEqual([c for c, v in selection.items() if v], ['firmware_build', 'firmware_host'])
 
     def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
@@ -96,8 +146,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets",
-                                  "ios_native", "amoled_equivalence_targets"}, set(selected))
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "firmware_host_checks", "firmware_renderer", "zone_contracts", "ios_native", "ios_checks", "ios_simulator", "ios_release", *changed_components.ci_scopes.MAP_SCOPES}, set(selected))
                 self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:
@@ -156,6 +205,19 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(selected["osm"])
         self.assertTrue(selected["map_backend"])
 
+    def test_source_shard_changes_require_native_poi_equivalence(self) -> None:
+        for path in (
+            "map-platform/backend/map_platform/source_shards.py",
+            "map-platform/backend/map_platform/__init__.py",
+            "map-platform/backend/tests/test_source_shards.py",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected["osm"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertFalse(selected["ios"])
+
     def test_shared_fmb_fixture_selects_every_consumer(self) -> None:
         selected = changed_components.classify_paths(
             ["tools/tests/fixtures/fmb/golden_blocks.txt"]
@@ -203,6 +265,84 @@ class ChangedComponentsTests(unittest.TestCase):
             },
             selected,
         )
+
+    def test_contour_companion_fixture_selects_backend_and_ios(self) -> None:
+        selected = changed_components.classify_paths(
+            ["map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"]
+        )
+
+        self.assertEqual(
+            {
+                "firmware_build": False,
+                "firmware_host": False,
+                "ios": True,
+                "map_backend": True,
+                "osm": False,
+            },
+            selected,
+        )
+
+    def test_map_compatibility_inputs_select_their_readers(self) -> None:
+        cases = {
+            # Backend, catalog, iPhone and firmware read the frozen corpus.
+            "map-platform/backend/tests/fixtures/map-compatibility-v1/corpus.json":
+                (True, True, True),
+            "map-platform/backend/tests/fixtures/map-compatibility-v2/new.bmap":
+                (True, True, True),
+            # The worker and the iPhone reader test load the contract.
+            "map-platform/config/map-compatibility-contract-v1.json": (False, True, True),
+            # Only the backend tests read the durable signer registry.
+            "map-platform/config/map-compatibility-signers-v1.json": (False, False, True),
+            # Firmware reports the capability bytes the iPhone decodes.
+            "protocol/fixtures/map-reader-capabilities-v1.txt": (True, True, False),
+        }
+        for path, (firmware_host, ios, map_backend) in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": firmware_host,
+                        "ios": ios,
+                        "map_backend": map_backend,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
+    def test_map_stream_client_trust_selects_the_backend_trust_checks(self) -> None:
+        # The backend keeps generated client trust in sync with the registry
+        # and every durable map signer trusted (test_map_compatibility_contract).
+        for path, component in (
+            ("esp32/lib/map_transfer/map_stream_compiled_keys.generated.inc", "firmware_host"),
+            ("esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc",
+             "firmware_host"),
+            ("ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+             "ios"),
+            ("ios-app/BikeComputer/Configuration/Development.xcconfig", "ios"),
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected[component])
+
+    def test_route_elevation_fixtures_select_every_consumer(self) -> None:
+        for path in (
+            "protocol/fixtures/route-elevation-v1/transfer-v1.txt",
+            "protocol/fixtures/route-elevation-v1/processing.json",
+            "protocol/fixtures/route-elevation-v1/service-response-v1.json",
+            "tools/generate_route_elevation_fixtures.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": True,
+                        "ios": True,
+                        "map_backend": True,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
 
     def test_contract_documents_select_their_consumers(self) -> None:
         firmware_contracts = (
@@ -339,11 +479,15 @@ class ChangedComponentsTests(unittest.TestCase):
             "WAVESHARE_AMOLED_175",
             "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_175_PRODUCTION",
+            "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
+            "WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION",
         )
         targets_206 = (
             "WAVESHARE_AMOLED_206",
             "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_206_PRODUCTION",
+            "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
+            "WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION",
         )
 
         self.assertEqual(
@@ -365,22 +509,13 @@ class ChangedComponentsTests(unittest.TestCase):
             ),
             changed_components.select_firmware_targets("397"),
         )
+        # Release and "all" selections remain the AMOLED families.
         self.assertEqual(
             targets_175 + targets_206,
             changed_components.select_firmware_targets("all"),
         )
         with self.assertRaisesRegex(ValueError, "unsupported firmware hardware"):
             changed_components.select_firmware_targets("unknown")
-
-        self.assertEqual(
-            (
-                "WAVESHARE_AMOLED_175",
-                "WAVESHARE_AMOLED_175_PRODUCTION",
-                "WAVESHARE_AMOLED_206",
-                "WAVESHARE_AMOLED_206_PRODUCTION",
-            ),
-            changed_components.AMOLED_EQUIVALENCE_TARGETS,
-        )
 
     def test_map_scope_runs_only_map_components(self) -> None:
         selected = changed_components.select_scope("map")

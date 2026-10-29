@@ -28,7 +28,7 @@
     "watch_ride": 2
   },
   "board_display_metadata": {
-    "tlv_type": 3,
+    "tlv_type": 4,
     "version": 1,
     "payload_bytes": 8,
     "layout": "version,u8 display kind,u8 input flags,u16le width,u16le height,u8 supported settings",
@@ -40,7 +40,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 29,
+    "current_client_version": 34,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -73,7 +73,15 @@
       "display_inactivity_timeouts": {"bit": 28, "minimum_client_version": 26},
       "workout_zones_v1": {"bit": 29, "minimum_client_version": 27},
       "topographic_contours": {"bit": 30, "minimum_client_version": 28},
-      "board_display_metadata": {"bit": 31, "minimum_client_version": 29}
+      "terrain_experiments": {"bit": 31, "minimum_client_version": 29}
+    },
+    "extended_feature_tlv_type": 3,
+    "extended_features": {
+      "group_riders_v1": {"bit": 0, "minimum_client_version": 30},
+      "friend_marker_scale_v1": {"bit": 1, "minimum_client_version": 31},
+      "route_elevation_v1": {"bit": 2, "minimum_client_version": 32},
+      "map_pois": {"bit": 3, "minimum_client_version": 33},
+      "board_display_metadata": {"bit": 4, "minimum_client_version": 34}
     }
   },
   "screen_types": {
@@ -82,7 +90,9 @@
     "ride_stats": 2,
     "map_plus_navigation": 3,
     "battery_status": 4,
-    "world_radio": 5
+    "world_radio": 5,
+    "elevation": 6,
+    "nearby": 7
   },
   "screen_configuration": {
     "schema_version": 1,
@@ -116,7 +126,9 @@
     "workout_start_magic": "WREQ",
     "destination_magic": "DREQ",
     "world_radio_request_magic": "WRQ1",
-    "world_radio_status_magic": "WRS1"
+    "world_radio_status_magic": "WRS1",
+    "route_elevation_magic": "ELV1",
+    "route_elevation_ack_magic": "EAK1"
   },
   "application_delivery": {
     "command_magic": "RCM1",
