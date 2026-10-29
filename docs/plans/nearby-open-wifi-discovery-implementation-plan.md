@@ -1,25 +1,30 @@
-# Nearby Open Wi-Fi Discovery Implementation Plan
+# Nearby Wi-Fi Discovery and Own-Network Password Testing Plan
 
 ## Status and baseline
 
 This plan addresses [GitHub issue #101](https://github.com/seichris/open-bike-computer/issues/101).
 It was refreshed against freshly fetched GitHub `main` at
-`0f6fc8c6f0238d5508df199f2a50b1482b62ca1d` on 2026-10-02, superseding the
-2026-08-31 baseline `9ef7f09fce0e0d95e349e6ef9c54da137fcff286`. PR #375 remains
+`df58b75a05e6aa3aa5813e33090cfab6d116b432` on 2026-10-29, superseding the
+October 2 refresh at `0f6fc8c6f0238d5508df199f2a50b1482b62ca1d`. PR #375 remains
 documentation-only. This is an implementation contract, not a claim that the
-feature, BLE protocol, endpoint,
-or physical validation already exists.
+feature, BLE protocol, endpoint, or physical validation already exists.
+
+Scope now includes two separately gated phases: open-network discovery/checks
+and foreground password-list testing against the user's own explicitly selected
+networks. Ownership scope was confirmed on October 29. The latter is fully
+planned below, not awaiting a further ownership clarification. This PR does
+not authorize implementation, deployment, network testing, or a device write.
 
 ### Changes required by current main
 
 | Area | Verified current source | Revised implementation decision |
 | --- | --- | --- |
-| Capability allocation | `protocol/ride-ble-contract-v1.json`: client 28; bits 0–30 assigned | Propose bit 31/client 29; recheck allocation before implementing; test unsigned high-bit handling |
-| Wi-Fi execution | `device_operation_owner.hpp/.cpp` implements `NetworkOperationOwner` on an internal-RAM task | Extend this executor with bounded scan and BSSID-bound association operations; add admission leases without a second driver owner |
-| Transfer lifecycle | `device_transfer_http.cpp`: PSRAM HTTP worker, RAM-backed Wi-Fi configuration, owner release, startup memory failures | Preserve cache safety, memory admission, TLS identity, session revocation, map activation and OTA maintenance |
+| Capability allocation | Client 33; base bits 0–31 occupied; extended-feature TLV type 3 uses bits 0–3 | Propose extended bit 4/client 34 for discovery and bit 5/client 35 for own-network testing; recheck before implementation |
+| Wi-Fi execution | `DeviceOperationOwner` plus native `DeviceWiFiRuntime`; static internal stack, resident driver/netifs | Extend native scan/exact-target association; never mix Arduino WiFi lifecycle flags with this runtime |
+| Transfer lifecycle | Shared commit grants, shutdown barrier, PSRAM protocol workers, quiescent internal owner | Add discovery admission without disturbing accepted map/OTA work or reclaiming resident runtime resources |
 | BLE routing | `BLEManager.sendTransferControlPacket`: Settings first, navigation fallback; maintenance-specific routing | Use existing queue and protected channel selection; reject discovery in firmware maintenance |
-| Credentials | `RemoteDebugLANCredentialStore` and Diagnostics Transfer Network settings already exist | Keep trusted-transfer credentials isolated from temporary discovery; any secured-network extension gets its own explicit scope |
-| Validation | `tools/dev-check`, `tools/development/checks.json`, `swift-sources.json` | Register checks and source graphs centrally; do not copy old compiler lists into new scripts |
+| iOS admission and credentials | App-wide `DeviceOperationCoordinator`; trusted LAN Keychain store | Extend shared admission with a temporary test kind and secret-free cleanup; use a separate password-list Keychain service |
+| Validation | `tools/dev-setup`, `tools/dev-env`, central checks/source graphs, path-selected firmware matrix | Use managed host dependencies and current check selection; retain separate physical qualification |
 
 All source paths in this table are repository-relative; detailed paths appear
 below. Plans for other unmerged branches are not treated as implemented code.
@@ -40,7 +45,7 @@ view is open, and are never uploaded or persisted.
 
 ## Outcome
 
-Add a capability-gated **Nearby Open Wi-Fi** row to the iPhone Developer
+Add a capability-gated **Nearby Wi-Fi** row to the iPhone Developer
 Settings form. The view lets an authenticated owner:
 
 1. explicitly request one bounded scan on the connected bike computer;
@@ -59,9 +64,13 @@ channel, and raw identity bytes never leave the device. The iPhone sends that
 opaque ID back for connection, so an identically named secured or newly
 appeared access point cannot be selected implicitly.
 
-The feature never auto-connects, never saves a network, never retries silently,
+The open-network phase never auto-connects, never saves a network, never retries silently,
 never follows or opens a captive-portal page, and never exposes the existing
 map/firmware/debug/diagnostics transfer server on an untrusted WLAN.
+The separately confirmed password-test phase may advance through a bounded
+user-selected list for one owned target; it saves only user-authored password
+lists, not discovered networks or scan history. Both phases retain the same
+headless device, no-listener and cleanup boundaries.
 
 ## Current `main` behavior
 
@@ -85,13 +94,14 @@ CoreBluetooth writer or a direct Wi-Fi API.
 
 ### BLE protocol and capability state
 
-The current generated BLE contract advertises a 32-bit `CAP2` feature mask; the
-highest assigned feature is bit 30 (`topographic_contours`) and the current
-client version is 28. Bits 23–29 now cover renderer samples, map orientation,
-Watch motion evidence, screen configuration, World Radio, display timeouts,
-and workout zones. The earlier bit 23/client 21 proposal is no longer valid.
-Bit 26 is also assigned to screen configuration. The remaining current mask
-slot is **bit 31**, provisionally paired with **client version 29**.
+The generated BLE contract has a full 32-bit base `CAP2` mask:
+bit 31 is now `terrain_experiments`. Current client version is 33.
+An existing extended-feature TLV (type 3) carries another UInt32 mask, with
+bits 0–3 assigned to group riders, friend-marker scale, route elevation and
+map POIs. Propose extended bit 4/client 34 for `nearby_open_wifi` and
+extended bit 5/client 35 for `owned_wifi_password_test_v1`. Base bit 31 must
+not be reused. These are allocations to reconfirm when code is implemented,
+not reservations made by this documentation PR.
 Authenticated transfer controls already use Settings/native and navigation
 fallback paths. Device-originated status can be sent as
 one protected notification or as a bounded chunk sequence.
@@ -102,10 +112,15 @@ and unknown notifications.
 
 ### ESP32 radio and power lifecycle
 
-The Waveshare environments currently compile with `DISABLE_RADIO=1`.
-`Power::begin()` disconnects Wi-Fi, selects `WIFI_OFF`, and stops the Wi-Fi
-driver at startup. Deep sleep also stops Wi-Fi. This is the low-power baseline
-that discovery must restore when no other owner needs the radio.
+Once initialized, the native runtime's radio-off baseline retains the driver
+and netifs. On normal 1.75-inch boot, `main.cpp` calls
+`operationOwner()->prepareWiFi()` before BLE fragments internal RAM, except
+after an unfinished boot when preparation is deferred. Maintenance and 2.06
+must retain their current first-use paths and independent memory qualification.
+Preparation installs no session credentials and does not start the radio.
+Runtime stop uses `esp_wifi_stop()`, clears RAM configuration and
+returns to `WIFI_MODE_NULL`. Restore this measured resident-but-stopped state,
+not Arduino `WiFi.mode(WIFI_OFF)` or driver deinitialization.
 
 The transfer subsystem now has an explicit internal execution boundary:
 
@@ -115,20 +130,25 @@ The transfer subsystem now has an explicit internal execution boundary:
   observed failures, not proof of successful discovery operation.
 - `esp32/lib/firmware_update/device_operation_owner.hpp/.cpp` implements
   `DeviceOperationOwner`: a serialized 16 KiB internal-RAM worker for Wi-Fi
-  mutations, OTA flash operations, and durable map activation. It correlates
-  command/results and poisons the owner on unsafe timeout/mismatch. Healthy
-  shutdown reclaims its task; poisoned state remains unavailable for the boot.
+  mutations, OTA flash operations, and durable map activation. Its internal
+  stack/TCB are static and boot-lifetime. It correlates command/results and
+  poisons the owner on unsafe timeout/mismatch. `release()` quiesces and clears
+  staging buffers; it does not delete the task or reclaim its stack.
+- `esp32/lib/firmware_update/device_wifi_runtime.hpp/.cpp` owns the native
+  IDF driver, netifs and event handlers. It distinguishes first-use allocation
+  admission from resident-radio headroom checks and publishes readiness and
+  disconnect observations. Extend this runtime, not Arduino WiFi internals.
 - `HttpTransferServer` delegates Wi-Fi mutations through that interface. Its
   HTTP/TLS worker uses PSRAM; map activation remains on the internal owner.
-  Wi-Fi configuration uses `WIFI_STORAGE_RAM`, persistence off, and
-  auto-reconnect off. Network teardown precedes owner release.
+  Wi-Fi configuration uses `WIFI_STORAGE_RAM`; there is no event-driven
+  reconnect loop. Network teardown precedes owner quiescence.
 
 The existing transfer path:
 
 1. it switches to station mode and attempts the configured preferred LAN;
 2. it falls back to a WPA2 SoftAP when station association fails;
 3. it starts the authenticated, pinned-HTTPS transfer server; and
-4. it disconnects and selects `WIFI_OFF` when transfer ends.
+4. it stops the radio and clears session configuration when transfer ends.
 
 There is still no discovery-versus-transfer admission lease or scan interface.
 Execution serialization alone does not prevent a discovery request from
@@ -136,11 +156,22 @@ reconfiguring a live transfer. Extend the existing owner and add non-preemptive
 admission above it. Do not reintroduce direct Wi-Fi mutations from a new worker.
 Preserve committed map activation/rollback and OTA maintenance boundaries even
 after BLE revocation; a discovery cancellation cannot interrupt those operations.
+The common commit-grant and shutdown barrier now govern these transitions;
+see `docs/wifi-device-operation-lifecycle.md`. Discovery is reversible work
+and must drain before shutdown can receive its power permit.
 
 `RemoteDebugLANCredentialStore` in `DeviceTransferManager.swift` already keeps
 one trusted LAN credential in this iPhone's device-only Keychain, with separate
 Debug/Release service identities. That is deliberate saved configuration for
 trusted transfers, not a scan-history store or implicit consent to try networks.
+
+`DeviceOperationCoordinator.swift` already serializes app-wide transfer
+admission, tracks device/connection-epoch leases and retains unresolved cleanup.
+Add a non-hotspot temporary-Wi-Fi operation kind to this coordinator rather
+than creating a parallel app lock. Do not reuse its recorded hotspot SSID field
+for a discovered target. Discovery never applies or removes an iPhone network
+configuration. Extend recovery to use fresh matching discovery status; a blank
+transfer `DSTS` alone cannot prove a discovery run has stopped.
 
 ### BLE and ride constraints
 
@@ -163,7 +194,8 @@ because radio, power, and general runtime behavior are target-specific:
 ### Developer Settings entry and lifecycle
 
 - Add a **Connectivity** or **Experimental Hardware** section to
-  `DeveloperSettingsView` containing **Nearby Open Wi-Fi**.
+  `DeveloperSettingsView` containing **Nearby Wi-Fi**, with an open-network
+  action and a separately gated **Test My Network** action.
 - Keep the feature out of the ESP32 `deviceSettingsScr` screen and out of the
   normal consumer-facing Settings sections.
 - Show an explanatory disabled row when the device is disconnected, not
@@ -274,7 +306,7 @@ owned by the same generation before using its retained raw SSID/BSSID/channel.
 The device then:
 
 1. acquires the `TemporaryOpenNetwork` radio lease;
-2. sets `WiFi.persistent(false)` and disables auto-reconnect;
+2. configures `WIFI_STORAGE_RAM` and zero connection retries in the native runtime;
 3. selects station-only mode;
 4. starts one BSSID/channel-bound association with a null passphrase;
 5. waits for association and DHCP for an eight-second overall deadline; and
@@ -347,6 +379,7 @@ enum class Owner {
     DeviceTransfer,
     DiscoveryScan,
     TemporaryOpenNetwork,
+    OwnedNetworkTest,
 };
 ```
 
@@ -359,8 +392,9 @@ Ownership is non-preemptive:
 | Current owner | Requested owner | Result |
 | --- | --- | --- |
 | None | Any valid owner | Grant |
-| DeviceTransfer | Discovery/temporary connection | Reject; transfer continues |
-| Discovery/temporary connection | DeviceTransfer | Reject with `wifi_busy` |
+| DeviceTransfer or accepted activation | Discovery/temporary connection/password test | Reject; transfer or accepted work continues |
+| Discovery/temporary connection/password test | DeviceTransfer | Reject with `wifi_busy` |
+| Shutdown admission closed or maintenance boot | Any discovery/test owner | Reject without starting the radio |
 | Discovery scan still running | Temporary connection | Reject as busy; finish scan and release its lease before confirming a result |
 | Any owner | Same owner with stale token | Reject as stale |
 
@@ -373,16 +407,19 @@ rejected transfer publishes the existing generic status with stable
 `lastError.code = "wifi_busy"`; the iPhone can explain that the Developer
 Settings session must end before transfer can start.
 
-The coordinator's last-owner cleanup, dispatched on the internal executor, must:
+The coordinator's last-owner cleanup orchestrates protocol-worker teardown and
+dispatches driver mutations on the internal executor. It must:
 
 1. cancel/delete scan state;
-2. stop owner-specific listeners before disconnecting;
+2. wait for owner-specific protocol-worker/listener teardown before disconnecting;
 3. disconnect station and SoftAP state and clear temporary RAM configuration;
    preserve existing persistent settings and never erase unrelated NVS;
-4. select `WIFI_OFF` and stop the driver when no owner remains; and
-5. release the matching power-management lock and reclaim a healthy executor
-   only after no network, flash, or activation command remains. If the owner is
-   poisoned, fail closed for the boot rather than reclaiming live buffers.
+4. invoke the native runtime stop/credential-clear path, leaving the driver and
+   netifs resident with radio stopped and `WIFI_MODE_NULL`; and
+5. release the matching power-management lock only after confirmed cleanup,
+   and quiesce the internal owner without deleting its static task. A poisoned
+   owner or failed cleanup keeps admission closed; it cannot claim radio-off
+   success or provide a shutdown acknowledgement.
 
 Extend `NetworkOperationOwner` with scan start/poll/cancel/delete and
 BSSID/channel-bound station association operations, carrying session generation
@@ -391,25 +428,33 @@ boundary; its eight-second deadline must not block behind the existing
 60-second synchronous owner dispatch or ten-minute map-activation timeout.
 Do not hold the internal executor waiting for DHCP, DNS, TCP, or a probe body.
 Admission must reject discovery while transfer, activation, or firmware
-maintenance is active. Preserve startup internal/DMA free-and-largest-block
-checks and expose bounded, non-secret failure codes to iOS.
+maintenance is active. Preserve first-use internal/DMA free-and-largest-block
+checks and resident-start headroom checks, including measured resident allocation.
+Expose bounded, non-secret failure codes to iOS.
 
-Do not snapshot/replay arbitrary `WiFi.getMode()` values. A failed discovery
+Add the discovery/test controller to the existing nonblocking shutdown drain:
+close admission, cancel outstanding reversible work, clear credentials/results,
+stop the radio, and acknowledge only after matching worker/owner completion.
+Missing or poisoned completion defers shutdown; it never forces sleep. Any
+PSRAM worker follows the existing completion-and-park, internal-owner-reclaims
+pattern. Do not self-delete a PSRAM task or delete the resident operation owner.
+
+Do not snapshot/replay arbitrary radio modes. A failed discovery
 acquisition leaves the transfer owner untouched; release from the only owner
 returns to the measured radio-off baseline.
 
 ### 2. Capability-gated authenticated BLE contract
 
-Provisionally add `nearby_open_wifi` as capability bit 31 with minimum client
-version 29 in
+Provisionally add `nearby_open_wifi` as extended-feature bit 4 with minimum client
+version 34, and `owned_wifi_password_test_v1` as extended bit 5/client 35, in
 `protocol/ride-ble-contract-v1.json`, regenerate the checked-in Swift and C++
 constants, and expose `supportsNearbyOpenWiFi` from `BLEManager`. Clear it on
 disconnect, authentication reset, malformed capability response, or downgrade.
-Recheck the generator input immediately before implementation: bit 31 is the
-last slot in the current 32-bit mask. If already assigned, design a versioned
-capability extension first; never reuse another feature's bit or shift beyond
-the wire width. Test `0x80000000` in Swift `UInt32`, C++ `uint32_t`, CAP2
-serialization, capability reset, and old-client parsing without signed casts.
+Use the existing type-3 extension and generated extended masks, not the base
+feature word. Recheck both allocations immediately before implementation.
+Test absent/truncated/unknown TLVs, independent capability gating, reset and
+old-client parsing. Password testing requires both discovery and test support;
+advertising discovery alone must never make secured rows connectable.
 The Developer Settings row remains disabled until the bit and navigation-ready
 state are both true. Older clients ignore the bit; older firmware never receives
 new commands.
@@ -474,7 +519,7 @@ missing chunks, stale operations, and capability gating. Update
 ### 3. Headless ESP32 discovery controller
 
 Add a `wifi_discovery` controller that exposes intent, snapshot, and lifecycle
-operations to BLE/control code, not Arduino calls to Swift-facing code:
+operations to BLE/control code, not direct native driver calls from BLE callbacks:
 
 ```cpp
 void requestScan(uint32_t operationId);
@@ -505,8 +550,8 @@ task.
 
 ### 4. Bounded scan policy
 
-Use asynchronous active scanning through the pinned Arduino-ESP32/ESP-IDF API
-with explicit limits:
+Extend `DeviceWiFiRuntime` with native asynchronous scanning through the pinned
+ESP-IDF API, invoked only from the internal owner, with explicit limits:
 
 - visible networks only;
 - all locally allowed 2.4 GHz channels;
@@ -519,9 +564,10 @@ The dwell is a starting value from the ESP-IDF active-scan range, not proof of
 BLE coexistence. Lower it or select a passive policy only from measured results;
 do not raise it without rerunning the active-ride matrix.
 
-When `scanComplete()` finishes, copy only normalized records and the strongest
-candidate metadata into the bounded RAM table, call `scanDelete()`, publish
-the chunked result, release `DiscoveryScan`, and return the radio to off. Apply
+On the matching scan-done event, retrieve records through the native scan-record
+API into a bounded normalization path, explicitly free any remaining driver
+AP list, publish the chunked result, release `DiscoveryScan`, and return the
+radio to off. Apply
 the same deletion/release path on timeout, cancellation, BLE loss, result expiry,
 and screen exit. The result list may remain on the iPhone while the device radio
 is off.
@@ -535,7 +581,7 @@ linkability. The ID is useless after its generation expires and is never logged.
 After a valid authenticated `WFTR connect` command, acquire
 `TemporaryOpenNetwork` and configure Wi-Fi in this order:
 
-1. disable persistence and auto-reconnect;
+1. use RAM-only configuration and zero driver retries, with no event reconnect loop;
 2. select station-only mode;
 3. ensure RAM-backed driver storage, then start one null-passphrase connection
    bound to the retained raw SSID,
@@ -595,7 +641,8 @@ host. If a zone-wide HTTPS/HSTS policy cannot isolate this HTTP endpoint without
 weakening existing hosts, use a separate dedicated zone/domain instead of
 disabling protection for `8o.vc`.
 
-Firmware uses a small bounded HTTP/1.1 parser over `WiFiClient`:
+Firmware uses a small bounded HTTP/1.1 parser over a socket/client adapter that
+does not initialize or mutate Arduino WiFi state:
 
 - resolve only the compiled first-party hostname;
 - send no query, cookie, user/device/network identifier, or firmware header;
@@ -617,8 +664,7 @@ The result is a heuristic, not definitive portal proof. Do not render response
 content, expose a redirect URL, submit forms, or use DHCP option 114 as a
 requirement for v1. RFC 8910/8908 support can be a future additive signal.
 
-Relevant references are the [Arduino-ESP32 Wi-Fi API](https://docs.espressif.com/projects/arduino-esp32/en/latest/api/wifi.html),
-[ESP-IDF Wi-Fi API](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/wifi/esp_wifi.html),
+Relevant references are the [ESP-IDF 5.5.1 ESP32-S3 Wi-Fi API](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32s3/api-reference/network/esp_wifi.html),
 [ESP32-S3 RF coexistence guidance](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/coexist.html),
 [ESP32-S3 Wi-Fi security](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/wifi-security.html),
 [RFC 8908](https://www.rfc-editor.org/rfc/rfc8908.html),
@@ -654,7 +700,9 @@ reusing transfer credentials or opening a second network path.
 
 ## Privacy and security invariants
 
-These are hard requirements:
+These are hard requirements for open-network v1. The password-test phase adds
+only the explicit Keychain-list and transient credential exceptions described
+in its section below; it does not relax scan-history or telemetry privacy:
 
 - Only an authenticated owner may request a scan or connection. Watch and
   unauthenticated clients cannot use the command.
@@ -706,7 +754,8 @@ should remain recognizable.
 
 ### BLE contract and firmware
 
-- Add `nearby_open_wifi` provisionally at bit 31/minimum client version 29 to
+- Add `nearby_open_wifi` provisionally at extended bit 4/client 34 and
+  `owned_wifi_password_test_v1` at extended bit 5/client 35 to
   `protocol/ride-ble-contract-v1.json`; regenerate the checked-in Swift/C++
   contract files and run the generator drift check.
 - Update `docs/ble-protocol.md` with `WFTR`, `WFST`, and `WFSC` semantics,
@@ -718,6 +767,9 @@ should remain recognizable.
   `esp32/lib/firmware_update/device_operation_owner.hpp/.cpp` with bounded
   generation-aware scan and exact-candidate station operations. Preserve
   `firmware_internal_owner_policy.hpp` poisoning and release guarantees.
+- Extend `esp32/lib/firmware_update/device_wifi_runtime.hpp/.cpp` with native
+  scan, exact-BSSID/security association and attempt-fenced event observations.
+  Preserve resident allocation, static internal stacks and credential clearing.
 - Update the wiring in `esp32/lib/firmware_update/firmware_update_http.cpp`
   to share its owner with discovery through an injected narrow interface.
 - Add `esp32/lib/wifi_discovery/wifi_discovery.hpp/.cpp` plus pure policy,
@@ -727,7 +779,9 @@ should remain recognizable.
 - Update `esp32/lib/device_transfer/device_transfer_http.hpp/.cpp` to use the
   shared lease and return `wifi_busy` without changing transfer auth/fallback.
 - Update `esp32/lib/power_management/power_management.hpp/.cpp` with a
-  dedicated Wi-Fi lock domain and `esp32/src/main.cpp` with controller polling.
+  dedicated Wi-Fi lock domain and `esp32/src/main.cpp` with controller polling
+  and shutdown-drain participation. Reuse `power/shutdown_barrier_policy.hpp`
+  and commit-grant admission rather than adding an independent shutdown path.
 - Inspect `esp32/platformio.ini`/generated SDK settings and change coexistence
   or task placement only when measurements require it.
 - Do not modify `esp32/lib/gui/src/deviceSettingsScr.cpp`,
@@ -794,17 +848,18 @@ contract, or privacy review.
    leases around the existing `DeviceOperationOwner`; extend its narrow network
    interface rather than creating a second internal worker.
 3. Preserve preferred-LAN, SoftAP fallback, authentication, and transfer status
-   behavior, memory admission, poisoning, task reclamation, and activation/OTA
+   behavior, memory admission, poisoning, resident-owner quiescence, and activation/OTA
    commit boundaries; add stable `wifi_busy` rejection.
-4. Add Wi-Fi power-lock accounting and assert `WIFI_OFF` after the last owner.
+4. Add Wi-Fi power-lock accounting and assert stopped radio/cleared RAM config/
+   `WIFI_MODE_NULL` after the last owner, retaining resident driver resources.
 
 Exit gate: existing transfer host/device regressions pass and concurrent owners
 cannot mutate the radio.
 
 ### Phase 2: authenticated BLE contract
 
-1. Recheck the provisional bit 31/client 29 allocation, add generated constants,
-   and test the mask's unsigned high bit and iOS capability gating.
+1. Recheck the proposed extended bits 4/5 and client versions 34/35, add
+   generated constants, and test TLV parsing plus independent feature gating.
 2. Implement strict `WFTR` command parsing/building and protected routing.
 3. Implement bounded `WFST`/`WFSC` notifications, Swift reassembly, golden
    vectors, retries, and generation/operation validation.
@@ -869,8 +924,9 @@ firmware service.
 
 ### Current validation entry point
 
-For this documentation refresh, run `tools/dev-check --plan`, the selected
-fast checks via `tools/dev-check`, and `git diff --check`. A docs-only refresh
+For this documentation refresh, prepare the worktree with `tools/dev-setup`,
+run `tools/dev-env tools/dev-check --plan`, selected fast checks via
+`tools/dev-env tools/dev-check`, and `git diff --check`. A docs-only refresh
 does not establish any of the implementation or physical gates below.
 
 During implementation, register new checks/source graphs first, then use the
@@ -879,8 +935,11 @@ firmware checks only when their sources change and prerequisites are available.
 Retain the generated report and label blocked prerequisites separately from
 failed or passed tests. Follow `docs/development-checks.md` and `AGENTS.md` for
 isolated simulator ownership, the Xcode wrapper, locked firmware runtime, and
-clean-source evidence. The default firmware CI gate covers 1.75 ordinary and
-production profiles; 2.06 remains a separate explicit qualification.
+clean-source evidence. Current CI chooses boards/profiles from changed paths;
+shared runtime/configuration and unknown libraries can select both boards.
+Record the actual matrix; never infer 2.06 or remote-debug validation from the
+aggregate gate's name. Clean local receipts may be reused only by the existing
+verifier; they do not substitute for firmware or physical acceptance.
 
 ### Pure host tests
 
@@ -900,10 +959,10 @@ Cover at least:
 - radio owner transitions, busy rejection, stale release, double cleanup, and
   scan-to-connection ownership transfer;
 - internal-owner creation/dispatch failure, memory rejection, timeout poison,
-  late result, safe task reclamation, map activation handoff, and rejected
+  late result, resident-owner quiescence, map activation handoff, and rejected
   discovery during firmware maintenance;
 - both native Settings and navigation fallback routes, maintenance rejection,
-  high-bit CAP2 round trips, and smallest-supported protected ATT budgets;
+  extended-feature CAP2 round trips, and smallest-supported protected ATT budgets;
 - cancellation during scan, association, DNS, TCP, headers, body, and display;
 - no automatic retry/reconnect transition;
 - exact 204 success, wrong marker, redirect, HTML, 2xx body, 5xx, timeout,
@@ -955,8 +1014,10 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_206_PRODUCTION
 ```
 
 Record exact source SHA, toolchain identity, firmware size/heap deltas, and
-coexistence configuration. Automatic CI for 1.75-inch environments does not
-substitute for explicit 2.06-inch builds or physical evidence.
+coexistence configuration. Use current path-selected CI evidence for the actual
+boards/profiles built, add missing target qualification explicitly, and retain
+physical evidence separately. Shared radio/runtime changes must also exercise
+the affected remote-debug/lifecycle profiles selected by current CI policy.
 
 This plan does not authorize flashing. Before each physical write, re-identify
 the attached device by stable serial and obtain fresh confirmation naming the
@@ -1086,44 +1147,284 @@ other.
 | Wi-Fi discovery does not persist or upload scan history | RAM-only device/iPhone snapshots, no BSSID/raw bytes over BLE, no storage/log/analytics fields, NVS/cold-boot checks, and no-storage Worker |
 | Leaving restores the previous low-power Wi-Fi state | Generation-scoped shared radio lease, idempotent cleanup, dedicated power lock, BLE-loss/background teardown, NVS check, and settled-current matrix |
 
-## Requested follow-up: user-supplied passwords for secured networks
+## Phase 7: password-list testing for the user's own networks
 
-The owner has requested an app-managed password list that could be used with
-nearby secured Wi-Fi. This expands issue #101's open-only scope. Target scope
-is pending clarification: password-list testing must be limited to networks
-the user owns or has explicit permission to test. Manual selection of a known
-password is a separate possible flow. Do not infer permission from proximity,
-an SSID match, or possession of a password list.
+The user confirmed that targets are their own networks and requested this
+extension on October 29. Design an explicit foreground test of one selected
+access point using a small list of passwords the user supplied in the app.
+No further ownership clarification is required to complete this plan.
+Implementation remains outside this documentation-only PR.
 
-Keep this as a separately approved implementation phase; it is not implicitly
-enabled by the open-network capability or the v1 command contract above.
-Before implementation, settle these concrete design requirements:
+### Product flow and target selection
 
-- An explicitly selected authorized target and foreground action, with clear
-  cancellation and bounded duration; no background testing of discovered APs.
-- A device-only iPhone Keychain collection, separate from
-  `RemoteDebugLANCredentialStore`, with user-driven add/delete and no cloud
-  sync, analytics, diagnostic export, or password values in UI status/logs.
-  Saving a password does not save scan history or grant consent for any network.
-- A separately versioned credential-bearing protocol with dedicated redaction
-  and compatibility tests. The current open-only `WFTR` format carries no
-  secrets. Send only the credential needed for the current authorized operation
-  through the authenticated owner session, never the whole collection.
-- Firmware RAM-only credential lifetime and clearing on every terminal path;
-  preserve driver admission, internal-stack execution, maintenance rejection,
-  and BLE responsiveness. A successful check never silently promotes the WLAN
-  to a trusted transfer network or starts its HTTPS/debug listeners.
-- Distinguish authentication failure, association failure, DHCP failure, and
-  Internet/probe failure. No-Internet does not mean the password is wrong.
-  Define supported WPA personal modes explicitly; enterprise, WPS, hidden
-  networks, and unknown security need separate decisions.
-- Controlled-AP validation for credential redaction, cancellation, stale
-  responses, Keychain isolation, and cleanup before enabling the extension.
+1. In **Nearby Wi-Fi**, tap **Password Lists** to create, name, edit, reorder
+   or delete a list. Each entry has an opaque local UUID, optional display label
+   and secret; passwords are masked. Manual entry is sufficient initially.
+   No dictionary downloads, password generation, permutations or bulk import.
+2. Scan explicitly, select a supported secured network, then tap **Test My
+   Network**. This action requires both extended capabilities and an
+   authenticated owner phone. Unsupported firmware shows an explanation.
+3. If the grouped SSID represents several APs, select a device-supplied
+   session-only AP choice (for example “Access point 1, -52 dBm”). Add
+   per-candidate opaque IDs beneath grouped rows in this capability version;
+   retain BSSID/channel/raw SSID exclusively on the device. Do not silently
+   move to the strongest sibling between attempts.
+4. Choose one list or a subset in its displayed order. Show the safe target
+   name, security, password count, bounded runtime and **Stop** behavior.
+   Require explicit confirmation that this is the user's own network and
+   **Start Test** for every run. Selecting a row/list is not consent.
+5. Show **Testing password 2 of 5**, elapsed time, the target and Stop. Do not
+   display the attempted password. Freeze the list revision and order for the
+   run; editing/deleting an active list first stops the run and waits for cleanup.
+6. Finish with a per-entry result and, on success, the local entry label/index.
+   Do not reveal, copy, save to a network profile or export the successful
+   password automatically. Session results disappear when leaving the view.
 
-Until target authorization and manual-versus-list behavior are resolved, the
-open-only acceptance criteria and non-goals below remain the v1 contract.
+Target selection must be less than 30 seconds old at Start. Firmware binds a
+new random run grant to its exact retained AP identity, security mode, current
+boot, owner session and run ID. The scan's normal expiry is replaced by the
+bounded run lifetime for that one pinned candidate only. Other candidates
+expire normally. If the AP disappears, changes security, or reports a different
+identity, end the run and request rescan/confirmation; never fall back by SSID.
+An SSID/BSSID match is a binding constraint, not cryptographic proof of AP
+ownership. Validation uses controlled APs owned by the tester.
+
+Cap selectable AP choices at four per retained group (96 total for 24 groups);
+show a per-group truncation notice when necessary and never automatically
+test an omitted AP. Recalculate result JSON/chunk bounds for these choices
+instead of assuming the open-only payload budget still suffices.
+
+Initial secured support is WPA2-Personal only. WPA3-only and transition modes,
+WPA/WEP, enterprise, OWE, WPS, hidden SSIDs and unknown modes remain disabled
+until separately qualified. Do not silently downgrade security to make a
+candidate work. Open networks keep their existing no-password flow.
+
+### Bounds, progression and outcome semantics
+
+These are initial product limits to enforce in firmware as well as iOS:
+
+| Limit | Initial policy |
+| --- | --- |
+| Stored collections | At most 5 lists, at most 10 entries each |
+| One confirmed run | One exact AP, 1–10 selected unique passwords, one attempt at a time |
+| Credential format | 8–63 UTF-8 bytes, no NUL; preserve bytes exactly without trimming/normalization; raw 64-hex PSKs deferred |
+| Authentication/association | At most 8 seconds per attempt |
+| Progression pacing | At least 5 seconds after confirmed teardown before a different password |
+| Whole run | 180-second monotonic absolute cap; not extended by heartbeat/retry |
+| Foreground liveness | Heartbeat every 2 seconds; device cancels after 8 seconds without a fresh heartbeat |
+| Cleanup acknowledgement | 3-second target; exceeding it reports cleanup unresolved and blocks new admission |
+| Application retry | At most one retry/query with the same request identity; never a second RF attempt for a duplicate |
+
+Exact duplicate entries are rejected within a list without logging their value.
+Advance only after a current-attempt authentication rejection or a classified
+WPA2 four-way/handshake failure for the still-pinned target. Wrong WPA2
+credentials can surface as handshake failures, so those must be exercised by
+the controlled-AP wrong-first/correct-second fixture rather than classified
+unconditionally as a transport outage. Report **Not accepted in this attempt**
+with a bounded reason, never that a password is definitively wrong.
+The existing `StationState::AuthenticationFailed` bucket is insufficient:
+retain typed current-attempt reason evidence and fence old events. A generic
+eight-second deadline with no matching handshake/authentication result,
+no-AP, changed target or unknown failure is inconclusive and stops the run.
+This conservative distinction follows
+[Espressif's Wi-Fi failure guidance](https://github.com/espressif/esp-faq/blob/master/docs/en/software-framework/wifi.rst):
+a handshake failure can accompany a bad password, but is not definitive proof.
+
+Stop at the first completed secure association. Verify the negotiated security
+and selected BSSID before reporting **Credential accepted**. DHCP then gets a
+separate eight-second window, followed by at most one optional bounded probe.
+No DHCP, captive portal or unavailable Internet does not invalidate the
+credential and must not cause another password attempt.
+
+| Observation | Result and next action |
+| --- | --- |
+| Current-attempt rejection or classified WPA2 handshake failure | Record not accepted with reason, teardown, wait, advance if within limits |
+| Generic timeout without matching auth result, AP absent/changed, disconnect ambiguity | Inconclusive; stop, no automatic next password |
+| Secure association verified, DHCP fails | Credential accepted; address unavailable; stop and disconnect |
+| Secure association and DHCP succeed | Credential accepted; optionally check reachability once |
+| Portal/no Internet/probe error | Separate network outcome; stop and disconnect, no additional passwords |
+| All selected entries attempted without acceptance | No selected password accepted in this run; end run |
+| Radio busy, low memory, poisoned owner, shutdown requested | Stop or reject before attempt; preserve other operation |
+| Cancel, background, BLE loss, heartbeat or absolute timeout | Cancel, clear secrets, stop radio; no automatic resume |
+
+The password-test phase always disconnects after its result, including success;
+it does not inherit the open-flow five-minute online display period. There is
+no auto-reconnect or attempt of the same password within a run. A new run needs
+a fresh scan and explicit confirmation. No testing during active navigation or
+a workout in the initial release: if a ride begins, cancel at the reversible
+boundary. Open-network scan coexistence remains separately qualified.
+
+### Storage and credential boundary
+
+Add a separate `OwnedWiFiPasswordListStore` using a versioned device-only
+Keychain service, isolated between Bicino Dev and production. Use
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, synchronization disabled, and
+no shared Watch/app-extension access group. See Apple's
+[Keychain accessibility contract](https://developer.apple.com/documentation/security/ksecattraccessiblewhenunlockedthisdeviceonly).
+Keychain failures or a locked device fail closed; never fall back to defaults.
+
+Store list/entry UUIDs, labels, order, revision and passwords together in
+bounded Keychain records. Persist only user-authored content: no discovered
+SSID/BSSID, network-to-password mapping, matched-password history, attempt
+history or result. Existing trusted-transfer credentials are never imported
+or modified automatically. Do not add clipboard/export or iCloud sync.
+
+The session coordinator holds entry IDs/order, not a second full plaintext
+list. Retrieve only the next entry at dispatch, bind it to the frozen list
+revision, and clear temporary references after transport completion/drop.
+On app background/lock, cancel and cover the secret editor in the app-switcher
+snapshot. Swift String/Data copies cannot promise complete process-memory
+zeroization; minimize copies/lifetime, never stringify packets, and explicitly
+wipe owned mutable byte buffers where supported. Firmware uses fixed bounded
+credential buffers, non-elidable clearing, and the native runtime's RAM config
+clear path. It never writes credentials or password hashes to NVS/SD.
+
+### Protocol and session state
+
+Keep open-only `WFTR` commands credential-free. Define an additive
+`WFTP` binary version-1 control family for test sessions and `WFTS` bounded
+status responses, using the existing owner-authenticated Settings/navigation
+routes with ownership-v2 AES-256-GCM protection; authenticated plaintext or
+legacy unprotected fallback is never acceptable for credentials.
+Reserve these prefixes in the generated contract and normative BLE doc
+during implementation. Do not overload `DTRN` trusted-LAN entry or create a
+transfer token, SoftAP, HTTPS listener or iPhone hotspot join.
+
+The finalized wire schema must include a version/action, request ID, random
+run ID, device-issued target grant where applicable, attempt index and explicit
+body length. Fix byte order and exact field sizes with cross-language golden
+vectors before writing either transport adapter. Proposed operations:
+
+| Operation | Meaning |
+| --- | --- |
+| Begin | Scan generation, candidate ID, expected security and selected count; device validates admission and returns a random target grant |
+| Try credential | Run/grant, next attempt index and one length-prefixed credential; no SSID, BSSID, whole list or user label |
+| Heartbeat/query | Run/grant only; observe/reaffirm liveness, never associate |
+| Cancel | Run/grant; terminally fence queued attempts and request teardown |
+| Status | Echo request/run/attempt, bounded phase/result/reason, counts and cleanup state; never credential, hash or packet echo |
+
+Keep the maximum command within the negotiated protected ATT budget at the
+minimum supported MTU; refuse an undersized transport before extracting a
+secret. Do not add credential fragmentation in the initial protocol. Treat
+credential writes as noncoalescible acknowledged control, never replaceable
+telemetry; cancellation invalidates queued Try writes before returning.
+The transport queue must clear secret-bearing bytes on ACK, drop, disconnect
+and reset, and its debug/diagnostic descriptions must be redacted.
+
+iOS obtains the shared app operation lease before Begin. Firmware independently
+checks native owner availability, shutdown/maintenance/ride state and the
+current session on Begin and Try. One in-flight attempt is admitted; changed
+run/grant/index, cross-device callbacks, skipped indices and attempts after
+terminal cancellation are rejected. Identical request retries return the
+existing status and cannot trigger a second association. Conflicting retry
+bodies fail closed, using a session-keyed RAM digest if needed; never log or
+persist a password digest.
+
+Device-originated Wi-Fi events do not inherently carry this app run ID. Extend
+the runtime adapter to fence them: finish the old stop/disconnect and clear
+pending observations before starting a new attempt, then bind observations to
+the active runtime epoch. Do not merely relabel a late callback with the newest
+run/index. If teardown or event ordering cannot establish the fence, stop as
+inconclusive. This requires deterministic late-event tests.
+
+Device state:
+
+```text
+Idle -> Admitted -> AwaitingCredential -> Associating
+     -> Rejected -> Cleaning -> Cooldown -> AwaitingCredential
+     -> Authenticated -> DHCP -> OptionalProbe -> Cleaning -> Complete
+Any active state -> Cancelling -> Cleaning -> Cancelled
+Unconfirmed cleanup -> CleanupUnresolved (admission remains closed)
+```
+
+The device is the authority for count/deadline/pacing. iOS never streams the
+whole list or prequeues later passwords. It sends the next entry only after a
+matching classified authentication failure plus cleanup/cooldown completion. Secret-free terminal
+deduplication metadata may remain in RAM for the authenticated session with a
+60-second retention limit; credentials and candidate identity must already be
+cleared. An evicted or unknown run ID can only be queried/rejected, not revived
+by Try. Starting again requires a new Begin and confirmation.
+
+### Lifecycle, recovery and diagnostics
+
+Reuse `DeviceOperationCoordinator` admission with a temporary test lease.
+Its retained unresolved-cleanup record may contain only device ID, operation
+kind, run ID and connection epoch, never target identity, list ID or secret.
+Fresh `WFTS` status must confirm stop/idle for that device; transfer `DSTS`
+does not substitute. Relaunch/reconnect reconciles cleanup only and never
+resumes a password sequence. Firmware clears the run on BLE loss/reboot and
+the absolute/heartbeat watchdog bounds phone suspension even if Cancel is lost.
+Do not reuse durable map/OTA receipt stores for reversible Wi-Fi testing.
+
+Cancel closes run admission immediately, drops queued secret writes, interrupts
+association/probe, stops the native radio, clears all credential copies and
+candidate identity, then reports cleanup and releases the exact lease.
+Late status cannot start the next entry or clear another device's lease.
+Deletion of the active list and logout/ownership reset follow this same stop.
+Accepted map/OTA work is never cancelled by the test controller.
+
+Diagnostics-v2 bundles, BLE debug events, status JSON, serial output and error
+paths must never include password/list labels, secret bytes, hashes, SSID,
+BSSID, raw packet dumps or portal content. Emit only bounded phase/reason,
+duration, counts and resource measurements using existing schemas where
+available. Audit credential staging, transport retry, failure formatting and
+incident export; synthetic secrets must be absent from every captured artifact.
+
+### Implementation slices and exit gates
+
+Expected additions are `OwnedWiFiPasswordListStore.swift`,
+`OwnedWiFiTestSession.swift` and a list-editor view under the app's existing
+Managers/Views conventions; a pure credential-test codec/state policy beside
+`wifi_discovery`; and synthetic fixtures in `protocol/fixtures/`.
+Update `DeviceOperationCoordinator.swift`, `BLEManager.swift`, Settings,
+the native owner/runtime, shutdown drain, protocol document and central
+test/source registries together. These are proposed files, not current main.
+
+1. Add pure list validation, Keychain adapter, state machine, clock and fake
+   transport; test exact bytes, duplicate policy and frozen revision behavior.
+2. Add the second extended capability and WFTP/WFTS golden vectors, owner-role
+   checks, MTU refusal, noncoalescible secret queue and redaction contracts.
+3. Extend native driver exact-target WPA2 association, typed reason evidence,
+   event fencing and fixed-buffer wiping; test rejection versus inconclusive
+   progression without real RF.
+4. Integrate app-wide/device admission, Cancel/background/liveness, shutdown
+   and unresolved-cleanup reconciliation; no listener or hotspot path.
+5. Add the list editor, AP selection, confirmation, progress and outcomes in
+   Developer Settings. Register production Swift sources/checks centrally.
+6. Qualify on the tester's controlled WPA2 APs and each supported board, keeping
+   the capability disabled in production until its own evidence gate passes.
+
+Additional acceptance cases:
+
+- Incorrect-first/correct-second and correct-first lists: classified current
+  authentication/handshake failures advance; success stops immediately with
+  the matching local label. Include APs that report bad PSKs as handshake timeout.
+- All-rejected, duplicate, empty, oversized, NUL, multibyte and delimiter-bearing
+  passwords: exact bounded binary handling, no truncation/normalization.
+- Correct password/no DHCP, captive portal or no uplink: credential acceptance
+  survives the separate connectivity failure and no next password is sent.
+- Generic timeout, changed security/AP, delayed old Wi-Fi events and missing
+  ACK: inconclusive/unchanged status, no extra RF attempt.
+- Same-name different BSSIDs and open/secured siblings: only the pinned AP can
+  be attempted; grouping never grants authorization to all neighbors.
+- Cancel during every state, background/lock/termination, BLE auth reset,
+  device switch/reboot, list edit/delete, ride start, transfer contention and
+  shutdown: no new attempts, secrets cleared, correct lease/drain behavior.
+- Reordered/duplicate/conflicting requests, capability downgrade, Watch role
+  and unauthenticated requests: fail closed without radio or credential use.
+- Enforce count, pacing, heartbeat and absolute cap on both sides with fake
+  monotonic clocks, then measure repeated success/failure cycles on devices.
+- Keychain unavailable/corrupt/version mismatch and all diagnostic/export
+  paths: no fallback persistence and no synthetic secret leakage.
+
+The extension is done only when these tests, UI behavior, both-board native
+runtime qualification, RF stop/credential-clear evidence, and source/CI checks
+pass. Open-network acceptance alone does not qualify password testing.
 
 ## Non-goals for open-only v1
+
+Phase 7 explicitly adds the bounded WPA2 own-network testing and user-authored
+Keychain lists above. Other exclusions remain applicable to both phases.
 
 - Adding this feature to the ESP32 LVGL **Device Settings** page; the entry is
   exclusively in the iPhone **Developer Settings** page.
@@ -1146,12 +1447,12 @@ open-only acceptance criteria and non-goals below remain the v1 contract.
 
 ## Definition of done
 
-The feature is complete only when:
+Open-network v1 is complete only when:
 
 - the capability-gated iPhone Developer Settings flow is implemented and the
   ESP32 remains the headless scanner/temporary connection owner;
-- the shared radio coordinator owns every firmware Wi-Fi lifecycle, including
-  existing device transfer;
+- shared admission covers all post-boot discovery/transfer use and shutdown,
+  with native driver mutations confined to the existing internal runtime;
 - authenticated `WFTR`/`WFST`/`WFSC` protocol code is bounded, idempotent,
   backward-compatible, and fully tested;
 - explicit confirmation, one-shot open association, reachability outcomes, and
@@ -1164,3 +1465,7 @@ The feature is complete only when:
   without weakening existing HTTPS policy; and
 - both identified display boards pass controlled-network, active-ride BLE, and
   power/teardown matrices using the exact release artifact.
+
+The full planned feature additionally requires Phase 7's independent capability,
+credential lifecycle, protocol, foreground flow and owned-AP acceptance gates.
+A documentation merge completes neither implementation phase.
