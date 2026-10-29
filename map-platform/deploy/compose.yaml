@@ -1,6 +1,6 @@
-# control-plane-source-commit: 54bebef0f47c4d035603480a19a7e4bf622e8a67
-# worker-source-commit: aecd91e635e5001fe82f17959c3792b941344619
-# promotion-source-commit: 8c3a14c3c0f619a91863af99429a21a6af663830
+# control-plane-source-commit: 05d3945fc618e7ca38f1db6cb576a0fe32e9ce8e
+# worker-source-commit: 8104250ca68499a50c9ec68b9102f13fe1ab5965
+# promotion-source-commit: 05d3945fc618e7ca38f1db6cb576a0fe32e9ce8e
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -11,12 +11,12 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:df8db9827ed2c91bfa1b98dc3db8afd9f20b89cbc59beab5c52a0aa2fe61f6bd
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:afe2d5cadeb7566c59d8ee6169b3fe6a7e8601f662872dd4a6f18f46b3726928
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d145e8633778b5f777eeadbb8af9c065daf4e533ac0c678790c804a8ec3f6481
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9
 
 services:
   map-platform-promotion:
-    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:0184002724c7ec96f2c7edd60662af2527fcbbebcb505229b082e919e7c09bb8
+    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:214b29f46736e725e6b8a1a5a005d9d5600139ef7d9d16c72c83552df4747003
     mem_limit: 2g
     cpus: 1
     environment:
@@ -36,7 +36,7 @@ services:
       MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
       MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}
       # This converter stays fixed even if the generation worker later advances.
-      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: ghcr.io/seichris/open-bike-computer-map-platform@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9
       MAP_PLATFORM_ARTIFACT_STORE: s3
       MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
       MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
@@ -143,7 +143,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       # Keep the approval identity atomic with the image pins in this lock.
-      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261022-worker-social-ios28
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261029-durable-contract1
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
