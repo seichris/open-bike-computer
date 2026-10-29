@@ -88,6 +88,8 @@ FIRMWARE_CONTRACT_PATHS = {
 FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
     "tools/tests/test_firmware_manifest.py",
+    # Host contract tests pin its slot sizes and pre-write ordering.
+    "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
 }
 RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py", "tools/bicino"}
 SHARED_RIDE_BLE_CONTRACT_PATHS = {
@@ -106,7 +108,10 @@ FIRMWARE_RELEASE_TOOL_PATHS = {
     "tools/firmware_release_candidate.py",
     "tools/firmware-signing-requirements.txt",
     "tools/verify_github_release_assets.py",
+    "tools/web_flasher_manifest.py",
 }
+# Signed USB recovery/migration vectors; the website copies them byte-for-byte.
+FIRMWARE_WEB_FLASHER_PREFIX = "tools/web-flasher/"
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
     "docs/device-ownership-test-vectors.json",
@@ -267,6 +272,7 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             or path in FIRMWARE_RELEASE_TOOL_PATHS
             or path in RIDE_DIAGNOSTICS_TOOL_PATHS
             or path.startswith("tools/bicino_diagnostics/")
+            or path.startswith(FIRMWARE_WEB_FLASHER_PREFIX)
         ):
             selected["firmware_host"] = True
 

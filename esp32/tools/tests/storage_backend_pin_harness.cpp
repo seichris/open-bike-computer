@@ -12,6 +12,7 @@
 #include <string>
 #include <sys/stat.h>
 #include "../../lib/ride_diagnostics/ride_diagnostics_transfer_policy.hpp"
+#include "../../lib/storage/internal_storage_identity.hpp"
 #include "../../lib/storage/storage_mount_policy.hpp"
 #include "../../lib/storage/storage_stream_admission.hpp"
 
@@ -77,11 +78,15 @@ unsigned removableMounts = 0, removableUnmounts = 0;
 struct FakeFFat {
   bool mounted = false;
   bool canMount = true;
-  unsigned begins = 0, ends = 0;
-  bool begin(bool, const char *basePath, uint8_t, const char *) {
+  unsigned begins = 0, ends = 0, formats = 0;
+  // Like Arduino FFat: a format request formats only after a failed mount.
+  bool begin(bool format, const char *basePath, uint8_t, const char *label) {
     ++begins;
     CHECK(std::strcmp(basePath, "/sdcard") == 0);
-    mounted = canMount;
+    CHECK(std::strcmp(label, "ffat") == 0);
+    if (!canMount && format)
+      ++formats;
+    mounted = canMount || format;
     return mounted;
   }
   void end() {
@@ -92,6 +97,21 @@ struct FakeFFat {
   size_t usedBytes() const { return 0; }
   File open(const char *) { return File{mounted}; }
 } FFat;
+
+// Raw FFat facts reported to initSPIFFS() before its first mount attempt.
+internal_storage::Assessment ffatAssessment;
+unsigned geometryRecords = 0;
+namespace internal_storage {
+Assessment assess(const char *label) {
+  CHECK(std::strcmp(label, "ffat") == 0);
+  return ffatAssessment;
+}
+bool recordGeometry(const Assessment &assessment) {
+  CHECK(assessment.partitionFound);
+  ++geometryRecords;
+  return true;
+}
+} // namespace internal_storage
 
 int harnessStat(const char *path, struct stat *out) {
   if (std::strcmp(path, "/sdcard") != 0 ||
@@ -262,6 +282,10 @@ void resetHardware() {
   removableVfsMounted = false;
   removableMounts = removableUnmounts = 0;
   FFat = FakeFFat{};
+  ffatAssessment = {true, false,
+                    storage_mount_policy::InternalGeometryRecord::Absent,
+                    0x810000, 0x700000};
+  geometryRecords = 0;
 }
 
 void cardBootPinsTheCardAndNeverRemounts() {
@@ -406,12 +430,70 @@ void noCardMapRequestsNeverReachFfat() {
   CHECK(removableMounts == 1 && removableUnmounts == 0);
 }
 
+esp_err_t noCardBoot() {
+  Storage storage;
+  CHECK(storage.initSD() != ESP_OK);
+  const esp_err_t result = storage.initSPIFFS();
+  CHECK(storage.hasInternalFallbackMounted() == (result == ESP_OK));
+  return result;
+}
+
+// FFat is formatted only when nothing can be lost: a fully erased partition
+// (new device, or the signed migration's explicit erase), or this device's own
+// filesystem at the geometry it last mounted. Anything else is left untouched.
+void ffatFormatsOnlyErasedOrOwnedVolumes() {
+  using storage_mount_policy::InternalGeometryRecord;
+  resetHardware();
+  FFat.canMount = false;
+  ffatAssessment.erased = true;
+  CHECK(noCardBoot() == ESP_OK);
+  CHECK(FFat.begins == 1 && FFat.formats == 1 && geometryRecords == 1);
+
+  resetHardware();
+  FFat.canMount = false;
+  ffatAssessment.record = InternalGeometryRecord::Matches;
+  CHECK(noCardBoot() == ESP_OK);
+  CHECK(FFat.begins == 2 && FFat.formats == 1 && geometryRecords == 1);
+
+  // Old data shifted under a replaced table, or vendor data: never formatted.
+  resetHardware();
+  FFat.canMount = false;
+  CHECK(noCardBoot() != ESP_OK);
+  CHECK(FFat.begins == 1 && FFat.formats == 0 && geometryRecords == 0);
+
+  // A valid volume this firmware has not seen before is adopted and recorded.
+  resetHardware();
+  CHECK(noCardBoot() == ESP_OK);
+  CHECK(FFat.begins == 1 && FFat.formats == 0 && geometryRecords == 1);
+
+  // FFat moved since this device last mounted it: not even a mount attempt,
+  // because a wear-levelling mount rewrites metadata it does not recognise.
+  resetHardware();
+  ffatAssessment.record = InternalGeometryRecord::Differs;
+  CHECK(noCardBoot() != ESP_OK);
+  CHECK(FFat.begins == 0 && FFat.formats == 0 && geometryRecords == 0);
+
+  // After the migration's erase the new geometry is initialised.
+  resetHardware();
+  FFat.canMount = false;
+  ffatAssessment.record = InternalGeometryRecord::Differs;
+  ffatAssessment.erased = true;
+  CHECK(noCardBoot() == ESP_OK);
+  CHECK(FFat.begins == 1 && FFat.formats == 1 && geometryRecords == 1);
+
+  resetHardware();
+  ffatAssessment.partitionFound = false;
+  CHECK(noCardBoot() != ESP_OK);
+  CHECK(FFat.begins == 0 && geometryRecords == 0);
+}
+
 int main() {
   cardBootPinsTheCardAndNeverRemounts();
   noCardBootKeepsMapsOffFfat();
   unmountedBootNeverMountsLater();
   mapDownloadUsesOnlyTheBootCard();
   noCardMapRequestsNeverReachFfat();
+  ffatFormatsOnlyErasedOrOwnedVolumes();
   std::puts("storage backend pin harness passed");
   return 0;
 }

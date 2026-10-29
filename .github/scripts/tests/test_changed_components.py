@@ -376,6 +376,7 @@ class ChangedComponentsTests(unittest.TestCase):
         for path in (
             "tools/firmware_manifest.py",
             "tools/tests/test_firmware_manifest.py",
+            "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         ):
             with self.subTest(path=path):
                 self.assertEqual(
@@ -396,6 +397,9 @@ class ChangedComponentsTests(unittest.TestCase):
             "tools/firmware_release_candidate.py",
             "tools/firmware-signing-requirements.txt",
             "tools/verify_github_release_assets.py",
+            "tools/web_flasher_manifest.py",
+            "tools/web-flasher/migration-test-vector.json",
+            "tools/web-flasher/rescue-test-vector.json",
         ):
             with self.subTest(path=path):
                 self.assertEqual(

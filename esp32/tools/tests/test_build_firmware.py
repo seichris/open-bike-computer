@@ -46,6 +46,7 @@ from generated_sdkconfig import (
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
     PRODUCTION_APPLICATION_RESERVE_BYTES,
+    PRODUCTION_LAYOUT_SUFFIXES,
     _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -54,6 +55,7 @@ from generated_sdkconfig import (
     recognized_generated_sdkconfigs,
 )
 from record_flash_plan import record_flash_plan
+import partition_layouts
 from pioarduino_custom_core import (
     IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
@@ -70,6 +72,11 @@ from pioarduino_custom_core import (
     UPSTREAM_PENV_URLLIB3_REQUIREMENT,
     UPSTREAM_PLATFORMIO_REQUIREMENT,
     UPSTREAM_ROOT_INSTALL_COMMAND,
+)
+
+PARTITION_LAYOUTS = partition_layouts.load()
+PRODUCTION_SLOT_BYTES = (
+    PARTITION_LAYOUTS.current("production").application_slots[0].size
 )
 
 
@@ -444,41 +451,45 @@ class FirmwareBuildTests(unittest.TestCase):
         self,
         environment=None,
         *,
-        ota_data_offset=0xE000,
-        app_offset=0x10000,
-        app_size=0x300000,
+        layout=None,
+        ota_data_offset=None,
+        app_offset=None,
+        app_size=None,
     ):
+        """Write the environment's registry table, or a deliberately odd one."""
         environment = environment or self.environment
         build_dir = self.project_dir / ".pio/build" / environment
         build_dir.mkdir(parents=True, exist_ok=True)
-        partition_entry = struct.Struct("<HBBII16sI")
-        partition_table = b"".join(
-            (
-                partition_entry.pack(
-                    0x50AA, 0x01, 0x02, 0x9000, 0x5000, b"nvs", 0
-                ),
-                partition_entry.pack(
-                    0x50AA,
-                    0x01,
-                    0x00,
-                    ota_data_offset,
-                    0x2000,
-                    b"otadata",
-                    0,
-                ),
-                partition_entry.pack(
-                    0x50AA,
-                    0x00,
-                    0x10,
-                    app_offset,
-                    app_size,
-                    b"app0",
-                    0,
-                ),
-                b"\xff" * partition_entry.size,
+        if layout is None:
+            layout = PARTITION_LAYOUTS.current(
+                "production"
+                if environment.endswith(PRODUCTION_LAYOUT_SUFFIXES)
+                else "development"
             )
+        partitions = []
+        for partition in layout.partitions:
+            if partition.name == "otadata" and ota_data_offset is not None:
+                partition = partition_layouts.Partition(
+                    partition.name,
+                    partition.type,
+                    partition.subtype,
+                    ota_data_offset,
+                    partition.size,
+                )
+            if partition.name == "app0" and (
+                app_offset is not None or app_size is not None
+            ):
+                partition = partition_layouts.Partition(
+                    partition.name,
+                    partition.type,
+                    partition.subtype,
+                    partition.offset if app_offset is None else app_offset,
+                    partition.size if app_size is None else app_size,
+                )
+            partitions.append(partition)
+        (build_dir / "partitions.bin").write_bytes(
+            partition_layouts.encode_table(partitions)
         )
-        (build_dir / "partitions.bin").write_bytes(partition_table)
 
     def write_core_attestation(self, environment=None):
         environment = environment or self.environment
@@ -1334,7 +1345,10 @@ build_src_filter =
         )
         calls = []
 
-        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+        # A shifted table is not a registered layout; isolate offset derivation.
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}), patch(
+            "generated_sdkconfig._require_current_partition_layout"
+        ):
             manifest_path = record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
@@ -1455,7 +1469,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
         )
 
         with patch.dict(
@@ -1482,7 +1496,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES)
         )
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
@@ -1503,7 +1517,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
         )
 
         with patch.dict(
@@ -1530,11 +1544,80 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES)
         )
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def _production_attestation_inputs(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        (self.project_dir / "sdkconfig.defaults").write_text(
+            GENERATED_CONFIG, encoding="utf-8"
+        )
+        self.write_firmware(production)
+        return production, core
+
+    def test_attestation_rejects_legacy_and_unknown_partition_layouts(self):
+        production, core = self._production_attestation_inputs()
+        legacy = PARTITION_LAYOUTS.legacy("production")
+        shifted_ffat = [
+            partition_layouts.Partition(
+                p.name, p.type, p.subtype, p.offset, p.size - 0x1000
+            )
+            if p.name == "ffat"
+            else p
+            for p in PARTITION_LAYOUTS.current("production").partitions
+        ]
+        for label, table in (
+            ("legacy", legacy.table_bytes()),
+            ("unknown", partition_layouts.encode_table(shifted_ffat)),
+        ):
+            with self.subTest(label):
+                (
+                    self.project_dir / ".pio/build" / production / "partitions.bin"
+                ).write_bytes(table)
+                with patch.dict(
+                    os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+                ), self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "not a current layout"
+                ):
+                    record_generated_sdkconfig_defaults(
+                        self.project_dir, production
+                    )
+
+    def test_attestation_rejects_development_layout_for_production(self):
+        production, core = self._production_attestation_inputs()
+        self.write_partition_table(
+            production, layout=PARTITION_LAYOUTS.current("development")
+        )
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError, "current production partition layout"
+        ):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def test_attestation_rejects_image_beyond_reserve_of_current_slots(self):
+        production, core = self._production_attestation_inputs()
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        # Fits a 4 MiB slot but would not keep the reserve: always rejected.
+        firmware.write_bytes(
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+        )
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(GeneratedSdkconfigError, "application reserve"):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+        self.assertEqual(PRODUCTION_SLOT_BYTES, 0x400000)
 
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()

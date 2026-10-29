@@ -258,6 +258,7 @@ publish:
 |---|---|
 | `<target>.bin` | Application-only image consumed by OTA |
 | `<target>.manifest.json` | Existing signed OTA manifest |
+| `<target>.web-recovery*.json`, `<target>.web-migration-*.json`, `<target>.web-<sha256>.bin` | Signed USB recovery/migration recipes and their images ([partition layouts](partition-layout-migration.md)) |
 | `<target>.factory.tar.gz` | Deterministic factory archive |
 | `<target>.factory-bundle.json` | Portable copy of the archive's flash layout and hashes |
 | `<target>.factory-release.json` | Signed release identity for the archive and bundle manifest |
@@ -394,6 +395,9 @@ uploads, edits, or replaces release assets. It downloads the complete
 published inventory,
 requires the repository verifier and GitHub release attestation to accept the
 immutable release, verifies every downloaded asset against that attestation,
-and deploys only the two exact signed OTA manifests. A mutable, incomplete, or
-unattested release fails closed. This manual path is for OTA Pages recovery
+and deploys only exact signed OTA manifests: the release's own manifest in each
+target's `dual4m` channel and, in the legacy `manifest.json` channel, that
+manifest or the newest older published one still fitting dual-3-MiB slots
+(`tools/firmware_ota_channels.py`). A mutable, incomplete, or unattested release
+fails closed. This manual path is for OTA Pages recovery
 only; failed or partial asset publication still requires a new release tag.

@@ -268,10 +268,7 @@ jobs:
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --map-metadata-reader-version 1 \
-              --output "public/firmware/${target}/manifest.json"
-            cp \
-              "public/firmware/${target}/manifest.json" \
-              "${release_assets}/${target}.manifest.json"
+              --output "${release_assets}/${target}.manifest.json"
             python tools/factory_release_manifest.py \
               --bundle "${release_assets}/${target}.factory.tar.gz" \
               --bundle-manifest "${release_assets}/${target}.factory-bundle.json" \
@@ -293,6 +290,13 @@ jobs:
               --tag "${RELEASE_TAG}" \
               --output-dir "${release_assets}"
           done
+          # Devices keep their installed partition table after OTA. Stage the
+          # dual-4-MiB channel and a legacy channel that keeps the newest
+          # release still fitting dual-3-MiB slots with the 64 KiB reserve.
+          python tools/firmware_ota_channels.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-assets "${release_assets}" \
+            --public-dir public/firmware
       - name: Require immutable releases
         uses: ./.github/actions/require-immutable-releases
         with:
@@ -425,11 +429,13 @@ jobs:
               echo "Missing OTA manifest: ${manifest}" >&2
               exit 1
             fi
-            mkdir -p "public/firmware/${target}"
-            cp "${manifest}" "public/firmware/${target}/manifest.json"
           done
-          if [ "$(find public -type f | wc -l)" -ne 2 ]; then
-            echo "Recovery payload must contain exactly two OTA manifests" >&2
+          python3 tools/firmware_ota_channels.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-assets release-assets \
+            --public-dir public/firmware
+          if [ "$(find public -type f | wc -l)" -ne 4 ]; then
+            echo "Recovery payload must contain exactly four OTA channel manifests" >&2
             exit 1
           fi
       - name: Require explicit older-channel recovery

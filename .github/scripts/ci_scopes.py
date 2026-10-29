@@ -17,6 +17,7 @@ COMPOSE_LOCKS = {'map-platform/deploy/compose.yaml', 'map-platform/deploy/compos
 # hosted selection; adding an input here must identify its executable consumers.
 SHARED_FAST_CHECKS = {
     'protocol/fixtures/workout-zones-v1.json': ('ios-navigation-workout',),
+    'tools/firmware_ota_channels.py': ('esp32-host-firmware-manifest-tests',),
     'tools/firmware_release_history.py': ('esp32-host-firmware-manifest-tests',),
     'tools/verify_firmware_boot_acceptance.py': ('esp32-host-firmware-manifest-tests',),
 }

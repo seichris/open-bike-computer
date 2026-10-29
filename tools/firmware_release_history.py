@@ -27,10 +27,15 @@ def validate_build(candidate, published, *, recovery=False, allow_older=False):
 
 
 def published_builds(repository):
+    return [release["build"] for release in published_manifests(repository)]
+
+
+def published_manifests(repository):
+    """Return every published firmware release's digest-verified OTA manifests."""
     pages = json.loads(subprocess.check_output([
         "gh", "api", f"repos/{repository}/releases?per_page=100", "--paginate", "--slurp"
     ], timeout=120))
-    builds = []
+    releases = []
     for release in (release for page in pages for release in page):
         if release.get("draft"):
             continue
@@ -40,6 +45,7 @@ def published_builds(repository):
         if not any(manifests.values()):
             continue  # Runtime and unrelated releases do not allocate firmware builds.
         pair = []
+        raw = {}
         for target in TARGETS:
             if len(manifests[target]) != 1:
                 raise ValueError("published firmware release has an incomplete target pair")
@@ -58,10 +64,11 @@ def published_builds(repository):
             if manifest.get("target") != target:
                 raise ValueError("published manifest target mismatch")
             pair.append(build_number(manifest.get("build")))
+            raw[target] = data
         if pair[0] != pair[1]:
             raise ValueError("published target build numbers disagree")
-        builds.append(pair[0])
-    return builds
+        releases.append({"tag": release["tag_name"], "build": pair[0], "manifests": raw})
+    return releases
 
 
 def main():

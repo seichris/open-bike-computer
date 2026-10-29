@@ -193,6 +193,29 @@ class BootPinnedStorageTests(unittest.TestCase):
         result = run_harness(storage_harness(), "storage_pin")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ffat_never_formats_bytes_of_unknown_provenance(self):
+        mutations = {
+            "format on every mount failure": lambda methods: mutated(
+                methods,
+                "mounted = FFat.begin(plan == InternalMountPlan::FormatErased, "
+                '"/sdcard", 20,\n                         "ffat");',
+                'mounted = FFat.begin(true, "/sdcard", 20, "ffat");'),
+            "relocated volume mounted": lambda methods: mutated(
+                methods,
+                "assessment.partitionFound && plan != InternalMountPlan::RefuseRelocated",
+                "assessment.partitionFound"),
+            "reformat without ownership": lambda methods: mutated(
+                methods,
+                "storage_mount_policy::internalMountFailure(assessment.record) ==",
+                "storage_mount_policy::internalMountFailure(assessment.record) !="),
+            "geometry never recorded": lambda methods: mutated(
+                methods, "  (void)internal_storage::recordGeometry(assessment);\n", ""),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate), "storage_ffat_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
     def test_live_backend_switch_or_ffat_map_root_is_detected(self):
         mutations = {
             "explicit initSD after pin mounts again": lambda methods: mutated(
