@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
+#include "internal_storage_identity.hpp"
 #include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
 #include "waveshare_storage_migration_policy.hpp"
@@ -847,7 +848,38 @@ esp_err_t Storage::initSPIFFS() {
   // The FFat fallback keeps the historical /sdcard path for diagnostics and
   // other device files. Maps use Storage::mapStorageRoot(), which never names
   // /sdcard on an FFat boot, so no map path can reach this volume.
-  if (!FFat.begin(true, "/sdcard", 20, "ffat")) {
+  //
+  // Never format bytes that may belong to another partition layout: classify
+  // the raw partition before mounting (docs/partition-layout-migration.md).
+  using storage_mount_policy::InternalMountPlan;
+  const internal_storage::Assessment assessment =
+      internal_storage::assess("ffat");
+  const InternalMountPlan plan = storage_mount_policy::internalMountPlan(
+      assessment.erased, assessment.record, assessment.wearLevellingValid);
+  bool mounted = false;
+  if (assessment.partitionFound && plan == InternalMountPlan::FormatErased) {
+    // Own the geometry first: an interrupted first format is then this
+    // device's volume on the next boot and is reformatted, not refused.
+    if (internal_storage::recordGeometry(assessment))
+      mounted = FFat.begin(true, "/sdcard", 20, "ffat");
+  } else if (assessment.partitionFound &&
+             plan == InternalMountPlan::MountExisting) {
+    // Owned volume: a failed mount is reformatted, as before this policy.
+    mounted = FFat.begin(false, "/sdcard", 20, "ffat") ||
+              FFat.begin(true, "/sdcard", 20, "ffat");
+    if (mounted)
+      (void)internal_storage::recordGeometry(assessment);
+  }
+  ESP_LOGI(TAG,
+           "STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
+           "mounted=%d offset=0x%lx size=0x%lx",
+           assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
+           assessment.wearLevellingValid ? 1 : 0,
+           static_cast<unsigned>(assessment.record),
+           static_cast<unsigned>(plan), mounted ? 1 : 0,
+           static_cast<unsigned long>(assessment.address),
+           static_cast<unsigned long>(assessment.size));
+  if (!mounted) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;
     mountedBackend = StorageBackend::Unavailable;

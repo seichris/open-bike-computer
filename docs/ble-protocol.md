@@ -118,7 +118,12 @@ committed that same key. Automatic promotion never overwrites a different final
 credential; the explicit replacement action is persisted so recovery remains
 possible if the final notification is lost.
 
-Pairing expires after 120 seconds. Names are non-empty UTF-8, exclude control
+Pairing expires after 120 seconds. Until its owner session authenticates, a
+client may hold the single link for 120 seconds from connecting while a pairing
+code is open and 12 seconds otherwise; ESP32 then disconnects it. Registration
+(`PAIRED`) restarts the 12-second window, because the human confirmation may
+have taken longer than that, and the owner-session handshake below has to
+follow within it. Names are non-empty UTF-8, exclude control
 characters and `|`, and are limited to 24 bytes. The app starts with the
 privacy-safe editable suggestion `My bike`; iOS does not expose the Apple ID
 owner name to apps.
@@ -1991,7 +1996,13 @@ its pending follow-up before publishing status for the new state.
 Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
 downloading or rebooting, iOS checks `firmware.otaEligible`,
 `firmware.eligibilityCode`, `firmware.inactivePartition`, and
-`firmware.maxImageBytes`. Preparation publishes a `maintenance` object with
+`firmware.maxImageBytes`. `maxImageBytes` is the inactive OTA slot of the
+installed partition table: 3,145,728 on dual-3-MiB devices and 4,194,304 on
+dual-4-MiB devices. OTA never changes that table, so iOS selects its release
+channel and accepts an image only from this fresh value, with the 64 KiB reserve
+([partition layouts](partition-layout-migration.md)); single-slot developer
+layouts report `otaEligible: false` and their running slot, which iOS ignores.
+Preparation publishes a `maintenance` object with
 `active: false`, stage `reboot_pending`, and a non-zero correlation. After the
 expected disconnect, iOS reconnects to the same device identity, authenticates
 again, and requires `maintenance.active: true` with the same correlation before

@@ -4,12 +4,15 @@ import configparser
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 project_dir = Path(__file__).resolve().parents[2]
 repo_root = project_dir.parent
+sys.path.insert(0, str(project_dir / "tools"))
+import partition_layouts  # noqa: E402
 config = configparser.ConfigParser(interpolation=None)
 config.read(project_dir / "platformio.ini")
 
@@ -413,20 +416,53 @@ for environment in large_diagnostic_profiles:
         == "partitions_remote_debug.csv"
     )
 
-for partition_name in ("partitions.csv", "partitions_remote_debug.csv"):
-    partition_rows = [
-        [field.strip() for field in line.split(",")]
-        for line in (project_dir / partition_name).read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    assert partition_rows[-2][0] == "ffat"
-    assert partition_rows[-1][:5] == [
-        "coredump",
-        "data",
-        "coredump",
-        "",
-        "0x0F0000",
-    ]
+# esp32/partition_layouts.json is the numeric source of truth. Each current
+# CSV must render exactly its registered table, and only current layouts have
+# CSVs: the legacy generation is kept for recovery and migration recipes.
+layouts = partition_layouts.load()
+production_layout = layouts.current("production")
+development_layout = layouts.current("development")
+assert production_layout.csv == "partitions.csv"
+assert development_layout.csv == "partitions_remote_debug.csv"
+assert sorted(path.name for path in project_dir.glob("*.csv")) == [
+    "partitions.csv",
+    "partitions_remote_debug.csv",
+]
+for layout in (production_layout, development_layout):
+    rows = partition_layouts.parse_csv(project_dir / layout.csv)
+    assert rows == layout.partitions, layout.csv
+    assert partition_layouts.encode_table(rows) == layout.table_bytes()
+# Profile switching within the current generation never relocates FFat, and the
+# coredump keeps its retained panic evidence at the same place in every layout.
+assert production_layout.ffat == development_layout.ffat
+assert production_layout.ffat.offset == 0x810000
+assert production_layout.ffat.size == 0x700000
+assert [slot.size for slot in production_layout.application_slots] == [
+    0x400000,
+    0x400000,
+]
+assert [slot.size for slot in development_layout.application_slots] == [0x800000]
+for layout in layouts.layouts:
+    assert layout.partition("coredump").record() == (
+        "coredump", 0x01, 0x03, 0xF10000, 0xF0000
+    )
+production_behaviour = (
+    "_PRODUCTION",
+    "_LIFECYCLE_QUALIFICATION",
+    "_PERSONAL",
+    "_USB_RECOVERY_VALIDATION",
+)
+waveshare_profiles = [
+    section
+    for section in config.sections()
+    if re.match(r"env:WAVESHARE_(AMOLED|EPAPER)_", section)
+]
+assert waveshare_profiles
+for section in waveshare_profiles:
+    layout = layouts.for_csv(inherited_option(section, "board_build.partitions"))
+    assert layout.status == "current", section
+    if section.endswith(production_behaviour):
+        assert layout is production_layout, section
 
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (

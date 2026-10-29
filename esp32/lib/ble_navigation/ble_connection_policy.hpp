@@ -36,4 +36,27 @@ bool endSession(uint16_t &activeHandle, uint16_t disconnectedHandle,
   return true;
 }
 
+// How long an unauthenticated client may hold the single link: the pairing
+// comparison's lifetime while a code is open, otherwise a short window for
+// authentication. The window starts when the link is accepted and again when
+// the client registers ownership on it. CONFIRM succeeds only after the
+// physical BOOT press, and the new owner still has to send OWNER and PROOF, so
+// a slow human confirmation must not consume that window.
+constexpr uint32_t pairingUnauthenticatedLimitMs = 120000;
+constexpr uint32_t unauthenticatedLimitMs = 12000;
+
+// Unsigned subtraction keeps the comparison correct across millis() wrap. A
+// start later than `nowMs` (a restart stored by another task after `nowMs` was
+// read) wraps past half the range and is a window that just began, never a
+// long-expired one: no window lasts anywhere near 24 days.
+inline bool unauthenticatedDeadlinePassed(uint32_t nowMs, uint32_t windowStartMs,
+                                          bool pairingActive) {
+  const uint32_t elapsedMs = nowMs - windowStartMs;
+  if (elapsedMs > UINT32_MAX / 2) {
+    return false;
+  }
+  return elapsedMs > (pairingActive ? pairingUnauthenticatedLimitMs
+                                    : unauthenticatedLimitMs);
+}
+
 } // namespace ble_connection_policy

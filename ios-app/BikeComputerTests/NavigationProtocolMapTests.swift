@@ -7002,6 +7002,236 @@ extension NavigationProtocolTests {
         }
     }
 
+    static func testFirmwareSlotCapacityPolicy() {
+        let legacy = FirmwareSlotLayout.legacySlotBytes
+        let current = FirmwareSlotLayout.currentSlotBytes
+        let reserve = FirmwareSlotLayout.applicationReserveBytes
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: true, maxImageBytes: current),
+                    .slot(current), "an eligible dual-4-MiB device reports its inactive slot")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: true, maxImageBytes: nil),
+                    .unknown, "older status without capacity stays unknown")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: nil, maxImageBytes: current),
+                    .unknown, "capacity without eligibility is not trusted")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: false, maxImageBytes: 8_388_608),
+                    .ineligible, "a single-slot developer layout reports its running slot only")
+        assertEqual(FirmwareSlotLayout.channels(for: .slot(current)).map(\.pathComponent),
+                    ["dual4m", nil], "migrated devices prefer the dual-4-MiB channel")
+        for capacity in [FirmwareSlotCapacity.slot(legacy), .unknown, .ineligible, .slot(current - 1)] {
+            assertEqual(FirmwareSlotLayout.channels(for: capacity).map(\.pathComponent), [nil],
+                        "\(capacity) is served only the legacy-compatible channel")
+        }
+        assert(FirmwareSlotLayout.channels(for: .slot(2 * 1024 * 1024)).isEmpty,
+               "a smaller unknown slot receives no channel")
+        for (bytes, capacity, fits) in [
+            (legacy - reserve, FirmwareSlotCapacity.slot(legacy), true),
+            (legacy - reserve + 1, .slot(legacy), false),
+            (legacy - reserve + 1, .unknown, false),
+            (current - reserve, .slot(current), true),
+            (current - reserve + 1, .slot(current), false),
+            (0, .slot(current), false)
+        ] as [(Int, FirmwareSlotCapacity, Bool)] {
+            assertEqual(FirmwareSlotLayout.fits(imageBytes: bytes, capacity: capacity), fits,
+                        "\(bytes) bytes against \(capacity) keeps the 64 KiB reserve")
+        }
+        func manifest(size: Int) -> FirmwareReleaseManifest {
+            FirmwareReleaseManifest(schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.0",
+                                    build: 120, gitSha: String(repeating: "a", count: 40), size: size,
+                                    sha256: String(repeating: "b", count: 64),
+                                    url: URL(string: "https://firmware.invalid/image.bin")!,
+                                    minUpdaterProtocol: 1, signature: "s")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: legacy), capacity: .slot(legacy))
+            assert(false, "a dual-4-MiB image is rejected on a legacy slot")
+        } catch {
+            assertEqual(error as? FirmwareUpdateError,
+                        .layoutMigrationRequired(version: "0.4.0", build: 120),
+                        "a larger-layout image asks for the USB migration before any write")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: current), capacity: .slot(current))
+            assert(false, "an image without its reserve is rejected")
+        } catch {
+            assertEqual(error as? FirmwareUpdateError,
+                        .imageExceedsDeviceSlot(imageBytes: current, slotBytes: current),
+                        "an oversized image is rejected before any write")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .slot(current))
+        } catch {
+            assert(false, "a migrated device accepts an image above 3 MiB: \(error)")
+        }
+        for (code, expected) in [(nil, "inactive_ota_partition_missing"),
+                                 ("running_partition_missing", "running_partition_missing")] as [(String?, String)] {
+            do {
+                try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .ineligible,
+                                                           eligibilityCode: code)
+                assert(false, "an ineligible device is rejected")
+            } catch {
+                assertEqual(error as? FirmwareUpdateError, .otaIneligible(expected),
+                            "ineligibility is reported as such, never as a needed migration")
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwareManifestChannelSelection() async {
+        let key = P256.Signing.PrivateKey()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+        let base = "https://firmware.invalid/firmware/WAVESHARE_AMOLED_175"
+        func signed(build: Int, size: Int, updater: Int = 1,
+                    signer: P256.Signing.PrivateKey? = nil) -> Data {
+            var manifest = FirmwareReleaseManifest(
+                schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.\(build)", build: build,
+                gitSha: String(repeating: "c", count: 40), size: size,
+                sha256: String(repeating: "d", count: 64),
+                url: URL(string: "https://firmware.invalid/\(build).bin")!,
+                minUpdaterProtocol: updater, signature: nil)
+            let payload = Data(FirmwareManifestSignatureVerifier.canonicalPayload(for: manifest).utf8)
+            manifest = FirmwareReleaseManifest(
+                schemaVersion: manifest.schemaVersion, target: manifest.target, version: manifest.version,
+                build: manifest.build, gitSha: manifest.gitSha, size: manifest.size, sha256: manifest.sha256,
+                url: manifest.url, minUpdaterProtocol: manifest.minUpdaterProtocol,
+                signature: try! (signer ?? key).signature(for: payload).derRepresentation.base64EncodedString())
+            return try! JSONEncoder().encode(manifest)
+        }
+        let legacy = signed(build: 110, size: 3_000_000)
+        let migrated = signed(build: 120, size: 3_500_000)
+        struct Case { let name: String; let maxImageBytes: Int?; let published: [String: Data]
+                      let build: Int?; let requests: [String]; let notice: Int?
+                      var failure: FirmwareUpdateError? = nil; var serverErrors: Set<String> = [] }
+        let cases = [
+            Case(name: "migrated device", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 120, requests: ["/dual4m/manifest.json"], notice: nil),
+            Case(name: "migrated device before the first dual-4-MiB release", maxImageBytes: 4_194_304,
+                 published: ["/manifest.json": legacy],
+                 build: 110, requests: ["/dual4m/manifest.json", "/manifest.json"], notice: nil),
+            Case(name: "legacy device left behind", maxImageBytes: 3_145_728,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json", "/dual4m/manifest.json"], notice: 120),
+            Case(name: "legacy device on a shared release", maxImageBytes: 3_145_728,
+                 published: ["/dual4m/manifest.json": legacy, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json", "/dual4m/manifest.json"], notice: nil),
+            Case(name: "unknown capacity", maxImageBytes: nil,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json"], notice: nil),
+            Case(name: "oversized legacy channel", maxImageBytes: 3_145_728,
+                 published: ["/manifest.json": migrated],
+                 build: nil, requests: ["/manifest.json"], notice: nil,
+                 failure: .invalidManifest),
+            // Only "not published" falls back; every other dual-4-MiB failure
+            // is reported instead of silently serving the legacy build.
+            Case(name: "dual-4-MiB release needs a newer app", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000, updater: 2),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .unsupportedUpdaterProtocol),
+            Case(name: "mis-signed dual-4-MiB release", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000,
+                                                             signer: P256.Signing.PrivateKey()),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .invalidManifestSignature),
+            Case(name: "dual-4-MiB channel server error", maxImageBytes: 4_194_304,
+                 published: ["/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 serverErrors: ["/dual4m/manifest.json"]),
+            Case(name: "no channel published", maxImageBytes: 4_194_304, published: [:],
+                 build: nil, requests: ["/dual4m/manifest.json", "/manifest.json"], notice: nil,
+                 failure: .notPublished)
+        ]
+        for testCase in cases {
+            let suite = "firmware-channel-test.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var requests: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                let path = String(request.url!.absoluteString.dropFirst(base.count))
+                requests.append(path)
+                let body = testCase.published[path]
+                let status = testCase.serverErrors.contains(path) ? 500 : body == nil ? 404 : 200
+                return (HTTPURLResponse(url: request.url!, statusCode: status,
+                                        httpVersion: nil, headerFields: nil)!, body ?? Data())
+            }
+            let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+            manager.manifestBaseURLString = "https://firmware.invalid/firmware"
+            manager.manifestPublicKeyForTesting = key.publicKey.x963Representation.base64EncodedString()
+            let ble = BLEManager()
+            let capacity = testCase.maxImageBytes.map { #","maxImageBytes":\#($0)"# } ?? ""
+            _ = ble.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(
+                    (#"{"enabled":false,"mode":"","firmware":{"target":"WAVESHARE_AMOLED_175","otaEligible":true,"eligibilityCode":"eligible""#
+                        + capacity + "}}").utf8))
+            do {
+                let manifest = try await manager.fetchLatestManifestForTesting(bleManager: ble)
+                assertEqual(manifest.build, testCase.build ?? -1, "\(testCase.name) selects its channel")
+            } catch {
+                assert(testCase.build == nil, "\(testCase.name) fetch failed: \(error)")
+                if let failure = testCase.failure {
+                    assertEqual(error as? FirmwareUpdateError, failure, "\(testCase.name) reports its cause")
+                }
+            }
+            assertEqual(requests, testCase.requests, "\(testCase.name) requests only fitting channels")
+            assertEqual(manager.layoutMigrationNotice?.build, testCase.notice,
+                        "\(testCase.name) explains a newer layout-only release")
+        }
+    }
+
+    @MainActor
+    static func testFirmwareInstallRejectsOversizedImageBeforeAnyWrite() async {
+        let suite = "firmware-slot-test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwarePausedDownloadProtocol.self]
+        let session = URLSession(configuration: configuration)
+        var downloads = 0
+        FirmwarePausedDownloadProtocol.onStart = { _ in Task { @MainActor in downloads += 1 } }
+        defer { session.invalidateAndCancel(); FirmwarePausedDownloadProtocol.onStart = nil }
+        let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+        // Verified manifest for a dual-4-MiB release that no longer fits 3 MiB.
+        let manifest = FirmwareReleaseManifest(
+            schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.5.0", build: 130,
+            gitSha: String(repeating: "e", count: 40), size: 3_200_000,
+            sha256: String(repeating: "f", count: 64),
+            url: URL(string: "https://firmware.invalid/130.bin")!, minUpdaterProtocol: 1, signature: "s")
+        manager.setVerifiedManifestForTesting(manifest)
+        let ble = BLEManager()
+        ble.setConnectedDeviceIDForTesting("ota-slot-device")
+        ble.isConnected = true
+        ble.isNavigationReady = true
+        ble.firmwareTarget = manifest.target
+        ble.firmwareBuild = 105
+        var packets: [String] = []
+        let legacyStatus = #"{"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"normal","correlation":0},"firmware":{"target":"WAVESHARE_AMOLED_175","otaEligible":true,"eligibilityCode":"eligible","maxImageBytes":3145728}}"#
+        ble.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96, canSend: { true }, write: { packet in
+                let text = String(decoding: packet, as: UTF8.self)
+                packets.append(text)
+                if text == "DSTS" {
+                    Task { @MainActor in
+                        _ = ble.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(legacyStatus.utf8))
+                    }
+                }
+            }))
+        manager.installLatest(bleManager: ble)
+        for _ in 0..<400 where manager.errorMessage == nil {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        assertEqual(manager.errorMessage,
+                    FirmwareUpdateError.layoutMigrationRequired(version: "0.5.0", build: 130).errorDescription,
+                    "a legacy-layout device is told to migrate instead of attempting OTA")
+        assertEqual(packets, ["DSTS"], "only the fresh status read happens; no maintenance or transfer command")
+        assertEqual(downloads, 0, "the image is never downloaded")
+        assert(defaults.data(forKey: "firmware.pendingUpdate") == nil, "no pending operation is recorded")
+        assert(!manager.isUpdateAllowed(manifest, bleManager: ble), "the install button stays disabled")
+    }
+
     @MainActor
     static func testFirmwareInstallRetainsOriginalDevice() async {
         for boundary in ["download", "eligibility", "before-task", "reconnect", "unchanged"] {

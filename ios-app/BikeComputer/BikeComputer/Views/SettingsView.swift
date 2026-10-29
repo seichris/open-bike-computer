@@ -771,6 +771,16 @@ private struct MainFirmwareUpdateSection: View {
             }
         }
 
+        if let notice = manager.layoutMigrationNotice {
+            Section(header: Text(FirmwareLayoutMigrationNotice.title)) {
+                Label(notice.message, systemImage: "info.circle")
+                    .font(.callout)
+                Link(destination: FirmwareLayoutMigrationNotice.updateURL) {
+                    Label("Open bicino.com/update", systemImage: "safari")
+                }
+            }
+        }
+
         if let manifest = manager.latestManifest,
            manager.isNewerUpdateAvailable(manifest, bleManager: bleManager) {
             Section(header: Text("Firmware Update")) {
@@ -2231,6 +2241,15 @@ private struct FirmwareUpdateSettingsSection: View {
                     value: storageBackend
                 )
             }
+            SettingsValueRow(
+                title: "OTA Slot",
+                value: otaSlotSummary
+            )
+            if let notice = manager.layoutMigrationNotice {
+                Text(notice.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             TextField("Manifest Base URL", text: $manager.manifestBaseURLString)
                 .textInputAutocapitalization(.never)
@@ -2302,6 +2321,17 @@ private struct FirmwareUpdateSettingsSection: View {
             return "unknown"
         }
         return "\(bleManager.firmwareVersion) (\(bleManager.firmwareBuild))"
+    }
+
+    private var otaSlotSummary: String {
+        switch FirmwareUpdateManager.deviceCapacity(bleManager) {
+        case .slot(let bytes):
+            return "\(bytes / 1024) KiB"
+        case .ineligible:
+            return bleManager.firmwareOTAEligibilityCode ?? "not eligible"
+        case .unknown:
+            return "unknown"
+        }
     }
 }
 
