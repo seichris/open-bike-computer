@@ -204,6 +204,10 @@ static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+// Start of the unauthenticated client's window (ble_connection_policy): set
+// when a link is accepted, and under the ownership lock when CONFIRM registers
+// ownership on it, in the same critical section that clears the pairing.
+static std::atomic<uint32_t> unauthenticatedWindowStartMs{0};
 #if BLE_RADIO_CHARACTERIZATION
 static std::atomic<bool> radioNavigationActive{false};
 static std::atomic<bool> radioUserWakePending{false};
@@ -2267,6 +2271,9 @@ static void handleAuthPayload(const std::string &frame) {
         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       ownershipLockAcquired = true;
       ownershipResult = deviceOwnership.handle(value, millis());
+      if (ownershipResult.event == device_ownership::Event::Paired) {
+        unauthenticatedWindowStartMs.store(millis(), std::memory_order_release);
+      }
       if (frame.size() >= 2 && frame[0] == 'S' && frame[1] == '2' &&
           !ownershipResult.response.empty() &&
           !(ownershipResult.response.size() >= 2 &&
@@ -6110,6 +6117,9 @@ public:
   }
 
   void acceptConnection() {
+    // Before `connected`: the deadline must never pair this link with the
+    // previous link's start.
+    unauthenticatedWindowStartMs.store(millis(), std::memory_order_release);
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
@@ -7408,6 +7418,12 @@ bool BLENavigationServer::pollShutdownQuiescence() {
 void BLENavigationServer::process() {
   processCompletedDiagnosticsSessionStart();
   scheduleDeferredNotificationEvent();
+  // The unauthenticated deadline uses the pairing state read under the
+  // ownership lock, never the snapshot another task may have just cleared: a
+  // registration clears the pairing and restarts the window together. A busy
+  // lock defers the check to the next pass.
+  bool deadlineStateRead = !deviceOwnershipReady;
+  bool deadlinePairingActive = false;
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
     if (deviceOwnershipMutex != nullptr &&
@@ -7416,6 +7432,8 @@ void BLENavigationServer::process() {
       deviceOwnership.process(millis());
       ownershipPairingActiveSnapshot = deviceOwnership.hasPairingCode();
       pairingExpired = wasPairing && !ownershipPairingActiveSnapshot;
+      deadlinePairingActive = ownershipPairingActiveSnapshot;
+      deadlineStateRead = true;
       xSemaphoreGive(deviceOwnershipMutex);
     }
     if (pairingExpired) {
@@ -7430,8 +7448,6 @@ void BLENavigationServer::process() {
     processPendingTransferControl();
     pumpPendingDeviceTransferStatusChunks();
     scheduleDeferredNotificationEvent();
-    const uint32_t unauthenticatedLimitMs =
-        ownershipPairingActiveSnapshot ? 120000 : 12000;
     if (connected && ownershipDisconnectPending) {
       ownershipDisconnectPending = false;
       unauthTimeoutDisconnectRequested = true;
@@ -7440,10 +7456,12 @@ void BLENavigationServer::process() {
         pServer->disconnect(activeConnHandle);
       }
     }
-    if (connected && !bleSessionAuthenticated &&
+    if (deadlineStateRead && connected && !bleSessionAuthenticated &&
         !unauthTimeoutDisconnectRequested &&
-        millis() - bleDebugStats.read().lastConnectMs >
-            unauthenticatedLimitMs) {
+        ble_connection_policy::unauthenticatedDeadlinePassed(
+            millis(),
+            unauthenticatedWindowStartMs.load(std::memory_order_acquire),
+            deadlinePairingActive)) {
       unauthTimeoutDisconnectRequested = true;
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
@@ -7530,10 +7548,10 @@ void BLENavigationServer::process() {
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&
       xSemaphoreTake(deviceOwnershipMutex, 0) == pdTRUE) {
     ownershipPairingActiveSnapshot = deviceOwnership.hasPairingCode();
+    deadlinePairingActive = ownershipPairingActiveSnapshot;
+    deadlineStateRead = true;
     xSemaphoreGive(deviceOwnershipMutex);
   }
-  const uint32_t unauthenticatedLimitMs =
-      ownershipPairingActiveSnapshot ? 120000 : 12000;
   if (connected && ownershipDisconnectPending) {
     ownershipDisconnectPending = false;
     unauthTimeoutDisconnectRequested = true;
@@ -7541,9 +7559,11 @@ void BLENavigationServer::process() {
       pServer->disconnect(activeConnHandle);
     }
   }
-  if (connected && !bleSessionAuthenticated &&
+  if (deadlineStateRead && connected && !bleSessionAuthenticated &&
       !unauthTimeoutDisconnectRequested &&
-      millis() - bleDebugStats.read().lastConnectMs > unauthenticatedLimitMs) {
+      ble_connection_policy::unauthenticatedDeadlinePassed(
+          millis(), unauthenticatedWindowStartMs.load(std::memory_order_acquire),
+          deadlinePairingActive)) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
