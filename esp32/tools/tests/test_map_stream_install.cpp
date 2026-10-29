@@ -2412,6 +2412,117 @@ void testTemporaryOnlyJournalIsUnpublishedScratch() {
   std::filesystem::remove_all(root);
 }
 
+void testPromotionUsesValidatedMarkerBackup() {
+  namespace op = map_transfer::operation;
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto key = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", key.data(), key.size()));
+  for (bool alreadyPromoted : {false, true}) {
+    const auto root = tempRoot();
+    const std::string session = "backup-promotion", device(32, 'a'), operation(32, '3');
+    MapStreamReceiver receiver(trust, root, session, stream.size(), "9.0.0", 1024 * 1024, {}, {}, {}, {}, operation);
+    assert(receiver.feed(stream.data(), stream.size()) && receiver.finish().ok);
+    map_transfer::Sha256Hasher hash; hash.update(stream.data(), stream.size());
+    op::Identity identity{device, operation, receiver.snapshot().manifestReceipt,
+        receiver.snapshot().signedManifestReceipt, hash.finalHex(), stream.size(), session, receiver.snapshot().mapId};
+    map_transfer::MapOperationStorage disk(root); op::Store store(disk, device);
+    assert(store.restore() == op::Result::Ok && store.initializeAdmission(100) == op::Result::Ok);
+    assert(store.admit(identity, store.admissionRevision()) == op::Result::Ok);
+    assert(store.prepare(identity) == op::Result::Ok && store.accept(identity) == op::Result::Ok);
+    MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+    const auto mapRoot = root + "/VECTMAP/.maps/" + session;
+    if (alreadyPromoted) {
+      assert(installer.promotePreparedOperation(session, operation).ok);
+      std::filesystem::remove(mapRoot + "/.operation-prepared");
+      std::filesystem::remove(mapRoot + "/.operation-prepared.bak");
+    }
+    const auto marker = mapRoot + (alreadyPromoted ? "/.operation-ready" : "/.operation-prepared");
+    std::filesystem::copy_file(marker, marker + ".bak");
+    writeFile(marker, "{}"); // readable torn primary, semantically valid backup
+    for (unsigned reboot = 0; reboot < 3; ++reboot) {
+      MapTransferInstaller boot(root); boot.setOperationDeviceID(device);
+      assert(boot.promotePreparedOperation(session, operation).ok);
+      map_transfer::ReadyStreamMap ready;
+      assert(boot.readReadyStreamMap(session, ready).ok && ready.operationID == operation);
+      assert(ready.manifestReceipt == identity.manifest && ready.signedManifestReceipt == identity.signedManifest);
+    }
+    assert(installer.activateReadyStreamMap(session).ok);
+    op::Record receipt;
+    assert(store.query(identity, receipt) == op::Result::Ok && receipt.phase == op::Phase::Accepted);
+    std::filesystem::remove_all(root);
+  }
+}
+
+void testTransactionRecoveryKeepsCompletedReactivation() {
+  namespace op = map_transfer::operation;
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto key = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", key.data(), key.size()));
+  for (bool sameSelection : {false, true}) for (bool missingPointer : {false, true})
+      for (bool damagedReady : {false, true}) {
+    const auto root = tempRoot();
+    const std::string session = "completed-reactivation", device(32, 'a'), operation(32, '3');
+    MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+    prepareReadyRoot(root, "previous"); assert(installer.activateReadyStreamMap("previous").ok);
+    MapStreamReceiver original(trust, root, session, stream.size(), "9.0.0", 1024 * 1024);
+    assert(original.feed(stream.data(), stream.size()) && original.finish().ok);
+    assert(installer.activateReadyStreamMap(session).ok);
+    if (!sameSelection) for (unsigned i = 0; i < 6; ++i) {
+      const auto other = "other-" + std::to_string(i);
+      prepareReadyRoot(root, other); assert(installer.activateReadyStreamMap(other).ok);
+    }
+    ActiveMapSelection before;
+    assert(installer.readActiveMap(before).ok);
+    const auto predecessor = sameSelection ? before.previousSessionId : before.sessionId;
+    MapStreamReceiver retry(trust, root, session, stream.size(), "9.0.0", 1024 * 1024, {}, {}, {}, {}, operation);
+    assert(retry.feed(stream.data(), stream.size()) && retry.finish().ok);
+    map_transfer::Sha256Hasher hash; hash.update(stream.data(), stream.size());
+    op::Identity identity{device, operation, retry.snapshot().manifestReceipt,
+        retry.snapshot().signedManifestReceipt, hash.finalHex(), stream.size(), session, retry.snapshot().mapId};
+    map_transfer::MapOperationStorage disk(root); op::Store store(disk, device);
+    assert(store.restore() == op::Result::Ok && store.initializeAdmission(100) == op::Result::Ok);
+    assert(store.admit(identity, store.admissionRevision()) == op::Result::Ok);
+    assert(store.prepare(identity) == op::Result::Ok && store.accept(identity) == op::Result::Ok);
+    assert(installer.promotePreparedOperation(session, operation).ok);
+    assert(installer.activateReadyStreamMap(session).ok);
+    const auto mapRoot = root + "/VECTMAP/.maps/" + session;
+    assert(exists(mapRoot + "/.library-retained"));
+    std::map<std::string, std::string> payloads;
+    for (const auto &file : std::filesystem::recursive_directory_iterator(mapRoot)) {
+      const auto extension = file.path().extension();
+      if (extension == ".fmb" || extension == ".fmp") payloads[file.path()] = readFile(file.path());
+    }
+    assert(!payloads.empty());
+    if (missingPointer) std::filesystem::remove(root + "/VECTMAP/active-map.json");
+    else writeFile(root + "/VECTMAP/active-map.json", "{}");
+    std::filesystem::remove(root + "/VECTMAP/active-map.json.bak");
+    if (damagedReady) writeFile(mapRoot + "/.operation-ready", "{}");
+    for (unsigned reboot = 0; reboot < 3; ++reboot) {
+      MapTransferInstaller boot(root); boot.setOperationDeviceID(device);
+      const auto recovered = boot.recoverInterruptedActivation();
+      assert(damagedReady ? !recovered.ok : recovered.ok);
+      ActiveMapSelection selected;
+      assert(boot.readActiveMap(selected).ok && selected.sessionId == predecessor);
+      for (const auto &file : payloads) assert(readFile(file.first) == file.second);
+      // Unverifiable retained metadata keeps its recovery journal. Verified
+      // completion returns to the library, without inventing an Installed receipt.
+      if (damagedReady) assert(exists(root + "/VECTMAP/.activation-transaction.json"));
+      else {
+        map_transfer::InstalledMap retained;
+        assert(boot.readInstalledMap(session, retained).ok && retained.available);
+      }
+      op::Store rebooted(disk, device); op::Record receipt;
+      assert(rebooted.restore() == op::Result::Ok && rebooted.query(identity, receipt) == op::Result::Ok);
+      assert(receipt.phase == op::Phase::Accepted);
+    }
+    std::filesystem::remove_all(root);
+  }
+}
+
 void testStartingNewStreamPrunesAbandonedPausedSessions() {
   const std::string root = tempRoot();
   const auto manifest = verified();
@@ -2431,6 +2542,8 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 } // namespace
 
 int main() {
+  testPromotionUsesValidatedMarkerBackup();
+  testTransactionRecoveryKeepsCompletedReactivation();
   testMetadataPublicationRejectsSilentCorruption();
   testActivationSurvivesEverySinglePowerCut();
   testCorruptTerminalJournalRecoveryIsFencedAndPreserved();

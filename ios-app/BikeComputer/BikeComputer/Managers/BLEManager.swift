@@ -1201,7 +1201,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
     @Published private(set) var deviceMapLibrary: DeviceMapLibrary?
     private var deviceMapLibraryPages = DeviceMapLibraryPages()
-    private(set) var lastMapLibraryRequestID = ""
+    private var pendingMapLibraryCommandID: String?
     @Published private(set) var mapSelectionHealth: MapSelectionHealth?
     private var mapSelectionHealthProjection = MapSelectionHealthProjection()
     private var mapSelectionHealthDeviceID: String?
@@ -1244,6 +1244,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published private(set) var hasFreshMapTransferStatus = false
+    /// Map-stream signers the connected bike verifies (`keyId=SHA256(key)`),
+    /// from its authenticated map transfer status; nil until it reports them.
+    @Published private(set) var mapTransferStreamTrust: [String]?
     @Published private(set) var mapOperationStatus: DeviceMapOperationReceipt?
     @Published private(set) var mapOperationObservationGeneration: UInt64 = 0
     @Published private(set) var mapOperationConnectionEpoch: UInt64 = 0
@@ -6375,17 +6378,82 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func requestDeviceMapLibrary(_ action: String = "refresh", map: DeviceInstalledMap? = nil) -> Bool {
-        let requestID = (action == "select" || action == "remove") ? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() : nil
+    func requestDeviceMapLibrary(
+        _ action: String = "refresh", map: DeviceInstalledMap? = nil,
+        requestID: String? = nil,
+        isStillValid: (() -> Bool)? = nil,
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
+    ) -> Bool {
         guard isNavigationReady, !firmwareMaintenanceReconnectExpected,
               authenticatedWriteSession != nil,
               !mapTransferModeEnabled, deviceTransferMode.isEmpty,
               action == "refresh" || (hasFreshMapTransferStatus && deviceMapLibrary?.known == true && deviceMapLibrary?.busy == false),
               let packet = DeviceMapLibrary.command(action, map: map, requestID: requestID) else { return false }
-        let queued = sendTransferControlPacket(packet, label: "device map library \(action)",
-            coalescingKey: "transfer.map.library.\(action)")
-        if queued { lastMapLibraryRequestID = requestID ?? "" }
-        return queued
+        return sendTransferControlPacket(packet, label: "device map library \(action)",
+            coalescingKey: "transfer.map.library.\(action)",
+            isStillValid: isStillValid, onDrop: onWriteFailure,
+            onWriteFailure: onWriteFailure, onWriteSuccess: onWriteSuccess)
+    }
+
+    func performDeviceMapLibraryCommand(
+        _ action: String, map: DeviceInstalledMap,
+        timeoutSeconds: TimeInterval = 600
+    ) async throws {
+        try Task.checkCancellation()
+        guard action == "select" || action == "remove",
+              pendingMapLibraryCommandID == nil else {
+            throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The Bike Computer is busy. Try again when the current map action finishes.")
+        }
+        let deviceID = activeDeviceID
+        let epoch = transferConnectionEpoch
+        let requestID = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        pendingMapLibraryCommandID = requestID
+        var writeFailed = false
+        var writeCompleted = false
+        defer { pendingMapLibraryCommandID = nil }
+        guard requestDeviceMapLibrary(action, map: map, requestID: requestID,
+            isStillValid: { [weak self] in
+                guard let self else { return false }
+                return self.pendingMapLibraryCommandID == requestID &&
+                    self.activeDeviceID == deviceID && self.transferConnectionEpoch == epoch
+            },
+            onWriteFailure: { writeFailed = true },
+            onWriteSuccess: { writeCompleted = true }) else {
+            throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The Bike Computer is busy or disconnected. Reconnect and try again.")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + timeoutSeconds
+        var nextStatusRequest = ProcessInfo.processInfo.systemUptime
+        while true {
+            try Task.checkCancellation()
+            guard activeDeviceID == deviceID, transferConnectionEpoch == epoch else {
+                throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The connection changed before the map action was confirmed. Reconnect and check the active map.")
+            }
+            // An ATT acknowledgement alone is not renderer/persistence proof.
+            // Only this command's complete inventory can confirm its result.
+            if let library = deviceMapLibrary, library.commandID == requestID {
+                if let error = library.commandError, !error.isEmpty {
+                    throw OfflineMapPlatformError.deviceMapLibraryCommandFailed(DeviceMapLibrary.errorDescription(error))
+                }
+                if library.isComplete,
+                   (action == "select" ? library.selectedSessionID == map.sessionID :
+                    !library.maps.contains(where: { $0.sessionID == map.sessionID })) {
+                    return
+                }
+            }
+            guard !writeFailed else {
+                throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The Bluetooth map command failed. Reconnect to the Bike Computer and check its active map before trying again.")
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now < deadline else {
+                throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The map action was not confirmed. Reconnect to the Bike Computer and check its active map.")
+            }
+            if writeCompleted, now >= nextStatusRequest {
+                requestMapTransferStatus()
+                nextStatusRequest = now + 2
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     @discardableResult
@@ -7409,6 +7477,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         hasFreshMapTransferStatus = false
+        mapTransferStreamTrust = nil
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
         mapTransferStatusChunks.removeAll()
@@ -9581,6 +9650,13 @@ class BLEManager: NSObject, ObservableObject {
                 "connectionGeneration":
                     String(pending.connectionGeneration),
             ]
+        if let error = error as NSError? {
+            // Keep transport evidence useful without persisting arbitrary
+            // error descriptions/userInfo, which may contain private values.
+            fields["errorDomain"] = ["CBATTErrorDomain", "CBErrorDomain"].contains(error.domain)
+                ? error.domain : "other"
+            fields["errorCode"] = String(error.code)
+        }
 #if DEBUG || HOST_TESTING
         fields["attemptId"] = String(pending.writeID)
         fields["phase"] = pending.submissionStage.rawValue
@@ -12264,6 +12340,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = status.activeMapId ?? ""
         mapTransferActiveSessionId = status.activeSessionId ?? ""
         activeMapManifestReceipt = status.activeManifestReceipt ?? ""
+        mapTransferStreamTrust = status.streamTrust
         // Only firmware that publishes the renderer-layer block (POI profile
         // fields with runtime font/POI health) may replace the BLE-reported
         // renderer state. Older HTTP status reports font health as merely
@@ -12372,6 +12449,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = object["activeMapId"] as? String ?? ""
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
+        mapTransferStreamTrust = object["streamTrust"] as? [String]
         activeDeviceMap = DeviceActiveMapDescriptor(statusObject: object)
         if let library = object["mapLibrary"],
            let data = try? JSONSerialization.data(withJSONObject: library),

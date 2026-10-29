@@ -131,6 +131,7 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
         "ios-app/BikeComputerTests/NavigationProtocolMapTests.swift",
+        "ios-app/BikeComputerTests/MapCompatibilityContractTests.swift",
         "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift",
         "ios-app/BikeComputerTests/BLERestorationAdapterTests.swift"
       ],

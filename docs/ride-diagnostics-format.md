@@ -107,9 +107,9 @@ queue depth make missing diagnostics distinguishable from a healthy empty log.
 The recorder applies separate budgets to removable SD and the internal FFat
 fallback. Removable storage retains at most 32 MiB of closed chunks and protects
 8 MiB of free space. FFat retains at most 1 MiB of chunks and protects 2 MiB of
-free space for maps and other storage owners. A new 256 KiB chunk starts only
-when that backend's protected free-space floor will remain after the complete
-chunk is written.
+free space for other storage owners such as GPX files; maps never use FFat. A
+new 256 KiB chunk starts only when that backend's protected free-space floor
+will remain after the complete chunk is written.
 
 Retention removes only closed diagnostic chunks, oldest first. It prunes when
 chunks exceed the backend's byte ceiling or when reclaiming diagnostic files

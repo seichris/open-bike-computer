@@ -1,10 +1,10 @@
-# API-only client upgrade on the exact healthy production controller.
-FROM ghcr.io/seichris/open-bike-computer-map-platform@sha256:a007eb1beeeba69e51a287394aa2741879598d55a7586fff1d13f3e0004e29f0 AS production-base
+# Registry-only controller on the attested contract-1 producer runtime.
+FROM ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9 AS production-base
 FROM production-base AS runtime
 COPY map-platform/config/map-stream-rollout-approvals.json /app/map-platform/config/map-stream-rollout-approvals.json
 COPY map-platform/deploy/client-compatibility/role_guard.py /opt/bicino-client-compatibility/role_guard.py
 LABEL org.bicino.release-profile="production-map-client-compatibility" \
-      org.bicino.base-source="2e4d28554061f3b7243fd7f8d21fe628a407f67b"
+      org.bicino.base-source="8104250ca68499a50c9ec68b9102f13fe1ab5965"
 ENTRYPOINT ["python", "/opt/bicino-client-compatibility/role_guard.py"]
 CMD ["uvicorn", "--factory", "map_platform.api:create_app", "--host", "0.0.0.0", "--port", "8080"]
 

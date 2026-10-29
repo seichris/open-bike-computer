@@ -62,6 +62,58 @@ with tempfile.TemporaryDirectory() as temporary:
             if not accepted:
                 assert "Waveshare Bluetooth IPC stack requires" in result.stderr
 lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
+
+# External BSS is used before setup(). Reject a core that only initializes
+# PSRAM later in Arduino, or silently expands the placement attribute away.
+external_bss_requirements = (
+    "CONFIG_SPIRAM_BOOT_HW_INIT", "CONFIG_SPIRAM_BOOT_INIT",
+    "CONFIG_SPIRAM_MEMTEST", "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
+)
+for environment in config.sections():
+    if environment.startswith("env:WAVESHARE_AMOLED_"):
+        sdkconfig = inherited_option(environment, "custom_sdkconfig")
+        for requirement in external_bss_requirements:
+            assert requirement + "=y" in sdkconfig, (environment, requirement)
+
+with tempfile.TemporaryDirectory(prefix="task-data-placement-") as temporary:
+    stub_dir = Path(temporary)
+    # Portable stand-in for the SDK attribute; the final target ELF, not this
+    # host compiler, proves external placement. Check forwarding and defaults.
+    (stub_dir / "esp_attr.h").write_text(
+        '#define EXT_RAM_BSS_ATTR __attribute__((aligned(64)))\n'
+    )
+    source = '''
+#include "task_data_placement.hpp"
+#include "startup_constructed.hpp"
+#include <cstdint>
+struct State { unsigned zero = 0; unsigned sentinel = 255; };
+static BICINO_TASK_DATA StartupConstructed<State> state;
+int main() {
+  return state.value.zero != 0 || state.value.sentinel != 255 ||
+         reinterpret_cast<std::uintptr_t>(&state) % 64 != 0;
+}
+'''
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"):
+        for missing in (None, *external_bss_requirements):
+            (stub_dir / "sdkconfig.h").write_text("".join(
+                f"#define {name} {int(name != missing)}\n"
+                for name in external_bss_requirements
+            ))
+            executable = stub_dir / "placement"
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-DESP_PLATFORM", f"-D{board}",
+                 "-I", str(stub_dir), "-I", str(project_dir / "lib/utils/src"),
+                 "-x", "c++", "-", "-o", str(executable)],
+                input=source, text=True, capture_output=True,
+            )
+            assert (result.returncode == 0) == (missing is None), (
+                board, missing, result.stderr
+            )
+            if missing is None:
+                subprocess.run([str(executable)], check=True)
+            else:
+                assert "boot-initialized external BSS" in result.stderr
+
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
 assert "SOURCE_DATE_EPOCH" in prebuild_source

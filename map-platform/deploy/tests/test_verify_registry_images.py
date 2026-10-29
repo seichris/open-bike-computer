@@ -20,6 +20,50 @@ SPEC.loader.exec_module(verify_registry_images)
 
 
 class VerifyRegistryImagesTests(unittest.TestCase):
+    def test_scheduler_converter_pairing_and_complete_rollback(self) -> None:
+        legacy = verify_registry_images.LEGACY_PROMOTION_REFERENCE
+        old_converter = verify_registry_images.LEGACY_CONVERTER_REFERENCE
+        current = verify_registry_images.IMAGE_REPOSITORY + "@sha256:" + "a" * 64
+        converter = verify_registry_images.IMAGE_REPOSITORY + "@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9"
+        verify_registry_images.verify_promotion_pairing(legacy, old_converter)
+        with self.assertRaises(ValueError):
+            verify_registry_images.verify_promotion_pairing(legacy, converter)
+        image = {
+            "os": "linux", "architecture": "amd64", "config": {"Labels": {
+                "org.bicino.release-profile": "production-map-promotion",
+                "org.bicino.converter-image": converter,
+            }},
+        }
+        with mock.patch.object(verify_registry_images, "_run", return_value=json.dumps(image)):
+            verify_registry_images.verify_promotion_pairing(current, converter)
+            for mismatched in (old_converter, None):
+                with self.assertRaises(ValueError):
+                    verify_registry_images.verify_promotion_pairing(current, mismatched)
+        for invalid in ("null", "{}", "[]", "invalid", json.dumps({
+            **image, "architecture": "arm64",
+        }), json.dumps({**image, "config": {"Labels": {
+            "org.bicino.release-profile": "standard",
+            "org.bicino.converter-image": converter,
+        }}})):
+            with self.subTest(invalid=invalid), mock.patch.object(
+                verify_registry_images, "_run", return_value=invalid,
+            ), self.assertRaises(ValueError):
+                verify_registry_images.verify_promotion_pairing(current, converter)
+
+    def test_deployment_verification_rejects_partial_scheduler_rollback(self) -> None:
+        from dataclasses import replace
+        deployment = verify_registry_images.DeploymentImages(
+            "a" * 40, "control", "b" * 40, "worker", "c" * 40,
+            verify_registry_images.LEGACY_PROMOTION_REFERENCE,
+            verify_registry_images.LEGACY_CONVERTER_REFERENCE,
+        )
+        with mock.patch.object(verify_registry_images, "verify_image"):
+            verify_registry_images.verify_deployment(deployment)
+            with self.assertRaises(ValueError):
+                verify_registry_images.verify_deployment(replace(
+                    deployment, promotion_converter_reference="wrong-converter",
+                ))
+
     def test_registry_commands_retry_transient_failures(self) -> None:
         failure = subprocess.CalledProcessError(
             1,

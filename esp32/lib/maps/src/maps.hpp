@@ -285,7 +285,8 @@ private:
   MemCache memCache;               // Worker-owned memory cache
   map_camera::PreparedScene preparedScene;
   std::atomic<size_t> cachedBlockCount{0};
-  String vectorMapFolder = "/sdcard/VECTMAP/";
+  // Set by bindMapStorageRoot() in setup(), before any render or probe.
+  String vectorMapFolder;
   map_font_asset::Asset labelFontAsset;
   std::atomic<bool> streetLabelFontHealthy{false};
   std::atomic<bool> nearbyPoiIndexHealthy{false};
@@ -709,6 +710,9 @@ public:
   MapTile getMapTile(double lon, double lat, uint8_t zoomLevel, int8_t offsetX,
                      int8_t offsetY);
   void initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull);
+  // Called once by setup() with Storage::mapStorageRoot(), before any render.
+  // Sets the legacy default folder without touching storage.
+  void bindMapStorageRoot(const char *root);
   bool setVectorMapFolder(const std::string &folder);
   bool probeVectorMapFolder(const std::string &folder);
   map_probe_diagnostics::Result

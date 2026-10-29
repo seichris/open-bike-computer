@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "contract": 1,
+  "signers": [
+    {
+      "channel": "development",
+      "keyId": "map-dev-2026-08",
+      "publicKeySha256": "c8d0e9e85da681ec048c9abbbb96c87072b9f672b16c7fb40250df1ec60baa0e"
+    },
+    {
+      "channel": "production",
+      "keyId": "map-prod-2026-08",
+      "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+    }
+  ],
+  "revokedSigners": []
+}

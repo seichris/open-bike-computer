@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "contract": 1,
+  "baselineId": "MAP-COMPAT-20261026",
+  "manifestMarker": {
+    "compatibility": {
+      "contract": 1
+    }
+  },
+  "streamFormats": [
+    {
+      "format": "bike-map-stream-v1",
+      "manifestSchemaVersions": [1]
+    }
+  ],
+  "profiles": [
+    {
+      "id": "buildings-3d-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 3,
+      "features": ["3d-buildings", "street-labels"],
+      "channels": ["development", "production"],
+      "companions": [],
+      "optionalLayers": []
+    },
+    {
+      "id": "topographic-contours-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 4,
+      "features": ["3d-buildings", "contours", "street-labels"],
+      "channels": ["development", "production"],
+      "companions": ["topography-ios-v1"],
+      "optionalLayers": ["terrain-experiment-v1"]
+    },
+    {
+      "id": "map-pois-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 5,
+      "features": ["3d-buildings", "map-pois", "street-labels"],
+      "channels": ["development"],
+      "companions": [],
+      "optionalLayers": []
+    },
+    {
+      "id": "map-pois-contours-v1",
+      "renderer": "esp32-fmb",
+      "rendererFormatVersion": 5,
+      "features": ["3d-buildings", "contours", "map-pois", "street-labels"],
+      "channels": ["development"],
+      "companions": ["topography-ios-v1"],
+      "optionalLayers": []
+    }
+  ],
+  "optionalLayers": [
+    {
+      "id": "terrain-experiment-v1",
+      "rendererFormatVersions": [4]
+    }
+  ],
+  "companions": [
+    {
+      "format": "topography-ios-v1",
+      "schemaVersion": 1,
+      "profileVersion": 1
+    }
+  ]
+}

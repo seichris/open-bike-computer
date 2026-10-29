@@ -282,6 +282,49 @@ class ChangedComponentsTests(unittest.TestCase):
             selected,
         )
 
+    def test_map_compatibility_inputs_select_their_readers(self) -> None:
+        cases = {
+            # Backend, catalog, iPhone and firmware read the frozen corpus.
+            "map-platform/backend/tests/fixtures/map-compatibility-v1/corpus.json":
+                (True, True, True),
+            "map-platform/backend/tests/fixtures/map-compatibility-v2/new.bmap":
+                (True, True, True),
+            # The worker and the iPhone reader test load the contract.
+            "map-platform/config/map-compatibility-contract-v1.json": (False, True, True),
+            # Only the backend tests read the durable signer registry.
+            "map-platform/config/map-compatibility-signers-v1.json": (False, False, True),
+            # Firmware reports the capability bytes the iPhone decodes.
+            "protocol/fixtures/map-reader-capabilities-v1.txt": (True, True, False),
+        }
+        for path, (firmware_host, ios, map_backend) in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": firmware_host,
+                        "ios": ios,
+                        "map_backend": map_backend,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
+    def test_map_stream_client_trust_selects_the_backend_trust_checks(self) -> None:
+        # The backend keeps generated client trust in sync with the registry
+        # and every durable map signer trusted (test_map_compatibility_contract).
+        for path, component in (
+            ("esp32/lib/map_transfer/map_stream_compiled_keys.generated.inc", "firmware_host"),
+            ("esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc",
+             "firmware_host"),
+            ("ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+             "ios"),
+            ("ios-app/BikeComputer/Configuration/Development.xcconfig", "ios"),
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected[component])
+
     def test_route_elevation_fixtures_select_every_consumer(self) -> None:
         for path in (
             "protocol/fixtures/route-elevation-v1/transfer-v1.txt",

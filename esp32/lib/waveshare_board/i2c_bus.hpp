@@ -8,6 +8,7 @@
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
+#include "i2c_transaction_trace.hpp"
 
 namespace waveshare_board::i2c {
 
@@ -34,7 +35,8 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
                          uint8_t len, const char *label = nullptr,
                          uint8_t attempts = 2);
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
-                     const char *label = nullptr, uint8_t attempts = 2);
+                     const char *label = nullptr, uint8_t attempts = 2,
+                     TransactionTrace *trace = nullptr);
 
 struct Axp2101PowerButtonOffLevelResult {
   uint8_t before = 0;
@@ -74,7 +76,8 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
                             uint8_t len);
 
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
-                    const char *label = nullptr, uint8_t attempts = 3);
+                    const char *label = nullptr, uint8_t attempts = 3,
+                    TransactionTrace *trace = nullptr);
 
 } // namespace waveshare_board::i2c
 

@@ -26,6 +26,7 @@
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "../../utils/src/mapTapArbiter.hpp"
 #include "../../utils/src/startup_constructed.hpp"
+#include "../../utils/src/task_data_placement.hpp"
 #include "../../maps/src/mapNearbyIcons.hpp"
 #include <algorithm>
 #include <array>
@@ -145,9 +146,11 @@ struct NearbyView {
   bool waitingForPosition = false;
   uint8_t highlightedResult = 255;
 };
-static StartupConstructed<NearbyView> nearbyStorage;
+static BICINO_TASK_DATA StartupConstructed<NearbyView> nearbyStorage;
 static NearbyView &nearby = nearbyStorage.value;
-alignas(4) static std::array<std::array<uint8_t,
+// LVGL consumes these canvas pixels on its task; the display DMA buffer and
+// full-refresh strategy are unchanged.
+alignas(4) static BICINO_TASK_DATA std::array<std::array<uint8_t,
     map_nearby_icons::kSize * map_nearby_icons::kSize * 3>, 5> nearbyIconPixels{};
 #endif
 struct DestinationRowContext {

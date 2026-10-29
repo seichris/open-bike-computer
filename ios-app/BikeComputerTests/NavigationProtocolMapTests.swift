@@ -21,6 +21,54 @@ private extension Data {
     }
 }
 
+private final class MapLibraryCommandTestBLEManager: BLEManager {
+    var epoch: UInt64 = 1
+    var commandID = ""
+    var commandIsValid: (() -> Bool)?
+    var failWrite: (() -> Void)?
+    var finishWrite: (() -> Void)?
+    var onQueue: (() -> Void)?
+    var onStatus: (() -> Void)?
+    var statusRequests = 0
+    var acceptsCommand = true
+
+    override var activeDeviceID: String? {
+        get { "map-library-test-bike" }
+        set {}
+    }
+    override var transferConnectionEpoch: UInt64 { epoch }
+    override func centralManagerDidUpdateState(_ central: CBCentralManager) {}
+    override func requestDeviceMapLibrary(
+        _ action: String = "refresh", map: DeviceInstalledMap? = nil,
+        requestID: String? = nil, isStillValid: (() -> Bool)? = nil,
+        onWriteFailure: (() -> Void)? = nil, onWriteSuccess: (() -> Void)? = nil
+    ) -> Bool {
+        commandID = requestID ?? ""
+        commandIsValid = isStillValid
+        failWrite = onWriteFailure
+        finishWrite = onWriteSuccess
+        onQueue?()
+        return acceptsCommand
+    }
+    override func requestMapTransferStatus() -> Bool {
+        statusRequests += 1
+        onStatus?()
+        return true
+    }
+    func publish(maps: [DeviceInstalledMap], selected: String,
+                 command: String, busy: Bool = false, error: String? = nil) {
+        let library = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: false, busy: busy, revision: UInt32(statusRequests + 1),
+            error: "", selectedSessionID: selected, maps: maps,
+            commandID: command, commandError: error)
+        applyAuthenticatedMapTransferStatus(MapTransferDeviceStatus(
+            mapLibrary: library, hasMapLibrary: true, enabled: false,
+            activeMapId: maps.first?.mapID, activeSessionId: selected,
+            activation: nil, protocols: nil, streamFormatVersions: nil,
+            streamTrust: nil, firmwareVersion: nil, firmwareBuild: nil, firmwareGitSha: nil))
+    }
+}
+
 private final class MapOperationRecoveryTestBLEManager: BLEManager {
     var recoveryDeviceID: String?
     var recoveryEpoch: UInt64 = 0
@@ -764,13 +812,13 @@ extension NavigationProtocolTests {
             "a background server probe without map state is recovery-only"
         )
         assert(
-            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+            OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
                 isServerRecoveryCheckPending: true,
                 hasCurrentJob: true,
                 hasDownloadedPack: false,
                 errorMessage: nil
             ),
-            "a recovered job is user-visible map state"
+            "a completed job selection does not turn discovery into a pending download"
         )
         assert(
             OfflineMapDownloadingSectionPresentation.isVisible(
@@ -845,7 +893,7 @@ extension NavigationProtocolTests {
             "launch recovery errors remain visible"
         )
         assert(
-            OfflineMapDownloadingSectionPresentation.isVisible(
+            !OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: true,
                 hasPendingJob: true,
                 hasPendingActivation: false,
@@ -854,7 +902,7 @@ extension NavigationProtocolTests {
                 hasDownloadedPack: false,
                 errorMessage: nil
             ),
-            "a recovered map job remains visible"
+            "a prior completed map does not expose a passive server scan"
         )
         assert(
             OfflineMapAutomaticRecoveryTrigger.shouldResume(
@@ -1700,7 +1748,33 @@ extension NavigationProtocolTests {
             OfflineMapRecoveryHistory.handledJobIds(defaults: discoveryDefaults).contains("job-discovered"),
             "launch discovery marks the exact recovered job handled"
         )
-        if let url = discoveryManager.downloadedPackURL {
+        // Reproduce completion -> foreground discovery with an unavailable
+        // server, retaining the completed selection exactly as the live app did.
+        let completedSelection = discoveryManager.downloadedPackURL
+        assertEqual(discoveryManager.downloadProgress, 1, "fixture download completed")
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        discoveryManager.resumePendingMapJobIfNeeded()
+        let discoveryRetryStarted = await waitForMapBusyState(discoveryManager, expected: true)
+        assert(discoveryRetryStarted, "foreground discovery retries offline")
+        assert(discoveryManager.isCheckingForServerMaps, "no real job is pending")
+        assertEqual(discoveryManager.activityProgress, nil, "discovery never reuses completed 99 percent progress")
+        assert(!discoveryManager.hasTerminalMapJobFailure, "previous job cannot block discovery controls")
+        assert(OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+            isServerRecoveryCheckPending: discoveryManager.isCheckingForServerMaps,
+            hasCurrentJob: discoveryManager.currentJob != nil,
+            hasDownloadedPack: discoveryManager.downloadedPackURL != nil,
+            errorMessage: discoveryManager.errorMessage
+        ), "completed map stays out of the pending row while discovery retries")
+        assertEqual(discoveryManager.downloadedPackURL, completedSelection, "discovery preserves the saved map selection")
+        assert(FileManager.default.fileExists(atPath: completedSelection!.path), "discovery preserves saved bytes")
+        discoveryManager.pausePendingMapJob()
+        let discoveryRetryPaused = await waitForMapBusyState(discoveryManager, expected: false)
+        assert(discoveryRetryPaused, "discovery can still pause")
+        assertEqual(discoveryManager.activityProgress, nil, "paused discovery has no stale percentage")
+        discoveryManager.forgetPendingMapJob()
+        if let url = completedSelection {
             discoveryManager.deleteCachedPack(at: url)
         }
 
@@ -3215,7 +3289,7 @@ extension NavigationProtocolTests {
                 !pendingSavedMapRowSource.contains(
                     "Text(preparationEstimatePresentation.title)"
                 ) &&
-                source.contains("Label(\"Retry Download\"") &&
+                source.contains("\"Retry Check\" : \"Retry Download\"") &&
                 source.contains("Button(\"Choose Another Map\"") &&
                 source.contains("if manager.errorMessage != nil"),
             "the pending download uses one friendly progress row and the normal Saved Maps background"
@@ -3297,7 +3371,7 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains(
-                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)"
+                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh("
             ) &&
                 source.contains("Label(\"Updated map available\"") &&
                 source.contains(".accessibilityLabel(\"Update \\(displayName) on this iPhone\")") &&
@@ -3305,6 +3379,23 @@ extension NavigationProtocolTests {
                 source.contains("manager.hasActiveBackgroundUpload ||") &&
                 source.contains("isPausedUpload ||"),
             "a stale local catalog artifact offers a current verified download before transfer"
+        )
+        assertEqual(
+            source.components(
+                separatedBy: "deviceStreamTrust: bleManager.mapTransferStreamTrust"
+            ).count - 1,
+            3,
+            "the refresh check and both catalog downloads follow the connected bike's map trust"
+        )
+        let contentSource = (try? String(
+            contentsOfFile: "ios-app/BikeComputer/BikeComputer/ContentView.swift",
+            encoding: .utf8
+        ))?.filter { !$0.isWhitespace } ?? ""
+        assert(
+            contentSource.contains(
+                "claimPendingShare(deviceStreamTrust:coordinator.bleManager.mapTransferStreamTrust)"
+            ),
+            "a claimed share downloads the copy the connected bike trusts"
         )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
@@ -4485,7 +4576,7 @@ extension NavigationProtocolTests {
                     "phase": "cancelled", "revision": 1]))
         }
 
-        for scenario in ["unknown", "installed", "unconfirmed", "legacy", "other-device", "other-app", "terminal"] {
+        for scenario in ["unknown", "installed", "unconfirmed", "missing-pointer", "stale-pointer", "stale-legacy-pointer", "ambiguous-pointer", "unavailable-pointer", "legacy", "other-device", "other-app", "terminal"] {
             let suite = "map-operation-recovery-\(UUID().uuidString)"
             guard let defaults = UserDefaults(suiteName: suite) else {
                 fatalError("test defaults unavailable")
@@ -4519,11 +4610,31 @@ extension NavigationProtocolTests {
                 assert(record.apply(receipt), "terminal history requires an exact device receipt")
                 record.cleanup = "complete"
             }
-            defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            if !["missing-pointer", "ambiguous-pointer"].contains(scenario) {
+                defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            }
             let store = DeviceMapOperationStore(url: directory
                 .appendingPathComponent("\(scenario)/operations.json"))
             do {
                 try store.save(record)
+                if ["stale-pointer", "stale-legacy-pointer", "ambiguous-pointer"].contains(scenario) {
+                    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as! [String: Any]
+                    object["operationID"] = UUID().uuidString
+                    var other = try JSONDecoder().decode(DeviceMapOperationRecord.self,
+                        from: JSONSerialization.data(withJSONObject: object))
+                    if scenario == "stale-pointer" {
+                        let receipt = try cancellationReceipt(for: other)
+                        assert(other.apply(receipt), "old pointer names exact terminal history")
+                    }
+                    if scenario == "stale-legacy-pointer" { other.usesDurableProtocol = false }
+                    if scenario != "ambiguous-pointer" {
+                        defaults.set(other.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+                    }
+                    try store.save(other)
+                }
+                if scenario == "unavailable-pointer" {
+                    defaults.set(UUID().uuidString, forKey: "offlineMap.deviceOperationID")
+                }
                 let original = try store.records()
                 let manager = OfflineMapManager(defaults: defaults,
                     cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
@@ -4534,7 +4645,7 @@ extension NavigationProtocolTests {
                 ble.isNavigationReady = true
                 manager.reconcileLastTransfer(bleManager: ble)
 
-                if ["unknown", "installed", "unconfirmed"].contains(scenario) {
+                if ["unknown", "installed", "unconfirmed", "missing-pointer", "stale-pointer", "stale-legacy-pointer"].contains(scenario) {
                     assertEqual(ble.requestedOperationIDs, [record.wireOperationID],
                         "an unresolved durable operation is queried independently of the \(scenario) summary")
                     assertEqual(manager.lastTransferMapId, record.mapID,
@@ -10453,6 +10564,97 @@ extension NavigationProtocolTests {
         )
         assert(disconnectedEndingPair.transmissions.first?.prioritized == true,
                "ending freshness loss uses the priority lane")
+    }
+
+    static func testDeviceMapLibraryCommandDelivery() async {
+        let map = DeviceInstalledMap(sessionID: "saved-map", mapID: "shanghai",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64),
+            displayName: "Shanghai", payloadBytes: 100, boundsE7: nil)
+        let ble = MapLibraryCommandTestBLEManager()
+        ble.onQueue = { [weak ble] in ble?.failWrite?() }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map)
+            assert(false, "an ATT rejection must fail selection")
+        } catch {
+            assert(error.localizedDescription.contains("Bluetooth map command failed"),
+                   "transport rejection has an actionable error")
+        }
+        assert(ProcessInfo.processInfo.systemUptime - started < 1,
+               "a rejected write does not wait for the ten-minute activation timeout")
+        assert(ble.statusRequests == 0 && ble.commandIsValid?() == false,
+               "failed/finished commands cannot poll or dispatch later")
+
+        // Retry is an explicit new operation. ATT success and a stale selected
+        // map do not settle it; only its renderer-confirmed inventory does.
+        ble.onQueue = { [weak ble] in
+            ble?.finishWrite?()
+            ble?.publish(maps: [map], selected: map.sessionID, command: "old-command")
+        }
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [map], selected: map.sessionID, command: ble.commandID)
+        }
+        do { try await ble.performDeviceMapLibraryCommand("select", map: map) }
+        catch { assert(false, "fresh matching inventory must confirm selection: \(error)") }
+        assert(ble.statusRequests == 1 && ble.commandIsValid?() == false,
+               "stale status was ignored and the confirmed operation is no longer dispatchable")
+
+        ble.onStatus = { [weak ble] in ble?.epoch += 1 }
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map)
+            assert(false, "another connection cannot confirm this command")
+        } catch {
+            assert(error.localizedDescription.contains("connection changed"), "connection loss is explicit")
+        }
+
+        ble.onQueue = nil
+        ble.onStatus = nil
+        let cancelled = Task { try await ble.performDeviceMapLibraryCommand("select", map: map) }
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assert(ble.commandIsValid?() == true, "queued command remains scoped to this operation")
+        cancelled.cancel()
+        do { try await cancelled.value; assert(false, "cancelled selection must stop") }
+        catch { assert(error is CancellationError, "task cancellation remains cancellation") }
+        assert(ble.commandIsValid?() == false, "cancellation invalidates the unsent command")
+
+        ble.onQueue = { [weak ble] in ble?.finishWrite?() }
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [map], selected: map.sessionID, command: ble.commandID, busy: true)
+        }
+        do {
+            try await ble.performDeviceMapLibraryCommand("select", map: map, timeoutSeconds: 0.15)
+            assert(false, "busy inventory is not renderer confirmation")
+        } catch { assert(error.localizedDescription.contains("not confirmed"), "unconfirmed stays unconfirmed") }
+
+        ble.onStatus = { [weak ble] in
+            guard let ble else { return }
+            ble.publish(maps: [], selected: "", command: ble.commandID)
+        }
+        do { try await ble.performDeviceMapLibraryCommand("remove", map: map) }
+        catch { assert(false, "removal uses the same confirmation contract: \(error)") }
+
+        let suite = "map-selection-failure-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = OfflineMapManager(defaults: defaults)
+        ble.onQueue = { [weak ble] in ble?.failWrite?() }
+        manager.selectInstalledMap(map, bleManager: ble)
+        while manager.isDeviceTransferBusy { await Task.yield() }
+        assert(manager.errorMessage?.contains("Bluetooth map command failed") == true,
+               "the device-only map row surfaces the failed command")
+        assert(manager.statusMessage.isEmpty, "failed selection clears its pending status")
+
+        let previousCommand = ble.commandID
+        manager.removeInstalledMap(map, bleManager: ble)
+        ble.epoch += 1 // reconnect before the manager's task gets to run
+        while manager.isDeviceTransferBusy { await Task.yield() }
+        assertEqual(ble.commandID, previousCommand, "a queued UI action cannot retarget another connection")
+        assert(manager.errorMessage?.contains("connection changed") == true,
+               "a pre-dispatch connection change is visible")
     }
 
     static func testDeviceMapLibrary() {
