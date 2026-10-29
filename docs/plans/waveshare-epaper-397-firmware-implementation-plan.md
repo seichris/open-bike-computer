@@ -21,9 +21,11 @@ they are flashed and qualified. Publication remains disabled.
 ### Implementation progress
 
 The implementation branch also integrates main's configurable screen instances
-from `22243516`. Physical buttons follow the configured instance order, and
-display metadata uses client version 29, feature bit 31 and TLV type 3 so the
-existing screen configuration contract remains compatible.
+from `22243516`. Physical buttons follow the configured instance order. After
+the 2026-10-29 merge of `main`, display metadata uses client version 34,
+extended feature bit 4 and TLV type 4, because main assigned bit 31 to terrain
+experiments and TLV type 3 to the extended feature word. The screen
+configuration contract remains compatible.
 
 | Area | Source implementation | Remaining qualification |
 | --- | --- | --- |

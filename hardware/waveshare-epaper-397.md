@@ -78,12 +78,42 @@ There is still a full cleaning after 20 successful
 partial waveforms. The vendor documentation does not specify an elapsed-time
 cleaning interval, so static content does not trigger a cleaning waveform. These
 are **unqualified values**, not panel lifetime or visible-latency promises. The
-panel controller enters deep sleep after 60 seconds without a waveform; changed
-content reinitializes it with a full base frame while unchanged content remains
-visible without waking it. Map pose/presentation runs at four-second cadence,
-with explicit screen/route/settings requests allowed sooner. Maps use a white
-background, hatched areas, black roads and a black route with a white halo.
-Bird's-eye, 3D and continuous course-up camera settings are disabled.
+panel controller enters deep sleep after 60 seconds without a waveform; the
+panel datasheet states that deep sleep does not retain RAM, so changed content
+reinitializes it with a full base frame while unchanged content remains visible
+without waking it.
+
+This cleaning cap is the remaining cause of the reported black/white flash.
+Any screen whose content changes every second (a moving map, a ticking ride
+clock, live speed) reaches 20 partial waveforms in roughly 20–25 seconds at the
+one-second routine cadence, then performs one full cleaning (about 2.5–3 s at
+23 °C). Waking after a minute without a waveform adds another full frame. Do not
+raise the cap, disable cleaning or switch to the vendor's 1.5 s fast-full
+waveform without the ghosting and temperature evidence in the
+[qualification checklist](../docs/epaper-refresh-qualification.md). The
+`EPAPER_FRAME` reason field attributes every flash.
+
+While moving, navigation re-renders the base map when the rider drifts at least
+6 px from the anchor (or after a 2 s deferral with any drift), no more often
+than once per second, and redraws the rider foreground in between. Screen,
+route-session, map-context and recovery requests may be served sooner. Maps use
+a white background, hatched areas, black roads and a black route with a white
+halo.
+
+Bird's-eye, LoD1 3D walls and roofs, and continuous course-up camera settings
+are disabled at every entry point (BLE settings, persisted profiles and screen
+configuration). CAP2 keeps the reader bits for street labels (8), OSM
+buildings/renderer target 3 (12) and topographic contours (30) because this
+board installs and reads durable renderer targets 1–4 exactly as `mapReader`
+reports; buildings are drawn as flat hatched footprints. It never advertises
+bird's-eye bits 9–11, orientation bit 24, display-off bits 19/28, terrain
+bit 31 or extended POI bit 3. Contour, terrain and POI visibility is removed
+from every stored or written profile, because a one-bit threshold would turn
+index contours into road-like strokes and drop minor contours. A companion
+toggle alone therefore never establishes e-paper 3D, contour or POI support;
+current iOS hides those controls for this board. A compile-time policy in
+`device_capabilities_protocol.hpp` must classify every new CAP2 bit for this
+board.
 
 | Gesture | Action |
 | --- | --- |
@@ -112,13 +142,19 @@ code; the next boot must replace it. A display fault can also retain the old
 image, so the authenticated `DSTS` display object and serial `EPAPER_FAULT`
 records provide independent fault evidence.
 
-Workout stats have a board-specific 480 × 800 grid, right-aligned tabular values,
-fixed widget-format font choices, a reserved altitude sign column and a fixed
-heart-icon column. Missing sensors do not resize the cell. Distance and remaining
-distance stay in kilometres with one decimal and a stationary unit caption.
-Altitude no longer inherits a changing neighbour's font. The AMOLED layouts and
-their row-pairing behavior remain unchanged. Normal map recentering is silent;
-coverage, connectivity, stale-GPS and actual recovery states remain visible.
+Workout stats have a board-specific 480 × 800 grid of 222 px cells. Each
+widget's font and box are fixed by its widest supported display format (for
+example 999.9 km/h, 9999.9 km, 99:59:59 and -9999 m), not by the live sample,
+availability or a neighbour. Tabular values are right-aligned inside that box,
+and the box, the reserved altitude sign column and the fixed heart-icon column
+are centred under the centred title. The hero speed uses the dedicated speed
+font and ride clocks use the 48 px tier. A value beyond its format still renders
+when it fits the box and otherwise fails closed to `--`; the cell never resizes.
+Missing sensors do not resize the cell. Distance and remaining distance stay in
+kilometres with one decimal and a stationary unit caption. The AMOLED layouts
+and their row-pairing behavior remain unchanged. Normal map recentering is
+silent; coverage, connectivity, stale-GPS and actual recovery states remain
+visible.
 
 ## Profiles and qualification procedure
 
@@ -166,12 +202,16 @@ An unchanged full-cleaning frame has zero dirty bounds and changed bytes; the
 actual waveform still covers the whole panel. Use the
 [refresh qualification checklist](../docs/epaper-refresh-qualification.md).
 
-The LVGL buffer and three packed frames total 912,000 raw bytes in PSRAM.
-The proposed full map/foreground surfaces bring the estimated total to
-4,730,496 bytes before fonts, map blocks, BLE, TLS, alignment and workspaces.
-That is allocation arithmetic, not a measured high-water mark. Keep the shared
-64 KiB internal/DMA reserve and measure largest free blocks under concurrent
-map, display and transfer load before release.
+The LVGL composition buffer and three packed frames total 912,000 raw bytes in
+PSRAM, and LVGL's fixed 192 KiB TLSF pool also lives in PSRAM (the first build
+aborted before `setup()` with it in internal RAM). The proposed full
+map/foreground surfaces bring the estimated total to 4,730,496 bytes before the
+LVGL pool, fonts, map blocks, BLE, TLS, alignment and workspaces. That is
+allocation arithmetic, not a measured high-water mark. The board inherits the
+shared Waveshare SDK contract, including the unqualified 96 KiB internal/DMA
+reserve, the 1536-byte IPC stack and boot-initialized external BSS for task
+workspaces. Measure largest free blocks under concurrent map, display and
+transfer load before release.
 
 CI's explicit `397` selector compiles all six e-paper profiles. Default automatic
 CI and the existing `all` release selection remain

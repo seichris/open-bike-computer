@@ -2,8 +2,10 @@
 
 Scope: PR #442, experimental `WAVESHARE_EPAPER_397` support. Automated checks
 do not qualify glass orientation, waveform quality, longevity or ride safety.
-The new addressing/cadence/layout changes are pending physical acceptance.
-No board was connected during their implementation.
+The addressing, cadence, workout-layout, capability and merged-`main` changes
+are pending physical acceptance. No board was connected while they were
+implemented or merged (latest: 2026-10-29), so no image built from them has
+been flashed.
 
 ## Before connecting a board
 
@@ -12,10 +14,13 @@ No board was connected during their implementation.
 - Confirm the physical model before building. Use only `tools/build_firmware.py`.
   Restate those exact identities and obtain explicit approval immediately before
   flashing; record upload and independent running-image boot acceptance separately.
-- The merge preserves published CAP2 bits 28–30 and assigns experimental board
-  metadata bit 31, minimum client version 29. Update the experimental iOS app and
-  firmware together. The older experimental bit-28/client-26 pair is incompatible;
-  do not alias that bit, which now belongs to the published inactivity setting.
+- Board display metadata is extended CAP2 bit 4 with its own TLV type 4 and
+  minimum client version 34. Update the experimental iOS app and firmware
+  together. Both earlier experimental allocations are incompatible and must not
+  be aliased: bit 28/client 26 (display inactivity timeouts) and bit 31/client
+  29 with TLV type 3 (terrain experiments and the extended feature word). An
+  older experimental e-paper image sends an 8-byte TLV 3 that a current app
+  rejects as a malformed extended feature word.
 - Use the matching diagnostic image for panel tests and ordinary/power-metrics
   firmware plus the authenticated companion for navigation/workout tests.
   `DISPLAY_TEST` intentionally cannot attest pairing or be used for a ride.
@@ -52,11 +57,17 @@ authorize an obsolete pairing generation.
 Keep the bike stationary. Run at least ten minutes of authenticated telemetry;
 capture phone samples, `EPAPER_FRAME` records and video on one time reference.
 
-- Speed 9.9→10.0→99.9→100.0: decimal/right anchor stays fixed.
+- Speed 9.9→10.0→99.9→100.0: decimal/right anchor stays fixed; the hero keeps
+  its dedicated speed font and stays centred under its caption.
 - HR 99→100 and missing→present: numeric right edge and icon column stay fixed.
 - Altitude 9→10, 99→100, -1→0→1: sign column and units remain stationary.
 - Unchanged altitude beside 59:59→1:00:00 and 9:59:59→10:00:00: no font change.
+- Ride clocks 59:59→1:00:00→9:59:59→10:00:00: same legible 48 px tier and right
+  edge; nothing moves at the hour boundaries.
 - Distance 999→1000 m and 9949→9950→10000 m: stable km caption, one decimal.
+- Readability at arm's length on the handlebar mount, in daylight and shade:
+  record which values are legible and whether any value shows `--`. An ordinary
+  ride must never reach the fail-closed `--` path.
 - Every configurable widget in hero and compact slots; smart-widget semantic
   changes, paused/ended sessions, missing sensors and reconnection.
 - Simulated navigation with SD maps: map cadence, route changes, stale GPS,
@@ -78,6 +89,45 @@ temperature evidence. Count unchanged frames separately; no static timer should
 force a cleaning refresh. Keep ghosting/contrast observations before and after
 every cleaning and run longer endurance/temperature tests before production.
 
+Expected flash cadence with the provisional cap: any screen whose content changes
+every second (moving map, ticking ride clock, live speed) reaches 20 partials in
+roughly 20–25 s, then cleans for about 2.5–3 s; a stop of a minute or more adds a
+wake frame. This is the reported navigation flash, not a regression. To qualify a
+higher cap, record ghost ∆L (or photographed residual contrast) for the
+moving-map and workout screens after 20, 40, 80 and 160 partials at 5, 23 and
+40 °C, on at least two panels, before and after each cleaning. A higher cap or
+the vendor's 1.5 s fast-full waveform then needs its own tracked qualification
+profile and a reviewed policy change.
+
+## Capability, map and navigation checks
+
+Use the ordinary profile (or `POWER_METRICS` when timing records are needed)
+with the coordinated client-34 companion.
+
+- Capability handshake: the companion names the board "Waveshare ePaper 3.97"
+  from CAP2 metadata, shows no brightness, tap-to-switch, display-off,
+  disconnected-sleep, course-up, bird's-eye, 3D-buildings, terrain, POI or
+  contour controls, and keeps the e-paper controls note.
+- Durable map transfer and activation: download a durable production-signed
+  `buildings-3d-v1` (target 3) map and, when a production-signed copy exists, a
+  `topographic-contours-v1` (target 4) map. Both must pass the app's reader
+  check, transfer, verify, activate and render after a reboot. Buildings appear
+  as flat hatched footprints; no contour lines are drawn. Record the `DSTS`
+  `activeRendererFormat`, `mapReader`, `streamTrust` and activation result.
+  E-paper profiles compile in production signers only, so development-signed
+  maps are expected to be refused as untrusted.
+- Screen configuration: upload a Map + Navigation instance with bird's-eye,
+  3D buildings, course-up, contours and POIs enabled. The board must keep a flat,
+  north-up, contour-free map, and a download must return the stored document.
+- Simulated navigation along a known route for at least 15 minutes: maneuver
+  icon/text changes are urgent and readable, recentering stays silent, the rider
+  marker and route redraw within the 1–2 s cadence, and every flash carries a
+  `cleaning`, `wake` or `recovery` reason. Repeat with an SD map transfer running
+  and confirm BLE, buttons and the display worker stay responsive.
+- Missing card, removed card and a card inserted after boot: maps stay
+  unavailable until restart (SD-only map storage), FFat diagnostics continue,
+  and the status line explains the missing map.
+
 ## Automated evidence and acceptance record
 
 `test_ssd1677_addressing.cpp` drives the actual adapter into an independent RAM
@@ -89,8 +139,10 @@ rest, count limits, faults, wake and clock wrap.
 `epaper-workout-lvgl` compiles pinned LVGL 9.2.2, the real production rendering
 helpers and real font assets at 480×800. It checks all widgets/slots, fixed label
 bounds/fonts, decimal glyph positions, sign/icon columns, availability changes,
-wire-range endpoints and pixel-identical unchanged altitude beside time rollovers.
-The ordinary AMOLED preview generator retains its 466×466 and 410×502 controls.
+display-range endpoints, fail-closed wire maxima, hero/clock/distance font
+tiers, centred groups and pixel-identical unchanged altitude beside time
+rollovers. The ordinary AMOLED preview generator retains its 466×466 and
+410×502 controls.
 
 Append physical results only after testing: exact source/profile/board, measured
 timings, videos, temperature and duration, each pass/failure, and unresolved
