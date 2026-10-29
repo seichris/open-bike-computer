@@ -154,6 +154,7 @@ private:
       lastDiagnosticsMountResult{
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
   sdmmc_card_t *card;
+  StaticSemaphore_t mountMutexStorage_{};
   SemaphoreHandle_t mountMutex = nullptr;
   esp_err_t mountRemovableStorage();
 

@@ -3,6 +3,7 @@
 #include "lifecycle_resource_event.hpp"
 #include "renderer_stack_metrics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
+#include "../storage/storage.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_maintenance/firmware_maintenance_policy.hpp"
 #include "../power_management/power_management.hpp"
@@ -19,6 +20,8 @@
 #include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <new>
+
+extern Storage storage;
 
 namespace device_transfer {
 namespace {
@@ -568,13 +571,15 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     observeResources("transfer_entry");
     TaskHandle_t worker = nullptr;
     const bool workerStackInPsram =
-        requestedMode == "debug" || requestedMode == "diagnostics" ||
-        requestedMode == "map" || requestedMode == "firmware";
+        !storage.hasInternalFallbackMounted() &&
+        (requestedMode == "debug" || requestedMode == "diagnostics" ||
+         requestedMode == "map" || requestedMode == "firmware");
     const uint32_t workerStackBytes =
         workerStackInPsram ? kPsramHttpWorkerStackBytes
                            : kTransferHttpWorkerStackBytes;
     // Map activation and OTA flash are dispatched to the internal owner.
-    // Keep only TLS and protocol parsing on this PSRAM-backed worker.
+    // FFat diagnostics reads still reach flash here and may disable cache.
+    // Keep that worker's stack internal; removable-SD sessions use PSRAM.
     const UBaseType_t workerStackCaps =
         workerStackInPsram
             ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)

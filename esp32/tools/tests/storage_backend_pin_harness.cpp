@@ -27,6 +27,9 @@
 using esp_err_t = int;
 constexpr esp_err_t ESP_OK = 0, ESP_FAIL = -1, ESP_ERR_INVALID_STATE = 0x103;
 using SemaphoreHandle_t = void *;
+struct StaticSemaphore_t { int storage = 0; };
+SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *storage) { return storage; }
+#define configASSERT(condition) CHECK(condition)
 constexpr unsigned portMAX_DELAY = 0xffffffffU;
 struct sdmmc_card_t {};
 SemaphoreHandle_t xSemaphoreCreateMutex() {

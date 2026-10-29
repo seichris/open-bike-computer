@@ -66,6 +66,7 @@ const char *TAG PROGMEM = "Maps";
 #include <cstring>
 #include <dirent.h>
 #include <limits>
+#include <memory>
 #include <new>
 #include <numeric>
 #include <sys/stat.h>
@@ -1231,12 +1232,13 @@ BBox Maps::parseBbox(String str) {
 Maps::MapBlock *Maps::readMapBlock(String fileName) {
   ESP_LOGI(TAG, "readMapBlock: %s", fileName.c_str());
   char str[30];
-  MapBlock *mblock = new MapBlock();
+  std::unique_ptr<MapBlock> blockOwner(new MapBlock());
+  MapBlock *mblock = blockOwner.get();
   if (!mapFilesAvailable()) {
     // Same outcome as a missing block, without opening any file.
     Maps::isMapFound = false;
     mblock->inView = false;
-    return mblock;
+    return blockOwner.release();
   }
   const uint32_t blockStartMs = MAPIO_TIME_MS();
 
@@ -1267,7 +1269,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
               (unsigned long)openMs);
     Maps::isMapFound = false;
     mblock->inView = false;
-    return mblock;
+    return blockOwner.release();
   } else {
     ESP_LOGI(TAG, "Loading %s (%s)", filePath.c_str(),
              isBinary ? "Binary" : "ASCII");
@@ -1282,7 +1284,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
                 (unsigned long)(MAPIO_TIME_MS() - statStartMs));
       Maps::isMapFound = false;
       mblock->inView = false;
-      return mblock;
+      return blockOwner.release();
     }
     const uint32_t statMs = MAPIO_TIME_MS() - statStartMs;
     size_t fileSize = st.st_size;
@@ -1292,7 +1294,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       ::close(fd);
       Maps::isMapFound = false;
       mblock->inView = false;
-      return mblock;
+      return blockOwner.release();
     }
 
 #ifdef BOARD_HAS_PSRAM
@@ -1300,13 +1302,14 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 #else
     char *file = (char *)malloc(fileSize + 1);
 #endif
+    std::unique_ptr<char, decltype(&free)> fileOwner(file, &free);
 
     if (!file) {
       ESP_LOGE(TAG, "Failed to allocate memory for map file (%u bytes)",
                fileSize);
       Maps::isMapFound = false;
       ::close(fd);
-      return mblock;
+      return blockOwner.release();
     }
 
     const uint32_t readStartMs = MAPIO_TIME_MS();
@@ -1331,9 +1334,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     const uint32_t readMs = MAPIO_TIME_MS() - readStartMs;
 
     if (readInterrupted) {
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
-      return mblock;
+      return blockOwner.release();
     }
 
     if (bytesRead != fileSize) {
@@ -1344,15 +1347,15 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
                 filePath.c_str(), (unsigned)fileSize, (int)bytesRead,
                 (unsigned long)openMs, (unsigned long)statMs,
                 (unsigned long)readMs);
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
-      return mblock;
+      return blockOwner.release();
     }
 
     if (shouldCancelMapRenderWork()) {
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
-      return mblock;
+      return blockOwner.release();
     }
 
     if (onMapRenderWorkerTask()) {
@@ -1364,8 +1367,8 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
 
     if (isBinary) {
       const uint32_t parseStartMs = MAPIO_TIME_MS();
-      delete mblock; // readMapBlockBinary creates a new one
-      mblock = readMapBlockBinary(file, fileSize);
+      blockOwner.reset(readMapBlockBinary(file, fileSize));
+      mblock = blockOwner.get();
 #if FIRMWARE_DIAGNOSTICS
       // Optional signed terrain sidecar. Legacy maps have no such file.
       try {
@@ -1389,9 +1392,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
             if (loaded != map_terrain::LoadResult::Complete)
               mblock->terrain.clear();
             if (loaded == map_terrain::LoadResult::Cancelled) {
-              free(file);
+              fileOwner.reset();
               Maps::isMapFound = false;
-              return mblock;
+              return blockOwner.release();
             }
           }
         }
@@ -1402,9 +1405,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       }
 #endif
       if (shouldCancelMapRenderWork()) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
       const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
       MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
@@ -1416,17 +1419,17 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
                 (unsigned long)(MAPIO_TIME_MS() - blockStartMs),
                 (unsigned)mblock->polygons.size(),
                 (unsigned)mblock->polylines.size());
-      free(file);
-      return mblock;
+      fileOwner.reset();
+      return blockOwner.release();
     }
 
     size_t normalizedSize = 0;
     for (size_t index = 0; index < fileSize; ++index) {
       if ((index & 0x0FFF) == 0 &&
           shouldCancelMapRenderWork()) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
       if (file[index] != '\r')
         file[normalizedSize++] = file[index];
@@ -1438,15 +1441,15 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
             filePath, reinterpret_cast<const uint8_t *>(file), fileSize,
             validationInterrupted)) {
       if (validationInterrupted) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
       ESP_LOGE(TAG, "Invalid or unsupported ASCII map block");
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
       mblock->inView = false;
-      return mblock;
+      return blockOwner.release();
     }
 
     try {
@@ -1458,9 +1461,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     Maps::parseStrUntil(file, ':', str);
     if (strcmp(str, "Polygons") != 0) {
       ESP_LOGE(TAG, "Map error. Expected Polygons instead of: %s", str);
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
-      return mblock;
+      return blockOwner.release();
     }
 
     int16_t count = Maps::parseInt16(file);
@@ -1469,9 +1472,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       // Continue to lines anyway, or return? For now let's be safe.
       if (count < 0) {
         // fd already closed after read()
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
     }
     line++;
@@ -1481,9 +1484,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     Point16 p;
     while (count > 0) {
       if (shouldCancelMapRenderWork()) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
       Maps::parseStrUntil(file, '\n', str); // color
       if (str[0] != '0' || str[1] != 'x') {
@@ -1522,9 +1525,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       }
 
       if (!Maps::parseCoords(file, polygon.points)) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        return mblock;
+        return blockOwner.release();
       }
       line++;
       mblock->polygons.push_back(polygon);
@@ -1543,9 +1546,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       Polyline polyline;
       while (count > 0) {
         if (shouldCancelMapRenderWork()) {
-          free(file);
+          fileOwner.reset();
           Maps::isMapFound = false;
-          return mblock;
+          return blockOwner.release();
         }
         Maps::parseStrUntil(file, '\n', str); // color
         if (str[0] != '0' || str[1] != 'x')
@@ -1581,9 +1584,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         if (strcmp(str, "coords") != 0)
           break;
         if (!Maps::parseCoords(file, polyline.points)) {
-          free(file);
+          fileOwner.reset();
           Maps::isMapFound = false;
-          return mblock;
+          return blockOwner.release();
         }
         line++;
         mblock->polylines.push_back(polyline);
@@ -1595,9 +1598,9 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
     const uint32_t gridStartMs = MAPIO_TIME_MS();
     if (!buildPolygonGrid(mblock)) {
       if (shouldCancelMapRenderWork()) {
-        free(file);
+        fileOwner.reset();
         Maps::isMapFound = false;
-        delete mblock;
+        blockOwner.reset();
         return new MapBlock();
       }
       ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
@@ -1616,13 +1619,13 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
               (unsigned)mblock->polygons.size(),
               (unsigned)mblock->polylines.size());
       // File descriptor was already closed via ::close(fd) after reading.
-      free(file);
-      return mblock;
+      fileOwner.reset();
+      return blockOwner.release();
     } catch (const std::bad_alloc &) {
       ESP_LOGE(TAG, "PSRAM exhausted while decoding ASCII map block");
-      free(file);
+      fileOwner.reset();
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
   }
@@ -1647,9 +1650,10 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
     return new MapBlock();
   }
 
-  MapBlock *mblock = nullptr;
+  std::unique_ptr<MapBlock> blockOwner;
   try {
-    mblock = new MapBlock();
+    blockOwner.reset(new MapBlock());
+    MapBlock *mblock = blockOwner.get();
     size_t offset = 0;
 
     // Get version from 4th byte
@@ -1669,7 +1673,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   for (int i = 0; i < polyCount; i++) {
     if ((i & 0x1F) == 0 && shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
     Polygon poly;
@@ -1711,7 +1715,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   for (int i = 0; i < lineCount; i++) {
     if ((i & 0x1F) == 0 && shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
     Polyline line;
@@ -1754,7 +1758,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
             mblock->labelData, &labelError)) {
       ESP_LOGE(TAG, "Could not decode FMB v3 labels: %s", labelError.c_str());
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
   }
@@ -1762,7 +1766,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
           reinterpret_cast<const uint8_t *>(file), fileSize,
           mblock->contourData, shouldCancelMapRenderWork)) {
     Maps::isMapFound = false;
-    delete mblock;
+    blockOwner.reset();
     return new MapBlock();
   }
   if (version >= 4) {
@@ -1773,7 +1777,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       ESP_LOGE(TAG, "Could not decode FMB v4 buildings: %s",
                buildingError.c_str());
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
   }
@@ -1783,7 +1787,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
                                fileSize, mblock->poiData, &poiError)) {
       ESP_LOGE(TAG, "Could not decode FMB v6 POIs: %s", poiError.c_str());
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
   }
@@ -1793,7 +1797,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   if (!buildPolygonGrid(mblock)) {
     if (shouldCancelMapRenderWork()) {
       Maps::isMapFound = false;
-      delete mblock;
+      blockOwner.reset();
       return new MapBlock();
     }
     ESP_LOGE(TAG, "Could not allocate bounded polygon grid");
@@ -1820,11 +1824,11 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
             (unsigned long)(gridStartMs - parseStartMs),
             (unsigned long)gridMs,
             (unsigned long)(MAPIO_TIME_MS() - parseStartMs));
-    return mblock;
+    return blockOwner.release();
   } catch (const std::bad_alloc &) {
     ESP_LOGE(TAG, "PSRAM exhausted while decoding binary map block");
     Maps::isMapFound = false;
-    delete mblock;
+    blockOwner.reset();
     return new MapBlock();
   }
 }
@@ -5006,14 +5010,14 @@ bool Maps::startRenderWorker() {
   // ESP-IDF allows that only while the stack is never used with the flash
   // cache disabled. This worker reads removable SD alone: map files never use
   // the FFat fallback (see mapFilesAvailable()), whose reads disable the cache.
+  constexpr UBaseType_t workerStackCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
   // IDLE0 is the only production TWDT subscriber. The renderer runs one level
   // above idle for deterministic progress, while its cooperative checkpoints
   // block every 10 ms to give IDLE0 a bounded watchdog-feeding window. FatFs
   // and SPI waits block independently and therefore also release the CPU.
   BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
-      tskIDLE_PRIORITY + 1, &renderWorkerTaskHandle, 0,
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      tskIDLE_PRIORITY + 1, &renderWorkerTaskHandle, 0, workerStackCaps);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;
     renderWorkerExited.store(true, std::memory_order_release);

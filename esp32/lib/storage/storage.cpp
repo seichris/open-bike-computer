@@ -186,7 +186,11 @@ std::string formatSize(uint64_t size) {
 /**
  * @brief Storage Class constructor
  */
-Storage::Storage() : isSdLoaded(false), card(nullptr) {}
+Storage::Storage() : isSdLoaded(false), card(nullptr) {
+  // Construct once before any producer can publish this Storage instance.
+  mountMutex = xSemaphoreCreateMutexStatic(&mountMutexStorage_);
+  configASSERT(mountMutex != nullptr);
+}
 
 bool Storage::pollShutdownQuiescence() {
   streamAdmission_.closeAdmission();
@@ -271,8 +275,6 @@ bool Storage::ensureSdMounted() {
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr)
     return false;
   xSemaphoreTake(mountMutex, portMAX_DELAY);
@@ -366,8 +368,6 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     return StoragePreparation::MountFailed;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  if (mountMutex == nullptr)
-    mountMutex = xSemaphoreCreateMutex();
   if (mountMutex == nullptr) {
     lastDiagnosticsMountResult = StoragePreparation::MountFailed;
     return StoragePreparation::MountFailed;
@@ -404,9 +404,15 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     return result;
   }
 
-  // Nothing was mounted at boot, and nothing may be mounted at runtime.
+  // Nothing is usable, and nothing may be mounted at runtime. A failed
+  // removable probe can leave an earlier successful readiness cached.
+  auto result = lastDiagnosticsMountResult.load();
+  if (ride_diagnostics::transfer_policy::storageReady(result))
+    result = StoragePreparation::MountFailed;
+  diagnosticsSdHealthy = false;
+  lastDiagnosticsMountResult = result;
   xSemaphoreGive(mountMutex);
-  return lastDiagnosticsMountResult.load();
+  return result;
 }
 
 bool Storage::ensureDiagnosticsSdMounted() {
