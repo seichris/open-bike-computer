@@ -751,6 +751,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
 
+    def test_release_and_recovery_stage_layout_ota_channels(self) -> None:
+        release = workflow_source("firmware-release.yml")
+        publish_job = mapping_block(release, "publish", indent=2)
+        recovery = mapping_block(release, "recover-pages", indent=2)
+        signing_step = next(
+            block
+            for block in sequence_mapping_blocks(publish_job, "steps", indent=4)
+            if "name: Generate signed manifests" in block
+        )
+        # Both jobs stage the legacy and dual-4-MiB channels through one tool;
+        # neither may copy a single latest manifest over the legacy path.
+        for block in (signing_step, recovery):
+            self.assertIn("tools/firmware_ota_channels.py", block)
+            self.assertIn("--public-dir public/firmware", block)
+            self.assertNotIn('"public/firmware/${target}/manifest.json"', block)
+        self.assertIn('--output "${release_assets}/${target}.manifest.json"', signing_step)
+        self.assertLess(signing_step.index("tools/web_flasher_manifest.py"),
+                        signing_step.index("tools/firmware_ota_channels.py"))
+        self.assertIn("exactly four OTA channel manifests", recovery)
+
     def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
         general_ci = workflow_source("ci.yml")
 

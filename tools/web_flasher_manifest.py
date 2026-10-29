@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Publish preservation-safe USB recovery inputs from an attested factory bundle.
+"""Publish signed USB recovery and migration recipes from an attested factory bundle.
 
-This deliberately supports only the existing dual-3-MiB production layout.
-A layout migration requires a new reviewed recipe, never a permissive fallback.
+Layouts come only from esp32/partition_layouts.json. Each release may emit:
+
+* ``<target>.web-recovery.json``: the unchanged dual-3-MiB rescue contract,
+  only while the application still fits a legacy slot with its 64 KiB reserve;
+* ``<target>.web-recovery-dual4m.json``: the same app0 + OTA-selection rescue
+  for devices that already carry the current dual-4-MiB table;
+* ``<target>.web-migration-dual3m-dual4m.json``: the explicit, ordered and
+  bounded migration recipe. It is signed ``qualificationRequired`` so the
+  website admits it only after per-target physical qualification.
+
+There is no permissive or unknown-layout fallback.
 """
 from __future__ import annotations
 
@@ -12,7 +21,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import struct
 import sys
 import tarfile
 
@@ -22,20 +30,29 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from factory_release_manifest import FULL_GIT_SHA, _validated_release_tag, read_bundle_manifest, verify_factory_bundle
 from firmware_manifest import _private_key
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "esp32" / "tools"))
+import partition_layouts  # noqa: E402
+
 DOMAIN = b"bicino-web-flasher-v1\n"
-LAYOUT_ID = "esp32s3-16m-dual3m-ffat9m-v1"
-FLASH_BYTES = 0x1000000
-SECTOR = 0x1000
-# Explicit independent allowlist, checked against the artifact's actual table.
-# Unknown data partitions (including additional credentials) must fail closed.
-PARTITIONS = [
-    ("nvs", 1, 2, 0x9000, 0x5000),
-    ("otadata", 1, 0, 0xE000, 0x2000),
-    ("app0", 0, 16, 0x10000, 0x300000),
-    ("app1", 0, 17, 0x310000, 0x300000),
-    ("ffat", 1, 129, 0x610000, 0x900000),
-    ("coredump", 1, 3, 0xF10000, 0xF0000),
-]
+FLASH_BYTES = partition_layouts.FLASH_BYTES
+SECTOR = partition_layouts.SECTOR
+RESERVE = partition_layouts.APPLICATION_RESERVE_BYTES
+BOOTLOADER_SPAN = partition_layouts.TABLE_OFFSET
+LAYOUTS = partition_layouts.load()
+LEGACY = LAYOUTS.legacy("production")
+CURRENT = LAYOUTS.current("production")
+MIGRATION = LAYOUTS.migration(LEGACY, CURRENT)
+# Kept for callers that still name the original rescue contract.
+LAYOUT_ID = LEGACY.id
+PARTITIONS = [partition.record() for partition in LEGACY.partitions]
+BOOTSTRAP_SHA256 = "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+RECOVERY_IMPACT = ("Preserves ownership, TLS identity, calibration, maps, app1 and diagnostics. "
+                   "Replaces app0 and resets OTA selection to app0.")
+MIGRATION_IMPACT = (
+    "Moves this device to dual 4 MiB firmware slots. Keeps ownership, TLS identity, settings, "
+    "calibration, coredump and everything on the SD card. Permanently erases internal storage "
+    "(diagnostics recorded without an SD card, internal GPX/device files and unused old maps) "
+    "and the previous rollback firmware. Export internal diagnostics first if you need them.")
 
 
 def canonical(value: object) -> bytes:
@@ -46,36 +63,46 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def partition_inventory(data: bytes) -> list[dict]:
-    if len(data) != 0xC00:
-        raise ValueError("partition artifact must contain exactly 3072 bytes")
-    records = []
-    checksum_seen = False
-    for offset in range(0, len(data), 32):
-        entry = data[offset:offset + 32]
-        if entry == b"\xff" * 32:
-            if any(byte != 255 for byte in data[offset:]):
-                raise ValueError("partition table has data after its terminator")
-            break
-        if entry[:2] == b"\xeb\xeb":
-            if checksum_seen or entry[2:16] != b"\xff" * 14 or entry[16:] != hashlib.md5(data[:offset]).digest():
-                raise ValueError("partition table checksum is invalid")
-            checksum_seen = True
-            continue
-        if checksum_seen:
-            raise ValueError("partition after checksum")
-        magic, kind, subtype, start, size, label, flags = struct.unpack("<HBBII16sI", entry)
-        if magic != 0x50AA or flags != 0:
-            raise ValueError("unsupported partition entry/security flags")
-        name = label.rstrip(b"\0").decode("ascii")
-        records.append((name, kind, subtype, start, size))
-    if not checksum_seen or records != PARTITIONS:
-        raise ValueError("USB recovery requires the exact production dual-3-MiB layout")
-    return [{"name": name, "offset": start, "length": size, "preserve": name not in {"app0", "otadata"}}
-            for name, _, _, start, size in records]
+def short_name(layout: partition_layouts.Layout) -> str:
+    """``esp32s3-16m-dual4m-ffat7m-v1`` -> ``dual4m`` for asset names."""
+    return layout.id.split("-")[2]
 
 
-def recovery_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, dict[str, bytes]]:
+def asset_names(target: str) -> dict[str, str]:
+    return {
+        "legacy-recovery": f"{target}.web-recovery.json",
+        "recovery": f"{target}.web-recovery-{short_name(CURRENT)}.json",
+        "migration": f"{target}.web-migration-{short_name(LEGACY)}-{short_name(CURRENT)}.json",
+    }
+
+
+def partition_inventory(data: bytes, layout: partition_layouts.Layout = LEGACY) -> list[dict]:
+    """Return the rescue region list after requiring the exact layout table."""
+    try:
+        records = partition_layouts.parse_table(data)
+    except partition_layouts.LayoutError as error:
+        raise ValueError(str(error)) from error
+    if records != layout.partitions or digest(data) != layout.table_sha256:
+        raise ValueError(f"USB recovery requires the exact {layout.id} layout")
+    return [{"name": p.name, "offset": p.offset, "length": p.size, "preserve": p.name not in {"app0", "otadata"}}
+            for p in records]
+
+
+def _regions(layout: partition_layouts.Layout) -> list[dict]:
+    return ([{"name": "bootloader", "offset": 0, "length": BOOTLOADER_SPAN, "preserve": True},
+             {"name": "partition-table", "offset": partition_layouts.TABLE_OFFSET, "length": SECTOR, "preserve": True}]
+            + partition_inventory(layout.table_bytes(), layout))
+
+
+def _layout_regions(layout: partition_layouts.Layout) -> list[dict]:
+    return [{"name": p.name, "offset": p.offset, "length": p.size} for p in layout.partitions]
+
+
+def _span(length: int) -> int:
+    return ((length + SECTOR - 1) // SECTOR) * SECTOR
+
+
+def _release_images(descriptor: dict, images: dict[str, bytes]) -> dict[str, tuple[int, bytes]]:
     target = descriptor["target"]
     if target not in {"WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"}:
         raise ValueError("unsupported hardware target")
@@ -97,41 +124,135 @@ def recovery_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, 
         raise ValueError("unexpected factory image inventory")
     if [by_name[n][0] for n in ("bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin")] != [0, 0x8000, 0xE000, 0x10000]:
         raise ValueError("factory image offsets do not match the supported layout")
-    regions = [{"name": "bootloader", "offset": 0, "length": 0x8000, "preserve": True},
-               {"name": "partition-table", "offset": 0x8000, "length": SECTOR, "preserve": True}]
-    regions += partition_inventory(by_name["partitions.bin"][1])
+    # A release is always built for the current production table. A legacy
+    # table here would mean an unreviewed or unmigrated build input.
+    partition_inventory(by_name["partitions.bin"][1], CURRENT)
     firmware = by_name["firmware.bin"][1]
-    bootstrap = by_name["boot_app0.bin"][1]
-    if len(firmware) < 256 or len(firmware) > 0x300000 - 65536 or firmware[0] != 0xE9:
+    if len(firmware) < 256 or len(firmware) > CURRENT.max_application_bytes or firmware[0] != 0xE9:
         raise ValueError("invalid application or missing 64-KiB slot reserve")
+    bootloader = by_name["bootloader.bin"][1]
+    if not 0 < len(bootloader) <= BOOTLOADER_SPAN:
+        raise ValueError("bootloader exceeds its region")
     # Pin the Arduino bootstrap (sequence 1, app0) instead of generating OTA
     # CRC/state records in the browser. A changed bootstrap needs explicit review.
-    if len(bootstrap) != 0x2000 or digest(bootstrap) != "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0":
+    bootstrap = by_name["boot_app0.bin"][1]
+    if len(bootstrap) != 0x2000 or digest(bootstrap) != BOOTSTRAP_SHA256:
         raise ValueError("unsupported OTA bootstrap")
-    assets = {}
-    writes = []
-    for name in ("firmware.bin", "boot_app0.bin"):
-        offset, data = by_name[name]
-        asset = f"{target}.web-{digest(data)}.bin"
-        assets[asset] = data
-        writes.append({"asset": asset, "offset": offset, "length": len(data),
-                       "eraseLength": ((len(data) + SECTOR - 1) // SECTOR) * SECTOR,
-                       "sha256": digest(data), "role": "application" if name == "firmware.bin" else "ota-selection"})
-    value = {
-        "schemaVersion": 1, "artifactType": "bicino-web-recovery", "operation": "recover",
-        "minFlasherVersion": 2, "target": target, "environment": descriptor["environment"],
+    return by_name
+
+
+def _write(target: str, role: str, offset: int, data: bytes) -> tuple[dict, str]:
+    asset = f"{target}.web-{digest(data)}.bin"
+    return ({"asset": asset, "offset": offset, "length": len(data), "eraseLength": _span(len(data)),
+             "sha256": digest(data), "role": role}, asset)
+
+
+def _common(descriptor: dict, by_name: dict[str, tuple[int, bytes]]) -> dict:
+    bootloader = by_name["bootloader.bin"][1]
+    return {
+        "target": descriptor["target"], "environment": descriptor["environment"],
         "chip": "ESP32-S3", "flashBytes": FLASH_BYTES,
         "version": descriptor["firmwareVersion"]["version"], "build": descriptor["firmwareVersion"]["build"],
-        "gitSha": descriptor["sourceIdentity"], "layoutId": LAYOUT_ID,
-        "partitionTableSha256": digest(by_name["partitions.bin"][1]),
-        "bootloaderSha256": digest(by_name["bootloader.bin"][1]),
-        "bootloaderLength": len(by_name["bootloader.bin"][1]),
-        "regions": regions, "writes": writes, "allowSameBuild": True,
-        "unknownBuildPolicy": "rescue", "qualificationRequired": False,
-        "dataImpact": "Preserves ownership, TLS identity, calibration, maps, app1 and diagnostics. Replaces app0 and resets OTA selection to app0.",
+        "gitSha": descriptor["sourceIdentity"],
+        "bootloaderSha256": digest(bootloader), "bootloaderLength": len(bootloader),
+        "unknownBuildPolicy": "rescue",
         "factoryDescriptorSha256": digest(canonical(descriptor)),
     }
+
+
+def recovery_payload(descriptor: dict, images: dict[str, bytes],
+                     layout: partition_layouts.Layout = LEGACY) -> tuple[dict, dict[str, bytes]]:
+    """Signed app0 + OTA-selection rescue that preserves the device's own table."""
+    by_name = _release_images(descriptor, images)
+    if layout not in (LEGACY, CURRENT):
+        raise ValueError("unsupported recovery layout")
+    target = descriptor["target"]
+    firmware = by_name["firmware.bin"][1]
+    if len(firmware) > layout.max_application_bytes:
+        raise ValueError(f"application does not fit {layout.id} with its 64-KiB reserve")
+    assets, writes = {}, []
+    for name, role in (("firmware.bin", "application"), ("boot_app0.bin", "ota-selection")):
+        offset, data = by_name[name]
+        write, asset = _write(target, role, offset, data)
+        writes.append(write)
+        assets[asset] = data
+    value = dict(_common(descriptor, by_name), **{
+        "schemaVersion": 1, "artifactType": "bicino-web-recovery", "operation": "recover",
+        # Version 2 keeps the dual-3-MiB contract readable by today's website.
+        # The dual-4-MiB layout needs a flasher that knows its regions.
+        "minFlasherVersion": 2 if layout is LEGACY else 3,
+        "layoutId": layout.id, "partitionTableSha256": layout.table_sha256,
+        "regions": _regions(layout), "writes": writes, "allowSameBuild": True,
+        "qualificationRequired": False, "dataImpact": RECOVERY_IMPACT,
+    })
     return value, assets
+
+
+def migration_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, dict[str, bytes]]:
+    """Ordered dual-3-MiB to dual-4-MiB recipe; the table is the last write.
+
+    Until the table commit the device keeps its legacy table. App0 and OTA
+    selection are written first, so an interrupted run can still boot the new
+    image on the old table when it fits there. App1 and FFat are then erased:
+    the firmware formats only fully erased FFat. The destination table is
+    written last, so a retried run either restarts from the legacy table or
+    finds every earlier step verified and only the table missing.
+    """
+    by_name = _release_images(descriptor, images)
+    target = descriptor["target"]
+    destination_table = CURRENT.table_bytes()
+    if by_name["partitions.bin"][1] != destination_table:
+        raise ValueError("migration requires the release's own destination table")
+    steps, assets = [], {}
+    for name, role in (("firmware.bin", "application"), ("boot_app0.bin", "ota-selection")):
+        offset, data = by_name[name]
+        step, asset = _write(target, role, offset, data)
+        steps.append(step)
+        assets[asset] = data
+    for name, role in (("app1", "erase-app1"), ("ffat", "erase-ffat")):
+        partition = CURRENT.partition(name)
+        steps.append({"role": role, "offset": partition.offset, "length": partition.size,
+                      "eraseLength": partition.size, "fill": 255,
+                      "sha256": digest(b"\xff" * partition.size)})
+    step, asset = _write(target, "partition-table", partition_layouts.TABLE_OFFSET, destination_table)
+    steps.append(step)
+    assets[asset] = destination_table
+    preserve = [{"name": "bootloader", "offset": 0, "length": BOOTLOADER_SPAN}] + [
+        {"name": name, "offset": CURRENT.partition(name).offset, "length": CURRENT.partition(name).size}
+        for name in ("nvs", "coredump")]
+    for step in steps:
+        end = step["offset"] + step["eraseLength"]
+        if step["offset"] % SECTOR or end > FLASH_BYTES or any(
+                step["offset"] < p["offset"] + p["length"] and end > p["offset"] for p in preserve):
+            raise ValueError("migration step would erase protected data")
+    value = dict(_common(descriptor, by_name), **{
+        "schemaVersion": 1, "artifactType": "bicino-web-migration", "operation": "migrate",
+        "migrationId": MIGRATION.id, "minFlasherVersion": 3,
+        "source": {"layoutId": LEGACY.id, "partitionTableSha256": LEGACY.table_sha256,
+                   "regions": _layout_regions(LEGACY)},
+        "destination": {"layoutId": CURRENT.id, "partitionTableSha256": CURRENT.table_sha256,
+                        "regions": _layout_regions(CURRENT)},
+        "preserve": preserve, "steps": steps,
+        # Signed as gated: no browser may run it before physical qualification.
+        "qualificationRequired": True, "dataImpact": MIGRATION_IMPACT,
+    })
+    return value, assets
+
+
+def release_packages(descriptor: dict, images: dict[str, bytes]) -> tuple[dict[str, dict], dict[str, bytes]]:
+    """Return every signed web payload this release supports, keyed by asset name."""
+    by_name = _release_images(descriptor, images)
+    names = asset_names(descriptor["target"])
+    payloads, assets = {}, {}
+    builders = [("recovery", lambda: recovery_payload(descriptor, images, CURRENT)),
+                ("migration", lambda: migration_payload(descriptor, images))]
+    if len(by_name["firmware.bin"][1]) <= LEGACY.max_application_bytes:
+        builders.insert(0, ("legacy-recovery", lambda: recovery_payload(descriptor, images, LEGACY)))
+    for kind, build in builders:
+        payload, package_assets = build()
+        payloads[names[kind]] = payload
+        assets.update(package_assets)
+    return payloads, assets
 
 
 def sign(payload: dict, scalar: str) -> dict:
@@ -167,13 +288,14 @@ def publish(args: argparse.Namespace) -> None:
             if stream is None:
                 raise ValueError("missing image")
             images[record["file"]] = stream.read(member.size + 1)
-    payload, assets = recovery_payload(descriptor, images)
+    payloads, assets = release_packages(descriptor, images)
     if args.bundle_manifest.read_bytes() != descriptor_bytes or digest(args.bundle.read_bytes()) != archive_digest:
         raise ValueError("factory inputs changed during validation")
-    payload["factoryDescriptorSha256"] = digest(descriptor_bytes)
-    payload["factoryArchiveSha256"] = archive_digest
-    payload["releaseTag"] = args.tag
-    assets[f"{args.target}.web-recovery.json"] = canonical(sign(payload, os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]))
+    for name, payload in payloads.items():
+        payload["factoryDescriptorSha256"] = digest(descriptor_bytes)
+        payload["factoryArchiveSha256"] = archive_digest
+        payload["releaseTag"] = args.tag
+        assets[name] = canonical(sign(payload, os.environ["FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY"]))
     if args.output_dir.is_symlink():
         raise ValueError("unsafe output directory")
     args.output_dir.mkdir(parents=True, exist_ok=True)

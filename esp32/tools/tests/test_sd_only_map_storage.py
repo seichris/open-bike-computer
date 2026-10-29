@@ -194,6 +194,40 @@ class BootPinnedStorageTests(unittest.TestCase):
         result = run_harness(storage_harness(), "storage_pin")
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_ffat_never_formats_bytes_of_unknown_provenance(self):
+        mutations = {
+            "format without a durable ownership record": lambda methods: mutated(
+                methods,
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                "    (void)internal_storage::recordGeometry(assessment);\n"
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat");'),
+            "format before recording ownership": lambda methods: mutated(
+                methods,
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat") &&\n'
+                "              internal_storage::recordGeometry(assessment);"),
+            "mount without wear-levelling evidence": lambda methods: mutated(
+                methods,
+                "assessment.erased, assessment.record, assessment.wearLevellingValid",
+                "assessment.erased, assessment.record, true"),
+            "relocated volume mounted": lambda methods: mutated(
+                methods, "plan == InternalMountPlan::MountExisting",
+                "plan != InternalMountPlan::FormatErased"),
+            "owned volume not reformatted": lambda methods: mutated(
+                methods,
+                ' ||\n              FFat.begin(true, "/sdcard", 20, "ffat");', ";"),
+            "adopted volume never recorded": lambda methods: mutated(
+                methods,
+                "    if (mounted)\n      (void)internal_storage::recordGeometry(assessment);\n",
+                ""),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate), "storage_ffat_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
     def test_live_backend_switch_or_ffat_map_root_is_detected(self):
         mutations = {
             "explicit initSD after pin mounts again": lambda methods: mutated(

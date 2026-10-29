@@ -57,4 +57,19 @@ int main() {
   corrupt.values[0].checksum^=1; Store torn(corrupt); assert(!torn.restore()); assert(!torn.accept(a));
   Memory failure; failure.unreadable=true; Store f(failure); assert(!f.restore());
   auto invalid=input(); invalid.operation[0]='G'; Memory fresh; Store bad(fresh); assert(bad.restore()); assert(!bad.accept(invalid));
+  // An Accepted receipt survives USB recovery and the layout migration in NVS.
+  // Legacy app1 (0x310000) is not a dual-4-MiB slot start, and app0 holds the
+  // USB-written image afterwards: both resolve to Failed once that image runs.
+  static_assert(reconcileAction(false,false,true)==ReconcileAction::Fail);
+  static_assert(reconcileAction(false,false,false)==ReconcileAction::Keep);
+  static_assert(reconcileAction(true,false,true)==ReconcileAction::Fail);
+  // A pending-verify OTA boot must still prove its exact bytes (rollback kept).
+  static_assert(reconcileAction(true,false,false)==ReconcileAction::Unresolved);
+  static_assert(reconcileAction(true,true,false)==ReconcileAction::Keep);
+  static_assert(reconcileAction(true,true,true)==ReconcileAction::Install);
+  Memory migrated; Store m(migrated); assert(m.restore()); assert(m.accept(input('d')));
+  assert(m.finish(reconcileAction(true,false,true)==ReconcileAction::Install));
+  assert(m.current().phase==Phase::Failed);
+  assert(m.acknowledge(m.current().device,m.current().operation,m.current().image));
+  assert(m.accept(input('e'))); // a later OTA is admitted again
 }
