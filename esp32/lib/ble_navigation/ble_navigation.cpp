@@ -12,6 +12,7 @@ extern Power power;
 #include "ble_navigation.hpp"
 #include "../utils/src/runtime_ownership.hpp"
 #include "../utils/src/startup_constructed.hpp"
+#include "../utils/src/task_data_placement.hpp"
 #include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -63,6 +64,7 @@ extern Power power;
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../map_transfer/map_reader_capabilities.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
@@ -350,20 +352,20 @@ struct OutgoingScreenConfigurationSnapshot {
 
 static StaticSemaphore_t screenConfigurationMutexStorage;
 static SemaphoreHandle_t screenConfigurationMutex = nullptr;
-static screen_configuration_protocol::UploadReassembler
+static BICINO_TASK_DATA screen_configuration_protocol::UploadReassembler
     screenConfigurationUpload;
-static StartupConstructed<PendingScreenConfigurationControl>
+static BICINO_TASK_DATA StartupConstructed<PendingScreenConfigurationControl>
     pendingScreenConfigurationStorage;
 static PendingScreenConfigurationControl &pendingScreenConfiguration =
     pendingScreenConfigurationStorage.value;
-static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
+static BICINO_TASK_DATA OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
 static std::atomic<bool> screenConfigurationSnapshotActive{false};
 static std::atomic<bool> screenConfigurationResetRequested{false};
 static bool screenConfigurationAckPending = false;
 static uint32_t screenConfigurationAckRequestID = 0;
 static screen_configuration::CommitOutcome screenConfigurationAckOutcome{};
 static NimBLECharacteristic *screenConfigurationCharacteristic = nullptr;
-static std::array<uint8_t,
+static BICINO_TASK_DATA std::array<uint8_t,
                   screen_configuration_protocol::MAX_DOCUMENT_BYTES>
     processingScreenConfigurationDocument{};
 
@@ -2679,7 +2681,15 @@ readActiveMapStatusSnapshot() {
   static ActivePresentationCache activePresentationCache;
   static ActiveMapStatusSnapshot snapshot;
 
-  map_transfer::MapTransferInstaller installer("/sdcard");
+  if (!storage.mapStorageAvailable()) {
+    // Without a card there is no active map, and FFat is never searched for
+    // one. The app shows the no-card state from "sdPresent".
+    activePresentationCache.clear();
+    snapshot.available = false;
+    snapshot.errorCode = "active_missing";
+    return snapshot;
+  }
+  map_transfer::MapTransferInstaller installer(storage.mapStorageRoot());
   map_transfer::ActiveMapSelection activeMap;
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
@@ -2773,7 +2783,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (streamSupported ? "[2]" : "[]") +
                      (streamSupported
                           ? ",\"streamFormatVersions\":[1],\"streamTrust\":" +
-                                map_transfer::compiledMapStreamTrustCapabilitiesJson()
+                                map_transfer::compiledMapStreamTrustCapabilitiesJson() +
+                                ",\"mapReader\":" +
+                                map_transfer::mapReaderCapabilitiesJson()
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +
@@ -3992,38 +4004,36 @@ static void processPendingTransferControl() {
       Serial.println(
           "BLE Map Transfer: enter rejected, transfer worker is stopping");
     } else {
-      const bool transitionReady =
-          ride_diagnostics::beginStorageTransition();
-      if (!transitionReady) {
+      // Only validates the card this boot mounted. Storage never remounts or
+      // falls back to FFat here, so the recorder needs no checkpoint; a card
+      // that was missing, failed or replaced is used after a restart.
+      const bool mounted = storage.ensureSdMounted();
+      if (!mounted) {
         mapTransferHttp.setLastError(
             "sd_unavailable",
-            "diagnostic storage could not checkpoint before remounting SD");
+            storage.mapStorageAvailable()
+                ? "SD card is not readable; reinsert it and restart the device"
+                : "no SD card was mounted at startup; insert one and restart "
+                  "the device");
         Serial.println(
-            "BLE Map Transfer: enter rejected, diagnostics checkpoint failed");
+            "BLE Map Transfer: enter rejected, SD card is not mounted");
+      } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
+        // The card validated; only its map namespace is not writable (full,
+        // locked or blocked). It stays in use for maps and diagnostics, and
+        // the next request probes it again.
+        mapTransferHttp.setLastError(
+            "sd_unwritable", "SD card map storage is not writable");
+        Serial.println(
+            "BLE Map Transfer: enter rejected, SD card is not writable");
       } else {
-        const bool mounted = storage.ensureSdMounted();
-        if (!mounted) {
-          mapTransferHttp.setLastError("sd_unavailable",
-                                       "SD card is not mounted");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not mounted");
-        } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
-          storage.markSdUnavailable();
-          mapTransferHttp.setLastError(
-              "sd_unwritable", "SD card map storage is not writable");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not writable");
-        } else {
-          const bool enabled = mapTransferHttp.setEnabled(true);
-          Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
-                        enabled);
-          (void)ride_diagnostics::record(
-              enabled ? ride_diagnostics::Level::Info
-                      : ride_diagnostics::Level::Warning,
-              "map", "transfer_entered",
-              enabled ? "{\"active\":true}" : "{\"active\":false}");
-        }
-        ride_diagnostics::endStorageTransition();
+        const bool enabled = mapTransferHttp.setEnabled(true);
+        Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
+                      enabled);
+        (void)ride_diagnostics::record(
+            enabled ? ride_diagnostics::Level::Info
+                    : ride_diagnostics::Level::Warning,
+            "map", "transfer_entered",
+            enabled ? "{\"active\":true}" : "{\"active\":false}");
       }
     }
     break;

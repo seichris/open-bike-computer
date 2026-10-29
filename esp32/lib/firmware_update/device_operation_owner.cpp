@@ -211,6 +211,27 @@ esp_err_t DeviceOperationOwner::runMapActivation(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
+bool DeviceOperationOwner::runOnInternalStack(void (*call)(void *),
+                                              void *context) {
+  if (call == nullptr)
+    return false;
+  // Already cache-safe, including this owner's own task: never queue to self.
+  if (callerStackIsInternal()) {
+    call(context);
+    return true;
+  }
+  Command command{Operation::InternalStackCall};
+  command.internalStackCall = call;
+  command.internalStackContext = context;
+  Result result;
+  // The call uses objects on the caller's stack. A timed-out caller could
+  // return while this owner still writes them, so wait for completion. A
+  // stalled flash operation is a watchdog reset, not a recoverable timeout.
+  return execute(command, result, nullptr, nullptr, nullptr, portMAX_DELAY) ==
+             ESP_OK &&
+         result.error == ESP_OK;
+}
+
 bool DeviceOperationOwner::stopAccessPoint(bool wifiOff) {
   Result result;
   Command command{Operation::StopAccessPoint};
@@ -510,6 +531,20 @@ void DeviceOperationOwner::run() {
       try {
         command.mapOperation(command.mapContext, mapSessionId_,
                              command.automaticExit);
+        result.error = ESP_OK;
+      } catch (const std::bad_alloc &) {
+        result.error = ESP_ERR_NO_MEM;
+      } catch (...) {
+        result.error = ESP_FAIL;
+      }
+      vTaskPrioritySet(nullptr, 2);
+      break;
+    case Operation::InternalStackCall:
+      // The waiting PSRAM handler runs at priority 1. Keep its storage scan
+      // there too, so moving it here cannot starve the UI or idle tasks.
+      vTaskPrioritySet(nullptr, 1);
+      try {
+        command.internalStackCall(command.internalStackContext);
         result.error = ESP_OK;
       } catch (const std::bad_alloc &) {
         result.error = ESP_ERR_NO_MEM;

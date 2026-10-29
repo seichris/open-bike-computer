@@ -764,13 +764,13 @@ extension NavigationProtocolTests {
             "a background server probe without map state is recovery-only"
         )
         assert(
-            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+            OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
                 isServerRecoveryCheckPending: true,
                 hasCurrentJob: true,
                 hasDownloadedPack: false,
                 errorMessage: nil
             ),
-            "a recovered job is user-visible map state"
+            "a completed job selection does not turn discovery into a pending download"
         )
         assert(
             OfflineMapDownloadingSectionPresentation.isVisible(
@@ -845,7 +845,7 @@ extension NavigationProtocolTests {
             "launch recovery errors remain visible"
         )
         assert(
-            OfflineMapDownloadingSectionPresentation.isVisible(
+            !OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: true,
                 hasPendingJob: true,
                 hasPendingActivation: false,
@@ -854,7 +854,7 @@ extension NavigationProtocolTests {
                 hasDownloadedPack: false,
                 errorMessage: nil
             ),
-            "a recovered map job remains visible"
+            "a prior completed map does not expose a passive server scan"
         )
         assert(
             OfflineMapAutomaticRecoveryTrigger.shouldResume(
@@ -1700,7 +1700,33 @@ extension NavigationProtocolTests {
             OfflineMapRecoveryHistory.handledJobIds(defaults: discoveryDefaults).contains("job-discovered"),
             "launch discovery marks the exact recovered job handled"
         )
-        if let url = discoveryManager.downloadedPackURL {
+        // Reproduce completion -> foreground discovery with an unavailable
+        // server, retaining the completed selection exactly as the live app did.
+        let completedSelection = discoveryManager.downloadedPackURL
+        assertEqual(discoveryManager.downloadProgress, 1, "fixture download completed")
+        OfflineMapTestURLProtocol.configure { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+        discoveryManager.resumePendingMapJobIfNeeded()
+        let discoveryRetryStarted = await waitForMapBusyState(discoveryManager, expected: true)
+        assert(discoveryRetryStarted, "foreground discovery retries offline")
+        assert(discoveryManager.isCheckingForServerMaps, "no real job is pending")
+        assertEqual(discoveryManager.activityProgress, nil, "discovery never reuses completed 99 percent progress")
+        assert(!discoveryManager.hasTerminalMapJobFailure, "previous job cannot block discovery controls")
+        assert(OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+            isServerRecoveryCheckPending: discoveryManager.isCheckingForServerMaps,
+            hasCurrentJob: discoveryManager.currentJob != nil,
+            hasDownloadedPack: discoveryManager.downloadedPackURL != nil,
+            errorMessage: discoveryManager.errorMessage
+        ), "completed map stays out of the pending row while discovery retries")
+        assertEqual(discoveryManager.downloadedPackURL, completedSelection, "discovery preserves the saved map selection")
+        assert(FileManager.default.fileExists(atPath: completedSelection!.path), "discovery preserves saved bytes")
+        discoveryManager.pausePendingMapJob()
+        let discoveryRetryPaused = await waitForMapBusyState(discoveryManager, expected: false)
+        assert(discoveryRetryPaused, "discovery can still pause")
+        assertEqual(discoveryManager.activityProgress, nil, "paused discovery has no stale percentage")
+        discoveryManager.forgetPendingMapJob()
+        if let url = completedSelection {
             discoveryManager.deleteCachedPack(at: url)
         }
 
@@ -3215,7 +3241,7 @@ extension NavigationProtocolTests {
                 !pendingSavedMapRowSource.contains(
                     "Text(preparationEstimatePresentation.title)"
                 ) &&
-                source.contains("Label(\"Retry Download\"") &&
+                source.contains("\"Retry Check\" : \"Retry Download\"") &&
                 source.contains("Button(\"Choose Another Map\"") &&
                 source.contains("if manager.errorMessage != nil"),
             "the pending download uses one friendly progress row and the normal Saved Maps background"
@@ -3297,7 +3323,7 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains(
-                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)"
+                "let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh("
             ) &&
                 source.contains("Label(\"Updated map available\"") &&
                 source.contains(".accessibilityLabel(\"Update \\(displayName) on this iPhone\")") &&
@@ -3305,6 +3331,23 @@ extension NavigationProtocolTests {
                 source.contains("manager.hasActiveBackgroundUpload ||") &&
                 source.contains("isPausedUpload ||"),
             "a stale local catalog artifact offers a current verified download before transfer"
+        )
+        assertEqual(
+            source.components(
+                separatedBy: "deviceStreamTrust: bleManager.mapTransferStreamTrust"
+            ).count - 1,
+            3,
+            "the refresh check and both catalog downloads follow the connected bike's map trust"
+        )
+        let contentSource = (try? String(
+            contentsOfFile: "ios-app/BikeComputer/BikeComputer/ContentView.swift",
+            encoding: .utf8
+        ))?.filter { !$0.isWhitespace } ?? ""
+        assert(
+            contentSource.contains(
+                "claimPendingShare(deviceStreamTrust:coordinator.bleManager.mapTransferStreamTrust)"
+            ),
+            "a claimed share downloads the copy the connected bike trusts"
         )
         assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&

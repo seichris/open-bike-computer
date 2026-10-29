@@ -1029,6 +1029,136 @@ describe("catalog library", () => {
     });
   });
 
+  // The iPhone shows a contour map as downloadable from the first tier that
+  // has a stream and exactly one companion (OfflineMapContourCompanionTests,
+  // testCatalogCompanionTierFallback). The grant must pick the same pair.
+  it("grants the next tier's pair when a tier has no single companion", async () => {
+    const enabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "1" };
+    const source = developmentTopographicPublication("companion-fallback");
+    await finalizePublication(
+      env,
+      source,
+      source.publicationId,
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    const promotion = await createPromotionGrant(enabled, source.mapEntryId);
+    if (promotion.state !== "granted") throw new Error("promotion is refused");
+    const developmentCompanion = source.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!;
+    const stream = structuredClone(source.artifacts[0]);
+    stream.artifactId = fixtureID("artifact");
+    stream.bucketSlot = "production";
+    stream.deliveryTier = "production";
+    stream.sha256 = "a".repeat(64);
+    stream.objectKey += ".promoted";
+    const companion = structuredClone(developmentCompanion);
+    companion.artifactId = fixtureID("artifact");
+    companion.bucketSlot = "production";
+    companion.deliveryTier = "production";
+    companion.objectKey = companion.objectKey.replace(
+      "/topography-ios-v1/",
+      "/topography-ios-v1/production/",
+    );
+    const production = validatePublication({
+      ...source,
+      publicationId: "promotion:production:companion-fallback",
+      deliveryState: "production",
+      artifacts: [stream, companion],
+    });
+    await finalizePublication(
+      enabled,
+      production,
+      production.publicationId,
+      await sha256Hex(JSON.stringify(production)),
+      promotion.leaseId,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      source.publicationId,
+      library.libraryId,
+      undefined,
+      "development",
+    );
+    const grant = () =>
+      createLibraryDownloadGrant(
+        env,
+        library.libraryId,
+        source.mapEntryId,
+        "development",
+        [{ keyId: "prod", keySha256: signerSha }],
+        appIdentity,
+        combinedReaderCapabilities,
+      );
+    const quarantine = (deliveryTier: string) =>
+      env.DB.prepare(
+        "UPDATE artifacts SET state = 'quarantined' WHERE map_entry_id = ? AND format = 'topography-ios-v1' AND delivery_tier = ?",
+      )
+        .bind(source.mapEntryId, deliveryTier)
+        .run();
+
+    const preferred = await grant();
+    expect(preferred.artifact.artifactId).toBe(source.artifacts[0].artifactId);
+    expect(preferred.companion?.artifact.artifactId).toBe(
+      developmentCompanion.artifactId,
+    );
+
+    // An ambiguous development companion yields to the production pair.
+    const rival = structuredClone(source);
+    rival.publicationId = `${source.publicationId}-rival`;
+    const rivalCompanion = rival.artifacts.find(
+      (artifact) => artifact.format === "topography-ios-v1",
+    )!;
+    rivalCompanion.artifactId = fixtureID("artifact");
+    rivalCompanion.sha256 = "4".repeat(64);
+    rivalCompanion.objectKey = `maps/${rival.legacyMapId}/topography-ios-v1/${rival.contentReceipt}/${rivalCompanion.sha256}.btopo`;
+    rivalCompanion.companionRequirements = {
+      ...rivalCompanion.companionRequirements!,
+      intermediateSha256: "4".repeat(64),
+    };
+    await finalizePublication(
+      env,
+      rival,
+      rival.publicationId,
+      await sha256Hex(JSON.stringify(rival)),
+      null,
+      verifyTestArtifact,
+    );
+    for (const missing of [false, true]) {
+      // So does a missing one.
+      if (missing) await quarantine("development");
+      const fallback = await grant();
+      expect(fallback.artifact.artifactId).toBe(stream.artifactId);
+      expect(fallback.companion?.artifact.artifactId).toBe(
+        companion.artifactId,
+      );
+      const companionToken = new URL(fallback.companion!.downloadURL).pathname
+        .split("/")
+        .at(-1)!;
+      expect(
+        (await resolveDownloadGrant(env, companionToken, "library")).id,
+      ).toBe(companion.artifactId);
+    }
+
+    // With no single companion in any tier, the grant still fails closed.
+    await quarantine("production");
+    await expect(grant()).rejects.toMatchObject({
+      status: 409,
+      message: "topography companion is unavailable",
+    });
+    // Later tests share this database, and retention passes take the first
+    // quarantined artifact they find.
+    await env.DB.prepare(
+      "UPDATE artifacts SET state = 'live' WHERE map_entry_id = ? AND state = 'quarantined'",
+    )
+      .bind(source.mapEntryId)
+      .run();
+  });
+
   it("delivery stop rejects new grants and existing bearer resolution, failing closed when unset", async () => {
     const library = await seededLibrary();
     const grant = await createLibraryDownloadGrant(
@@ -2428,6 +2558,69 @@ describe("validation", () => {
     reject(undeclared, "non-topographic map contains a companion artifact");
   });
 
+  it("accepts only the renderer profiles the map backend publishes", () => {
+    const retarget = (
+      source: ReturnType<typeof publication>,
+      rendererFormatVersion: number,
+      features: string[],
+      renderer = "esp32-fmb",
+    ) => {
+      const candidate = structuredClone(source);
+      candidate.renderer = renderer;
+      candidate.rendererFormatVersion = rendererFormatVersion;
+      candidate.features = features;
+      candidate.artifacts[0].readerRequirements = {
+        ...candidate.artifacts[0].readerRequirements!,
+        renderer,
+        rendererFormatVersion,
+        requiredFeatures: features,
+      };
+      return candidate as unknown as Record<string, unknown>;
+    };
+    const plain = publication();
+    const contoured = topographicPublication();
+    // Contour-free targets 1 and 2 predate the durable contract but are
+    // still valid publications.
+    for (const [version, features] of [
+      [1, []],
+      [2, ["street-labels"]],
+      [3, ["3d-buildings", "street-labels"]],
+    ] as const) {
+      expect(
+        validatePublication(retarget(plain, version, [...features])),
+      ).toMatchObject({ rendererFormatVersion: version, features });
+    }
+    expect(contoured.features).toEqual([
+      "3d-buildings",
+      "contours",
+      "street-labels",
+    ]);
+    expect(
+      developmentCombinedPublication("profile-poi", false).features,
+    ).toEqual(["3d-buildings", "map-pois", "street-labels"]);
+    expect(
+      developmentCombinedPublication("profile-poi-contours").features,
+    ).toEqual(combinedFeatures);
+
+    // Each candidate otherwise satisfies the stream and companion contract.
+    const reject = (value: Record<string, unknown>) =>
+      expect(() => validatePublication(value)).toThrow(
+        "renderer features are not publishable",
+      );
+    reject(
+      retarget(contoured, 3, ["3d-buildings", "contours", "street-labels"]),
+    );
+    reject(
+      retarget(contoured, 5, ["3d-buildings", "contours", "street-labels"]),
+    );
+    reject(retarget(plain, 4, ["3d-buildings", "street-labels"]));
+    reject(retarget(plain, 5, ["map-pois", "street-labels"]));
+    reject(retarget(plain, 3, ["3d-buildings", "map-pois", "street-labels"]));
+    reject(retarget(plain, 1, ["street-labels"]));
+    reject(retarget(plain, 6, ["3d-buildings", "street-labels"]));
+    reject(retarget(plain, 3, ["3d-buildings", "street-labels"], "fmb"));
+  });
+
   it("normalizes aliases using the cross-platform Unicode contract", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
     expect(normalizeAlias("\uFEFFMap name\uFEFF")).toBe("Map name");
@@ -2821,28 +3014,50 @@ describe("catalog lifecycle boundaries", () => {
     });
   });
 
-  it("gates combined POI contour maps by their contours layer", async () => {
-    const candidate = developmentCombinedPublication("combined-gated");
-    await finalizePublication(
-      env,
-      candidate,
-      candidate.publicationId,
-      await sha256Hex(JSON.stringify(candidate)),
-      null,
-      verifyTestArtifact,
-    );
-    await expect(
-      createPromotionGrant(env, candidate.mapEntryId),
-    ).rejects.toMatchObject({
-      status: 409,
-      message: "topographic promotion is not qualified",
-    });
-    // Target-5 POI maps stay outside automatic production promotion even
-    // after contour promotion is qualified.
+  it("keeps target-5 POI maps out of every promotion entry point", async () => {
     const enabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "1" };
-    expect(
-      (await listPromotionCandidates(enabled, null, 100)).mapEntryIds,
-    ).not.toContain(candidate.mapEntryId);
+    for (const candidate of [
+      developmentCombinedPublication("poi-gated", false),
+      developmentCombinedPublication("combined-gated"),
+    ]) {
+      await finalizePublication(
+        env,
+        candidate,
+        candidate.publicationId,
+        await sha256Hex(JSON.stringify(candidate)),
+        null,
+        verifyTestArtifact,
+      );
+      // Backend promotion refuses target 5, so neither discovery nor a
+      // manual grant may lease one, whatever its contour qualification.
+      for (const promotionEnv of [env, enabled]) {
+        expect(
+          (await listPromotionCandidates(promotionEnv, null, 100)).mapEntryIds,
+        ).not.toContain(candidate.mapEntryId);
+        await expect(
+          createPromotionGrant(promotionEnv, candidate.mapEntryId),
+        ).rejects.toMatchObject({
+          status: 409,
+          message: "renderer target is not promotable",
+        });
+      }
+      const state = await env.DB.prepare(
+        `SELECT me.delivery_state,
+                (SELECT COUNT(*) FROM promotion_leases lease
+                  WHERE lease.map_entry_id = me.id) AS leases,
+                (SELECT COUNT(*) FROM download_grants grant_row
+                   JOIN artifacts a ON a.id = grant_row.artifact_id
+                  WHERE a.map_entry_id = me.id) AS grants
+           FROM map_entries me WHERE me.id = ?`,
+      )
+        .bind(candidate.mapEntryId)
+        .first<{ delivery_state: string; leases: number; grants: number }>();
+      expect(state).toEqual({
+        delivery_state: "development",
+        leases: 0,
+        grants: 0,
+      });
+    }
   });
 
   it("promotes a qualified topographic stream with its exact companion", async () => {

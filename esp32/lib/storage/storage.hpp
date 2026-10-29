@@ -135,11 +135,13 @@ private:
   std::atomic<bool> shutdownStarted_{false};
   std::atomic<bool> shutdownComplete_{false};
   static void shutdownTask(void *context);
-  // True when /sdcard is currently backed by the main-branch FFat fallback.
-  // Diagnostics must not treat this as removable-SD availability, but a
-  // failed SD retry must restore it so the rest of the application keeps the
-  // same fallback behavior as the non-diagnostics firmware.
+  // True when /sdcard is backed by the FFat fallback for this boot. It holds
+  // bounded diagnostics and other device files, never maps.
   std::atomic<bool> internalFallbackMounted{false};
+  // Set once by pinBackendForBoot(), before any file owner starts. Afterwards
+  // no request may unmount, remount or replace /sdcard until shutdown.
+  std::atomic<bool> backendPinned_{false};
+  std::atomic<bool> mapStorageAvailable_{false};
   // Recorder health is separate from the physical mount. A write fault must
   // not unmount SD beneath map/font readers or an in-flight diagnostics GET.
   std::atomic<bool> diagnosticsSdHealthy{true};
@@ -153,6 +155,7 @@ private:
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
   sdmmc_card_t *card;
   SemaphoreHandle_t mountMutex = nullptr;
+  esp_err_t mountRemovableStorage();
 
 public:
   uint32_t mountGeneration() const { return mountGeneration_.load(std::memory_order_acquire); }
@@ -161,17 +164,27 @@ public:
   // Called only after transfer, renderer and diagnostics producer ACKs.
   // Starts a dedicated internal-stack unmount task; never waits on the UI.
   bool pollShutdownQuiescence();
+  // Boot-only mounts: setup() tries the card, then FFat, then pins the result.
+  // Both refuse once the backend is pinned.
   esp_err_t initSD();
-  // Remount the removable card when requested. Existing callers retain the
-  // FFat fallback by default. Diagnostics keeps whichever backend owns
-  // /sdcard stable for the complete boot.
-  bool ensureSdMounted(bool allowInternalFallback = true);
-  void markSdUnavailable();
+  // Called once by setup() after its mount attempts and before any file owner
+  // starts. /sdcard then keeps this backend until the shutdown barrier; a card
+  // that fails, is removed or is inserted later is adopted after a restart.
+  void pinBackendForBoot();
+  bool backendPinned() const;
+  // True only when this boot pinned removable SD. Map data never uses FFat.
+  bool mapStorageAvailable() const;
+  // Root for every map path. It is the removable mount when
+  // mapStorageAvailable(), and otherwise a path that no filesystem serves, so
+  // a map lookup cannot reach the FFat fallback that shares /sdcard.
+  const char *mapStorageRoot() const;
+  // Validates the pinned removable mount without mounting, remounting or
+  // falling back. A failed or removed card is marked unavailable.
+  bool ensureSdMounted();
   bool hasInternalFallbackMounted() const;
   StorageBackend storageBackend() const;
   const char *storageBackendName() const;
   bool storagePowerCycleRequired() const;
-  bool canRetryRemovableSd() const;
   uint64_t removableSdFreeBytes() const;
   bool tryRemovableSdFreeBytes(uint64_t &bytes) const;
   ride_diagnostics::transfer_policy::StoragePreparation
@@ -191,6 +204,17 @@ public:
   // already-closing streams return EOF rather than closing a foreign handle.
   FILE *open(const char *path, const char *mode);
   int close(FILE *file);
+  // Raw descriptors for owners that must keep failing safely under memory
+  // pressure. fopen() aborts when newlib cannot allocate its stream lock from
+  // internal RAM; open(), write() and fsync() only return errors. A
+  // descriptor holds the same shutdown admission from open to close.
+  int openDescriptor(const char *path, int flags);
+  int closeDescriptor(int descriptor);
+  size_t writeDescriptor(int descriptor, const uint8_t *buffer, size_t size);
+  StorageReadEvidence readDescriptor(int descriptor, uint8_t *buffer,
+                                     size_t size);
+  // fsync commits FAT data, allocation and directory size.
+  int syncDescriptor(int descriptor);
   bool exists(const char *path);
   bool mkdir(const char *path);
   bool remove(const char *path);

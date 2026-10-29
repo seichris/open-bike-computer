@@ -32,9 +32,8 @@
 namespace map_transfer {
 namespace {
 
-struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
 struct DirectoryCloser { void operator()(DIR *dir) const noexcept { ::closedir(dir); } };
-using FileHandle = std::unique_ptr<FILE, FileCloser>;
+using FileHandle = descriptor_file::File;
 
 struct ActivationOperationWorkspace {
   MapOperationStorage storage;
@@ -4247,17 +4246,17 @@ bool MapTransferInstaller::mkdirs(const std::string &path) const {
 
 bool MapTransferInstaller::copyFile(const std::string &from,
                                     const std::string &to) const {
-  FileHandle input(std::fopen(from.c_str(), "rb"));
+  FileHandle input(from.c_str(), O_RDONLY);
   if (!input) return false;
-  FileHandle output(std::fopen(to.c_str(), "wb"));
+  FileHandle output(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   if (!output) return false;
   std::array<char, 4096> buffer = {};
-  size_t count = 0;
-  while ((count = std::fread(buffer.data(), 1, buffer.size(), input.get())) > 0) {
-    if (std::fwrite(buffer.data(), 1, count, output.get()) != count) return false;
+  ssize_t count = 0;
+  while ((count = descriptor_file::readSome(input.get(), buffer.data(), buffer.size())) > 0) {
+    if (!descriptor_file::writeAll(output.get(), buffer.data(), static_cast<size_t>(count))) return false;
   }
-  if (std::ferror(input.get()) || std::fflush(output.get()) != 0) return false;
-  return std::fclose(output.release()) == 0;
+  if (count < 0) return false;
+  return output.close() == 0;
 }
 
 bool MapTransferInstaller::copyTree(const std::string &from,
@@ -4536,12 +4535,11 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     if (!fileSize(path, size) || size == 0 ||
         size > map_block_format::kMaximumBlockBytes)
       return fail("label_block_open", "could not read label-aware FMB block");
-    FileHandle input(std::fopen(path.c_str(), "rb"));
+    FileHandle input(path.c_str(), O_RDONLY);
     if (!input)
       return fail("label_block_open", "could not read label-aware FMB block");
     std::vector<uint8_t> bytes(static_cast<size_t>(size));
-    const bool readOk = std::fread(bytes.data(), 1, bytes.size(), input.get()) == bytes.size() &&
-                        !std::ferror(input.get());
+    const bool readOk = descriptor_file::readExact(input.get(), bytes.data(), bytes.size());
     const uint8_t expectedBlockVersion =
         manifest.formatVersion == 5
             ? 6
@@ -5034,12 +5032,13 @@ bool MapTransferInstaller::fileSha256Hex(const std::string &path,
     std::array<uint8_t, 1024> buffer;
   };
   const auto workspace = makeActivationWorkspace<Workspace>();
-  FileHandle input(std::fopen(path.c_str(), "rb"));
+  FileHandle input(path.c_str(), O_RDONLY);
   if (!input) return false;
   auto &sha = workspace->sha;
   auto &buffer = workspace->buffer;
-  size_t count = 0, progressBytes = 0;
-  while ((count = std::fread(buffer.data(), 1, buffer.size(), input.get())) > 0) {
+  size_t progressBytes = 0;
+  ssize_t count = 0;
+  while ((count = descriptor_file::readSome(input.get(), buffer.data(), buffer.size())) > 0) {
     sha.update(buffer.data(), count);
     progressBytes += count;
     if (storageProgressCallback_ != nullptr && progressBytes >= 64U * 1024U) {
@@ -5047,7 +5046,7 @@ bool MapTransferInstaller::fileSha256Hex(const std::string &path,
       progressBytes = 0;
     }
   }
-  if (std::ferror(input.get())) return false;
+  if (count < 0) return false;
   if (storageProgressCallback_ != nullptr && progressBytes != 0)
     storageProgressCallback_(storageProgressContext_);
   hex = sha.finalHex();
@@ -5059,22 +5058,24 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
   if (!mkdirs(dirnameOf(path)))
     return false;
   storageMutationBoundary("open_truncate", path, false);
-  FileHandle output(std::fopen(path.c_str(), "wb"));
+  FileHandle output(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   storageMutationBoundary("open_truncate", path, true);
   if (!output) return false;
   storageMutationBoundary("write", path, false);
-  const bool written = std::fwrite(text.data(), 1, text.size(), output.get()) == text.size();
+  const bool written = descriptor_file::writeAll(output.get(), text.data(), text.size());
   storageMutationBoundary("write", path, true);
   storageMutationBoundary("flush", path, false);
-  const bool flushed = std::fflush(output.get()) == 0;
+  // Raw writes have no userspace buffer; retain the mutation boundary
+  // used by recovery fault tests, then require the explicit fsync below.
+  const bool flushed = true;
   storageMutationBoundary("flush", path, true);
   if (!written || !flushed) return false;
   storageMutationBoundary("fsync", path, false);
-  const bool synced = ::fsync(::fileno(output.get())) == 0;
+  const bool synced = ::fsync(output.get()) == 0;
   storageMutationBoundary("fsync", path, true);
   if (!synced) return false;
   storageMutationBoundary("close", path, false);
-  const bool closed = std::fclose(output.release()) == 0;
+  const bool closed = output.close() == 0;
   storageMutationBoundary("close", path, true);
   // SDK success alone is not enough to publish boot-eligible metadata. Detect
   // silent/partial writes (including a zeroed stdio-sized prefix) while the

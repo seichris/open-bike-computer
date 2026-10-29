@@ -143,6 +143,13 @@ inline bool onMapRenderWorkerTask() {
          xTaskGetCurrentTaskHandle() == gMapRenderWorkerTaskHandle;
 }
 
+// Map files live only on removable SD (Storage::mapStorageAvailable). On a
+// no-card boot FFat owns /sdcard, and reading it from this renderer's PSRAM
+// stack would trip ESP-IDF's cache-disabled stack check. Every block, terrain,
+// directory, font and Nearby lookup and every queued map operation checks
+// this first, before any filesystem call.
+bool mapFilesAvailable() { return storage.mapStorageAvailable(); }
+
 bool shouldCancelMapRenderWork() {
   if (onMapRenderWorkerTask()) {
     const uint32_t nowUs = micros();
@@ -189,7 +196,7 @@ constexpr uint16_t rgb565FromRgb888(uint32_t rgb) {
 
 bool findMapBlock(const std::string &directory, std::string &basePath,
                   size_t &visited, size_t depth) {
-  if (depth > 6 || visited >= 65536)
+  if (!mapFilesAvailable() || depth > 6 || visited >= 65536)
     return false;
   std::unique_ptr<DIR, decltype(&::closedir)> directoryOwner(
       ::opendir(directory.c_str()), &::closedir);
@@ -1225,6 +1232,12 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
   ESP_LOGI(TAG, "readMapBlock: %s", fileName.c_str());
   char str[30];
   MapBlock *mblock = new MapBlock();
+  if (!mapFilesAvailable()) {
+    // Same outcome as a missing block, without opening any file.
+    Maps::isMapFound = false;
+    mblock->inView = false;
+    return mblock;
+  }
   const uint32_t blockStartMs = MAPIO_TIME_MS();
 
   // Try Binary first (.fmb) then ASCII (.fmp)
@@ -4339,8 +4352,10 @@ void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
   hint_dsc.opa = LV_OPA_COVER;
   hint_dsc.font = &lv_font_montserrat_16;
   hint_dsc.align = LV_TEXT_ALIGN_CENTER;
+  // Storage is chosen once per boot, so a newly inserted card needs a restart.
+  // Keep that hint on one line: a second line sits under the rider marker.
   hint_dsc.text = sdPresent ? "Download a map\nin the Bicino app"
-                            : "Insert a microSD card";
+                            : "Insert a microSD card and restart";
   lv_area_t hint_area = {16, (int16_t)(h / 2 - 6), (int16_t)(w - 17),
                          (int16_t)(h / 2 + 58)};
   lv_draw_label(&layer, &hint_dsc, &hint_area);
@@ -4988,6 +5003,9 @@ bool Maps::startRenderWorker() {
   // Wi-Fi driver before it has a chance to report an allocation failure. The
   // AMOLED boards have PSRAM and their SDK configuration explicitly permits
   // external task stacks, so reserve internal RAM for radio/driver work.
+  // ESP-IDF allows that only while the stack is never used with the flash
+  // cache disabled. This worker reads removable SD alone: map files never use
+  // the FFat fallback (see mapFilesAvailable()), whose reads disable the cache.
   // IDLE0 is the only production TWDT subscriber. The renderer runs one level
   // above idle for deterministic progress, while its cooperative checkpoints
   // block every 10 ms to give IDLE0 a bounded watchdog-feeding window. FatFs
@@ -6392,6 +6410,10 @@ void Maps::initMap(uint16_t mapHeight, uint16_t mapWidth, uint16_t mapFull) {
   buildingFailureRetryCooldown.clear();
 }
 
+void Maps::bindMapStorageRoot(const char *root) {
+  vectorMapFolder = String(root) + "/VECTMAP/";
+}
+
 bool Maps::setVectorMapFolder(const std::string &folder) {
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
@@ -6418,6 +6440,10 @@ bool Maps::setVectorMapFolder(const std::string &folder) {
 }
 
 bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
+  if (!mapFilesAvailable()) {
+    ESP_LOGE(TAG, "Vector map root switch refused: no map storage");
+    return false;
+  }
   String normalized(folder.c_str());
   if (!normalized.endsWith("/"))
     normalized += "/";
@@ -6544,6 +6570,11 @@ map_probe_diagnostics::Result
 Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
   const uint32_t startedMs = millis();
   map_probe_diagnostics::Result result;
+  if (!mapFilesAvailable()) {
+    result.code = map_probe_diagnostics::Code::RootUnavailable;
+    result.elapsedMs = millis() - startedMs;
+    return result;
+  }
   std::string normalized = folder;
   while (normalized.size() > 1 && normalized.back() == '/')
     normalized.pop_back();
@@ -6612,6 +6643,8 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 
 bool Maps::requestStorageControl(void (*work)(void *), void *context) {
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
+  // Queued map operations read and write map storage; refuse them up front.
+  if (!mapFilesAvailable()) return false;
   if (work == nullptr || renderWorkerShutdown.load(std::memory_order_acquire))
     return false;
   if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
@@ -6732,7 +6765,9 @@ bool Maps::processPendingNearbySearch() {
   map_nearby_storage::SearchResult result;
   bool complete = false;
   try {
-    if (nearbyCoverageBlocks.empty()) {
+    // The POI index is map data, so a no-card boot answers Unavailable
+    // before any cursor can open a file.
+    if (!mapFilesAvailable() || nearbyCoverageBlocks.empty()) {
       result.status = map_nearby_storage::Status::Unavailable;
       complete = true;
     } else {
@@ -6816,6 +6851,7 @@ bool Maps::processPendingStorageControl() {
 
 bool Maps::requestVectorMapFolderActivation(const std::string &folder) try {
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
+  if (!mapFilesAvailable()) return false; // Activation probes map storage.
   std::string ownedFolder = folder; // Allocate before taking the render mutex.
   if (folder.empty())
     return false;

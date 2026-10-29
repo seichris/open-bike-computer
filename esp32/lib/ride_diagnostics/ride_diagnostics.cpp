@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -23,6 +24,7 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../storage/storage.hpp"
 #include "../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
+#include "../utils/src/task_data_placement.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../boot_diagnostics/boot_diagnostics.hpp"
@@ -137,7 +139,10 @@ SemaphoreHandle_t producerMutex = nullptr;
 SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
 SemaphoreHandle_t faultCapsuleFlushMutex = nullptr;
-FILE *activeFile = nullptr;
+// A raw descriptor, never a FILE: newlib aborts in fopen() when it cannot
+// allocate a stream lock, and the writer must keep failing safely under
+// memory pressure.
+int activeDescriptor = -1;
 mbedtls_sha256_context activeHash{};
 bool activeHashValid = false;
 uint32_t activeFirstSequence = 0, activeLastSequence = 0;
@@ -181,6 +186,13 @@ void noteMaximum(std::atomic<uint32_t> &maximum, uint32_t value) {
              previous, value, std::memory_order_relaxed)) {
   }
 }
+
+void noteMinimum(std::atomic<uint32_t> &minimum, uint32_t value) {
+  uint32_t previous = minimum.load(std::memory_order_relaxed);
+  while (value < previous && !minimum.compare_exchange_weak(
+             previous, value, std::memory_order_relaxed)) {
+  }
+}
 // When the reserved critical lane overflows, critical records may spill into
 // the normal queue. Count protected entries so a full mixed queue can evict
 // its oldest normal entry without sacrificing a spilled critical record.
@@ -214,8 +226,20 @@ uint32_t storageBootFloor = 1;
 uint32_t transitionMountGeneration = 0;
 uint32_t captureGeneration = 0;
 uint32_t lastCheckpointMs = 0;
-ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
-ChunkFile filePruneCandidates[kFilePruneBatch] = {};
+// Retention scratch is used only by the writer task's pruning, never from an
+// ISR, a flash-cache-disabled region or a callback, so it lives in PSRAM.
+BICINO_TASK_DATA ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
+BICINO_TASK_DATA ChunkFile filePruneCandidates[kFilePruneBatch] = {};
+// Writer memory admission. Deferred I/O is reported, never silent: episodes,
+// the longest one and the lowest DMA headroom that caused a deferral.
+std::atomic<uint32_t> memoryDeferrals{0};
+std::atomic<uint32_t> maximumMemoryDeferralMs{0};
+std::atomic<uint32_t> memoryDeferralMinimumDmaFree{UINT32_MAX};
+std::atomic<uint32_t> memoryDeferralMinimumDmaLargest{UINT32_MAX};
+uint32_t lastReportedMemoryDeferrals = 0;
+uint32_t lastReportedMemoryDeferralMs = 0;
+uint32_t lastReportedMemoryDmaFree = UINT32_MAX;
+uint32_t lastReportedMemoryDmaLargest = UINT32_MAX;
 
 struct SemaphoreGuard {
   explicit SemaphoreGuard(SemaphoreHandle_t handleRef) : handle(handleRef) {
@@ -282,9 +306,11 @@ bool removeChunkFile(const ChunkFile &file) {
            static_cast<unsigned long>(file.boot),
            static_cast<unsigned long>(file.chunk));
   if (!storage->remove(path)) return false;
-  const std::string catalog = std::string(path) + ".cat2";
-  (void)storage->remove(catalog.c_str());
-  (void)storage->remove((catalog + ".tmp").c_str());
+  char catalog[catalog_v2::kPathBytes] = {};
+  if (catalog_v2::catalogPath(path, catalog, sizeof(catalog)))
+    (void)storage->remove(catalog);
+  if (catalog_v2::catalogPath(path, catalog, sizeof(catalog), true))
+    (void)storage->remove(catalog);
   return true;
 }
 
@@ -557,7 +583,7 @@ enum class ActiveFileCloseResult : uint8_t {
 };
 
 ActiveFileCloseResult closeActiveFile() {
-  if (activeFile == nullptr)
+  if (activeDescriptor < 0)
     return ActiveFileCloseResult::Ready;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
@@ -565,17 +591,19 @@ ActiveFileCloseResult closeActiveFile() {
       runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
       nextSequence.load(std::memory_order_relaxed));
 #endif
-  const int flushResult =
-      storage != nullptr ? storage->sync(activeFile) : fflush(activeFile);
-  const int closeResult =
-      storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
+  const int flushResult = storage != nullptr
+                              ? storage->syncDescriptor(activeDescriptor)
+                              : ::fsync(activeDescriptor);
+  const int closeResult = storage != nullptr
+                              ? storage->closeDescriptor(activeDescriptor)
+                              : ::close(activeDescriptor);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting,
       nextSequence.load(std::memory_order_relaxed));
 #endif
-  activeFile = nullptr;
+  activeDescriptor = -1;
   if (flushResult != 0)
     return ActiveFileCloseResult::FlushFailed;
   if (closeResult != 0)
@@ -644,7 +672,7 @@ bool ensurePaths() {
 }
 
 bool openActiveFile() {
-  if (activeFile != nullptr)
+  if (activeDescriptor >= 0)
     return true;
   if (!ensurePaths())
     return false;
@@ -662,8 +690,9 @@ bool openActiveFile() {
       activeChunkSnapshot.store(activeChunk);
       continue;
     }
-    activeFile = storage->open(activePath, "a");
-    if (activeFile == nullptr)
+    activeDescriptor =
+        storage->openDescriptor(activePath, O_WRONLY | O_CREAT | O_APPEND);
+    if (activeDescriptor < 0)
       return false;
     activeFileBytes = static_cast<uint32_t>(existingBytes);
     mbedtls_sha256_free(&activeHash);
@@ -901,7 +930,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
   }
-  if (activeFile == nullptr && !prepareChunkWriteReserve()) {
+  if (activeDescriptor < 0 && !prepareChunkWriteReserve()) {
     storageErrors.fetch_add(1);
     updateFaultCapsule(Level::Error, "storage", "free_space_reserved", true);
     return false;
@@ -933,9 +962,9 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
   }
-  const size_t result = storage->write(activeFile,
-                                       reinterpret_cast<const uint8_t *>(event.line),
-                                       event.length);
+  const size_t result = storage->writeDescriptor(
+      activeDescriptor, reinterpret_cast<const uint8_t *>(event.line),
+      event.length);
   if (result != event.length) {
     abandonActiveChunkAfterUncertainWrite();
     storage->markDiagnosticsSdUnavailable();
@@ -958,7 +987,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
         event.sequence);
 #endif
-    if (storage->sync(activeFile) != 0) {
+    if (storage->syncDescriptor(activeDescriptor) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
       storageErrors.fetch_add(1);
@@ -1127,13 +1156,64 @@ bool completeSealIfReady() {
   return true;
 }
 
+storage_policy::MemoryHeadroom backgroundIoHeadroom() {
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+  };
+}
+
+struct MemoryDeferral {
+  bool active = false;
+  uint32_t startedMs = 0;
+  storage_policy::MemoryHeadroom lowest{};
+};
+
+// One episode spans consecutive writer passes whose medium I/O was refused
+// for memory. Its end is printed; process() records the cumulative counts
+// once the queue drains, so a pause is evidence rather than a silent gap.
+void updateMemoryDeferral(MemoryDeferral &deferral, bool refused,
+                          storage_policy::MemoryHeadroom headroom,
+                          uint32_t nowMs) {
+  if (refused) {
+    noteMinimum(memoryDeferralMinimumDmaFree, headroom.dmaFree);
+    noteMinimum(memoryDeferralMinimumDmaLargest, headroom.dmaLargest);
+    if (!deferral.active) {
+      deferral.active = true;
+      deferral.startedMs = nowMs;
+      deferral.lowest = headroom;
+      memoryDeferrals.fetch_add(1, std::memory_order_relaxed);
+    }
+    deferral.lowest.dmaFree = std::min(deferral.lowest.dmaFree, headroom.dmaFree);
+    deferral.lowest.dmaLargest =
+        std::min(deferral.lowest.dmaLargest, headroom.dmaLargest);
+    return;
+  }
+  if (!deferral.active)
+    return;
+  deferral.active = false;
+  const uint32_t durationMs = static_cast<uint32_t>(nowMs - deferral.startedMs);
+  noteMaximum(maximumMemoryDeferralMs, durationMs);
+  // Format on the stack: Print::printf mallocs for lines over 63 bytes.
+  char line[112] = {};
+  snprintf(line, sizeof(line),
+           "RIDE_DIAGNOSTICS: memory_deferred durationMs=%lu dmaFree=%lu "
+           "dmaLargest=%lu queued=%u",
+           static_cast<unsigned long>(durationMs),
+           static_cast<unsigned long>(deferral.lowest.dmaFree),
+           static_cast<unsigned long>(deferral.lowest.dmaLargest),
+           static_cast<unsigned>(queuedDepth()));
+  Serial.println(line);
+}
+
 void writerTask(void *) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting);
 #endif
-  uint32_t lastMountAttemptMs = 0;
+  storage_policy::RecoveryBackoff recovery;
+  MemoryDeferral deferral;
   lastStorageAvailable.store(
       storage != nullptr && storage->getDiagnosticsSdLoaded(),
       std::memory_order_release);
@@ -1148,10 +1228,40 @@ void writerTask(void *) {
     const bool transitionPaused =
         storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire);
-    if (queueMutationMutex != nullptr &&
+    // Medium I/O borrows internal DMA memory (see storage_policy). Sample it
+    // at most once per pass, only for I/O this pass would start, and never
+    // inside the producers' queue fence.
+    storage_policy::MemoryHeadroom headroom{};
+    bool sampled = false;
+    uint32_t sampledAtMs = 0;
+    const auto ioAdmitted = [&headroom, &sampled, &sampledAtMs]() {
+      if (!sampled) {
+        headroom = backgroundIoHeadroom();
+        sampledAtMs = millis();
+        sampled = true;
+      }
+      return storage_policy::admitsBackgroundIo(headroom);
+    };
+    // A healthy recorder writes the next record now. An unavailable one only
+    // counts the record's loss, which needs no memory.
+    const bool recorderHealthy =
+        storage != nullptr && storage->getDiagnosticsSdLoaded();
+    const bool recordsWaiting = !transitionPaused && queuedDepth() != 0;
+    const bool memoryWait = recorderHealthy && recordsWaiting && !ioAdmitted();
+    const bool mayDequeue =
+        !transitionPaused && (!recorderHealthy || (recordsWaiting && !memoryWait));
+    if (memoryWait) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::heartbeat(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
+#endif
+      // Records stay queued; overflow is counted as queue_full. Producer
+      // notifications cannot shorten this wait into a sampling loop.
+      vTaskDelay(pdMS_TO_TICKS(storage_policy::kBackgroundIoRetryMs));
+    } else if (queueMutationMutex != nullptr &&
         xSemaphoreTake(queueMutationMutex, 1) == pdTRUE) {
       hasNext = peekNextEvent(event, selected);
-      if (hasNext && !transitionPaused &&
+      if (hasNext && mayDequeue &&
           xQueueReceive(selected, &event, 0) == pdTRUE) {
         if (selected == normalQueue && event.critical) {
           const uint16_t spilled =
@@ -1183,7 +1293,8 @@ void writerTask(void *) {
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
 #endif
-    } else if ((!hasNext && !lockMissed) || transitionPaused) {
+    } else if (!memoryWait &&
+               ((!hasNext && !lockMissed) || transitionPaused)) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
@@ -1197,7 +1308,7 @@ void writerTask(void *) {
       continue;
     // A map-storage remount owns the backend after the seal completes. Keep
     // ordinary admission fenced until the caller resumes the writer so no
-    // FILE can be opened between the seal and SD.end()/FFat.end().
+    // file can be opened between the seal and SD.end()/FFat.end().
     if (storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire)) {
       if (!storageTransitionIdle.load(std::memory_order_acquire)) {
@@ -1208,16 +1319,20 @@ void writerTask(void *) {
       continue;
     }
     const uint32_t nowMs = millis();
-    if (activeFile != nullptr &&
-        (checkpointRequested.exchange(false) ||
-         static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {
+    // A deferred checkpoint keeps its request; the written bytes stay in the
+    // open file until headroom returns.
+    if (activeDescriptor >= 0 &&
+        (checkpointRequested.load(std::memory_order_acquire) ||
+         static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) &&
+        ioAdmitted()) {
+      checkpointRequested.store(false, std::memory_order_release);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      if (storage->sync(activeFile) == 0) {
+      if (storage->syncDescriptor(activeDescriptor) == 0) {
         lastCheckpointMs = nowMs;
       } else {
         abandonActiveChunkAfterUncertainWrite();
@@ -1232,18 +1347,25 @@ void writerTask(void *) {
           nextSequence.load(std::memory_order_relaxed));
 #endif
     }
-    const bool recoveryAllowed = storageRecoveryAllowedProbe == nullptr ||
-                                 storageRecoveryAllowedProbe();
-    if (recoveryAllowed && storage->canRetryDiagnosticsSd() &&
-        static_cast<uint32_t>(nowMs - lastMountAttemptMs) >= 5000U) {
-      lastMountAttemptMs = nowMs;
+    // Recovery probes the pinned backend with a create/write/fsync/unlink.
+    // It waits a backoff interval after the fault, is never started without
+    // headroom, and asks the transfer gate only when a probe is actually due.
+    if (!storage->canRetryDiagnosticsSd()) {
+      recovery.reset();
+    } else if (recovery.due(nowMs) &&
+               (storageRecoveryAllowedProbe == nullptr ||
+                storageRecoveryAllowedProbe()) &&
+               ioAdmitted()) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsRecovery,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      storage->ensureDiagnosticsSdMounted();
+      if (storage->ensureDiagnosticsSdMounted())
+        recovery.reset();
+      else
+        recovery.probeFailed(nowMs);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
@@ -1251,6 +1373,9 @@ void writerTask(void *) {
           nextSequence.load(std::memory_order_relaxed));
 #endif
     }
+    updateMemoryDeferral(deferral,
+                         sampled && !storage_policy::admitsBackgroundIo(headroom),
+                         headroom, sampled ? sampledAtMs : millis());
     const bool available = storage->getDiagnosticsSdLoaded();
     const bool wasAvailable =
         lastStorageAvailable.exchange(available, std::memory_order_acq_rel);
@@ -1547,6 +1672,35 @@ void process(uint32_t nowMs) {
           static_cast<unsigned>(maxQueueDepth.load(std::memory_order_relaxed)));
       if (record(Level::Info, "logger", "loss", fields))
         lastReportedDrops[index] = count;
+    }
+    // Writer memory deferrals are cumulative for the boot, like the losses.
+    // Exported fields are a closed vocabulary that installed apps verify, so
+    // this reuses existing names: episodes, the longest one in ms, and the
+    // lowest DMA free/largest values that caused a deferral.
+    const uint32_t deferrals = memoryDeferrals.load(std::memory_order_relaxed);
+    const uint32_t duration = maximumMemoryDeferralMs.load(std::memory_order_relaxed);
+    const uint32_t minimumFree = memoryDeferralMinimumDmaFree.load(std::memory_order_relaxed);
+    const uint32_t minimumLargest = memoryDeferralMinimumDmaLargest.load(std::memory_order_relaxed);
+    // Completion and a deeper trough can change evidence without starting a
+    // new episode. Retry the complete snapshot until admission succeeds.
+    if (deferrals != lastReportedMemoryDeferrals ||
+        duration != lastReportedMemoryDeferralMs ||
+        minimumFree != lastReportedMemoryDmaFree ||
+        minimumLargest != lastReportedMemoryDmaLargest) {
+      char fields[160] = {};
+      snprintf(fields, sizeof(fields),
+          "{\"eventCount\":%lu,\"durationMs\":%lu,"
+          "\"minimumFreeBytes\":%lu,\"minimumLargestBytes\":%lu}",
+          static_cast<unsigned long>(deferrals),
+          static_cast<unsigned long>(duration),
+          static_cast<unsigned long>(minimumFree),
+          static_cast<unsigned long>(minimumLargest));
+      if (record(Level::Warning, "storage", "memory_deferred", fields)) {
+        lastReportedMemoryDeferrals = deferrals;
+        lastReportedMemoryDeferralMs = duration;
+        lastReportedMemoryDmaFree = minimumFree;
+        lastReportedMemoryDmaLargest = minimumLargest;
+      }
     }
   }
   if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {
@@ -2194,7 +2348,7 @@ bool prepareForShutdown(uint32_t timeoutMs) {
 #else
   // Maintenance/partial startup never created a writer or opened a chunk.
   // No SD presence is required to prove that this recorder has no IO to drain.
-  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+  if (writerTaskHandle == nullptr && activeDescriptor < 0) {
     storageTransitionRequested.store(true, std::memory_order_release);
     return true;
   }
@@ -2203,7 +2357,7 @@ bool prepareForShutdown(uint32_t timeoutMs) {
   checkpointRequested.store(true);
   // This is a one-way storage transition. Once shutdown begins, keep the
   // writer paused after its seal through peripheral power-off/deep sleep so a
-  // post-cutoff producer cannot reopen a FILE beneath SPI teardown.
+  // post-cutoff producer cannot reopen a file beneath SPI teardown.
   storageTransitionRequested.store(true, std::memory_order_release);
   const bool sealed = sealActiveChunk(timeoutMs);
   if (!sealed)
@@ -2229,7 +2383,7 @@ bool pollShutdownQuiescence() {
 #if !PERSISTENT_RIDE_DIAGNOSTICS
   return true;
 #else
-  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+  if (writerTaskHandle == nullptr && activeDescriptor < 0) {
     storageTransitionRequested.store(true, std::memory_order_release);
     return true;
   }

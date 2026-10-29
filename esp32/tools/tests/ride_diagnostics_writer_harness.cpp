@@ -41,14 +41,19 @@ struct Stop {};
 struct StorageMock {
  bool getDiagnosticsSdLoaded() { return true; }
  bool canRetryDiagnosticsSd() { return false; }
- void ensureDiagnosticsSdMounted() { assert(false); }
- int sync(FILE*) { return 0; }
+ bool ensureDiagnosticsSdMounted() { assert(false); return false; }
+ int syncDescriptor(int) { return 0; }
  void markDiagnosticsSdUnavailable() { assert(false); }
 } instance;
 StorageMock *storage=&instance;
-FILE *activeFile=nullptr;
+int activeDescriptor=-1;
 unsigned lastCheckpointMs=0;
 bool (*storageRecoveryAllowedProbe)()=nullptr;
+// Ample internal DMA memory: bursts must never be deferred here (the
+// memory-pressure harness covers deferral).
+storage_policy::MemoryHeadroom backgroundIoHeadroom() { return {1U<<20,1U<<20}; }
+struct MemoryDeferral {};
+void updateMemoryDeferral(MemoryDeferral&,bool refused,storage_policy::MemoryHeadroom,unsigned) { assert(!refused); }
 enum class ActiveFileCloseResult { Ready };
 ActiveFileCloseResult closeAndAdvanceActiveChunk() { return ActiveFileCloseResult::Ready; }
 void abandonActiveChunkAfterUncertainWrite() { assert(false); }

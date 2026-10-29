@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
@@ -787,10 +788,20 @@ bool stopActiveDeviceTransfer() {
   return deviceTransferHttp.setEnabled(false);
 }
 
+// Renderer roots are the map storage root followed by the installer's root.
+static std::string relativeMapRoot(const std::string &rendererRoot) {
+  return rendererRoot.substr(std::strlen(storage.mapStorageRoot()));
+}
+
 #if FIRMWARE_DIAGNOSTICS
 static bool readActiveRendererMap(
     map_transfer::ActiveMapSelection &active, std::string &contentReceipt) {
-  map_transfer::MapTransferInstaller installer("/sdcard");
+  if (!storage.mapStorageAvailable()) {
+    Serial.println(
+        "RENDERER_DIAGNOSTICS: rejected map fixture map_storage_unavailable");
+    return false;
+  }
+  map_transfer::MapTransferInstaller installer(storage.mapStorageRoot());
   const map_transfer::InstallStatus status =
       installer.readActiveMapContentReceipt(active, contentReceipt);
   if (!status.ok) {
@@ -1851,6 +1862,13 @@ void setup() {
     Serial.println("SD Card failed, falling back to FFat...");
     storage.initSPIFFS();
   }
+  // File owners start below, so /sdcard keeps this boot's backend until
+  // shutdown. Maps exist only on removable SD; FFat keeps diagnostics and
+  // other device files, and a card inserted later is used after a restart.
+  // Both map owners take their root here, before boot recovery uses either.
+  storage.pinBackendForBoot();
+  mapView.bindMapStorageRoot(storage.mapStorageRoot());
+  mapTransferHttp.bindStorageRoot(storage.mapStorageRoot());
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const boot_diagnostics::Snapshot diagnosticBoot = boot_diagnostics::snapshot();
   ride_diagnostics::begin(
@@ -1898,14 +1916,20 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);
 #endif
 
-  {
-    map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+  // This is the same immutable eFuse derivation later authenticated by BLE;
+  // it neither initializes BLE nor changes ownership credentials.
+  mapTransferHttp.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
+  if (!storage.mapStorageAvailable()) {
+    // No card at boot. Guidance and the embedded UI run without maps, and no
+    // map recovery may read or repair files on the FFat fallback.
+    recordMapDiagnostic(ride_diagnostics::Level::Info, "boot_selection_final",
+                        "boot_selection", "unavailable",
+                        "map_storage_unavailable");
+  } else {
+    map_transfer::MapTransferInstaller mapInstaller(storage.mapStorageRoot());
     mapInstaller.setStorageProgressCallback([](void *) { delay(1); }, nullptr);
     // Bind early journal recovery before reading/rendering a candidate pointer.
-    // This is the same immutable eFuse derivation later authenticated by BLE;
-    // it neither initializes BLE nor changes ownership credentials.
     mapInstaller.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
-    mapTransferHttp.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
     map_transfer::InstallStatus recoveryStatus =
         mapInstaller.recoverInterruptedActivation();
     recordMapDiagnostic(
@@ -1946,7 +1970,8 @@ void setup() {
     const auto loadSelection =
         [&](const map_transfer::ActiveMapSelection &selection) {
           const uint32_t startedMs = millis();
-          const std::string root = std::string("/sdcard") + selection.root;
+          const std::string root =
+              std::string(storage.mapStorageRoot()) + selection.root;
           MapLoadAttempt attempt;
           attempt.probe = mapView.probeVectorMapFolderDetailed(root);
           attempt.loaded = attempt.probe.loaded();
@@ -2081,7 +2106,7 @@ void setup() {
       boot_diagnostics::Stage::ApplicationServices);
 #endif
   deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
-  mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
+  mapTransferHttp.configure(8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
   mapTransferHttp.setRendererHealthProbes(
@@ -2092,7 +2117,7 @@ void setup() {
     if (!storage.tryRemovableSdFreeBytes(bytes)) return std::nullopt;
     return bytes;
   });
-  mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
+  mapTransferHttp.setStreamStorageAvailable(storage.mapStorageAvailable() &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {
     return mapView.requestStorageControl(work, context);
@@ -2422,7 +2447,7 @@ void loop() {
             pendingMapRendererActivation.transferRoot, loaded);
       } else if (labelRollback) {
         mapTransferHttp.acknowledgeRuntimeRollback(
-            pendingMapRendererActivation.rendererRoot.substr(7), loaded);
+            relativeMapRoot(pendingMapRendererActivation.rendererRoot), loaded);
         Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                       "restored=%d\n",
                       pendingMapRendererActivation.labelFailure.c_str(),
@@ -2441,7 +2466,7 @@ void loop() {
       map_transfer::MapTransferHttpServer::ActivatedMapRoot activated;
       if (mapTransferHttp.takeActivatedMapRoot(activated)) {
         const std::string rendererRoot =
-            std::string("/sdcard") + activated.root;
+            std::string(storage.mapStorageRoot()) + activated.root;
         RendererMapDiagnosticIdentity identity;
         identity.mapId = activated.mapId;
         identity.sessionPresent = activated.sessionPresent;
@@ -2458,7 +2483,8 @@ void loop() {
         !labelRollbackQueued) {
       if (labelRuntimeFailure.empty())
         mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure);
-      if (!labelRuntimeFailure.empty()) {
+      // A rollback rewrites the active pointer, which lives only on SD.
+      if (!labelRuntimeFailure.empty() && storage.mapStorageAvailable()) {
         mapTransferHttp.markSelectionDegraded();
         labelRollbackQueued = mapTransferHttp.requestRuntimeRollback();
       }
@@ -2470,7 +2496,8 @@ void loop() {
       if (rollbackSucceeded) {
         pendingMapRendererActivation = {
             PendingMapRendererActivationSource::LabelRollback,
-            std::string("/sdcard") + restored.root, {}, labelRuntimeFailure,
+            std::string(storage.mapStorageRoot()) + restored.root, {},
+            labelRuntimeFailure,
             "rollback", mapDiagnosticIdentity(restored), false, now};
       } else {
         rendererMapDiagnosticIdentity = {};
@@ -2501,7 +2528,8 @@ void loop() {
               pendingMapRendererActivation.transferRoot, false);
         } else {
           mapTransferHttp.acknowledgeRuntimeRollback(
-              pendingMapRendererActivation.rendererRoot.substr(7), false);
+              relativeMapRoot(pendingMapRendererActivation.rendererRoot),
+              false);
           Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                         "restored=0 queue_timeout=1\n",
                         pendingMapRendererActivation.labelFailure.c_str(),
@@ -2707,9 +2735,9 @@ void loop() {
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
 #ifdef WAVESHARE_AMOLED_175
-  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
-  // low-level state as a supplemental wake signal; decoded-frame activity from
-  // the throttled reader remains authoritative.
+  // TP_INT (GPIO11) may return HIGH before the latched edge is serviced. Keep
+  // its current LOW level as a supplemental wake signal; decoded-frame
+  // activity from the throttled reader remains authoritative.
   touchWake = display_inactivity::touchWakeRequested(
       currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif

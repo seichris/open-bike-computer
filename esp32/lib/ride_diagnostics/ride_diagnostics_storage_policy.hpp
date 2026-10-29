@@ -44,4 +44,68 @@ inline constexpr bool constraintsExceeded(uint64_t retainedBytes,
          !hasWriteReserve(freeBytes, nextChunkBytes, budget);
 }
 
+// Recorder file I/O borrows internal DMA-capable RAM. FatFs keeps its sector
+// buffers in PSRAM on these boards, so each SDMMC sector transfer allocates a
+// 512-byte bounce (ESP-IDF sdmmc_cmd.c); FFat reads into PSRAM borrow one too.
+// Starting that work during a short BLE crypto or Wi-Fi peak only turns the
+// peak into I/O errors and an abandoned chunk. The writer waits below the
+// authenticated-BLE crypto guard (4096 bytes free, 1024 largest) plus one
+// bounce. This is a best-effort sample, not a reservation against concurrent
+// allocators; every I/O failure must still be handled safely.
+constexpr uint32_t kSdmmcBounceBytes = 512;
+constexpr uint32_t kBackgroundIoMinimumDmaFreeBytes = 4096 + kSdmmcBounceBytes;
+constexpr uint32_t kBackgroundIoMinimumDmaLargestBytes = 1024;
+// Short enough to drain soon after a peak, long enough that a waiting writer
+// samples the heap at most 50 times a second.
+constexpr uint32_t kBackgroundIoRetryMs = 20;
+
+struct MemoryHeadroom {
+  uint32_t dmaFree = 0;
+  uint32_t dmaLargest = 0;
+};
+
+inline constexpr bool admitsBackgroundIo(MemoryHeadroom headroom) {
+  return headroom.dmaFree >= kBackgroundIoMinimumDmaFreeBytes &&
+         headroom.dmaLargest >= kBackgroundIoMinimumDmaLargestBytes;
+}
+
+// A recorder write fault re-probes the pinned backend with a create, write,
+// fsync and unlink. Repeating that every few seconds while memory or the card
+// keeps failing only multiplies uncertain FAT updates. The first probe waits
+// one base interval after the fault is seen; each failed probe doubles the
+// wait up to the cap, and a fault that clears resets it.
+class RecoveryBackoff {
+public:
+  static constexpr uint32_t kBaseMs = 5000;
+  static constexpr uint32_t kMaximumMs = 60000;
+
+  // Arms on the first call after a fault and reports whether a probe is due.
+  bool due(uint32_t nowMs) {
+    if (!armed_) {
+      armed_ = true;
+      waitStartedMs_ = nowMs;
+      delayMs_ = kBaseMs;
+      return false;
+    }
+    return static_cast<uint32_t>(nowMs - waitStartedMs_) >= delayMs_;
+  }
+
+  void probeFailed(uint32_t nowMs) {
+    waitStartedMs_ = nowMs;
+    delayMs_ = delayMs_ >= kMaximumMs / 2 ? kMaximumMs : delayMs_ * 2;
+  }
+
+  void reset() {
+    armed_ = false;
+    delayMs_ = kBaseMs;
+  }
+
+  uint32_t delayMs() const { return delayMs_; }
+
+private:
+  bool armed_ = false;
+  uint32_t waitStartedMs_ = 0;
+  uint32_t delayMs_ = kBaseMs;
+};
+
 } // namespace ride_diagnostics::storage_policy

@@ -810,8 +810,8 @@ private struct DownloadingMapsSettingsSection: View {
     @ObservedObject var manager: OfflineMapManager
 
     var body: some View {
-        Section(header: Text("Downloading Maps")) {
-            if let bounds = manager.selectedMapBounds {
+        Section(header: Text(manager.isCheckingForServerMaps ? "Map server check" : "Downloading Maps")) {
+            if !manager.isCheckingForServerMaps, let bounds = manager.selectedMapBounds {
                 SettingsValueRow(
                     title: "Selected Bounds",
                     value: String(
@@ -878,7 +878,7 @@ private struct DownloadingMapsSettingsSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let downloadProgress = manager.downloadByteProgress {
+            if !manager.isCheckingForServerMaps, let downloadProgress = manager.downloadByteProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Download Progress")
@@ -892,7 +892,7 @@ private struct DownloadingMapsSettingsSection: View {
                 .accessibilityLabel("Map download \(downloadProgress.percentage) percent")
             }
 
-            if let overallGenerationProgress {
+            if !manager.isCheckingForServerMaps, let overallGenerationProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Overall Generation")
@@ -914,7 +914,7 @@ private struct DownloadingMapsSettingsSection: View {
                 .accessibilityElement(children: .combine)
             }
 
-            if let generationProgress {
+            if !manager.isCheckingForServerMaps, let generationProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Generation Progress")
@@ -939,7 +939,7 @@ private struct DownloadingMapsSettingsSection: View {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
-            if let queueDescription = manager.currentJob?.queueDescription {
+            if !manager.isCheckingForServerMaps, let queueDescription = manager.currentJob?.queueDescription {
                 SettingsValueRow(title: "Queue", value: queueDescription)
             }
 
@@ -958,7 +958,13 @@ private struct DownloadingMapsSettingsSection: View {
 
             if manager.hasPendingMapJob {
                 if !manager.hasTerminalMapJobFailure {
-                    if manager.currentJob?.mapId != nil {
+                    if manager.isCheckingForServerMaps {
+                        Button {
+                            manager.retryPendingMapJob(bleManager: bleManager)
+                        } label: {
+                            Label("Retry Server Check", systemImage: "arrow.clockwise")
+                        }
+                    } else if manager.currentJob?.mapId != nil {
                         Button {
                             manager.retryPendingMapJob(bleManager: bleManager)
                         } label: {
@@ -981,14 +987,15 @@ private struct DownloadingMapsSettingsSection: View {
                 Button(role: .destructive) {
                     manager.forgetPendingMapJob()
                 } label: {
-                    Label("Discard Pending Map", systemImage: "trash")
+                    Label(manager.isCheckingForServerMaps ? "Dismiss Server Check" : "Discard Pending Map", systemImage: "trash")
                 }
             }
         }
     }
 
     private var sourceSummary: String? {
-        guard let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
+        guard !manager.isCheckingForServerMaps,
+              let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
         if let area = manager.currentJob?.geometry?.areaKm2 {
             return "\(regionName) \(Int(area.rounded())) km²"
         }
@@ -997,7 +1004,8 @@ private struct DownloadingMapsSettingsSection: View {
 
     private var preparationEstimatePresentation:
         OfflineMapPreparationEstimatePresentation? {
-        guard let job = manager.currentJob else { return nil }
+        guard !manager.isCheckingForServerMaps,
+              let job = manager.currentJob else { return nil }
         return OfflineMapPreparationEstimatePresentation.presentation(for: job)
     }
 
@@ -1183,7 +1191,7 @@ private struct SavedMapsSettingsSection: View {
             manager.hasPendingMapJob &&
             !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
                 isServerRecoveryCheckPending:
-                    manager.isServerRecoveryCheckPending,
+                    manager.isCheckingForServerMaps,
                 hasCurrentJob: manager.currentJob != nil,
                 hasDownloadedPack: manager.downloadedPackURL != nil,
                 errorMessage: manager.errorMessage
@@ -1385,10 +1393,12 @@ private struct PendingSavedMapRow: View {
             HStack(spacing: 12) {
                 SavedMapThumbnail(image: nil)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(sourceSummary ?? "Pending Offline Map")
+                    Text(manager.isCheckingForServerMaps ? "Check for unfinished maps" : (sourceSummary ?? "Pending Offline Map"))
                         .font(.body.weight(.semibold))
                         .lineLimit(2)
-                    Text(manager.hasTerminalMapJobFailure
+                    Text(manager.isCheckingForServerMaps
+                        ? (manager.isMapJobProcessing ? "Checking the map server" : "Map server check paused")
+                        : manager.hasTerminalMapJobFailure
                         ? "Map preparation ended"
                         : manager.currentJob?.queueDescription != nil
                             ? (manager.currentJob?.queueDescription ?? "Waiting in map queue")
@@ -1433,7 +1443,7 @@ private struct PendingSavedMapRow: View {
                         Button {
                             manager.retryPendingMapJob(bleManager: bleManager)
                         } label: {
-                            Label("Retry Download", systemImage: "arrow.clockwise")
+                            Label(manager.isCheckingForServerMaps ? "Retry Check" : "Retry Download", systemImage: "arrow.clockwise")
                         }
                     }
                     Button("Choose Another Map", role: .destructive) {
@@ -1469,7 +1479,8 @@ private struct PendingSavedMapRow: View {
     }
 
     private var sourceSummary: String? {
-        guard let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
+        guard !manager.isCheckingForServerMaps,
+              let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
         if let area = manager.currentJob?.geometry?.areaKm2 {
             return "\(regionName) \(Int(area.rounded())) km²"
         }
@@ -1478,7 +1489,8 @@ private struct PendingSavedMapRow: View {
 
     private var preparationEstimatePresentation:
         OfflineMapPreparationEstimatePresentation? {
-        guard let job = manager.currentJob else { return nil }
+        guard !manager.isCheckingForServerMaps,
+              let job = manager.currentJob else { return nil }
         return OfflineMapPreparationEstimatePresentation.presentation(for: job)
     }
 
@@ -1594,7 +1606,10 @@ private struct SavedMapRow: View {
         ) ?? false
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
-        let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)
+        let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(
+            for: item,
+            deviceStreamTrust: bleManager.mapTransferStreamTrust
+        )
         let uploadProgress = packURL.flatMap(manager.mapUploadProgress(for:))
         let activationProgress = item.localRecord?.mapID == manager.lastTransferMapId
             ? manager.activationProgress
@@ -1714,7 +1729,10 @@ private struct SavedMapRow: View {
                     Button {
                         finishRenaming()
                         focusedPackFilename = nil
-                        manager.downloadCatalogMap(catalogMap)
+                        manager.downloadCatalogMap(
+                            catalogMap,
+                            deviceStreamTrust: bleManager.mapTransferStreamTrust
+                        )
                     } label: {
                         Image(systemName: "arrow.down.circle")
                             .frame(width: 32, height: 32)
@@ -1775,7 +1793,10 @@ private struct SavedMapRow: View {
                     Button {
                         finishRenaming()
                         focusedPackFilename = nil
-                        manager.downloadCatalogMap(catalogMap)
+                        manager.downloadCatalogMap(
+                            catalogMap,
+                            deviceStreamTrust: bleManager.mapTransferStreamTrust
+                        )
                     } label: {
                         Image(
                             systemName: catalogAvailability?.canDownload == true
@@ -1848,6 +1869,16 @@ private struct SavedMapRow: View {
             if installedDeviceMap?.isAvailable == false {
                 Label("Files need repair. Swipe left to remove this copy from Bicino, then upload it again.", systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundColor(.secondary)
+            }
+
+            if let packURL, manager.savedMapLacksDurableContract(packURL) {
+                Label(
+                    "Not a durable map, so an update may stop it working. Download this area again with current firmware to replace it.",
+                    systemImage: "clock.arrow.circlepath"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .accessibilityLabel("\(displayName): not a durable map")
             }
 
             if let packURL,
@@ -4072,9 +4103,11 @@ private struct DeveloperSettingsView: View {
                     offlineMapManager.isDeviceTransferBusy ||
                     offlineMapManager.hasActiveBackgroundUpload,
                 hasPendingJob: offlineMapManager.hasPendingMapJob,
-                hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
+                hasPendingActivation: offlineMapManager.hasPendingDeviceActivation ||
+                    offlineMapManager.isDeviceTransferBusy ||
+                    offlineMapManager.hasActiveBackgroundUpload,
                 isServerRecoveryCheckPending:
-                    offlineMapManager.isServerRecoveryCheckPending,
+                    offlineMapManager.isCheckingForServerMaps,
                 hasCurrentJob: offlineMapManager.currentJob != nil,
                 hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
                 errorMessage: offlineMapManager.errorMessage
