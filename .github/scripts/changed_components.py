@@ -106,7 +106,10 @@ FIRMWARE_RELEASE_TOOL_PATHS = {
     "tools/firmware_release_candidate.py",
     "tools/firmware-signing-requirements.txt",
     "tools/verify_github_release_assets.py",
+    "tools/web_flasher_manifest.py",
 }
+# Public test-key vectors for the web flasher publisher; the website copies them.
+WEB_FLASHER_FIXTURE_PREFIX = "tools/web-flasher/"
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
     "docs/device-ownership-test-vectors.json",
@@ -265,6 +268,7 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             or path in FIRMWARE_WORKFLOW_PATHS
             or path in FIRMWARE_CONTRACT_PATHS
             or path in FIRMWARE_RELEASE_TOOL_PATHS
+            or path.startswith(WEB_FLASHER_FIXTURE_PREFIX)
             or path in RIDE_DIAGNOSTICS_TOOL_PATHS
             or path.startswith("tools/bicino_diagnostics/")
         ):
