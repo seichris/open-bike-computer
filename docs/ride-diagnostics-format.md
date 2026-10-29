@@ -95,9 +95,17 @@ prefix, whether an authenticated transfer session supplied the activation, the
 probe `durationMs`, `visitedEntries`, and detected `formatVersion`. Probe
 records (`renderer_probe`, `rollback_completed`, and runtime activation or
 rollback completion) also carry `blockLoadMs`, the part of `durationMs` spent
-reading the single probed map block; the remainder is label-font validation
-and the root switch. Runtime availability transitions include total
-`durationMs` and `blockLoadMs`.
+reading and parsing the single probed map block. It excludes the remainder:
+- the block lookup;
+- label-font validation;
+- the root switch, which in POI-enabled builds also validates the Nearby
+  index and coverage;
+- when the activation starts on the UI task, any render-worker stop and
+  restart.
+
+Diagnostics builds print that split in `MAP_ACTIVATION_TIMING`; see
+`docs/firmware-startup-sequence.md`. Runtime availability transitions include
+total `durationMs` and `blockLoadMs`.
 They never include map geometry, coordinates, transfer credentials, or a full
 content receipt. Availability is recorded only initially and when it changes,
 not once per render loop.

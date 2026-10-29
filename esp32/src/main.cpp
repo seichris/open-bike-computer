@@ -2270,9 +2270,12 @@ void setup() {
   }
 #endif
 
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
   log_i("Loading Splash Screen...");
   splashScreen();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#else
+  // The splash draws outside LVGL and is compiled out for Arduino_GFX
+  // panels; the waiting screen was already presented before map recovery.
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::ApplicationServices);
 #endif

@@ -15,6 +15,50 @@ void enterAndCrash(PersistentState &state, Stage stage) {
   assert(boot_diagnostics::policy::enterStage(state, stage));
 }
 
+// Waveshare setup() renders the waiting screen (user_interface) before map
+// recovery and finishes application services afterwards, so stages are no
+// longer entered in numeric order. Completing them through to the stage the
+// boot reaches must still be accepted.
+constexpr Stage kWaveshareSetupOrder[] = {
+    Stage::CoreServices, Stage::WakeConfiguration, Stage::I2cBus,
+    Stage::PmicInspection, Stage::ClockAndSensors, Stage::Display,
+    Stage::Storage, Stage::UserInterface, Stage::MapRecovery,
+    Stage::ApplicationServices, Stage::Speaker, Stage::Ble,
+    Stage::Finalization};
+
+void runSetupUntil(PersistentState &state, Stage last) {
+  using namespace boot_diagnostics::policy;
+  assert(completeStage(state, Stage::Startup));
+  for (Stage stage : kWaveshareSetupOrder) {
+    assert(enterStage(state, stage));
+    if (stage == last)
+      return;
+    assert(completeStage(state, stage));
+    assert(state.completedStage == static_cast<uint8_t>(stage));
+  }
+}
+
+void testWaveshareSetupOrderReachesReadyAndAttributesMapFailures() {
+  using namespace boot_diagnostics::policy;
+  PersistentState state{};
+  (void)beginBoot(state, kFirmwareB, 1, true);
+  runSetupUntil(state, Stage::Finalization);
+  assert(completeStage(state, Stage::Finalization));
+  assert(state.completedStage == static_cast<uint8_t>(Stage::Finalization));
+  assert(markReady(state));
+
+  // A crash or hang in map recovery, after the waiting screen was shown, is
+  // still an early failure counted toward safe mode.
+  (void)beginBoot(state, kFirmwareB, 11, false);
+  runSetupUntil(state, Stage::MapRecovery);
+  const BeginResult afterMapCrash = beginBoot(state, kFirmwareB, 4, false);
+  assert(afterMapCrash.failureRecorded && !afterMapCrash.safeMode);
+  assert(state.consecutiveEarlyFailures == 1);
+  assert(state.lastFailureStage == static_cast<uint8_t>(Stage::MapRecovery));
+  assert(state.lastFailureCompletedStage ==
+         static_cast<uint8_t>(Stage::UserInterface));
+}
+
 } // namespace
 
 int main() {
@@ -152,5 +196,6 @@ int main() {
   assert(!afterMaintenance.safeMode);
   assert(maintenance.consecutiveEarlyFailures == 0);
 
+  testWaveshareSetupOrderReachesReadyAndAttributesMapFailures();
   return 0;
 }

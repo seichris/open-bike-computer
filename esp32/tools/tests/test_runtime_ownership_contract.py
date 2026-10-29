@@ -375,6 +375,20 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
                          waiting.index("void updateWaitingOwnershipStatus(")]
         self.assertIn("ownershipUnknownSnapshot()", create)
         self.assertNotIn("applyPhase(Phase::Welcome", create)
+        # BLE forwards every pending ownership snapshot, so an unclaimed
+        # device still moves to Welcome on the first loop() pass.
+        ble = source("lib/ble_navigation/ble_navigation.cpp")
+        apply_update = ble[ble.index("static void applyPendingOwnershipUiUpdate()"):]
+        apply_update = apply_update[:apply_update.index("\n}\n")]
+        self.assertIn("if (pending) {", apply_update)
+        self.assertIn("updateWaitingOwnershipStatus(nextSnapshot);", apply_update)
+        # AMOLED builds never run the legacy splash, which draws outside LVGL
+        # and would otherwise overwrite the early waiting-screen frame.
+        splash = setup.index("splashScreen();")
+        self.assertEqual(setup.count("splashScreen();"), 1)
+        self.assertTrue(setup[:splash].rstrip().endswith(
+            "#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)\n"
+            '  log_i("Loading Splash Screen...");'))
         # One static frame: setup never runs LVGL timers or input callbacks.
         self.assertNotIn("lv_timer_handler", setup)
         self.assertEqual(setup.count("startUserInterface();"), 2)

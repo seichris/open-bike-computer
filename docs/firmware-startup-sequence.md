@@ -12,7 +12,7 @@ original order because their splash screen preloads the recovered map.
 | `storage` | SD mount, backend pin, recorder start | Diagnostics events only queue here. |
 | `user_interface` | Map viewport, preferences, LVGL screens, waiting screen, one refresh | `lv_refr_now(display)` renders without running LVGL timers or input. Records `boot.waiting_screen`. |
 | `map_recovery` | Journal recovery, active selection, map activation, rollback | Sole SD owner. Its time grows with the installed map. |
-| `application_services` | Transfer servers, GPX folders, event loop, 1.75-inch Wi-Fi preparation | Wi-Fi resources are still allocated before BLE. |
+| `application_services` | Transfer servers, GPX folders, event loop, 1.75-inch Wi-Fi preparation | Wi-Fi resources are still allocated before BLE. The legacy splash, which draws outside LVGL, is not called. |
 | `speaker`, `ble`, `finalization` | Audio, NimBLE, pending activations, OTA confirmation | `markRunningAppValid()` and `markReady()` remain last. |
 
 The waiting screen stays static while recovery runs. BLE starts after recovery,
@@ -90,9 +90,12 @@ display; never compare them with production timings.
 
 ## Physical comparison
 
-Use one board, identified by its stable serial, with the same SD card and
-active map in every run. Build `WAVESHARE_AMOLED_175_PRODUCTION` for each arm
-with `tools/build_firmware.py`.
+The 1.75-inch and 2.06-inch boards are separate qualification targets. Each
+keeps its own gate, and the change is not qualified on a board until that
+board's comparison passes. Run the comparison once per board, each with one
+board identified by its stable serial and the same SD card and active map in
+every run. Build `WAVESHARE_AMOLED_175_PRODUCTION` or
+`WAVESHARE_AMOLED_206_PRODUCTION` for each arm with `tools/build_firmware.py`.
 
 1. Unplug USB, keep the battery above 60 % and keep the same owner-paired
    iPhone with the app in the foreground about 0.5 m away.
@@ -100,12 +103,16 @@ with `tools/build_firmware.py`.
    same way each time.
 3. Record five power-ons per arm (A×5, B×5, then A once more) with 240 fps
    video showing the PWR button, the panel and the iPhone.
-4. From the PWR press, measure the first logo frame, the first real waiting
-   screen frame and the first frame where the app shows the device connected
-   and authenticated.
-5. Export diagnostics for each arm and confirm, per boot:
-   `boot_selection_final=loaded`, `boot.acceptance` with `ready=true`, the
-   `renderer_probe` timings and the Wi-Fi `boot_prepared` memory values.
+4. From the PWR press, measure the first logo frame (1.75-inch only), the
+   first real waiting screen frame and the first frame where the app shows the
+   device connected and authenticated.
+5. Confirm "Waiting for iPhone" stays on the panel, at normal brightness, from
+   its first frame until the app connects. It must not be replaced by the
+   logo, a blank panel or Welcome on an owned device.
+6. Export diagnostics for each arm and confirm, per boot:
+   `boot_selection_final=loaded`, `boot.acceptance` with `ready=true` and the
+   `renderer_probe` timings. On the 1.75-inch board, also check the Wi-Fi
+   `boot_prepared` memory values.
 
 ## Background map activation (not implemented)
 

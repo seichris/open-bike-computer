@@ -27,6 +27,11 @@ int main() {
   static_assert(pre_connection_presentation::content(
                     pre_connection_presentation::resolve(unknown)).group !=
                 pre_connection_presentation::Group::Welcome);
+  // BLE's first snapshot for an unclaimed device replaces that first frame:
+  // the presentation's change check does not suppress the move to Welcome.
+  static_assert(pre_connection_presentation::needsUpdate(
+      true, pre_connection_presentation::resolve(unknown), 0,
+      pre_connection_presentation::resolve({}), 0));
   static_assert(pre_connection_presentation::resolve(
                     {false, true, false, false, false, 0}) ==
                 Phase::Connecting);
