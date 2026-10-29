@@ -17,6 +17,7 @@ COMPOSE_LOCKS = {'map-platform/deploy/compose.yaml', 'map-platform/deploy/compos
 # hosted selection; adding an input here must identify its executable consumers.
 SHARED_FAST_CHECKS = {
     'protocol/fixtures/workout-zones-v1.json': ('ios-navigation-workout',),
+    'tools/firmware_ota_channels.py': ('esp32-host-firmware-manifest-tests',),
     'tools/firmware_release_history.py': ('esp32-host-firmware-manifest-tests',),
     'tools/verify_firmware_boot_acceptance.py': ('esp32-host-firmware-manifest-tests',),
 }
@@ -120,7 +121,7 @@ def firmware_targets(paths, full_targets):
         if path.startswith(('esp32/lib/ble_navigation/', 'esp32/lib/map_transfer/')):
             # Remote-debug inherits ordinary diagnostics and adds debug/trust
             # branches; production exercises their disabled branches. The POI
-            # budget profile is the only diagnostics-off, 3 MiB-slot image of
+            # budget profile is the only diagnostics-off, production-slot image of
             # their nearby-POI code. Neither library contains the lifecycle-only
             # adapter implementation.
             profiles.update(('_REMOTE_DEBUG', '_POI_LIFECYCLE_QUALIFICATION'))

@@ -1,0 +1,110 @@
+#include "internal_storage_identity.hpp"
+#include "wear_levelling_state.hpp"
+
+#include <algorithm>
+#include <esp_memory_utils.h>
+#include <esp_partition.h>
+#include <nvs.h>
+#include <sdkconfig.h>
+
+#ifndef CONFIG_WL_SECTOR_SIZE
+#error "FFat ownership checks need the wear-levelling sector size"
+#endif
+static_assert(CONFIG_WL_SECTOR_SIZE == wear_levelling_state::kSectorBytes,
+              "wear_levelling_state.hpp reads 4096-byte wear-levelling sectors");
+
+namespace internal_storage {
+namespace {
+
+constexpr const char *kNamespace = "ffat_layout";
+constexpr const char *kGeometryKey = "geometry";
+
+uint64_t geometry(uint32_t address, uint32_t size) {
+  return (static_cast<uint64_t>(address) << 32) | size;
+}
+
+bool onInternalStack() {
+  uint32_t marker = 0;
+  return esp_ptr_internal(&marker);
+}
+
+// Scan from the end: wear-levelling keeps its state and configuration there,
+// so any initialised volume, including an old one shifted under a moved table,
+// is recognised after the first chunk. Only a fully erased partition (a new
+// device, or the signed migration's erase) is read completely, once.
+bool fullyErased(const esp_partition_t *partition) {
+  uint8_t buffer[1024];
+  for (uint32_t end = partition->size; end > 0;) {
+    const uint32_t count =
+        std::min<uint32_t>(static_cast<uint32_t>(sizeof(buffer)), end);
+    end -= count;
+    if (esp_partition_read(partition, end, buffer, count) != ESP_OK ||
+        std::any_of(buffer, buffer + count,
+                    [](uint8_t value) { return value != 0xFF; }))
+      return false;
+  }
+  return true;
+}
+
+bool wearLevellingStateValid(const esp_partition_t *partition) {
+  for (unsigned copy = 0; copy < 2; ++copy) {
+    uint8_t state[wear_levelling_state::kStateBytes];
+    if (esp_partition_read(
+            partition,
+            wear_levelling_state::stateOffset(partition->size, copy), state,
+            sizeof(state)) == ESP_OK &&
+        wear_levelling_state::stateValid(state))
+      return true;
+  }
+  return false;
+}
+
+} // namespace
+
+Assessment assess(const char *label) {
+  Assessment result;
+  if (!onInternalStack())
+    return result;
+  const esp_partition_t *partition = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, label);
+  if (partition == nullptr)
+    return result;
+  result.partitionFound = true;
+  result.address = partition->address;
+  result.size = partition->size;
+  result.erased = fullyErased(partition);
+  result.wearLevellingValid =
+      !result.erased && wearLevellingStateValid(partition);
+  // A missing or unreadable record is Absent: a non-erased volume is then
+  // mounted (and reformatted after a failed mount) only when its
+  // wear-levelling state is valid at this exact geometry.
+  nvs_handle_t handle;
+  if (nvs_open(kNamespace, NVS_READONLY, &handle) == ESP_OK) {
+    uint64_t stored = 0;
+    if (nvs_get_u64(handle, kGeometryKey, &stored) == ESP_OK)
+      result.record = stored == geometry(result.address, result.size)
+                          ? storage_mount_policy::InternalGeometryRecord::Matches
+                          : storage_mount_policy::InternalGeometryRecord::Differs;
+    nvs_close(handle);
+  }
+  return result;
+}
+
+bool recordGeometry(const Assessment &assessment) {
+  if (!assessment.partitionFound ||
+      assessment.record == storage_mount_policy::InternalGeometryRecord::Matches)
+    return true;
+  if (!onInternalStack())
+    return false;
+  nvs_handle_t handle;
+  if (nvs_open(kNamespace, NVS_READWRITE, &handle) != ESP_OK)
+    return false;
+  esp_err_t error = nvs_set_u64(handle, kGeometryKey,
+                                geometry(assessment.address, assessment.size));
+  if (error == ESP_OK)
+    error = nvs_commit(handle);
+  nvs_close(handle);
+  return error == ESP_OK;
+}
+
+} // namespace internal_storage
