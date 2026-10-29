@@ -1942,7 +1942,13 @@ its pending follow-up before publishing status for the new state.
 Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
 downloading or rebooting, iOS checks `firmware.otaEligible`,
 `firmware.eligibilityCode`, `firmware.inactivePartition`, and
-`firmware.maxImageBytes`. Preparation publishes a `maintenance` object with
+`firmware.maxImageBytes`. `maxImageBytes` is the inactive OTA slot of the
+installed partition table: 3,145,728 on dual-3-MiB devices and 4,194,304 on
+dual-4-MiB devices. OTA never changes that table, so iOS selects its release
+channel and accepts an image only from this fresh value, with the 64 KiB reserve
+([partition layouts](partition-layout-migration.md)); single-slot developer
+layouts report `otaEligible: false` and their running slot, which iOS ignores.
+Preparation publishes a `maintenance` object with
 `active: false`, stage `reboot_pending`, and a non-zero correlation. After the
 expected disconnect, iOS reconnects to the same device identity, authenticates
 again, and requires `maintenance.active: true` with the same correlation before

@@ -1,8 +1,12 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     ,        0x5000,
-otadata,  data, ota,     ,        0x2000,
-app0,     app,  ota_0,   ,        0x300000,
-app1,     app,  ota_1,   ,        0x300000,
-ffat,     data, fat,     ,        0x900000,
+# Production layout esp32s3-16m-dual4m-ffat7m-v1 (generation 2). Keep in sync
+# with esp32/partition_layouts.json; tests and the build guard require the exact
+# table. Devices that still carry the dual-3-MiB table keep it after OTA and
+# need the signed USB migration before they can accept images above 3 MiB.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x400000,
+app1,     app,  ota_1,    0x410000, 0x400000,
+ffat,     data, fat,      0x810000, 0x700000,
 # Retain panic evidence in the otherwise-unused 960 KiB tail of 16 MiB flash.
-coredump, data, coredump,,        0x0F0000,
+coredump, data, coredump, 0xf10000, 0xf0000,
