@@ -4687,6 +4687,30 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func restorePendingDurableTransfer(bleManager: BLEManager) {
+        // The atomic journal is the recovery authority. UserDefaults may retain
+        // an older selection (or no pointer) when the app is terminated.
+        let referenced = currentDeviceMapOperation
+        if let deviceID = bleManager.activeDeviceID,
+           defaults.string(forKey: "offlineMap.deviceOperationID") == nil ||
+            referenced.map({ $0.deviceID != deviceID || !$0.usesDurableProtocol ||
+                $0.isTerminal || $0.isRetiredUnknown }) == true {
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier)
+            do {
+                let pending = try deviceMapOperationStore.records().filter {
+                    $0.deviceID == deviceID && $0.appNamespace == namespace &&
+                        $0.usesDurableProtocol && !$0.isTerminal && !$0.isRetiredUnknown
+                }
+                // Multiple unresolved records need reconciliation, never an
+                // arbitrary choice. An unreadable store is likewise retained.
+                if pending.count == 1 {
+                    defaults.set(pending[0].operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+                }
+            } catch {
+                statusMessage = "Saved map operation needs recovery before its result can be confirmed"
+                return
+            }
+        }
         guard let record = currentDeviceMapOperation,
               record.usesDurableProtocol, !record.isTerminal, !record.isRetiredUnknown,
               record.deviceID == bleManager.activeDeviceID,

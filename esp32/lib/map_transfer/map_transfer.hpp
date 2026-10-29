@@ -334,7 +334,8 @@ private:
                              const std::string &operationID) const;
   bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
   InstallStatus readStreamMapMetadata(const std::string &sessionId,
-                                      ReadyStreamMap &ready, bool prepared) const;
+                                      ReadyStreamMap &ready, bool prepared,
+                                      std::string *validatedMarker = nullptr) const;
   std::string storageRoot_;
   std::string operationDeviceID_;
   StorageProgressCallback storageProgressCallback_ = nullptr;

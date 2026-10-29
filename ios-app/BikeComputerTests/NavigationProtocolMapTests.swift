@@ -4528,7 +4528,7 @@ extension NavigationProtocolTests {
                     "phase": "cancelled", "revision": 1]))
         }
 
-        for scenario in ["unknown", "installed", "unconfirmed", "legacy", "other-device", "other-app", "terminal"] {
+        for scenario in ["unknown", "installed", "unconfirmed", "missing-pointer", "stale-pointer", "stale-legacy-pointer", "ambiguous-pointer", "unavailable-pointer", "legacy", "other-device", "other-app", "terminal"] {
             let suite = "map-operation-recovery-\(UUID().uuidString)"
             guard let defaults = UserDefaults(suiteName: suite) else {
                 fatalError("test defaults unavailable")
@@ -4562,11 +4562,31 @@ extension NavigationProtocolTests {
                 assert(record.apply(receipt), "terminal history requires an exact device receipt")
                 record.cleanup = "complete"
             }
-            defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            if !["missing-pointer", "ambiguous-pointer"].contains(scenario) {
+                defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            }
             let store = DeviceMapOperationStore(url: directory
                 .appendingPathComponent("\(scenario)/operations.json"))
             do {
                 try store.save(record)
+                if ["stale-pointer", "stale-legacy-pointer", "ambiguous-pointer"].contains(scenario) {
+                    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as! [String: Any]
+                    object["operationID"] = UUID().uuidString
+                    var other = try JSONDecoder().decode(DeviceMapOperationRecord.self,
+                        from: JSONSerialization.data(withJSONObject: object))
+                    if scenario == "stale-pointer" {
+                        let receipt = try cancellationReceipt(for: other)
+                        assert(other.apply(receipt), "old pointer names exact terminal history")
+                    }
+                    if scenario == "stale-legacy-pointer" { other.usesDurableProtocol = false }
+                    if scenario != "ambiguous-pointer" {
+                        defaults.set(other.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+                    }
+                    try store.save(other)
+                }
+                if scenario == "unavailable-pointer" {
+                    defaults.set(UUID().uuidString, forKey: "offlineMap.deviceOperationID")
+                }
                 let original = try store.records()
                 let manager = OfflineMapManager(defaults: defaults,
                     cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
@@ -4577,7 +4597,7 @@ extension NavigationProtocolTests {
                 ble.isNavigationReady = true
                 manager.reconcileLastTransfer(bleManager: ble)
 
-                if ["unknown", "installed", "unconfirmed"].contains(scenario) {
+                if ["unknown", "installed", "unconfirmed", "missing-pointer", "stale-pointer", "stale-legacy-pointer"].contains(scenario) {
                     assertEqual(ble.requestedOperationIDs, [record.wireOperationID],
                         "an unresolved durable operation is queried independently of the \(scenario) summary")
                     assertEqual(manager.lastTransferMapId, record.mapID,
