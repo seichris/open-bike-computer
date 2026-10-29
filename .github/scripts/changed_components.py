@@ -110,7 +110,7 @@ FIRMWARE_RELEASE_TOOL_PATHS = {
     "tools/verify_github_release_assets.py",
     "tools/web_flasher_manifest.py",
 }
-# Signed USB recovery/migration vectors; the website copies them byte-for-byte.
+# Signed USB recovery/migration/identity vectors; the website copies them byte-for-byte.
 FIRMWARE_WEB_FLASHER_PREFIX = "tools/web-flasher/"
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",

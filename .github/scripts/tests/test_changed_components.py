@@ -398,6 +398,7 @@ class ChangedComponentsTests(unittest.TestCase):
             "tools/firmware-signing-requirements.txt",
             "tools/verify_github_release_assets.py",
             "tools/web_flasher_manifest.py",
+            "tools/web-flasher/identity-test-vector.json",
             "tools/web-flasher/migration-test-vector.json",
             "tools/web-flasher/rescue-test-vector.json",
         ):
