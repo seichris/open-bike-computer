@@ -60,8 +60,20 @@ for full and partial writes: software row `y` maps to RAM row `479-y`, in
 X-increasing/Y-decreasing mode. Every window reasserts that mode after reset,
 uses inclusive X endpoints, and starts the counter at its first streamed row.
 An independent RAM-address model checks asymmetric, off-center and edge windows
-against full-frame writes. Physical orientation and differential base retention
-still require the pattern and repeated-partial tests below. These new addressing
+against full-frame writes.
+
+A partial waveform writes two complete planes, not just the dirty window: the
+new frame to RAM `0x24` and the frame on the glass to RAM `0x26`. The dirty
+window only decides whether a waveform runs. On 2026-10-30 the glass showed why
+(E397-11). With window-only writes, rows outside later windows (the footer, the
+arrow stem, the bottom of the distance) flipped between two older images on
+every partial until the next full cleaning. That happens if the controller
+swaps the two RAM roles after each differential update. A host glass model
+reproduces the flip for that history and checks the complete-plane writes
+against swap, copy and keep histories. The extra transfer is about 96 KB per
+partial, roughly 0.2 s at the 4 MHz SPI clock. Physical orientation and
+differential base retention still require the pattern and repeated-partial
+tests below. These new addressing
 changes are **not yet physically qualified**. A failed operation retries once with full
 initialization/base history, then latches a fault.
 Controller waits are individually limited to 10 seconds; the worker yields

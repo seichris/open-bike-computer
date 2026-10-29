@@ -22,18 +22,30 @@ public:
            command(0x3C, {0x01}) && addressWindow({0, 0, width, height});
   }
 
-  bool present(const uint8_t *image, Window dirty, bool full) {
-    if (!image || dirty.empty()) return false;
+  // `previous` is the frame currently on the glass; partial waveforms need it.
+  bool present(const uint8_t *image, const uint8_t *previous, Window dirty,
+               bool full) {
+    constexpr Window whole{0, 0, width, height};
+    if (!image || dirty.empty() || dirty.right > width ||
+        dirty.bottom > height || dirty.x % 8 || dirty.right % 8) return false;
     if (full) {
-      if (!initialize() || !plane(0x24, image, {0, 0, width, height}) ||
-          !plane(0x26, image, {0, 0, width, height})) return false;
+      if (!initialize() || !plane(0x24, image, whole) ||
+          !plane(0x26, image, whole)) return false;
     } else {
-      // Vendor partial mode resets/configures the window without SWRESET,
-      // retaining the base plane. Only use it after a successful full/base.
+      if (!previous) return false;
+      // Vendor partial mode resets/configures the window without SWRESET.
+      // Only use it after a successful full/base. On the glass the controller
+      // behaves as if it swaps the new and previous RAM after each
+      // differential update: with dirty-window writes, rows outside the
+      // window held two older images and flipped on every partial (E397-11).
+      // Writing both complete planes makes the waveform drive exactly the
+      // difference from the glass, whatever the controller does with them.
+      // Like the full path, the second plane starts where the first wrapped.
       io_.reset();
       if (!io_.waitReady(busyTimeoutMs) || !command(0x18, {0x80}) ||
-          !command(0x3C, {0x80}) || !addressWindow(dirty) ||
-          !plane(0x24, image, dirty)) return false;
+          !command(0x3C, {0x80}) || !addressWindow(whole) ||
+          !plane(0x24, image, whole) || !plane(0x26, previous, whole))
+        return false;
     }
     return command(0x22, {static_cast<uint8_t>(full ? 0xF7 : 0xFF)}) &&
            command(0x20) && io_.waitWaveform(busyTimeoutMs);

@@ -89,6 +89,12 @@ temperature evidence. Count unchanged frames separately; no static timer should
 force a cleaning refresh. Keep ghosting/contrast observations before and after
 every cleaning and run longer endurance/temperature tests before production.
 
+Partials must leave rows outside their changed area untouched. Before E397-11
+was fixed, footer text, the maneuver arrow's stem and the lower part of the
+distance flipped between two older images on every partial until the next
+cleaning. A higher cleaning cap made that obvious. Ghosting observations taken
+with a cap above 20 before that fix are confounded by it and need repeating.
+
 Expected flash cadence with the provisional cap: any screen whose content changes
 every second (moving map, ticking ride clock, live speed) reaches 20 partials in
 roughly 20–25 s, then cleans for about 2.5–3 s; a stop of a minute or more adds a

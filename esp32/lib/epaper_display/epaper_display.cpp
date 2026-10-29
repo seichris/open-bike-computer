@@ -230,7 +230,8 @@ void displayWorker(void *) {
         portENTER_CRITICAL(&mux);
         snapshot.transmitted = generation;
         portEXIT_CRITICAL(&mux);
-        ok = panel.present(flight, full ? Window{0, 0, width, height} : dirty, full);
+        ok = panel.present(flight, mailbox.shown(),
+                           full ? Window{0, 0, width, height} : dirty, full);
         waveformFinishedMs = millis();
         waveformDurationMs = waveformFinishedMs - waveformStartedMs;
         if (ok) break;

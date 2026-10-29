@@ -91,7 +91,7 @@ int main() {
   assert(window.x == 0 && window.right == 16 && window.y == 100 && window.bottom == 102);
   FakeTransport io;
   Ssd1677<FakeTransport> panel(io);
-  assert(panel.present(packed.data(), {0, 0, width, height}, true));
+  assert(panel.present(packed.data(), nullptr, {0, 0, width, height}, true));
   assert(io.dataByCommand[0x11] == std::vector<uint8_t>{0x01});
   assert((io.dataByCommand[0x44] ==
           std::vector<uint8_t>{0x00, 0x00, 0x1F, 0x03}));
@@ -102,23 +102,24 @@ int main() {
   assert(io.dataByCommand[0x24] == packed && io.dataByCommand[0x26] == packed &&
          io.completedWaveforms == 1);
   io.clearWrites();
-  assert(panel.present(packed.data(), window, false));
+  // A partial writes the complete new and previous planes, never only the
+  // dirty window: the glass behaves as if RAM roles swap per update (E397-11).
+  assert(panel.present(packed.data(), shown.data(), window, false));
   assert(io.dataByCommand[0x11] == std::vector<uint8_t>{0x01});
   assert((io.dataByCommand[0x44] ==
-          std::vector<uint8_t>{0x00, 0x00, 0x0F, 0x00}));
+          std::vector<uint8_t>{0x00, 0x00, 0x1F, 0x03}));
   assert((io.dataByCommand[0x45] ==
-          std::vector<uint8_t>{0x7B, 0x01, 0x7A, 0x01}));
+          std::vector<uint8_t>{0xDF, 0x01, 0x00, 0x00}));
   assert((io.dataByCommand[0x4E] ==
           std::vector<uint8_t>{0x00, 0x00}));
   assert((io.dataByCommand[0x4F] ==
-          std::vector<uint8_t>{0x7B, 0x01}));
-  assert((io.dataByCommand[0x24] ==
-          std::vector<uint8_t>{0xFE, 0xFF, 0xFF, 0x7F}));
-  assert(io.dataByCommand[0x26].empty());
+          std::vector<uint8_t>{0xDF, 0x01}));
+  assert(io.dataByCommand[0x24] == packed && io.dataByCommand[0x26] == shown);
+  assert(!panel.present(packed.data(), nullptr, window, false));
   io.waveform = false;
-  assert(!panel.present(packed.data(), window, false));
+  assert(!panel.present(packed.data(), shown.data(), window, false));
   assert(io.completedWaveforms == 2);
-  assert(!panel.present(packed.data(), {1, 0, 9, 1}, false));
+  assert(!panel.present(packed.data(), shown.data(), {1, 0, 9, 1}, false));
 
   uint8_t a[8]{}, b[8]{}, c[8]{};
   FrameMailbox mailbox;
