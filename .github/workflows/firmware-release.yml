@@ -101,7 +101,7 @@ jobs:
             echo "Unable to prove that release ${RELEASE_TAG} does not exist" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-release-gate-${{ github.event.workflow_run.id }}
           path: ${{ runner.temp }}/firmware-release-gate.json
@@ -150,7 +150,7 @@ jobs:
             --expected-workflow-path .github/workflows/firmware-release-candidate.yml \
             --github-output "${GITHUB_OUTPUT}" \
             --output-receipt "${RUNNER_TEMP}/firmware-release-gate-revalidated.json"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: firmware-release-gate-${{ needs.gate.outputs.candidate_run_id }}
           path: ${{ runner.temp }}/release-gate
@@ -267,10 +267,8 @@ jobs:
               --version "${firmware_version}" \
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
-              --output "public/firmware/${target}/manifest.json"
-            cp \
-              "public/firmware/${target}/manifest.json" \
-              "${release_assets}/${target}.manifest.json"
+              --map-metadata-reader-version 1 \
+              --output "${release_assets}/${target}.manifest.json"
             python tools/factory_release_manifest.py \
               --bundle "${release_assets}/${target}.factory.tar.gz" \
               --bundle-manifest "${release_assets}/${target}.factory-bundle.json" \
@@ -282,7 +280,24 @@ jobs:
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "${release_assets}/${target}.factory-release.json"
+            python tools/web_flasher_manifest.py \
+              --bundle "${release_assets}/${target}.factory.tar.gz" \
+              --bundle-manifest "${release_assets}/${target}.factory-bundle.json" \
+              --target "${target}" \
+              --git-sha "${GIT_SHA}" \
+              --version "${firmware_version}" \
+              --build "${firmware_build}" \
+              --tag "${RELEASE_TAG}" \
+              --output-dir "${release_assets}"
           done
+          # Devices keep their installed partition table after OTA. Stage the
+          # dual-4-MiB channel and a legacy channel: this release when it fits
+          # dual-3-MiB slots with the 64 KiB reserve, otherwise the verified
+          # live legacy manifest.
+          python tools/firmware_ota_channels.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-assets "${release_assets}" \
+            --public-dir public/firmware
       - name: Require immutable releases
         uses: ./.github/actions/require-immutable-releases
         with:
@@ -328,7 +343,7 @@ jobs:
             --asset-dir "${release_assets}" \
             --require-immutable \
             --output "${RUNNER_TEMP}/publication-receipt.json"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-release-publication-receipts
           path: |
@@ -415,11 +430,13 @@ jobs:
               echo "Missing OTA manifest: ${manifest}" >&2
               exit 1
             fi
-            mkdir -p "public/firmware/${target}"
-            cp "${manifest}" "public/firmware/${target}/manifest.json"
           done
-          if [ "$(find public -type f | wc -l)" -ne 2 ]; then
-            echo "Recovery payload must contain exactly two OTA manifests" >&2
+          python3 tools/firmware_ota_channels.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --release-assets release-assets \
+            --public-dir public/firmware
+          if [ "$(find public -type f | wc -l)" -ne 4 ]; then
+            echo "Recovery payload must contain exactly four OTA channel manifests" >&2
             exit 1
           fi
       - name: Require explicit older-channel recovery
@@ -433,7 +450,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --recovery-assets release-assets "${options[@]}"
           echo "Older channel explicitly authorized: ${ALLOW_OLDER}" >> "${GITHUB_STEP_SUMMARY}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-release-recovery-receipt-${{ inputs.release_tag }}
           path: ${{ runner.temp }}/recovery-receipt.json

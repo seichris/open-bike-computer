@@ -1,0 +1,151 @@
+# Browser USB recovery
+
+The consumer page is **https://bicino.com/update**, implemented in the separate
+`seichris/bicino` repository. This change adds the signed package producer and a
+quiet USB status implementation for qualification. It does not publish a firmware
+release, enable a consumer package, flash hardware, or complete issue #483.
+
+## Release package contract
+
+The existing protected publisher calls `tools/web_flasher_manifest.py` only after
+validating and signing the factory archive. Candidate build jobs remain without
+release credentials. The generator re-verifies the complete archive/attestation
+chain and emits a `.web-recovery.json` envelope plus individually hashed images.
+It never signs the merged factory image as an ordinary recovery operation.
+
+The envelope identifies schema 1, key `bicino-release-p256-1`, and `ES256-P1363`.
+Its base64 payload is canonical ASCII JSON (sorted keys, no insignificant spaces,
+one trailing LF). Sign `bicino-web-flasher-v1\n` followed by those exact bytes with
+P-256/SHA-256, storing the 64-byte `r || s` signature in base64. Existing OTA and
+factory signature encodings are unchanged. The browser verifies the signature
+before interpreting offsets and rechecks all artifact SHA-256 values before any
+write. `tools/web-flasher/test-vector.json` is a public test-key fixture shared
+byte-for-byte with the website; it must never be admitted as a real release.
+
+Each payload binds the model, production profile, full SHA, version/build, chip,
+16 MiB capacity, exact binary table and bootloader hashes, complete flash region
+inventory, ordered writes and erase spans, and factory archive/descriptor provenance.
+New packages sign `minFlasherVersion=2`, `unknownBuildPolicy="rescue"`, and
+`qualificationRequired=false` together. The website automatically admits these
+packages from immutable published GitHub releases after checking signatures and
+asset digests. Legacy version-1 deny packages, including release 9, retain their
+qualification requirement and cannot be changed in place. A signature proves
+origin; automatic availability is not physical qualification. The original
+`test-vector.json` remains the legacy fixture; `rescue-test-vector.json` binds
+the new policy using the same public test key.
+
+The rescue recipe exists for the dual-3-MiB layout (`<target>.web-recovery.json`,
+unchanged contract, published only while the image fits a 3 MiB slot with its
+reserve) and for the dual-4-MiB layout (`<target>.web-recovery-dual4m.json`,
+`minFlasherVersion=3`). The separate, ordered layout migration and its gate are
+described in [partition layouts](partition-layout-migration.md). Each rescue writes
+and verifies app0 before replacing OTA selection with the pinned Arduino app0
+bootstrap. It preserves bootloader/table, app1, NVS, FFat, coredump, and SD. This
+deliberately uses a named deterministic ROM rescue recipe rather than pretending
+that factory bootstrap replay is an inactive-slot OTA transaction. Both initial
+active-slot states still need physical evidence for a qualification claim. The
+rescue planner accepts unknown development images, stale app1, partial/erased
+application slots and partial OTA selection, allowing a fresh-session retry after
+interruption. It never writes app1. Exact bootloader/table, chip/capacity/security,
+model confirmation, signed write bounds and every image readback remain required.
+Known wrong-model/newer/conflicting builds are blocked; unidentified firmware
+cannot provide downgrade protection and the user must acknowledge that risk.
+Fully blank chips and damaged bootloader/table remain incompatible.
+
+The producer rejects unsupported layouts/bootstrap bytes rather than silently
+emitting unsafe packages, and requires the factory bundle to carry the current
+registered production table. Future partition/toolchain changes must update
+`esp32/partition_layouts.json` and this contract before using the release
+workflow. No migration is inferred from a larger application binary.
+
+## Signed image identity records
+
+The same publisher step also emits `<TARGET>.image-identity.json`, so the website
+can recognize a release's application bytes on a device without reading whole
+OTA slots and without a website catalog change per release. It uses the same
+envelope and key as the recovery recipe, but signs `bicino-image-identity-v1\n`
+followed by the canonical payload, so neither document type can verify as the
+other. The payload binds target, production environment, version, build, full
+Git SHA and release tag to the exact application image: `size`, `sha256`,
+`headLength` (4096, or the whole image if shorter), `headSha256` of those first
+bytes, and `tail`, the last 32 bytes (the ESP-IDF appended image digest). It is
+derived from the dual-4-MiB rescue recipe, which every release carries; the
+dual-3-MiB rescue is omitted once the image outgrows a 3 MiB slot. The publisher
+refuses an image that differs from that recipe's signed application write. `descriptor` repeats the app description's version, project name and ELF
+SHA-256 as read by the publisher; it is informational and never identity.
+
+The website rules an image out of a slot exactly when the slot's first 4 KiB or
+its 32 bytes at `size - 32` differ, and calls a slot recognized only after a
+SHA-256 of the whole image. Releases published before this record existed are
+recognized from their signed OTA manifests and a reviewed website catalog.
+`tools/web-flasher/identity-test-vector.json` is the public test-key fixture for
+this record, shared byte-for-byte with the website.
+
+## Quiet status protocol (qualification profiles only)
+
+`USB_RECOVERY_STATUS` defaults to zero. Ordinary production and developer profiles
+remain unchanged. Named `WAVESHARE_AMOLED_175_USB_RECOVERY_VALIDATION` and
+`WAVESHARE_AMOLED_206_USB_RECOVERY_VALIDATION` profiles opt in while retaining
+`FIRMWARE_DIAGNOSTICS=0` and `ARDUINO_USB_CDC_ON_BOOT=0`. They use a dedicated HWCDC
+instance, so existing Serial/UART diagnostics are not redirected to USB.
+
+The only accepted command is ASCII `BICINO_USB_STATUS 1 ` followed by exactly 32
+lowercase hexadecimal nonce characters and LF. The response is one bounded JSON
+line with type/schema, the same nonce, target/profile, version/build, full SHA,
+binary partition-table SHA-256, boot sequence, running app offset, chip MAC, and
+readiness. MAC is used only to correlate the same physical chip inspected by the
+ROM loader, after the user's local inspection consent. No credentials, TLS key,
+location, or unsolicited diagnostics are returned. This is local operational
+evidence, not cryptographic device attestation.
+
+Input processing is bounded to 64 bytes per loop, a 64-byte parser buffer, a
+one-second inter-byte timeout, and at most one reply per second. Replies are
+smaller than 768 bytes and emitted only with TX queue capacity available. The
+readiness bit uses the existing boot diagnostic milestone after initialization
+and durable OTA confirmation. No storage or eFuse writes are exposed.
+
+Qualification builds retain their distinct profile identity and cannot pass the
+consumer's production-profile match. After both boards pass the quiet-USB power,
+boot, parser, privacy, and interoperability gates, enable the flag in production
+through a separate reviewed rollout. Do not substitute a validation-profile boot
+for acceptance of actual production bytes. The page currently falls back to
+owner-app boot confirmation when production firmware does not answer the protocol.
+
+## Consumer admission and remaining gates
+
+The maintainer explicitly accepted automatic signed rescue admission and the
+unknown-source/interruption risks on 2026-10-03. Build 103 publishes that policy;
+release 9 (build 102) stays immutable with its original deny policy. This change
+modifies packaging/planning, not the firmware's production hardware paths or the
+validation-only USB status rollout.
+
+The website rechecks the still-published immutable release, pinned signature and
+manifest digest immediately before writing, with an explicit revocation denylist.
+No per-release qualification entry or website asset import is needed for the new
+policy. Automatic admission must not be described as completed physical testing.
+Qualification still binds exact website/firmware commits, manifest/image hashes,
+board identity, flash/readback, fresh ready boot, real cold boot and preservation.
+Only 1.75-inch hardware is available; its valid development app0 and stale app1
+have been inspected read-only. No new rescue write or physical interruption test
+has passed, and 2.06-inch physical validation remains pending.
+
+Still required to close #483:
+
+- Physical recovery from the reported 0.3.4 build-95 OTA-entry failure on both
+  targets, including ownership/TLS/settings/maps preservation.
+- Qualification and production rollout of the request-only status protocol.
+- Physical interruption/retry evidence for app erase/write and OTA metadata.
+  Mock browser tests cover fresh-session retry of unknown partial/erased slots;
+  damaged bootloader/table remain blocked and require a separate procedure.
+- #461's dual-4-MiB layout, developer layout and signed migration recipe are
+  implemented ([partition layouts](partition-layout-migration.md)); the recipe is
+  signed `qualificationRequired` and stays unadmitted until its per-board
+  physical gates (migration readback, preservation, FFat recreate, OTA into both
+  slots, cold boot and power-loss retry) pass. Legacy devices keep a compatible
+  OTA channel meanwhile.
+- Separately qualified first-install and factory-reset operations if exposed.
+
+Keep these per-target hardware gates visible until their evidence is complete.
+Do not describe automatically available releases as a physically qualified
+recovery path or factory/golden images. Development tests and merged PRs do not
+replace physical records.

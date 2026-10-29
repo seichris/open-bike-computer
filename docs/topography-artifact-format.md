@@ -88,9 +88,114 @@ The iPhone reader requires a separate trusted receipt binding file bytes/SHA,
 map entry, device-content receipt, map ID, intermediate, source policy and
 attribution. Self-declared SQLite metadata cannot establish that trust. The
 reader is actor-serialized and read-only; its PNG cache is capped at 4 MiB and
-128 entries. Download grants, durable association journaling and regional
-alignment eligibility are separate, still-unfinished integration layers.
+128 entries. Regional alignment eligibility is a separate integration layer.
+
+### Delivery contract
+
+One rule governs every producer and consumer, independent of renderer format:
+
+- **Layers.** A map contains contours exactly when its signed BMAP manifest
+  carries `topography`. Renderer 4 always does; renderer 5 does exactly when
+  `layers.contours` is `included`, and readers reject any other combination.
+  Catalog `features` and stream `readerRequirements.requiredFeatures` mirror
+  the layer as `contours`; clients verify them against the signed manifest.
+- **Companion requirement.** A map with contours has exactly one
+  `topography-ios-v1` companion; a contour-free map has none. Missing,
+  duplicate or undeclared companions are errors, never silently dropped.
+- **Association.** The companion delivery record carries `filename`
+  `<mapId>.btopo`, its byte count and SHA-256, the object key
+  `maps/<mapId>/topography-ios-v1/[production/]<mapContentReceipt>/<sha256>.btopo`,
+  and `companionRequirements` (`mapContentReceipt`, `mapId`,
+  `intermediateSha256`, `sourcePolicySha256`, `attributionSha256`). The map
+  content receipt is the producer-independent manifest receipt of the map's ZIP
+  and catalog entry. The intermediate, source-policy and attribution digests
+  must equal the signed manifest's `topography`, and the SQLite metadata must
+  agree again before the file is trusted.
+- **Consumers.** The backend packages the companion with the map that produced
+  it, rejects contour-free exact-reuse candidates that carry one, and publishes
+  it only with the contours feature. The catalog accepts and grants exactly one
+  live companion per contour stream and none otherwise, and gates contour
+  promotion on the same layer (target-5 POI maps remain outside production
+  promotion). A contour stream is granted, and shown as downloadable by the
+  iPhone, only from a delivery tier that has exactly one live companion; a tier
+  without one yields to the next tier's pair. Before a contour map from a
+  direct job or the catalog is saved (and so before it can be shown or sent to
+  the device), the iPhone verifies the companion's delivery record against the
+  signed stream and content receipt, then its bytes and SQLite content.
+- **Saved state.** Saved map metadata records the exact companion receipt it
+  was activated with; later catalog attachment cannot re-key it. The companion
+  association file binds the companion to the exact saved stream. The saved map
+  pair is the commit point: a staged companion is kept only if its saved map
+  committed the bound stream, so failed, cancelled or interrupted replacements
+  keep the previous map and companion. Deleting a map deletes its companion.
+- **Display.** The iPhone overlay and the device contour switches act only on
+  downloaded layers and never regenerate a map. A saved contour map without a
+  valid companion, including one saved before this contract, is reported as
+  needing a fresh download rather than adapted.
+
+The companion's digest is bound by authenticated delivery metadata and the
+signed contour identity, not by the BMAP signature itself: adding it to the
+signed manifest would change the device-installed manifest contract.
 
 Native-runtime changes can alter SQLite/PNG bytes. Repeated builds in the same
 tested runtime are deterministic; cross-platform producer locking and visual
 equivalence are not yet qualified.
+
+## Experimental terrain and contour numbers (issue #527)
+
+Development clients negotiate `target.terrainProfileVersion: 1` with renderer
+format 4. Requests without that field retain the original FMB5/v1 companion
+contract. The optional field participates in the map build/reuse identity.
+Firmware advertises `terrain_experiments` in CAP2 bit 31 to client version 29
+only in diagnostics builds. Production does not advertise or accept terrain
+screen settings. Existing FMB5 contours gain numeric labels without requiring
+terrain files or a new FMB version.
+
+An experimental pair retains the FMB5 blocks and adds a same-basename `.fme`
+sidecar for each covered block. FME1 is exactly 4,372 bytes:
+
+| Offset | Content |
+| --- | --- |
+| 0 | ASCII `FME1` |
+| 4 | Signed little-endian block X (Web Mercator / 4,096) |
+| 8 | Signed little-endian block Y |
+| 12 | Little-endian CRC32 of all node bytes |
+| 16 | 33 × 33 nodes, X fastest, Y south to north, 128 Mercator metres apart |
+
+A node is `i16 elevationMetres, u8 shade, u8 slopeDegrees`. Elevations are
+−12,000…10,000; −32,768 means no-data and requires shade/slope zero. Slope is
+0…90°. Shade is 0…255 from a fixed northwest light at 45° elevation. Derivatives
+use physical ground spacing. All contributing samples must be valid; missing
+pixels are never interpreted as sea level. The DEM is the same pinned surface
+model/datum used by contours. Node quantization is one metre; this does not
+imply one-metre source accuracy.
+
+Generation samples globally aligned nodes plus a derivative halo. It retains
+normalized grids in operator sample evidence and packages the grids with the
+signed map. Grids are clipped to the same polygon/route corridor, including
+holes. Block borders share nodes. Limits remain 256 blocks and existing worker
+raster bounds. Sidecar bytes are included in manifest hashes, transfer totals,
+atomic installation and rollback. Readers validate exact size, coordinates,
+CRC and node semantics; absent sidecars leave legacy map behavior available.
+
+Experimental `.btopo` uses SQLite user/schema version 2, with style
+`contours-labels-terrain-v2`; profile version remains 1. The existing two tables
+are retained, with two additional exact tables:
+
+```sql
+CREATE TABLE labels (x INTEGER NOT NULL, y INTEGER NOT NULL, elevation INTEGER NOT NULL, PRIMARY KEY (x, y, elevation)) WITHOUT ROWID
+CREATE TABLE terrain (x INTEGER NOT NULL, y INTEGER NOT NULL, grid BLOB NOT NULL, PRIMARY KEY (x, y)) WITHOUT ROWID
+```
+
+Labels use integer Web Mercator metres and signed elevation metres, capped at
+100,000 anchors. Terrain contains at most 256 validated FME1 blobs bound to
+their X/Y primary key. The file retains its authenticated companion receipt,
+byte limit and contour-tile limits. New readers support both SQLite versions;
+v1 stays contour-only on iPhone. Regenerate/download an experimental pair to
+obtain phone labels and terrain. No unsigned amendment to a saved companion is
+accepted. The transport artifact role remains `topography-ios-v1`; the SQLite
+schema, negotiated by the map request, versions its payload.
+
+For operator fixtures, `map-topography sample --terrain ...` includes DEM grids
+in sample evidence. Feed that sample to the existing `encode` command. This
+produces development artifacts, not a signature or production-source approval.

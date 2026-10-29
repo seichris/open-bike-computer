@@ -146,7 +146,9 @@ private final class RecordingPolylineRoute: MKRoute {
 struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
+        await testOnlinePOIReadOnlySelection()
         testLabelExpansion()
+        testInitialGPSFollow()
         testRouteAlternativeMapSelection()
         await testDestinationSelectionTrackingIntegration()
         await testResolvedAddressCallbackAndRecentInsertion()
@@ -154,6 +156,110 @@ struct DestinationCalloutLayoutTests {
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testInitialGPSFollow() {
+        let map = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        coordinator.isUserLocationAuthorized = true
+        let firstFix = CLLocation(latitude: 1.3, longitude: 103.85)
+        coordinator.updateInitialRegionIfNeeded(mapView: map, location: nil,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(!coordinator.hasSetInitialRegion,
+                     "startup waits for an actual location before establishing its camera")
+        coordinator.updateInitialRegionIfNeeded(mapView: map, location: firstFix,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(coordinator.hasSetInitialRegion && map.userTrackingMode == .follow,
+                     "the first GPS fix enables native follow and its active tracking button")
+        let regionCount = map.regionUpdateCount
+        map.userTrackingMode = .none
+        coordinator.updateInitialRegionIfNeeded(mapView: map,
+            location: CLLocation(latitude: 1.31, longitude: 103.86),
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: false)
+        precondition(map.regionUpdateCount == regionCount && map.userTrackingMode == .none,
+                     "later GPS fixes preserve a rider's manual pan")
+        let selection = MapViewContainer.Coordinator()
+        selection.isUserLocationAuthorized = true
+        selection.updateInitialRegionIfNeeded(mapView: map, location: firstFix,
+            simulatedPosition: nil, isSimulationMode: false, isFreePanActive: true)
+        precondition(!selection.hasSetInitialRegion && map.userTrackingMode == .none,
+                     "a first fix does not steal the camera from map selection")
+    }
+
+    @MainActor
+    private static func testOnlinePOIReadOnlySelection() async {
+        let item = MKMapItem(placemark: MKPlacemark(coordinate:
+            CLLocationCoordinate2D(latitude: 1.3, longitude: 103.85)))
+        item.name = "Fixture cafe"
+        let map = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        coordinator.isUserLocationAuthorized = true
+        map.userTrackingMode = .follow
+        coordinator.isOnlinePOISearchActive = true
+        var selected: MKMapItem?
+        var navigationCallbacks = 0
+        coordinator.onOnlinePOISelected = { selected = $0 }
+        coordinator.onDestinationSelected = { _, _ in navigationCallbacks += 1 }
+        coordinator.updateOnlinePOIs([item], selected: nil, on: map, bottomPadding: 280)
+        let annotation = map.annotations.compactMap { $0 as? OnlinePOIAnnotation }.first!
+        let view = coordinator.mapView(map, viewFor: annotation)!
+        precondition(view.rightCalloutAccessoryView == nil && view.leftCalloutAccessoryView == nil,
+                     "Online pins have no route/favorite accessory action")
+        coordinator.mapView(map, didSelect: view)
+        coordinator.mapView(map, annotationView: view,
+                            calloutAccessoryControlTapped: UIControl())
+        precondition(selected === item && navigationCallbacks == 0,
+                     "Selecting an online pin cannot enter the destination callback")
+        precondition(coordinator.isFreePanActive(mapView: map, isOfflineMapSelectionActive: false),
+                     "Search stays on the chosen map area instead of following GPS")
+        precondition(map.userTrackingMode == .none)
+        coordinator.updateOnlinePOIs([item], selected: item, on: map, bottomPadding: 280)
+        let originalSelections = map.selectionCount
+        map.deselectAnnotation(annotation, animated: false)
+        coordinator.mapView(map, didDeselect: view)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        precondition(selected == nil, "Map deselection must clear the detail card's selection")
+        coordinator.updateOnlinePOIs([item], selected: item, on: map, bottomPadding: 280)
+        precondition(map.selectionCount == originalSelections + 1,
+                     "The same result can be selected and focused again after map deselection")
+        // A transient deselect/reselect must not erase the selected result.
+        selected = item
+        map.deselectAnnotation(annotation, animated: false)
+        coordinator.mapView(map, didDeselect: view)
+        map.selectAnnotation(annotation, animated: false)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        precondition(selected === item, "A synchronous map reselect keeps the current detail card")
+        coordinator.isOnlinePOISearchActive = false
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        precondition(!map.annotations.contains { $0 is OnlinePOIAnnotation },
+                     "Clearing search removes all online map annotations")
+        precondition(map.userTrackingMode == .follow,
+                     "Closing Nearby must resume rider tracking")
+        coordinator.isNavigating = true
+        coordinator.isOnlinePOISearchActive = true
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        coordinator.isOnlinePOISearchActive = false
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        precondition(map.userTrackingMode == .followWithHeading,
+                     "Ending Nearby restores the navigation tracking policy")
+        coordinator.isOnlinePOISearchActive = true
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        coordinator.offlineMapSelectionFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        coordinator.isOnlinePOISearchActive = false
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        precondition(map.userTrackingMode == .none,
+                     "Ending Nearby cannot interrupt another free-pan mode")
+        coordinator.offlineMapSelectionFrame = nil
+        coordinator.isOnlinePOISearchActive = true
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        coordinator.isOnlinePOISearchActive = false
+        coordinator.isSimulationMode = true
+        coordinator.simulatedPosition = item.placemark.coordinate
+        let previousCameraUpdates = map.cameraUpdateCount
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        precondition(map.cameraUpdateCount == previousCameraUpdates + 1,
+                     "Ending Nearby restores the simulated rider camera")
     }
 
     @MainActor

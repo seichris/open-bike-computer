@@ -28,6 +28,14 @@ core entries. Publication is atomic and serialized per environment. A dirty
 build may consume an entry but cannot publish one. Corrupt shared entries stop
 the build; they are never silently used or overwritten.
 
+The custom SDK export retains ESP-IDF's complete generated `sections.ld` beside
+its matching `sdkconfig.h` and archives. Recursive Arduino builds copy that
+script unchanged into their linker search path; they must not reconstruct it
+from the stock SDK's layout. External-BSS configurations reject scripts missing
+either boundary. The transform and prebuild sources already participate in the
+core key, and the exported script is covered by the package-tree attestation
+and normal private/shared core transport.
+
 The receiving worktree restores its own mutable tools and packages. Absolute
 symlinks are rebased by the existing archive extractor; UTF-8 launchers and
 configuration referring to the producer are rebased to the receiving project.
@@ -49,6 +57,13 @@ Changing a commit therefore recompiles metadata and changed sources while
 allowing unchanged libraries to be restored. Raw unverified builds retain
 their previous global identity flags. Version, board/profile, and configuration
 changes still affect normal compiler input identities.
+LVGL's macro-expanded `LV_CONF_PATH` include is an explicit dependency of
+application/library objects: relying on include scanning alone can restore an
+allocator built with an older pool size. A real SCons host regression alternates
+configuration sizes with the same object cache and checks the executable result.
+Every existing file named by `-include`/`-imacros` in the compiler flags (such
+as `include/nimble_connection_config.h`) is declared the same way, because the
+scanner never reads compiler flags; a second SCons regression alternates one.
 Verified compiles explicitly define `__DATE__`, `__TIME__`, and `__TIMESTAMP__`
 as the Unix epoch through a generated header with a compiler dependency.
 Arduino's chip report uses these macros; their fixed values prevent the source
@@ -64,12 +79,36 @@ plan authorizes a device write.
 
 ## CI and qualification
 
-The reusable firmware-cache action restores pinned runtime transport, verified
-core transport, and application compiler objects. Keys separate OS,
-architecture, environment and build tools/configuration. Each source commit
-saves a fresh cache snapshot with a matching-input restore prefix. CI, release
-candidates, diagnostics, and speaker builds use this action. Mutable toolchain
-trees, current firmware manifests, upload plans, and final images are excluded.
+The reusable firmware-cache action restores three content-keyed entries:
+the pinned runtime transport (keyed by the runtime lock), the verified core
+transport for one environment (keyed by every core input), and that
+environment's compiler objects (keyed by core inputs plus commit, with a
+matching-input restore prefix). Runtime and core entries are saved only when
+their exact key is absent; a commit that changes no core input uploads
+nothing. CI, release candidates, diagnostics, and speaker builds use this
+action. Mutable toolchain trees, current firmware manifests, upload plans, and
+final images are excluded. The pinned download store keeps its own job cache.
+
+The Actions cache is scoped to a branch and capped per repository, so cores
+built on one pull request never warm another and the regular 1.75-inch cores
+do not fit the cap together. **Firmware core warm** therefore runs the normal
+`firmware` CI scope on every `main` push that touches `esp32/` or the cache
+tooling, plus a weekly schedule, and that run publishes each verified core
+entry as a workflow artifact named after its environment and content key
+(`firmware_core_artifact.py pack`, 14-day retention, re-uploaded once older
+than a week). Shared entries are named by the request key, which a new
+worktree can compute before generated SDK sidecars exist, but the attested
+build manifest records only the core input key. `pack` therefore archives the
+single entry whose `transport.json` records that core input key, under its
+request-key name. A pull-request build whose core cache misses restores that
+artifact before building; an artifact lookup or download failure only costs a
+cold build. Only an artifact uploaded by a
+run of this repository's own `main` branch is accepted (`select` checks the
+uploading run's branch and repository id, so forks and other branches never
+supply cores), the extracted entry is sealed read-only, and
+`build_firmware.py` verifies it exactly like a locally shared entry. Partial
+scopes called from `main` publish `Partial CI Gate (firmware)`, never the
+protected **CI Gate**, and promotion dispatch ignores push runs.
 
 The manual **Firmware cache qualification** workflow offers either one macOS
 1.75-inch ordinary-profile job or the full eight-job Linux/macOS matrix for both

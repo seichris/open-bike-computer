@@ -44,6 +44,12 @@ struct CommandResult {
   std::string response;
 };
 
+// Read-only immutable physical identity, using the exact ownership derivation.
+// This does not load/create credentials or authorize a BLE session. Boot storage
+// recovery uses it before BLE starts; failures return false/an empty string.
+bool deriveHardwareDeviceId(DeviceId &deviceId);
+std::string hardwareDeviceIdHex();
+
 class DeviceOwnership {
 public:
   bool begin();

@@ -6,16 +6,26 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
     var id: UUID { archive.routeID }
     let archive: NavigationRouteArchiveV1
     let requiresExistingArchive: Bool
+    /// Raw GPX `<ele>` values aligned with `archive.route.points`; saved in a
+    /// route-elevation sidecar, never inside the hashed archive.
+    let gpxVertexElevations: [Double?]?
 
-    private init(archive: NavigationRouteArchiveV1, requiresExistingArchive: Bool) {
+    private init(
+        archive: NavigationRouteArchiveV1,
+        requiresExistingArchive: Bool,
+        gpxVertexElevations: [Double?]? = nil
+    ) {
         self.archive = archive
         self.requiresExistingArchive = requiresExistingArchive
+        self.gpxVertexElevations = gpxVertexElevations
     }
 
     static func gpx(data: Data, fileName: String, now: Date) throws -> Self {
-        Self(archive: try GPXRouteImporterV1.archive(
-            data: data, fallbackName: fileName, createdAt: now
-        ), requiresExistingArchive: false)
+        let imported = try GPXRouteImporterV1.importRoute(
+            data: data, fallbackName: fileName, source: .local(createdAt: now)
+        )
+        return Self(archive: imported.archive, requiresExistingArchive: false,
+                    gpxVertexElevations: imported.vertexElevations)
     }
 
     /// Takes the already-validated canonical route selected in the planner,

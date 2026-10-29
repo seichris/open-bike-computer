@@ -42,6 +42,7 @@ struct BikeComputerApp: App {
                     appDelegate.setApplicationActive($0)
                 }
             )
+            .environmentObject(appDelegate.social)
         }
     }
 }
@@ -50,6 +51,11 @@ struct BikeComputerApp: App {
 
 @MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        social.didRegisterNotifications(deviceToken)
+    }
+
+    let social = SocialCoordinator()
     let workoutMirrorManager: WorkoutMirrorManager
     let workoutSessionCoordinator: WorkoutSessionCoordinator
     let cyclingSensorStore: CyclingSensorStore
@@ -61,6 +67,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let routeLibrary: PhoneRouteLibrary
     let bicinoServiceSession: BicinoServiceSession
     let stravaIntegrationCoordinator: StravaIntegrationCoordinator
+    let routeElevationService: RouteElevationService
     let destinationStore: SavedDestinationStore
     let locationManager: CurrentLocationManager
     let rideDiagnosticsRecorder: RideDiagnosticsRecorder
@@ -109,7 +116,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 persistence: recordingStore,
                 locations: locationManager.$currentLocation.eraseToAnyPublisher(),
                 onRecoveredMirror: { [weak workoutMirrorManager] session in
-                    workoutMirrorManager?.acceptMirroredSession(session)
+                    workoutMirrorManager?.acceptMirroredSession(session, origin: .nativeRecovery)
                 },
                 canStartAfterAuthorization: { [weak workoutMirrorManager] in
                     guard let presentation = workoutMirrorManager?.store.presentation else { return false }
@@ -153,7 +160,27 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             routeLibrary: routeLibrary,
             callbackScheme: callbackScheme
         )
+        routeElevationService = RouteElevationService(
+            fetcher: RouteElevationClient(serviceSession: bicinoServiceSession),
+            sidecars: routeLibrary
+        )
         super.init()
+        social.live.prepareLocation = { [weak locationManager] in
+            guard let locationManager else { return false }
+            return await locationManager.prepareSocialRideLocation()
+        }
+        social.friendLive.prepareLocation = social.live.prepareLocation
+        locationManager.$authorizationStatus.removeDuplicates().sink { [weak social] status in
+            social?.live.locationAuthorizationChanged(authorized: status == .authorizedAlways || status == .authorizedWhenInUse)
+        }.store(in: &cancellables)
+        social.live.$isSharing.combineLatest(social.friendLive.$isSharing)
+            .map { $0 || $1 }.removeDuplicates().sink { [weak locationManager] sharing in
+            locationManager?.setSocialRideSharing(sharing)
+        }.store(in: &cancellables)
+        locationManager.$currentLocation.sink { [weak social] location in
+            social?.live.updateLocation(location)
+            social?.friendLive.updateLocation(location)
+        }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
@@ -202,8 +229,37 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         )
         _ = coordinator
         _ = rideAutomationCoordinator
+        coordinator.configureRouteElevation(routeElevationService)
         let bleManager = coordinator.bleManager
+        social.bindBLE(bleManager)
+
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        DiagnosticsBrokerClient.shared.configure(recorder: rideDiagnosticsRecorder, bleManager: bleManager)
+        DiagnosticsCollectionCoordinator.shared.configure(
+            recorder: rideDiagnosticsRecorder, bleManager: bleManager,
+            canCollect: { [weak self] in
+                guard let self else { return false }
+                return UIApplication.shared.applicationState == .active &&
+                    !self.coordinator.isNavigating &&
+                    !self.workoutSessionCoordinator.store.presentation.isWorkoutActive
+            })
+        Publishers.CombineLatest(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsRideDiagnostics
+        )
+            // Authentication may finish before capability discovery. Either
+            // transition must wake a retained collection once both are ready.
+            .map { $0 && $1 }
+            .removeDuplicates()
+            // Published emits during willSet. Resume reads the committed BLE
+            // state, so deliver on the next main-queue turn rather than here.
+            .receive(on: DispatchQueue.main)
+            .filter { $0 }
+            .sink { _ in
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
+                DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            }
+            .store(in: &cancellables)
         watchConnectivityCoordinator.diagnosticsRecorder =
             rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
@@ -212,6 +268,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        // Runtime policy forwarding is explicit at each caller. An iPhone-only
+        // broker request must never mutate a connected peripheral's policy.
         rideDiagnosticsRecorder.$captureBinding
             .removeDuplicates()
             .sink { [weak bleManager] binding in
@@ -219,6 +277,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     binding.captureID,
                     detailed: binding.detailed
                 )
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
             }
             .store(in: &cancellables)
         Publishers.CombineLatest(
@@ -237,14 +296,16 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .scan((previous: false, current: false)) { state, active in
                 (previous: state.current, current: active)
             }
-            .filter {
-                RideDiagnosticsRideLifecyclePolicy.didEndRide(
-                    previous: $0.previous,
-                    current: $0.current
-                )
-            }
-            .sink { [weak rideDiagnosticsRecorder] _ in
-                rideDiagnosticsRecorder?.endRideCapture()
+            .sink { [weak rideDiagnosticsRecorder, weak social] state in
+                // Snapshot the finished ride's original identities BEFORE the
+                // recorder rotates its capture. Delivery may occur much later.
+                DiagnosticsCollectionCoordinator.shared.observeRide(active: state.current)
+                if RideDiagnosticsRideLifecyclePolicy.didEndRide(
+                    previous: state.previous, current: state.current
+                ) {
+                    rideDiagnosticsRecorder?.endRideCapture()
+                    Task { @MainActor in await social?.live.stopSharing() }
+                }
             }
             .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(
@@ -347,7 +408,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func setApplicationActive(_ isActive: Bool) {
+        DiagnosticsBrokerClient.shared.setActive(isActive)
         coordinator.setApplicationActive(isActive)
+        if isActive {
+            // SwiftUI can publish its phase before UIKit commits applicationState.
+            DispatchQueue.main.async {
+                DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            }
+        }
         if #available(iOS 17.0, *),
            let controller =
                workoutLiveActivityController

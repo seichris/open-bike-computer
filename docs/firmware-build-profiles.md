@@ -45,14 +45,19 @@ Production keeps native USB hardware support (`ARDUINO_USB_MODE=1`) but sets
 CDC cost, while the ESP32-S3 ROM download mode remains available for recovery:
 hold BOOT (GPIO0) while reconnecting USB, then flash the correct board target.
 
-Developer and diagnostic profiles use one 6 MiB application partition because
+Developer and diagnostic profiles use one 8 MiB application partition because
 their renderer, automation, and instrumentation code is not constrained by the
-release OTA slot. Production keeps two 3 MiB OTA application partitions. Both
-layouts keep FFat at `0x610000`, so USB-flashing a diagnostic image does not
-relocate or format fallback map and diagnostics data. OTA release artifacts
-continue to use only the production layout. Production builds must retain at
-least 64 KiB in each application slot; the locked build helper rejects an image
-that merely fits but leaves less reserve. The two embedded horn recordings are
+release OTA slot. Production uses two 4 MiB OTA application partitions. Both
+layouts keep a 7 MiB FFat at `0x810000`, so USB-flashing between current
+profiles does not relocate or format fallback diagnostics and device data. (FFat
+no longer serves maps; files an older firmware left there are kept but not
+read.) The numbers come from `esp32/partition_layouts.json`; the locked build
+helper rejects any table that is not a current registered layout. Flashing a
+current image onto a board with the older 3 MiB/6 MiB generation does move FFat;
+see [partition layouts](partition-layout-migration.md) before doing so. OTA
+release artifacts continue to use only the production layout. Production builds
+must retain at least 64 KiB in each application slot; the locked build helper
+rejects an image that merely fits but leaves less reserve. The two embedded horn recordings are
 stored as mono PCM and expanded to their original identical-channel stereo
 streams during playback. The unused rotating-bell recording was removed; sound
 ID `3` remains reserved so older clients and persisted settings fail closed.

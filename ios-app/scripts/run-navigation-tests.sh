@@ -3,11 +3,12 @@ set -euo pipefail
 
 DEV_SWIFT_COMPILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/development/swift_compile.py"
 
+
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bicino-swift-check.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 export TMPDIR="${RUN_TMP}/"
 
-"$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
+
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -16,7 +17,13 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+group="${1:-all}"
+case "$group" in all|map|sensors|workout|radio) ;; *) echo "Unknown navigation group: $group" >&2; exit 64 ;; esac
+if [[ "$group" == all || "$group" == map ]]; then
+  bash "$SCRIPT_DIR/run-online-poi-tests.sh"
+  bash "$SCRIPT_DIR/run-device-map-operation-tests.sh"
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
+python3 "${SCRIPT_DIR}/run-map-upload-binding-tests.py"
 
 TOPOGRAPHY_ALIGNMENT_OUT="${TMPDIR:-/tmp}/open-bike-topography-alignment-tests"
 python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
@@ -24,7 +31,7 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
   -o "${TOPOGRAPHY_ALIGNMENT_OUT}"
 "${TOPOGRAPHY_ALIGNMENT_OUT}"
 
-"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
+"${SCRIPT_DIR}/run-device-operation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
 
@@ -52,19 +59,10 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-5 -- \
 
 "${OUT}"
 
-bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
+bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
 
-CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
-for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
-python3 "${DEV_SWIFT_COMPILER}" navigation-6 -- \
-  -parse-as-library \
-  -default-isolation MainActor \
-  -o "${CYCLING_SENSOR_OUT}" \
-  "ios-app/BikeComputerTests/${CYCLING_SENSOR_TEST}.swift"
-
-"${CYCLING_SENSOR_OUT}"
-done
+bash "${SCRIPT_DIR}/run-route-elevation-tests.sh"
 
 CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
@@ -109,3 +107,58 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-9 -- \
   -o "${PREVIEW_CATALYST_OUT}"
 
 "${PREVIEW_CATALYST_OUT}"
+
+# The embedded Info.plist supplies the build-owned development map service
+# and catalog hosts that OfflineMapManager reads from Bundle.main.
+CONTOUR_COMPANION_OUT="${TMPDIR:-/tmp}/open-bike-contour-companion-tests"
+python3 "${DEV_SWIFT_COMPILER}" contour-companion-1 -- \
+  -D HOST_TESTING -parse-as-library \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "${IOS_DIR}/tests/contour-companion-host/Info.plist" \
+  -o "${CONTOUR_COMPANION_OUT}"
+"${CONTOUR_COMPANION_OUT}"
+
+CONTOUR_OVERLAY_CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-contour-overlay-tests"
+python3 "${DEV_SWIFT_COMPILER}" contour-companion-2 -- \
+  -D HOST_TESTING \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CONTOUR_OVERLAY_CATALYST_OUT}"
+"${CONTOUR_OVERLAY_CATALYST_OUT}"
+
+CONTOUR_LABEL_OUT="${TMPDIR:-/tmp}/open-bike-contour-label-tests"
+python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CONTOUR_LABEL_OUT}"
+"${CONTOUR_LABEL_OUT}"
+fi
+if [[ "$group" == all || "$group" == sensors ]]; then
+  bash "$SCRIPT_DIR/run-cycling-sensor-observation-tests.sh"
+CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
+
+for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
+python3 "${DEV_SWIFT_COMPILER}" navigation-6 -- \
+  -parse-as-library \
+  -default-isolation MainActor \
+  -o "${CYCLING_SENSOR_OUT}" \
+  "ios-app/BikeComputerTests/${CYCLING_SENSOR_TEST}.swift"
+
+"${CYCLING_SENSOR_OUT}"
+done
+
+fi
+if [[ "$group" == all || "$group" == workout ]]; then
+  bash "$SCRIPT_DIR/run-native-workout-zone-tests.sh"
+fi
+if [[ "$group" == all || "$group" == radio ]]; then
+  bash "$SCRIPT_DIR/run-world-radio-tests.sh"
+fi

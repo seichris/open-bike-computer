@@ -126,6 +126,7 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
 #endif
 
 struct NavigationWrite {
+    var isStillValid: (() -> Bool)?
     let data: Data
     let prepareData: (() -> Data?)?
     let label: String
@@ -133,6 +134,9 @@ struct NavigationWrite {
     let onWrite: (() -> Void)?
     let onDrop: (() -> Void)?
     let onWriteFailure: (() -> Void)?
+    /// Runs after a successful ATT write response. A write without response
+    /// has no stronger evidence, so it runs once that write is issued.
+    let onWriteSuccess: (() -> Void)?
     let transportCanSend: (() -> Bool)?
     let transportExpectsWriteResponse: Bool?
     /// The actual CoreBluetooth characteristic used by `transportWrite`.
@@ -149,11 +153,13 @@ struct NavigationWrite {
     init(
         data: Data,
         label: String,
+        isStillValid: (() -> Bool)? = nil,
         prepareData: (() -> Data?)? = nil,
         transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil,
         transportCanSend: (() -> Bool)? = nil,
         transportExpectsWriteResponse: Bool? = nil,
         transportCharacteristicUUIDString: String? = nil,
@@ -163,6 +169,7 @@ struct NavigationWrite {
         protectedFromEviction: Bool = false,
         enqueuedAtUptime: TimeInterval? = nil
     ) {
+        self.isStillValid = isStillValid
         self.data = data
         self.prepareData = prepareData
         self.label = label
@@ -170,6 +177,7 @@ struct NavigationWrite {
         self.onWrite = onWrite
         self.onDrop = onDrop
         self.onWriteFailure = onWriteFailure
+        self.onWriteSuccess = onWriteSuccess
         self.transportCanSend = transportCanSend
         self.transportExpectsWriteResponse = transportExpectsWriteResponse
         self.transportCharacteristicUUIDString =
@@ -195,11 +203,13 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:
@@ -216,11 +226,13 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:
@@ -686,6 +698,14 @@ struct NavigationWriteQueue {
         var writesRemaining = max(0, maxWrites)
         while writesRemaining > 0 && count > 0 {
             let nextWrite = pendingPriorityWrites.first ?? pendingWrites.first!
+            if nextWrite.isStillValid?() == false {
+                let retired = pendingPriorityWrites.isEmpty
+                    ? pendingWrites.removeFirst() : pendingPriorityWrites.removeFirst()
+                recordDropped(write: retired)
+                recordDepth()
+                retired.onDrop?()
+                continue
+            }
             guard canSend(nextWrite) else {
                 recordBackpressureStop()
                 break

@@ -4,6 +4,11 @@ This document defines how a tagged production build becomes a portable
 factory-flash artifact without bypassing the repository-owned firmware runtime
 or its upload attestation.
 
+The protected publisher also derives signed, preservation-scoped web recovery
+assets from supported factory bundles. See [USB recovery](usb-firmware-recovery.md)
+for the `/update` contract and separate consumer qualification gate. A factory
+release signature does not itself enable browser flashing.
+
 ## Source and qualification boundary
 
 `open-bike-computer` is the production firmware source of truth. Build both
@@ -244,6 +249,20 @@ removable storage or installed maps are available. The exact observed behavior
 and remaining matrix are recorded in
 [`hardware/README.md`](../hardware/README.md#8-sd-card--map-io).
 
+The first release after the dual-4-MiB layout change
+([PR #662](https://github.com/seichris/open-bike-computer/pull/662), issue #461)
+changes two production paths at once. Its factory images carry the new
+production partition table, and legacy devices that update over the air run the
+new internal-FFat ownership policy on their unchanged dual-3-MiB table. The
+per-board gates are listed in
+[partition layouts](partition-layout-migration.md#physical-qualification-gates-each-board-separately);
+none had run on hardware when the change merged. That release must not be
+tagged or published until the production-path gates pass on both boards: FFat,
+OTA on the new layout, true cold boot and the legacy-device update. Accepting
+residual risk to merge the change does not cover publishing it. The signed
+migration package stays unadmitted, with no website catalog entry, until every
+gate passes with that release's exact bytes.
+
 ## Release outputs
 
 For each production target, the candidate and protected publisher together
@@ -253,6 +272,7 @@ publish:
 |---|---|
 | `<target>.bin` | Application-only image consumed by OTA |
 | `<target>.manifest.json` | Existing signed OTA manifest |
+| `<target>.web-recovery*.json`, `<target>.web-migration-*.json`, `<target>.web-<sha256>.bin` | Signed USB recovery/migration recipes and their images ([partition layouts](partition-layout-migration.md)) |
 | `<target>.factory.tar.gz` | Deterministic factory archive |
 | `<target>.factory-bundle.json` | Portable copy of the archive's flash layout and hashes |
 | `<target>.factory-release.json` | Signed release identity for the archive and bundle manifest |
@@ -389,6 +409,10 @@ uploads, edits, or replaces release assets. It downloads the complete
 published inventory,
 requires the repository verifier and GitHub release attestation to accept the
 immutable release, verifies every downloaded asset against that attestation,
-and deploys only the two exact signed OTA manifests. A mutable, incomplete, or
-unattested release fails closed. This manual path is for OTA Pages recovery
+and deploys only exact signed OTA manifests: the release's own manifest in each
+target's `dual4m` channel and, in the legacy `manifest.json` channel, that
+manifest when it fits dual-3-MiB slots, otherwise the live legacy manifest after
+verifying it against an immutable published release
+(`tools/firmware_ota_channels.py`). A mutable, incomplete, or unattested release
+fails closed. This manual path is for OTA Pages recovery
 only; failed or partial asset publication still requires a new release tag.

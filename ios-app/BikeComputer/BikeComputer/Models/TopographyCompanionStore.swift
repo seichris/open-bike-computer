@@ -50,8 +50,8 @@ nonisolated struct TopographyCompanionMetadata: Codable, Equatable, Sendable {
     let tileCount: Int
 
     func validate(receipt: TopographyCompanionReceipt) throws {
-        guard schemaVersion == 1, profileVersion == 1,
-              styleId == "contours-transparent-20-50-v1", tileScheme == "xyz",
+        guard (1...2).contains(schemaVersion), profileVersion == 1,
+              styleId == (schemaVersion == 1 ? "contours-transparent-20-50-v1" : "contours-labels-terrain-v2"), tileScheme == "xyz",
               tileSize == 256, scales == [1, 2], minimumZoom == 9, maximumZoom == 16,
               mapId == receipt.mapID, intermediateSha256 == receipt.intermediateSha256,
               sourcePolicySha256 == receipt.sourcePolicySha256, attributionSha256 == receipt.attributionSha256,
@@ -156,9 +156,11 @@ nonisolated enum SavedTopographyCompanionStorage {
 }
 
 /// Crash-safe two-file replacement for a companion and its external binding.
-/// The journal is committed only after both new files and the directory have
-/// been synchronized. Recovery therefore keeps either the old pair or the new
-/// pair, never a newly trusted database with an old association.
+/// The saved map pair it decorates is the commit point: the journal stays
+/// uncommitted until that map commits, and recovery keeps the new companion
+/// only when the saved map is the exact stream it is bound to. Recovery
+/// therefore keeps either the old pair or the new pair, never a newly trusted
+/// database with an old association or a companion for a rolled-back map.
 nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
     static let suffix = ".topography-replacement.json"
 
@@ -167,6 +169,11 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
     let hadArtifact: Bool
     let hadAssociation: Bool
     var committed: Bool
+    /// The saved map file and exact stream this replacement belongs to.
+    var mapArtifactFilename: String? = nil
+    var streamArtifactSHA256: String? = nil
+    /// Set once the new companion and association are both synchronized.
+    var staged: Bool? = nil
 
     func artifact(in directory: URL) -> URL {
         directory.appendingPathComponent(filename)
@@ -193,7 +200,11 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
         try Self.sync(directory)
     }
 
-    static func begin(at destination: URL) throws -> Self {
+    static func begin(
+        at destination: URL,
+        mapArtifactFilename: String? = nil,
+        streamArtifactSHA256: String? = nil
+    ) throws -> Self {
         guard destination.pathExtension == "btopo",
               destination.lastPathComponent == URL(
                 fileURLWithPath: destination.lastPathComponent
@@ -209,7 +220,9 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                 atPath: SavedTopographyCompanionStorage
                     .associationURL(for: destination).path
             ),
-            committed: false
+            committed: false,
+            mapArtifactFilename: mapArtifactFilename,
+            streamArtifactSHA256: streamArtifactSHA256
         )
         try value.save(in: destination.deletingLastPathComponent())
         return value
@@ -246,7 +259,12 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
         try Self.sync(directory)
     }
 
-    static func recover(in directory: URL) throws {
+    /// `savedStreamSHA256` returns the exact stream of a saved map file after
+    /// that map's own replacement journal has been recovered.
+    static func recover(
+        in directory: URL,
+        savedStreamSHA256: (String) -> String? = { _ in nil }
+    ) throws {
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
@@ -261,7 +279,7 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                   (values.fileSize ?? Int.max) <= 4096 else {
                 throw POSIXError(.EINVAL)
             }
-            let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+            var value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
             guard value.filename.hasPrefix("topography-"),
                   value.filename.hasSuffix(".btopo"),
                   !value.filename.contains("/"),
@@ -273,6 +291,13 @@ nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
                   ) == value.filename,
                   value.url(in: directory).standardizedFileURL == file.standardizedFileURL else {
                 throw POSIXError(.EINVAL)
+            }
+            if !value.committed, value.staged == true,
+               let mapArtifactFilename = value.mapArtifactFilename,
+               let streamArtifactSHA256 = value.streamArtifactSHA256,
+               savedStreamSHA256(mapArtifactFilename) == streamArtifactSHA256 {
+                // The map pair committed before the process stopped.
+                value.committed = true
             }
             try value.finish(in: directory)
         }
@@ -373,17 +398,24 @@ actor TopographyCompanionStore {
         }
         guard count == receipt.bytes, Self.hex(hash.finalize()) == receipt.sha256 else { throw TopographyCompanionError.receipt }
         let database = try TopographyDatabase(url: url)
+        let version = try database.integer("PRAGMA user_version")
         guard try database.integer("PRAGMA application_id") == 0x42544F50,
-              try database.integer("PRAGMA user_version") == 1,
+              (1...2).contains(version),
               try database.integer("PRAGMA page_size") == 4096,
-              try database.integer("SELECT count(*) FROM sqlite_schema") == 2 else { throw TopographyCompanionError.schema }
-        let schemas = [
+              try database.integer("SELECT count(*) FROM sqlite_schema") == (version == 1 ? 2 : 4) else { throw TopographyCompanionError.schema }
+        var schemas = [
             "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)",
             "CREATE TABLE tiles (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, scale INTEGER NOT NULL, png BLOB NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (z, x, y, scale)) WITHOUT ROWID"
         ]
+        var names = ["metadata", "tiles"]
+        if version == 2 {
+            schemas.insert("CREATE TABLE labels (x INTEGER NOT NULL, y INTEGER NOT NULL, elevation INTEGER NOT NULL, PRIMARY KEY (x, y, elevation)) WITHOUT ROWID", at: 0)
+            schemas.insert("CREATE TABLE terrain (x INTEGER NOT NULL, y INTEGER NOT NULL, grid BLOB NOT NULL, PRIMARY KEY (x, y)) WITHOUT ROWID", at: 2)
+            names = ["labels", "metadata", "terrain", "tiles"]
+        }
         let schema = try database.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name")
         defer { sqlite3_finalize(schema) }
-        for (index, name) in ["metadata", "tiles"].enumerated() {
+        for (index, name) in names.enumerated() {
             guard sqlite3_step(schema) == SQLITE_ROW,
                   try TopographyDatabase.text(schema, 0, maximum: 16) == "table",
                   try TopographyDatabase.text(schema, 1, maximum: 16) == name,
@@ -397,6 +429,22 @@ actor TopographyCompanionStore {
         let json = try TopographyDatabase.text(row, 0, maximum: 16384)
         let metadata = try JSONDecoder().decode(TopographyCompanionMetadata.self, from: Data(json.utf8))
         try metadata.validate(receipt: receipt)
+        guard metadata.schemaVersion == version else { throw TopographyCompanionError.schema }
+        if version == 2 {
+            guard try database.integer("SELECT count(*) FROM labels") <= 100_000,
+                  try database.integer("SELECT count(*) FROM terrain") <= 256,
+                  try database.integer("SELECT count(*) FROM labels WHERE typeof(x) != 'integer' OR typeof(y) != 'integer' OR typeof(elevation) != 'integer' OR abs(x) > 20037509 OR abs(y) > 20037509 OR elevation < -12000 OR elevation > 10000 OR elevation % 50 != 0") == 0 else { throw TopographyCompanionError.tile }
+            let rows = try database.prepare("SELECT x,y,grid FROM terrain")
+            defer { sqlite3_finalize(rows) }
+            var result = sqlite3_step(rows)
+            while result == SQLITE_ROW {
+                try Task.checkCancellation()
+                let grid = try Self.terrainGrid(rows)
+                guard grid.x == Int(sqlite3_column_int64(rows, 0)), grid.y == Int(sqlite3_column_int64(rows, 1)) else { throw TopographyCompanionError.tile }
+                result = sqlite3_step(rows)
+            }
+            guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        }
         // Exact canonical JSON rejects duplicate keys, extras, booleans in
         // numeric fields and alternate whitespace/number representations.
         let encoder = JSONEncoder()
@@ -433,7 +481,83 @@ actor TopographyCompanionStore {
         return metadata
     }
 
+    private static func terrainGrid(_ row: OpaquePointer) throws -> TerrainGrid {
+        guard sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 1) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 2) == SQLITE_BLOB,
+              sqlite3_column_bytes(row, 2) == 4372,
+              let pointer = sqlite3_column_blob(row, 2) else { throw TopographyCompanionError.tile }
+        return try TerrainGrid(Data(bytes: pointer, count: 4372))
+    }
+
+    func labels(west: Int, south: Int, east: Int, north: Int) throws -> [ContourLabelAnchor] {
+        guard let database, metadata?.schemaVersion == 2 else { return [] }
+        // Round-robin spatial cells before the global bound, with stable centre
+        // preference inside each cell. Dense western contours cannot starve
+        // the rest of the viewport.
+        let row = try database.prepare("""
+            SELECT x,y,elevation FROM (
+              SELECT x,y,elevation,
+                ROW_NUMBER() OVER (
+                  PARTITION BY ((x-?)*8/?),((y-?)*8/?)
+                  ORDER BY (x-?)*(x-?)+(y-?)*(y-?),x,y,elevation
+                ) AS cell_rank
+              FROM labels WHERE x>=? AND x<=? AND y>=? AND y<=?
+            ) ORDER BY cell_rank,(x-?)*(x-?)+(y-?)*(y-?),x,y,elevation LIMIT 512
+            """)
+        defer { sqlite3_finalize(row) }
+        let cx = west + (east - west) / 2, cy = south + (north - south) / 2
+        let parameters = [west, max(1, east-west+1), south, max(1, north-south+1),
+                          cx, cx, cy, cy, west, east, south, north, cx, cx, cy, cy]
+        for (i,v) in parameters.enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
+        var output: [ContourLabelAnchor] = []
+        var result = sqlite3_step(row)
+        while result == SQLITE_ROW {
+            try Task.checkCancellation()
+            output.append(ContourLabelAnchor(x: Int(sqlite3_column_int64(row,0)), y: Int(sqlite3_column_int64(row,1)), elevation: Int(sqlite3_column_int64(row,2))))
+            result = sqlite3_step(row)
+        }
+        guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        return output
+    }
+
+    func terrain(x: Int, y: Int) throws -> [TerrainGrid] {
+        guard let database, metadata?.schemaVersion == 2 else { return [] }
+        let row = try database.prepare("SELECT x,y,grid FROM terrain ORDER BY (x-?)*(x-?)+(y-?)*(y-?),x,y LIMIT 4")
+        defer { sqlite3_finalize(row) }
+        for (i,v) in [x,x,y,y].enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
+        var output: [TerrainGrid] = []
+        var result = sqlite3_step(row)
+        while result == SQLITE_ROW { try Task.checkCancellation(); output.append(try Self.terrainGrid(row)); result = sqlite3_step(row) }
+        guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        return output
+    }
+
+    // Composition stays synchronous on this actor: only one overview buffer
+    // exists per companion, and cancellation is checked between child reads.
+    func displayTile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
+        if (TopographyContourOverview.nativeMinimumZoom...TopographyContourOverview.nativeMaximumZoom).contains(z) {
+            return try tile(z: z, x: x, y: y, scale: scale)
+        }
+        try Task.checkCancellation()
+        guard database != nil, metadata != nil else { throw TopographyCompanionError.closed }
+        let key = TileKey(z: z, x: x, y: y, scale: scale)
+        if let data = tileCache[key] { return data }
+        let data = try TopographyContourOverview.tile(z: z, x: x, y: y, scale: scale) {
+            [self] z, x, y, scale in
+            try self.readTile(z: z, x: x, y: y, scale: scale, cacheResult: false)
+        }
+        try Task.checkCancellation()
+        guard database != nil else { throw TopographyCompanionError.closed }
+        if let data { cache(data, for: key) }
+        return data
+    }
+
     func tile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
+        try readTile(z: z, x: x, y: y, scale: scale, cacheResult: true)
+    }
+
+    private func readTile(z: Int, x: Int, y: Int, scale: Int, cacheResult: Bool) throws -> Data? {
         try Task.checkCancellation()
         guard let database, metadata != nil else { throw TopographyCompanionError.closed }
         let key = TileKey(z: z, x: x, y: y, scale: scale)
@@ -446,12 +570,20 @@ actor TopographyCompanionStore {
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW else { throw TopographyCompanionError.database }
         let data = try Self.tileData(statement, pngColumn: 0, shaColumn: 1, scale: scale)
+        if cacheResult { cache(data, for: key) }
+        return data
+    }
+
+    private func cache(_ data: Data, for key: TileKey) {
+        if let previous = tileCache.removeValue(forKey: key) {
+            cacheBytes -= previous.count
+            cacheOrder.removeAll { $0 == key }
+        }
         while cacheBytes + data.count > Self.cacheLimit || cacheOrder.count >= 128 {
             let oldest = cacheOrder.removeFirst()
             cacheBytes -= tileCache.removeValue(forKey: oldest)?.count ?? 0
         }
         tileCache[key] = data; cacheOrder.append(key); cacheBytes += data.count
-        return data
     }
 
     func close() {
@@ -489,4 +621,34 @@ actor TopographyCompanionStore {
               CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { throw TopographyCompanionError.tile }
         return data
     }
+}
+
+nonisolated struct TerrainGrid: Sendable {
+    struct Node: Sendable { let height: Int; let shade: UInt8; let slope: UInt8 }
+    let x: Int
+    let y: Int
+    let nodes: [Node]
+    init(_ data: Data) throws {
+        let bytes = [UInt8](data)
+        guard bytes.count == 4372, data.prefix(4) == Data("FME1".utf8) else { throw TopographyCompanionError.tile }
+        func u32(_ p: Int) -> UInt32 { UInt32(bytes[p]) | UInt32(bytes[p+1]) << 8 | UInt32(bytes[p+2]) << 16 | UInt32(bytes[p+3]) << 24 }
+        x = Int(Int32(bitPattern: u32(4))); y = Int(Int32(bitPattern: u32(8)))
+        guard (-4892...4891).contains(x), (-4892...4891).contains(y) else { throw TopographyCompanionError.tile }
+        var crc: UInt32 = 0xffffffff
+        for byte in bytes.dropFirst(16) { crc ^= UInt32(byte); for _ in 0..<8 { crc = (crc >> 1) ^ (crc & 1 == 0 ? 0 : 0xedb88320) } }
+        guard crc ^ 0xffffffff == u32(12) else { throw TopographyCompanionError.tile }
+        var result: [Node] = []; result.reserveCapacity(1089)
+        for p in stride(from: 16, to: bytes.count, by: 4) {
+            let height = Int(Int16(bitPattern: UInt16(bytes[p]) | UInt16(bytes[p+1]) << 8))
+            let shade = bytes[p+2], slope = bytes[p+3]
+            guard height == -32768 ? (shade == 0 && slope == 0) : ((-12000...10000).contains(height) && slope <= 90) else { throw TopographyCompanionError.tile }
+            result.append(Node(height: height, shade: shade, slope: slope))
+        }
+        nodes = result
+    }
+}
+nonisolated struct ContourLabelAnchor: Hashable, Sendable {
+    let x: Int
+    let y: Int
+    let elevation: Int
 }

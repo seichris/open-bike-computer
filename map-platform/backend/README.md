@@ -44,6 +44,11 @@ contract and operating procedure.
 - Installation-scoped Strava OAuth, connection management, cycling-route
   GPX import, availability checks, encrypted token storage, and revocation
   maintenance behind an opt-in capability flag.
+- Installation-scoped route elevation profiles
+  (`POST /v1/route-elevation-profiles`): Geoapify hosted terrain with an
+  internal Copernicus DEM fallback, conservative OSM bridge/tunnel correction,
+  credit budgets and rate limits. See
+  [Route elevation](../../docs/route-elevation-profile.md).
 - Coolify-oriented compose file and Dockerfile.
 
 ## Local API
@@ -135,6 +140,33 @@ success or no later than 30 days after disconnection, including when Strava or
 its client configuration remains unavailable. Revocation uses Strava's current
 Basic-authenticated `POST /oauth/revoke` flow with the encrypted refresh token;
 do not restore the legacy deauthorization endpoint.
+
+### Route elevation
+
+Route elevation runs in the API process. Hosted terrain is inert until the
+Geoapify key is present; never commit it or pass it to the worker or
+maintenance service:
+
+```sh
+MAP_PLATFORM_GEOAPIFY_API_KEY=<secret from the deployment secret store>
+MAP_PLATFORM_GEOAPIFY_DAILY_CREDIT_BUDGET=1500
+MAP_PLATFORM_ROUTE_ELEVATION_INSTALLATION_DAILY_CREDITS=200
+```
+
+The Copernicus fallback stays off (`MAP_PLATFORM_ROUTE_ELEVATION_DEM_ENABLED=0`)
+and is refused in production until its pinned sources are approved; it samples
+only tiles staged with `map-topography stage`. Build a bridge/tunnel index from
+an OSM extract and point `MAP_PLATFORM_ROUTE_ELEVATION_STRUCTURE_INDEX_DIR` at
+its directory:
+
+```sh
+python -m map_platform.cli route-elevation-structures \
+  --osm extract.osm.pbf --output structures/region.sqlite3 \
+  --source-label geofabrik:region
+```
+
+All variables, limits and retention rules are in
+[Route elevation](../../docs/route-elevation-profile.md#configuration).
 
 Run a job:
 

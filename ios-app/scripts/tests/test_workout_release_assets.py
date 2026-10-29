@@ -96,6 +96,29 @@ def target_build_configurations(project: str, target_name: str) -> dict[str, str
 
 
 class WorkoutReleaseAssetsTests(unittest.TestCase):
+    def test_background_audio_is_development_only(self):
+        production = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
+        development = load_plist(
+            IOS_PROJECT / "BikeComputer" / "Info-Development.plist"
+        )
+        self.assertEqual(
+            set(production["UIBackgroundModes"]), {"location", "bluetooth-central"}
+        )
+        self.assertEqual(
+            set(development["UIBackgroundModes"]),
+            {"audio", "location", "bluetooth-central"},
+        )
+        development["UIBackgroundModes"].remove("audio")
+        self.assertEqual(development, production, "Shared app metadata must stay aligned")
+
+        project = (IOS_PROJECT / "BikeComputer.xcodeproj/project.pbxproj").read_text()
+        configurations = target_build_configurations(project, "BikeComputer")
+        self.assertIn(
+            "INFOPLIST_FILE = BikeComputer/Info-Development.plist;",
+            configurations["Debug"],
+        )
+        self.assertIn("INFOPLIST_FILE = BikeComputer/Info.plist;", configurations["Release"])
+
     def test_development_and_production_identities_are_separate(self):
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
@@ -184,8 +207,32 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             load_xcconfig(IOS_PROJECT / "Configuration" / "HealthKitZones.xcconfig"),
             expected_zone_flags,
         )
-        self.assertEqual(development, {**expected_zone_flags, **expected_development})
-        self.assertEqual(production, {**expected_zone_flags, **expected_production})
+        # Firebase's public client identities must match the app family; neither
+        # build requires an external feature switch to expose account features.
+        expected_development_social = {
+            "BICINO_FIREBASE_API_KEY": "AIzaSyAqEA5LP16RFDQcPXBMeqEvGOPsuIEZ1b0",
+            "BICINO_FIREBASE_APP_ID": "1:508574122896:ios:6edaa42944894d22b86915",
+            "BICINO_FIREBASE_PROJECT_ID": "bicino-dev",
+            "BICINO_FIREBASE_SENDER_ID": "508574122896",
+            "BICINO_GOOGLE_CLIENT_ID": "508574122896-bg7ciq6ecdsq0j450mduvnfp9c7ubsko.apps.googleusercontent.com",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "com.googleusercontent.apps.508574122896-bg7ciq6ecdsq0j450mduvnfp9c7ubsko",
+        }
+        expected_production_social = {
+            "BICINO_FIREBASE_APP_ID": "1:578330303218:ios:fcc893df60771bd1d60e6b",
+            "BICINO_FIREBASE_SENDER_ID": "578330303218",
+            "BICINO_FIREBASE_API_KEY": "AIzaSyAt1IoeVRCF8lGTO5tkXfKyaXXAnMFrtFw",
+            "BICINO_FIREBASE_PROJECT_ID": "bicino-prod",
+            "BICINO_GOOGLE_CLIENT_ID": "578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi.apps.googleusercontent.com",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "com.googleusercontent.apps.578330303218-qbvs9sa1nuvk8rf3ufqe1lmf8adrv2mi",
+        }
+        self.assertEqual(development, {
+            **expected_zone_flags, **expected_development,
+            **expected_development_social, "BICINO_APNS_ENVIRONMENT": "development",
+        })
+        self.assertEqual(production, {
+            **expected_zone_flags, **expected_production,
+            **expected_production_social, "BICINO_APNS_ENVIRONMENT": "production",
+        })
 
         development_key_id = development[
             "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"
@@ -366,13 +413,24 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "$(BICINO_URL_SCHEME)",
         )
         self.assertEqual(
-            ios_info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
-            ["$(BICINO_URL_SCHEME)"],
+            sorted(scheme for entry in ios_info["CFBundleURLTypes"]
+                   for scheme in entry["CFBundleURLSchemes"]),
+            ["$(BICINO_GOOGLE_REVERSED_CLIENT_ID)", "$(BICINO_URL_SCHEME)"],
         )
         self.assertEqual(
             ios_info["LSApplicationQueriesSchemes"],
             ["strava"],
         )
+        self.assertNotIn("aps-environment", ios_entitlements)
+        self.assertNotIn("com.apple.developer.applesignin", ios_entitlements)
+        self.assertEqual(ios_entitlements["keychain-access-groups"], ["$(AppIdentifierPrefix)LetItRide.BikeComputer.map-library"])
+        social_entitlements = load_plist(IOS_PROJECT / "BikeComputer" / "BikeComputerSocial.entitlements")
+        self.assertEqual(social_entitlements["aps-environment"], "$(BICINO_APNS_ENVIRONMENT)")
+        self.assertEqual(social_entitlements["com.apple.developer.applesignin"], ["Default"])
+        self.assertEqual(social_entitlements["keychain-access-groups"], [
+            "$(AppIdentifierPrefix)LetItRide.BikeComputer.map-library",
+            "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)",
+        ])
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
 
@@ -474,6 +532,11 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                 "NSPrivacyCollectedDataTypeUserID",
                 "NSPrivacyCollectedDataTypeOtherUserContent",
                 "NSPrivacyCollectedDataTypeProductInteraction",
+                "NSPrivacyCollectedDataTypeName",
+                "NSPrivacyCollectedDataTypeEmailAddress",
+                "NSPrivacyCollectedDataTypePhotosorVideos",
+                "NSPrivacyCollectedDataTypeFitness",
+                "NSPrivacyCollectedDataTypeContacts",
             },
         )
         for entry in collected.values():
@@ -519,6 +582,27 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(len(watch_icons), 1)
         self.assertEqual(watch_icons[0]["size"], "1024x1024")
         self.assertTrue(watch_icons[0].get("filename"))
+        assets = IOS_PROJECT / "BikeComputer" / "Assets.xcassets"
+        family_icons = {}
+        for family in ("AppIcon", "AppIconDev"):
+            folder = assets / (family + ".appiconset")
+            images = json.loads((folder / "Contents.json").read_text())["images"]
+            phone = [image for image in images if image.get("platform") == "ios"]
+            watch = [image for image in images if image.get("platform") == "watchos"]
+            self.assertEqual(len(watch), 1)
+            self.assertEqual(len({image["filename"] for image in phone}), 1,
+                             "Each app family keeps its artwork in every iPhone appearance")
+            data = (folder / watch[0]["filename"]).read_bytes()
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n", "Watch launcher artwork must be PNG")
+            self.assertEqual(int.from_bytes(data[16:20], "big"), 1024)
+            self.assertEqual(int.from_bytes(data[20:24], "big"), 1024)
+            stored = {path.name for path in folder.iterdir()
+                      if path.name != "Contents.json" and not path.name.startswith(".")}
+            self.assertEqual(stored, {image["filename"] for image in images},
+                             "Icon sets contain only artwork they assign")
+            family_icons[family] = data
+        self.assertNotEqual(family_icons["AppIcon"], family_icons["AppIconDev"],
+                            "Production and Dev must have distinct Watch launcher artwork")
 
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
@@ -527,10 +611,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(
             project.count(
                 "CODE_SIGN_ENTITLEMENTS = "
-                "BikeComputer/BikeComputer.entitlements;"
+                "BikeComputer/BikeComputerSocial.entitlements;"
             ),
             2,
-            "iPhone Debug and Release must both reference HealthKit entitlements",
+            "iPhone Debug and Release must include Apple sign-in, push and private social Keychain access",
         )
         self.assertEqual(
             project.count(
@@ -544,13 +628,13 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             project.count(
                 'ASSETCATALOG_COMPILER_APPICON_NAME = "$(BICINO_APP_ICON_NAME)";'
             ),
-            2,
-            "iPhone Debug and Release must select their configured app icon",
+            4,
+            "iPhone and Watch Debug and Release must select their configured app icon",
         )
         self.assertEqual(
             project.count("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"),
-            2,
-            "Watch Debug and Release must both use the Watch icon asset",
+            0,
+            "Watch must inherit the app-family icon instead of hardcoding production",
         )
 
         required_files = [

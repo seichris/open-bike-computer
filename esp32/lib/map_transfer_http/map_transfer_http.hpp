@@ -4,12 +4,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <functional>
 
+// Explicit direct dependency for PlatformIO circular-library include paths.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 #include "../device_transfer/device_transfer_http_limits.hpp"
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
+#include "map_operation_journal.hpp"
+#include "map_selection_health.hpp"
+#include "../device_transfer/operation_admission_policy.hpp"
 
 namespace firmware_update { class DeviceOperationOwner; }
 
@@ -25,16 +31,34 @@ public:
     bool sessionPresent = false;
   };
 
-  void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080,
+  void setOperationDeviceID(const std::string &device);
+  bool operationsSupported() const;
+  bool requestOperationStatus(const std::string &operationID);
+  std::string operationStatusJson() const;
+  bool takeOperationStatusNotification();
+  // Boot-only: setup() binds Storage::mapStorageRoot() (removable SD only,
+  // never FFat) as soon as storage is pinned, before boot recovery reads the
+  // operation journal and before configure().
+  void bindStorageRoot(std::string storageRoot);
+  void configure(uint16_t port = 8080,
                  device_transfer::HttpTransferServer *sharedServer = nullptr);
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
+  void setRendererHealthProbes(bool (*font)(), bool (*pois)()) {
+    fontHealthy_ = font;
+    poisHealthy_ = pois;
+  }
+  void setStreamStorageSpaceProbe(MapStreamFreeSpaceProbe probe) { streamStorageSpaceProbe_ = std::move(probe); }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
   bool setEnabled(bool enabled);
   void setLastError(const std::string &code, const std::string &message);
   void process();
+  bool shutdownQuiescent() const;
+  uint32_t storageProgressSequence() const {
+    return storageProgressSequence_.load(std::memory_order_relaxed);
+  }
   HttpTransferStatus status() const;
   MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
@@ -48,17 +72,130 @@ public:
   void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
     operationOwner_ = owner;
   }
+  std::string selectionHealthJson() const;
+  // Boot recovery/storage worker only: resolves retained operation identity.
+  void observeBootSelection(const ActiveMapSelection &selected, bool loaded,
+                            bool preserveAffected = false);
+  void markSelectionDegraded();
+  void acknowledgeRuntimeRollback(const std::string &root, bool loaded);
   bool requestRuntimeRollback();
   void submitPendingRollback();
+  void submitPendingOperationTask();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
+  // Authenticated BLE commands only enqueue bounded work. Filesystem access
+  // executes on the storage worker through the internal operation owner.
+  bool requestMapLibrary(const std::string &action,
+                         const std::string &session = "",
+                         const std::string &receipt = "", const std::string &requestID = "");
+  std::string mapLibraryJson(bool paged = false) const;
+  bool requestMapLibraryPage(size_t offset);
+  void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void considerMapSuggestion(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void submitPendingMapLibrary() { submitLibraryTask(); }
 
 private:
-  std::string storageRoot_ = "/sdcard";
+  bool (*fontHealthy_)() = nullptr;
+  bool (*poisHealthy_)() = nullptr;
+  class OperationStoreGuard {
+  public:
+    explicit OperationStoreGuard(const MapTransferHttpServer &owner) : owner_(owner) {
+      if (owner_.operationStoreMutex_) xSemaphoreTakeRecursive(owner_.operationStoreMutex_,portMAX_DELAY);
+    }
+    ~OperationStoreGuard() {
+      if (owner_.operationStoreMutex_) xSemaphoreGiveRecursive(owner_.operationStoreMutex_);
+    }
+    OperationStoreGuard(const OperationStoreGuard &) = delete;
+    OperationStoreGuard &operator=(const OperationStoreGuard &) = delete;
+  private:
+    const MapTransferHttpServer &owner_;
+  };
+  class StateGuard {
+  public:
+    explicit StateGuard(const MapTransferHttpServer &owner) : owner_(owner) { owner_.lockState(); }
+    ~StateGuard() { owner_.unlockState(); }
+    StateGuard(const StateGuard &) = delete;
+    StateGuard &operator=(const StateGuard &) = delete;
+  private:
+    const MapTransferHttpServer &owner_;
+  };
+  std::string storageRoot_; // Bound by bindStorageRoot(); empty names no volume.
+  std::atomic<uint32_t> storageProgressSequence_{0};
+  std::string operationDeviceID_;
+  MapSelectionHealth selectionHealth_;
+  std::vector<InstalledMap> libraryMaps_;
+  std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
+  std::string libraryError_, libraryRequestID_, libraryCommandID_, libraryCommandError_;
+  std::string pendingMapLibraryCommandID_;
+  std::vector<std::string> libraryRejectedSessions_;
+  bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
+  // A journaled manual Use pins selection until reconciliation settles it.
+  bool libraryManualPending_ = false;
+  // Library switches leave the renderer on its previous root when loading fails.
+  bool pendingMapFromLibrary_ = false, rollbackFromLibrary_ = false;
+  uint32_t libraryRevision_ = 0;
+  uint32_t libraryRetryAfterMs_ = 0;
+  uint8_t libraryRetryStreak_ = 0;
+  void scheduleLibraryRetry(uint32_t baseMs);
+  bool libraryRetryPending();
+  uint64_t libraryAutomaticBlock_ = 0;
+  bool libraryAutomaticBlockKnown_ = false;
+  bool libraryCoverageKnown_ = false, libraryCurrentCovered_ = false;
+  uint32_t libraryCoverageBoundsMask_ = 0;
+  std::string libraryCoveringSession_, libraryCoverageSelection_;
+  size_t libraryPageOffset_ = 0;
+  int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
+  void submitLibraryTask();
+  static void libraryTask(void *context);
+  static void ownedLibraryTask(void *context, const char *, bool);
+  void executeLibraryTask();
+  void recoverLibraryTask(const char *code);
+  std::string selectionOperationID(const ActiveMapSelection &selected) const;
+  mutable operation::AdmissionFence operationAdmission_;
+  bool observeOperationRevision(uint64_t revision) const;
+  bool permitsOperationAdmission(const std::string &epoch, uint64_t revision) const;
+  std::string operationQuery_;
+  std::string operationStatus_;
+  bool operationTaskSubmitted_ = false;
+  bool operationStatusNotification_ = false;
+  std::string terminalOperationID_;
+  std::string terminalSessionID_;
+  std::string terminalMapID_;
+  bool terminalCleanupReported_ = false;
+  uint32_t terminalCleanupReportedAtMs_ = 0;
+  bool terminalAutomaticExit_ = false;
+  bool terminalFailed_ = false;
+  std::string rollbackOperationID_;
+  struct CommitRecovery {
+    operation::Identity identity;
+    device_transfer::HttpResponseCompletionToken response;
+    bool armed = false;
+    bool responseCompleted = false;
+    bool pending() const { return !identity.session.empty(); }
+  };
+  CommitRecovery commitRecovery_;
+  void armCommitRecovery(const device_transfer::HttpRequest &request);
+  void retryAcceptedActivation(const std::string &sessionId);
+  bool recoverCommitDisposition(const CommitRecovery &recovery);
+  static void operationTask(void *context);
+  void executeOperationTask();
+  std::string readOperationStatus(const std::string &operationID) const;
+  bool admitReceivingOperation(const device_transfer::HttpRequest &request,
+                               const MapStreamInstallSnapshot &snapshot);
+  std::string resolveRejectedStreamOperation(const device_transfer::HttpRequest &request,
+                                             const MapStreamInstallSnapshot &snapshot);
+  bool handleOperationControl(const device_transfer::HttpRequest &request,
+                              device_transfer::TransferClient &client);
+  bool recordPreparedOperation(const device_transfer::HttpRequest &request,
+                       const MapStreamInstallSnapshot &snapshot,
+                       const std::string &streamHash);
+  std::string pendingMapOperationID_;
   device_transfer::HttpTransferServer ownedTransferServer_;
   device_transfer::HttpTransferServer *transferServer_ =
       &ownedTransferServer_;
-  MapTransferInstaller installer_{"/sdcard"};
+  MapTransferInstaller installer_{std::string()};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
+  mutable SemaphoreHandle_t operationStoreMutex_ = nullptr;
+  StaticSemaphore_t operationStoreMutexStorage_{};
   StaticSemaphore_t stateMutexStorage_{};
   MapActivationState activationState_;
   MapStreamTrustStore streamTrustStore_;
@@ -66,6 +203,7 @@ private:
   bool streamStatusActive_ = false;
   bool streamStorageAvailable_ = false;
   std::function<bool()> streamStorageProbe_;
+  MapStreamFreeSpaceProbe streamStorageSpaceProbe_;
   std::string pendingMapRoot_;
   std::string pendingMapSessionId_;
   std::string pendingMapId_;
@@ -81,6 +219,9 @@ private:
     bool pending() const { return !sessionId.empty(); }
   };
   DeferredActivation deferredActivation_;
+  // Unique server grant retained until renderer ACK or verified rollback.
+  device_transfer::HttpTransferServer::CommitGrant pendingCommitGrant_ = 0;
+  void releaseCommitGrant();
   enum class RollbackKind { None, Transfer, Runtime };
   StorageControlSubmit storageControlSubmit_ = nullptr;
   firmware_update::DeviceOperationOwner *operationOwner_ = nullptr;
@@ -124,7 +265,10 @@ private:
   static void ownedInstalledCleanup(void *context, const char *sessionId,
                                     bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
-                               bool automaticExit);
+                               bool automaticExit, bool internalOwner = false);
+  void rememberOwnerRecovery(const char *code) noexcept;
+  __attribute__((noinline)) void recordActivationOutcome(const std::string &phase,
+                                                        const std::string &code);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,
                                 bool active);
   bool streamStoragePathAccessible() const;

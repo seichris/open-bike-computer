@@ -11,7 +11,7 @@ from .topography_grid import contour_grid, processing_region, region_resolution
 from .topography_pipeline import CONTOUR_ALGORITHM, MAX_GRID_PIXELS, canonical_bytes
 from .topography_sources import TopographySourcePolicy, plan_elevation
 
-def topography_input_identity(policy: TopographySourcePolicy, cache, bounds: list[float]) -> dict[str, Any]:
+def topography_input_identity(policy: TopographySourcePolicy, cache, bounds: list[float], *, terrain: bool = False) -> dict[str, Any]:
     """Stage and rehash every selected DEM tile without sampling contours."""
     import contourpy
     import numpy as np
@@ -20,6 +20,9 @@ def topography_input_identity(policy: TopographySourcePolicy, cache, bounds: lis
     region = processing_region(bounds)
     indexes = {source.id: cache.index(source) for source in policy.sources}
     resolution = region_resolution(policy, indexes, region)
+    if terrain:
+        from .terrain import sampling_bounds
+        bounds = sampling_bounds(bounds)
     grid = contour_grid(bounds, resolution, MAX_GRID_PIXELS)
     plan = plan_elevation(policy, indexes, list(grid.acquisition_bounds))
     if not plan["coverageComplete"]:
@@ -45,18 +48,21 @@ def topography_input_identity(policy: TopographySourcePolicy, cache, bounds: lis
         },
         "topographyProfileVersion": TOPOGRAPHY_PROFILE_VERSION,
     }
+    if terrain:
+        from .terrain import ALGORITHM
+        body["terrainAlgorithm"] = ALGORITHM
     return {**body, "identitySha256": hashlib.sha256(canonical_bytes(body)).hexdigest()}
 
 
 def sample_matches_input_identity(sample: dict[str, Any], identity: dict[str, Any]) -> bool:
     return all(sample.get(field) == identity.get(field) for field in (
         "sourcePolicySha256", "processingGrid", "gridSize", "qualityMode",
-        "inputs", "algorithm", "runtime",
+        "inputs", "algorithm", "runtime", "terrainAlgorithm",
     ))
 
 
 def valid_input_identity(identity: Any) -> bool:
-    if not isinstance(identity, dict) or set(identity) != {
+    if not isinstance(identity, dict) or set(identity) - {"terrainAlgorithm"} != {
         "schemaVersion", "sourcePolicySha256", "processingGrid", "gridSize",
         "qualityMode", "inputs", "algorithm", "runtime",
         "topographyProfileVersion", "identitySha256",

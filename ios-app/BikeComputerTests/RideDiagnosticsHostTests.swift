@@ -3,7 +3,650 @@ import Foundation
 
 @main
 enum RideDiagnosticsHostTests {
-    static func main() throws {
+    static func storedZIPChecksumsMatchKnownVectors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let padded = Data([0xff] + Array("123456789".utf8) + [0xff])
+        let fixtures: [(String, Data, UInt32)] = [
+            ("empty", Data(), 0),
+            ("digits", padded[1..<10], 0xcbf4_3926),
+            ("binary", Data((0..<256).map { UInt8($0) }), 0x2905_8c73),
+        ]
+        let url = root.appendingPathComponent("vectors.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: fixtures.map { ($0.0, $0.1) }, to: url)
+        let archive = try Data(contentsOf: url)
+        func littleEndian32(at offset: Int) -> UInt32 {
+            (0..<4).reduce(UInt32(0)) { $0 | UInt32(archive[offset + $1]) << ($1 * 8) }
+        }
+        var offset = 0
+        for (name, body, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0403_4b50)
+            precondition(littleEndian32(at: offset + 14) == checksum,
+                         "local ZIP headers must retain the standard IEEE CRC")
+            let payloadStart = offset + 30 + name.utf8.count
+            precondition(archive[payloadStart..<(payloadStart + body.count)] == body)
+            offset = payloadStart + body.count
+        }
+        for (name, _, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0201_4b50)
+            precondition(littleEndian32(at: offset + 16) == checksum,
+                         "central ZIP headers must match the known checksum")
+            offset += 46 + name.utf8.count
+        }
+    }
+
+    static func oversizedAppSnapshotReportsCacheFull() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .lifecycle, event: "snapshot_limit")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let original = try await recorder.appEvidenceSnapshot(captureID: capture)
+        let path = try require(original.keys.sorted().first)
+        let data = try require(original[path])
+        let directory = root.appendingPathComponent("app").appendingPathComponent(path).deletingLastPathComponent()
+        // Valid, original-capture chunks reach the request-count bound before
+        // the acquisition store or network can be entered.
+        for chunk in 1...257 {
+            try data.write(to: directory.appendingPathComponent(String(format: "events-%06d.jsonl", chunk)))
+        }
+        do {
+            _ = try await recorder.appEvidenceSnapshot(captureID: capture)
+            preconditionFailure("oversized app snapshot admitted")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            precondition(DiagnosticsAcquisitionFailureReporting.code(for: error) == "cache_full")
+        }
+        let retained = try Data(contentsOf: root.appendingPathComponent("app").appendingPathComponent(path))
+        precondition(retained == data, "snapshot refusal must preserve original recorder evidence")
+    }
+
+    static func cacheAdmissionFailureIsRecorded() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root.appendingPathComponent("recorder"))
+        recorder.record(category: .lifecycle, event: "before_admission")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("cache"), maximumEvidenceBytes: 1)
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
+        do {
+            try await store.retainAppEvidence(job.id, chunks: chunks)
+            preconditionFailure("original app evidence should exceed this cache")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            // Use the same report as the coordinator before any transfer
+            // manager is entered. Actual recorder output must retain the code.
+            recorder.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                fields: DiagnosticsAcquisitionFailureReporting.fields(for: error, acquisitionID: job.id, phase: "app_evidence"))
+            try await store.interrupt(job.id, code: DiagnosticsAcquisitionFailureReporting.code(for: error))
+        }
+        recorder.flush()
+        let events = try require(FileManager.default.enumerator(at: root.appendingPathComponent("recorder/app"), includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try events.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let failure = try require(records.first { $0.event == "diagnostics_download_failed" })
+        precondition(failure.fields["code"] == "cache_full" && failure.fields["reason"] == "cache_full")
+        precondition(failure.fields["operationId"] == job.id.uuidString.lowercased())
+        precondition(failure.fields["phase"] == "app_evidence")
+        precondition(!failure.fields.values.contains { $0.contains(root.path) || $0.contains("http") })
+        let persisted = try await store.load(job.id)
+        precondition(persisted.failureCode == "cache_full" && persisted.indexData == nil && persisted.appEvidence == nil)
+        // Failure reporting must not consume or remove the original recorder
+        // history it failed to copy into the acquisition cache.
+        for (path, data) in chunks {
+            let original = try Data(contentsOf: root.appendingPathComponent("recorder/app").appendingPathComponent(path))
+            precondition(original == data)
+        }
+    }
+
+    /// Exercise the real queue, not a source-string assertion. The v1 sequence
+    /// remains storage order; emissionSequence and occurrence time identify ingress.
+    static func occurrenceTimeSurvivesWriterDelay() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-clock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var wall = Date(timeIntervalSince1970: 1_790_000_000)
+        var monotonic: TimeInterval = 100
+        let recorder = RideDiagnosticsRecorder(rootURL: root, now: { wall }, uptime: { monotonic })
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        recorder.suspendWriterForTesting()
+        recorder.record(category: .ble, event: "before_delay")
+        wall.addTimeInterval(90)
+        monotonic += 90
+        // Queued mode change cannot relabel the record already admitted.
+        recorder.beginDetailedTrace()
+        recorder.record(category: .ble, event: "after_delay")
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        let urls = try require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try urls.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let before = try require(records.first { $0.event == "before_delay" })
+        let after = try require(records.first { $0.event == "after_delay" })
+        precondition(before.uptimeMs == 0)
+        precondition(after.uptimeMs == 90_000)
+        precondition(before.captureId == capture.uuidString.lowercased())
+        precondition(after.captureId == capture.uuidString.lowercased())
+        precondition(before.fields["writerDelayMs"] == "90000")
+        precondition(before.wallTime != after.wallTime)
+        precondition(before.fields["emissionSequence"] != after.fields["emissionSequence"])
+    }
+
+    /// Reproduce a complete multi-boot acquisition followed by the ordinary
+    /// 20-capture prune, then export the original cutoff after a store restart.
+    static func acquisitionSurvivesCaptureRetention() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceRecorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        let storeRoot = base.appendingPathComponent("v2")
+        let store = DiagnosticsAcquisitionStore(root: storeRoot)
+        let device = "0123456789abcdef"
+        sourceRecorder.record(category: .ble, event: "retained_capture")
+        sourceRecorder.flush()
+        let originalCapture = try require(sourceRecorder.currentCaptureID)
+        var appEvidence = try await sourceRecorder.appEvidenceSnapshot(captureID: originalCapture)
+        precondition(!appEvidence.isEmpty)
+        // Simulate a previous process ending mid-record. Cache/export must
+        // preserve the raw tail and its degraded-coverage result, not discard it.
+        let crashedPath = appEvidence.keys.sorted()[0]
+        appEvidence[crashedPath]!.append(Data("{\"schema".utf8))
+        try appEvidence[crashedPath]!.write(to: base.appendingPathComponent("v1/app").appendingPathComponent(crashedPath))
+        let job = try await store.create(deviceDigest: device, captureID: originalCapture)
+        try await store.retainAppEvidence(job.id, chunks: appEvidence)
+        let recorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        var expected: [DiagnosticsChunkReceipt] = []
+        var bodies: [Data] = []
+        var originals: [URL] = []
+        for boot in 1...39 {
+            let capture = boot == 1 ? originalCapture.uuidString.lowercased() : String(format: "00000000-0000-0000-0000-%012d", boot)
+            let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"test\",\"captureId\":\"\(capture)\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            expected.append(DiagnosticsChunkReceipt(bootSequence: UInt32(boot), chunk: 1, bytes: data.count, sha256: hash))
+            bodies.append(data)
+            originals.append(try recorder.importDeviceChunk(deviceDigest: device, bootSequence: UInt32(boot),
+                chunk: 1, data: data, sha256: hash, enforceRetention: false))
+        }
+        let index: [String: Any] = ["schema": 1, "source": "firmware", "bootSequence": 39,
+            "activeChunk": 2, "stats": ["enqueued": 39, "written": 39, "dropped": 0, "storageErrors": 0],
+            "chunks": try JSONSerialization.jsonObject(with: JSONEncoder().encode(expected))]
+        let indexData = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+        _ = try await store.inventory(job.id, deviceDigest: device, index: indexData, chunks: expected)
+        for (receipt, data) in zip(expected, bodies) {
+            try await store.verified(job.id, receipt: receipt, data: data)
+        }
+        try await store.finish(job.id)
+        try recorder.enforceRetention()
+        precondition(originals.contains { !FileManager.default.fileExists(atPath: $0.path) },
+            "fixture must actually prune original acquired chunks")
+        // Simulate ordinary app retention removing every original member.
+        // The acquisition cache must survive independently of those files.
+        for path in appEvidence.keys {
+            let source = base.appendingPathComponent("v1/app").appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.removeItem(at: source) }
+        }
+        let restarted = DiagnosticsAcquisitionStore(root: storeRoot)
+        let snapshot = try await restarted.exportSnapshot()
+        precondition(snapshot.manifests.first?.deliveryComplete == true && snapshot.chunks.count == 39)
+        precondition(snapshot.appChunks == appEvidence)
+        recorder.record(category: .lifecycle, event: "outside_frozen_cutoff")
+        recorder.flush()
+        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks, acquisitionOnly: true)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let bytes = try Data(contentsOf: archive)
+        precondition(bytes.range(of: Data("outside_frozen_cutoff".utf8)) == nil,
+            "scoped acquisition exports must not duplicate unrelated recorder history")
+        for (relative, body) in snapshot.chunks {
+            precondition(bytes.range(of: Data("device/\(relative)".utf8)) != nil)
+            precondition(bytes.range(of: body) != nil, "every original chunk must be present byte-for-byte")
+        }
+        let receiptName = "acquisitions/\(job.id.uuidString.lowercased()).json"
+        let envelope: [String: Any] = ["schema": 2, "eventFormatSchema": 1,
+            "registryDigest": DiagnosticsSchema.digest, "evidenceArchive": "evidence-v1.zip",
+            "evidenceSha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            "acquisitions": [receiptName], "privacy": "diagnostic-no-raw-payloads"]
+        var entries: [(String, Data)] = [
+            ("manifest.json", try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])),
+            ("evidence-v1.zip", bytes), (receiptName, try JSONEncoder().encode(snapshot.manifests[0]))]
+        let checksums = entries.map { name, data in
+            "\(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())  \(name)\n"
+        }.joined()
+        entries.append(("checksums.sha256", Data(checksums.utf8)))
+        let portable = base.appendingPathComponent("retained-acquisition.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: entries, to: portable)
+        // Exercise the real host consumer, including its closed envelope schema,
+        // manifest validation and independently hashed delivery inventory.
+        let verify = Process()
+        verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/bicino")
+        verify.arguments = ["diag", "verify", portable.path, "--acquisition", job.id.uuidString.lowercased(),
+            "--require", "ios,firmware", "--require-complete", "--json"]
+        let output = Pipe()
+        verify.standardOutput = output
+        try verify.run()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        verify.waitUntilExit()
+        guard verify.terminationStatus == 0 else {
+            throw RideDiagnosticsError.unavailable("Retention export failed host verification: \(String(decoding: result, as: UTF8.self))")
+        }
+        let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
+        let delivery = (report["delivery"] as! [[String: Any]])[0]
+        precondition(delivery["expectedChunks"] as? Int == 39 && delivery["state"] as? String == "complete")
+        precondition((report["missingRequiredSources"] as? [String])?.isEmpty == true)
+        precondition(report["recoverableTails"] as? Int == 1 && report["recordingCoverage"] as? String == "degraded")
+        let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
+    }
+
+    /// Routine durability checkpoints must stay independent of historical
+    /// corpus size. Retention/import/export still perform full reconciliation.
+    static func routineCheckpointsAvoidHistoricalInventory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-checkpoints-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let historical = root.appendingPathComponent("imported-device/0123456789abcdef/1")
+        try FileManager.default.createDirectory(at: historical, withIntermediateDirectories: true)
+        for number in 1...64 {
+            try Data("historical evidence\n".utf8).write(to:
+                historical.appendingPathComponent(String(format: "events-%06d.jsonl", number)))
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        let before = recorder.retentionInventoryScansForTesting
+        for number in 0..<48 {
+            recorder.record(category: .ble, event: "checkpoint_sample", fields: ["sequence": String(number)])
+        }
+        recorder.flush()
+        precondition(recorder.retentionInventoryScansForTesting == before,
+            "routine checkpoints must not walk unrelated retained files")
+        let files = try require(FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: [.fileSizeKey])).compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "jsonl" || $0.lastPathComponent == "manifest.json" }
+        let actualBytes = try files.reduce(0) { total, url in
+            total + (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        precondition(recorder.health.retainedBytes == actualBytes,
+            "incremental checkpoint accounting must match stored bytes")
+        let appRecords = try files.filter { $0.path.contains("/app/") && $0.pathExtension == "jsonl" }
+            .flatMap { url in
+                try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                    try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+                }
+            }
+        precondition(appRecords.filter { $0.event == "checkpoint_sample" }.count == 48)
+        precondition(recorder.health.droppedEventCount == 0)
+    }
+
+    static func queueOverflowRetainsCriticalEvidenceAndReportsLoss() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-overflow-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        recorder.suspendWriterForTesting()
+        for number in 0..<300 {
+            recorder.record(category: .ble, event: "overflow_sample", fields: ["sequence": String(number)])
+        }
+        recorder.record(level: .warning, category: .workout, event: "critical_after_overflow")
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        let files = try require(FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: nil)).compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "jsonl" }
+        let records = try files.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        precondition(records.filter { $0.event == "overflow_sample" }.count == 255)
+        precondition(records.filter { $0.event == "critical_after_overflow" }.count == 1,
+            "critical evidence must displace a normal record in a full queue")
+        precondition(recorder.health.droppedEventCount == 45)
+        let reportedDrops = records.filter { $0.event == "queue_dropped" }.reduce(0) {
+            $0 + (Int($1.fields["droppedCount"] ?? "") ?? 0)
+        }
+        precondition(reportedDrops == 45,
+            "persisted loss counters must include rejection and critical eviction")
+    }
+
+    static func deletionDoesNotReuseRetainedChunkIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root.appendingPathComponent("v1"))
+        recorder.record(category: .ble, event: "before_deletion")
+        recorder.flush()
+        let oldCapture = try require(recorder.currentCaptureID)
+        let old = try await recorder.appEvidenceSnapshot(captureID: oldCapture)
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("v2"))
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: oldCapture)
+        try await store.retainAppEvidence(job.id, chunks: old)
+        try recorder.deleteLocalLogs()
+        recorder.flush()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        precondition(!recorder.recentEvents.contains { $0.event == "before_deletion" })
+        let newCapture = try require(recorder.currentCaptureID)
+        let replacement = try await recorder.appEvidenceSnapshot(captureID: newCapture)
+        precondition(Set(old.keys).isDisjoint(with: replacement.keys))
+        // Even an independently retained pre-deletion snapshot cannot collide.
+        let exported = try recorder.exportBundle(additionalAppChunks: old)
+        try FileManager.default.removeItem(at: exported)
+        try await store.deleteAll()
+        let reloaded = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("v2"))
+        let remaining = try await reloaded.exportSnapshot()
+        precondition(remaining.manifests.isEmpty && remaining.appChunks.isEmpty && remaining.chunks.isEmpty)
+    }
+
+    static func legacyAcquisitionExportPreservesReferencedEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .lifecycle, event: "legacy_original_app")
+        recorder.flush()
+        let capture = recorder.currentCaptureID!
+        let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"legacy_original_device\",\"fields\":{\"bootSequence\":1,\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        _ = try recorder.importDeviceChunk(deviceDigest: "0123456789abcdef", bootSequence: 1, chunk: 1, data: data, sha256: hash)
+        let item = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: data.count, sha256: hash)
+        let legacy = DiagnosticsAcquisitionManifest(schema: 2, id: UUID(), captureID: capture,
+            deviceDigest: "0123456789abcdef", createdAt: Date(), updatedAt: Date(), phase: .complete,
+            indexData: Data(), expected: [item], verified: [item.key], failureCode: nil)
+        let archive = try await recorder.exportAcquisitionBundleAsync(manifests: [legacy], deviceChunks: [:], appChunks: [:])
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let bytes = try Data(contentsOf: archive)
+        precondition(bytes.range(of: data) != nil && bytes.range(of: Data("legacy_original_app".utf8)) != nil,
+            "pre-cache receipts retain their original device and app evidence in scoped exports")
+    }
+
+    static func missingWriterDirectoryRecoversWithoutRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        let directory = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        // Older byte-retention versions could prune the writer's sidecar and
+        // empty directory. Recover in the same process during migration.
+        try FileManager.default.removeItem(at: directory)
+        recorder.record(category: .gps, event: "after_directory_loss")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0)
+        precondition(recorder.health.lastError == nil)
+        let streams = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(streams.contains("after_directory_loss"))
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path))
+        let bytes = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]).reduce(0) {
+                $0 + ((try $1.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+            }
+        precondition(recorder.health.retainedBytes == bytes, "directory recovery reconciles byte accounting")
+    }
+
+    static func byteRetentionAlwaysKeepsLatestChunks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldProcess = UUID().uuidString.lowercased()
+        let oldCapture = UUID().uuidString.lowercased()
+        let oldDirectory = root.appendingPathComponent("app/" + oldProcess)
+        try FileManager.default.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
+        // Reproduce the device's single old capture occupying the whole store.
+        let line = Data("{\"schema\":1,\"source\":\"ios\",\"sequence\":0,\"level\":\"info\",\"category\":\"ble\",\"event\":\"historical\",\"processId\":\"\(oldProcess)\",\"captureId\":\"\(oldCapture)\"}\n".utf8)
+        var body = Data()
+        while body.count + line.count <= RideDiagnosticsRecorder.chunkLimit { body.append(line) }
+        let stamp = Date()
+        var oldChunks: [URL] = []
+        for number in 1...201 {
+            let url = oldDirectory.appendingPathComponent(String(format: "events-%06d.jsonl", number))
+            try body.write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: stamp.addingTimeInterval(Double(number - 202))], ofItemAtPath: url.path)
+            oldChunks.append(url)
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .gps, event: "latest_after_full_store")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0, "a full historical capture must not block new recording")
+        precondition(recorder.health.retainedBytes <= RideDiagnosticsRecorder.retainedBytesLimit)
+        precondition(!FileManager.default.fileExists(atPath: oldChunks[0].path), "byte retention overwrites the oldest chunk")
+        precondition(FileManager.default.fileExists(atPath: oldChunks.last!.path), "byte retention keeps the newest historical chunk")
+        let current = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        let latest = try FileManager.default.contentsOfDirectory(at: current, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(latest.contains("latest_after_full_store"), "newest GPS evidence must reach disk")
+    }
+
+    private static func appEvents(under root: URL) throws -> [RideDiagnosticEvent] {
+        try (FileManager.default.enumerator(at: root.appendingPathComponent("app"),
+            includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? [])
+            .filter { $0.pathExtension == "jsonl" }
+            .flatMap { url in
+                try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                    try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+                }
+            }
+            .sorted { $0.sequence < $1.sequence }
+    }
+
+    /// Drive one active capture through several byte budgets with the real
+    /// writer, rotation and pruning, then verify the export with the host CLI.
+    static func activeCaptureRollsOverThroughRealRotation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let limit = 4 * RideDiagnosticsRecorder.chunkLimit
+        let recorder = RideDiagnosticsRecorder(rootURL: root, retainedBytesLimit: limit)
+        let capture = try require(recorder.currentCaptureID).uuidString.lowercased()
+        let padding = String(repeating: "p", count: 200)
+        for number in 0..<6_000 {
+            recorder.record(category: .gps, event: "rollover_sample",
+                fields: ["reason": padding, "chunk": String(number)])
+            // Stay inside the bounded mailbox; this test is about retention.
+            if number % 128 == 127 { recorder.flush() }
+        }
+        recorder.record(category: .gps, event: "rollover_latest")
+        recorder.flush()
+        let health = recorder.health
+        precondition(health.droppedEventCount == 0 && health.lastError == nil,
+            "rolling retention never blocks or drops new events")
+        precondition(health.retainedBytes <= limit, "retention honours the byte budget")
+        let directory = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        let chunks = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }
+        precondition(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("events-000001.jsonl").path),
+            "the oldest chunk of the active capture rolled off")
+        precondition((3...5).contains(chunks.count), "only the newest budget of chunks remains")
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path),
+            "the current writer manifest survives rollover")
+        let events = try appEvents(under: root)
+        precondition(events.allSatisfy { $0.captureId == capture }, "rollover happened inside one active capture")
+        precondition(events.contains { $0.event == "rollover_latest" }, "the newest event reached disk")
+        precondition(events.contains { $0.event == "retention_pruned" && $0.fields["reason"] == "byte_limit" },
+            "byte rollover is recorded as durable storage evidence")
+        let sequences = events.map(\.sequence)
+        let firstRetained = try require(sequences.first)
+        precondition(firstRetained > 0, "the process prefix was overwritten")
+        precondition(zip(sequences, sequences.dropFirst()).allSatisfy { $1 == $0 + 1 },
+            "rollover removes the oldest history, never interior history")
+
+        let bundle = try recorder.exportBundle()
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        // The export checkpoint may append outcomes and prune once more; the
+        // snapshot is the store as it stands after export.
+        let exportedFirst = try require(appEvents(under: root).first).sequence
+        let verify = Process()
+        verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/bicino")
+        verify.arguments = ["diag", "verify", bundle.path, "--require", "ios", "--json"]
+        let output = Pipe()
+        verify.standardOutput = output
+        try verify.run()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        verify.waitUntilExit()
+        guard verify.terminationStatus == 0 else {
+            throw RideDiagnosticsError.unavailable("Rolled export failed host verification: \(String(decoding: result, as: UTF8.self))")
+        }
+        let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
+        precondition(report["integrity"] as? String == "verified")
+        precondition(report["sequenceGaps"] as? Int == 0, "a rolled prefix is not an interior sequence gap")
+        precondition(report["unretainedLeadingSequences"] as? Int == exportedFirst &&
+            report["iosProcessHistory"] as? String == "leading_history_unretained",
+            "the host reports the overwritten process history")
+        precondition(report["recordingCoverage"] as? String == "no_detected_loss",
+            "rolling retention is missing history, not recording loss")
+    }
+
+    /// Batch yielding must not let a checkpoint overtake events that were
+    /// already admitted to the writer mailbox.
+    static func checkpointsPersistTheAdmittedBacklog() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        func admit(_ name: String, count: Int = 200) {
+            for number in 0..<count {
+                recorder.record(category: .ble, event: "\(name)_\(number)")
+            }
+        }
+        func precede(_ prefix: String, _ checkpoint: String, count: Int = 200) throws {
+            let events = try appEvents(under: root)
+            let marker = try require(events.last { $0.event == checkpoint }).sequence
+            let admitted = events.filter { $0.event.hasPrefix(prefix + "_") }
+            precondition(admitted.count == count && admitted.allSatisfy { $0.sequence < marker },
+                "\(checkpoint) must follow every event admitted before it")
+        }
+
+        // Asynchronous transitions queue behind the first drain batch.
+        recorder.suspendWriterForTesting()
+        admit("before_ride_end")
+        recorder.endRideCapture()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_ride_end", "ride_capture_ended")
+        recorder.suspendWriterForTesting()
+        admit("before_trace")
+        recorder.beginDetailedTrace()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_trace", "detailed_trace_started")
+        recorder.suspendWriterForTesting()
+        admit("before_trace_end")
+        recorder.endDetailedTrace()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_trace_end", "detailed_trace_ended")
+
+        // Synchronous checkpoints race the first drain batch after resume.
+        recorder.suspendWriterForTesting()
+        admit("before_issue", count: 250)
+        recorder.resumeWriterForTesting()
+        precondition(recorder.markIssue(.other), "the issue marker is durable")
+        try precede("before_issue", "issue_marker", count: 250)
+
+        recorder.suspendWriterForTesting()
+        admit("before_export", count: 250)
+        recorder.resumeWriterForTesting()
+        let bundle = try recorder.exportBundle()
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let exported = try Data(contentsOf: bundle)
+        precondition((0..<250).allSatisfy { exported.range(of: Data("\"before_export_\($0)\"".utf8)) != nil },
+            "an export contains every event admitted before it")
+
+        recorder.suspendWriterForTesting()
+        admit("before_delete", count: 250)
+        recorder.resumeWriterForTesting()
+        try recorder.deleteLocalLogs()
+        recorder.flush()
+        let remaining = try appEvents(under: root)
+        precondition(remaining.contains { $0.event == "logs_deleted" })
+        precondition(!remaining.contains { $0.event.hasPrefix("before_delete_") },
+            "events admitted before deletion are deleted with the store")
+        precondition(recorder.health.droppedEventCount == 0)
+    }
+
+    /// An fsync or manifest failure stays visible until a complete checkpoint
+    /// succeeds; the write_failed outcome appended after it is not recovery.
+    static func failedCheckpointStaysVisibleUntilRecovered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        precondition(recorder.health.lastError == nil)
+        let manifest = root.appendingPathComponent("app/\(recorder.processId.uuidString.lowercased())/manifest.json")
+        try FileManager.default.removeItem(at: manifest)
+        try FileManager.default.createDirectory(at: manifest.appendingPathComponent("obstruction"),
+            withIntermediateDirectories: true)
+        recorder.flush()
+        precondition(recorder.health.lastError != nil, "a failed manifest checkpoint is reported")
+        try FileManager.default.removeItem(at: manifest)
+        recorder.record(category: .gps, event: "after_checkpoint_failure")
+        precondition(recorder.health.lastError != nil,
+            "an ordinary append does not prove the failed checkpoint recovered")
+        recorder.flush()
+        precondition(recorder.health.lastError == nil, "a complete checkpoint clears the failure")
+        let events = try appEvents(under: root)
+        precondition(events.contains { $0.event == "after_checkpoint_failure" })
+        precondition(events.contains { $0.event == "write_failed" && $0.fields["reason"] == "manifest_failed" },
+            "the failed checkpoint remains durable evidence")
+    }
+
+    static func main() async throws {
+        try missingWriterDirectoryRecoversWithoutRelaunch()
+        try byteRetentionAlwaysKeepsLatestChunks()
+        try activeCaptureRollsOverThroughRealRotation()
+        try checkpointsPersistTheAdmittedBacklog()
+        try failedCheckpointStaysVisibleUntilRecovered()
+        try await legacyAcquisitionExportPreservesReferencedEvidence()
+        try await deletionDoesNotReuseRetainedChunkIdentity()
+        try queueOverflowRetainsCriticalEvidenceAndReportsLoss()
+        try routineCheckpointsAvoidHistoricalInventory()
+        try storedZIPChecksumsMatchKnownVectors()
+        try await oversizedAppSnapshotReportsCacheFull()
+        try await cacheAdmissionFailureIsRecorded()
+        try await acquisitionSurvivesCaptureRetention()
+        try occurrenceTimeSurvivesWriterDelay()
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("recorderReady"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: true)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: 1)))
+        // Match the bounded firmware resource producer's numeric/boolean/string
+        // types; retain the existing importer privacy and field-count limits.
+        for key in ["freeBytes", "largestBytes", "minimumFreeBytes",
+                    "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+                    "rendererStackBytes", "stackAvailableMask"] {
+            precondition(RideDiagnosticsFieldPolicy.isAllowed(key))
+            precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: UInt32.max)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: true)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: "123"))
+        }
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("cleanupFailed"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: false)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: 0)))
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("operationId"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: "123456781234abcdABCD123456789abc"))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: NSNumber(value: 1)))
+        for key in ["sessionToken", "password", "tlsCertificateSha256"] {
+            precondition(!RideDiagnosticsFieldPolicy.isAllowed(key))
+        }
+
         var now = Date()
         let defaultsSuite = "ride-diagnostics-host-\(UUID().uuidString)"
         let defaults = try require(UserDefaults(suiteName: defaultsSuite))

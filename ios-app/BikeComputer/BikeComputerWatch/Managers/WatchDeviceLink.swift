@@ -91,6 +91,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var protectedSession: WatchAuthenticatedBLESessionV1?
     private var capabilities: WatchDeviceCapabilitiesV1?
     private var connectionGeneration: UInt64 = 0
+    private static let diagnosticsProcessID = UUID()
     private var transportAttemptID = UUID()
     private var transportDiagnosticSequence: UInt32 = 0
     private var transportStateMachine = RideBLETransportStateMachineV1(
@@ -138,6 +139,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var lastDispatchedRouteWindow: Data?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
+    private var lastDispatchedWorkoutMotion: RideBLEMotionDispatch?
+    // Firmware treats Starting after a finished session as a new session even
+    // when the random token collides. Motion enqueued before a finished workout
+    // was cleared belongs to that session and must not seed the next baseline.
+    private var workoutMotionClearedUptime: TimeInterval = -.infinity
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -380,11 +386,6 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         }
         phonePreparationAccepted = false
         guard !transportStateMachine.isReady else { return }
-        if state == .scanning {
-            central.stopScan()
-        }
-        operationTimeoutTask?.cancel()
-        operationTimeoutTask = nil
         let message: String
         switch response.errorCode {
         case "phone_navigation_active":
@@ -398,9 +399,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         default:
             message = "Bicino is controlled by iPhone"
         }
-        lastError = message
+        // A negative handoff retires the platform connection through the same
+        // cancellation boundary as any other failed attempt. A timer cannot
+        // invalidate CoreBluetooth's outstanding callbacks. Without a
+        // peripheral no disconnect callback will consume the busy marker.
+        disconnectingForBusyLease = peripheral != nil
+        fail(message, reason: .leaseBusy)
         state = .busy
-        scheduleReconnect()
     }
 
     func directRidePreparationSubmissionDidFail(
@@ -526,6 +531,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         latestWorkoutFrames = frames
         latestWorkoutGPS = nil
         latestWorkoutMotion = nil
+        lastDispatchedWorkoutMotion = nil
+        workoutMotionClearedUptime = ProcessInfo.processInfo.systemUptime
+        queue.removeReplaceableGroups(coalescingKeys: ["workout-motion"])
         guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
         drainQueue()
@@ -560,7 +568,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         return true
     }
 
-    func endWorkoutDemandAfterClearing(_ frames: WorkoutDeviceFrames) {
+    func endWorkoutDemandAfterSending(_ frames: WorkoutDeviceFrames) {
         demand.beginWorkoutRelease()
         clearWorkout(frames)
         finishPendingReleasesIfPossible()
@@ -1022,6 +1030,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         capabilities = nil
         lastDispatchedNavigationSnapshot = nil
         lastDispatchedRouteWindow = nil
+        lastDispatchedWorkoutMotion = nil
         workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
@@ -1600,7 +1609,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             var payload = write.gpsDispatch?.payload() ?? write.payload
             if let motion = write.motionDispatch {
-                guard let freshPayload = motion.payload() else {
+                guard motion.enqueuedUptime > workoutMotionClearedUptime,
+                      motion.isNewer(than: lastDispatchedWorkoutMotion),
+                      let freshPayload = motion.payload() else {
                     activeWriteIndex += 1
                     continue
                 }
@@ -1660,6 +1671,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 lastDispatchedNavigationSnapshot = snapshot
             }
             if write.target == .route { lastDispatchedRouteWindow = write.payload }
+            if let motion = write.motionDispatch {
+                // Queue admission/eviction and expiry must not consume a sample.
+                // Reconnect clears this baseline after an ATT failure or reset.
+                lastDispatchedWorkoutMotion = motion
+            }
             peripheral.writeValue(
                 frame,
                 for: characteristic,
@@ -2041,7 +2057,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             uptimeMs: max(0, Int(
                 ProcessInfo.processInfo.systemUptime * 1_000
             )),
-            latencyMs: latencyMs
+            latencyMs: latencyMs,
+            originUnixTimeMs: Int64(Date().timeIntervalSince1970 * 1_000),
+            originProcessID: Self.diagnosticsProcessID
         ))
     }
 
@@ -2132,7 +2150,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.reconnectTask = nil
             guard self.hasDemand,
-                  self.connectionGeneration == generation else { return }
+                  self.connectionGeneration == generation,
+                  self.peripheral == nil,
+                  !self.transportStateMachine.isReady else { return }
             self.resetTransport(keepingPeripheral: false)
             self.beginIfNeeded()
         }

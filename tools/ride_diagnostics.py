@@ -22,21 +22,14 @@ MAX_ENTRY_BYTES = 12 * 1024 * 1024
 MAX_LINE_BYTES = 8 * 1024
 MAX_COMPRESSION_RATIO = 1_000
 ALLOWED_SOURCES = {"ios", "firmware", "host"}
-ALLOWED_LEVELS = {"debug", "info", "warning", "error"}
+ALLOWED_LEVELS = {'trace', 'debug', 'info', 'warning', 'error', 'fatal'}
 ALLOWED_CATEGORIES = {
-    "lifecycle",
-    "boot",
-    "ble",
-    "navigation",
-    "gps",
-    "workout",
-    "rideAutomation",
-    "storage",
-    "map",
-    "power",
-    "transfer",
-    "user",
-    "logger",
+    "audio", "ble", "boot", "display",
+    "gps", "http", "lifecycle", "logger",
+    "map", "memory", "navigation", "ota",
+    "power", "rideAutomation", "sensor", "storage",
+    "tasks", "tls", "touch", "transfer",
+    "user", "wifi", "workout",
 }
 REQUIRED_KEYS = {"schema", "source", "sequence", "level", "category", "event"}
 OPTIONAL_KEYS = {"wallTime", "uptimeMs", "processId", "captureId", "fields"}
@@ -69,74 +62,109 @@ REQUIRED_MANIFEST_KEYS = {
 # here and to the Swift transfer validator before it can enter an exported
 # bundle; this prevents a future call site from quietly widening the privacy
 # boundary.
+# BEGIN GENERATED DIAGNOSTICS FIELDS
 ALLOWED_FIELD_KEYS = {
-    "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
-    "active", "activeStage", "ageMs", "alertMode",
+    "acceptedClients", "accuracy", "accuracyAvailable", "accuracyBucket",
+    "acknowledgedKind", "active", "activeStage", "ageMs",
+    "alertMode", "apEventStarted", "apStarts", "apStops",
     "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
     "attemptId", "authorization", "authorized", "autoPauseEnabled",
     "available", "background", "blockLoadMs", "bootSequence",
-    "bytes", "chunk", "class", "clockSynchronized",
-    "code", "commandClass", "completedStage", "connectCompleted",
-    "connectDurationMs", "connectStarted", "connectionGeneration", "connectionReused",
-    "connectionState", "consecutiveEarlyFailures", "controllerRole", "decisionSequence",
-    "diagnosticHold", "domain", "droppedCount", "durationLimit",
-    "durationMs", "enqueuedCount", "errorCode", "errorDomain",
-    "eventCount", "expectedState", "fallback", "featureFlags",
-    "firmwareBuild", "firmwareFingerprint", "firmwareTarget", "firstMissingUptimeMs",
-    "firmwareProfile", "firmwareVersion", "firmwareGitSha", "otaState",
-    "fixValid", "formatVersion", "generation", "highWater",
-    "highWaterBytes", "httpStatus", "importedCount", "kind",
-    "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage", "lastFailureResetReason",
-    "lastFailureStage", "lastGapMs", "lastMissingUptimeMs", "latencyMs",
-    "leaseGeneration", "localAccessorySubnet", "mapDetail", "mapId",
-    "mapPhase", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-    "members", "messageBytes", "messageDigest", "mode",
-    "navigating", "networkObservation", "networkProtocol", "networkTransport",
-    "origin", "outcome", "pendingControl", "phase",
-    "profileVersion", "proxyConnection", "queueBytes", "queueDepth",
-    "ready", "reason", "rejectedCount", "remoteEndpointMatched",
-    "replacedCount", "resetReason", "result", "retries",
-    "rideDetectionArmed", "rideGeneration", "role", "routeLoaded",
-    "rssiBucket", "runtimeBootSequence", "safeMode", "sampleCount",
-    "schemaVersion", "scope", "sequence", "sessionPresent",
-    "sha256Prefix", "simulation", "sizeBucket", "sourceHealthMask",
-    "speedAvailable", "startMode", "state", "storage",
-    "storageErrorCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-    "tlsStarted", "transition", "uiPhase", "uiProgressMs",
-    "underlyingErrorCode", "underlyingErrorDomain", "viewingMap", "visitedEntries",
-    "waitedForConnectivity", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-    "watchdogUptimeMs", "workoutActive", "writerDetail", "writerPhase",
+    "budgetBytes", "budgetRemainingBytes", "bytes", "captureGeneration",
+    "catalogGeneration", "chunk", "class", "cleanupFailed",
+    "clientJoins", "clientLeaves", "clients", "clockSynchronized",
+    "clockUncertaintyMs", "code", "commandClass", "completedStage",
+    "connectCompleted", "connectDurationMs", "connectStarted", "connectionGeneration",
+    "connectionReused", "connectionState", "consecutiveEarlyFailures", "controllerRole",
+    "coverage", "cutoffSequence", "decisionSequence", "delivery",
+    "dhcpLeases", "dhcpStatus", "diagnosticHold", "disconnectReason",
+    "domain", "dropReason", "droppedCount", "durable",
+    "durationLimit", "durationMs", "effectiveLevel", "emissionSequence",
+    "enqueuedCount", "errorCode", "errorDomain", "eventCount",
+    "eventUptimeMs", "expectedChunks", "expectedState", "expiresUptimeMs",
+    "fallback", "featureFlags", "filteredCount", "firmwareBuild",
+    "firmwareFingerprint", "firmwareGitSha", "firmwareProfile", "firmwareTarget",
+    "firmwareVersion", "firstMissingUptimeMs", "fixValid", "formatVersion",
+    "freeBytes", "freeInternalBytes", "freePsramBytes", "generation",
+    "hasIP", "highWater", "highWaterBytes", "httpStatus",
+    "importedCount", "incidentId", "kind", "largestBytes",
+    "largestInternalBytes", "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage",
+    "lastFailureResetReason", "lastFailureStage", "lastGapMs", "lastMissingUptimeMs",
+    "latencyMs", "leaseGeneration", "listenerReady", "localAccessorySubnet",
+    "mailboxDelayMs", "mapDetail", "mapId", "mapPhase",
+    "mapProgressMs", "maxQueueDepth", "maximumGapMs", "maximumLevel",
+    "members", "messageBytes", "messageDigest", "metricsAvailable",
+    "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
+    "mode", "navigating", "netifUp", "networkObservation",
+    "networkProtocol", "networkTransport", "operationId", "origin",
+    "originCaptureAssociation", "originClockUncertainty", "originProcessId", "originUnixTimeMs",
+    "otaState", "outcome", "ownerStackBytes", "pendingControl",
+    "phase", "policyGeneration", "policyMask", "profileVersion",
+    "providerId", "proxyConnection", "queueBytes", "queueDepth",
+    "radioStarted", "readinessElapsedMs", "readinessRemainingMs", "ready",
+    "reason", "recorderReady", "rejectedCount", "remoteEndpointMatched",
+    "rendererStackBytes", "replacedCount", "resetReason", "result",
+    "retries", "rideDetectionArmed", "rideGeneration", "role",
+    "routeLoaded", "rssiBucket", "runtimeBootSequence", "safeMode",
+    "sampleCount", "sampleIntervalMs", "schemaDigest", "schemaVersion",
+    "scope", "sequence", "sessionPresent", "sha256Prefix",
+    "simulation", "sizeBucket", "sourceAgeKnown", "sourceAgeMs",
+    "sourceHealthMask", "speedAvailable", "stackAvailableMask", "startMode",
+    "state", "stationMode", "storage", "storageErrorCount",
+    "taskCount", "timeBasis", "tlsChallenge", "tlsCompleted",
+    "tlsDurationMs", "tlsFailed", "tlsStackBytes", "tlsStarted",
+    "tlsSucceeded", "transactionCount", "transition", "uiPhase",
+    "uiProgressMs", "underlyingErrorCode", "underlyingErrorDomain", "unsupportedReason",
+    "verifiedChunks", "viewingMap", "visitedEntries", "waitedForConnectivity",
+    "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
+    "workoutActive", "writerDelayMs", "writerDetail", "writerPhase",
     "writerProgressMs", "writtenCount",
 }
 FIRMWARE_NUMBER_FIELD_KEYS = {
-    "accuracy", "activeStage", "ageMs", "alertMode",
-    "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
-    "bytes", "chunk", "commandClass", "completedStage",
-    "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures", "decisionSequence",
-    "droppedCount", "durationMs", "enqueuedCount", "errorCode",
-    "eventCount", "firmwareBuild", "firstMissingUptimeMs", "formatVersion",
-    "generation", "highWater", "highWaterBytes", "httpStatus",
-    "importedCount", "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage",
-    "lastGapMs", "lastMissingUptimeMs", "latencyMs", "leaseGeneration",
-    "mapDetail", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-    "members", "messageBytes", "profileVersion", "queueBytes",
-    "queueDepth", "rejectedCount", "replacedCount", "resetReason",
-    "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-    "schemaVersion", "sequence", "sourceHealthMask", "storageErrorCount",
-    "tlsDurationMs", "uiProgressMs", "underlyingErrorCode", "visitedEntries",
-    "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
-    "writerDetail", "writerProgressMs", "writtenCount",
+    "acceptedClients", "accuracy", "activeStage", "ageMs",
+    "alertMode", "apStarts", "apStops", "applyErrorCode",
+    "attempt", "blockLoadMs", "bootSequence", "budgetBytes",
+    "budgetRemainingBytes", "bytes", "captureGeneration", "catalogGeneration",
+    "chunk", "clientJoins", "clientLeaves", "clients",
+    "clockUncertaintyMs", "commandClass", "completedStage", "connectDurationMs",
+    "connectionGeneration", "consecutiveEarlyFailures", "cutoffSequence", "decisionSequence",
+    "dhcpLeases", "dhcpStatus", "disconnectReason", "droppedCount",
+    "durationMs", "emissionSequence", "enqueuedCount", "errorCode",
+    "eventCount", "eventUptimeMs", "expectedChunks", "expiresUptimeMs",
+    "filteredCount", "firmwareBuild", "firstMissingUptimeMs", "formatVersion",
+    "freeBytes", "freeInternalBytes", "freePsramBytes", "generation",
+    "highWater", "highWaterBytes", "httpStatus", "importedCount",
+    "largestBytes", "largestInternalBytes", "lastFailureCompletedStage", "lastFailureResetReason",
+    "lastFailureStage", "lastGapMs", "lastMissingUptimeMs", "latencyMs",
+    "leaseGeneration", "mailboxDelayMs", "mapDetail", "mapProgressMs",
+    "maxQueueDepth", "maximumGapMs", "members", "messageBytes",
+    "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
+    "originUnixTimeMs", "ownerStackBytes", "policyGeneration", "policyMask",
+    "profileVersion", "queueBytes", "queueDepth", "readinessElapsedMs",
+    "readinessRemainingMs", "rejectedCount", "rendererStackBytes", "replacedCount",
+    "resetReason", "retries", "rideGeneration", "runtimeBootSequence",
+    "sampleCount", "sampleIntervalMs", "schemaVersion", "sequence",
+    "sourceAgeMs", "sourceHealthMask", "stackAvailableMask", "storageErrorCount",
+    "taskCount", "tlsDurationMs", "tlsFailed", "tlsStackBytes",
+    "tlsSucceeded", "transactionCount", "uiProgressMs", "underlyingErrorCode",
+    "verifiedChunks", "visitedEntries", "watchSequence", "watchUptimeMs",
+    "watchdogCoreMask", "watchdogUptimeMs", "writerDelayMs", "writerDetail",
+    "writerProgressMs", "writtenCount",
 }
 FIRMWARE_BOOLEAN_FIELD_KEYS = {
-    "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
-    "available", "background", "clockSynchronized", "connectCompleted",
-    "connectStarted", "connectionReused", "diagnosticHold", "fallback",
-    "fixValid", "localAccessorySubnet", "navigating", "pendingControl",
-    "proxyConnection", "ready", "remoteEndpointMatched", "rideDetectionArmed",
-    "routeLoaded", "safeMode", "sessionPresent", "simulation",
-    "speedAvailable", "tlsCompleted", "tlsStarted", "viewingMap",
-    "waitedForConnectivity", "workoutActive",
+    "accuracyAvailable", "active", "apEventStarted", "authorized",
+    "autoPauseEnabled", "available", "background", "cleanupFailed",
+    "clockSynchronized", "connectCompleted", "connectStarted", "connectionReused",
+    "diagnosticHold", "durable", "fallback", "fixValid",
+    "hasIP", "listenerReady", "localAccessorySubnet", "metricsAvailable",
+    "navigating", "netifUp", "pendingControl", "proxyConnection",
+    "radioStarted", "ready", "recorderReady", "remoteEndpointMatched",
+    "rideDetectionArmed", "routeLoaded", "safeMode", "sessionPresent",
+    "simulation", "sourceAgeKnown", "speedAvailable", "stationMode",
+    "tlsCompleted", "tlsStarted", "viewingMap", "waitedForConnectivity",
+    "workoutActive",
 }
+# END GENERATED DIAGNOSTICS FIELDS
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -378,6 +406,7 @@ class StreamResult:
     truncated_tail: bool = False
     dropped_sequences: int = 0
     firmware_identity: tuple[int, str] | None = None
+    unretained_leading_sequences: int = 0
 
 
 def validate_jsonl(data: bytes, source_path: str, expected_source: str | None = None) -> StreamResult:
@@ -955,6 +984,14 @@ def _validate_stream_boundaries(streams: list[StreamResult]) -> None:
                 stream.path,
             )
         )
+        # Every iPhone process stream starts at sequence 0. A later first
+        # retained sequence means rolling byte retention, deletion or an
+        # acquisition's capture scope left that history out of this bundle.
+        # Report it separately from recording loss and inter-chunk gaps.
+        if APP_EVENT_MEMBER_RE.fullmatch(members[0].path):
+            members[0].unretained_leading_sequences = int(
+                members[0].events[0]["sequence"]
+            )
         previous: int | None = None
         previous_stream: StreamResult | None = None
         firmware_identity: tuple[int, str] | None = None
@@ -1028,8 +1065,10 @@ def _correlate_events(
     for scope, raw in scoped_events:
         event = dict(raw)
         timestamp = _event_timestamp(raw)
-        uncertainty_ms = 0
+        uncertainty_ms = None
         if raw.get("source") == "firmware":
+            event["clockResolutionMs"] = 1_000
+            event["clockUncertaintyReason"] = "sync_and_drift_unbounded"
             uptime = raw.get("uptimeMs")
             candidates = anchors.get(firmware_scope(scope, raw), [])
             if isinstance(uptime, int) and candidates:
@@ -1045,7 +1084,10 @@ def _correlate_events(
                 # Always correlate firmware against its nearest same-device
                 # anchor. Raw wallTime remains untouched evidence, while this
                 # derived value reflects later RTC corrections and uptime wrap.
-                uncertainty_ms = 0 if raw.get("event") == "clock_anchor" else 1_000
+                # Neither synchronization latency nor oscillator drift has an
+                # established bound. Whole-second firmware timestamps add up
+                # to 999 ms quantization even at the anchor itself.
+                uncertainty_ms = None
         if timestamp is not None:
             event["correlatedWallTime"] = (
                 timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1158,7 +1200,7 @@ def summarize(
             1 for event in events if event.get("correlatedWallTime")
         ),
         "inferredClockEventCount": sum(
-            1 for event in events if event.get("clockUncertaintyMs", 0) > 0
+            1 for event in events if event.get("clockUncertaintyReason") == "sync_and_drift_unbounded"
         ),
         "streams": [
             {
@@ -1166,6 +1208,7 @@ def summarize(
                 "eventCount": len(stream.events),
                 "truncatedTail": stream.truncated_tail,
                 "droppedSequences": stream.dropped_sequences,
+                "unretainedLeadingSequences": stream.unretained_leading_sequences,
             }
             for stream in streams
         ],
@@ -1177,7 +1220,7 @@ def summarize(
         f"Events: {len(events)}",
         f"Streams: {len(streams)}",
         "",
-        "Immutable raw archive entries are preserved under `raw/`. Sequence gaps and recoverable tails are reported in `summary.json`.",
+        "Immutable raw archive entries are preserved under `raw/`. Sequence gaps, unretained leading iPhone history and recoverable tails are reported in `summary.json`.",
         "",
     ]
     (output / "report.md").write_text("\n".join(report_lines))

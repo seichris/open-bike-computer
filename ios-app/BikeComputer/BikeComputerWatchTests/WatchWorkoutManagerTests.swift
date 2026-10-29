@@ -2578,6 +2578,95 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
+    func testColdPhoneRequestsCurrentSnapshotOnNativeSession() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(probe: probe)
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session, identity: runtime.identity, state: state)
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1".utf8)])
+            try await waitUntil { probe.sentData.count == 1 }
+            let snapshot = try WorkoutContractCodec.decode(XCTUnwrap(probe.sentData.first))
+            XCTAssertEqual(snapshot.sessionID, runtime.identity.sessionID)
+            XCTAssertEqual(snapshot.snapshot?.state, state)
+            XCTAssertEqual(runtime.manager.state, state)
+            XCTAssertEqual(probe.endSessionCallCount, 0)
+            XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+            let latest = runtime.manager.latestEnvelope
+            let unrelated = try makeMirrorRuntime(probe: WatchMirrorTransportProbe())
+            runtime.manager.workoutSession(unrelated.session,
+                didReceiveDataFromRemoteWorkoutSession: [WorkoutMirrorSnapshotRequest.data])
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1.invalid".utf8)])
+            await Task.yield()
+            await Task.yield()
+            XCTAssertEqual(runtime.manager.latestEnvelope, latest,
+                           "Other sessions and malformed requests cannot publish credentials")
+        }
+    }
+
+    func testMirrorStartTimeoutRetriesWithoutEndingPausedWorkout() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, startTimeout: 0.1)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session, identity: runtime.identity, state: .paused)
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        runtime.manager.startMirroringForTesting()
+        try await waitUntil { probe.startCallCount == 2 }
+        XCTAssertEqual(runtime.manager.state, .paused)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+        XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(probe.sentData.isEmpty,
+                      "A timed-out start's late callback cannot attach its replacement")
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 1 }
+        XCTAssertEqual(try WorkoutContractCodec.decode(probe.sentData[0]).snapshot?.state, .paused)
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+        XCTAssertEqual(runtime.manager.state, .paused)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+    }
+
+    func testLiveMirrorTimeoutRetriesLatestSnapshotWithoutEndingWorkout() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, liveSendTimeout: 0.1)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session, identity: runtime.identity, state: .running)
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        let latest = runtime.manager.latestEnvelope
+        try await waitUntil { probe.startCallCount == 2 }
+        XCTAssertEqual(runtime.manager.state, .running)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+        XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 2 }
+        XCTAssertEqual(try WorkoutContractCodec.decode(probe.sentData[1]), try latest.map {
+            try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone($0, peerVersion: nil))
+        })
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting,
+                      "The timed-out send's late completion cannot clear its replacement")
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+    }
+
     func testSupersededLiveCallbackCannotCompleteFinalShutdownSend() async throws {
         for startFailure in [false, true] {
             let probe = WatchMirrorTransportProbe()
@@ -8690,9 +8779,143 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
     }
 
+    func testPreStartTransitionIsRejectedWithoutCorruptingRecovery() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        let start = Date()
+        let identity = try store.begin(startDate: start)
+        XCTAssertThrowsError(try store.confirmRideTransition(
+            origin: .manual, paused: true, at: start.addingTimeInterval(-1),
+            detectorProfileVersion: nil
+        ))
+        XCTAssertNil(store.recoveredIdentity?.lastTransitionAt)
+        let reloaded = WatchWorkoutRecoveryStore(persistence: persistence)
+        XCTAssertEqual(reloaded.loadState, .valid)
+        XCTAssertEqual(reloaded.recoveredIdentity?.sessionID, identity.sessionID)
+    }
+
+    func testLockedFinishCallbackArchivesSavedWorkoutWithoutReturnedObject() async throws {
+        let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
+        let start = Date().addingTimeInterval(-60)
+        let identity = try store.begin(startDate: start)
+        try store.markFinishing(disposition: .save, requestedAt: start.addingTimeInterval(60))
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+        let builder = session.associatedWorkoutBuilder()
+        var saves = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session, builder: builder, sessionState: { .stopped }
+            ),
+            builderElapsedTime: { _ in 60 },
+            endCollectionOperation: { _, _ in },
+            finishWorkoutCallback: { _, completion in
+                saves += 1
+                completion(nil, nil)
+            },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(session: session, identity: try XCTUnwrap(store.recoveredIdentity), state: .ending)
+        await manager.finalizeForTesting(disposition: .save, endDate: start.addingTimeInterval(60))
+        XCTAssertEqual(saves, 1)
+        XCTAssertEqual(manager.summary?.outcome, .saved)
+        XCTAssertNil(manager.finishRequestError)
+        XCTAssertNil(store.recoveredIdentity)
+        XCTAssertEqual(store.terminalTombstone(externalUUID: identity.sessionID.uuidString)?.disposition, .save)
+    }
+
+    func testDelayedTransitionCannotMutateConsecutiveRideOrCorruptRecovery() async throws {
+        for failOldWrite in [false, true] {
+            let persistence = ToggleRecoveryPersistence()
+            let store = WatchWorkoutRecoveryStore(persistence: persistence)
+            let start = Date().addingTimeInterval(-120)
+            let oldIdentity = try store.begin(startDate: start)
+            let healthStore = HKHealthStore()
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .cycling
+            configuration.locationType = .outdoor
+            let oldSession = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+            let oldBuilder = oldSession.associatedWorkoutBuilder()
+            let probe = AsyncThrowingVoidProbe()
+            let manager = WatchWorkoutManager(
+                healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
+                recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                    session: oldSession, builder: oldBuilder, sessionState: { .running }
+                ),
+                rideTransitionEventOperation: { _ in try await probe.run() },
+                initializeOnLaunch: false
+            )
+            manager.configureMirrorRuntimeForTesting(session: oldSession, identity: oldIdentity, state: .running)
+            let delayed = Task { await manager.applySessionState(oldSession, to: .paused, from: .running, date: start.addingTimeInterval(30)) }
+            try await waitUntil { probe.callCount == 1 }
+            manager.discard()
+            await manager.finalizeForTesting(disposition: .discard, endDate: start.addingTimeInterval(60))
+            XCTAssertNil(store.recoveredIdentity)
+            let next = try store.begin(startDate: start.addingTimeInterval(90))
+            let newSession = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+            manager.configureMirrorRuntimeForTesting(
+                session: newSession, identity: next, state: .running,
+                builder: newSession.associatedWorkoutBuilder()
+            )
+            if failOldWrite { probe.fail() } else { probe.complete() }
+            await delayed.value
+            XCTAssertEqual(store.recoveredIdentity?.sessionID, next.sessionID)
+            XCTAssertNil(store.recoveredIdentity?.lastTransitionAt)
+            XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
+            XCTAssertEqual(WatchWorkoutRecoveryStore(persistence: persistence).loadState, .valid)
+            XCTAssertNil(manager.snapshot.errorCode)
+        }
+    }
+
+    func testOutOfOrderTransitionWritesKeepNewestNativeTransition() async throws {
+        let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
+        let start = Date().addingTimeInterval(-120)
+        let identity = try store.begin(startDate: start)
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+        let first = AsyncThrowingVoidProbe()
+        let second = AsyncThrowingVoidProbe()
+        var calls = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session, builder: session.associatedWorkoutBuilder(), sessionState: { .running }
+            ),
+            rideTransitionEventOperation: { _ in
+                calls += 1
+                if calls == 1 { try await first.run() } else { try await second.run() }
+            },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(session: session, identity: identity, state: .running)
+        let pauseDate = start.addingTimeInterval(30)
+        let resumeDate = start.addingTimeInterval(40)
+        let pausedTask = Task { await manager.applySessionState(session, to: .paused, from: .running, date: pauseDate) }
+        try await waitUntil { first.callCount == 1 }
+        let resumedTask = Task { await manager.applySessionState(session, to: .running, from: .paused, date: resumeDate) }
+        try await waitUntil { second.callCount == 1 }
+        second.complete()
+        await resumedTask.value
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, resumeDate)
+        first.complete()
+        await pausedTask.value
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, resumeDate)
+        XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
+        XCTAssertEqual(manager.state, .running)
+    }
+
     private func makeMirrorRuntime(
         probe: WatchMirrorTransportProbe,
         shutdownTimeout: TimeInterval = 10,
+        startTimeout: TimeInterval = 10,
+        liveSendTimeout: TimeInterval = 10,
         workoutConfigurationHandler:
             (@MainActor (HKWorkoutConfiguration) -> Void)? = nil,
         builderElapsedTime:
@@ -8729,6 +8952,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
             mirrorSendOperation: probe.send,
             mirrorShutdownEndSession: probe.endSession,
             mirrorRetryDelay: 0.01,
+            mirrorStartTimeout: startTimeout,
+            mirrorLiveSendTimeout: liveSendTimeout,
             mirrorShutdownDeliveryTimeout: shutdownTimeout,
             initializeOnLaunch: false
         )

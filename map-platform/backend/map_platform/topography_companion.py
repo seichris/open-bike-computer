@@ -34,6 +34,13 @@ SCHEMA = (
     "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)",
     "CREATE TABLE tiles (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, scale INTEGER NOT NULL, png BLOB NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (z, x, y, scale)) WITHOUT ROWID",
 )
+EXTRA_SCHEMA = (
+    "CREATE TABLE labels (x INTEGER NOT NULL, y INTEGER NOT NULL, elevation INTEGER NOT NULL, PRIMARY KEY (x, y, elevation)) WITHOUT ROWID",
+    "CREATE TABLE terrain (x INTEGER NOT NULL, y INTEGER NOT NULL, grid BLOB NOT NULL, PRIMARY KEY (x, y)) WITHOUT ROWID",
+)
+STYLE_V2 = "contours-labels-terrain-v2"
+MAX_LABELS = 100_000
+
 
 
 class TopographyCompanionAdmissionError(ValueError):
@@ -50,7 +57,10 @@ def _validate_metadata(metadata: dict) -> None:
         "mapId", "intermediateSha256", "sourcePolicySha256", "attributionSha256", "boundsE7", "tileCount",
     }:
         raise ValueError("companion metadata fields differ")
-    constants = {"schemaVersion": 1, "profileVersion": 1, "styleId": STYLE_ID, "tileScheme": "xyz",
+    version = metadata.get("schemaVersion")
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError("unsupported companion schema")
+    constants = {"schemaVersion": version, "profileVersion": 1, "styleId": STYLE_ID if version == 1 else STYLE_V2, "tileScheme": "xyz",
                  "tileSize": 256, "scales": [1, 2], "minimumZoom": MIN_ZOOM, "maximumZoom": MAX_ZOOM}
     if any(type(metadata[key]) is not type(value) or metadata[key] != value for key, value in constants.items()):
         raise ValueError("unsupported companion profile")
@@ -82,7 +92,7 @@ def _png_valid(data: bytes, scale: int) -> None:
 
 def validate_companion(path: Path, *, expected_map_id: str | None = None,
                        expected_intermediate: str | None = None,
-                       cancel: Callable[[], None] = lambda: None) -> dict:
+                       cancel: Callable[[], None] = lambda: None, terrain_grids: dict | None = None) -> dict:
     if path.is_symlink() or not path.is_file() or not 512 <= path.stat().st_size <= MAX_BYTES:
         raise ValueError("invalid companion file")
     # URI escaping belongs to Path.as_uri(), not string concatenation with an
@@ -94,14 +104,16 @@ def validate_companion(path: Path, *, expected_map_id: str | None = None,
         if hasattr(connection, "setlimit"):
             connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_TILE_BYTES + 65536)
         connection.set_progress_handler(lambda: (cancel(), 0)[1], 1000)
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        schema = SCHEMA if version == 1 else SCHEMA + EXTRA_SCHEMA
         if (connection.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-                or connection.execute("PRAGMA user_version").fetchone()[0] != 1
+                or version not in (1, 2)
                 or connection.execute("PRAGMA page_size").fetchone()[0] != 4096):
             raise ValueError("unsupported companion SQLite identity")
-        if connection.execute("SELECT count(*), coalesce(max(length(sql)), 0), coalesce(max(length(name)), 0) FROM sqlite_schema").fetchone() != (2, max(map(len, SCHEMA)), 8):
+        if connection.execute("SELECT count(*), coalesce(max(length(sql)), 0), coalesce(max(length(name)), 0) FROM sqlite_schema").fetchone() != (len(schema), max(map(len, schema)), 8):
             raise ValueError("unexpected companion SQLite schema bounds")
         actual = connection.execute("SELECT type, name, sql FROM sqlite_schema ORDER BY name").fetchall()
-        if actual != [("table", "metadata", SCHEMA[0]), ("table", "tiles", SCHEMA[1])]:
+        if actual != sorted(("table", sql.split()[2], sql) for sql in schema):
             raise ValueError("unexpected companion SQLite schema")
         if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise ValueError("corrupt companion database")
@@ -114,6 +126,10 @@ def validate_companion(path: Path, *, expected_map_id: str | None = None,
             raise ValueError("invalid companion metadata row")
         metadata = json.loads(rows[0][1])
         _validate_metadata(metadata)
+        if metadata["schemaVersion"] != version:
+            raise ValueError("companion schema identity differs")
+        if version == 2:
+            validate_features(connection)
         if canonical_bytes(metadata).decode() != rows[0][1]:
             raise ValueError("noncanonical companion metadata")
         if expected_map_id is not None and metadata["mapId"] != expected_map_id:
@@ -144,7 +160,7 @@ def validate_companion(path: Path, *, expected_map_id: str | None = None,
 
 def write_companion(path: Path, compiled: CompiledTopography, *, map_id: str,
                     source_policy_sha256: str, attribution_sha256: str, bounds_e7: list[int],
-                    cancel: Callable[[], None] = lambda: None) -> dict:
+                    cancel: Callable[[], None] = lambda: None, terrain_grids: dict | None = None) -> dict:
     if path.exists() or path.is_symlink():
         raise FileExistsError(path)
     # Index bounded line references by tile; never hold all decoded tile images.
@@ -172,7 +188,8 @@ def write_companion(path: Path, compiled: CompiledTopography, *, map_id: str,
                             raise TopographyCompanionAdmissionError("companion exceeds tile admission budget")
                         if references > MAX_REFERENCES:
                             raise TopographyCompanionAdmissionError("companion exceeds reference admission budget")
-    metadata = {"schemaVersion": 1, "profileVersion": 1, "styleId": STYLE_ID, "tileScheme": "xyz", "tileSize": 256,
+    version = 2 if terrain_grids is not None else 1
+    metadata = {"schemaVersion": version, "profileVersion": 1, "styleId": STYLE_ID if version == 1 else STYLE_V2, "tileScheme": "xyz", "tileSize": 256,
                 "scales": [1, 2], "minimumZoom": MIN_ZOOM, "maximumZoom": MAX_ZOOM, "mapId": map_id,
                 "intermediateSha256": compiled.intermediate_sha256, "sourcePolicySha256": source_policy_sha256,
                 "attributionSha256": attribution_sha256, "boundsE7": bounds_e7, "tileCount": 0}
@@ -186,10 +203,12 @@ def write_companion(path: Path, compiled: CompiledTopography, *, map_id: str,
             connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
-            connection.execute("PRAGMA user_version=1")
+            connection.execute(f"PRAGMA user_version={version}")
             connection.execute(f"PRAGMA max_page_count={MAX_BYTES // 4096}")
-            for sql in SCHEMA:
+            for sql in (SCHEMA if version == 1 else SCHEMA + EXTRA_SCHEMA):
                 connection.execute(sql)
+            if version == 2:
+                write_features(connection, compiled, terrain_grids, cancel)
             for (z, x, y), contours in sorted(tiles.items()):
                 cancel()
                 rendered = []
@@ -226,3 +245,48 @@ def write_companion(path: Path, compiled: CompiledTopography, *, map_id: str,
         os.link(staged, path)
         _sync_directory(path.parent)
     return metadata
+
+
+def write_features(connection, compiled, terrain_grids, cancel):
+    from .terrain import validate_grid
+    anchors = set()
+    # Global 256 m crossings are independent of record splitting/block order.
+    for (bx, by), section in sorted(compiled.sections.items()):
+        for contour in section.contours:
+            cancel()
+            if not contour.flags & 1:
+                continue
+            for a, b in zip(contour.points, contour.points[1:]):
+                ax, ay = bx*4096+a[0], by*4096+a[1]
+                ex, ey = bx*4096+b[0], by*4096+b[1]
+                horizontal = abs(ex-ax) >= abs(ey-ay)
+                start, end = (ax, ex) if horizontal else (ay, ey)
+                if start == end:
+                    continue
+                for crossing in range(math.ceil(min(start, end)/256)*256, max(start, end), 256):
+                    t = (crossing-start)/(end-start)
+                    anchors.add((round(ax+(ex-ax)*t), round(ay+(ey-ay)*t), contour.elevation_m))
+                    if len(anchors) > MAX_LABELS:
+                        raise TopographyCompanionAdmissionError("contour label anchors exceed budget")
+    connection.executemany("INSERT INTO labels VALUES (?, ?, ?)", sorted(anchors))
+    if len(terrain_grids) > 256:
+        raise TopographyCompanionAdmissionError("terrain blocks exceed budget")
+    for (x,y), data in sorted(terrain_grids.items()):
+        cancel()
+        if validate_grid(data) != (x,y):
+            raise ValueError("terrain block identity mismatch")
+        connection.execute("INSERT INTO terrain VALUES (?, ?, ?)", (x,y,data))
+
+
+def validate_features(connection):
+    from .terrain import validate_grid
+    if connection.execute("SELECT count(*) FROM labels").fetchone()[0] > MAX_LABELS:
+        raise ValueError("too many contour labels")
+    for x,y,elevation in connection.execute("SELECT x,y,elevation FROM labels"):
+        if any(type(v) is not int for v in (x,y,elevation)) or abs(x)>MAX_WORLD_METRES or abs(y)>MAX_WORLD_METRES or not -12000<=elevation<=10000 or elevation % 50:
+            raise ValueError("invalid contour label anchor")
+    if connection.execute("SELECT count(*) FROM terrain").fetchone()[0] > 256:
+        raise ValueError("too many terrain blocks")
+    for x,y,data in connection.execute("SELECT x,y,grid FROM terrain"):
+        if type(x) is not int or type(y) is not int or not isinstance(data,bytes) or validate_grid(data)!=(x,y):
+            raise ValueError("invalid terrain block identity")

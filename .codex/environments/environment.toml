@@ -1,0 +1,44 @@
+# Codex app local environment. Fields follow the schema in the installed Codex
+# app: version, name, [setup]/[cleanup] script with optional darwin/linux/win32
+# overrides, and [[actions]] with name, command, optional icon and platform.
+# Keep logic in tools/dev-setup so Claude Code (.claude/settings.json) and
+# manual worktrees run exactly the same steps.
+version = 1
+name = "open-bike-computer"
+
+[setup]
+script = '''
+cd "$CODEX_WORKTREE_PATH"
+tools/dev-setup
+'''
+
+[[actions]]
+name = "Set up environment"
+icon = "tool"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-setup'
+
+[[actions]]
+name = "Plan checks"
+icon = "test"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-env tools/dev-check --plan'
+
+[[actions]]
+name = "Fast checks"
+icon = "test"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-env tools/dev-check'
+
+[[actions]]
+name = "Map backend checks"
+icon = "test"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-setup --map-backend && tools/dev-env --map-backend tools/dev-check --suite map'
+
+# Build-only; neither action flashes. Confirm which board is connected first.
+[[actions]]
+name = "Build firmware (1.75)"
+icon = "tool"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-env tools/dev-check --suite firmware --level full --board 175'
+
+[[actions]]
+name = "Build firmware (2.06)"
+icon = "tool"
+command = 'cd "$(git rev-parse --show-toplevel)" && tools/dev-env tools/dev-check --suite firmware --level full --board 206'

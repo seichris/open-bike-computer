@@ -32,6 +32,12 @@ from .catalog import (
     map_entry_id_for_descriptor,
 )
 from .map_artifact_validation import validate_renderer_artifacts
+from .map_compatibility import (
+    MapCompatibilityContract,
+    MapCompatibilityError,
+    load_map_compatibility_contract,
+    manifest_contract,
+)
 from .map_stream import (
     canonical_stream_manifest_bytes,
     manifest_receipt,
@@ -274,6 +280,7 @@ def promote_catalog_map(
     work_root: Path,
     grant: dict[str, Any] | None = None,
     source_policy: TopographySourcePolicy | None = None,
+    compatibility_contract: MapCompatibilityContract | None = None,
 ) -> dict[str, Any]:
     """Repackage one validated development ZIP as a production-signed stream."""
 
@@ -361,6 +368,8 @@ def promote_catalog_map(
                                 ["3d-buildings", "contours", "street-labels"])
         ):
             raise CatalogPromotionError("promotion map metadata does not match its ZIP")
+        # Production promotion supports renderer targets 1-4 only; target-5 POI
+        # maps stay behind their production rollout gate.
         expected_features = {
             1: [],
             2: ["street-labels"],
@@ -369,6 +378,13 @@ def promote_catalog_map(
         }.get(format_version)
         if expected_features is None or features != expected_features:
             raise CatalogPromotionError("promotion renderer features are unsupported")
+        # The declared contours layer and the signed manifest's topography must
+        # agree; that layer alone decides whether a companion is required.
+        contour_layer = "contours" in features
+        if contour_layer != isinstance(manifest.get("topography"), dict):
+            raise CatalogPromotionError("promotion contour layer does not match its ZIP")
+        if not contour_layer and grant.get("companion") is not None:
+            raise CatalogPromotionError("promotion companion has no contour layer")
         canonical_content_receipt = manifest_receipt(
             canonical_stream_manifest_bytes(manifest)
         )
@@ -406,7 +422,7 @@ def promote_catalog_map(
             format_version,
         )
         production_companion: ArtifactRecord | None = None
-        if format_version == 4:
+        if contour_layer:
             companion_grant = grant.get("companion")
             topo = manifest.get("topography")
             if not isinstance(companion_grant, dict) or not isinstance(topo, dict):
@@ -501,6 +517,34 @@ def promote_catalog_map(
             "buildSha256": producer_build_sha256,
             "imageDigest": producer_image_digest,
         }
+        # Promotion re-signs the exact development content, so a durable
+        # development map stays durable and any other map stays outside the
+        # contract. A durable map is promoted only for a profile that
+        # production may publish.
+        try:
+            durable_contract = manifest_contract(stream_manifest)
+            if durable_contract is not None:
+                contract = (
+                    compatibility_contract
+                    if compatibility_contract is not None
+                    else load_map_compatibility_contract()
+                )
+                if durable_contract != contract.contract:
+                    raise MapCompatibilityError(
+                        "durable map declares an unknown compatibility contract"
+                    )
+                profile = contract.profile_for(
+                    _require_string(map_value.get("renderer"), "renderer"),
+                    format_version,
+                    features,
+                )
+                if profile is None:
+                    raise MapCompatibilityError(
+                        "durable map profile is not registered"
+                    )
+                contract.require_publishable(profile, "production")
+        except MapCompatibilityError as exc:
+            raise CatalogPromotionError(str(exc)) from exc
         stream_path = temporary_root / f"{map_id}.bmap"
         stream = write_map_stream_artifact(
             pack_root,
@@ -546,7 +590,11 @@ def promote_catalog_map(
                 "promotion artifact is missing from shared delivery storage"
             )
         heartbeat.check()
-        delivery = catalog_delivery_requirements("production")
+        delivery = (
+            catalog_delivery_requirements("production")
+            if durable_contract is None
+            else {}
+        )
         companion_publication = []
         if production_companion is not None:
             companion_publication.append({

@@ -1,0 +1,793 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import os
+import re
+import time
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from sqlalchemy import and_, delete, or_, select, text, update
+from sqlalchemy.exc import IntegrityError, OperationalError
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import HTTPConnection
+
+from ..request_limits import RequestBodyLimitMiddleware
+from ..user_auth import FirebaseIdentity, IdentityUnavailable
+from .database import (RETRYABLE_SQLSTATES, Database, accounts, blocks, content, devices, friendships,
+                       invites, links, media, members, messages, replays, rides)
+from .client_address import ClientAddressPolicy
+from .media import S3Media
+from .features import SocialFeatures
+from .invite_preview import InvitePreviews
+from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
+                     DeviceRelease, FriendLiveState, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
+                     RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion)
+from .service import SocialError, SocialService, digest, identifier, public_content, row
+
+INSTALLATION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+# Socket identity re-checks tolerate a provider outage this long before closing.
+IDENTITY_OUTAGE_GRACE_SECONDS = 90
+# Close codes the native client treats as "retry later" rather than revocation.
+TRANSIENT_CODES = frozenset({"identity_unavailable", "database_busy"})
+# Requests without an account token, bounded per client network (or, for the
+# signed website bridge, per verified account subject) in fixed hourly windows.
+# Each key is independent, so one network cannot spend another's allowance.
+ANONYMOUS_LIMITS = {
+    "ride_preview": 600,           # view-only card metadata/image, per network
+    "link_resolve": 60,            # anonymous share-link resolution, per network
+    "deletion_receipt": 30,        # receipt confirmation, per network
+    "push_release": 30,            # installation binding release, per network
+    "website_deletion": 10,        # verified proofs, per account subject
+}
+# Signed-in share-link resolution, per account, in addition to general quotas.
+ACCOUNT_LINK_RESOLVE_LIMIT = 120
+
+
+def create_app(*, service=None, identity=None, features=None, client_addresses=None):
+    if service is None:
+        db = Database(os.environ["BICINO_SOCIAL_DATABASE_URL"])
+        db.check_schema()
+        service = SocialService(db, S3Media())
+    if identity is None:
+        identity = FirebaseIdentity(os.environ["BICINO_FIREBASE_PROJECT_ID"])
+    addresses = client_addresses if client_addresses is not None else ClientAddressPolicy.from_environment()
+
+    def anonymous_limit(category, request):
+        """Charge the caller's network bucket before any other database work."""
+        service.anonymous_rate(category, addresses.bucket(request.scope), ANONYMOUS_LIMITS[category])
+    async def rollout(request: HTTPConnection):
+        if request.scope["type"] != "http":
+            return  # The socket handler checks the flag before every snapshot.
+        parts = request.url.path.removeprefix(request.scope.get("root_path", "")).strip("/").split("/")
+        # Rollback must retain deletion, revocation and explicit stop operations.
+        if request.method == "DELETE":
+            return
+        if parts[0] in {"group-rides", "ride-invites"}:
+            if parts[-1] == "invite-preview":
+                app.state.features.require("invitePreviews")
+            if request.method == "GET" and parts[-1] == "consent":
+                return  # An explicit stop can refresh its epoch during rollback.
+            if request.method == "POST" and parts[-1] in {"leave", "end", "decline"}:
+                return
+            if request.method == "POST" and parts[-1] == "consent":
+                try:
+                    body = await request.json()
+                except (ValueError, UnicodeError):
+                    raise SocialError("invalid_json", 422) from None
+                if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
+                    return
+            app.state.features.require("groups")
+        elif parts[0] == "friend-sharing":
+            if request.method == "GET" and parts[-1] == "consent":
+                return
+            if request.method == "POST" and parts[-1] == "consent":
+                try:
+                    body = await request.json()
+                except (ValueError, UnicodeError):
+                    raise SocialError("invalid_json", 422) from None
+                if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
+                    return
+            app.state.features.require("friendSharing")
+        elif parts[0] == "ride-previews":
+            app.state.features.require("invitePreviews")
+        elif parts[0] in {"routes", "activities", "media"}:
+            app.state.features.require(parts[0])
+        elif parts == ["me", "avatar"]:
+            app.state.features.require("media")
+
+    app = FastAPI(title="Bicino social", version="1", dependencies=[Depends(rollout)])
+    app.state.features = features if features is not None else SocialFeatures.from_environment()
+    app.state.service = service
+    app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=5*1024*1024)
+
+    @app.exception_handler(SocialError)
+    async def error_handler(request, error):
+        return JSONResponse({"code": error.code}, status_code=error.status,
+                            headers={"Cache-Control": "no-store"})
+
+    @app.exception_handler(IntegrityError)
+    async def conflict_handler(request, error):
+        return JSONResponse({"code": "conflict"}, status_code=409)
+
+    @app.exception_handler(OperationalError)
+    async def database_handler(request, error):
+        # Serialization and deadlock aborts reach here only after bounded retries.
+        if getattr(error.orig, "sqlstate", None) in RETRYABLE_SQLSTATES:
+            return JSONResponse({"code": "database_busy"}, status_code=503,
+                                headers={"Cache-Control": "no-store", "Retry-After": "1"})
+        raise error  # Other database faults remain logged server errors.
+
+    @app.middleware("http")
+    async def private_responses(request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    def authenticate(authorization: str | None = Header(default=None)):
+        if not authorization or not authorization.startswith("Bearer "):
+            raise SocialError("authentication_required", 401)
+        try:
+            principal = identity.verify(authorization[7:])
+        except IdentityUnavailable:
+            # A provider outage is not a revocation. The client retries later.
+            raise SocialError("identity_unavailable", 503) from None
+        except Exception:
+            raise SocialError("authentication_required", 401) from None
+        actor = service.account(principal)
+        service.rate(actor, "requests", 600, 60)
+        return actor, principal
+
+    async def limit(actor, category, maximum, seconds=3600):
+        # Rate accounting is a database transaction; keep it off the event loop.
+        await run_in_threadpool(service.rate, actor, category, maximum, seconds)
+
+    def read(callback):
+        """Run one read transaction with bounded serialization/deadlock retries.
+
+        Whole read transactions are retried. Their only writes are idempotent
+        route-exposure records. Mutations stay behind the idempotency ledger in
+        `operation`, and rate-limit increments run once before a retried read.
+        """
+        return service.db.run(callback)
+
+    async def operation(request, auth, callback):
+        actor, _ = auth
+        key = request.headers.get("Idempotency-Key", "")
+        if not 8 <= len(key) <= 128:
+            raise SocialError("idempotency_key_required")
+        raw = await request.body()
+        fingerprint = hashlib.sha256(request.method.encode()+request.url.path.encode()+request.url.query.encode()+raw).hexdigest()
+        def execute():
+            with service.db.transaction() as c:
+                if c.dialect.name == "postgresql":
+                    # Serialize only this actor's replay ledger. Pair row locks
+                    # are acquired later in canonical order by domain operations.
+                    lock_id = int.from_bytes(hashlib.sha256(actor.encode()).digest()[:8], "big", signed=True)
+                    c.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id})
+                service.active(c, actor)
+                old = c.execute(select(replays).where(and_(replays.c.owner == actor, replays.c.key == key))).mappings().first()
+                if old:
+                    if old["digest"] != fingerprint:
+                        raise SocialError("idempotency_conflict", 409)
+                    if old["response"].get("receipt") == "link":
+                        link = row(c, links, links.c.id == old["response"]["id"])
+                        app.state.features.require_content(service.content_read(c, actor, link["content"])["kind"])
+                    result = service.replay(c, actor, old["response"])
+                    if result.get("kind") in {"route", "activity"}:
+                        app.state.features.require_content(result["kind"])
+                    if "url" in result:
+                        link = row(c, links, links.c.id == result["id"])
+                        app.state.features.require_content(service.content_read(c, actor, link["content"])["kind"])
+                    return result
+                result = callback(c, actor)
+                retained = service.replay_receipt(result)
+                c.execute(replays.insert().values(owner=actor, key=key, digest=fingerprint,
+                                                 response=retained, created=service.now()))
+                return result
+        for attempt in range(4):
+            try:
+                return await run_in_threadpool(execute)
+            except OperationalError as error:
+                if getattr(error.orig, "sqlstate", None) not in RETRYABLE_SQLSTATES:
+                    raise
+                if attempt == 3:
+                    raise SocialError("concurrent_update_retry", 409) from None
+                await asyncio.sleep(0.02 * (attempt + 1))
+
+    @app.post("/internal/account-deletion")
+    async def website_deletion(data: WebsiteDeletion, request: Request):
+        # Typed outcomes, checked in this order with no database work before the
+        # signature is valid. Only a stale recent sign-in asks the person to sign in
+        # again; the others are website/service configuration or protocol faults.
+        secret = os.environ.get("BICINO_SOCIAL_DELETION_SECRET", "")
+        signature = request.headers.get("X-Bicino-Deletion-Signature", "")
+        raw = await request.body()
+        if len(secret) < 32:
+            raise SocialError("deletion_bridge_unconfigured", 503)
+        if not hmac.compare_digest(signature, hmac.new(secret.encode(), raw, "sha256").hexdigest()):
+            raise SocialError("deletion_proof_invalid", 401)
+        if data.project != os.environ.get("BICINO_FIREBASE_PROJECT_ID"):
+            raise SocialError("deletion_project_mismatch", 403)
+        if abs(service.now()-data.issuedAt) > 60:
+            raise SocialError("deletion_proof_expired", 401)
+        if not -60 <= service.now()-data.authTime <= 300:
+            raise SocialError("reauthentication_required", 401)
+        # Only the website holds the secret, so verified proofs are bounded per
+        # account subject rather than per (shared, serverless) network address.
+        await run_in_threadpool(service.anonymous_rate, "website_deletion",
+                                digest(f"{data.project}:{data.uid}")[:32], ANONYMOUS_LIMITS["website_deletion"])
+        def perform(c):
+            account = c.execute(select(accounts).where(and_(accounts.c.uid == data.uid,
+                accounts.c.project == data.project))).mappings().first()
+            if account and account["state"] == "active":
+                service.begin_deletion(c, account["id"])
+            # A duplicate proof can only continue the same verified deletion.
+            return {"status": "deleting"}
+        return await run_in_threadpool(service.db.run, perform)
+
+    @app.get("/healthz")
+    def health():
+        service.db.check_schema()
+        return {"status": "ok"}
+
+    @app.get("/me")
+    def me(auth=Depends(authenticate)):
+        return read(lambda c: service.profile(c, auth[0], auth[0], True))
+
+    @app.get("/capabilities")
+    def capabilities(auth=Depends(authenticate)):
+        return app.state.features.document()
+
+    @app.put("/group-rides/{ride_id}/invite-preview")
+    async def upload_invite_preview(ride_id: str, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "invite_preview", 10)
+        previews = InvitePreviews(service)
+        await run_in_threadpool(read, lambda c: previews.owner(c, auth[0], ride_id))
+        raw = await request.body()
+        try:
+            prepared = await run_in_threadpool(previews.prepare, auth[0], ride_id, raw)
+            return await operation(request, auth, lambda c, a: previews.attach(c, a, ride_id, prepared))
+        except (ValueError, OSError):
+            raise SocialError("invalid_image") from None
+
+    def public_preview(request, preview_id):
+        anonymous_limit("ride_preview", request)
+        if not INSTALLATION_ID.fullmatch(preview_id):
+            raise SocialError("not_found", 404)
+        return InvitePreviews(service)
+
+    @app.get("/ride-previews/{preview_id}")
+    def invite_preview_metadata(preview_id: str, request: Request):
+        previews = public_preview(request, preview_id)
+        return read(lambda c: previews.metadata(c, preview_id))
+
+    @app.get("/ride-previews/{preview_id}/image")
+    def invite_preview_image(preview_id: str, request: Request):
+        previews = public_preview(request, preview_id)
+        _, receipt = read(lambda c: previews.locate(c, preview_id))
+        data = service.media.get(receipt["key"])
+        if len(data) > 512000 or hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise SocialError("media_unavailable", 503)
+        # End/deletion/replacement during slow storage I/O still revokes access.
+        read(lambda c: previews.locate(c, preview_id))
+        return Response(data, media_type="image/png")
+
+    @app.patch("/me")
+    async def edit_me(data: ProfileEdit, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.edit_profile(c, a, data))
+
+    @app.put("/me/avatar")
+    async def avatar(request: Request, version: int = Query(ge=1), auth=Depends(authenticate)):
+        await limit(auth[0], "avatar", 10)
+        raw = await request.body()
+        try:
+            def preflight(c):
+                service.active(c, auth[0])
+            await run_in_threadpool(service.db.run, preflight)
+            prepared = await run_in_threadpool(service.prepare_avatar, auth[0], raw)
+            # Object writes occur before the transaction/replay retry boundary.
+            # Unreferenced prepared uploads are swept after the orphan grace period.
+            return await operation(request, auth, lambda c, a: service.set_avatar(c, a, prepared, version))
+        except (ValueError, OSError):
+            raise SocialError("invalid_image") from None
+
+    @app.delete("/me/avatar")
+    async def remove_avatar(request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, service.remove_avatar)
+
+    @app.get("/media/{asset_id}/{variant}")
+    def get_media(asset_id: str, variant: str, auth=Depends(authenticate)):
+        def locate(c):
+            asset = row(c, media, media.c.id == asset_id)
+            service.pair_allowed(c, auth[0], asset["owner"])
+            if service.active(c, asset["owner"])["avatar"] != asset_id or variant not in asset["variants"]:
+                raise SocialError("not_found", 404)
+            return asset
+        asset = read(locate)
+        receipt = asset["variants"][variant]
+        data = service.media.get(receipt["key"])
+        if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise SocialError("media_unavailable", 503)
+        # Revalidate after I/O so revocation during a slow read still wins.
+        def revalidate(c):
+            service.pair_allowed(c, auth[0], asset["owner"])
+            if service.active(c, asset["owner"])["avatar"] != asset_id:
+                raise SocialError("not_found", 404)
+        read(revalidate)
+        return Response(data, media_type="image/png")
+
+    @app.get("/profiles/by-username/{username}")
+    def lookup(username: str, auth=Depends(authenticate)):
+        service.rate(auth[0], "lookup", 60)
+        def find(c):
+            target = row(c, accounts, accounts.c.username == username.lower())["id"]
+            return service.profile(c, auth[0], target)
+        return read(find)
+
+    @app.get("/profiles/{profile_id}")
+    def profile(profile_id: str, auth=Depends(authenticate)):
+        return read(lambda c: service.profile(c, auth[0], profile_id))
+
+    @app.get("/friends")
+    def friends(after: str = "", auth=Depends(authenticate)):
+        actor = auth[0]
+        def perform(c):
+            records = list(c.execute(select(friendships).where(and_(
+                or_(friendships.c.a == actor, friendships.c.b == actor),
+                friendships.c.status == "accepted", friendships.c.id > after))
+                .order_by(friendships.c.id).limit(50)).mappings())
+            result = []
+            for item in records:
+                other = item["b"] if item["a"] == actor else item["a"]
+                try:
+                    result.append(service.profile(c, actor, other))
+                except SocialError:
+                    continue
+            return {"items": result, "cursor": records[-1]["id"] if len(records) == 50 else None}
+        return read(perform)
+
+    @app.get("/friend-sharing")
+    def friend_sharing(auth=Depends(authenticate)):
+        return read(lambda c: service.friend_snapshot(c, auth[0]))
+
+    @app.delete("/friend-sharing")
+    async def stop_friend_sharing(request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.stop_friend_sharing(c, a))
+
+    @app.get("/friend-sharing/{profile_id}/consent")
+    def friend_consent_status(profile_id: str, auth=Depends(authenticate)):
+        return read(lambda c: service.friend_consent_read(c, auth[0], profile_id))
+
+    @app.post("/friend-sharing/{profile_id}/consent")
+    async def friend_consent(profile_id: str, data: Consent, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.friend_consent(c, a, profile_id, data))
+
+    @app.post("/friend-sharing/state")
+    def friend_publish(data: FriendLiveState, auth=Depends(authenticate)):
+        return service.db.run(lambda c: service.publish_friends(c, auth[0], data))
+
+    @app.get("/friend-requests")
+    def requests(after: str = "", auth=Depends(authenticate)):
+        actor = auth[0]
+        def perform(c):
+            values = list(c.execute(select(friendships).where(and_(or_(friendships.c.a == actor,
+                friendships.c.b == actor), friendships.c.status == "pending", friendships.c.id > after,
+                friendships.c.updated > service.now()-30*86400)).order_by(friendships.c.id).limit(50)).mappings())
+            return {"items": [dict(v) for v in values], "cursor": values[-1]["id"] if len(values) == 50 else None}
+        return read(perform)
+
+    @app.post("/friend-requests")
+    async def send_request(data: Target, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "friend_requests", 20)
+        return await operation(request, auth, lambda c, a: service.friend_request(c, a, data.profileID))
+
+    @app.delete("/friend-requests/{request_id}")
+    async def cancel_request(request_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            item = row(c, friendships, friendships.c.id == request_id)
+            service.db.lock(c, item["a"], item["b"])
+            if item["sender"] != actor or item["status"] != "pending":
+                raise SocialError("not_found", 404)
+            c.execute(update(friendships).where(friendships.c.id == request_id).values(status="cancelled", updated=service.now()))
+            return {"status": "cancelled"}
+        return await operation(request, auth, perform)
+
+    @app.get("/blocks")
+    def blocked_profiles(auth=Depends(authenticate)):
+        def perform(c):
+            values = c.execute(select(accounts.c.id, accounts.c.name).join(blocks, blocks.c.target == accounts.c.id)
+                .where(blocks.c.owner == auth[0]).order_by(accounts.c.name)).mappings()
+            return {"items": [{"id": v["id"], "displayName": v["name"]} for v in values]}
+        return read(perform)
+
+    @app.post("/friend-requests/{request_id}/{action}")
+    async def respond(request_id: str, action: str, request: Request, auth=Depends(authenticate)):
+        if action not in {"accept", "decline"}:
+            raise SocialError("not_found", 404)
+        return await operation(request, auth, lambda c, a: service.friend_action(c, a, request_id,
+            "accepted" if action == "accept" else "declined"))
+
+    @app.delete("/friends/{profile_id}")
+    async def remove_friend(profile_id: str, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.remove_friend(c, a, profile_id))
+
+    @app.put("/blocks/{profile_id}")
+    async def block(profile_id: str, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.remove_friend(c, a, profile_id, True))
+
+    @app.delete("/blocks/{profile_id}")
+    async def unblock(profile_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            service.db.lock(c, actor, profile_id)
+            c.execute(delete(blocks).where(and_(blocks.c.owner == actor, blocks.c.target == profile_id)))
+            return {"status": "unrelated"}
+        return await operation(request, auth, perform)
+
+    @app.get("/routes")
+    @app.get("/activities")
+    def list_content(request: Request, owner: str | None = None, after: str = "", auth=Depends(authenticate)):
+        kind = "route" if request.url.path.endswith("/routes") else "activity"
+        def perform(c):
+            listed = owner or auth[0]
+            service.pair_allowed(c, auth[0], listed)
+            condition = and_(content.c.owner == listed, content.c.kind == kind, content.c.id > after)
+            if listed != auth[0]:
+                if not service.friends(c, auth[0], listed):
+                    raise SocialError("not_found", 404)
+                condition = and_(condition, content.c.visibility == "friends")
+            values = list(c.execute(select(content).where(condition).order_by(content.c.id).limit(20)).mappings())
+            return {"items": [dict(public_content(dict(v)), body={}) for v in values],
+                    "cursor": values[-1]["id"] if len(values) == 20 else None}
+        return read(perform)
+
+    @app.post("/routes")
+    async def upload_route(data: RouteUpload, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "publication", 30)
+        return await operation(request, auth, lambda c, a: public_content(service.upload_route(c, a, data)))
+
+    @app.post("/activities")
+    async def upload_activity(data: ActivityUpload, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "publication", 30)
+        return await operation(request, auth, lambda c, a: public_content(service.upload_activity(c, a, data)))
+
+    @app.get("/routes/{content_id}")
+    @app.get("/activities/{content_id}")
+    def read_content(content_id: str, auth=Depends(authenticate)):
+        def perform(c):
+            item = service.content_read(c, auth[0], content_id)
+            app.state.features.require_content(item["kind"])
+            service.expose_content(c, auth[0], item)
+            return public_content(item)
+        return read(perform)
+
+    @app.patch("/routes/{content_id}")
+    @app.patch("/activities/{content_id}")
+    async def edit_content(content_id: str, data: ContentEdit, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            app.state.features.require_content(service.content_read(c, actor, content_id)["kind"])
+            return public_content(service.edit_content(c, actor, content_id, data))
+        return await operation(request, auth, perform)
+
+    @app.delete("/routes/{content_id}")
+    @app.delete("/activities/{content_id}")
+    async def delete_content(content_id: str, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.delete_content(c, a, content_id))
+
+    @app.post("/share-links")
+    async def share(data: ShareInput, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            app.state.features.require_content(service.content_read(c, actor, data.contentID)["kind"])
+            return service.share(c, actor, data)
+        return await operation(request, auth, perform)
+
+    @app.delete("/share-links/{link_id}")
+    async def revoke_link(link_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            c.execute(delete(links).where(and_(links.c.owner == actor, links.c.id == link_id)))
+            return {"revoked": True}
+        return await operation(request, auth, perform)
+
+    @app.post("/shared/resolve")
+    def shared(data: Join, request: Request, authorization: str | None = Header(default=None)):
+        # Signed-in resolution is charged to the account; anonymous resolution to
+        # the client network. Either is charged before the link lookup.
+        if authorization:
+            actor = authenticate(authorization)[0]
+            service.rate(actor, "link_resolve", ACCOUNT_LINK_RESOLVE_LIMIT)
+        else:
+            actor = None
+            anonymous_limit("link_resolve", request)
+        def perform(c):
+            link = row(c, links, and_(links.c.digest == digest(data.code), links.c.expires > service.now()))
+            item = service.content_read(c, actor, link["content"], capability=True)
+            app.state.features.require_content(item["kind"])
+            service.expose_content(c, actor, item)
+            return public_content(item)
+        return read(perform)
+
+    @app.post("/group-rides")
+    async def create_ride(data: RideCreate, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "create_ride", 10)
+        return await operation(request, auth, lambda c, a: service.create_ride(c, a, data))
+
+    @app.get("/group-rides")
+    def my_rides(auth=Depends(authenticate)):
+        def perform(c):
+            ids = c.scalars(select(members.c.ride).join(rides, members.c.ride == rides.c.id).where(and_(
+                members.c.account == auth[0], members.c.status == "accepted", rides.c.expires > service.now(),
+                rides.c.status.in_(["planned", "active"]))).limit(25)).all()
+            result = []
+            for ride in ids:
+                try:
+                    result.append(dict(service.ride_read(c, auth[0], ride), route={}, members=[], riders=[]))
+                except SocialError:
+                    continue
+            return {"items": result}
+        return read(perform)
+
+    @app.post("/group-rides/join")
+    async def join(data: Join, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "join", 20)
+        def perform(c, actor):
+            ride_id = row(c, rides, rides.c.code == digest(data.code))["id"]
+            return service.join(c, actor, ride_id)
+        return await operation(request, auth, perform)
+
+    @app.post("/group-rides/preview")
+    def preview_ride(data: Join, auth=Depends(authenticate)):
+        service.rate(auth[0], "join", 20)
+        def perform(c):
+            ride = row(c, rides, and_(rides.c.code == digest(data.code), rides.c.expires > service.now(),
+                                      rides.c.status.in_(["planned", "active"])))
+            service.pair_allowed(c, auth[0], ride["owner"])
+            prior = c.execute(select(members.c.status).where(and_(members.c.ride == ride["id"], members.c.account == auth[0]))).scalar()
+            if prior == "removed":
+                raise SocialError("new_invitation_required", 403)
+            service.expose(c, auth[0], ride["fingerprint"], ride["owner"])
+            return {"title": ride["title"], "route": ride["route"], "expiresAt": ride["expires"]}
+        return read(perform)
+
+    @app.delete("/group-rides/{ride_id}/members/{member_id}")
+    async def remove_member(ride_id: str, member_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            service.db.lock(c, actor, member_id)
+            ride, _ = service.require_member(c, actor, ride_id)
+            if ride["owner"] != actor or actor == member_id:
+                raise SocialError("owner_required", 403)
+            c.execute(update(members).where(and_(members.c.ride == ride_id, members.c.account == member_id))
+                      .values(status="removed", sharing=False, stats=False, live=None))
+            c.execute(update(invites).where(and_(invites.c.ride == ride_id, invites.c.recipient == member_id))
+                      .values(status="revoked"))
+            return {"status": "removed"}
+        return await operation(request, auth, perform)
+
+    @app.get("/group-rides/{ride_id}")
+    def get_ride(ride_id: str, auth=Depends(authenticate)):
+        return read(lambda c: service.ride_read(c, auth[0], ride_id))
+
+    @app.get("/group-rides/{ride_id}/consent")
+    def consent_status(ride_id: str, auth=Depends(authenticate)):
+        def perform(c):
+            _, member = service.require_member(c, auth[0], ride_id)
+            return {"epoch": member["epoch"]}
+        return read(perform)
+
+    @app.post("/group-rides/{ride_id}/consent")
+    async def consent(ride_id: str, data: Consent, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.consent(c, a, ride_id, data))
+
+    @app.post("/group-rides/{ride_id}/state")
+    def state(ride_id: str, data: LiveState, auth=Depends(authenticate)):
+        return service.db.run(lambda c: service.publish(c, auth[0], ride_id, data))
+
+    @app.post("/group-rides/{ride_id}/leave")
+    async def leave(ride_id: str, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.leave(c, a, ride_id))
+
+    @app.post("/group-rides/{ride_id}/end")
+    async def end(ride_id: str, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.leave(c, a, ride_id, True))
+
+    @app.post("/group-rides/{ride_id}/rotate-code")
+    async def rotate(ride_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            service.db.lock(c, actor)
+            ride, _ = service.require_member(c, actor, ride_id)
+            if ride["owner"] != actor:
+                raise SocialError("owner_required", 403)
+            code = __import__("secrets").token_urlsafe(24)
+            c.execute(update(rides).where(rides.c.id == ride_id).values(code=digest(code)))
+            return {"joinCode": code}
+        return await operation(request, auth, perform)
+
+    @app.get("/ride-invites")
+    def invitations(sent: bool = False, auth=Depends(authenticate)):
+        def perform(c):
+            audience = invites.c.sender if sent else invites.c.recipient
+            values = c.execute(select(invites).where(and_(audience == auth[0],
+                invites.c.status == "pending", invites.c.expires > service.now())).limit(50)).mappings().all()
+            items = []
+            for v in values:
+                try:
+                    service.pair_allowed(c, auth[0], v["sender"])
+                    service.pair_allowed(c, auth[0], v["recipient"])
+                except SocialError:
+                    continue
+                ride = row(c, rides, rides.c.id == v["ride"])
+                items.append(dict(v, title=ride["title"], startsAt=ride["starts"]))
+            return {"items": items}
+        return read(perform)
+
+    @app.delete("/ride-invites/{invite_id}")
+    async def cancel_invitation(invite_id: str, request: Request, auth=Depends(authenticate)):
+        def perform(c, actor):
+            invitation = row(c, invites, and_(invites.c.id == invite_id, invites.c.sender == actor))
+            service.db.lock(c, actor, invitation["recipient"])
+            c.execute(update(invites).where(invites.c.id == invite_id).values(status="revoked"))
+            return {"revoked": True}
+        return await operation(request, auth, perform)
+
+    @app.get("/ride-invites/{invite_id}")
+    def invitation_preview(invite_id: str, auth=Depends(authenticate)):
+        def perform(c):
+            invitation = row(c, invites, and_(invites.c.id == invite_id, invites.c.recipient == auth[0],
+                invites.c.status == "pending", invites.c.expires > service.now()))
+            service.pair_allowed(c, auth[0], invitation["sender"])
+            ride = row(c, rides, and_(rides.c.id == invitation["ride"], rides.c.status.in_(["planned", "active"])))
+            service.expose(c, auth[0], ride["fingerprint"], ride["owner"])
+            return dict(invitation, title=ride["title"], route=ride["route"], startsAt=ride["starts"])
+        return read(perform)
+
+    @app.post("/ride-invites")
+    async def invite(data: RideInvitation, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "invites", 30)
+        return await operation(request, auth, lambda c, a: service.invite(c, a, data))
+
+    @app.post("/ride-invites/{invite_id}/{action}")
+    async def answer(invite_id: str, action: str, request: Request, auth=Depends(authenticate)):
+        if action not in {"accept", "decline"}:
+            raise SocialError("not_found", 404)
+        def perform(c, actor):
+            invite = row(c, invites, and_(invites.c.id == invite_id, invites.c.recipient == actor))
+            service.db.lock(c, actor, invite["sender"])
+            invite = row(c, invites, invites.c.id == invite_id)
+            service.pair_allowed(c, actor, invite["sender"])
+            if invite["status"] != "pending" or invite["expires"] <= service.now():
+                raise SocialError("invite_expired", 410)
+            result = service.join(c, actor, invite["ride"], invited=True) if action == "accept" else {"status": "declined"}
+            c.execute(update(invites).where(invites.c.id == invite_id).values(status="accepted" if action == "accept" else "declined"))
+            return result
+        return await operation(request, auth, perform)
+
+    @app.post("/group-rides/{ride_id}/messages")
+    async def send_message(ride_id: str, data: QuickMessage, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "messages", 10, 60)
+        def perform(c, actor):
+            service.require_member(c, actor, ride_id)
+            item = {"id": identifier(), "ride": ride_id, "sender": actor,
+                    "status": data.status, "created": service.now()}
+            c.execute(messages.insert().values(**item))
+            return item
+        return await operation(request, auth, perform)
+
+    @app.get("/group-rides/{ride_id}/messages")
+    def get_messages(ride_id: str, auth=Depends(authenticate)):
+        def perform(c):
+            service.require_member(c, auth[0], ride_id)
+            values = c.execute(select(messages).where(messages.c.ride == ride_id)
+                               .order_by(messages.c.created.desc()).limit(50)).mappings().all()
+            return {"items": [dict(v) for v in values if not service.blocked(c, auth[0], v["sender"])]}
+        return read(perform)
+
+    def installation(identifier_value):
+        if not INSTALLATION_ID.fullmatch(identifier_value):
+            raise SocialError("invalid_binding")
+        return identifier_value.lower()
+
+    @app.put("/notification-devices/{installation_id}")
+    async def bind(installation_id: str, data: DeviceBinding, request: Request, auth=Depends(authenticate)):
+        if data.environment != os.environ.get("BICINO_SOCIAL_ENVIRONMENT", "development"):
+            raise SocialError("notification_environment_mismatch", 400)
+        binding = installation(installation_id)
+        return await operation(request, auth, lambda c, a: service.bind_device(c, a, binding, data))
+
+    @app.post("/notification-devices/{installation_id}/release")
+    def release(installation_id: str, data: DeviceRelease, request: Request):
+        # No bearer token: after forced sign-out or deletion none may exist. The
+        # installation secret and the expected owner authorize this idempotent cleanup.
+        binding = installation(installation_id)
+        anonymous_limit("push_release", request)
+        return service.db.run(lambda c: service.release_device(c, binding, data))
+
+    @app.delete("/notification-devices/{installation_id}")
+    async def unbind(installation_id: str, request: Request, auth=Depends(authenticate)):
+        binding = installation(installation_id)
+        def perform(c, actor):
+            c.execute(delete(devices).where(and_(devices.c.owner == actor, devices.c.id == binding)))
+            return {"deleted": True}
+        return await operation(request, auth, perform)
+
+    @app.post("/me/deletion")
+    async def deletion(data: Deletion, request: Request, auth=Depends(authenticate)):
+        actor, principal = auth
+        if data.expectedProfileID != actor:
+            raise SocialError("account_changed", 409)
+        try:
+            principal.require_recent(service.now())
+        except ValueError:
+            raise SocialError("reauthentication_required", 401) from None
+        await run_in_threadpool(identity.revoke_apple, principal.uid, data.appleAuthorizationCode)
+        return await operation(request, auth, lambda c, a: service.begin_deletion(c, a, data.receiptDigest))
+
+    @app.post("/deletion-receipts/resolve")
+    def deletion_receipt(data: DeletionReceipt, request: Request):
+        # Unauthenticated by design: after cleanup no identity remains, and recovery
+        # must not recreate one by signing in. Only the receipt secret, whose digest
+        # was committed with the accepted deletion, proves the earlier request.
+        anonymous_limit("deletion_receipt", request)
+        return read(lambda c: service.deletion_receipt(c, data.receipt))
+
+    @app.websocket("/group-rides/{ride_id}/live")
+    async def live(websocket: WebSocket, ride_id: str):
+        # Native URLSession sends Authorization at the handshake. No URL tokens.
+        header = websocket.headers.get("authorization", "")
+        await websocket.accept()
+        try:
+            app.state.features.require("groups")
+            auth = await run_in_threadpool(authenticate, header)
+            actor = auth[0]
+            await limit(actor, "sockets", 20, 60)
+            started = time.monotonic()
+            last_identity_check = started
+            # Database-backed snapshots make revocation consistent across API
+            # processes. A two-second bounded read interval avoids process-local
+            # broadcast authority and reconnect resumes from the latest state.
+            while time.monotonic()-started < 300:
+                app.state.features.require("groups")
+                loop_start = time.monotonic()
+                if loop_start-last_identity_check >= 30:
+                    try:
+                        await run_in_threadpool(identity.verify, header[7:])
+                        last_identity_check = loop_start
+                    except IdentityUnavailable:
+                        # SQL membership, block and account checks still run for every
+                        # snapshot. Only a prolonged provider outage ends the socket.
+                        if loop_start-last_identity_check >= 30+IDENTITY_OUTAGE_GRACE_SECONDS:
+                            raise SocialError("identity_unavailable", 503) from None
+                    except Exception:
+                        raise SocialError("authentication_required", 401) from None
+                def snapshot():
+                    def perform(c):
+                        value = service.ride_read(c, actor, ride_id)
+                        value.pop("route", None)
+                        value["capabilities"] = app.state.features.document()
+                        return value
+                    return service.db.run(perform)
+                try:
+                    value = await run_in_threadpool(snapshot)
+                except OperationalError as error:
+                    if getattr(error.orig, "sqlstate", None) not in RETRYABLE_SQLSTATES:
+                        raise
+                    await asyncio.sleep(0.2)
+                    continue
+                await asyncio.wait_for(websocket.send_json(value), timeout=10)
+                try:
+                    message = await asyncio.wait_for(websocket.receive_text(), timeout=2)
+                    if message != "ping":
+                        raise SocialError("invalid_socket_message")
+                except asyncio.TimeoutError:
+                    pass
+                await asyncio.sleep(max(0, 2-(time.monotonic()-loop_start)))
+            await websocket.close(code=4001, reason="reauthenticate")
+        except (SocialError, WebSocketDisconnect, asyncio.TimeoutError) as error:
+            transient = isinstance(error, SocialError) and error.code in TRANSIENT_CODES
+            try:
+                # 1013 asks the client to retry later; 4003 means the session ended.
+                await websocket.close(code=1013 if transient else 4003,
+                                      reason="try_again_later" if transient else "session_unavailable")
+            except RuntimeError:
+                pass
+    return app

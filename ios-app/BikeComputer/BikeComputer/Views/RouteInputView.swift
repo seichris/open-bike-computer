@@ -25,6 +25,10 @@ class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleter
     }
     
     func search(query: String) {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            completer.cancel()
+            suggestions = []
+        }
         completer.queryFragment = query
     }
     
@@ -34,7 +38,7 @@ class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleter
     }
     
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
-        suggestions = completer.results
+        suggestions = completer.queryFragment.isEmpty ? [] : completer.results
     }
     
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
@@ -59,7 +63,10 @@ struct RouteSearchPanel: View {
     let currentAddress: String
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
-    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
+    @ObservedObject var onlinePlaces: OnlinePOISearchSession
+    var nearbySearchRegion: () -> MKCoordinateRegion?
+    var initialDestination: SavedDestination? = nil
+    var onStartNavigation: (RouteEndpoint, SavedDestination, MKDirectionsTransportType) -> Void
     var onSaveToFavorites:
         ((SavedDestination, RouteEndpoint, MKDirectionsTransportType) -> Void)? = nil
 
@@ -87,20 +94,25 @@ struct RouteSearchPanel: View {
         .frame(maxHeight: isExpanded ? maxExpandedHeight : nil, alignment: .bottom)
         .onAppear {
             updateSearchRegions()
+            if isExpanded, let initialDestination { selectInitialDestination(initialDestination) }
         }
         .onChange(of: currentLocation) { _ in
             updateSearchRegions()
         }
         .onChange(of: isExpanded) { expanded in
             if expanded {
-                DispatchQueue.main.async {
-                    focusedField = .destination
+                if let initialDestination {
+                    selectInitialDestination(initialDestination)
                 }
             } else {
                 focusedField = nil
                 resetTransientState()
             }
         }
+        .onChange(of: initialDestination) { destination in
+            if isExpanded, let destination { selectInitialDestination(destination) }
+        }
+        .onDisappear { onlinePlaces.clear() }
     }
 
     private var collapsedSearchButton: some View {
@@ -128,6 +140,13 @@ struct RouteSearchPanel: View {
         VStack(spacing: 12) {
             destinationSearchField
 
+            if !hasSelectedDestination && !isEditingSource && destinationAddress.isEmpty {
+                OnlinePOICategoryRow(session: onlinePlaces) { category in
+                    focusedField = nil
+                    onlinePlaces.toggle(category, region: nearbySearchRegion())
+                }
+            }
+
             if hasSelectedDestination {
                 sourcePicker
                 transportControls
@@ -153,7 +172,7 @@ struct RouteSearchPanel: View {
                 .textContentType(.fullStreetAddress)
                 .focused($focusedField, equals: .destination)
                 .onTapGesture {
-                    expandForDestinationSearch()
+                    focusedField = .destination
                 }
                 .onChange(of: destinationAddress) { newValue in
                     if isSelectingFromSuggestion {
@@ -162,6 +181,7 @@ struct RouteSearchPanel: View {
                     }
 
                     destinationCompleter.search(query: newValue)
+                    if !newValue.isEmpty { onlinePlaces.clear() }
                     selectedDestination = nil
                     if hasSelectedDestination {
                         hasSelectedDestination = false
@@ -176,6 +196,15 @@ struct RouteSearchPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear destination")
             }
+
+            Button {
+                isExpanded = false
+            } label: {
+                Image(systemName: "chevron.down").foregroundStyle(.secondary)
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close destination search")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -289,13 +318,23 @@ struct RouteSearchPanel: View {
             } else {
                 Spacer(minLength: 0)
             }
-        } else if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
+        } else if onlinePlaces.isActive {
+            OnlinePOIResultsView(session: onlinePlaces) {
+                onlinePlaces.search(region: nearbySearchRegion())
+            }
+        } else if !hasSelectedDestination && !destinationAddress.isEmpty && !destinationCompleter.suggestions.isEmpty {
             suggestionsScroll(for: destinationCompleter.suggestions) { suggestion in
                 let fullAddress = formattedAddress(for: suggestion)
                 selectDestination(SavedDestination(name: fullAddress))
             }
         } else if shouldShowSavedDestinations {
             savedDestinationsScroll
+        } else if !hasSelectedDestination && destinationAddress.isEmpty {
+            Text("Choose nearby categories, or type a destination.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
         } else if !hasSelectedDestination {
             Spacer(minLength: 0)
         }
@@ -307,17 +346,13 @@ struct RouteSearchPanel: View {
                 if !destinationStore.favoriteDestinations.isEmpty {
                     savedDestinationSectionHeader("Favorites")
 
-                    ForEach(destinationStore.favoriteDestinations) { destination in
-                        savedDestinationButton(destination, icon: "star.fill")
-                    }
+                    savedDestinationRows(destinationStore.favoriteDestinations, icon: "star.fill")
                 }
 
                 if !destinationStore.nonFavoriteRecentDestinations.isEmpty {
                     savedDestinationSectionHeader("Recent Searches")
 
-                    ForEach(destinationStore.nonFavoriteRecentDestinations) { destination in
-                        savedDestinationButton(destination, icon: "clock.arrow.circlepath")
-                    }
+                    savedDestinationRows(destinationStore.nonFavoriteRecentDestinations, icon: "clock.arrow.circlepath")
                 }
             }
         }
@@ -333,15 +368,21 @@ struct RouteSearchPanel: View {
             .padding(.bottom, 6)
     }
 
-    @ViewBuilder
+    private func savedDestinationRows(_ destinations: [SavedDestination], icon: String) -> some View {
+        ForEach(destinations) { destination in
+            savedDestinationButton(destination, icon: icon)
+            if destination.id != destinations.last?.id {
+                Divider()
+            }
+        }
+    }
+
     private func savedDestinationButton(_ destination: SavedDestination, icon: String) -> some View {
         Button(action: { selectDestination(destination) }) {
             SavedDestinationRow(destination: destination, icon: icon)
                 .padding(.vertical, 12)
         }
         .buttonStyle(.plain)
-
-        Divider()
     }
 
     private var favoriteButton: some View {
@@ -371,7 +412,7 @@ struct RouteSearchPanel: View {
             )
             guard let destination = activeDestination else { return }
             destinationStore.addRecent(destination)
-            onStartNavigation(sourceEndpoint, destination.routeEndpoint, selectedTransportType)
+            onStartNavigation(sourceEndpoint, destination, selectedTransportType)
         }) {
             Text("Go")
                 .font(.headline)
@@ -432,7 +473,7 @@ struct RouteSearchPanel: View {
 
     private func expandForDestinationSearch() {
         isExpanded = true
-        focusedField = .destination
+        focusedField = nil
     }
 
     private func clearDestination() {
@@ -460,6 +501,7 @@ struct RouteSearchPanel: View {
     }
 
     private func resetTransientState() {
+        onlinePlaces.clear()
         isEditingSource = false
         hasSelectedSource = false
         hasSelectedDestination = false
@@ -485,12 +527,19 @@ struct RouteSearchPanel: View {
     }
 
     private func selectDestination(_ destination: SavedDestination) {
-        isSelectingFromSuggestion = true
+        onlinePlaces.clear()
+        isSelectingFromSuggestion = destinationAddress != destination.name
         selectedDestination = destination
         destinationAddress = destination.name
         hasSelectedDestination = true
         focusedField = nil
         destinationStore.addRecent(destination)
+    }
+
+    private func selectInitialDestination(_ destination: SavedDestination) {
+        focusedField = nil
+        guard !hasSelectedDestination || selectedDestination != destination else { return }
+        selectDestination(destination)
     }
 
     private func toggleSelectedDestinationFavorite() {

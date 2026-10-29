@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BicinoFirebaseAppID</key>
+	<string>$(BICINO_FIREBASE_APP_ID)</string>
+	<key>BicinoFirebaseSenderID</key>
+	<string>$(BICINO_FIREBASE_SENDER_ID)</string>
+	<key>BicinoFirebaseAPIKey</key>
+	<string>$(BICINO_FIREBASE_API_KEY)</string>
+	<key>BicinoFirebaseProjectID</key>
+	<string>$(BICINO_FIREBASE_PROJECT_ID)</string>
+	<key>BicinoSocialKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>BicinoGoogleReversedClientID</key>
+	<string>$(BICINO_GOOGLE_REVERSED_CLIENT_ID)</string>
+	<key>BicinoGoogleClientID</key>
+	<string>$(BICINO_GOOGLE_CLIENT_ID)</string>
+
+	<key>BicinoMapServiceHost</key>
+	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoURLScheme</key>
+	<string>$(BICINO_URL_SCHEME)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict><key>CFBundleURLSchemes</key><array><string>$(BICINO_GOOGLE_REVERSED_CLIENT_ID)</string></array></dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.openbikecomputer.strava-oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(BICINO_URL_SCHEME)</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>strava</string>
+	</array>
+	<key>BicinoMapCatalogHost</key>
+	<string>$(BICINO_MAP_CATALOG_HOST)</string>
+	<key>BicinoMapR2DownloadHost</key>
+	<string>$(BICINO_MAP_R2_DOWNLOAD_HOST)</string>
+	<key>BicinoMapDevelopmentSigningKeyID</key>
+	<string>$(BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID)</string>
+	<key>BicinoMapDevelopmentSigningPublicKeyX963Hex</key>
+	<string>$(BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX)</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(BICINO_APP_DISPLAY_NAME)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>location</string>
+		<string>bluetooth-central</string>
+	</array>
+
+	<!-- Location Permissions -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Bicino uses background location for navigation, iPhone cycling workout routes, and optional ride detection while the app is not visible.</string>
+
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Bicino uses your location for navigation, iPhone cycling workout routes and distance, and optional ride detection.</string>
+
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Bicino uses background location to continue navigation, iPhone workout routes, and optional ride detection when the app is not visible.</string>
+
+	<!-- Bluetooth Permission -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Bicino uses Bluetooth to connect to your ESP32 bike computer display.</string>
+
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Bicino uses Bluetooth to communicate with your bike computer display.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Bicino connects to your bike computer over local Wi-Fi for device transfers and diagnostics.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Bicino reads live and completed cycling workout metrics from your selected recorder: iPhone or Apple Watch. Heart rate on iPhone requires a compatible external monitor.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Bicino saves cycling workouts, cycling distance, and permitted workout routes to HealthKit from your selected recorder: iPhone or Apple Watch.</string>
+
+	<!-- Location Accuracy -->
+	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+	<dict>
+		<key>Navigation</key>
+			<string>Bicino uses precise location for accurate navigation and ride detection.</string>
+	</dict>
+
+	<!-- Supported Interface Orientations -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- App Transport Security (allow local development) -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- Launch Screen -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIImageName</key>
+		<string>LaunchImage</string>
+	</dict>
+</dict>
+</plist>

@@ -143,6 +143,11 @@ class MapStreamRolloutPolicy:
     report_sha256: str | None = None
     requirements_sha256: str | None = None
     approved_signing_keys: frozenset[tuple[str, str]] = frozenset()
+    approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
+    # Every hardware-approved producer whose signer is still trusted. Durable
+    # maps from an earlier approval stay deliverable after a new worker is
+    # promoted; removing its approval record is the revocation path.
+    approved_producers: frozenset[tuple[str, str, str, str]] = frozenset()
 
     @classmethod
     def from_environment(
@@ -193,6 +198,8 @@ class MapStreamRolloutPolicy:
         ).strip()
         approval: MapStreamPromotionApproval | None = None
         approved_keys: frozenset[tuple[str, str]] = frozenset()
+        approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
+        approved_producers: frozenset[tuple[str, str, str, str]] = frozenset()
         if mode == MapStreamRolloutMode.ALLOWLIST and not allowlist_values:
             raise ValueError("allowlist rollout mode requires at least one installation ID")
         if mode == MapStreamRolloutMode.PERCENTAGE:
@@ -234,6 +241,33 @@ class MapStreamRolloutPolicy:
                     "map stream rollout approval uses signing material absent from production trust"
                 )
             approved_keys = approval.approved_signing_keys
+            # Retain the measured test-client identities for rollout audit only.
+            # These do not bind saved artifacts or gate later app versions.
+            # The selected hardware, producer and trust approval remains exact.
+            compatibility_fields = (
+                "candidate_git_sha", "producer_build_sha256", "worker_image_digest",
+                "firmware_version", "firmware_build", "firmware_git_sha",
+                "requirements_sha256", "approved_signing_keys",
+            )
+            approved_ios_identities = frozenset(
+                (item.ios_build, item.ios_git_sha, item.ios_build_sha256)
+                for item in (approved_promotions_by_id or {}).values()
+                if all(
+                    getattr(item, name) == getattr(approval, name)
+                    for name in compatibility_fields
+                )
+            )
+            approved_producers = frozenset(
+                (
+                    item.producer_build_sha256,
+                    item.worker_image_digest,
+                    key_id,
+                    key_sha256,
+                )
+                for item in (approved_promotions_by_id or {}).values()
+                for key_id, key_sha256 in item.approved_signing_keys
+                if (key_id, key_sha256) in current_keys
+            )
         elif promotion_id:
             raise ValueError(
                 "rollout promotion ID is only valid in percentage or all mode"
@@ -257,6 +291,8 @@ class MapStreamRolloutPolicy:
             report_sha256=approval.report_sha256 if approval else None,
             requirements_sha256=approval.requirements_sha256 if approval else None,
             approved_signing_keys=approved_keys if promotion_id else frozenset(),
+            approved_ios_identities=approved_ios_identities,
+            approved_producers=approved_producers,
         )
 
     def includes(self, installation_id: str | None) -> bool:
@@ -287,6 +323,8 @@ class MapStreamRolloutPolicy:
         client_app_build: str | None,
         client_app_git_sha: str | None,
         client_app_build_sha256: str | None,
+        *,
+        compatibility_contract: int | None = None,
     ) -> bool:
         if not self.includes(installation_id):
             return False
@@ -297,61 +335,71 @@ class MapStreamRolloutPolicy:
         )
         if artifact_key is None or artifact_key not in client_trust_capabilities:
             return False
-        if (
-            client_app_build is None
-            or client_app_git_sha is None
-            or client_app_build_sha256 is None
-        ):
-            return False
+        # Requester versions remain request audit context. Map reuse depends on
+        # the signed reader contract, not the build that requested the download.
+        del client_app_build, client_app_git_sha, client_app_build_sha256
         if self.mode == MapStreamRolloutMode.ALLOWLIST:
             return True
+        if compatibility_contract is not None:
+            # A durable map stays available while any recorded approval still
+            # covers its producer and trusted signer, not only the newest one.
+            return (
+                producer_build_sha256,
+                producer_image_digest,
+                *artifact_key,
+            ) in self.approved_producers
+        # Maps outside the contract keep the single-approval behavior.
         return bool(
             artifact_key in self.approved_signing_keys
             and producer_build_sha256 == self.producer_build_sha256
             and producer_image_digest == self.worker_image_digest
-            and client_app_build == self.required_ios_build
-            and client_app_git_sha == self.required_ios_git_sha
-            and client_app_build_sha256 == self.required_ios_build_sha256
         )
 
-    def artifact_identity_requirements(
+    def artifact_delivery_requirements(
         self,
-        client_app_build: str | None,
-        client_app_git_sha: str | None,
-        client_app_build_sha256: str | None,
+        client_app_build: str | None = None,
+        client_app_git_sha: str | None = None,
+        client_app_build_sha256: str | None = None,
+        *,
+        reader_contract: str | None = "1",
+        compatibility_contract: int | None = None,
     ) -> dict[str, str | int]:
-        if self.mode == MapStreamRolloutMode.ALLOWLIST:
+        # New clients derive compatibility from the signed manifest. Keep the
+        # old response shape only for clients that predate that reader contract.
+        values: dict[str, str | int] = {}
+        # Durable maps never carry the approval's exact firmware identity:
+        # readers check the device's reported reader capabilities instead.
+        if (
+            self.mode != MapStreamRolloutMode.ALLOWLIST
+            and compatibility_contract is None
+        ):
             if (
-                client_app_build is None
-                or client_app_git_sha is None
-                or client_app_build_sha256 is None
+                self.required_firmware_version is None
+                or self.required_firmware_build is None
+                or self.required_firmware_git_sha is None
             ):
-                raise ValueError("allowlisted rollout is missing requester app identity")
-            return {
+                raise ValueError("promoted rollout is missing required device identity")
+            values.update({
+                "requiredFirmwareVersion": self.required_firmware_version,
+                "requiredFirmwareBuild": self.required_firmware_build,
+                "requiredFirmwareGitSha": self.required_firmware_git_sha,
+            })
+        if reader_contract is None and all((
+            client_app_build, client_app_git_sha, client_app_build_sha256,
+        )):
+            values.update({
                 "requiredIosBuild": client_app_build,
                 "requiredIosGitSha": client_app_git_sha,
                 "requiredIosBuildSha256": client_app_build_sha256,
-            }
-        if (
-            self.required_firmware_version is None
-            or self.required_firmware_build is None
-            or self.required_firmware_git_sha is None
-            or self.required_ios_build is None
-            or self.required_ios_git_sha is None
-            or self.required_ios_build_sha256 is None
-        ):
-            raise ValueError("promoted rollout is missing required client/device identity")
-        return {
-            "requiredIosBuild": self.required_ios_build,
-            "requiredIosGitSha": self.required_ios_git_sha,
-            "requiredIosBuildSha256": self.required_ios_build_sha256,
-            "requiredFirmwareVersion": self.required_firmware_version,
-            "requiredFirmwareBuild": self.required_firmware_build,
-            "requiredFirmwareGitSha": self.required_firmware_git_sha,
-        }
+            })
+        return values
 
     def public_summary(self) -> dict[str, int | str]:
         summary: dict[str, int | str] = {"mode": self.mode.value}
+        if len(self.approved_ios_identities) > 1:
+            summary["approvedIosBuilds"] = ",".join(
+                sorted({identity[0] for identity in self.approved_ios_identities})
+            )
         if self.mode == MapStreamRolloutMode.ALLOWLIST:
             summary["allowlistCount"] = len(self.allowlist)
         elif self.mode == MapStreamRolloutMode.PERCENTAGE:

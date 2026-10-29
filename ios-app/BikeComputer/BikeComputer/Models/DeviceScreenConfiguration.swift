@@ -15,6 +15,8 @@ extension RideBLEScreenTypeV1: Identifiable {
         case .mapPlusNavigation: return "Map + Navigation"
         case .batteryStatus: return "Battery Status"
         case .worldRadio: return "World Radio"
+        case .elevation: return "Elevation"
+        case .nearby: return "Nearby"
         }
     }
 }
@@ -125,8 +127,10 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     static let defaultVisibilityMask: UInt32 = 0x0fff
     static let contoursVisibilityMask: UInt32 = 1 << 13
+    static let poiVisibilityMask: UInt32 = 0x1f << 18
+    static let terrainVisibilityMask: UInt32 = 0x3c000
     static let allowedVisibilityMask: UInt32 =
-        defaultVisibilityMask | contoursVisibilityMask
+        defaultVisibilityMask | contoursVisibilityMask | terrainVisibilityMask | poiVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2
@@ -144,16 +148,36 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     var birdsEyePerspective: UInt8 = 1
     var buildings3DEnabled = true
 
-    static var mapDefault: DeviceScreenMapProfile { .init() }
+    static var mapDefault: DeviceScreenMapProfile {
+        var profile = DeviceScreenMapProfile()
+        profile.routeLineWidth = 10
+        profile.visibilityMask |= poiVisibilityMask
+        return profile
+    }
+
+    static var nearbyDefault: DeviceScreenMapProfile { .init() }
+
+    func supported(by capabilities: DeviceScreenConfigurationCapabilities) -> Self {
+        var profile = self
+        if !capabilities.supports(.nearby) {
+            profile.visibilityMask &= ~Self.poiVisibilityMask
+        }
+        return profile
+    }
 
     static var mapPlusNavigationDefault: DeviceScreenMapProfile {
         var profile = DeviceScreenMapProfile()
         profile.detailLevel = 0
-        profile.routeLineWidth = 15
+        profile.routeLineWidth = 10
+        profile.zoomLevel = 2
         profile.visibilityMask = 0x0339
         profile.labelDensity = 0
         profile.rotationMode = 1
         return profile
+    }
+
+    mutating func setTerrainVisibility(_ value: UInt32) {
+        visibilityMask = (visibilityMask & ~Self.terrainVisibilityMask) | (value & Self.terrainVisibilityMask)
     }
 
     func isValid(for type: ConfiguredDeviceScreenType) -> Bool {
@@ -170,7 +194,11 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
               labelOrientation <= 1 else { return false }
         switch type {
         case .map: return rotationMode <= 1
-        case .mapPlusNavigation: return birdsEyePerspective <= 4 && rotationMode <= 1
+        case .nearby:
+            return visibilityMask & Self.terrainVisibilityMask == 0 && rotationMode <= 1
+        case .mapPlusNavigation:
+            return visibilityMask & Self.terrainVisibilityMask == 0 &&
+                birdsEyePerspective <= 4 && rotationMode <= 1
         default: return false
         }
     }
@@ -205,7 +233,8 @@ struct DeviceScreenInstance: Identifiable, Equatable, Codable, Sendable {
             enabled: true,
             name: name ?? type.title,
             mapProfile: type == .map ? .mapDefault :
-                (type == .mapPlusNavigation ? .mapPlusNavigationDefault : nil),
+                (type == .nearby ? .nearbyDefault :
+                    (type == .mapPlusNavigation ? .mapPlusNavigationDefault : nil)),
             rideStatsLayout: type == .rideStats ? RideStatsLayout() : nil
         )
     }
@@ -291,9 +320,11 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 throw DeviceScreenConfigurationValidationError.unsupportedType
             }
             switch instance.type {
-            case .map, .mapPlusNavigation:
+            case .map, .mapPlusNavigation, .nearby:
                 guard let profile = instance.mapProfile,
                       profile.isValid(for: instance.type),
+                      (profile.visibilityMask & DeviceScreenMapProfile.poiVisibilityMask == 0 ||
+                       capabilities.supports(.nearby)),
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
                 }
@@ -309,7 +340,7 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 guard layout.slots.contains(where: { $0 != .empty }) else {
                     throw DeviceScreenConfigurationValidationError.emptyRideStatsLayout
                 }
-            case .navigation, .batteryStatus, .worldRadio:
+            case .navigation, .batteryStatus, .worldRadio, .elevation:
                 guard instance.mapProfile == nil,
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
@@ -512,7 +543,7 @@ enum DeviceScreenConfigurationCodec {
     private static func encodePayload(_ instance: DeviceScreenInstance) throws -> Data {
         var payload = Data([payloadVersion])
         switch instance.type {
-        case .map, .mapPlusNavigation:
+        case .map, .mapPlusNavigation, .nearby:
             guard let profile = instance.mapProfile else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
@@ -526,7 +557,7 @@ enum DeviceScreenConfigurationCodec {
                 profile.labelDensity, profile.labelLanguageMode,
                 profile.labelTextSize, profile.labelOrientation,
             ])
-            if instance.type == .map {
+            if instance.type == .map || instance.type == .nearby {
                 payload.append(profile.rotationMode)
             } else {
                 payload.append(profile.birdsEyeEnabled ? 1 : 0)
@@ -541,7 +572,7 @@ enum DeviceScreenConfigurationCodec {
             payload.append(1)
             payload.append(UInt8(layout.slots.count))
             payload.append(contentsOf: layout.slots.map(\.rawValue))
-        case .navigation, .batteryStatus, .worldRadio:
+        case .navigation, .batteryStatus, .worldRadio, .elevation:
             break
         }
         return payload
@@ -561,15 +592,17 @@ enum DeviceScreenConfigurationCodec {
         var mapProfile: DeviceScreenMapProfile?
         var rideStatsLayout: RideStatsLayout?
         switch type {
-        case .map, .mapPlusNavigation:
-            let expectedCount = type == .map ? 16 : 19
+        case .map, .mapPlusNavigation, .nearby:
+            let expectedCount = type == .map || type == .nearby ? 16 : 19
             let legacyNavigation = type == .mapPlusNavigation && payload.count == 18
             guard payload.count == expectedCount || legacyNavigation else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
             var profile = type == .map
                 ? DeviceScreenMapProfile.mapDefault
-                : DeviceScreenMapProfile.mapPlusNavigationDefault
+                : (type == .nearby
+                    ? DeviceScreenMapProfile.nearbyDefault
+                    : DeviceScreenMapProfile.mapPlusNavigationDefault)
             profile.minimumPolygonSize = try reader.byte()
             profile.detailLevel = try reader.byte()
             profile.routeLineWidth = try reader.byte()
@@ -581,7 +614,7 @@ enum DeviceScreenConfigurationCodec {
             profile.labelLanguageMode = try reader.byte()
             profile.labelTextSize = try reader.byte()
             profile.labelOrientation = try reader.byte()
-            if type == .map {
+            if type == .map || type == .nearby {
                 profile.rotationMode = try reader.byte()
             } else {
                 let birdsEye = try reader.byte()
@@ -611,7 +644,7 @@ enum DeviceScreenConfigurationCodec {
                 slots.append(widget)
             }
             rideStatsLayout = RideStatsLayout(slots: slots)
-        case .navigation, .batteryStatus, .worldRadio:
+        case .navigation, .batteryStatus, .worldRadio, .elevation:
             guard payload.count == 1 else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }

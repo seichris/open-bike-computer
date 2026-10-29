@@ -439,7 +439,29 @@ final class DeviceScreenConfigurationController: ObservableObject {
         guard draft.instances.count < Int(capabilities.maximumInstances) else {
             throw DeviceScreenConfigurationValidationError.invalidInstanceCount
         }
-        _ = try draft.add(type: type, after: instanceID)
+        let id = try draft.add(type: type, after: instanceID)
+        if let index = draft.instances.firstIndex(where: { $0.id == id }) {
+            draft.instances[index].mapProfile =
+                draft.instances[index].mapProfile?.supported(by: capabilities)
+        }
+        self.draft = draft
+    }
+
+    func addTerrainScreen(_ style: TerrainMapStyle) throws {
+        guard var draft, let capabilities, capabilities.supports(.map),
+              draft.instances.count < Int(capabilities.maximumInstances) else {
+            throw DeviceScreenConfigurationValidationError.invalidInstanceCount
+        }
+        let id = try draft.add(type: .map, after: draft.instances.last?.id)
+        guard let index = draft.instances.firstIndex(where: { $0.id == id }) else { return }
+        draft.instances[index].name = style == .elevationTint ? "Tint & Slope" : style.title
+        var profile = DeviceScreenMapProfile.mapDefault
+        profile.visibilityMask |= style.rawValue | DeviceScreenMapProfile.contoursVisibilityMask
+        if style == .terrain3D {
+            profile.visibilityMask = DeviceScreenMapProfile.defaultVisibilityMask | style.rawValue
+            profile.labelDensity = 0
+        }
+        draft.instances[index].mapProfile = profile.supported(by: capabilities)
         self.draft = draft
     }
 

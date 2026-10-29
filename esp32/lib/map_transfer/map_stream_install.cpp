@@ -1,4 +1,5 @@
 #include "map_stream_install.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
@@ -8,9 +9,8 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
+#include <memory>
 #include <new>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -272,12 +272,10 @@ bool readText(const std::string &path, std::string &value,
   uint64_t bytes = 0;
   if (!regularFileSize(path, bytes) || bytes > maximumBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
-  value.assign(std::istreambuf_iterator<char>(input),
-               std::istreambuf_iterator<char>());
-  return input.good() || input.eof();
+  return input.readAll(value, static_cast<size_t>(bytes));
 }
 
 std::string jsonEscape(const std::string &value) {
@@ -412,6 +410,8 @@ const char *mapStreamInstallStateCode(MapStreamInstallState state) {
     return "paused";
   case MapStreamInstallState::Finalizing:
     return "finalizing";
+  case MapStreamInstallState::Prepared:
+    return "prepared";
   case MapStreamInstallState::Ready:
     return "ready";
   case MapStreamInstallState::Failed:
@@ -499,7 +499,11 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
         !safeSessionIdentifier(sessionId))
       continue;
     const std::string root = joinPath(mapsRoot, sessionId);
-    const bool ready = regularFileExists(joinPath(root, kReadyFile)) ||
+    const bool operationReady = regularFileExists(joinPath(root, ".operation-ready")) ||
+                                regularFileExists(joinPath(root, ".operation-ready.bak"));
+    const bool operationPrepared = regularFileExists(joinPath(root, ".operation-prepared")) ||
+        regularFileExists(joinPath(root, ".operation-prepared.bak"));
+    const bool ready = operationReady || regularFileExists(joinPath(root, kReadyFile)) ||
                        regularFileExists(joinPath(root, kReadyFile) + ".bak");
     const bool consumed =
         regularFileExists(joinPath(root, kConsumedFile)) ||
@@ -507,22 +511,22 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
     const bool installing =
         regularFileExists(joinPath(root, kInstallingFile)) ||
         regularFileExists(joinPath(root, kInstallingFile) + ".bak");
-    if ((!ready || consumed) && !installing)
+    if ((!ready || consumed) && !installing && !operationPrepared)
       continue;
     MapStreamInstallSnapshot candidate;
     std::string marker;
     bool markerValid = false;
     const std::string markerPath =
-        joinPath(root, ready ? kReadyFile : kInstallingFile);
+        joinPath(root, operationPrepared ? ".operation-prepared" : (operationReady ? ".operation-ready" : (ready ? kReadyFile : kInstallingFile)));
     for (const std::string &path : {markerPath, markerPath + ".bak"}) {
       std::string value;
       if (!readText(path, value, 2048))
         continue;
       MapStreamInstallSnapshot parsed;
       parsed.state =
-          ready ? MapStreamInstallState::Ready : MapStreamInstallState::Paused;
-      parsed.currentStep = ready ? 2 : 1;
-      parsed.finalizationCompleted = ready ? parsed.finalizationTotal : 0;
+          operationPrepared ? MapStreamInstallState::Prepared : (ready ? MapStreamInstallState::Ready : MapStreamInstallState::Paused);
+      parsed.currentStep = (ready || operationPrepared) ? 2 : 1;
+      parsed.finalizationCompleted = (ready || operationPrepared) ? parsed.finalizationTotal : 0;
       parsed.sessionId = jsonString(value, "sessionId");
       parsed.mapId = jsonString(value, "mapId");
       parsed.manifestReceipt = jsonString(value, "manifestReceipt");
@@ -532,7 +536,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
           jsonUnsigned(value, "validationVersion", haveValidation);
       if (parsed.sessionId == sessionId && safeMapIdentifier(parsed.mapId) &&
           parsed.signedManifestReceipt.size() == 64 &&
-          (!ready || (haveValidation && validation == 1))) {
+          (!(ready || operationPrepared) || (haveValidation && validation == 1))) {
         candidate = std::move(parsed);
         marker = std::move(value);
         markerValid = true;
@@ -589,7 +593,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
         invalid = true;
         continue;
       }
-    } else if (ready) {
+    } else if (ready || operationPrepared) {
       bool haveFiles = false;
       const uint64_t totalFiles = jsonUnsigned(marker, "fileCount", haveFiles);
       if (!haveFiles || totalFiles == 0 || totalFiles > UINT32_MAX) {
@@ -624,9 +628,9 @@ MapStreamInstallSession::MapStreamInstallSession(
     std::string storageRoot, std::string sessionId,
     MapStreamCheckpointPolicy checkpointPolicy, MapStreamNowCallback now,
     std::shared_ptr<MapStreamStorage> storage,
-    MapStreamStatusCallback onStatus)
+    MapStreamStatusCallback onStatus, std::string operationID)
     : storageRoot_(std::move(storageRoot)), sessionId_(std::move(sessionId)),
-      checkpointPolicy_(checkpointPolicy), now_(std::move(now)),
+      operationID_(std::move(operationID)), checkpointPolicy_(checkpointPolicy), now_(std::move(now)),
       storage_(std::move(storage)), onStatus_(std::move(onStatus)) {
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
@@ -642,6 +646,10 @@ MapStreamInstallSession::~MapStreamInstallSession() { closeCurrentFile(true); }
 bool MapStreamInstallSession::onManifest(
     const VerifiedMapStreamManifest &manifest,
     std::string_view canonicalManifest) {
+  if (!operationID_.empty() && (operationID_.size()!=32 ||
+      !std::all_of(operationID_.begin(),operationID_.end(),[](char c) {
+        return (c>='0' && c<='9') || (c>='a' && c<='f'); })))
+    return fail("operation_id","invalid map operation identity");
   closeCurrentFile(true);
   nextFileIndex_ = 0;
   status_.sequence++;
@@ -658,6 +666,17 @@ bool MapStreamInstallSession::onManifest(
   canonicalManifest_ = canonicalManifest;
   checkpointAtMilliseconds_ = now_();
   const bool prepared = prepareRoot(manifest, canonicalManifest);
+  if (prepared && freeSpaceProbe_) {
+    // FAT allocation slack plus metadata/checkpoints. Verified resumed files
+    // need no second payload allocation. This runs before the first file callback.
+    const uint64_t remainingFiles = status_.totalFiles - status_.durableFilePrefix;
+    const uint64_t required = status_.totalPayloadBytes - status_.completedPayloadBytes +
+        remainingFiles * 65536ULL + (remainingFiles ? 1048576ULL : 65536ULL);
+    const auto available = freeSpaceProbe_();
+    if (!available) return fail("stream_storage_unavailable", "SD storage is busy or unavailable; try again shortly");
+    if (*available < required)
+      return fail("stream_sd_full", "remove a map from Maps on this Bike Computer before installing another");
+  }
   publishStatus();
   return prepared;
 }
@@ -878,17 +897,47 @@ bool MapStreamInstallSession::prepareRoot(
   if (status_.state == MapStreamInstallState::Failed)
     return false;
   if (!resumed) {
+    // Selected and rollback content is never rewritten, damaged or not.
     std::string active;
     const std::string activePath =
         joinPath(storageRoot_, "/VECTMAP/active-map.json");
     for (const std::string &candidate : {activePath, activePath + ".bak"}) {
-      if (storage_->readText(candidate, active, 2048) &&
+      // Same 4 KiB limit as the installer's pointer reader and writer.
+      if (storage_->readText(candidate, active, 4096) &&
           (jsonString(active, "root") == inactiveRootRelative() ||
            jsonString(active, "previousRoot") == inactiveRootRelative())) {
         return fail("stream_session_conflict",
                     "cannot replace an active or rollback map root in place");
       }
     }
+    std::string consumed;
+    for (const char *name : {".activation-consumed", ".activation-consumed.bak"}) {
+      if (!storage_->readText(joinPath(inactiveRoot(), name), consumed, 2048))
+        continue;
+      // The same signed version failed byte validation above, so its SD copy is
+      // damaged. Repair goes through explicit, protection-checked removal; the
+      // installer never deletes a completed version as an upload side effect.
+      if (jsonString(consumed, "sessionId") == sessionId_ &&
+          jsonString(consumed, "mapId") == status_.mapId &&
+          jsonString(consumed, "manifestReceipt") == manifest.manifestReceipt &&
+          jsonString(consumed, "signedManifestReceipt") == manifest.signedManifestReceipt)
+        return fail("stream_repair_requires_removal",
+                    "this map's SD copy is damaged; remove it in Maps on this Bike Computer, then install it again");
+      return fail("stream_session_conflict", "completed map versions cannot be replaced in place");
+    }
+    uint64_t completedBytes = 0;
+    if (storage_->regularFileSize(joinPath(inactiveRoot(), ".activation-consumed"), completedBytes) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), ".activation-consumed.bak"), completedBytes))
+      return fail("stream_session_conflict", "completed map versions cannot be replaced in place");
+    // A legacy archive receipt is installation evidence. Signed streams also
+    // write this file before activation, so their unconsumed staging is repairable.
+    uint64_t ignored = 0;
+    const bool signedStaging = storage_->regularFileSize(joinPath(inactiveRoot(), kReadyFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), std::string(kReadyFile) + ".bak"), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), kCheckpointFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), ".operation-prepared"), ignored);
+    if (!signedStaging && storage_->regularFileSize(joinPath(inactiveRoot(), kManifestReceiptFile), ignored))
+      return fail("stream_session_conflict", "completed archive versions cannot be replaced in place");
     if (!storage_->removeTree(inactiveRoot()) ||
         !storage_->createDirectories(inactiveRoot()))
       return fail("stream_root_prepare", "could not prepare inactive map root");
@@ -1011,10 +1060,20 @@ bool MapStreamInstallSession::loadMatchingCheckpoint(
       return true;
     }
   }
-  const std::string readyPath = joinPath(inactiveRoot(), kReadyFile);
+  const std::string readyPath = joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-prepared");
   for (const std::string &path : {readyPath, readyPath + ".bak"}) {
     if (storage_->readText(path, value, 2048) && tryReady(value))
       return true;
+  }
+  if (!operationID_.empty()) {
+    // A new attempt may reuse identical installed bytes, but every skipped byte
+    // is compared against this signed retransmission by onFileData. Preparation
+    // creates a separate marker and never inherits the older commit authority.
+    for (const char *name : {".operation-ready", ".ready"}) {
+      const auto path=joinPath(inactiveRoot(),name);
+      for (const auto &candidate : {path,path+".bak"})
+        if (storage_->readText(candidate,value,2048) && tryReady(value)) return true;
+    }
   }
   resetResume();
   return false;
@@ -1104,10 +1163,23 @@ bool MapStreamInstallSession::writeFinalMetadata(
       "\",\"payloadBytes\":" + std::to_string(status_.totalPayloadBytes) +
       ",\"protocolVersion\":2,\"sessionId\":\"" + jsonEscape(sessionId_) +
       "\",\"signedManifestReceipt\":\"" + status_.signedManifestReceipt +
-      "\",\"streamFormatVersion\":1,\"validationVersion\":1}\n";
-  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), kReadyFile), ready))
-    return fail("stream_ready_write", "could not publish map ready marker");
+      "\",\"streamFormatVersion\":1,\"validationVersion\":1" +
+      (operationID_.empty() ? std::string() : ",\"operationID\":\"" + operationID_ + "\"") + "}\n";
+  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-prepared"), ready))
+    return fail(operationID_.empty() ? "stream_ready_write" : "stream_prepared_write",
+                operationID_.empty() ? "could not publish map ready marker" : "could not publish prepared map marker");
   advanceFinalization();
+  if (!operationID_.empty()) {
+    if (!storage_->removeTree(joinPath(inactiveRoot(), kInstallingFile)) ||
+        !storage_->syncDirectory(inactiveRoot()))
+      return fail("stream_prepared_cleanup", "prepared stream cleanup is pending");
+    status_.state = MapStreamInstallState::Prepared;
+    status_.durableFilePrefix = status_.totalFiles;
+    status_.finalizationCompleted = status_.finalizationTotal;
+    status_.errorCode.clear(); status_.errorMessage.clear();
+    publishStatus();
+    return true;
+  }
   const std::string pending =
       std::string("{\"manifestReceipt\":\"") + status_.manifestReceipt +
       "\",\"mapId\":\"" + jsonEscape(status_.mapId) + "\",\"root\":\"" +

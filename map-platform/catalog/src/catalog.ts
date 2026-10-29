@@ -7,6 +7,7 @@ import {
 } from "./security";
 import { verifyArtifactObject } from "./r2";
 import type { ArtifactRow, Channel, Env, MapEntryRow } from "./types";
+import { TOPOGRAPHY_COMPANION_FORMAT, hasContourLayer } from "./validation";
 import type {
   PublicationArtifactInput,
   PublicationInput,
@@ -34,6 +35,12 @@ const MAX_LIVE_ARTIFACT_GENERATION_CLASSES = 16;
 const MAX_RETENTION_BATCH = 10;
 const RETENTION_AUTHORIZATION_MILLISECONDS = 15 * 60 * 1000;
 const PROMOTION_LEASE_MILLISECONDS = 60 * 60 * 1000;
+// Backend promotion repackages renderer targets 1-4 only; target-5 POI maps
+// stay behind their production rollout gate.
+const PROMOTABLE_RENDERER_FORMAT_VERSIONS = [1, 2, 3, 4];
+// SQL form of hasContourLayer for one map_entries row alias.
+const CONTOUR_LAYER_SQL = (alias: string) =>
+  `EXISTS (SELECT 1 FROM json_each(${alias}.features_json) WHERE value = 'contours')`;
 
 /** Production-only discovery; promotion grants still revalidate each artifact. */
 export async function listPromotionCandidates(
@@ -58,13 +65,13 @@ export async function listPromotionCandidates(
   const rows = await env.DB.prepare(
     `SELECT m.id FROM map_entries m
       WHERE m.id > ? AND m.origin_channel = 'development'
-        AND m.renderer_format_version IN (1, 2, 3, 4)
-        AND (m.renderer_format_version <> 4 OR ? = '1')
+        AND m.renderer_format_version IN (${PROMOTABLE_RENDERER_FORMAT_VERSIONS.join(", ")})
+        AND (NOT ${CONTOUR_LAYER_SQL("m")} OR ? = '1')
         AND m.delivery_state IN ('development', 'promotion_pending')
         AND EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
           AND a.bucket_slot = 'development' AND a.delivery_tier = 'development'
           AND a.format = 'zip-stored-v1' AND a.generation_head = 1 AND a.state = 'live')
-        AND (m.renderer_format_version <> 4 OR EXISTS (
+        AND (NOT ${CONTOUR_LAYER_SQL("m")} OR EXISTS (
           SELECT 1 FROM artifacts companion WHERE companion.map_entry_id = m.id
             AND companion.bucket_slot = 'development'
             AND companion.delivery_tier = 'development'
@@ -229,6 +236,47 @@ function companionRequirementsForArtifact(
   return parseJSON<TopographyCompanionRequirements | null>(
     row.reader_requirements_json,
     null,
+  );
+}
+
+// A contour stream pairs only with the single live companion bound to its map
+// content and ID. A missing or ambiguous companion never selects "the latest".
+function soleCompanion<T extends ArtifactWithReaderDescriptor>(
+  rows: T[],
+  contentReceipt: string,
+  legacyMapId: string,
+  deliveryTier: string,
+): T | null {
+  const matches = rows.filter((row) => {
+    const requirements = companionRequirementsForArtifact(row);
+    return (
+      row.format === TOPOGRAPHY_COMPANION_FORMAT &&
+      row.delivery_tier === deliveryTier &&
+      requirements?.mapContentReceipt === contentReceipt &&
+      requirements?.mapId === legacyMapId
+    );
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+async function soleDevelopmentCompanion(
+  env: Env,
+  mapEntryID: string,
+  contentReceipt: string,
+  legacyMapId: string,
+): Promise<ArtifactRow | null> {
+  const rows = await env.DB.prepare(
+    `SELECT * FROM artifacts WHERE map_entry_id = ?
+      AND bucket_slot = 'development' AND delivery_tier = 'development'
+      AND format = 'topography-ios-v1' AND generation_head = 1 AND state = 'live'`,
+  )
+    .bind(mapEntryID)
+    .all<ArtifactRow>();
+  return soleCompanion(
+    rows.results,
+    contentReceipt,
+    legacyMapId,
+    "development",
   );
 }
 
@@ -605,13 +653,13 @@ export async function finalizePublication(
     };
   }
 
+  const contourLayer = hasContourLayer(publication.features);
   if (promotionLeaseID !== null) {
     if (
       !PROMOTION_LEASE_ID.test(promotionLeaseID) ||
       publication.originChannel !== "development" ||
       publication.deliveryState !== "production" ||
-      publication.artifacts.length !==
-        (publication.rendererFormatVersion === 4 ? 2 : 1) ||
+      publication.artifacts.length !== (contourLayer ? 2 : 1) ||
       publication.artifacts.some(
         (artifact) =>
           artifact.bucketSlot !== "production" ||
@@ -620,10 +668,9 @@ export async function finalizePublication(
       publication.artifacts.filter(
         (artifact) => artifact.format === "bike-map-stream-v1",
       ).length !== 1 ||
-      (publication.rendererFormatVersion === 4 &&
-        publication.artifacts.filter(
-          (artifact) => artifact.format === "topography-ios-v1",
-        ).length !== 1)
+      publication.artifacts.filter(
+        (artifact) => artifact.format === TOPOGRAPHY_COMPANION_FORMAT,
+      ).length !== (contourLayer ? 1 : 0)
     ) {
       throw new HttpError(400, "promotion publication is invalid");
     }
@@ -645,27 +692,15 @@ export async function finalizePublication(
     if (!activeLease) {
       throw new HttpError(409, "promotion lease is not active");
     }
-    if (publication.rendererFormatVersion === 4) {
-      const sourceCompanion = await env.DB.prepare(
-        `SELECT sha256, reader_requirements_json FROM artifacts
-          WHERE map_entry_id = ? AND bucket_slot = 'development'
-            AND delivery_tier = 'development' AND format = 'topography-ios-v1'
-            AND generation_head = 1 AND state = 'live'
-            AND json_extract(reader_requirements_json, '$.mapContentReceipt') = ?
-            AND json_extract(reader_requirements_json, '$.mapId') = ?
-          ORDER BY created_at DESC LIMIT 1`,
-      )
-        .bind(
-          publication.mapEntryId,
-          publication.contentReceipt,
-          publication.legacyMapId,
-        )
-        .first<{
-          sha256: string;
-          reader_requirements_json: string | null;
-        }>();
+    if (contourLayer) {
+      const sourceCompanion = await soleDevelopmentCompanion(
+        env,
+        publication.mapEntryId,
+        publication.contentReceipt,
+        publication.legacyMapId,
+      );
       const promoted = publication.artifacts.find(
-        (artifact) => artifact.format === "topography-ios-v1",
+        (artifact) => artifact.format === TOPOGRAPHY_COMPANION_FORMAT,
       );
       const sourceRequirements =
         parseJSON<TopographyCompanionRequirements | null>(
@@ -1813,39 +1848,57 @@ export async function createLibraryDownloadGrant(
   )
     .bind(mapEntryID, tiers[0], tiers[1] ?? tiers[0], tiers[0])
     .all<ArtifactWithReaderDescriptor>();
-  const artifact = result.results.find((candidate) => {
+  // Candidates arrive in preference order. A contour stream is usable only
+  // with the single live companion of its own tier, so a tier without one
+  // yields to the next tier, as the app's availability check does.
+  let companionUnavailable = false;
+  let selected:
+    | {
+        artifact: ArtifactWithReaderDescriptor;
+        companion: ArtifactWithReaderDescriptor | null;
+      }
+    | undefined;
+  for (const candidate of result.results) {
     const signerAccepted = acceptedSigners.some(
       (signer) =>
         signer.keyId === candidate.signature_key_id &&
         signer.keySha256 === candidate.signature_key_sha256,
     );
-    if (!signerAccepted) return false;
+    if (!signerAccepted) continue;
     const requirements = readerRequirementsForArtifact(candidate);
-    return (
-      requirements !== null && readerCanUse(readerCapabilities, requirements)
+    if (
+      requirements === null ||
+      !readerCanUse(readerCapabilities, requirements)
+    ) {
+      continue;
+    }
+    if (!hasContourLayer(requirements.requiredFeatures)) {
+      selected = { artifact: candidate, companion: null };
+      break;
+    }
+    const pair = soleCompanion(
+      result.results,
+      candidate.map_content_receipt ?? "",
+      map.legacy_map_id,
+      candidate.delivery_tier,
     );
-  });
-  if (!artifact) {
+    if (pair) {
+      selected = { artifact: candidate, companion: pair };
+      break;
+    }
+    companionUnavailable = true;
+  }
+  if (!selected) {
     if (channel === "production" && result.results.length === 0)
       throw new HttpError(409, "production promotion required");
-    throw new HttpError(409, "no compatible artifact is available");
+    throw new HttpError(
+      409,
+      companionUnavailable
+        ? "topography companion is unavailable"
+        : "no compatible artifact is available",
+    );
   }
-  const artifactRequirements = readerRequirementsForArtifact(artifact);
-  const companion =
-    artifactRequirements?.rendererFormatVersion === 4
-      ? result.results.find((candidate) => {
-          const requirements = companionRequirementsForArtifact(candidate);
-          return (
-            candidate.format === "topography-ios-v1" &&
-            candidate.delivery_tier === artifact.delivery_tier &&
-            requirements?.mapContentReceipt === artifact.map_content_receipt &&
-            requirements?.mapId === map.legacy_map_id
-          );
-        })
-      : undefined;
-  if (artifactRequirements?.rendererFormatVersion === 4 && !companion) {
-    throw new HttpError(409, "topography companion is unavailable");
-  }
+  const { artifact, companion } = selected;
   const grant = randomToken(32);
   const companionGrant = companion ? randomToken(32) : null;
   const now = new Date();
@@ -1938,7 +1991,7 @@ export async function resolveDownloadGrant(
                     AND a.generation_head = 1
                     AND EXISTS (
                       SELECT 1 FROM map_entries m WHERE m.id = a.map_entry_id
-                        AND m.renderer_format_version = 4
+                        AND ${CONTOUR_LAYER_SQL("m")}
                         AND json_extract(a.reader_requirements_json, '$.mapContentReceipt') = m.content_receipt
                         AND json_extract(a.reader_requirements_json, '$.mapId') = m.legacy_map_id
                     ))
@@ -2024,9 +2077,14 @@ export async function createPromotionGrant(
     throw new HttpError(409, "map is not eligible for promotion");
   }
   if (
-    map.renderer_format_version === 4 &&
-    env.TOPOGRAPHY_PROMOTION_ENABLED !== "1"
+    !PROMOTABLE_RENDERER_FORMAT_VERSIONS.includes(map.renderer_format_version)
   ) {
+    throw new HttpError(409, "renderer target is not promotable");
+  }
+  const contourLayer = hasContourLayer(
+    parseJSON<string[]>(map.features_json, []),
+  );
+  if (contourLayer && env.TOPOGRAPHY_PROMOTION_ENABLED !== "1") {
     throw new HttpError(409, "topographic promotion is not qualified");
   }
   const artifact = await env.DB.prepare(
@@ -2039,26 +2097,15 @@ export async function createPromotionGrant(
     .bind(mapEntryID)
     .first<ArtifactRow>();
   if (!artifact) throw new HttpError(404, "promotable artifact not found");
-  const companion =
-    map.renderer_format_version === 4
-      ? await env.DB.prepare(
-          `SELECT * FROM artifacts WHERE map_entry_id = ?
-          AND bucket_slot = 'development' AND delivery_tier = 'development'
-          AND format = 'topography-ios-v1' AND generation_head = 1 AND state = 'live'
-          AND json_extract(reader_requirements_json, '$.mapContentReceipt') = ?
-          AND json_extract(reader_requirements_json, '$.mapId') = ?
-          ORDER BY created_at DESC LIMIT 1`,
-        )
-          .bind(mapEntryID, map.content_receipt, map.legacy_map_id)
-          .first<ArtifactRow>()
-      : null;
-  if (
-    map.renderer_format_version === 4 &&
-    (!companion ||
-      companionRequirementsForArtifact(companion)?.mapContentReceipt !==
-        map.content_receipt ||
-      companionRequirementsForArtifact(companion)?.mapId !== map.legacy_map_id)
-  ) {
+  const companion = contourLayer
+    ? await soleDevelopmentCompanion(
+        env,
+        mapEntryID,
+        map.content_receipt,
+        map.legacy_map_id,
+      )
+    : null;
+  if (contourLayer && !companion) {
     throw new HttpError(
       409,
       "topography companion is unavailable for promotion",

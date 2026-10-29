@@ -4,8 +4,48 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <sstream>
 
 int main() {
+  // Match the previous stream-based parser's whitespace/token contract.
+  const std::string separators[] = {" ", "\t", "\r", "\n", "\f", "\v", "  \t "};
+  for (const auto &separator : separators) {
+    for (const auto &prefix : {std::string(), separator}) {
+      for (const auto &suffix : {std::string(), separator,
+                                 separator + "extra"}) {
+        for (const auto &version : {"HTTP/1.1", "HTTP/1.0", "", "HTTP/2"}) {
+          const std::string line = prefix + "GET" + separator +
+              "/map-transfer/status" + separator + version + suffix;
+          std::stringstream oldParser(line);
+          std::string oldMethod, oldPath, oldVersion, trailing;
+          oldParser >> oldMethod >> oldPath >> oldVersion >> trailing;
+          const bool expected = !oldMethod.empty() && !oldPath.empty() &&
+              oldVersion == "HTTP/1.1" && trailing.empty();
+          std::string method, path;
+          assert(device_transfer::parseHttpRequestLine(line, method, path) ==
+                 expected);
+          if (expected) {
+            assert(method == oldMethod);
+            assert(path == oldPath);
+          }
+        }
+      }
+    }
+  }
+  for (const auto &line : {"", "GET", "GET /path", "GET /path HTTP/1.1 extra"}) {
+    std::string method, path;
+    assert(!device_transfer::parseHttpRequestLine(line, method, path));
+  }
+  {
+    device_transfer::HttpSecurityHeaders headers;
+    headers.accept("x-map-operation-id",std::string(32,'a'));
+    headers.accept("x-map-stream-sha256",std::string(64,'b'));
+    assert(headers.mapOperationSeen && headers.mapStreamSHA256Seen);
+    assert(!headers.hasAmbiguousFraming());
+    headers.accept("x-map-operation-id",std::string(32,'a'));
+    assert(headers.hasAmbiguousFraming());
+  }
+
   device_transfer::HttpHeaderBudget budget;
   for (size_t index = 0; index < device_transfer::HTTP_MAX_LINE_BYTES; index++)
     assert(budget.acceptDataByte());
@@ -60,17 +100,21 @@ int main() {
   assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
       true, true, false, true, false));
   const device_transfer::HttpResponseCompletionToken responseToken{
-      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"};
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 42};
   assert(responseToken.matches(
-      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"));
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
       generation + 1, "PUT",
-      "/map-transfer/sessions/session-1/install-stream"));
+      "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
       generation, "POST",
-      "/map-transfer/sessions/session-1/install-stream"));
+      "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
-      generation, "PUT", "/map-transfer/sessions/session-2/install-stream"));
+      generation, "PUT", "/map-transfer/sessions/session-2/install-stream", 42));
+  assert(!responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 41));
+  assert(!responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 43));
   assert(device_transfer::validHttpHeaderName("Content-Length"));
   assert(device_transfer::validHttpHeaderName("x-bike_token.v2"));
   assert(!device_transfer::validHttpHeaderName("Content Length"));

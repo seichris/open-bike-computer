@@ -51,10 +51,20 @@ def load_contract() -> dict:
     for value in [contract["service_uuid"], *contract["characteristics"].values()]:
         if not uuid_pattern.fullmatch(value):
             raise SystemExit(f"invalid uppercase UUID: {value}")
-    features = contract["capabilities"]["features"]
-    bits = [entry["bit"] for entry in features.values()]
-    if len(bits) != len(set(bits)) or any(bit < 0 or bit > 31 for bit in bits):
-        raise SystemExit("capability bits must be unique UInt32 positions")
+    caps = contract["capabilities"]
+    for features in (caps["features"], caps["extended_features"]):
+        bits = [entry["bit"] for entry in features.values()]
+        if len(bits) != len(set(bits)) or any(bit < 0 or bit > 31 for bit in bits):
+            raise SystemExit("capability bits must be unique UInt32 positions per word")
+        if any(not 1 <= entry["minimum_client_version"] <= caps["current_client_version"]
+               for entry in features.values()):
+            raise SystemExit("capabilities cannot require a future client version")
+    if set(caps["features"]) & set(caps["extended_features"]):
+        raise SystemExit("capability names must be unique across words")
+    if set(caps["features"]) & {"extended_" + name for name in caps["extended_features"]}:
+        raise SystemExit("main-word names must not collide with generated extended-word names")
+    if caps["extended_feature_tlv_type"] in (1, contract["screen_configuration"]["capability_tlv_type"]):
+        raise SystemExit("extended features must have a distinct TLV type")
     requests = contract["device_requests"]
     for key, value in requests.items():
         if len(value.encode("ascii")) != 4:
@@ -73,6 +83,12 @@ def load_contract() -> dict:
     if sorted(widgets.values()) != list(range(22)):
         raise SystemExit("Ride Stats widgets must retain their append-only v1 IDs 0...21")
     screen_types = contract["screen_types"]
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio",
+                           "elevation")
+    if any(screen_types.get(name) != value
+           for value, name in enumerate(legacy_screen_types)):
+        raise SystemExit("legacy screen setting IDs 0...6 must remain unchanged")
     values = list(screen_types.values())
     if (not screen_types or len(values) != len(set(values))
             or any(type(value) is not int or not 0 <= value < 8 for value in values)
@@ -145,12 +161,23 @@ def render_swift(contract: dict) -> str:
             f"    static let currentClientVersion: UInt8 = {caps['current_client_version']}",
         ]
     )
+    lines.append(f"    static let extendedFeatureTLVType: UInt8 = {caps['extended_feature_tlv_type']}")
     for name, entry in caps["features"].items():
         lines.append(
             f"    static let {camel(name)}Feature: UInt32 = 1 << {entry['bit']}"
         )
         lines.append(
             f"    static let {camel(name)}MinimumClientVersion: UInt8 = "
+            f"{entry['minimum_client_version']}"
+        )
+    # Extended-word bits restart at zero, so their names carry a distinct prefix:
+    # an extended flag can never be mistaken for the main word's same-valued bit.
+    for name, entry in caps["extended_features"].items():
+        lines.append(
+            f"    static let {camel('extended_' + name)}Feature: UInt32 = 1 << {entry['bit']}"
+        )
+        lines.append(
+            f"    static let {camel('extended_' + name)}MinimumClientVersion: UInt8 = "
             f"{entry['minimum_client_version']}"
         )
     lines.extend(
@@ -174,6 +201,8 @@ def render_swift(contract: dict) -> str:
             f'    static let destinationRequestMagic = "{requests["destination_magic"]}"',
             f'    static let worldRadioRequestMagic = "{requests["world_radio_request_magic"]}"',
             f'    static let worldRadioStatusMagic = "{requests["world_radio_status_magic"]}"',
+            f'    static let routeElevationMagic = "{requests["route_elevation_magic"]}"',
+            f'    static let routeElevationAcknowledgementMagic = "{requests["route_elevation_ack_magic"]}"',
             f'    static let applicationCommandMagic = "{delivery["command_magic"]}"',
             f'    static let applicationAcknowledgementMagic = "{delivery["ack_magic"]}"',
             f"    static let applicationDeliveryVersion: UInt8 = {delivery['version']}",
@@ -203,16 +232,22 @@ def render_swift(contract: dict) -> str:
     for name, value in screen_configuration["results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
-    # Separate legacy Int and wire UInt8 adapters preserve source compatibility;
-    # both are generated from the same identifiers, never from UI ordering.
+    # The legacy screen-settings channel carries the released screens through
+    # Elevation. Nearby is configurable-screen wire-only and must never leak
+    # into the old screen-settings channel.
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio",
+                           "elevation")
     for enum_name, raw_type in (("RideBLEScreenTypeV1", "UInt8"),
                                 ("RideBLELegacyScreenV1", "Int")):
         lines.append(f"nonisolated enum {enum_name}: {raw_type}, CaseIterable, Codable, Sendable {{")
-        for name, value in contract["screen_types"].items():
+        names = contract["screen_types"] if raw_type == "UInt8" else legacy_screen_types
+        for name in names:
+            value = contract["screen_types"][name]
             lines.append(f"    case {camel(name)} = {value}")
         if raw_type == "Int":
             lines.extend(["", "    var wireType: RideBLEScreenTypeV1 {", "        switch self {"])
-            for name in contract["screen_types"]:
+            for name in legacy_screen_types:
                 lines.append(f"        case .{camel(name)}: return .{camel(name)}")
             lines.extend(["        }", "    }"])
         lines.extend(["}", ""])
@@ -255,12 +290,23 @@ def render_cpp(contract: dict) -> str:
             f"inline constexpr uint8_t CURRENT_CLIENT_VERSION = {caps['current_client_version']};",
         ]
     )
+    lines.append(f"inline constexpr uint8_t EXTENDED_FEATURE_TLV_TYPE = {caps['extended_feature_tlv_type']};")
     for name, entry in caps["features"].items():
         lines.append(
             f"inline constexpr uint32_t {upper(name)}_FEATURE = 1UL << {entry['bit']};"
         )
         lines.append(
             f"inline constexpr uint8_t {upper(name)}_MINIMUM_CLIENT_VERSION = "
+            f"{entry['minimum_client_version']};"
+        )
+    # Extended-word bits restart at zero; the EXTENDED_ prefix keeps them from
+    # being OR'd into the main CAP2 word, where the same value means another feature.
+    for name, entry in caps["extended_features"].items():
+        lines.append(
+            f"inline constexpr uint32_t EXTENDED_{upper(name)}_FEATURE = 1UL << {entry['bit']};"
+        )
+        lines.append(
+            f"inline constexpr uint8_t EXTENDED_{upper(name)}_MINIMUM_CLIENT_VERSION = "
             f"{entry['minimum_client_version']};"
         )
     requests = contract["device_requests"]
@@ -270,6 +316,8 @@ def render_cpp(contract: dict) -> str:
             f'inline constexpr char DESTINATION_REQUEST_MAGIC[] = "{requests["destination_magic"]}";',
             f'inline constexpr char WORLD_RADIO_REQUEST_MAGIC[] = "{requests["world_radio_request_magic"]}";',
             f'inline constexpr char WORLD_RADIO_STATUS_MAGIC[] = "{requests["world_radio_status_magic"]}";',
+            f'inline constexpr char ROUTE_ELEVATION_MAGIC[] = "{requests["route_elevation_magic"]}";',
+            f'inline constexpr char ROUTE_ELEVATION_ACK_MAGIC[] = "{requests["route_elevation_ack_magic"]}";',
             f"inline constexpr uint8_t SCREEN_CONFIGURATION_SCHEMA_VERSION = {screen_configuration['schema_version']};",
             f"inline constexpr uint8_t SCREEN_CONFIGURATION_CAPABILITY_TLV_TYPE = {screen_configuration['capability_tlv_type']};",
             f"inline constexpr std::size_t MAXIMUM_SCREEN_CONFIGURATION_INSTANCES = {screen_configuration['maximum_instances']};",

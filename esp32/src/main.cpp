@@ -7,9 +7,12 @@
  */
 
 #include <Arduino.h>
+#include "ipc_stack_budget.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
@@ -18,6 +21,7 @@
 #error "remote renderer debugging requires firmware diagnostics"
 #endif
 #include <SPI.h>
+#include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_bt.h>
@@ -36,6 +40,7 @@
 #include "gps.hpp"
 #include "hal.hpp"
 #include "storage.hpp"
+#include "usb_recovery_status.hpp"
 #include "tft.hpp"
 
 #ifdef HMC5883L
@@ -68,6 +73,7 @@ extern xSemaphoreHandle gpsMutex;
 #endif
 
 #include "battery.hpp"
+#include "device_ownership.hpp"
 #include "gpxParser.hpp"
 #include "power.hpp"
 
@@ -168,7 +174,7 @@ static void processFirmwareMaintenanceMode() {
       firmware_maintenance::policy::bootButtonExitRequested(
           bootButtonExit, digitalRead(BOARD_BOOT_PIN) == LOW, now)) {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_boot_button", "{}");
+                                   "ota", "exit_boot_button", "{}");
     firmware_maintenance::requestExit();
   }
 
@@ -182,7 +188,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_authentication_timeout",
         "owner authentication did not complete before the deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_auth_timeout", "{}");
+                                   "ota", "exit_auth_timeout", "{}");
     firmware_maintenance::requestExit();
   } else if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
              firmware_maintenance::policy::transferTimedOut(
@@ -193,7 +199,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_inactivity_timeout",
         "firmware transfer made no useful progress before the deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_inactivity", "{}");
+                                   "ota", "exit_inactivity", "{}");
     firmware_maintenance::requestExit();
   }
   if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
@@ -203,7 +209,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_deadline",
         "firmware maintenance exceeded its overall deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_deadline", "{}");
+                                   "ota", "exit_deadline", "{}");
     firmware_maintenance::requestExit();
   }
 
@@ -212,7 +218,7 @@ static void processFirmwareMaintenanceMode() {
     if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
       Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
       delay(250);
-      ESP.restart();
+      power.deviceRestart();
     }
   }
   delay(5);
@@ -619,6 +625,56 @@ static display_inactivity::Mode currentDisplayMode =
 static uint32_t lastPowerButtonHousekeepingMs = 0;
 #endif
 
+// Allocate the fallback view during normal startup, never while storage may
+// be unmounting or a worker may be stuck. The built-in LVGL font needs no SD.
+static lv_obj_t *shutdownDeferredNotice = nullptr;
+static bool shutdownDeferredNoticeShown = false;
+
+static void prepareShutdownDeferredNotice() {
+  shutdownDeferredNotice = lv_obj_create(lv_layer_sys());
+  lv_obj_set_size(shutdownDeferredNotice, LV_PCT(100), LV_PCT(100));
+  lv_obj_center(shutdownDeferredNotice);
+  lv_obj_set_style_bg_color(shutdownDeferredNotice, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(shutdownDeferredNotice, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(shutdownDeferredNotice, 0, 0);
+  lv_obj_set_style_radius(shutdownDeferredNotice, 0, 0);
+  lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *label = lv_label_create(shutdownDeferredNotice);
+  lv_obj_set_width(label, TFT_WIDTH - 48);
+  lv_obj_set_style_text_font(label, LV_FONT_DEFAULT, 0);
+  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text_static(label,
+      "Shutdown deferred\n\nLeave device powered on");
+  lv_obj_center(label);
+  lv_obj_add_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void showShutdownDeferredNotice(uint8_t failedStage) {
+  (void)failedStage; // Exact sub-barrier is retained in RTC/serial diagnostics.
+  if (shutdownDeferredNotice == nullptr || shutdownDeferredNoticeShown) return;
+  shutdownDeferredNoticeShown = true;
+  if (mainTimer != nullptr) lv_timer_pause(mainTimer);
+  // Hide the old scene before the one-shot refresh: no map/image/font draw
+  // callback should be invoked against storage that is stopping or unmounted.
+  if (lv_screen_active() != nullptr)
+    lv_obj_add_flag(lv_screen_active(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(lv_layer_top(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(lv_layer_bottom(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
+#ifdef USE_ARDUINO_GFX
+  displayPowerManager.requestState(display_power::State::Dimmed);
+  displayPowerManager.applyPendingPanelChange();
+#else
+  tftOn(24);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  currentDisplayMode = display_inactivity::Mode::Dimmed;
+#endif
+  // Refresh only; never run LVGL timers or input callbacks in this fallback.
+  lv_refr_now(display);
+}
+
 static const char *remoteDebugStartErrorCode(
     device_debug::FrameStoreStartResult result) {
   switch (result) {
@@ -732,10 +788,20 @@ bool stopActiveDeviceTransfer() {
   return deviceTransferHttp.setEnabled(false);
 }
 
+// Renderer roots are the map storage root followed by the installer's root.
+static std::string relativeMapRoot(const std::string &rendererRoot) {
+  return rendererRoot.substr(std::strlen(storage.mapStorageRoot()));
+}
+
 #if FIRMWARE_DIAGNOSTICS
 static bool readActiveRendererMap(
     map_transfer::ActiveMapSelection &active, std::string &contentReceipt) {
-  map_transfer::MapTransferInstaller installer("/sdcard");
+  if (!storage.mapStorageAvailable()) {
+    Serial.println(
+        "RENDERER_DIAGNOSTICS: rejected map fixture map_storage_unavailable");
+    return false;
+  }
+  map_transfer::MapTransferInstaller installer(storage.mapStorageRoot());
   const map_transfer::InstallStatus status =
       installer.readActiveMapContentReceipt(active, contentReceipt);
   if (!status.ok) {
@@ -850,6 +916,10 @@ static const char *debugTileName(uint8_t tile) {
     return "RIDESTATS";
   case BATTERY_STATUS:
     return "BATTERY_STATUS";
+  case WORLD_RADIO:
+    return "WORLD_RADIO";
+  case ELEVATION:
+    return "ELEVATION";
   default:
     return "UNKNOWN";
   }
@@ -904,6 +974,10 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
 
 static display_inactivity::Update updateDisplayInactivityPolicy(
     uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
+  if (shutdownDeferredNoticeShown) {
+    observedTouchActivity = false;
+    return {currentDisplayMode, currentDisplayMode, false, false};
+  }
   struct Signals {
     bool initialized = false;
     lv_obj_t *screen = nullptr;
@@ -1501,6 +1575,35 @@ static void processDisconnectedShutdown() {
  *
  */
 void setup() {
+  usb_recovery_status::begin();
+  power.setShutdownDeferredCallback(showShutdownDeferredNotice);
+  power.configureShutdown(
+      []() { deviceTransferHttp.beginShutdown(); return true; },
+      []() {
+        deviceTransferHttp.pollShutdown();
+        mapTransferHttp.submitPendingOperationTask();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+        const bool audioStopped = waveshare_board::speaker::pollShutdownQuiescence();
+#else
+        const bool audioStopped = true;
+#endif
+        const bool bleWritesStopped = bleNavServer.pollShutdownQuiescence();
+        return bleWritesStopped && audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
+               mapTransferHttp.shutdownQuiescent();
+      },
+      []() { return mapView.pollShutdownQuiescence(); },
+      []() { return deviceTransferHttp.commitInProgress(); },
+      []() { return storage.pollShutdownQuiescence(); },
+      []() -> uint64_t {
+        const auto activation = mapTransferHttp.activationSnapshot();
+        // Only real activation/hash progress refreshes the watchdog. Polling
+        // and keepalives cannot extend its absolute ten-minute cap. The low
+        // counter advances per 64 KiB actual hash IO, not merely per request.
+        return (uint64_t{activation.step} << 56) |
+               (uint64_t{activation.progress} << 48) |
+               (uint64_t{activation.sequence & 0xffffU} << 32) |
+               mapTransferHttp.storageProgressSequence();
+      });
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif
@@ -1759,6 +1862,13 @@ void setup() {
     Serial.println("SD Card failed, falling back to FFat...");
     storage.initSPIFFS();
   }
+  // File owners start below, so /sdcard keeps this boot's backend until
+  // shutdown. Maps exist only on removable SD; FFat keeps diagnostics and
+  // other device files, and a card inserted later is used after a restart.
+  // Both map owners take their root here, before boot recovery uses either.
+  storage.pinBackendForBoot();
+  mapView.bindMapStorageRoot(storage.mapStorageRoot());
+  mapTransferHttp.bindStorageRoot(storage.mapStorageRoot());
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const boot_diagnostics::Snapshot diagnosticBoot = boot_diagnostics::snapshot();
   ride_diagnostics::begin(
@@ -1806,8 +1916,20 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);
 #endif
 
-  {
-    map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+  // This is the same immutable eFuse derivation later authenticated by BLE;
+  // it neither initializes BLE nor changes ownership credentials.
+  mapTransferHttp.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
+  if (!storage.mapStorageAvailable()) {
+    // No card at boot. Guidance and the embedded UI run without maps, and no
+    // map recovery may read or repair files on the FFat fallback.
+    recordMapDiagnostic(ride_diagnostics::Level::Info, "boot_selection_final",
+                        "boot_selection", "unavailable",
+                        "map_storage_unavailable");
+  } else {
+    map_transfer::MapTransferInstaller mapInstaller(storage.mapStorageRoot());
+    mapInstaller.setStorageProgressCallback([](void *) { delay(1); }, nullptr);
+    // Bind early journal recovery before reading/rendering a candidate pointer.
+    mapInstaller.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
     map_transfer::InstallStatus recoveryStatus =
         mapInstaller.recoverInterruptedActivation();
     recordMapDiagnostic(
@@ -1848,7 +1970,8 @@ void setup() {
     const auto loadSelection =
         [&](const map_transfer::ActiveMapSelection &selection) {
           const uint32_t startedMs = millis();
-          const std::string root = std::string("/sdcard") + selection.root;
+          const std::string root =
+              std::string(storage.mapStorageRoot()) + selection.root;
           MapLoadAttempt attempt;
           attempt.probe = mapView.probeVectorMapFolderDetailed(root);
           attempt.loaded = attempt.probe.loaded();
@@ -1861,6 +1984,7 @@ void setup() {
           return attempt;
         };
 
+    map_transfer::ActiveMapSelection finalSelection = activeMap;
     RendererMapDiagnosticIdentity finalIdentity;
     std::string finalCode = activeStatus.code;
     bool finalLoaded = false;
@@ -1887,6 +2011,7 @@ void setup() {
         Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
                       activeMap.mapId.c_str(), activeMap.root.c_str());
       } else if (!activeMap.sessionId.empty()) {
+        mapTransferHttp.observeBootSelection(activeMap, false);
         const map_transfer::InstallStatus rollback =
             mapInstaller.rollbackActiveMap(activeMap.sessionId);
         map_transfer::ActiveMapSelection restored;
@@ -1931,6 +2056,7 @@ void setup() {
             rollback.ok && restoredStatus.ok ? MapDiagnosticMetrics::Probe
                                              : MapDiagnosticMetrics::None);
         if (restoredLoaded) {
+          finalSelection = restored;
           finalIdentity = restoredIdentity;
           finalCode = map_probe_diagnostics::name(restoredAttempt.probe.code);
           finalLoaded = true;
@@ -1958,6 +2084,7 @@ void setup() {
       Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
+    mapTransferHttp.observeBootSelection(finalSelection, finalLoaded, true);
     rendererMapDiagnosticIdentity =
         finalLoaded ? finalIdentity : RendererMapDiagnosticIdentity{};
     recordMapDiagnostic(
@@ -1979,10 +2106,18 @@ void setup() {
       boot_diagnostics::Stage::ApplicationServices);
 #endif
   deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
-  mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
+  mapTransferHttp.configure(8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
-  mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
+  mapTransferHttp.setRendererHealthProbes(
+      [] { return mapView.debugStreetLabelFontHealthy(); },
+      [] { return mapView.nearbyIndexHealthy(); });
+  mapTransferHttp.setStreamStorageSpaceProbe([]() -> std::optional<uint64_t> {
+    uint64_t bytes = 0;
+    if (!storage.tryRemovableSdFreeBytes(bytes)) return std::nullopt;
+    return bytes;
+  });
+  mapTransferHttp.setStreamStorageAvailable(storage.mapStorageAvailable() &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {
     return mapView.requestStorageControl(work, context);
@@ -2010,6 +2145,7 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
 #endif
   initLVGL();
+  prepareShutdownDeferredNotice();
   log_i("Checkpoint A: LVGL Init Done");
 
   // Get init Latitude and Longitude
@@ -2047,6 +2183,47 @@ void setup() {
 
   if (WiFi.getMode() == WIFI_OFF)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+#if defined(WAVESHARE_AMOLED_175)
+  // The default event loop and boot safety checks are complete. Allocate the
+  // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
+  // Network.begin() accepts the already-created default event loop.
+  if (!firmware_maintenance::active()) {
+    (void)Network.begin();
+    // First-transfer initialization after a ride can find enough total RAM but
+    // no 32 KiB contiguous internal block. Allocate the existing resident Wi-Fi
+    // resources before BLE pools/tasks fragment the heap. The native owner keeps
+    // the driver in NULL mode with empty RAM credentials until an authenticated
+    // transfer starts; this does not start the radio or an access point.
+    // Preparation runs before boot is ready, so a driver crash or hang would
+    // count toward safe mode. After an unfinished boot, defer to first-use
+    // initialization under its unchanged floor instead of repeating it.
+    device_transfer::NetworkStartResult prepared;
+    const char *code = "deferred_unfinished_boot";
+    const bool deferred = boot_diagnostics::snapshot().consecutiveEarlyFailures != 0;
+    if (deferred) {
+      prepared.after.internalFree = static_cast<uint32_t>(
+          heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+      prepared.after.internalLargest = static_cast<uint32_t>(
+          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    } else {
+      prepared = firmwareUpdateHttp.operationOwner()->prepareWiFi();
+      code = device_transfer::networkStartCode(prepared.failedStep);
+    }
+    char fields[256] = {};
+    snprintf(fields, sizeof(fields),
+             "{\"phase\":\"boot_prepare\",\"code\":\"%s\",\"errorCode\":%ld,"
+             "\"freeInternalBytes\":%lu,\"largestInternalBytes\":%lu}",
+             code, static_cast<long>(prepared.espError),
+             static_cast<unsigned long>(prepared.after.internalFree),
+             static_cast<unsigned long>(prepared.after.internalLargest));
+    (void)ride_diagnostics::record(
+        prepared.ok() && !deferred ? ride_diagnostics::Level::Info
+                                   : ride_diagnostics::Level::Warning,
+        "wifi", "boot_prepared", fields);
+    // A failed preparation stays a typed transfer failure. Navigation and BLE
+    // still boot; never bypass the memory floor or retry partial driver init.
+  }
+#endif
 
   log_i("Loading Splash Screen...");
   splashScreen();
@@ -2100,7 +2277,7 @@ void setup() {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "boot",
                                    "confirmation_failed", "{}");
     firmwareUpdateHttp.rejectRunningApp();
-    ESP.restart();
+    power.deviceRestart();
     return;
   }
   boot_diagnostics::markReady();
@@ -2122,9 +2299,16 @@ void setup() {
  *
  */
 void loop() {
+  usb_recovery_status::process();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
+#endif
+  if (power.processShutdown()) {
+    delay(shutdownDeferredNoticeShown ? 50 : 5);
+    return;
+  }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
@@ -2138,7 +2322,7 @@ void loop() {
       millis() - firmware_maintenance::activeSinceMs() >= 750) {
     Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
     Serial.flush();
-    ESP.restart();
+    power.deviceRestart();
   }
 #endif
   uint32_t now = millis();
@@ -2262,6 +2446,8 @@ void loop() {
         mapTransferHttp.acknowledgeActivatedMapRoot(
             pendingMapRendererActivation.transferRoot, loaded);
       } else if (labelRollback) {
+        mapTransferHttp.acknowledgeRuntimeRollback(
+            relativeMapRoot(pendingMapRendererActivation.rendererRoot), loaded);
         Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                       "restored=%d\n",
                       pendingMapRendererActivation.labelFailure.c_str(),
@@ -2280,7 +2466,7 @@ void loop() {
       map_transfer::MapTransferHttpServer::ActivatedMapRoot activated;
       if (mapTransferHttp.takeActivatedMapRoot(activated)) {
         const std::string rendererRoot =
-            std::string("/sdcard") + activated.root;
+            std::string(storage.mapStorageRoot()) + activated.root;
         RendererMapDiagnosticIdentity identity;
         identity.mapId = activated.mapId;
         identity.sessionPresent = activated.sessionPresent;
@@ -2297,8 +2483,11 @@ void loop() {
         !labelRollbackQueued) {
       if (labelRuntimeFailure.empty())
         mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure);
-      if (!labelRuntimeFailure.empty())
+      // A rollback rewrites the active pointer, which lives only on SD.
+      if (!labelRuntimeFailure.empty() && storage.mapStorageAvailable()) {
+        mapTransferHttp.markSelectionDegraded();
         labelRollbackQueued = mapTransferHttp.requestRuntimeRollback();
+      }
     }
     map_transfer::ActiveMapSelection restored;
     bool rollbackSucceeded = false;
@@ -2307,7 +2496,8 @@ void loop() {
       if (rollbackSucceeded) {
         pendingMapRendererActivation = {
             PendingMapRendererActivationSource::LabelRollback,
-            std::string("/sdcard") + restored.root, {}, labelRuntimeFailure,
+            std::string(storage.mapStorageRoot()) + restored.root, {},
+            labelRuntimeFailure,
             "rollback", mapDiagnosticIdentity(restored), false, now};
       } else {
         rendererMapDiagnosticIdentity = {};
@@ -2337,6 +2527,9 @@ void loop() {
           mapTransferHttp.acknowledgeActivatedMapRoot(
               pendingMapRendererActivation.transferRoot, false);
         } else {
+          mapTransferHttp.acknowledgeRuntimeRollback(
+              relativeMapRoot(pendingMapRendererActivation.rendererRoot),
+              false);
           Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                         "restored=0 queue_timeout=1\n",
                         pendingMapRendererActivation.labelFailure.c_str(),
@@ -2396,6 +2589,19 @@ void loop() {
     updateMapActivationProgressOverlay();
     deviceTransferHttp.process();
     mapTransferHttp.submitPendingRollback();
+    mapTransferHttp.submitPendingOperationTask();
+    static uint32_t lastLibraryLocationMs = 0;
+    if (now - lastLibraryLocationMs >= 5000U) {
+      lastLibraryLocationMs = now;
+      if (gps.gpsData.fixMode >= 2 && mapView.followGps &&
+          std::isfinite(gps.gpsData.latitude) && std::isfinite(gps.gpsData.longitude) &&
+          gps.gpsData.latitude >= -90 && gps.gpsData.latitude <= 90 &&
+          gps.gpsData.longitude >= -180 && gps.gpsData.longitude <= 180)
+        mapTransferHttp.considerMapSuggestion(
+            static_cast<int32_t>(gps.gpsData.latitude * 10000000.0),
+            static_cast<int32_t>(gps.gpsData.longitude * 10000000.0), mapView.debugIsMapFound());
+    }
+    mapTransferHttp.submitPendingMapLibrary();
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();
@@ -2502,13 +2708,13 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
-  if (processWaveshareBootButton()) {
+  if (!shutdownDeferredNoticeShown && processWaveshareBootButton()) {
     displayInactivityPolicy.noteMeaningfulActivity(now);
   }
   if (ui_scheduler::isDue(now, lastPowerButtonHousekeepingMs,
                           kStaticHousekeepingPeriodMs)) {
     lastPowerButtonHousekeepingMs = now;
-    if (processWavesharePowerButton()) {
+    if (!shutdownDeferredNoticeShown && processWavesharePowerButton()) {
       displayInactivityPolicy.noteMeaningfulActivity(now);
     }
   }
@@ -2529,9 +2735,9 @@ void loop() {
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
 #ifdef WAVESHARE_AMOLED_175
-  // GPIO21 is only a transient CST9217 hint on the tested board. Preserve its
-  // low-level state as a supplemental wake signal; decoded-frame activity from
-  // the throttled reader remains authoritative.
+  // TP_INT (GPIO11) may return HIGH before the latched edge is serviced. Keep
+  // its current LOW level as a supplemental wake signal; decoded-frame
+  // activity from the throttled reader remains authoritative.
   touchWake = display_inactivity::touchWakeRequested(
       currentDisplayMode, touchWake, isTouchWakeSourceActive());
 #endif
@@ -2551,7 +2757,7 @@ void loop() {
   }
 #endif
 
-  bool runLvglHandler = !waitScreenRefresh;
+  bool runLvglHandler = !waitScreenRefresh && !shutdownDeferredNoticeShown;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   constexpr uint32_t kDimmedLvglCadenceMs = 100;
   if (currentDisplayMode == display_inactivity::Mode::DisplayOff) {

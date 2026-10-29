@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +17,7 @@ HEADER = (
 DEVICE_TRANSFER_SOURCE = (
     PROJECT_DIR / "lib/device_transfer/device_transfer_http.cpp"
 ).read_text(encoding="utf-8")
+MAPS_SOURCE = (PROJECT_DIR / "lib/maps/src/maps.cpp").read_text(encoding="utf-8")
 
 
 def method_body(name: str) -> str:
@@ -32,6 +36,84 @@ def method_body(name: str) -> str:
 
 
 class MapActivationHandoffTests(unittest.TestCase):
+    def test_renderer_status_uses_actual_health_and_round_trips_json(self):
+        program = r'''
+#include "map_renderer_status.hpp"
+#include <iostream>
+struct Target {
+  unsigned formatVersion, poiProfileVersion, poiIndexProfileVersion;
+  bool contoursIncluded;
+};
+int main() {
+  for (const auto target : {Target{5,1,1,true}, Target{5,1,1,false},
+                            Target{5,0,1,true}, Target{3,0,0,false}}) {
+    for (bool healthy : {false, true}) {
+      std::string body = "{\"activeRendererFormat\":" + std::to_string(target.formatVersion);
+      map_transfer::appendRendererLayerStatus(body, target, healthy, healthy);
+      std::cout << body << "}\n";
+    }
+  }
+}
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "status.cpp"
+            source.write_text(program)
+            executable = root / "status"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I" + str(PROJECT_DIR / "lib/map_transfer"),
+                            str(source), "-o", str(executable)], check=True)
+            rows = [json.loads(line) for line in subprocess.check_output(
+                [str(executable)], text=True).splitlines()]
+        self.assertEqual(len(rows), 8)
+        for index, row in enumerate(rows):
+            healthy = index % 2 == 1
+            self.assertEqual(row["fontAssetHealthy"], healthy)
+            self.assertEqual(row["poiDataHealthy"], index < 4 and healthy)
+            self.assertEqual(row["poiIndexHealthy"], index < 4 and healthy)
+            self.assertEqual(row["contourLayerIncluded"], index // 2 in (0, 2))
+        self.assertIn("appendRendererLayerStatus(body, activeMap.target,", SOURCE)
+        ble = (PROJECT_DIR / "lib/ble_navigation/ble_navigation.cpp").read_text()
+        self.assertIn("appendRendererLayerStatus(body, activeMap.target,", ble)
+
+    def test_nearby_file_lifetime_is_fenced_before_storage_mutation(self):
+        # Query codecs run in executable host tests. The RTOS worker wiring is
+        # checked here so persistent read handles cannot block FATFS mutation.
+        control = MAPS_SOURCE.split("bool Maps::processPendingStorageControl()", 1)[1].split(
+            "bool Maps::requestVectorMapFolderActivation", 1)[0]
+        activation = MAPS_SOURCE.split("bool Maps::processPendingVectorMapActivation()", 1)[1].split(
+            "bool Maps::takeVectorMapFolderActivationResult", 1)[0]
+        for body, mutation in ((control, "work(context)"),
+                               (activation, "probeVectorMapFolderOnStorageOwner(request.folder)")):
+            self.assertLess(body.index("LockDomain::Storage"),
+                            body.index("pauseNearbySearchOnStorageOwner()"))
+            self.assertLess(body.index("pauseNearbySearchOnStorageOwner()"), body.index(mutation))
+        query = MAPS_SOURCE.split("bool Maps::processPendingNearbySearch()", 1)[1].split(
+            "void Maps::pauseNearbySearchOnStorageOwner()", 1)[0]
+        self.assertLess(query.index("LockDomain::Storage"), query.index("activeNearbyCursor.reset()"))
+        self.assertIn("activeNearbyCursor->step(", query)
+        self.assertNotIn("map_nearby_storage::search(", query)
+        shutdown = MAPS_SOURCE.split("void Maps::renderWorkerLoop()", 1)[1].split(
+            "bool Maps::publishReadyFrame", 1)[0]
+        close = shutdown.index("activeNearbyCursor.reset()")
+        self.assertLess(shutdown.rindex("LockDomain::Storage"), close)
+        self.assertLess(close, shutdown.index("gMapRenderWorkerTaskHandle = nullptr"))
+
+    def test_nearby_slice_is_not_starved_by_continuously_queued_frames(self):
+        worker = MAPS_SOURCE.split("void Maps::renderWorkerLoop()", 1)[1].split(
+            "bool Maps::publishReadyFrame", 1)[0]
+        drain = worker.split("while (takeWorkerRequest(request)) {", 1)[1].split(
+            "if (!nearbySliceRan)", 1)[0]
+        # An outer-loop-only query slice never runs if requests keep arriving.
+        # The worker now advances the real cursor after every rendered frame,
+        # only after shutdown/control fences, with a fallback on idle wakes.
+        slice_at = drain.index("(void)processPendingNearbySearch();")
+        self.assertLess(drain.index("renderWorkerShutdown.load"), slice_at)
+        self.assertLess(drain.rindex("processPendingStorageControl()"), slice_at)
+        self.assertLess(slice_at, drain.index("nearbySliceRan = true;"))
+        self.assertEqual(worker.count("(void)processPendingNearbySearch();"), 2)
+        self.assertIn("if (!nearbySliceRan)\n      (void)processPendingNearbySearch();", worker)
+
     def test_response_completion_uses_internal_operation_owner(self):
         body = method_body("beginDeferredActivation")
         self.assertIn("runMapActivation(ownedActivation", body)
@@ -41,15 +123,42 @@ class MapActivationHandoffTests(unittest.TestCase):
 
     def test_verified_stream_response_closes_before_activation_handoff(self):
         body = method_body("handleInstallStream")
-        close = body.index("client.requestHttpResponseClose();")
+        defer = body.index("deferActivationUntilResponse(")
+        close = body.index("client.requestHttpResponseClose();", defer)
         success = body.index("sendJson(client, 200,", close)
-        defer = body.index("deferActivationUntilResponse(", success)
         self.assertLess(close, success)
-        self.assertLess(success, defer)
+        self.assertLess(defer, close)
         completion = DEVICE_TRANSFER_SOURCE.index(
             "handler->responseDidComplete(request, peerClosedCleanly);"
         )
         self.assertIn("if (keepAlive)", DEVICE_TRANSFER_SOURCE[:completion])
+
+    def test_revocation_is_fenced_before_finalizing_finish(self):
+        body = method_body("handleInstallStream")
+        prepared = body.index("receiver->readyToFinish()")
+        grant = body.index("beginAuthorizedCommit(")
+        finish = body.index("receiver->finish()", grant)
+        self.assertLess(prepared, grant)
+        self.assertLess(grant, finish)
+        self.assertIn("receiver->abort()", body[:finish])
+        # Operation-aware finish produces only prepared metadata and returns
+        # before this legacy implicit grant. It cannot register activation.
+        operation = body[body.index('if (!request.mapOperationID.empty()) {'):
+                         body.index('// Allocate the recovery identity')]
+        self.assertIn('recordPreparedOperation(', operation)
+        self.assertIn('receiver->finish()', operation)
+        self.assertNotIn('beginAuthorizedCommit(', operation)
+        self.assertNotIn('deferActivationUntilResponse(', operation)
+        control = method_body('handleOperationControl')
+        self.assertLess(control.index('beginAuthorizedCommit('), control.index('store.accept(record.identity)'))
+        self.assertLess(control.index('store.accept(record.identity)'), control.index('promotePreparedOperation('))
+
+    def test_both_response_outcomes_preserve_accepted_work(self):
+        for name in ("responseDidComplete", "responseDidAbort"):
+            body = method_body(name)
+            self.assertIn("beginDeferredActivation(deferred,", body)
+            self.assertNotIn("discardUnselectedStreamMap", body)
+            self.assertNotIn("isRequestAuthorized", body)
 
     def test_unsigned_archive_routes_are_rejected(self):
         body = method_body("handleRequest")
@@ -59,7 +168,13 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertNotIn("handlePut(", SOURCE)
 
     def test_dedicated_task_is_reserved_for_signed_stream_boot_recovery(self):
+        # Legacy boot recovery retains its dedicated task. Accepted operation
+        # recovery is serialized through storage control, including promotion.
         self.assertEqual(SOURCE.count("startActivationTask("), 2)
+        boot = method_body("resumePendingActivations")
+        self.assertNotIn("startActivationTask(", boot)
+        self.assertIn("recovery.armed=true", boot)
+        self.assertIn("submitPendingOperationTask()", boot)
         self.assertIn(
             "startActivationTask(",
             method_body("resumePendingStreamActivation"),
@@ -102,7 +217,8 @@ class MapActivationHandoffTests(unittest.TestCase):
             "static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)",
             DEVICE_TRANSFER_SOURCE,
         )
-        self.assertIn("vTaskDeleteWithCaps(nullptr);", DEVICE_TRANSFER_SOURCE)
+        self.assertIn("vTaskDeleteWithCaps(worker);", DEVICE_TRANSFER_SOURCE)
+        self.assertNotIn("vTaskDeleteWithCaps(nullptr);", DEVICE_TRANSFER_SOURCE)
         self.assertNotIn("vTaskDelete(nullptr);", DEVICE_TRANSFER_SOURCE)
 
     def test_activation_progress_yields_to_the_idle_task(self):

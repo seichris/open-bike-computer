@@ -6,10 +6,65 @@
 #include <string>
 
 using ride_diagnostics::http_policy::RouteKind;
+using ride_diagnostics::http_policy::StorageCallPlacement;
+using ride_diagnostics::http_policy::runStorageCall;
+using ride_diagnostics::http_policy::storageCallPlacement;
 using ride_diagnostics::index_policy::CandidateDisposition;
 using ride_diagnostics::index_policy::classifyCandidate;
 
+// Only an FFat read from a PSRAM stack must move. Removable SD stays direct.
+static_assert(storageCallPlacement(true, false) ==
+              StorageCallPlacement::InternalStack);
+static_assert(storageCallPlacement(true, true) == StorageCallPlacement::Direct);
+static_assert(storageCallPlacement(false, false) ==
+              StorageCallPlacement::Direct);
+static_assert(storageCallPlacement(false, true) == StorageCallPlacement::Direct);
+
+template <typename Step> void runStep(void *context) {
+  (*static_cast<Step *>(context))();
+}
+
+void checkStorageCallPlacement() {
+  bool stackInternal = false;
+  unsigned dispatches = 0;
+  unsigned steps = 0;
+  bool ffat = false;
+  auto owner = [&](void (*call)(void *), void *context) {
+    ++dispatches;
+    const bool caller = stackInternal;
+    stackInternal = true;
+    call(context);
+    stackInternal = caller;
+    return true;
+  };
+  auto refusingOwner = [&](void (*)(void *), void *) {
+    ++dispatches;
+    return false;
+  };
+  auto step = [&] {
+    // Stand-in for a flash read: never on a PSRAM stack while FFat is mounted.
+    assert(!ffat || stackInternal);
+    ++steps;
+  };
+  void (*call)(void *) = runStep<decltype(step)>;
+
+  assert(runStorageCall(ffat, stackInternal, owner, call, &step));
+  assert(steps == 1 && dispatches == 0);
+
+  ffat = true;
+  assert(runStorageCall(ffat, stackInternal, owner, call, &step));
+  assert(steps == 2 && dispatches == 1 && !stackInternal);
+
+  assert(!runStorageCall(ffat, stackInternal, refusingOwner, call, &step));
+  assert(steps == 2 && dispatches == 2);
+
+  stackInternal = true;
+  assert(runStorageCall(ffat, stackInternal, refusingOwner, call, &step));
+  assert(steps == 3 && dispatches == 2);
+}
+
 int main() {
+  checkStorageCallPlacement();
   constexpr char prefix[] = "/device-diagnostics/v1/";
   const auto status = ride_diagnostics::http_policy::parseRoute(
       "GET", std::string(prefix) + "status", prefix);

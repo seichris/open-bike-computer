@@ -1,7 +1,11 @@
 #include "ride_diagnostics.hpp"
+#include "live_tail_v2.hpp"
+#include <new>
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
+#include "catalog_v2.hpp"
+#include <mbedtls/sha256.h>
 
 #include <Arduino.h>
 #include <atomic>
@@ -9,15 +13,18 @@
 #include <dirent.h>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include <esp_attr.h>
+#include <esp_random.h>
 #endif
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../storage/storage.hpp"
 #include "../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
+#include "../utils/src/task_data_placement.hpp"
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../boot_diagnostics/boot_diagnostics.hpp"
@@ -46,12 +53,14 @@ bool recordInternal(Level level, const char *category, const char *event,
 
 namespace {
 
-bool flushFaultCapsulesIfPossible();
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff = false);
+uint16_t queuedDepth();
 void pruneRetention();
 bool parseUnsigned(const char *value, uint32_t &out);
 
 struct QueuedEvent {
   uint32_t sequence;
+  uint32_t enqueuedAtMs;
   uint16_t length;
   bool critical;
   bool rotateBeforeWrite;
@@ -88,12 +97,16 @@ FaultCapsuleState retainedFaultCapsule = {};
 FaultCapsuleState currentFaultCapsule = {};
 FaultCapsuleState pendingFaultCapsule = {};
 bool pendingFaultCapsuleValid = false;
+std::atomic<bool> faultCapsulesInitialized{false};
 portMUX_TYPE faultCapsuleMux = portMUX_INITIALIZER_UNLOCKED;
 
 constexpr std::size_t kMaximumRetainedFiles = 256;
 constexpr std::size_t kFilePruneBatch = 16;
 
 Storage *storage = nullptr;
+std::atomic<bool> shutdownSealStarted{false};
+std::atomic<bool> shutdownSealReady{false};
+live_v2::Ring *liveRing = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -126,7 +139,13 @@ SemaphoreHandle_t producerMutex = nullptr;
 SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
 SemaphoreHandle_t faultCapsuleFlushMutex = nullptr;
-FILE *activeFile = nullptr;
+// A raw descriptor, never a FILE: newlib aborts in fopen() when it cannot
+// allocate a stream lock, and the writer must keep failing safely under
+// memory pressure.
+int activeDescriptor = -1;
+mbedtls_sha256_context activeHash{};
+bool activeHashValid = false;
+uint32_t activeFirstSequence = 0, activeLastSequence = 0;
 uint32_t activeFileBytes = 0;
 uint32_t activeChunk = 1;
 std::atomic<uint32_t> activeChunkSnapshot{1};
@@ -138,25 +157,57 @@ std::atomic<uint32_t> enqueued{0};
 std::atomic<uint32_t> written{0};
 std::atomic<bool> retentionPrunedThisBoot{false};
 std::atomic<uint32_t> dropped{0};
+using queue_policy::DropReason;
+constexpr std::size_t kDropReasonCount =
+    static_cast<std::size_t>(DropReason::Count);
+std::atomic<uint32_t> dropsByReason[kDropReasonCount]{};
+uint32_t lastReportedDrops[kDropReasonCount]{};
+uint32_t lastLossSummaryMs = 0;
+
+void noteDrop(DropReason reason) {
+  dropped.fetch_add(1, std::memory_order_relaxed);
+  dropsByReason[static_cast<std::size_t>(reason)].fetch_add(
+      1, std::memory_order_relaxed);
+}
 std::atomic<uint32_t> storageErrors{0};
 std::atomic<uint32_t> faultCapsuleGeneration{0};
 std::atomic<uint32_t> faultCapsuleQueuedGeneration{0};
 std::atomic<uint32_t> pendingFaultCapsuleQueuedChecksum{0};
 std::atomic<uint32_t> currentFaultCapsuleQueuedChecksum{0};
 std::atomic<uint16_t> maxQueueDepth{0};
+// Boot-local high-water timings: backlog/scheduling versus the writer's full
+// synchronous I/O step (including checkpoint, rotation and retention work).
+std::atomic<uint32_t> maximumWriterDelayMs{0};
+std::atomic<uint32_t> maximumWriteDurationMs{0};
+
+void noteMaximum(std::atomic<uint32_t> &maximum, uint32_t value) {
+  uint32_t previous = maximum.load(std::memory_order_relaxed);
+  while (value > previous && !maximum.compare_exchange_weak(
+             previous, value, std::memory_order_relaxed)) {
+  }
+}
+
+void noteMinimum(std::atomic<uint32_t> &minimum, uint32_t value) {
+  uint32_t previous = minimum.load(std::memory_order_relaxed);
+  while (value < previous && !minimum.compare_exchange_weak(
+             previous, value, std::memory_order_relaxed)) {
+  }
+}
 // When the reserved critical lane overflows, critical records may spill into
-// the normal queue. While any spill remains, normal producers are rejected so
-// noncritical records can never be appended behind a critical record and make
-// head eviction unsafe.
+// the normal queue. Count protected entries so a full mixed queue can evict
+// its oldest normal entry without sacrificing a spilled critical record.
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
+policy_v2::State runtimeCapturePolicy{};
+uint32_t lastMemorySampleMs = 0;
 #if DETAILED_RIDE_DIAGNOSTICS
 std::atomic<bool> detailedCapture{false};
 std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
 #endif
 std::atomic<bool> captureBoundaryPending{false};
 std::atomic<uint32_t> lastMarkerSequence{0};
+control::MarkerReplayReceipt lastMarkerReceipt;
 char activePath[192] = {};
 std::atomic<bool> lastStorageAvailable{false};
 std::atomic<bool> sealRequested{false};
@@ -166,14 +217,29 @@ std::atomic<transfer_policy::SealPreparation> sealPreparationResult{
 std::atomic<bool> clockAnchorEmitted{false};
 std::atomic<bool> checkpointRequested{false};
 std::atomic<bool> storageTransitionRequested{false};
+std::atomic<bool> storageTransitionIdle{false};
 std::atomic<uint32_t> retentionLeaseDeadlineMs{0};
 SemaphoreHandle_t retentionMutex = nullptr;
 StorageRecoveryAllowedProbe storageRecoveryAllowedProbe = nullptr;
 uint32_t runtimeBootSequence = 0;
+uint32_t storageBootFloor = 1;
+uint32_t transitionMountGeneration = 0;
 uint32_t captureGeneration = 0;
 uint32_t lastCheckpointMs = 0;
-ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
-ChunkFile filePruneCandidates[kFilePruneBatch] = {};
+// Retention scratch is used only by the writer task's pruning, never from an
+// ISR, a flash-cache-disabled region or a callback, so it lives in PSRAM.
+BICINO_TASK_DATA ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
+BICINO_TASK_DATA ChunkFile filePruneCandidates[kFilePruneBatch] = {};
+// Writer memory admission. Deferred I/O is reported, never silent: episodes,
+// the longest one and the lowest DMA headroom that caused a deferral.
+std::atomic<uint32_t> memoryDeferrals{0};
+std::atomic<uint32_t> maximumMemoryDeferralMs{0};
+std::atomic<uint32_t> memoryDeferralMinimumDmaFree{UINT32_MAX};
+std::atomic<uint32_t> memoryDeferralMinimumDmaLargest{UINT32_MAX};
+uint32_t lastReportedMemoryDeferrals = 0;
+uint32_t lastReportedMemoryDeferralMs = 0;
+uint32_t lastReportedMemoryDmaFree = UINT32_MAX;
+uint32_t lastReportedMemoryDmaLargest = UINT32_MAX;
 
 struct SemaphoreGuard {
   explicit SemaphoreGuard(SemaphoreHandle_t handleRef) : handle(handleRef) {
@@ -196,7 +262,17 @@ struct ChunkFileScan {
   std::size_t storedCount = 0;
   std::size_t totalCount = 0;
   std::size_t pruneCandidateCount = 0;
+  bool interrupted = false;
 };
+
+// A snapshot can arrive after a maintenance pass has started. Check at every
+// filesystem boundary, not just on entry; an incomplete inventory cannot be
+// used to delete files. The current SD transaction still has to return.
+bool retentionScanInterrupted() {
+  return retention_policy::maintenanceMustYield(
+      millis(), retentionLeaseDeadlineMs.load(std::memory_order_acquire),
+      sealRequested.load(std::memory_order_acquire));
+}
 
 bool chunkFileOlder(const ChunkFile &left, const ChunkFile &right) {
   if (left.boot != right.boot)
@@ -221,7 +297,7 @@ void considerFilePruneCandidate(const ChunkFile &file,
 }
 
 bool removeChunkFile(const ChunkFile &file) {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return false;
   char path[224] = {};
   snprintf(path, sizeof(path),
@@ -229,11 +305,17 @@ bool removeChunkFile(const ChunkFile &file) {
            diagnosticsRoot(),
            static_cast<unsigned long>(file.boot),
            static_cast<unsigned long>(file.chunk));
-  return storage->remove(path);
+  if (!storage->remove(path)) return false;
+  char catalog[catalog_v2::kPathBytes] = {};
+  if (catalog_v2::catalogPath(path, catalog, sizeof(catalog)))
+    (void)storage->remove(catalog);
+  if (catalog_v2::catalogPath(path, catalog, sizeof(catalog), true))
+    (void)storage->remove(catalog);
+  return true;
 }
 
 void removeEmptyBootDirectories() {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return;
   char bootsRoot[192] = {};
   snprintf(bootsRoot, sizeof(bootsRoot),
@@ -242,17 +324,24 @@ void removeEmptyBootDirectories() {
   if (boots == nullptr)
     return;
   const uint32_t currentBoot = bootSequence.load();
-  while (struct dirent *entry = readdir(boots)) {
+  while (!retentionScanInterrupted()) {
+    struct dirent *entry = readdir(boots);
+    if (entry == nullptr || retentionScanInterrupted()) break;
     uint32_t boot = 0;
     if (!parseUnsigned(entry->d_name, boot) || boot == currentBoot)
       continue;
     char path[224] = {};
-    snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path))
+      continue;
+    if (retentionScanInterrupted()) break;
     DIR *directory = opendir(path);
     if (directory == nullptr)
       continue;
     bool empty = true;
-    while (struct dirent *child = readdir(directory)) {
+    while (!retentionScanInterrupted()) {
+      struct dirent *child = readdir(directory);
+      if (child == nullptr) break;
       if (strcmp(child->d_name, ".") != 0 &&
           strcmp(child->d_name, "..") != 0) {
         empty = false;
@@ -260,7 +349,7 @@ void removeEmptyBootDirectories() {
       }
     }
     closedir(directory);
-    if (empty)
+    if (empty && !retentionScanInterrupted())
       (void)storage->rmdir(path);
   }
   closedir(boots);
@@ -268,6 +357,10 @@ void removeEmptyBootDirectories() {
 
 const char *levelName(Level level) {
   switch (level) {
+  case Level::Trace:
+    return "trace";
+  case Level::Fatal:
+    return "fatal";
   case Level::Debug:
     return "debug";
   case Level::Info:
@@ -364,14 +457,17 @@ void initializeFaultCapsules() {
 #endif
   sealFaultCapsule(currentFaultCapsule);
   portEXIT_CRITICAL(&faultCapsuleMux);
+  faultCapsulesInitialized.store(true, std::memory_order_release);
 }
 
 void updateFaultCapsule(Level level, const char *category, const char *event,
                         bool storageFailure) {
+  // Maintenance can emit before begin. Never replace retained previous-boot
+  // evidence with the default boot identity.
+  if (!faultCapsulesInitialized.load(std::memory_order_acquire)) return;
   const uint32_t selectedBootSequence = bootSequence.load();
   portENTER_CRITICAL(&faultCapsuleMux);
-  if (!validFaultCapsuleEnvelope(currentFaultCapsule) ||
-      currentFaultCapsule.bootSequence != selectedBootSequence) {
+  if (!validFaultCapsuleEnvelope(currentFaultCapsule)) {
     memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
     currentFaultCapsule.bootSequence = selectedBootSequence;
   }
@@ -382,7 +478,7 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   currentFaultCapsule.eventCount++;
   if (storageFailure)
     currentFaultCapsule.storageErrorCount++;
-  if (level == Level::Warning || level == Level::Error || storageFailure) {
+  if (level >= Level::Warning || storageFailure) {
     if (category != nullptr) {
       strncpy(currentFaultCapsule.lastCriticalCategory, category,
               sizeof(currentFaultCapsule.lastCriticalCategory) - 1);
@@ -398,7 +494,8 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   }
   currentFaultCapsule.droppedCount = dropped.load();
   sealFaultCapsule(currentFaultCapsule);
-  retainedFaultCapsule = currentFaultCapsule;
+  if (!pendingFaultCapsuleValid)
+    retainedFaultCapsule = currentFaultCapsule;
   faultCapsuleGeneration.fetch_add(1, std::memory_order_release);
   portEXIT_CRITICAL(&faultCapsuleMux);
 }
@@ -418,13 +515,17 @@ void clearFaultCapsule(uint32_t capsuleBoot, uint32_t capsuleChecksum) {
     // written by the current boot while the old record was queued.
     if (faultCapsuleIdentityMatches(retainedFaultCapsule, capsuleBoot,
                                     capsuleChecksum)) {
-      memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
+      if (validFaultCapsule(currentFaultCapsule))
+        retainedFaultCapsule = currentFaultCapsule;
+      else
+        memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
     }
   }
   if (faultCapsuleIdentityMatches(currentFaultCapsule, capsuleBoot,
                                   capsuleChecksum)) {
     memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
-    memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
+    if (!pendingFaultCapsuleValid)
+      memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
     currentFaultCapsuleQueuedChecksum.store(0, std::memory_order_release);
   }
   portEXIT_CRITICAL(&faultCapsuleMux);
@@ -465,9 +566,9 @@ uint32_t persistentBootSequence(uint32_t requested) {
 bool initializePersistentBootSequenceIfNeeded() {
   if (persistentBootSequenceReady.load(std::memory_order_acquire))
     return true;
-  if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
+  if (storage == nullptr || !storage->getDiagnosticsSdLoaded() || storageBootFloor == 0)
     return false;
-  const uint32_t selected = persistentBootSequence(runtimeBootSequence);
+  const uint32_t selected = persistentBootSequence(std::max(runtimeBootSequence, storageBootFloor));
   if (selected == 0)
     return false;
   bootSequence.store(selected, std::memory_order_release);
@@ -482,7 +583,7 @@ enum class ActiveFileCloseResult : uint8_t {
 };
 
 ActiveFileCloseResult closeActiveFile() {
-  if (activeFile == nullptr)
+  if (activeDescriptor < 0)
     return ActiveFileCloseResult::Ready;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
@@ -490,17 +591,19 @@ ActiveFileCloseResult closeActiveFile() {
       runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
       nextSequence.load(std::memory_order_relaxed));
 #endif
-  const int flushResult =
-      storage != nullptr ? storage->flush(activeFile) : fflush(activeFile);
-  const int closeResult =
-      storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
+  const int flushResult = storage != nullptr
+                              ? storage->syncDescriptor(activeDescriptor)
+                              : ::fsync(activeDescriptor);
+  const int closeResult = storage != nullptr
+                              ? storage->closeDescriptor(activeDescriptor)
+                              : ::close(activeDescriptor);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting,
       nextSequence.load(std::memory_order_relaxed));
 #endif
-  activeFile = nullptr;
+  activeDescriptor = -1;
   if (flushResult != 0)
     return ActiveFileCloseResult::FlushFailed;
   if (closeResult != 0)
@@ -513,6 +616,18 @@ ActiveFileCloseResult closeAndAdvanceActiveChunk() {
   if (activePath[0] != '\0')
     strncpy(closingPath, activePath, sizeof(closingPath) - 1);
   const ActiveFileCloseResult closeResult = closeActiveFile();
+  // Hash state belongs to this writer and includes only complete successful
+  // writes. Publish a descriptor only after the data file's close succeeded.
+  if (closeResult == ActiveFileCloseResult::Ready && activeHashValid && activeFileBytes > 0) {
+    catalog_v2::Descriptor descriptor;
+    descriptor.boot = bootSequence.load(); descriptor.chunk = activeChunk;
+    descriptor.bytes = activeFileBytes;
+    descriptor.firstSequence = activeFirstSequence; descriptor.lastSequence = activeLastSequence;
+    if (mbedtls_sha256_finish(&activeHash, descriptor.digest.data()) == 0)
+      (void)catalog_v2::write(*storage, closingPath, descriptor);
+  }
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   // stdio may buffer a short capture entirely until fclose(). Determine
   // whether the chunk exists only after the close has flushed those bytes.
   const bool hadActiveChunk = closingPath[0] != '\0' &&
@@ -557,12 +672,12 @@ bool ensurePaths() {
 }
 
 bool openActiveFile() {
-  if (activeFile != nullptr)
+  if (activeDescriptor >= 0)
     return true;
   if (!ensurePaths())
     return false;
-  // Preserve any legacy/failed chunk that already reached the hard limit.
-  // Never append to it: the transfer contract rejects oversized chunks.
+  // Every newly opened chunk belongs to exactly one stream. Preserve any
+  // existing bytes, including a shorter legacy/uncertain chunk, without appending.
   for (std::size_t attempt = 0; attempt < kMaximumRetainedFiles; ++attempt) {
     snprintf(activePath, sizeof(activePath),
              "%s/BICINO/DIAGNOSTICS/v1/boots/%lu/events-%06lu.jsonl",
@@ -570,15 +685,20 @@ bool openActiveFile() {
              static_cast<unsigned long>(bootSequence.load()),
              static_cast<unsigned long>(activeChunk));
     const uint64_t existingBytes = storage->size(activePath);
-    if (existingBytes >= kChunkBytes) {
+    if (existingBytes > 0) {
       ++activeChunk;
       activeChunkSnapshot.store(activeChunk);
       continue;
     }
-    activeFile = storage->open(activePath, "a");
-    if (activeFile == nullptr)
+    activeDescriptor =
+        storage->openDescriptor(activePath, O_WRONLY | O_CREAT | O_APPEND);
+    if (activeDescriptor < 0)
       return false;
     activeFileBytes = static_cast<uint32_t>(existingBytes);
+    mbedtls_sha256_free(&activeHash);
+    mbedtls_sha256_init(&activeHash);
+    // Only a fresh empty file can begin a new writer-owned hash.
+    activeHashValid = existingBytes == 0 && mbedtls_sha256_starts(&activeHash, 0) == 0;
     return true;
   }
   activePath[0] = '\0';
@@ -587,6 +707,8 @@ bool openActiveFile() {
 }
 
 void abandonActiveChunkAfterUncertainWrite() {
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   const bool hadPath = activePath[0] != '\0';
   (void)closeActiveFile();
   activePath[0] = '\0';
@@ -601,6 +723,14 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
                                 ChunkFile *pruneCandidates,
                                 std::size_t pruneCandidateCapacity) {
   ChunkFileScan scan;
+  auto shouldStop = [&scan]() {
+    scan.interrupted = scan.interrupted || retentionScanInterrupted();
+    return scan.interrupted;
+  };
+  if (shouldStop()) {
+    scan.interrupted = true;
+    return scan;
+  }
   if (files == nullptr || capacity == 0 || storage == nullptr ||
       !storage->getDiagnosticsSdLoaded()) {
     return scan;
@@ -614,17 +744,26 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
 
   const uint32_t selectedBoot = bootSequence.load();
   const uint32_t selectedActiveChunk = activeChunk;
-  while (struct dirent *bootEntry = readdir(boots)) {
+  while (!shouldStop()) {
+    struct dirent *bootEntry = readdir(boots);
+    if (bootEntry == nullptr || shouldStop()) break;
     uint32_t boot = 0;
     if ((bootEntry->d_type == DT_DIR || bootEntry->d_type == DT_UNKNOWN) &&
         parseUnsigned(bootEntry->d_name, boot)) {
       char bootPath[192] = {};
-      snprintf(bootPath, sizeof(bootPath),
-               "%s/%s", bootsRoot, bootEntry->d_name);
+      const int bootPathLength = snprintf(bootPath, sizeof(bootPath),
+                                           "%s/%s", bootsRoot, bootEntry->d_name);
+      if (bootPathLength < 0 || static_cast<std::size_t>(bootPathLength) >= sizeof(bootPath)) {
+        scan.interrupted = true;
+        break;
+      }
+      if (shouldStop()) break;
       DIR *bootDirectory = opendir(bootPath);
       if (bootDirectory == nullptr)
         continue;
-      while (struct dirent *chunkEntry = readdir(bootDirectory)) {
+      while (!shouldStop()) {
+        struct dirent *chunkEntry = readdir(bootDirectory);
+        if (chunkEntry == nullptr || shouldStop()) break;
         const char *name = chunkEntry->d_name;
         if (strncmp(name, "events-", 7) != 0 ||
             strlen(name) < 14 ||
@@ -643,8 +782,13 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
         file.boot = boot;
         file.chunk = chunk;
         char path[224] = {};
-        snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+          scan.interrupted = true;
+          break;
+        }
         file.bytes = static_cast<uint32_t>(storage->size(path));
+        if (shouldStop()) break;
         struct stat metadata = {};
         file.modifiedAt = ::stat(path, &metadata) == 0 ? metadata.st_mtime : 0;
         if (scan.storedCount < capacity)
@@ -662,23 +806,23 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
     }
   }
   closedir(boots);
+  (void)shouldStop();
   std::sort(files, files + scan.storedCount, chunkFileOlder);
   return scan;
 }
 
 void pruneRetention() {
   SemaphoreGuard retentionGuard(retentionMutex);
-  const uint32_t leaseDeadline =
-      retentionLeaseDeadlineMs.load(std::memory_order_acquire);
-  if (retention_policy::snapshotLeaseActive(millis(), leaseDeadline))
+  if (retentionScanInterrupted())
     return;
-  if (leaseDeadline != 0)
-    retentionLeaseDeadlineMs.store(0, std::memory_order_release);
+  // Do not clear an expired deadline here: a concurrent snapshot may have
+  // installed a newer lease since the read.
   std::size_t count = 0;
   while (true) {
     const ChunkFileScan scan = collectChunkFiles(
         retentionFiles, kMaximumRetainedFiles, filePruneCandidates,
         kFilePruneBatch);
+    if (scan.interrupted || retentionScanInterrupted()) return;
     if (scan.totalCount <= kMaximumRetainedFiles) {
       count = scan.storedCount;
       break;
@@ -686,8 +830,10 @@ void pruneRetention() {
     const std::size_t deleteCount = std::min(
         scan.totalCount - kMaximumRetainedFiles, scan.pruneCandidateCount);
     bool removedAny = false;
-    for (std::size_t index = 0; index < deleteCount; ++index)
+    for (std::size_t index = 0; index < deleteCount; ++index) {
+      if (retentionScanInterrupted()) return;
       removedAny = removeChunkFile(filePruneCandidates[index]) || removedAny;
+    }
     if (!removedAny)
       return;
     vTaskDelay(1);
@@ -709,6 +855,7 @@ void pruneRetention() {
     totalBytes += retentionFiles[index].bytes;
 
   for (std::size_t index = 0; index < count; ++index) {
+    if (retentionScanInterrupted()) return;
     const ChunkFile &file = retentionFiles[index];
     const bool isActive = file.boot == bootSequence.load() &&
                           file.chunk == activeChunk;
@@ -746,7 +893,21 @@ bool prepareChunkWriteReserve() {
   return hasChunkWriteReserve();
 }
 
+struct FaultCapsuleWriteReceipt {
+  const QueuedEvent &event;
+  bool durable = false;
+  ~FaultCapsuleWriteReceipt() {
+    if (durable || !event.clearsFaultCapsule) return;
+    uint32_t expected = event.faultCapsuleChecksum;
+    pendingFaultCapsuleQueuedChecksum.compare_exchange_strong(expected, 0);
+    expected = event.faultCapsuleChecksum;
+    currentFaultCapsuleQueuedChecksum.compare_exchange_strong(expected, 0);
+    faultCapsuleQueuedGeneration.store(UINT32_MAX, std::memory_order_release);
+  }
+};
+
 bool writeQueuedEvent(const QueuedEvent &event) {
+  FaultCapsuleWriteReceipt receipt{event};
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
@@ -769,7 +930,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
   }
-  if (activeFile == nullptr && !prepareChunkWriteReserve()) {
+  if (activeDescriptor < 0 && !prepareChunkWriteReserve()) {
     storageErrors.fetch_add(1);
     updateFaultCapsule(Level::Error, "storage", "free_space_reserved", true);
     return false;
@@ -801,9 +962,9 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
   }
-  const size_t result = storage->write(activeFile,
-                                       reinterpret_cast<const uint8_t *>(event.line),
-                                       event.length);
+  const size_t result = storage->writeDescriptor(
+      activeDescriptor, reinterpret_cast<const uint8_t *>(event.line),
+      event.length);
   if (result != event.length) {
     abandonActiveChunkAfterUncertainWrite();
     storage->markDiagnosticsSdUnavailable();
@@ -811,16 +972,22 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     updateFaultCapsule(Level::Error, "storage", "write_failed", true);
     return false;
   }
+  if (activeFileBytes == 0) activeFirstSequence = event.sequence;
+  activeLastSequence = event.sequence;
+  if (activeHashValid && mbedtls_sha256_update(&activeHash,
+      reinterpret_cast<const uint8_t *>(event.line), result) != 0)
+    activeHashValid = false;
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
-  if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
+  if (event.critical || event.clearsFaultCapsule ||
+      static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
     runtime_watchdog_diagnostics::notePhase(
         runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
         event.sequence);
 #endif
-    if (storage->flush(activeFile) != 0) {
+    if (storage->syncDescriptor(activeDescriptor) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
       storageErrors.fetch_add(1);
@@ -839,10 +1006,6 @@ bool writeQueuedEvent(const QueuedEvent &event) {
                                               alreadyPrunedThisBoot)) {
     pruneRetention();
   }
-  if (event.clearsFaultCapsule) {
-    clearFaultCapsule(event.faultCapsuleBoot,
-                      event.faultCapsuleChecksum);
-  }
   if (event.rotateAfterWrite) {
     const ActiveFileCloseResult closeResult = closeAndAdvanceActiveChunk();
     if (closeResult != ActiveFileCloseResult::Ready) {
@@ -853,13 +1016,28 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
   }
+  receipt.durable = true;
+  if (event.clearsFaultCapsule) {
+    clearFaultCapsule(event.faultCapsuleBoot,
+                      event.faultCapsuleChecksum);
+  }
   if (faultCapsuleGeneration.load(std::memory_order_acquire) !=
       faultCapsuleQueuedGeneration.load(std::memory_order_acquire))
     (void)flushFaultCapsulesIfPossible();
   return true;
 }
 
-bool flushFaultCapsulesIfPossible() {
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff) {
+  // Current-boot snapshots are cumulative. Drain real traffic before publishing
+  // them, rather than turning each new drop into another critical write/sync;
+  // the snapshot and generation stay eligible until admission succeeds.
+  // A previous-boot capsule is one-shot evidence: until its checked write
+  // clears it, the single RTC slot cannot also retain this boot's losses, so
+  // it is admitted even under sustained load. A seal must admit both before
+  // publishing its cutoff, then waits only for a bounded drain to that cutoff.
+  // A storage transition parks ordinary draining before its explicit seal.
+  const bool coalesceCurrent = !beforeSealCutoff && queuedDepth() != 0 &&
+      !storageTransitionRequested.load(std::memory_order_acquire);
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded() ||
       faultCapsuleFlushMutex == nullptr ||
       xSemaphoreTake(faultCapsuleFlushMutex, 0) != pdTRUE)
@@ -887,11 +1065,14 @@ bool flushFaultCapsulesIfPossible() {
     char fields[512] = {};
     if (!formatFaultCapsuleFields(capsule, fields, sizeof(fields)))
       return false;
+    queuedChecksum.store(capsule.checksum, std::memory_order_release);
     const bool queued = recordInternal(
         Level::Warning, "storage", "storage_gap", fields, true,
         capsule.bootSequence, capsule.eventCount, capsule.checksum);
-    if (queued)
-      queuedChecksum.store(capsule.checksum, std::memory_order_release);
+    if (!queued) {
+      uint32_t expected = capsule.checksum;
+      queuedChecksum.compare_exchange_strong(expected, 0);
+    }
     return queued;
   };
 
@@ -899,7 +1080,8 @@ bool flushFaultCapsulesIfPossible() {
   if (hasPending)
     queuedAll = flush(pending, pendingFaultCapsuleQueuedChecksum) && queuedAll;
   if (hasCurrent)
-    queuedAll = flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
+    queuedAll = !coalesceCurrent &&
+                flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
   if (queuedAll)
     faultCapsuleQueuedGeneration.store(generation,
                                        std::memory_order_release);
@@ -974,13 +1156,64 @@ bool completeSealIfReady() {
   return true;
 }
 
+storage_policy::MemoryHeadroom backgroundIoHeadroom() {
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)),
+  };
+}
+
+struct MemoryDeferral {
+  bool active = false;
+  uint32_t startedMs = 0;
+  storage_policy::MemoryHeadroom lowest{};
+};
+
+// One episode spans consecutive writer passes whose medium I/O was refused
+// for memory. Its end is printed; process() records the cumulative counts
+// once the queue drains, so a pause is evidence rather than a silent gap.
+void updateMemoryDeferral(MemoryDeferral &deferral, bool refused,
+                          storage_policy::MemoryHeadroom headroom,
+                          uint32_t nowMs) {
+  if (refused) {
+    noteMinimum(memoryDeferralMinimumDmaFree, headroom.dmaFree);
+    noteMinimum(memoryDeferralMinimumDmaLargest, headroom.dmaLargest);
+    if (!deferral.active) {
+      deferral.active = true;
+      deferral.startedMs = nowMs;
+      deferral.lowest = headroom;
+      memoryDeferrals.fetch_add(1, std::memory_order_relaxed);
+    }
+    deferral.lowest.dmaFree = std::min(deferral.lowest.dmaFree, headroom.dmaFree);
+    deferral.lowest.dmaLargest =
+        std::min(deferral.lowest.dmaLargest, headroom.dmaLargest);
+    return;
+  }
+  if (!deferral.active)
+    return;
+  deferral.active = false;
+  const uint32_t durationMs = static_cast<uint32_t>(nowMs - deferral.startedMs);
+  noteMaximum(maximumMemoryDeferralMs, durationMs);
+  // Format on the stack: Print::printf mallocs for lines over 63 bytes.
+  char line[112] = {};
+  snprintf(line, sizeof(line),
+           "RIDE_DIAGNOSTICS: memory_deferred durationMs=%lu dmaFree=%lu "
+           "dmaLargest=%lu queued=%u",
+           static_cast<unsigned long>(durationMs),
+           static_cast<unsigned long>(deferral.lowest.dmaFree),
+           static_cast<unsigned long>(deferral.lowest.dmaLargest),
+           static_cast<unsigned>(queuedDepth()));
+  Serial.println(line);
+}
+
 void writerTask(void *) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting);
 #endif
-  uint32_t lastMountAttemptMs = 0;
+  storage_policy::RecoveryBackoff recovery;
+  MemoryDeferral deferral;
   lastStorageAvailable.store(
       storage != nullptr && storage->getDiagnosticsSdLoaded(),
       std::memory_order_release);
@@ -991,13 +1224,44 @@ void writerTask(void *) {
     QueueHandle_t selected = nullptr;
     bool hasNext = false;
     bool dequeued = false;
+    bool lockMissed = false;
     const bool transitionPaused =
         storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire);
-    if (queueMutationMutex != nullptr &&
-        xSemaphoreTake(queueMutationMutex, 0) == pdTRUE) {
+    // Medium I/O borrows internal DMA memory (see storage_policy). Sample it
+    // at most once per pass, only for I/O this pass would start, and never
+    // inside the producers' queue fence.
+    storage_policy::MemoryHeadroom headroom{};
+    bool sampled = false;
+    uint32_t sampledAtMs = 0;
+    const auto ioAdmitted = [&headroom, &sampled, &sampledAtMs]() {
+      if (!sampled) {
+        headroom = backgroundIoHeadroom();
+        sampledAtMs = millis();
+        sampled = true;
+      }
+      return storage_policy::admitsBackgroundIo(headroom);
+    };
+    // A healthy recorder writes the next record now. An unavailable one only
+    // counts the record's loss, which needs no memory.
+    const bool recorderHealthy =
+        storage != nullptr && storage->getDiagnosticsSdLoaded();
+    const bool recordsWaiting = !transitionPaused && queuedDepth() != 0;
+    const bool memoryWait = recorderHealthy && recordsWaiting && !ioAdmitted();
+    const bool mayDequeue =
+        !transitionPaused && (!recorderHealthy || (recordsWaiting && !memoryWait));
+    if (memoryWait) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+      runtime_watchdog_diagnostics::heartbeat(
+          runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
+#endif
+      // Records stay queued; overflow is counted as queue_full. Producer
+      // notifications cannot shorten this wait into a sampling loop.
+      vTaskDelay(pdMS_TO_TICKS(storage_policy::kBackgroundIoRetryMs));
+    } else if (queueMutationMutex != nullptr &&
+        xSemaphoreTake(queueMutationMutex, 1) == pdTRUE) {
       hasNext = peekNextEvent(event, selected);
-      if (hasNext && !transitionPaused &&
+      if (hasNext && mayDequeue &&
           xQueueReceive(selected, &event, 0) == pdTRUE) {
         if (selected == normalQueue && event.critical) {
           const uint16_t spilled =
@@ -1010,44 +1274,65 @@ void writerTask(void *) {
         dequeued = true;
       }
       xSemaphoreGive(queueMutationMutex);
+    } else if (queueMutationMutex != nullptr) {
+      // An expired tick-bounded take proves nothing about queue depth, and a
+      // producer that then finds the queue full does not notify. Retry through
+      // the next bounded take instead of sleeping beside a backlog.
+      lockMissed = true;
     }
     if (dequeued) {
+      const uint32_t startedMs = millis();
+      noteMaximum(maximumWriterDelayMs,
+                  static_cast<uint32_t>(startedMs - event.enqueuedAtMs));
       writeQueuedEvent(event);
+      noteMaximum(maximumWriteDurationMs,
+                  static_cast<uint32_t>(millis() - startedMs));
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
 #endif
-    } else if (!hasNext || transitionPaused) {
+    } else if (!memoryWait &&
+               ((!hasNext && !lockMissed) || transitionPaused)) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
 #endif
-      vTaskDelay(pdMS_TO_TICKS(50));
+      // A notification is latched even if admission races this wait. Retain a
+      // bounded timeout for checkpoint/recovery/heartbeat housekeeping.
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
 
     if (storage == nullptr)
       continue;
     // A map-storage remount owns the backend after the seal completes. Keep
-    // newly queued records in RAM until the caller resumes the writer so no
-    // FILE can be opened between the seal and SD.end()/FFat.end().
+    // ordinary admission fenced until the caller resumes the writer so no
+    // file can be opened between the seal and SD.end()/FFat.end().
     if (storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire)) {
+      if (!storageTransitionIdle.load(std::memory_order_acquire)) {
+        (void)closeAndAdvanceActiveChunk();
+        storageTransitionIdle.store(true, std::memory_order_release);
+      }
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
     const uint32_t nowMs = millis();
-    if (activeFile != nullptr &&
-        (checkpointRequested.exchange(false) ||
-         static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {
+    // A deferred checkpoint keeps its request; the written bytes stay in the
+    // open file until headroom returns.
+    if (activeDescriptor >= 0 &&
+        (checkpointRequested.load(std::memory_order_acquire) ||
+         static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) &&
+        ioAdmitted()) {
+      checkpointRequested.store(false, std::memory_order_release);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      if (storage->flush(activeFile) == 0) {
+      if (storage->syncDescriptor(activeDescriptor) == 0) {
         lastCheckpointMs = nowMs;
       } else {
         abandonActiveChunkAfterUncertainWrite();
@@ -1062,18 +1347,25 @@ void writerTask(void *) {
           nextSequence.load(std::memory_order_relaxed));
 #endif
     }
-    const bool recoveryAllowed = storageRecoveryAllowedProbe == nullptr ||
-                                 storageRecoveryAllowedProbe();
-    if (recoveryAllowed && storage->canRetryDiagnosticsSd() &&
-        static_cast<uint32_t>(nowMs - lastMountAttemptMs) >= 5000U) {
-      lastMountAttemptMs = nowMs;
+    // Recovery probes the pinned backend with a create/write/fsync/unlink.
+    // It waits a backoff interval after the fault, is never started without
+    // headroom, and asks the transfer gate only when a probe is actually due.
+    if (!storage->canRetryDiagnosticsSd()) {
+      recovery.reset();
+    } else if (recovery.due(nowMs) &&
+               (storageRecoveryAllowedProbe == nullptr ||
+                storageRecoveryAllowedProbe()) &&
+               ioAdmitted()) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsRecovery,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      storage->ensureDiagnosticsSdMounted();
+      if (storage->ensureDiagnosticsSdMounted())
+        recovery.reset();
+      else
+        recovery.probeFailed(nowMs);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
@@ -1081,24 +1373,31 @@ void writerTask(void *) {
           nextSequence.load(std::memory_order_relaxed));
 #endif
     }
+    updateMemoryDeferral(deferral,
+                         sampled && !storage_policy::admitsBackgroundIo(headroom),
+                         headroom, sampled ? sampledAtMs : millis());
     const bool available = storage->getDiagnosticsSdLoaded();
     const bool wasAvailable =
         lastStorageAvailable.exchange(available, std::memory_order_acq_rel);
-    if (available && !wasAvailable)
+    if (available && (!wasAvailable || faultCapsuleGeneration.load() != faultCapsuleQueuedGeneration.load()))
       (void)flushFaultCapsulesIfPossible();
   }
 }
 
 void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
+  if (storageTransitionRequested.load(std::memory_order_acquire)) return;
   if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
-    // timeout inside fopen()/fflush(). Keep that lowest-priority I/O task off
-    // CPU0, whose idle task is covered by the production task watchdog, and
-    // let the UI/setup task preempt it on CPU1 while a card is recovering.
+    // timeout inside fopen()/fflush(). Stay off watchdog-covered CPU0, but
+    // share CPU1 with the priority-1 Arduino UI task through time slicing.
+    // Idle priority can starve the writer whenever reconnect/UI work stays
+    // runnable, filling even an otherwise healthy bounded queue.
+    static_assert(configUSE_PREEMPTION == 1 && configUSE_TIME_SLICING == 1,
+                  "diagnostics writer fairness requires preemptive time slicing");
     const BaseType_t created = xTaskCreatePinnedToCore(
-        writerTask, "ride_diag_writer", 6144, nullptr, 0, &writerTaskHandle, 1);
+        writerTask, "ride_diag_writer", 6144, nullptr, 1, &writerTaskHandle, 1);
     recorderWriterReady.store(created == pdPASS, std::memory_order_release);
     if (created != pdPASS) {
       writerTaskHandle = nullptr;
@@ -1111,21 +1410,25 @@ void startWriterTask() {
 
 bool enqueue(QueuedEvent &event) {
   QueueHandle_t target = event.critical ? criticalQueue : normalQueue;
-  if (target == nullptr || queueMutationMutex == nullptr ||
-      xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
-    dropped.fetch_add(1);
+  if (target == nullptr || queueMutationMutex == nullptr) {
+    noteDrop(DropReason::QueueUnavailable);
     return false;
   }
-  // Spilled critical records occupy the tail of the normal queue. Holding
-  // normal traffic until they drain preserves the invariant that any
-  // noncritical records are at the head and can be evicted safely.
-  if (!event.critical &&
-      normalQueueCriticalCount.load(std::memory_order_acquire) != 0) {
-    xSemaphoreGive(queueMutationMutex);
-    dropped.fetch_add(1);
+  // Publishing either lane and selecting both heads must be one coherent
+  // snapshot. RTOS per-queue locks alone cannot protect an initially empty lane.
+  // One RTOS tick lets a preempted owner finish this short, I/O-free fence.
+  // Never wait for queue capacity or a storage operation in a callback.
+  if (xSemaphoreTake(queueMutationMutex, 1) != pdTRUE) {
+    noteDrop(DropReason::QueueBusy);
     return false;
   }
   BaseType_t result = xQueueSend(target, &event, 0);
+  if (result != pdTRUE && event.critical && normalQueue != nullptr) {
+    normalQueueCriticalCount.fetch_add(1, std::memory_order_acq_rel);
+    result = xQueueSend(normalQueue, &event, 0);
+    if (result != pdTRUE)
+      normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
+  }
   if (result != pdTRUE && event.critical && normalQueue != nullptr) {
     // Critical records may consume otherwise unused normal capacity. If both
     // lanes are full, evict one lower-priority record before dropping the
@@ -1141,28 +1444,34 @@ bool enqueue(QueuedEvent &event) {
       if (result != pdTRUE)
         normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
     } else if (overflow == queue_policy::CriticalOverflow::EvictNormal) {
-      QueuedEvent evicted = {};
-      if (xQueueReceive(normalQueue, &evicted, 0) == pdTRUE) {
-        if (evicted.critical) {
-          // Defensive invariant recovery. Queue mutation is serialized with
-          // the writer, so this should be unreachable, but never sacrifice or
-          // reorder a protected record if state is found inconsistent.
-          (void)xQueueSend(normalQueue, &evicted, 0);
+      // One bounded rotation restores the original order of every survivor.
+      // Producers and the writer share this mutex, and each receive frees a
+      // slot for its send. Normal traffic may therefore use free space even
+      // behind spill records without making head-only eviction unsafe.
+      const UBaseType_t entries = uxQueueMessagesWaiting(normalQueue);
+      bool evictedNormal = false;
+      QueuedEvent queued = {};
+      for (UBaseType_t index = 0; index < entries; ++index) {
+        if (xQueueReceive(normalQueue, &queued, 0) != pdTRUE)
+          break;
+        if (!evictedNormal && !queued.critical) {
+          evictedNormal = true;
+          noteDrop(DropReason::NormalEvicted);
         } else {
-          dropped.fetch_add(1);
-          normalQueueCriticalCount.fetch_add(1,
-                                             std::memory_order_acq_rel);
-          result = xQueueSend(normalQueue, &event, 0);
-          if (result != pdTRUE)
-            normalQueueCriticalCount.fetch_sub(1,
-                                               std::memory_order_acq_rel);
+          (void)xQueueSend(normalQueue, &queued, 0);
         }
+      }
+      if (evictedNormal) {
+        normalQueueCriticalCount.fetch_add(1, std::memory_order_acq_rel);
+        result = xQueueSend(normalQueue, &event, 0);
+        if (result != pdTRUE)
+          normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
       }
     }
   }
   if (result != pdTRUE) {
     xSemaphoreGive(queueMutationMutex);
-    dropped.fetch_add(1);
+    noteDrop(DropReason::QueueFull);
     return false;
   }
   enqueued.fetch_add(1);
@@ -1173,6 +1482,11 @@ bool enqueue(QueuedEvent &event) {
                                                static_cast<uint16_t>(depth))) {
   }
   xSemaphoreGive(queueMutationMutex);
+  // Task creation publishes its handle before this release/acquire ready
+  // flag. Early producers can queue safely without racing handle publication;
+  // the new writer inspects those records on its first iteration.
+  if (recorderWriterReady.load(std::memory_order_acquire))
+    xTaskNotifyGive(writerTaskHandle);
   return true;
 }
 
@@ -1184,6 +1498,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
                            bool rotateBeforeWrite = false,
                            bool rotateAfterWrite = false,
                            uint32_t faultChecksum = 0) {
+  const uint32_t admittedAtMs = millis();
   const uint32_t sequence = nextSequence.fetch_add(1);
   char detail[320] = {};
   strncpy(detail, fieldsJson + 1, sizeof(detail) - 1);
@@ -1205,12 +1520,13 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
       static_cast<unsigned long>(firmwareFingerprint),
       hasDetail ? "," : "", detail);
   if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(queued.line)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::RecordTooLarge);
     return false;
   }
   queued.sequence = sequence;
+  queued.enqueuedAtMs = admittedAtMs;
   queued.length = static_cast<uint16_t>(length);
-  queued.critical = level == Level::Error || level == Level::Warning ||
+  queued.critical = level >= Level::Warning ||
                     strcmp(category, "user") == 0 ||
                     strcmp(category, "lifecycle") == 0;
   queued.rotateBeforeWrite = rotateBeforeWrite;
@@ -1219,7 +1535,9 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   queued.faultCapsuleBoot = faultBoot;
   queued.faultCapsuleEventCount = faultEventCount;
   queued.faultCapsuleChecksum = faultChecksum;
-  return enqueue(queued);
+  const bool accepted = enqueue(queued);
+  if (accepted && liveRing != nullptr) liveRing->append(sequence, queued.line, queued.length);
+  return accepted;
 }
 
 } // namespace
@@ -1240,6 +1558,8 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   portEXIT_CRITICAL(&captureMux);
   activePath[0] = '\0';
   nextSequence.store(0);
+  maximumWriterDelayMs.store(0);
+  maximumWriteDurationMs.store(0);
   retentionPrunedThisBoot.store(false, std::memory_order_release);
   normalQueueCriticalCount.store(0, std::memory_order_release);
   clockAnchorEmitted.store(false);
@@ -1248,6 +1568,7 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   detailedCapture.store(false);
 #endif
   lastMarkerSequence.store(0);
+  lastMarkerReceipt = {};
 #if PERSISTENT_RIDE_DIAGNOSTICS
   faultCapsuleGeneration.store(0, std::memory_order_release);
   faultCapsuleQueuedGeneration.store(UINT32_MAX, std::memory_order_release);
@@ -1286,6 +1607,12 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
       producerMutex != nullptr && queueMutationMutex != nullptr &&
       faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
       retentionMutex != nullptr;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (liveRing == nullptr) {
+    void *memory = heap_caps_malloc(sizeof(live_v2::Ring), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (memory != nullptr) liveRing = new (memory) live_v2::Ring();
+  }
+#endif
   recorderResourcesReady.store(resourcesReady, std::memory_order_release);
   if (!resourcesReady) {
     Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
@@ -1323,6 +1650,79 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 }
 
 void process(uint32_t nowMs) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  // Report cumulative per-reason counts only after the queue drains. The
+  // summaries themselves must not amplify an existing overload. Failed
+  // summaries remain eligible for the next bounded attempt.
+  if (static_cast<uint32_t>(nowMs - lastLossSummaryMs) >= 30'000U &&
+      queuedDepth() == 0) {
+    lastLossSummaryMs = nowMs;
+    for (std::size_t index = 0; index < kDropReasonCount; ++index) {
+      const uint32_t count = dropsByReason[index].load(std::memory_order_relaxed);
+      if (count == lastReportedDrops[index]) continue;
+      char fields[288] = {};
+      snprintf(fields, sizeof(fields),
+          "{\"dropReason\":\"%s\",\"eventCount\":%lu,\"droppedCount\":%lu,"
+          "\"writerDelayMs\":%lu,\"durationMs\":%lu,\"maxQueueDepth\":%u}",
+          queue_policy::dropReasonName(static_cast<DropReason>(index)),
+          static_cast<unsigned long>(count),
+          static_cast<unsigned long>(dropped.load(std::memory_order_relaxed)),
+          static_cast<unsigned long>(maximumWriterDelayMs.load(std::memory_order_relaxed)),
+          static_cast<unsigned long>(maximumWriteDurationMs.load(std::memory_order_relaxed)),
+          static_cast<unsigned>(maxQueueDepth.load(std::memory_order_relaxed)));
+      if (record(Level::Info, "logger", "loss", fields))
+        lastReportedDrops[index] = count;
+    }
+    // Writer memory deferrals are cumulative for the boot, like the losses.
+    // Exported fields are a closed vocabulary that installed apps verify, so
+    // this reuses existing names: episodes, the longest one in ms, and the
+    // lowest DMA free/largest values that caused a deferral.
+    const uint32_t deferrals = memoryDeferrals.load(std::memory_order_relaxed);
+    const uint32_t duration = maximumMemoryDeferralMs.load(std::memory_order_relaxed);
+    const uint32_t minimumFree = memoryDeferralMinimumDmaFree.load(std::memory_order_relaxed);
+    const uint32_t minimumLargest = memoryDeferralMinimumDmaLargest.load(std::memory_order_relaxed);
+    // Completion and a deeper trough can change evidence without starting a
+    // new episode. Retry the complete snapshot until admission succeeds.
+    if (deferrals != lastReportedMemoryDeferrals ||
+        duration != lastReportedMemoryDeferralMs ||
+        minimumFree != lastReportedMemoryDmaFree ||
+        minimumLargest != lastReportedMemoryDmaLargest) {
+      char fields[160] = {};
+      snprintf(fields, sizeof(fields),
+          "{\"eventCount\":%lu,\"durationMs\":%lu,"
+          "\"minimumFreeBytes\":%lu,\"minimumLargestBytes\":%lu}",
+          static_cast<unsigned long>(deferrals),
+          static_cast<unsigned long>(duration),
+          static_cast<unsigned long>(minimumFree),
+          static_cast<unsigned long>(minimumLargest));
+      if (record(Level::Warning, "storage", "memory_deferred", fields)) {
+        lastReportedMemoryDeferrals = deferrals;
+        lastReportedMemoryDeferralMs = duration;
+        lastReportedMemoryDmaFree = minimumFree;
+        lastReportedMemoryDmaLargest = minimumLargest;
+      }
+    }
+  }
+  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {
+    lastMemorySampleMs = nowMs;
+    portENTER_CRITICAL(&captureMux);
+    const bool sampleMemory = policy_v2::active(runtimeCapturePolicy, nowMs, activeCapture) &&
+        (runtimeCapturePolicy.request.mask & registry::domainMask("memory")) != 0;
+    portEXIT_CRITICAL(&captureMux);
+    if (sampleMemory) {
+      char fields[240] = {};
+      snprintf(fields, sizeof(fields),
+        "{\"freeInternalBytes\":%u,\"largestInternalBytes\":%u,\"freePsramBytes\":%u,"
+        "\"minimumInternalBytes\":%u,\"taskCount\":%u}",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+      (void)record(Level::Debug, "memory", "health", fields);
+    }
+  }
+#endif
 #if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
@@ -1347,6 +1747,10 @@ bool enqueueEventWithProducerLockHeld(
     uint32_t faultEventCount, const char *captureOverride = nullptr,
     bool rotateBeforeWrite = false, bool rotateAfterWrite = false,
     uint32_t faultChecksum = 0) {
+  if (!clearsFaultCapsule && storageTransitionRequested.load(std::memory_order_acquire)) {
+    noteDrop(DropReason::StorageTransition);
+    return false;
+  }
   char capture[48] = {};
   bool pendingBoundary = false;
   if (captureOverride != nullptr) {
@@ -1398,8 +1802,19 @@ bool recordInternal(Level level, const char *category, const char *event,
   (void)fieldsJson;
   return false;
 #else
+  // Filtering precedes JSON construction and never consumes storage/queue loss
+  // counters. Existing explicit RAUT capture remains bounded by its own lease.
+  portENTER_CRITICAL(&captureMux);
+  const bool policyInstalled = runtimeCapturePolicy.installed &&
+      std::strcmp(runtimeCapturePolicy.request.capture, activeCapture) == 0;
+  const bool policyAllows = policy_v2::admit(runtimeCapturePolicy,
+      static_cast<unsigned>(level), registry::domainMask(category), millis(),
+      activeCapture, kMaximumEventBytes);
+  portEXIT_CRITICAL(&captureMux);
+  if (!policyAllows && (policyInstalled || !detailedCaptureEnabled()))
+    return false;
   if (!validToken(category, 32) || !validToken(event, 64)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidToken);
     return false;
   }
   const std::size_t fieldsLength =
@@ -1407,30 +1822,39 @@ bool recordInternal(Level level, const char *category, const char *event,
   if (fieldsLength < 2 || fieldsLength >= 320 || fieldsJson[0] != '{' ||
       fieldsJson[fieldsLength - 1] != '}' ||
       strchr(fieldsJson, '\n') != nullptr || strchr(fieldsJson, '\r') != nullptr) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidFields);
     return false;
   }
   if (!validateFieldsJson(fieldsJson, fieldsLength)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidFields);
     return false;
   }
   if (storage == nullptr ||
       (!storage->getDiagnosticsSdLoaded() &&
        !storageTransitionRequested.load(std::memory_order_acquire))) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::StorageUnavailable);
     storageErrors.fetch_add(1);
     updateFaultCapsule(level, category, event, true);
     return false;
   }
-  if (producerMutex == nullptr ||
-      xSemaphoreTake(producerMutex, 0) != pdTRUE) {
-    dropped.fetch_add(1);
+  if (producerMutex == nullptr) {
+    noteDrop(DropReason::ProducerUnavailable);
     updateFaultCapsule(level, category, event, false);
+    return false;
+  }
+  if (xSemaphoreTake(producerMutex, 0) != pdTRUE) {
+    noteDrop(DropReason::ProducerBusy);
+    updateFaultCapsule(level, category, event, false);
+    return false;
+  }
+  if (!clearsFaultCapsule && storageTransitionRequested.load(std::memory_order_acquire)) {
+    xSemaphoreGive(producerMutex);
+    noteDrop(DropReason::StorageTransition);
     return false;
   }
   if (!initializePersistentBootSequenceIfNeeded()) {
     xSemaphoreGive(producerMutex);
-    dropped.fetch_add(1);
+    noteDrop(DropReason::BootIdentityUnavailable);
     storageErrors.fetch_add(1);
     updateFaultCapsule(level, category, event, true);
     return false;
@@ -1452,24 +1876,64 @@ bool record(Level level, const char *category, const char *event,
   return recordInternal(level, category, event, fieldsJson, false, 0, 0);
 }
 
+bool applyCapturePolicy(const policy_v2::Request &request) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  portENTER_CRITICAL(&captureMux);
+  const bool accepted = policy_v2::apply(runtimeCapturePolicy, request, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  if (accepted) {
+    char fields[240] = {};
+    snprintf(fields, sizeof(fields),
+      "{\"policyGeneration\":%lu,\"policyMask\":%lu,\"effectiveLevel\":\"%s\",\"budgetBytes\":%lu}",
+      static_cast<unsigned long>(request.generation), static_cast<unsigned long>(request.mask),
+      levelName(static_cast<Level>(request.minimumLevel)), static_cast<unsigned long>(request.budgetBytes));
+    (void)record(Level::Info, "logger", "policy_applied", fields);
+  }
+  return accepted;
+#else
+  (void)request;
+  return false;
+#endif
+}
+
+std::string capturePolicyJson() {
+  portENTER_CRITICAL(&captureMux);
+  const policy_v2::State policy = runtimeCapturePolicy;
+  const bool enabled = policy_v2::active(policy, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  char result[512] = {};
+  snprintf(result, sizeof(result),
+    "{\"schema\":2,\"schemaDigest\":\"%s\",\"supportedMask\":%lu,\"generation\":%lu,"
+    "\"mask\":%lu,\"minimumLevel\":%lu,\"active\":%s,\"captureId\":\"%s\","
+    "\"remainingBytes\":%lu,\"filteredCount\":%lu,\"deadlineUptimeMs\":%lu,"
+    "\"baselineMinimumLevel\":2,\"rawPayloads\":false,\"markerReplaySafe\":true}", registry::kSha256,
+    static_cast<unsigned long>(registry::kInstrumentedMask),
+    static_cast<unsigned long>(policy.request.generation), static_cast<unsigned long>(policy.request.mask),
+    static_cast<unsigned long>(policy.request.minimumLevel), enabled ? "true" : "false", policy.request.capture,
+    static_cast<unsigned long>(policy.remaining), static_cast<unsigned long>(policy.filtered),
+    static_cast<unsigned long>(policy.deadline));
+  return result;
+}
+
+bool liveTailJson(uint32_t boot, uint32_t after, std::string &output) {
+  // Reserve outside the producer lock. Two records plus metadata fit without
+  // allocating while the producer is briefly excluded; busy reads fail fast.
+  output.reserve(2304);
+  if (liveRing == nullptr || producerMutex == nullptr ||
+      xSemaphoreTake(producerMutex, 0) != pdTRUE) return false;
+  liveRing->json(bootSequence.load(), boot, after, output);
+  xSemaphoreGive(producerMutex);
+  return true;
+}
+
 bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
   char fields[288] = {};
-  snprintf(fields, sizeof(fields),
-           "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
-           "\"writtenCount\":%lu,\"droppedCount\":%lu,"
-           "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
-           reason, static_cast<unsigned long>(snapshot.enqueued),
-           static_cast<unsigned long>(snapshot.written),
-           static_cast<unsigned long>(snapshot.dropped),
-           static_cast<unsigned long>(snapshot.storageErrors),
-           static_cast<unsigned>(snapshot.queueDepth),
-           static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false",
-           snapshot.recorderReady ? "true" : "false");
+  if (!detail::formatRecorderHealthFields(fields, sizeof(fields), reason,
+                                         snapshot))
+    return false;
   return record(Level::Info, "logger", "health", fields);
 }
 
@@ -1482,19 +1946,61 @@ bool recordClockAnchor() {
   return recorded;
 }
 
-bool markIssue(const char *code, uint32_t markerSequence) {
+bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId) {
   if (!validIssueCode(code) || markerSequence == 0 ||
-      !control::markerSequenceCanAdvance(lastMarkerSequence.load(),
-                                         markerSequence))
+      (incidentId != nullptr && !control::validIncidentId(incidentId)))
     return false;
-  char fields[96] = {};
-  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
-           code, static_cast<unsigned long>(markerSequence));
+  // An ATT failure does not prove the first application failed. Replaying the
+  // latest exact v2 packet is successful without recording or changing capture
+  // state. The receipt is retained through capture_end/rebinding, but is RAM
+  // only: neither ATT success nor this no-op claims durable SD delivery.
+  if (lastMarkerReceipt.matches(markerSequence, code, incidentId))
+    return true;
+  if (lastMarkerReceipt.sameIncident(incidentId) ||
+      !control::markerSequenceCanAdvance(lastMarkerSequence.load(), markerSequence))
+    return false;
+  char fields[192] = {};
+  if (incidentId != nullptr) {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu,\"incidentId\":\"%s\",\"origin\":\"iphone\"}",
+             code, static_cast<unsigned long>(markerSequence), incidentId);
+  } else {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
+             code, static_cast<unsigned long>(markerSequence));
+  }
   if (!record(Level::Warning, "user", "issue_marker", fields))
     return false;
   lastMarkerSequence.store(markerSequence);
+  if (incidentId != nullptr)
+    lastMarkerReceipt.remember(markerSequence, code, incidentId);
+  else
+    lastMarkerReceipt = {}; // only the latest accepted marker is replayable
   checkpointRequested.store(true);
   return true;
+}
+
+bool markLocalIssue(const char *code) {
+#if PERSISTENT_RIDE_DIAGNOSTICS && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  if (!validIssueCode(code)) return false;
+  uint8_t id[16];
+  esp_fill_random(id, sizeof(id));
+  id[6] = (id[6] & 0x0f) | 0x40;
+  id[8] = (id[8] & 0x3f) | 0x80;
+  char incident[37] = {};
+  snprintf(incident, sizeof(incident),
+      "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+      id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+  char fields[144] = {};
+  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"incidentId\":\"%s\",\"origin\":\"device\"}", code, incident);
+  // Local markers have their own UUID; do not consume the phone's monotonic
+  // anti-replay sequence and thereby reject a later legitimate phone marker.
+  if (!record(Level::Warning, "user", "issue_marker", fields)) return false;
+  checkpointRequested.store(true);
+  return true;
+#else
+  (void)code;
+  return false;
+#endif
 }
 
 bool bindCapture(const char *captureID, bool detailed) {
@@ -1688,14 +2194,16 @@ sealActiveChunkForTransfer(uint32_t timeoutMs) {
   if (!storage->getDiagnosticsSdLoaded())
     return transfer_policy::SealPreparation::StorageUnavailable;
 
-  // Producers deliberately use a non-blocking mutex and record a retained gap
-  // when they race the seal. Converge those transient races inside this one
+  // Producers use a non-blocking producer mutex and retain a gap when they
+  // race the seal. Converge those transient races inside this one
   // bounded request instead of rejecting the download and requiring the user
   // to press the button again.
   while (remainingMs() > 0) {
+    // Admit capsules regardless of backlog: the cutoff below bounds the drain,
+    // whereas waiting for an idle queue can starve under sustained traffic.
     while (faultCapsuleGeneration.load(std::memory_order_acquire) !=
            faultCapsuleQueuedGeneration.load(std::memory_order_acquire)) {
-      if (flushFaultCapsulesIfPossible())
+      if (flushFaultCapsulesIfPossible(/*beforeSealCutoff=*/true))
         continue;
       if (remainingMs() == 0)
         return transfer_policy::SealPreparation::SealFailed;
@@ -1737,6 +2245,7 @@ sealActiveChunkForTransfer(uint32_t timeoutMs) {
     // exact request. The writer re-peeks both priority queues afterward.
     sealRequested.store(true, std::memory_order_release);
     xSemaphoreGive(producerMutex);
+    xTaskNotifyGive(writerTaskHandle);
 
     const uint32_t completionWaitMs = remainingMs();
     if (completionWaitMs == 0 ||
@@ -1774,9 +2283,38 @@ bool beginStorageTransition(uint32_t timeoutMs) {
                                           std::memory_order_acq_rel)) {
     return false;
   }
-  if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
+  storageTransitionIdle.store(false, std::memory_order_release);
+  transitionMountGeneration = storage == nullptr ? 0 : storage->mountGeneration();
+  const uint32_t started = millis();
+  const auto waitForIdle = [started, timeoutMs]() {
+    while (writerTaskHandle != nullptr && !storageTransitionIdle.load(std::memory_order_acquire)) {
+      if (static_cast<uint32_t>(millis() - started) >= timeoutMs) return false;
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
     return true;
-  if (sealActiveChunk(timeoutMs))
+  };
+  if (storage == nullptr || !storage->getDiagnosticsSdLoaded()) {
+    if (!waitForIdle()) {
+      storageTransitionRequested.store(false, std::memory_order_release);
+      return false;
+    }
+    // The previous medium is unavailable, so queued records cannot be sealed
+    // there. Report their loss before changing identity; never write old JSONL
+    // into the next medium's namespace.
+    SemaphoreGuard producer(producerMutex);
+    SemaphoreGuard queues(queueMutationMutex);
+    for (QueueHandle_t lane : {normalQueue, criticalQueue}) {
+      QueuedEvent event = {};
+      while (lane != nullptr && xQueueReceive(lane, &event, 0) == pdTRUE) {
+        FaultCapsuleWriteReceipt receipt{event};
+        noteDrop(DropReason::StorageTransition);
+        updateFaultCapsule(Level::Warning, "storage", "remount_queue_lost", false);
+      }
+    }
+    normalQueueCriticalCount.store(0, std::memory_order_release);
+    return true;
+  }
+  if (sealActiveChunk(timeoutMs) && waitForIdle())
     return true;
   storageTransitionRequested.store(false, std::memory_order_release);
   return false;
@@ -1784,6 +2322,22 @@ bool beginStorageTransition(uint32_t timeoutMs) {
 }
 
 void endStorageTransition() {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  // The sealed writer is still paused and ordinary producers are fenced.
+  // A mount attempt may restore FFat or expose a different SD namespace, even
+  // when the backend enum is unchanged. Allocate above both namespaces.
+  SemaphoreGuard guard(producerMutex);
+  if (storage != nullptr && storage->mountGeneration() != transitionMountGeneration) {
+    storageBootFloor = bootSequence.load() == UINT32_MAX ? 0 : bootSequence.load() + 1;
+    persistentBootSequenceReady.store(false, std::memory_order_release);
+    activeChunk = 1;
+    activeChunkSnapshot.store(activeChunk);
+    activePath[0] = '\0';
+    activeFileBytes = 0;
+    retentionPrunedThisBoot.store(false, std::memory_order_release);
+    (void)initializePersistentBootSequenceIfNeeded();
+  }
+#endif
   storageTransitionRequested.store(false, std::memory_order_release);
 }
 
@@ -1792,18 +2346,61 @@ bool prepareForShutdown(uint32_t timeoutMs) {
   (void)timeoutMs;
   return true;
 #else
+  // Maintenance/partial startup never created a writer or opened a chunk.
+  // No SD presence is required to prove that this recorder has no IO to drain.
+  if (writerTaskHandle == nullptr && activeDescriptor < 0) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
   (void)recordHealth("shutdown");
   (void)record(Level::Warning, "lifecycle", "controlled_shutdown", "{}");
   checkpointRequested.store(true);
   // This is a one-way storage transition. Once shutdown begins, keep the
   // writer paused after its seal through peripheral power-off/deep sleep so a
-  // post-cutoff producer cannot reopen a FILE beneath SPI teardown.
+  // post-cutoff producer cannot reopen a file beneath SPI teardown.
   storageTransitionRequested.store(true, std::memory_order_release);
   const bool sealed = sealActiveChunk(timeoutMs);
   if (!sealed)
     updateFaultCapsule(Level::Error, "lifecycle",
                        "controlled_shutdown_unsealed", true);
   return sealed;
+#endif
+}
+
+void noteShutdownDeferred(uint8_t stage) {
+  const char *event = "shutdown_deferred";
+  switch (stage) {
+  case 1: event = "shutdown_drain_timeout"; break;
+  case 2: event = "shutdown_renderer_timeout"; break;
+  case 3: event = "shutdown_seal_timeout"; break;
+  case 4: event = "shutdown_unmount_timeout"; break;
+  default: break;
+  }
+  updateFaultCapsule(Level::Error, "lifecycle", event, false);
+}
+
+bool pollShutdownQuiescence() {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  return true;
+#else
+  if (writerTaskHandle == nullptr && activeDescriptor < 0) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
+  if (!shutdownSealStarted.exchange(true, std::memory_order_acq_rel)) {
+    // Join/publish exactly one cutoff and allow the writer's 50 ms idle wait
+    // to expire. Repeated short synchronous seal calls would replace an ACK
+    // received between polls with a fresh cutoff indefinitely.
+    const auto sealTask = [](void *) {
+      const bool sealed = prepareForShutdown(4000);
+      shutdownSealReady.store(sealed, std::memory_order_release);
+      vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(sealTask, "diag_stop", 6144, nullptr,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS)
+      return false;
+  }
+  return shutdownSealReady.load(std::memory_order_acquire);
 #endif
 }
 

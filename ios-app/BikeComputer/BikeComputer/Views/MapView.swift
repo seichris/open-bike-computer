@@ -17,6 +17,18 @@ final class DestinationAnnotation: MKPointAnnotation {
     var calloutAddress = ""
 }
 
+/// A read-only online result, deliberately unrelated to DestinationAnnotation.
+final class OnlinePOIAnnotation: MKPointAnnotation {
+    let item: MKMapItem
+
+    init(item: MKMapItem) {
+        self.item = item
+        super.init()
+        coordinate = item.placemark.coordinate
+        title = item.name
+    }
+}
+
 @MainActor
 enum DestinationCalloutLabel {
     static let preferredWidth: CGFloat = 240
@@ -59,10 +71,23 @@ extension MKMapView: MapAppearanceConfigurationTarget {}
 @MainActor
 final class MapViewControlState: ObservableObject {
     static let pitchedThreshold: CLLocationDegrees = 5
-    static let defaultPitchedAngle: CLLocationDegrees = 45
+    nonisolated static let defaultPitchedAngle: CLLocationDegrees = 45
 
     @Published private(set) var mapView: MKMapView?
     @Published private(set) var isPitched = false
+    private(set) var preferredInitialPitch = defaultPitchedAngle
+
+    static func initialCamera(
+        from camera: MKMapCamera,
+        pitch: CLLocationDegrees = defaultPitchedAngle
+    ) -> MKMapCamera {
+        MKMapCamera(
+            lookingAtCenter: camera.centerCoordinate,
+            fromDistance: camera.centerCoordinateDistance,
+            pitch: pitch,
+            heading: camera.heading
+        )
+    }
 
     static func isPitched(_ pitch: CLLocationDegrees) -> Bool {
         pitch > pitchedThreshold
@@ -97,10 +122,11 @@ final class MapViewControlState: ObservableObject {
         guard let mapView else { return }
 
         let currentCamera = mapView.camera
+        preferredInitialPitch = Self.targetPitch(isCurrentlyPitched: isPitched)
         let camera = MKMapCamera(
             lookingAtCenter: currentCamera.centerCoordinate,
             fromDistance: currentCamera.centerCoordinateDistance,
-            pitch: Self.targetPitch(isCurrentlyPitched: isPitched),
+            pitch: preferredInitialPitch,
             heading: currentCamera.heading
         )
         mapView.setCamera(camera, animated: true)
@@ -119,6 +145,22 @@ struct MapCompassControl: UIViewRepresentable {
     func updateUIView(_ compass: MKCompassButton, context: Context) {
         compass.mapView = controlState.mapView
         compass.compassVisibility = .adaptive
+    }
+}
+
+struct MapUserTrackingControl: UIViewRepresentable {
+    @ObservedObject var controlState: MapViewControlState
+
+    func makeUIView(context: Context) -> MKUserTrackingButton {
+        let button = MKUserTrackingButton(mapView: controlState.mapView)
+        // The shared control rail supplies the background and shadow.
+        button.backgroundColor = .clear
+        button.layer.shadowOpacity = 0
+        return button
+    }
+
+    func updateUIView(_ button: MKUserTrackingButton, context: Context) {
+        button.mapView = controlState.mapView
     }
 }
 
@@ -261,6 +303,13 @@ struct MapViewContainer: UIViewRepresentable {
     var isRouteCalculationActive = false
     var topographyOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
+    var socialRiders: [SocialRider] = []
+    var socialPhotos: [String: UIImage] = [:]
+    var socialMarkerStyle = SocialMapMarkerStyle()
+    var onlinePOIItems: [MKMapItem] = []
+    var selectedOnlinePOI: MKMapItem? = nil
+    var isOnlinePOISearchActive = false
+    var onOnlinePOISelected: ((MKMapItem?) -> Void)? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -284,17 +333,20 @@ struct MapViewContainer: UIViewRepresentable {
             appearance,
             to: mapView
         )
+        mapView.setCamera(MapViewControlState.initialCamera(
+            from: mapView.camera, pitch: controlState.preferredInitialPitch
+        ), animated: false)
         mapView.delegate = context.coordinator
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
-            visibleSavedRoutePreview == nil ? .follow : .none
+            visibleSavedRoutePreview == nil
+                ? (isNavigating ? .followWithHeading : .follow) : .none
         
         // Configure map appearance
         mapView.showsCompass = false
         mapView.showsScale = true
         context.coordinator.controlState = controlState
-        context.coordinator.installTrackingControl(on: mapView)
         
         // Add long press gesture recognizer
         let longPress = UILongPressGestureRecognizer(
@@ -322,6 +374,8 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isSimulationMode = isSimulationMode
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
+        context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
+        context.coordinator.onOnlinePOISelected = onOnlinePOISelected
 
         DispatchQueue.main.async {
             controlState.connect(to: mapView)
@@ -331,6 +385,10 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
+        context.coordinator.onOnlinePOISelected = onOnlinePOISelected
+        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
+                                              location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
@@ -347,6 +405,9 @@ struct MapViewContainer: UIViewRepresentable {
         )
         let preview = visibleSavedRoutePreview
         let isFreePanActive = otherFreePanActive || preview != nil
+        let shouldResetTracking = context.coordinator.isNavigating != isNavigating ||
+            (!context.coordinator.isUserLocationAuthorized && isUserLocationAuthorized) ||
+            (context.coordinator.isSimulationMode && !isSimulationMode)
 
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
@@ -361,7 +422,6 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isSimulationMode = isSimulationMode
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
-        context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         if controlState.mapView !== uiView {
             DispatchQueue.main.async {
                 controlState.connect(to: uiView)
@@ -431,7 +491,7 @@ struct MapViewContainer: UIViewRepresentable {
                     mapView: uiView,
                     isNavigating: isNavigating,
                     isOfflineMapSelectionActive: isOfflineMapSelectionActive,
-                    preservesStoppedTracking: true
+                    preservesCurrentTracking: !shouldResetTracking
                 )
             } else {
                 if uiView.showsUserLocation {
@@ -446,6 +506,11 @@ struct MapViewContainer: UIViewRepresentable {
                 uiView.removeAnnotations(existingSimAnnotations)
             }
         }
+        context.coordinator.refreshContourLabels(on: uiView)
+        context.coordinator.updateOnlinePOIs(
+            onlinePOIItems, selected: selectedOnlinePOI, on: uiView,
+            bottomPadding: routePlanningBottomPadding
+        )
     }
     
     func makeCoordinator() -> Coordinator {
@@ -462,7 +527,63 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        let socialLayer = SocialMapLayer()
+        var isOnlinePOISearchActive = false
+        var onOnlinePOISelected: ((MKMapItem?) -> Void)?
+        private var focusedOnlinePOI: MKMapItem?
+        private var wasOnlinePOISearchActive = false
+
+        func updateOnlinePOIs(_ items: [MKMapItem], selected: MKMapItem?,
+                              on mapView: MKMapView, bottomPadding: CGFloat) {
+            let didFinishSearch = wasOnlinePOISearchActive && !isOnlinePOISearchActive
+            wasOnlinePOISearchActive = isOnlinePOISearchActive
+            let existing = mapView.annotations.compactMap { $0 as? OnlinePOIAnnotation }
+            mapView.removeAnnotations(existing.filter { annotation in
+                !items.contains { $0 === annotation.item }
+            })
+            for item in items where !existing.contains(where: { $0.item === item }) {
+                mapView.addAnnotation(OnlinePOIAnnotation(item: item))
+            }
+            if isOnlinePOISearchActive {
+                mapView.setUserTrackingMode(.none, animated: false)
+                mapView.removeAnnotations(mapView.annotations.filter { $0 is DestinationAnnotation })
+            } else if didFinishSearch && !isFreePanActive(
+                mapView: mapView, isOfflineMapSelectionActive: offlineMapSelectionFrame != nil
+            ) {
+                if isSimulationMode, let simulatedPosition {
+                    updateNavigationCamera(mapView: mapView, coordinate: simulatedPosition, animated: true)
+                } else if isUserLocationAuthorized {
+                    updateUserTrackingMode(mapView: mapView, isNavigating: isNavigating,
+                                           isOfflineMapSelectionActive: false)
+                }
+            }
+            guard focusedOnlinePOI !== selected else { return }
+            focusedOnlinePOI = selected
+            if selected == nil {
+                for annotation in mapView.selectedAnnotations where annotation is OnlinePOIAnnotation {
+                    mapView.deselectAnnotation(annotation, animated: false)
+                }
+            }
+            guard let selected,
+                  let annotation = mapView.annotations.compactMap({ $0 as? OnlinePOIAnnotation })
+                    .first(where: { $0.item === selected }) else { return }
+            mapView.selectAnnotation(annotation, animated: true)
+            let point = MKMapPoint(annotation.coordinate)
+            let meters = MKMapPointsPerMeterAtLatitude(annotation.coordinate.latitude) * 150
+            mapView.setVisibleMapRect(
+                MKMapRect(x: point.x - meters, y: point.y - meters, width: meters * 2, height: meters * 2),
+                edgePadding: UIEdgeInsets(top: 70, left: 40,
+                    bottom: min(max(bottomPadding, mapView.bounds.height * 0.68),
+                                max(0, mapView.bounds.height - 120)), right: 40),
+                animated: true
+            )
+        }
+
+        private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
+#if DEBUG
+        private var contourDiagnosticCount = 0
+#endif
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
             guard displayedTopographyOverlay !== overlay else { return }
@@ -471,11 +592,22 @@ struct MapViewContainer: UIViewRepresentable {
                     .cancelPendingLoads()
                 mapView.removeOverlay(displayedTopographyOverlay)
             }
+            contourLabels.clear(on: mapView)
             displayedTopographyOverlay = overlay
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics") {
+                print("ContourOverlay instance=\((overlay as? BicinoTopographyTileOverlay)?.diagnosticID ?? "none")")
+            }
+#endif
+            contourLabels.update(on: mapView, overlay: overlay as? BicinoTopographyTileOverlay)
             if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
             // Navigation and saved-route overlays retain their own ownership.
             // No camera, tracking, selection or route state changes here.
         }
+        func refreshContourLabels(on mapView: MKMapView) {
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
+        }
+
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
@@ -500,7 +632,6 @@ struct MapViewContainer: UIViewRepresentable {
         private(set) var displayedSavedRouteFinishAnnotation: SavedRouteFinishAnnotation?
         private var savedRouteCamera = SavedRouteMapCameraState<AnyHashable>()
         private var routeOverlays: [MKPolyline] = []
-        private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
         private var routeAlternativeIDsByOverlay:
@@ -527,33 +658,11 @@ struct MapViewContainer: UIViewRepresentable {
             lastAppliedAppearance = appearance
         }
 
-        func installTrackingControl(on mapView: MKMapView) {
-            guard trackingButton == nil else { return }
-
-            let tracking = MKUserTrackingButton(mapView: mapView)
-            tracking.translatesAutoresizingMaskIntoConstraints = false
-            mapView.addSubview(tracking)
-
-            NSLayoutConstraint.activate([
-                tracking.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -18),
-                tracking.topAnchor.constraint(
-                    equalTo: mapView.safeAreaLayoutGuide.topAnchor,
-                    constant: 220
-                )
-            ])
-
-            trackingButton = tracking
-        }
-
-        func updateControlVisibility(isNavigating: Bool) {
-            trackingButton?.isHidden = !isNavigating
-        }
-
         func updateUserTrackingMode(
             mapView: MKMapView,
             isNavigating: Bool,
             isOfflineMapSelectionActive: Bool,
-            preservesStoppedTracking: Bool = false,
+            preservesCurrentTracking: Bool = false,
             animated: Bool = true
         ) {
             let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
@@ -562,7 +671,7 @@ struct MapViewContainer: UIViewRepresentable {
             let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                 isNavigating: isNavigating,
                 isOfflineMapSelectionActive: isOfflineMapSelectionActive ||
-                    displayedSavedRouteOverlay != nil,
+                    displayedSavedRouteOverlay != nil || isOnlinePOISearchActive,
                 isDestinationSelectionActive: isDestinationSelectionActive
             )
 
@@ -591,7 +700,7 @@ struct MapViewContainer: UIViewRepresentable {
             guard MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: currentTrackingBehavior,
                 desiredMode: desiredTrackingBehavior,
-                preservesStoppedTracking: preservesStoppedTracking
+                preservesCurrentTracking: preservesCurrentTracking
             ) else { return }
 
             mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)
@@ -602,7 +711,8 @@ struct MapViewContainer: UIViewRepresentable {
             isOfflineMapSelectionActive: Bool,
             includesSavedRoutePreview: Bool = true
         ) -> Bool {
-            (includesSavedRoutePreview && displayedSavedRouteOverlay != nil) ||
+            isOnlinePOISearchActive ||
+                (includesSavedRoutePreview && displayedSavedRouteOverlay != nil) ||
                 isOfflineMapSelectionActive || mapView.selectedAnnotations.contains {
                     $0 is DestinationAnnotation
                 }
@@ -629,12 +739,48 @@ struct MapViewContainer: UIViewRepresentable {
                 center = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
             }
 
+#if DEBUG
+            // Lab-only camera presets exercise the real MapKit renderer on a
+            // physical phone without synthesizing unsupported pinch gestures.
+            let prefix = "--contour-test-zoom="
+            if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }),
+               let zoom = Double(argument.dropFirst(prefix.count)), zoom.isFinite,
+               (7...22).contains(zoom), mapView.bounds.width > 0, mapView.bounds.height > 0 {
+                let point = MKMapPoint(center)
+                let width = MKMapSize.world.width * mapView.bounds.width / (256 * pow(2, zoom))
+                let height = width * mapView.bounds.height / mapView.bounds.width
+                mapView.setVisibleMapRect(MKMapRect(
+                    x: point.x - width / 2, y: point.y - height / 2,
+                    width: width, height: height), animated: false)
+                hasSetInitialRegion = true
+                return
+            }
+#endif
+
             let region = MKCoordinateRegion(
                 center: center,
                 span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
             )
             mapView.setRegion(region, animated: false)
+            // World-scale views can clamp pitch. Apply the initial preference
+            // again after the first location establishes a useful local scale.
+            // Later GPS updates never reset the rider's chosen camera.
+            mapView.setCamera(MapViewControlState.initialCamera(
+                from: mapView.camera,
+                pitch: controlState?.preferredInitialPitch
+                    ?? MapViewControlState.defaultPitchedAngle
+            ), animated: false)
             hasSetInitialRegion = true
+            if !isSimulationMode, isUserLocationAuthorized {
+                // Initial camera changes can stop MapKit follow. Restore it once,
+                // after the first GPS fix; later updates still preserve manual pan.
+                updateUserTrackingMode(
+                    mapView: mapView,
+                    isNavigating: isNavigating,
+                    isOfflineMapSelectionActive: false,
+                    animated: false
+                )
+            }
         }
 
         func finishNavigationTracking(
@@ -1083,11 +1229,35 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            socialLayer.layout()
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics"),
+               contourDiagnosticCount < 32, mapView.visibleMapRect.width > 0 {
+                contourDiagnosticCount += 1
+                let zoom = log2(MKMapSize.world.width * mapView.bounds.width /
+                                mapView.visibleMapRect.width / 256)
+                print("ContourCamera zoomEstimate=\(zoom) pitch=\(mapView.camera.pitch) heading=\(mapView.camera.heading) min=\(displayedTopographyOverlay?.minimumZ ?? -1) max=\(displayedTopographyOverlay?.maximumZ ?? -1)")
+            }
+#endif
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
             controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            if let annotation = view.annotation as? OnlinePOIAnnotation {
+                // MapKit deselects the old pin before selecting its replacement.
+                // Wait for that transition, and never clear a newer selection.
+                DispatchQueue.main.async { [weak self, weak mapView] in
+                    guard let self, let mapView,
+                          self.focusedOnlinePOI === annotation.item,
+                          !mapView.selectedAnnotations.contains(where: { $0 is OnlinePOIAnnotation })
+                    else { return }
+                    self.focusedOnlinePOI = nil
+                    self.onOnlinePOISelected?(nil)
+                }
+                return
+            }
             guard view.annotation is DestinationAnnotation else { return }
 
             // MapKit reports the temporary deselection used to rebuild a
@@ -1116,6 +1286,12 @@ struct MapViewContainer: UIViewRepresentable {
             }
         }
 
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let annotation = view.annotation as? OnlinePOIAnnotation {
+                onOnlinePOISelected?(annotation.item)
+            }
+        }
+
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
             guard gestureRecognizer.state == .ended else { return }
             if let mapView,
@@ -1138,6 +1314,7 @@ struct MapViewContainer: UIViewRepresentable {
         
         @objc func handleLongPress(_ gestureRecognizer: UILongPressGestureRecognizer) {
             guard gestureRecognizer.state == .began,
+                  !isOnlinePOISearchActive,
                   let mapView = mapView,
                   onDestinationSelected != nil else { return }
             
@@ -1339,6 +1516,21 @@ struct MapViewContainer: UIViewRepresentable {
 
         
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let place = annotation as? OnlinePOIAnnotation {
+                let identifier = "OnlinePOI"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                    as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(annotation: place, reuseIdentifier: identifier)
+                view.annotation = place
+                view.canShowCallout = true
+                view.markerTintColor = .systemOrange
+                view.glyphImage = UIImage(systemName: "mappin")
+                view.accessibilityLabel = place.item.name ?? "Nearby place"
+                return view
+            }
+            if let rider = annotation as? SocialRiderAnnotation {
+                return socialLayer.annotationView(rider, map: mapView)
+            }
+            if let label = annotation as? BicinoContourLabelAnnotation { return BicinoContourLabelAnnotation.view(on: mapView, annotation: label) }
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil

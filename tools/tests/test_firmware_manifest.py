@@ -135,6 +135,26 @@ class FirmwareManifestTests(unittest.TestCase):
                 ec.ECDSA(hashes.SHA256()),
             )
 
+    def test_reader_attestation_is_bound_to_exact_image_and_capability(self):
+        manifest = {
+            "schemaVersion": 1, "target": "WAVESHARE_AMOLED_175", "version": "1.0",
+            "build": 1, "gitSha": "a" * 40, "size": 123, "sha256": "b" * 64,
+            "url": "https://example.invalid/image.bin", "minUpdaterProtocol": 1,
+        }
+        key = base64.b64encode((1).to_bytes(32, "big")).decode("ascii")
+        primary = firmware_manifest.sign_manifest(manifest, key)
+        attestation = dict(manifest, schemaVersion=2, mapMetadataReaderVersion=1)
+        signature = firmware_manifest.sign_manifest(attestation, key)
+        public = ec.derive_private_key(1, ec.SECP256R1()).public_key()
+        public.verify(base64.b64decode(primary), firmware_manifest.canonical_payload(manifest), ec.ECDSA(hashes.SHA256()))
+        public.verify(base64.b64decode(signature), firmware_manifest.canonical_payload(attestation), ec.ECDSA(hashes.SHA256()))
+        from cryptography.exceptions import InvalidSignature
+        for field, changed in (("sha256", "c" * 64), ("mapMetadataReaderVersion", 0), ("target", "WAVESHARE_AMOLED_206")):
+            with self.subTest(field=field), self.assertRaises(InvalidSignature):
+                public.verify(base64.b64decode(signature),
+                              firmware_manifest.canonical_payload(dict(attestation, **{field: changed})),
+                              ec.ECDSA(hashes.SHA256()))
+
     def test_signing_rejects_a_zero_private_scalar(self) -> None:
         zero_scalar = base64.b64encode(bytes(32)).decode("ascii")
 

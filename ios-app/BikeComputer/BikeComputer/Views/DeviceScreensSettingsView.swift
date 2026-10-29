@@ -189,12 +189,15 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .mapPlusNavigation: return "location.north.line"
         case .batteryStatus: return "battery.100percent"
         case .worldRadio: return "radio"
+        case .elevation: return "mountain.2"
+        case .nearby: return "mappin.and.ellipse"
         }
     }
 }
 
 // The stable Settings root owns presentation; the sheet dismisses only itself.
 struct AddDeviceScreenSheet: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var controller: DeviceScreenConfigurationController
     @State private var errorMessage: String?
@@ -204,6 +207,18 @@ struct AddDeviceScreenSheet: View {
             List {
                 if let errorMessage {
                     Text(errorMessage).foregroundStyle(.red)
+                }
+                if bleManager.supportsTerrainExperiments {
+                    Section("Terrain Experiments") {
+                        ForEach([TerrainMapStyle.hillshade, .elevationTint, .terrain3D]) { style in
+                            Button(style == .elevationTint ? "Tint & Slope" : style.title) {
+                                do { try controller.addTerrainScreen(style); dismiss() }
+                                catch { errorMessage = String(describing: error) }
+                            }
+                        }
+                        Text("Independent Map screens. Download a new topographic map for terrain data. 3D is a terrain-only exploration, without navigation overlays.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(supportedScreenTypes) { type in
                     Button(type.title) {
@@ -277,15 +292,25 @@ private struct DeviceScreenInstanceEditorView: View {
                 .disabled(!instance.enabled || isDefault)
             }
 
-            if instance.type == .map || instance.type == .mapPlusNavigation,
+            if instance.type == .map || instance.type == .mapPlusNavigation ||
+                instance.type == .nearby,
                instance.mapProfile != nil {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
                     type: instance.type,
                     supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
                     topographicContoursAvailable:
-                        bleManager.topographicContoursAvailable
+                        bleManager.topographicContoursAvailable,
+                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
+                    supportsMapPois: bleManager.supportsMapPois,
+                    poisAvailable: bleManager.supportsMapPois &&
+                        bleManager.activeMapRendererFormat == 5 &&
+                        bleManager.activeMapPoiProfileVersion == 1 &&
+                        bleManager.activeMapPoiIndexProfileVersion == 1 &&
+                        bleManager.activeMapPoiDataHealthy &&
+                        bleManager.activeMapPoiIndexHealthy
                 )
+                FriendMarkerSizeSection(bleManager: bleManager)
             }
 
             if instance.type == .rideStats,
@@ -369,6 +394,17 @@ private struct DeviceScreenMapProfileEditor: View {
     let type: ConfiguredDeviceScreenType
     let supportsNavigationOrientation: Bool
     let topographicContoursAvailable: Bool
+    let supportsTerrainExperiments: Bool
+    let supportsMapPois: Bool
+    let poisAvailable: Bool
+
+    private let poiOptions: [(String, UInt32)] = [
+        ("Shops", 1 << 18),
+        ("Restaurants & Cafes", 1 << 19),
+        ("Public Toilets", 1 << 20),
+        ("Gas Stations", 1 << 21),
+        ("Bicycle Shops & Repair", 1 << 22),
+    ]
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -386,7 +422,8 @@ private struct DeviceScreenMapProfileEditor: View {
             Stepper("Route Width: \(profile.routeLineWidth)", value: $profile.routeLineWidth, in: 2...48)
             Stepper("Street Width: \(profile.streetLineWidth)", value: $profile.streetLineWidth, in: 1...24)
             Stepper("Position Scale: \(profile.positionMarkerScale)", value: $profile.positionMarkerScale, in: 1...5)
-            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 0...5)
+            // Firmware renders zoom 1-5; a stored 0 is drawn at 1.
+            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 1...5)
         }
 
         Section("Map Content") {
@@ -400,6 +437,15 @@ private struct DeviceScreenMapProfileEditor: View {
                 )
             )
             .disabled(!topographicContoursAvailable)
+        }
+
+        if type != .nearby && supportsMapPois {
+            Section("Points of Interest") {
+                ForEach(poiOptions, id: \.1) { option in
+                    Toggle(option.0, isOn: visibilityBinding(option.1))
+                        .disabled(!poisAvailable)
+                }
+            }
         }
 
         Section("Labels") {
@@ -426,6 +472,20 @@ private struct DeviceScreenMapProfileEditor: View {
             }
         }
 
+        if supportsTerrainExperiments && type == .map {
+            Section("Terrain Experiment") {
+                Picker("Terrain", selection: Binding(
+                    get: { TerrainMapStyle(rawValue: profile.visibilityMask & DeviceScreenMapProfile.terrainVisibilityMask) ?? .none },
+                    set: { value in
+                        profile.setTerrainVisibility(value.rawValue)
+                    }
+                )) {
+                    ForEach(TerrainMapStyle.allCases) { Text($0.title).tag($0) }
+                }
+                Text("Tint includes subtle hillshade. Slope uses a separate color scale. 3D shows the height surface only; it is not a navigation view.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
         if type == .map || supportsNavigationOrientation {
             Section("Orientation") {
                 Picker("Rotation", selection: $profile.rotationMode) {

@@ -77,6 +77,12 @@ def renderer_features(job: MapJob) -> tuple[str, int, list[str]]:
         3: ["3d-buildings", "street-labels"],
         4: ["3d-buildings", "contours", "street-labels"],
     }
+    if format_version == 5:
+        from .map_pois import requested_poi_features
+        try:
+            return renderer, format_version, list(requested_poi_features(job.request))
+        except ValueError as exc:
+            raise CatalogPublicationError("ready POI map has invalid requested features") from exc
     try:
         features = features_by_format[format_version]
     except KeyError as exc:
@@ -218,7 +224,13 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
     renderer, format_version, features = renderer_features(job)
     content_receipt = catalog_content_receipt(job)
     entry_id = map_entry_id(job)
-    delivery_requirements = catalog_delivery_requirements(channel)
+    # A durable map's signed manifest is its reader contract. Configured
+    # catalog firmware gates apply only to maps outside the contract.
+    delivery_requirements = (
+        catalog_delivery_requirements(channel)
+        if job.compatibility_contract is None
+        else {}
+    )
     artifact_values: list[dict[str, Any]] = []
     for artifact in job.artifacts:
         value = {
@@ -267,8 +279,14 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
         artifact for artifact in artifact_values
         if artifact["format"] == TOPOGRAPHY_COMPANION_FORMAT
     ]
-    if format_version == 4:
-        if len(companions) != 1 or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt:
+    # The declared contours layer, never the renderer version, requires the
+    # iPhone companion; a contour-free map must not carry one.
+    if "contours" in features:
+        if (
+            len(companions) != 1
+            or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt
+            or companions[0]["filename"] != f"{job.map_id}.btopo"
+        ):
             raise CatalogPublicationError("topographic map requires one exact companion artifact")
     elif companions:
         raise CatalogPublicationError("non-topographic map contains a companion artifact")

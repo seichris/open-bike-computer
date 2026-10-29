@@ -89,9 +89,11 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         legacyCapabilities,
         "legacy screen capability TLV retains its exact limits and mask"
     )
+    // Development firmware with native zones and every screen type,
+    // including Elevation (bit 6).
     let zoneCapabilityValue = Data([
         1, 16, 24, 7,
-        0x3f, 0, 0, 0,
+        0x7f, 0, 0, 0,
         0xff, 0xff, 0x3f, 0,
         0x00, 0x10,
     ])
@@ -102,9 +104,14 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         return
     }
     assertEqual(
-        zoneCapabilities,
-        .v1,
-        "native-zone screen capability TLV decodes exact limits and mask"
+        zoneCapabilities.supportedScreenTypes,
+        0x7f,
+        "native-zone firmware with Elevation (bit 6) does not advertise Nearby (bit 7)"
+    )
+    assert(
+        !legacyCapabilities.supports(.nearby) &&
+            !zoneCapabilities.supports(.nearby),
+        "older screen capability masks keep Nearby unavailable"
     )
     for widget in RideStatsWidget.allCases {
         assertEqual(
@@ -144,6 +151,23 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         ) == nil,
         "screen capability TLV rejects the wrong length"
     )
+    let newMap = DeviceScreenInstance.defaults(id: 1, type: .map)
+    let newNavigation = DeviceScreenInstance.defaults(id: 2, type: .mapPlusNavigation)
+    assertEqual(newMap.mapProfile?.routeLineWidth, 10, "new Map route width")
+    assertEqual(newMap.mapProfile?.zoomLevel, 3, "new Map zoom stays unchanged")
+    assertEqual(newNavigation.mapProfile?.routeLineWidth, 10, "new Map + Navigation route width")
+    assertEqual(newNavigation.mapProfile?.zoomLevel, 2, "new Map + Navigation zoom")
+    assertEqual(DeviceScreenMapProfile.nearbyDefault.routeLineWidth, 4, "Nearby keeps its own default")
+    var profile = DeviceScreenMapProfile.mapDefault
+    profile.visibilityMask |= DeviceScreenMapProfile.contoursVisibilityMask
+    profile.labelDensity = 3
+    profile.visibilityMask &= ~UInt32(1 << 8)
+    let originalProfile = profile
+    profile.setTerrainVisibility(1 << 17)
+    assert(profile.isValid(for: .map))
+    assert(!profile.isValid(for: .mapPlusNavigation), "terrain must not hide navigation overlays")
+    profile.setTerrainVisibility(0)
+    assertEqual(profile, originalProfile, "3D round trip preserves layers and labels")
     let document = DeviceScreenConfigurationDocument.legacyDefault
     guard let encoded = try? DeviceScreenConfigurationCodec.encode(document),
           let decoded = try? DeviceScreenConfigurationCodec.decode(encoded) else {
@@ -170,6 +194,56 @@ func testDeviceScreenConfigurationCodecAndValidation() {
             DeviceScreenMapProfile.contoursVisibilityMask == 0,
         "topographic contours default off until an active map proves support"
     )
+    assertEqual(
+        DeviceScreenMapProfile.mapDefault.visibilityMask &
+            DeviceScreenMapProfile.poiVisibilityMask,
+        DeviceScreenMapProfile.poiVisibilityMask,
+        "new ordinary Map instances include all five POI categories"
+    )
+    assertEqual(
+        DeviceScreenMapProfile.poiVisibilityMask &
+            DeviceScreenMapProfile.terrainVisibilityMask,
+        0,
+        "POI visibility never enables diagnostic terrain layers"
+    )
+    assertEqual(
+        DeviceScreenMapProfile.mapPlusNavigationDefault.visibilityMask &
+            DeviceScreenMapProfile.poiVisibilityMask,
+        0,
+        "new navigation instances remain uncluttered by POIs"
+    )
+    var nearby = DeviceScreenInstance.defaults(id: 7, type: .nearby)
+    nearby.mapProfile?.visibilityMask |=
+        DeviceScreenMapProfile.contoursVisibilityMask
+    let nearbyDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 7,
+        instances: [nearby]
+    )
+    let nearbyCapabilities = DeviceScreenConfigurationCapabilities.v1
+    for style in [TerrainMapStyle.elevationTint, .hillshade, .terrain3D] {
+        var terrain = DeviceScreenMapProfile.mapDefault
+        terrain.visibilityMask |= style.rawValue
+        let supported = terrain.supported(by: legacyCapabilities)
+        assertEqual(supported.visibilityMask & DeviceScreenMapProfile.poiVisibilityMask, 0,
+                    "terrain defaults cannot poison a legacy editor draft")
+        assertEqual(terrain.supported(by: nearbyCapabilities), terrain,
+                    "POI-qualified peers retain their visibility defaults")
+    }
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(
+            DeviceScreenConfigurationCodec.encode(
+                nearbyDocument, capabilities: nearbyCapabilities
+            ), capabilities: nearbyCapabilities
+        ),
+        nearbyDocument,
+        "Nearby retains its own 16-byte map profile independently of picker selections"
+    )
+    assert(
+        (try? DeviceScreenConfigurationCodec.encode(
+            nearbyDocument, capabilities: legacyCapabilities
+        )) == nil,
+        "Nearby is rejected before the device advertises screen type 6"
+    )
     let radioDocument = DeviceScreenConfigurationDocument(
         defaultInstanceID: 6,
         instances: [.defaults(id: 6, type: .worldRadio)]
@@ -183,6 +257,20 @@ func testDeviceScreenConfigurationCodecAndValidation() {
     assert(
         (try? DeviceScreenConfigurationCodec.encode(radioDocument, capabilities: productionCapabilities)) == nil,
         "production capabilities reject World Radio instances"
+    )
+    let elevationDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 7,
+        instances: [.defaults(id: 7, type: .elevation)]
+    )
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(DeviceScreenConfigurationCodec.encode(elevationDocument)),
+        elevationDocument, "Elevation survives the configurable-screen wire round trip"
+    )
+    assertEqual(elevationDocument.instances[0].name, "Elevation", "Elevation has a default screen name")
+    productionCapabilities.supportedScreenTypes &= ~ConfiguredDeviceScreenType.elevation.bit
+    assert(
+        (try? DeviceScreenConfigurationCodec.encode(elevationDocument, capabilities: productionCapabilities)) == nil,
+        "firmware without the Elevation screen rejects Elevation instances"
     )
     var navigation = DeviceScreenInstance.defaults(
         id: 1, type: .mapPlusNavigation, name: "Nav"
@@ -293,6 +381,36 @@ func testDeviceScreenConfigurationController() {
         return
     }
     defer { defaults.removePersistentDomain(forName: suite) }
+
+    for style in [TerrainMapStyle.hillshade, .elevationTint, .terrain3D] {
+        var capabilities = DeviceScreenConfigurationCapabilities.v1
+        capabilities.supportedScreenTypes &= ~ConfiguredDeviceScreenType.nearby.bit
+        var productionDocument = DeviceScreenConfigurationDocument.legacyDefault
+        for index in productionDocument.instances.indices {
+            productionDocument.instances[index].mapProfile =
+                productionDocument.instances[index].mapProfile?.supported(by: capabilities)
+        }
+        let terrainController = DeviceScreenConfigurationController(defaults: defaults)
+        var snapshotRequest: Data?
+        terrainController.connect(deviceID: "terrain-legacy", generation: 1,
+            capabilities: capabilities, maximumPlaintextWriteBytes: 40,
+            sendFrames: { frames, sent, _ in
+                snapshotRequest = frames.first
+                sent()
+                return true
+            })
+        let snapshotID = readUInt32LE(snapshotRequest!, offset: 4)
+        let snapshot = try! DeviceScreenConfigurationCodec.encode(
+            productionDocument, capabilities: capabilities)
+        for frame in screenConfigurationDownloadFrames(requestID: snapshotID,
+                revision: 1, document: snapshot) {
+            terrainController.receive(frame, deviceID: "terrain-legacy", generation: 1)
+        }
+        try! terrainController.addTerrainScreen(style)
+        assert(terrainController.canSave,
+               "adding a terrain screen must not block the entire production draft")
+        terrainController.disconnect(deviceID: "terrain-legacy", generation: 1)
+    }
 
     let source = ScreenConfigurationRequestIDSource()
     let controller = DeviceScreenConfigurationController(defaults: defaults)

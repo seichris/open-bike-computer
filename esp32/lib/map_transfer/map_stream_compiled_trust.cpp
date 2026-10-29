@@ -17,6 +17,9 @@ struct CompiledKey {
 #if defined(MAP_STREAM_DEVELOPMENT_TRUST) && MAP_STREAM_DEVELOPMENT_TRUST
 #include "map_stream_development_compiled_key.generated.inc"
 #endif
+#if defined(MAP_STREAM_QUALIFICATION_TRUST) && MAP_STREAM_QUALIFICATION_TRUST
+#include "map_stream_qualification_key.inc"
+#endif
 
 template <typename Callback> bool forEachCompiledKey(Callback callback) {
   for (const CompiledKey &key : kCompiledKeys) {
@@ -25,6 +28,10 @@ template <typename Callback> bool forEachCompiledKey(Callback callback) {
   }
 #if defined(MAP_STREAM_DEVELOPMENT_TRUST) && MAP_STREAM_DEVELOPMENT_TRUST
   if (!callback(kDevelopmentCompiledKey))
+    return false;
+#endif
+#if defined(MAP_STREAM_QUALIFICATION_TRUST) && MAP_STREAM_QUALIFICATION_TRUST
+  if (!callback(kQualificationCompiledKey))
     return false;
 #endif
   return true;

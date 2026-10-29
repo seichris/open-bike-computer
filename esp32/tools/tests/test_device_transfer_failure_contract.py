@@ -33,16 +33,19 @@ class TransferFailureContractTests(unittest.TestCase):
         self.assertIn("wantReadCalls_", write)
         self.assertIn("wantWriteCalls_", write)
 
-    def test_file_error_is_sampled_before_close_and_positive_ferror_aborts(self):
+    def test_file_error_is_sampled_before_close_and_read_errors_abort(self):
+        # Diagnostics exports read raw descriptors: newlib's fopen() aborts
+        # when its stream lock cannot be allocated from internal RAM.
         read = STORAGE[
-            STORAGE.index("StorageReadEvidence Storage::readWithEvidence") :
-            STORAGE.index("size_t Storage::read(FILE *file, char")
+            STORAGE.index("StorageReadEvidence Storage::readDescriptor") :
+            STORAGE.index("int Storage::syncDescriptor")
         ]
         self.assertLess(read.index("evidence.errorNumber = errno"), read.rindex("return evidence"))
-        self.assertIn("ferror(file)", read)
-        self.assertIn("feof(file)", read)
+        self.assertIn("evidence.error = true", read)
+        self.assertIn("evidence.eof = true", read)
         send = DIAGNOSTICS[DIAGNOSTICS.index("bool sendFile(") : DIAGNOSTICS.index("bool resolveClosedChunk")]
-        self.assertLess(send.index("client.noteFileRead("), send.index("storage.close(file);", send.index("client.noteFileRead(")))
+        self.assertIn("storage.readDescriptor(file, buffer, requested)", send)
+        self.assertLess(send.index("client.noteFileRead("), send.index("closeFile(server, file);", send.index("client.noteFileRead(")))
         self.assertIn("fileReadFailed(count, read.error)", send)
 
     def test_ios_preserves_exact_prefix_and_never_imports_partial_chunk(self):

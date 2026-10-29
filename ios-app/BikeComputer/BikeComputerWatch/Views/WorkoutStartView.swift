@@ -11,13 +11,9 @@ struct WorkoutStartView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
-                Image(systemName: "bicycle")
+                Image(systemName: "figure.outdoor.cycle")
                     .font(.title)
-                    .foregroundStyle(.green)
                     .accessibilityHidden(true)
-
-                Text("Outdoor Cycle")
-                    .font(.headline)
 
                 setupContent
 

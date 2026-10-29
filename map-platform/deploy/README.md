@@ -106,6 +106,11 @@ pins.
 
 ## Development channel
 
+For the staged durable-map producer update, follow
+[Backend-first durable map rollout](../../docs/map-compatibility-backend-rollout.md).
+A new app cannot make maps from an older worker durable; verify the signed
+manifest after promoting the development image.
+
 Create a second Coolify Docker Compose application using
 `compose.development.yaml` and the hostname `maps-dev.8o.vc`:
 
@@ -276,6 +281,18 @@ The control plane and worker share backend code and persistent job state, so the
 workflow never offers an unsafe "new API with old worker" override after worker
 inputs have changed. Resolve the pending candidate or build a dedicated,
 reviewed compatibility release instead.
+
+The dedicated `production-map-client-compatibility` release profile supports an
+approved App Store build upgrade without replacing the qualified worker. It
+starts from the exact healthy production controller and overlays only the
+rollout policy and public approval registry. Its validation checks the complete
+runtime file inventory against that base, and its entrypoint rejects generation
+commands. Publish this candidate manually on `main`, then review a controller-only
+Compose-lock PR with attestation verification and CI Gate. Keep the worker and
+promotion scheduler pins unchanged. See
+[client-compatibility/README.md](client-compatibility/README.md) for its immutable
+base and publishing command. This profile does not open an automatic production
+proposal or move `latest`.
 
 The shared `map-platform-data` volume is also the restart-safe source for
 `jobs/*.json`, `map-monitoring.sqlite3`, `app-attest.sqlite3`, source-cache

@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .building_scope import nearby_output_blocks
 from .map_artifact_validation import (
     summarize_fmb_buildings,
     validate_fmb5,
+    validate_fmb6,
+    summarize_fmb6_pois,
     validate_renderer_artifacts,
 )
 from .map_buildings import (
@@ -19,6 +22,10 @@ from .map_buildings import (
     manifest_building_summary,
 )
 from .map_labels import renderer_format_version
+from .map_pois import (
+    POI_PROFILE_VERSION, POI_INDEX_PROFILE_VERSION, manifest_poi_summary,
+    requested_poi_features, request_has_contours,
+)
 from .models import MapJob
 from .preview import (
     DEFAULT_PREVIEW_HEIGHT,
@@ -27,6 +34,7 @@ from .preview import (
     DEFAULT_PREVIEW_WIDTH,
     render_boundary_preview,
 )
+from .reuse import MAP_BLOCK_SIZE_METERS, block_from_pack_path
 from .topography_artifacts import (
     TOPOGRAPHY_PROFILE_VERSION,
     TOPOGRAPHY_RENDERER_FORMAT_VERSION,
@@ -36,8 +44,8 @@ from .topography_artifacts import (
 
 ALLOWED_PACK_FILE_RE = re.compile(
     r"VECTMAP/[A-Za-z0-9._-]+/(?:"
-    r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]|"
-    r"assets/street-labels\.fma)"
+    r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bpe]|"
+    r"assets/(?:street-labels\.fma|nearby-pois\.fpi))"
 )
 MAX_PACK_MAP_ID_BYTES = 64
 MAX_PACK_PATH_COMPONENT_BYTES = 64
@@ -192,7 +200,9 @@ def build_manifest(
     *,
     building_stats: dict[str, Any] | None = None,
     building_preprocessing: dict[str, Any] | None = None,
+    poi_stats: dict[str, Any] | None = None,
     topography: dict[str, Any] | None = None,
+    compatibility: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -264,6 +274,10 @@ def build_manifest(
     build_identity = build_identity_manifest(job, building_preprocessing)
     if build_identity is not None:
         manifest["buildIdentity"] = build_identity
+    if compatibility is not None:
+        # Signed with the content, so every copy and reader sees the same
+        # durable-contract classification; see map_compatibility.py.
+        manifest["compatibility"] = dict(compatibility)
     if renderer_has_labels(format_version):
         labels = job.request["labels"]
         manifest["target"]["labelProfileVersion"] = labels["profileVersion"]
@@ -290,7 +304,36 @@ def build_manifest(
         raise ValueError("building statistics require renderer target 3 or 4")
     elif building_preprocessing is not None:
         raise ValueError("building preprocessing metadata requires renderer target 3 or 4")
-    if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+    if format_version == 5:
+        coverage_blocks = nearby_output_blocks(job)
+        coverage_set = set(coverage_blocks)
+        for entry in files:
+            if entry["path"].endswith(".fmb") and block_from_pack_path(entry["path"]) not in coverage_set:
+                raise ValueError("rendered block is outside the selected Nearby coverage")
+        manifest["nearbyCoverage"] = {
+            "profileVersion": 1,
+            "blockSizeMeters": MAP_BLOCK_SIZE_METERS,
+            "blocks": [[block.x, block.y] for block in coverage_blocks],
+        }
+        manifest["target"]["poiProfileVersion"] = POI_PROFILE_VERSION
+        manifest["target"]["poiIndexProfileVersion"] = POI_INDEX_PROFILE_VERSION
+        manifest["target"]["requestedFeatures"] = list(requested_poi_features(job.request))
+        contours_included = request_has_contours(job.request)
+        manifest["layers"] = {"contours": "included" if contours_included else "not-included"}
+        blocks = [map_root / entry["path"] for entry in files if entry["path"].endswith(".fmb")]
+        artifact_pois = summarize_fmb6_pois(blocks)
+        if poi_stats is not None and manifest_poi_summary(poi_stats) != artifact_pois:
+            raise ValueError("POI statistics do not match FMB v6 artifacts")
+        manifest["pois"] = artifact_pois
+        if not contours_included:
+            for path in blocks:
+                metadata = validate_fmb6(path)
+                if (metadata.contour_records or metadata.contour_points
+                        or metadata.contour_intervals != (20, 100)):
+                    raise ValueError("map without elevation contains noncanonical contours")
+    elif poi_stats is not None:
+        raise ValueError("POI statistics require renderer target 5")
+    if request_has_contours(job.request):
         if not isinstance(topography, dict):
             raise ValueError("renderer target 4 is missing topography metadata")
         required = {
@@ -335,7 +378,7 @@ def build_manifest(
         ):
             raise ValueError("renderer target 4 topography identity is invalid")
         block_metadata = [
-            validate_fmb5(map_root / entry["path"])
+            (validate_fmb6 if format_version == 5 else validate_fmb5)(map_root / entry["path"])
             for entry in files
             if entry["path"].endswith(".fmb")
         ]
@@ -418,7 +461,7 @@ def build_manifest(
             "sources": manifest_sources,
         }
     elif topography is not None:
-        raise ValueError("topography metadata requires renderer target 4")
+        raise ValueError("topography metadata requires explicitly requested contours")
     return manifest
 
 

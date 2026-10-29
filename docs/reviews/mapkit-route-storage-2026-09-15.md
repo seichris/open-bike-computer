@@ -49,6 +49,37 @@ No release, merge into main, or device deployment is part of this change.
   before. This implementation does not establish permission for displaying
   Apple-derived data on an ESP32/non-Apple basemap; review that separately too.
 
+## 22 October 2026: exact saved-route social sharing
+
+The maintainer explicitly requested the same Group Ride behavior for saved Apple
+Maps routes as imported GPX: publish the saved archive and deliver the exact
+snapshot to accepted riders, who may save it on their iPhones. This extends the
+implementation policy above; it is not written Apple permission or a legal
+approval. The Apple terms reviewed for this change still restrict extraction,
+secondary databases, publication and storage (Attachment 6, sections 2.2–2.5).
+The distribution resolution above therefore remains open.
+
+The social flow retains the original `apple.mapkit` provider, `Apple Maps`
+attribution and `phoneOnly` storage scope. Ordinary active-only responses and
+Strava are still rejected. Hash verification, immutable room snapshots and
+organizer provenance apply to Apple Maps copies just as to GPX; received routes
+cannot be republished by another rider. No Watch transfer is enabled.
+
+## 23 October 2026: route elevation lookup
+
+The maintainer explicitly requested removing the Apple Maps elevation-service
+block after testing an online route. Both active-only and deliberately saved
+Apple Maps routes may now send their WGS-84 geometry to Bicino's managed route
+elevation service, identified as `routeSource: "mapkit"`. The service forwards
+sample coordinates to Geoapify or samples its own staged DEM. It does not store
+or log route coordinates; coordinate-free replay profiles expire after ten
+minutes and pseudonymous daily usage counts expire within 48 hours. Saved
+elevation profiles follow the existing phone-side route sidecar lifecycle.
+
+This records the maintainer's implementation-policy decision, not written Apple
+permission or a legal approval. The separate distribution resolution above
+remains open. Strava's elevation-service policy is unchanged.
+
 ## Verification expectations
 
 Run the focused offline-save, full navigation, saved-map, shared route and

@@ -62,11 +62,22 @@ jobs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
+      firmware_host_checks: ${{ steps.components.outputs.firmware_host_checks }}
+      firmware_renderer: ${{ steps.components.outputs.firmware_renderer }}
+      zone_contracts: ${{ steps.components.outputs.zone_contracts }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
       ios_native: ${{ steps.components.outputs.ios_native }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
+      map_source: ${{ steps.components.outputs.map_source }}
+      map_catalog: ${{ steps.components.outputs.map_catalog }}
+      map_social: ${{ steps.components.outputs.map_social }}
+      map_readers: ${{ steps.components.outputs.map_readers }}
+      map_deploy: ${{ steps.components.outputs.map_deploy }}
+      ios_checks: ${{ steps.components.outputs.ios_checks }}
+      ios_simulator: ${{ steps.components.outputs.ios_simulator }}
+      ios_release: ${{ steps.components.outputs.ios_release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -92,6 +103,8 @@ jobs:
             heavy_ci=false
           fi
           echo "heavy_ci=${heavy_ci}" >> "$GITHUB_OUTPUT"
+      - name: Verify generated diagnostics contract
+        run: python3 tools/generate_diagnostics_contract.py --check
       - name: Validate the protected partial gate scope
         if: >-
           github.event_name == 'workflow_dispatch' && inputs.scope == 'map' &&
@@ -128,17 +141,25 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '0000000000000000000000000000000000000000' }}
           CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
           FIRMWARE_HARDWARE: ${{ inputs.firmware_hardware || '175' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        run: >-
-          python3 .github/scripts/changed_components.py
-          --event "$EVENT_NAME"
-          --base "$BASE_SHA"
-          --head "$HEAD_SHA"
-          --scope "$CI_SCOPE"
-          --firmware-hardware "$FIRMWARE_HARDWARE"
-          >> "$GITHUB_OUTPUT"
+        run: |
+          if test "$EVENT_NAME" = workflow_dispatch && test "$CI_SCOPE" = map; then
+            case "$GITHUB_REF" in
+              refs/heads/deploy/map-platform-production|refs/heads/deploy/map-platform-development)
+                # The exact branch/file restriction above must pass first.
+                EVENT_NAME=pull_request
+                BASE_SHA="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+                CI_SCOPE=auto
+                ;;
+            esac
+          fi
+          python3 .github/scripts/changed_components.py \
+            --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --scope "$CI_SCOPE" --firmware-hardware "$FIRMWARE_HARDWARE" >> "$GITHUB_OUTPUT"
+
 
   esp32:
     name: ESP32 (${{ matrix.target }})
@@ -146,7 +167,10 @@ jobs:
     if: >-
       needs.changes.outputs.firmware_build == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -161,10 +185,12 @@ jobs:
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
-      - name: Restore verified firmware build caches
+      - id: cache
+        name: Restore verified firmware build caches
         uses: ./.github/actions/firmware-build-cache
         with:
           environment: ${{ matrix.target }}
+          github-token: ${{ github.token }}
       - name: Build with the repository-owned firmware runtime
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
@@ -185,8 +211,48 @@ jobs:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
           BICINO_BUILD_EVIDENCE_DIR: ${{ runner.temp }}/bicino-build-symbols
         run: python3 ../tools/build_evidence.py firmware --environment "$BUILD_ENVIRONMENT"
+      - id: core_identity
+        name: Record the verified core identity
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: python3 .github/scripts/firmware_core_artifact.py identity --project esp32 --environment "$BUILD_ENVIRONMENT" >> "$GITHUB_OUTPUT"
+      - name: Pack the verified core entry for pull requests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+          CORE_INPUT_KEY: ${{ steps.core_identity.outputs.core-input-key }}
+        run: |
+          python3 .github/scripts/firmware_core_artifact.py pack \
+            --root "${OPEN_BIKE_FIRMWARE_BUILD_CACHE}/cores-v1/${BUILD_ENVIRONMENT}" \
+            --key "${CORE_INPUT_KEY}" --output "${RUNNER_TEMP}/firmware-core-entry.tar"
+      - name: Publish the verified core entry for pull requests
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.core-artifact-fresh != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.cache.outputs.core-artifact-name }}
+          path: ${{ runner.temp }}/firmware-core-entry.tar
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+      - name: Stress eight rider badges with the pinned LVGL renderer
+        if: contains(matrix.target, '_REMOTE_DEBUG') && needs.changes.outputs.firmware_renderer != 'false'
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 tools/run_social_riders_render_test.py --lvgl-source \
+            ".pio/open-bike-build/platformio/${BUILD_ENVIRONMENT}/libdeps/${BUILD_ENVIRONMENT}/lvgl"
+      - name: Verify remote-debug excludes locale startup allocations
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 tools/check_debug_memory.py \
+            --elf ".pio/build/${BUILD_ENVIRONMENT}/firmware.elf" \
+            --nm ".pio/open-bike-build/platformio/${BUILD_ENVIRONMENT}/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp-elf-nm"
       - name: Upload firmware symbol and cache evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-build-evidence-${{ matrix.target }}
           path: ${{ runner.temp }}/bicino-build-symbols/
@@ -247,7 +313,7 @@ jobs:
             has_radio=true
           fi
           case "$BUILD_ENVIRONMENT" in
-            *_PRODUCTION)
+            *_PRODUCTION|*_LIFECYCLE_QUALIFICATION)
               test "$has_radio" = false
               ;;
             *)
@@ -276,6 +342,33 @@ jobs:
                   "Missing persistent diagnostics markers: " + ", ".join(missing)
               )
           PY
+      - name: Verify nonshipping lifecycle adapter coverage
+        if: endsWith(matrix.target, '_LIFECYCLE_QUALIFICATION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 - "${BUILD_ENVIRONMENT}" <<'PYTHON'
+          from pathlib import Path
+          import sys
+
+          profile = sys.argv[1]
+          firmware = (Path(".pio/build") / profile / "firmware.elf").read_bytes()
+          # These messages exist only inside FIRMWARE_OPERATIONS_V1_ENABLED.
+          # Keep the actual authenticated OTA adapter compiled, not only policies.
+          required = (
+              profile,
+              "fresh durable admission and operation identity required",
+              "durable OTA acceptance could not be confirmed",
+          )
+          missing = [marker for marker in required if marker.encode() + b"\0" not in firmware]
+          if missing:
+              raise SystemExit("Missing lifecycle qualification markers: " + ", ".join(missing))
+          PYTHON
+      - name: Verify remote-debug browser service
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        run: |
+          grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"
+          grep -aFq "Bicino real-device debugger" ".pio/build/${{ matrix.target }}/firmware.elf"
       - name: Verify remote-debug artifacts include renderer metrics routes
         if: contains(matrix.target, '_REMOTE_DEBUG')
         run: |
@@ -297,6 +390,25 @@ jobs:
           if b"map-dev-2026-08\0" not in firmware:
               raise SystemExit("Missing remote-debug development map signer")
           PY
+      - id: release_bytes
+        name: Retain verified production bytes for this release candidate
+        if: github.ref_type == 'tag' && endsWith(matrix.target, '_PRODUCTION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+          echo "directory=${RUNNER_TEMP}/factory-${factory_target}" >> "$GITHUB_OUTPUT"
+          cp ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin" "${RUNNER_TEMP}/factory-${factory_target}/${factory_target}.bin"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.ref_type == 'tag' && endsWith(matrix.target, '_PRODUCTION')
+        with:
+          name: verified-production-${{ matrix.target }}
+          path: |
+            ${{ steps.release_bytes.outputs.directory }}/*.bin
+            ${{ steps.release_bytes.outputs.directory }}/*.factory-bundle.json
+            ${{ steps.release_bytes.outputs.directory }}/*.factory.tar.gz
+          if-no-files-found: error
+          retention-days: 14
 
   ios-fast:
     name: iOS Fast Tests
@@ -305,35 +417,26 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Test generated app build identity
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-test-generated-app-build-identity --report "$RUNNER_TEMP/dev-checks/ios-fast-test-generated-app-build-identity/results.json"
-        working-directory: ios-app
-      - name: Run Swift helper tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-swift-helper-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-swift-helper-tests/results.json"
-        working-directory: ios-app
-      - name: Run ride diagnostics recorder tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-ride-diagnostics-recorder-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-ride-diagnostics-recorder-tests/results.json"
-        working-directory: ios-app
-      - name: Run shared route and Watch BLE contract tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-shared-route-and-watch-ble-contract-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-shared-route-and-watch-ble-contract-tests/results.json"
-        working-directory: ios-app
-      - name: Type-check the complete Watch source graph
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-type-check-the-complete-watch-source-graph --report "$RUNNER_TEMP/dev-checks/ios-fast-type-check-the-complete-watch-source-graph/results.json"
-        working-directory: ios-app
-      - name: Run Watch offline navigation persistence tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-watch-offline-navigation-persistence-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-watch-offline-navigation-persistence-tests/results.json"
-        working-directory: ios-app
-      - name: Run Watch online navigation policy tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-watch-online-navigation-policy-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-watch-online-navigation-policy-tests/results.json"
-        working-directory: ios-app
-      - name: Fetch immutable pre-388 workout decoder
-        run: git fetch --no-tags --depth=1 origin fe73e43431ed76c39159de7624c4cd9ede509434
-      - name: Run workout contracts and firmware-to-Swift legacy compatibility tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-workout-contracts-and-firmware-to-swift-legacy-compatibility-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-workout-contracts-and-firmware-to-swift-legacy-compatibility-tests/results.json"
-        working-directory: ios-app
+      - name: Run selected Swift and host contracts
+        env:
+          IOS_CHECKS: ${{ needs.changes.outputs.ios_checks }}
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          checks = json.loads(os.environ['IOS_CHECKS'])
+          if not isinstance(checks, list) or not checks:
+              raise SystemExit('iOS scope must select at least one check')
+          command = ['python3', 'tools/dev_check.py', '--reuse-local']
+          for check in checks:
+              command.extend(['--check', check])
+          command.extend(['--report', os.environ['RUNNER_TEMP']+'/dev-checks/ios-fast/results.json'])
+          subprocess.run(command, check=True)
+          PYTHON
       - name: Retain check evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-fast-evidence
           path: ${{ runner.temp }}/dev-checks/
@@ -343,7 +446,7 @@ jobs:
     name: iOS Simulator Tests
     needs: changes
     if: >-
-      needs.changes.outputs.ios_native == 'true' &&
+      needs.changes.outputs.ios_simulator == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: macos-latest
     steps:
@@ -351,10 +454,13 @@ jobs:
       - name: Configure job-scoped Xcode DerivedData
         run: echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
       - name: Run iOS and Watch simulator contracts
-        run: python3 tools/dev_check.py --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
+        run: python3 tools/dev_check.py --reuse-local --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
       - name: Retain check evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-simulator-evidence
           path: ${{ runner.temp }}/dev-checks/
@@ -369,15 +475,16 @@ jobs:
     runs-on: macos-latest
     env:
       BICINO_REQUIRE_BUILD_EVIDENCE: "1"
+      BICINO_IOS_CONFIGURATIONS: ${{ needs.changes.outputs.ios_release == 'true' && 'Debug,Release' || 'Debug' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Configure exact-build symbol retention
         run: echo "BICINO_BUILD_EVIDENCE_DIR=$RUNNER_TEMP/bicino-build-symbols" >> "$GITHUB_ENV"
-      - name: Build and validate Debug and Release app containers
+      - name: Build and validate selected app containers
         run: python3 tools/dev_check.py --check ios-build-containers --fresh --evidence --report "$RUNNER_TEMP/dev-checks/ios-build-containers/results.json"
       - name: Retain check evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ios-container-evidence
           path: |
@@ -390,12 +497,28 @@ jobs:
     needs: changes
     if: needs.changes.outputs.firmware_host == 'true'
     runs-on: ubuntu-latest
+    env:
+      FIRMWARE_HOST_CHECKS: ${{ needs.changes.outputs.firmware_host_checks }}
     defaults:
       run:
         working-directory: esp32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install host crypto dependencies
+      - name: Validate selected host checks
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          checks = json.loads(os.environ['FIRMWARE_HOST_CHECKS'])
+          registry = json.load(open('tools/development/checks.json'))['checks']
+          known = {c['id'] for c in registry if c['component'] == 'firmware_host'}
+          if not isinstance(checks, list) or not checks or any(not isinstance(c, str) for c in checks):
+              raise SystemExit('firmware host scope must be a nonempty list of check IDs')
+          if len(checks) != len(set(checks)) or set(checks) - known:
+              raise SystemExit('firmware host scope contains duplicate or unknown checks')
+          PYTHON
+      - name: Install native host test dependencies
+        if: join(fromJSON(needs.changes.outputs.firmware_host_checks), ',') != 'esp32-host-firmware-manifest-tests'
         run: |
           for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             if [ -f "$source" ]; then
@@ -407,79 +530,144 @@ jobs:
           done
           sudo apt-get update
           sudo apt-get install -y libmbedtls-dev python3-cryptography
-          python3 -m pip install -r tools/preconnection-assets-requirements.txt
+      - name: Install Python host test dependencies
+        run: python3 -m pip install -r ../tools/development/requirements.txt
       - name: Firmware manifest tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-firmware-manifest-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-firmware-manifest-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-firmware-manifest-tests/results.json"
         working-directory: ${{ github.workspace }}
+      - name: Shutdown barrier executable fault tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-shutdown-barrier-executable-fault-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-shutdown-barrier-executable-fault-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-shutdown-barrier-executable-fault-tests/results.json"
       - name: Runtime ownership and allocation recovery tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-runtime-ownership-and-allocation-recovery-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-runtime-ownership-and-allocation-recovery-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-runtime-ownership-and-allocation-recovery-tests/results.json"
       - name: Ride diagnostics and watchdog host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-ride-diagnostics-and-watchdog-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-ride-diagnostics-and-watchdog-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-ride-diagnostics-and-watchdog-host-tests/results.json"
       - name: Verify generated pre-connection assets
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-verify-generated-pre-connection-assets')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-verify-generated-pre-connection-assets --report "$RUNNER_TEMP/dev-checks/esp32-host-verify-generated-pre-connection-assets/results.json"
       - name: GUI layout host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-gui-layout-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-gui-layout-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-gui-layout-host-tests/results.json"
       - name: Power metrics host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-power-metrics-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-power-metrics-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-power-metrics-host-tests/results.json"
       - name: Display power and redraw policy host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-display-power-and-redraw-policy-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-display-power-and-redraw-policy-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-display-power-and-redraw-policy-host-tests/results.json"
       - name: Two-finger Map zoom host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-two-finger-map-zoom-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-two-finger-map-zoom-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-two-finger-map-zoom-host-tests/results.json"
       - name: Map projection host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-map-projection-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-projection-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-projection-host-tests/results.json"
       - name: Render-ahead map architecture host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-render-ahead-map-architecture-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-render-ahead-map-architecture-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-render-ahead-map-architecture-host-tests/results.json"
       - name: Map profile protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-map-profile-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-profile-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-profile-protocol-host-tests/results.json"
+      - name: Social rider protocol and circular layout tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'social-riders-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check social-riders-host-tests --report "$RUNNER_TEMP/dev-checks/social-riders-host-tests/results.json"
       - name: Device capabilities protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-device-capabilities-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-capabilities-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-capabilities-protocol-host-tests/results.json"
+      - name: USB recovery status request tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-usb-recovery-status')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-usb-recovery-status --report "$RUNNER_TEMP/dev-checks/esp32-host-usb-recovery-status/results.json"
       - name: Screen configuration protocol and Ride Stats widget host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests/results.json"
       - name: Ride controller lease host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-ride-controller-lease-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-ride-controller-lease-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-ride-controller-lease-host-tests/results.json"
       - name: Remote device debug host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-remote-device-debug-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-remote-device-debug-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-remote-device-debug-host-tests/results.json"
       - name: Filled line rasterizer host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-filled-line-rasterizer-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-filled-line-rasterizer-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-filled-line-rasterizer-host-tests/results.json"
       - name: Device screen protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-device-screen-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-screen-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-screen-protocol-host-tests/results.json"
       - name: World Radio protocol and screen registry host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-world-radio-protocol-and-screen-registry-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-world-radio-protocol-and-screen-registry-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-world-radio-protocol-and-screen-registry-host-tests/results.json"
+      - name: Route elevation protocol and Elevation screen host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-route-elevation-protocol-and-screen-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-route-elevation-protocol-and-screen-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-route-elevation-protocol-and-screen-host-tests/results.json"
       - name: Device ownership crypto host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-device-ownership-crypto-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-ownership-crypto-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-ownership-crypto-host-tests/results.json"
       - name: Device ownership state host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-device-ownership-state-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-ownership-state-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-ownership-state-host-tests/results.json"
       - name: Destination picker protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-destination-picker-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-destination-picker-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-destination-picker-protocol-host-tests/results.json"
       - name: Workout telemetry protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-workout-telemetry-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-workout-telemetry-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-workout-telemetry-protocol-host-tests/results.json"
       - name: Workout telemetry state and presentation host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-workout-telemetry-state-and-presentation-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-workout-telemetry-state-and-presentation-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-workout-telemetry-state-and-presentation-host-tests/results.json"
       - name: Ride automation policy and trace replay host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-ride-automation-policy-and-trace-replay-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-ride-automation-policy-and-trace-replay-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-ride-automation-policy-and-trace-replay-host-tests/results.json"
       - name: Map profile persistence host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-map-profile-persistence-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-profile-persistence-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-profile-persistence-host-tests/results.json"
       - name: Binary map block format host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-binary-map-block-format-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-binary-map-block-format-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-binary-map-block-format-host-tests/results.json"
+      - name: Nearby POI query host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-query-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-query-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-query-host-tests/results.json"
+      - name: Nearby POI layout host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-layout-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-layout-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-layout-host-tests/results.json"
+      - name: Nearby POI feature gate host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-nearby-poi-feature-gate-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-nearby-poi-feature-gate-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-nearby-poi-feature-gate-host-tests/results.json"
+      - name: Durable map operation host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-durable-map-operation-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-durable-map-operation-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-durable-map-operation-host-tests/results.json"
       - name: Map transfer host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-map-transfer-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-transfer-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-transfer-host-tests/results.json"
       - name: Map stream format host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-map-stream-format-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-stream-format-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-stream-format-host-tests/results.json"
       - name: Transfer control dispatch host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-transfer-control-dispatch-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-transfer-control-dispatch-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-transfer-control-dispatch-host-tests/results.json"
+      - name: Firmware text size helper equivalence
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-firmware-text-size-helper-equivalence')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-firmware-text-size-helper-equivalence --report "$RUNNER_TEMP/dev-checks/esp32-host-firmware-text-size-helper-equivalence/results.json"
       - name: Device transfer HTTP limit host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-device-transfer-http-limit-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-transfer-http-limit-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-transfer-http-limit-host-tests/results.json"
       - name: Sound protocol host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-sound-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-sound-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-sound-protocol-host-tests/results.json"
       - name: Codec recovery host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-codec-recovery-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-codec-recovery-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-codec-recovery-host-tests/results.json"
       - name: Retain check evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-host-evidence
           path: ${{ runner.temp }}/dev-checks/
           if-no-files-found: error
+
+  zone-contracts:
+    needs: changes
+    if: needs.changes.outputs.zone_contracts == 'true'
+    uses: ./.github/workflows/workout-zone-contracts.yml
 
   map-platform:
     name: Map Platform
@@ -495,14 +683,20 @@ jobs:
     with:
       run_backend: ${{ needs.changes.outputs.map_backend == 'true' }}
       run_osm: ${{ needs.changes.outputs.osm == 'true' }}
+      run_source: ${{ needs.changes.outputs.map_source == 'true' }}
+      run_catalog: ${{ needs.changes.outputs.map_catalog == 'true' }}
+      run_social: ${{ needs.changes.outputs.map_social == 'true' }}
+      run_readers: ${{ needs.changes.outputs.map_readers == 'true' }}
+      run_deploy: ${{ needs.changes.outputs.map_deploy == 'true' }}
 
   gate:
     name: >-
-      ${{ (github.event_name != 'workflow_dispatch' || inputs.scope == 'all' ||
+      ${{ (!inputs.scope || inputs.scope == 'all' ||
       (inputs.scope == 'map' &&
       (github.ref == 'refs/heads/deploy/map-platform-production' ||
       github.ref == 'refs/heads/deploy/map-platform-development'))) && 'CI Gate' ||
-      format('Manual CI Gate ({0})', inputs.scope) }}
+      (github.event_name == 'workflow_dispatch' && format('Manual CI Gate ({0})', inputs.scope) ||
+      format('Partial CI Gate ({0})', inputs.scope)) }}
     needs:
       - changes
       - esp32
@@ -511,11 +705,14 @@ jobs:
       - ios
       - ios-platform
       - map-platform
+      - zone-contracts
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require every selected component
         env:
+          ZONE_RESULT: ${{ needs.zone-contracts.result }}
+          ZONE_CHANGED: ${{ needs.changes.outputs.zone_contracts }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           ESP32_RESULT: ${{ needs.esp32.result }}
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
@@ -523,6 +720,7 @@ jobs:
           HOST_RESULT: ${{ needs.esp32-host.result }}
           HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          IOS_SIMULATOR_CHANGED: ${{ needs.changes.outputs.ios_simulator }}
           IOS_NATIVE_CHANGED: ${{ needs.changes.outputs.ios_native }}
           IOS_FAST_RESULT: ${{ needs.ios-fast.result }}
           IOS_RESULT: ${{ needs.ios.result }}
@@ -542,6 +740,15 @@ jobs:
           }
 
           require_result "CI component selection" "$CHANGES_RESULT" success
+
+          for selection in "$FIRMWARE_BUILD_CHANGED" "$FIRMWARE_HOST_CHANGED" "$HEAVY_CI" "$IOS_CHANGED" "$IOS_NATIVE_CHANGED" "$IOS_SIMULATOR_CHANGED" "$MAP_BACKEND_CHANGED" "$OSM_CHANGED" "$ZONE_CHANGED"; do
+            case "$selection" in true|false) ;; *) echo "::error::Invalid CI selection"; exit 1 ;; esac
+          done
+          if test "$ZONE_CHANGED" = true; then
+            require_result "Zone contracts" "$ZONE_RESULT" success
+          else
+            require_result "Zone contracts" "$ZONE_RESULT" skipped
+          fi
 
           if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success
@@ -563,9 +770,13 @@ jobs:
 
           if test "$IOS_NATIVE_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "iOS app builds" "$IOS_RESULT" success
-            require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" success
           else
             require_result "iOS app builds" "$IOS_RESULT" skipped
+          fi
+
+          if test "$IOS_SIMULATOR_CHANGED" = true && test "$HEAVY_CI" = true; then
+            require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" success
+          else
             require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" skipped
           fi
 

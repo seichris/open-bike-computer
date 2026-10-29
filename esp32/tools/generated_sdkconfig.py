@@ -23,6 +23,12 @@ from firmware_build_identity import (
     firmware_git_identity,
     git_commit_source_date_epoch,
 )
+from partition_layouts import (
+    APPLICATION_RESERVE_BYTES,
+    Layout,
+    LayoutError,
+    load as load_partition_layouts,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -36,7 +42,10 @@ FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
 FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
 FLASH_PLAN_MAX_BYTES = 1024 * 1024
-PRODUCTION_APPLICATION_RESERVE_BYTES = 64 * 1024
+PRODUCTION_APPLICATION_RESERVE_BYTES = APPLICATION_RESERVE_BYTES
+# Release candidates and their lifecycle qualifications are OTA artifacts: they
+# must use the current production layout and keep the reserve in its slots.
+PRODUCTION_LAYOUT_SUFFIXES = ("_PRODUCTION", "_LIFECYCLE_QUALIFICATION")
 ESP_PARTITION_TABLE_MAX_BYTES = 0xC00
 ESP_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
 ESP_PARTITION_MAGIC = 0x50AA
@@ -1629,6 +1638,35 @@ def _application_partition_from_partition_table(path: Path) -> tuple[int, int]:
     return selected_partitions[0]
 
 
+def _require_current_partition_layout(path: Path, environment: str) -> Layout:
+    """Require one of esp32/partition_layouts.json's current exact tables.
+
+    Every Waveshare profile shares the current FFat geometry, so USB-switching
+    between them never relocates internal storage. A legacy or unknown table
+    would be a silent layout migration and fails the build instead.
+    """
+    try:
+        table = path.read_bytes()
+        layout = load_partition_layouts().identify(table)
+    except (OSError, LayoutError) as error:
+        raise GeneratedSdkconfigError(
+            f"could not check the verified partition table layout: {error}"
+        ) from error
+    if layout is None or layout.status != "current":
+        raise GeneratedSdkconfigError(
+            "verified partition table is not a current layout in "
+            "partition_layouts.json"
+        )
+    if environment.endswith(PRODUCTION_LAYOUT_SUFFIXES) and (
+        layout.role != "production"
+    ):
+        raise GeneratedSdkconfigError(
+            "production-behavior firmware must use the current production "
+            f"partition layout, not {layout.id}"
+        )
+    return layout
+
+
 def _parse_esptool_options(
     tokens: tuple[str, ...],
     *,
@@ -1919,12 +1957,12 @@ def _validated_flash_plan(
             )
         if (
             offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
-            and environment.endswith("_PRODUCTION")
+            and environment.endswith(PRODUCTION_LAYOUT_SUFFIXES)
             and application_partition_size - size
             < PRODUCTION_APPLICATION_RESERVE_BYTES
         ):
             raise GeneratedSdkconfigError(
-                "verified production firmware image leaves less than the "
+                "verified production-behavior firmware image leaves less than the "
                 f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
                 "application reserve"
             )
@@ -2023,6 +2061,7 @@ def _validated_flash_plan(
         raise GeneratedSdkconfigError(
             "verified esptool command may rewrite an attested flash image"
         )
+    _require_current_partition_layout(build_dir / "partitions.bin", environment)
     return {
         "schema": FLASH_PLAN_SCHEMA,
         "environment": environment,

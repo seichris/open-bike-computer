@@ -7,6 +7,11 @@
  */
 
 #include "WAVESHARE_AMOLED_175.hpp"
+#if defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_DISPLAY_TEST) && \
+    !defined(WAVESHARE_DISPLAY_PROBE)
+#include "early_boot_logo.hpp"
+#include "../images/src/bicino_logo.h"
+#endif
 #include "../device_debug/device_debug_frame_store.hpp"
 #include "../device_debug/device_debug_input.hpp"
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
@@ -240,6 +245,13 @@ void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx->writeAddrWindow(targetX, targetY, targetW, targetH);
   gfx->writePixels(pixels, targetW * targetH);
   gfx->endWrite();
+
+#if defined(WAVESHARE_AMOLED_175) && FIRMWARE_DIAGNOSTICS
+  if (displayFlushCount == 0) {
+    Serial.printf("BOOT_VISUAL schema=1 milestone=first_ui uptimeMs=%lu\n",
+                  static_cast<unsigned long>(millis()));
+  }
+#endif
 
 #ifdef WAVESHARE_AMOLED_206
   // The 2.06-inch CO5300 presents the completed frame after a following window
@@ -625,7 +637,13 @@ static uint32_t touchBackoffUntilMs = 0;
 static uint32_t lastTouchErrorLogMs = 0;
 static uint32_t lastTouchDebugLogMs = 0;
 static uint32_t lastTouchRawLogMs = 0;
-static uint32_t touchFastPollUntilMs = 0;
+static waveshare_board::touch_sampling_policy::ReadWindow touchReadWindow;
+#if DEVICE_REMOTE_DEBUG
+static uint32_t touchReadAttempts = 0;
+static uint32_t lastTouchReleaseMs = 0;
+static uint32_t touchIoFailedCalls = 0;
+static uint8_t touchIoTraceRecords = 0;
+#endif
 static uint32_t lastValidTouchMs = 0;
 static uint32_t lastTouchHintActiveMs = 0;
 static uint32_t lastTouchHintChangeMs = 0;
@@ -641,17 +659,69 @@ static uint32_t lastTouchDiagnosticLogMs = 0;
 static uint32_t previousDiagnosticSampleMs = 0;
 #endif
 
-static bool readCst9217Register(uint16_t reg, uint8_t *data, uint8_t len) {
+static bool readCst9217Register(
+    uint16_t reg, uint8_t *data, uint8_t len,
+    waveshare_board::i2c::TransactionTrace *trace = nullptr) {
   return waveshare_board::i2c::readRegister16(
-      waveshare_board::touch::CST9217_ADDR, reg, data, len, "CST9217");
+      waveshare_board::touch::CST9217_ADDR, reg, data, len, "CST9217", 3, trace);
 }
 
-static bool acknowledgeCst9217Frame() {
+static bool acknowledgeCst9217Frame(
+    waveshare_board::i2c::TransactionTrace *trace = nullptr) {
   return waveshare_board::i2c::writeRegister16(
       waveshare_board::touch::CST9217_ADDR,
       waveshare_board::touch::CST9217_DATA_REG,
-      waveshare_board::touch::CST9217_ACK, "CST9217");
+      waveshare_board::touch::CST9217_ACK, "CST9217", 2, trace);
 }
+
+#if DEVICE_REMOTE_DEBUG
+struct TouchIoContext {
+  uint32_t startedMs;
+  uint32_t irq;
+  uint32_t validAgeMs;
+  uint32_t releaseAgeMs;
+  bool hintActive;
+  bool pending;
+  bool pressed;
+  bool window;
+};
+
+// At most 32 detailed failed/recovered calls per boot. Successful calls remain
+// silent. Per-call traces cannot attribute another I2C user's failures to touch;
+// the timing heartbeat exposes truncation via both counts.
+static void logTouchIo(const char *operation, bool ok,
+                       const waveshare_board::i2c::TransactionTrace &trace,
+                       const TouchIoContext &context,
+                       int decoded = -1, unsigned contacts = 0) {
+  if (trace.failedAttempts == 0) return;
+  if (touchIoFailedCalls != UINT32_MAX) ++touchIoFailedCalls;
+  if (touchIoTraceRecords >= 32) return;
+  ++touchIoTraceRecords;
+  Serial.printf(
+      "TOUCH_IO schema=1 sample=%lu tMs=%lu operation=%s ok=%u "
+      "attempts=%u failures=%u firstPhase=%u firstStatus=%u "
+      "lastPhase=%u lastStatus=%u elapsedMs=%lu "
+      "hint=%u pending=%u pressed=%u window=%u irqStart=%lu irqObserved=%lu "
+      "validAgeMs=%lu releaseAgeMs=%lu decoded=%d contacts=%u "
+      "record=%u limit=32\n",
+      static_cast<unsigned long>(touchReadAttempts),
+      static_cast<unsigned long>(context.startedMs), operation, ok ? 1U : 0U,
+      static_cast<unsigned>(trace.attempts),
+      static_cast<unsigned>(trace.failedAttempts),
+      static_cast<unsigned>(trace.firstPhase),
+      static_cast<unsigned>(trace.firstStatus),
+      static_cast<unsigned>(trace.lastPhase),
+      static_cast<unsigned>(trace.lastStatus),
+      static_cast<unsigned long>(trace.elapsedMs),
+      context.hintActive ? 1U : 0U, context.pending ? 1U : 0U,
+      context.pressed ? 1U : 0U, context.window ? 1U : 0U,
+      static_cast<unsigned long>(context.irq),
+      static_cast<unsigned long>(touchInterruptGeneration),
+      static_cast<unsigned long>(context.validAgeMs),
+      static_cast<unsigned long>(context.releaseAgeMs), decoded, contacts,
+      static_cast<unsigned>(touchIoTraceRecords));
+}
+#endif
 
 static void logTouchPacket(const char *label, const uint8_t *data,
                            uint8_t length, uint16_t rawX, uint16_t rawY,
@@ -688,6 +758,9 @@ static void setTouchPressed(bool pressed) {
 static void releaseAllTouches(uint32_t now) {
   if (previousRawTouchFrame.count != 0 || latestTouchFrame.count != 0 ||
       touchPressed) {
+#if DEVICE_REMOTE_DEBUG
+    lastTouchReleaseMs = now;
+#endif
     waveshare_board::touch::TouchFrame released;
     publishTouchFrame(released, now);
   }
@@ -772,8 +845,8 @@ static bool updateTouchHintState(bool active, uint32_t now) {
   if (changed) {
     lastTouchHintChangeMs = now;
     if (active) {
-      touchFastPollUntilMs =
-          now + waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS;
+      touchReadWindow.arm(
+          now, waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS);
     }
   }
 
@@ -783,6 +856,16 @@ static bool updateTouchHintState(bool active, uint32_t now) {
     Serial.printf("Touch debug: init=%d int=%s pressed=%d hint_age_ms=%lu\n",
                   touchInitialized, active ? "LOW(active)" : "HIGH(idle)",
                   touchPressed, static_cast<unsigned long>(msSinceHintChange));
+#if DEVICE_REMOTE_DEBUG
+    Serial.printf("TOUCH_TIMING schema=1 pin=%u irq=%lu attemptedIrq=%lu reads=%lu window=%u ioFailedCalls=%lu ioTraceRecords=%u\n",
+                  static_cast<unsigned>(waveshare_board::touch::CST9217_INT_PIN),
+                  static_cast<unsigned long>(touchInterruptGeneration),
+                  static_cast<unsigned long>(attemptedTouchInterruptGeneration),
+                  static_cast<unsigned long>(touchReadAttempts),
+                  touchReadWindow.active(now) ? 1U : 0U,
+                  static_cast<unsigned long>(touchIoFailedCalls),
+                  static_cast<unsigned>(touchIoTraceRecords));
+#endif
     lastTouchDebugLogMs = now;
     lastTouchHintActive = active;
     touchHintStateKnown = true;
@@ -818,7 +901,7 @@ static uint32_t touchReadInterval(bool hintActive, bool hintChanged,
           waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS) {
     return waveshare_board::touch::RECENT_HINT_READ_INTERVAL_MS;
   }
-  if (now < touchFastPollUntilMs) {
+  if (touchReadWindow.active(now)) {
     return waveshare_board::touch::FAST_FALLBACK_READ_INTERVAL_MS;
   }
   return waveshare_board::touch::IDLE_FALLBACK_READ_INTERVAL_MS;
@@ -924,6 +1007,10 @@ void readTouch() {
     // Consume the one immediate attempt before initialization so an init
     // failure cannot leave the map renderer permanently interrupted.
     attemptedTouchInterruptGeneration = interruptGenerationBeforeAttempt;
+    // A latched pulse may already be HIGH by the time this task runs. Keep
+    // retries possible after that first attempt without polling forever idle.
+    touchReadWindow.arm(
+        now, waveshare_board::touch::HINT_FAST_POLL_WINDOW_MS);
   }
   bool touchHintChanged = updateTouchHintState(touchHintActive, now);
 
@@ -946,13 +1033,11 @@ void readTouch() {
     }
   }
 
-  // The CST9217's GPIO21 pulse is not a persistent touch level on the tested
-  // 1.75-inch board, so the existing throttled reader must retain its idle
-  // fallback even when automatic light sleep is enabled.
-  constexpr bool kAllowIdleFallback = true;
-  if (!waveshare_board::touch_sampling_policy::shouldAttemptRead(
-          kAllowIdleFallback, touchHintActive, touchPressed, interruptPending,
-          now, touchFastPollUntilMs)) {
+  // Read after a latched edge, while a contact is active, or during the
+  // bounded follow-up window. TP_INT need not remain LOW. Do not issue idle
+  // register-pointer writes when there has been no touch activity.
+  if (!touchReadWindow.shouldAttemptRead(
+          touchHintActive, touchPressed, interruptPending, now)) {
     return;
   }
 
@@ -962,10 +1047,29 @@ void readTouch() {
     return;
   }
   lastTouchReadMs = now;
+#if DEVICE_REMOTE_DEBUG
+  ++touchReadAttempts;
+  const TouchIoContext ioContext{
+      now, interruptGenerationBeforeAttempt,
+      lastValidTouchMs == 0 ? UINT32_MAX : now - lastValidTouchMs,
+      lastTouchReleaseMs == 0 ? UINT32_MAX : now - lastTouchReleaseMs,
+      touchHintActive, interruptPending, touchPressed,
+      touchReadWindow.active(now)};
+  waveshare_board::i2c::TransactionTrace readTrace;
+  waveshare_board::i2c::TransactionTrace ackTrace;
+  auto *readTracePtr = &readTrace;
+  auto *ackTracePtr = &ackTrace;
+#else
+  waveshare_board::i2c::TransactionTrace *readTracePtr = nullptr;
+  waveshare_board::i2c::TransactionTrace *ackTracePtr = nullptr;
+#endif
 
   uint8_t data[waveshare_board::touch::CST9217_DATA_LENGTH] = {0};
   if (!readCst9217Register(waveshare_board::touch::CST9217_DATA_REG, data,
-                           sizeof(data))) {
+                           sizeof(data), readTracePtr)) {
+#if DEVICE_REMOTE_DEBUG
+    logTouchIo("read", false, readTrace, ioContext);
+#endif
     noteTouchReadFailure("data read", now);
     return;
   }
@@ -977,6 +1081,10 @@ void readTouch() {
       waveshare_board::touch::ACTIVE_HEIGHT, decodedFrame);
   if (decodeStatus ==
       waveshare_board::touch::Cst9217DecodeStatus::InvalidAcknowledgement) {
+#if DEVICE_REMOTE_DEBUG
+    logTouchIo("read", true, readTrace, ioContext,
+               static_cast<int>(decodeStatus), decodedFrame.count);
+#endif
     // An idle speculative read can return bytes without the controller's 0xAB
     // ready marker. There is no frame to consume in that case, and writing the
     // host ACK makes the CST9217 NACK often enough to exercise an ESP-IDF I2C
@@ -992,7 +1100,16 @@ void readTouch() {
     releaseAllTouches(now);
     return;
   }
-  if (!acknowledgeCst9217Frame()) {
+  const bool acknowledged = acknowledgeCst9217Frame(ackTracePtr);
+#if DEVICE_REMOTE_DEBUG
+  // Keep new serial output after the ACK, so tracing a recovered read does not
+  // introduce an extra delay between receiving a frame and acknowledging it.
+  logTouchIo("read", true, readTrace, ioContext,
+             static_cast<int>(decodeStatus), decodedFrame.count);
+  logTouchIo("ack", acknowledged, ackTrace, ioContext,
+             static_cast<int>(decodeStatus), decodedFrame.count);
+#endif
+  if (!acknowledged) {
     noteTouchReadFailure("frame acknowledgement", now);
     return;
   }
@@ -1010,6 +1127,9 @@ void readTouch() {
   }
 
   if (decodedFrame.count == 0) {
+    // Only a valid, acknowledged release ends follow-up sampling. Keep failed
+    // first reads and no-frame packets eligible for their bounded retries.
+    touchReadWindow.confirmRelease();
     releaseAllTouches(now);
     return;
   }
@@ -1020,13 +1140,14 @@ void readTouch() {
   const auto activeFrame =
       waveshare_board::touch::activeCst9217Contacts(decodedFrame);
   if (activeFrame.count == 0) {
+    touchReadWindow.confirmRelease();
     releaseAllTouches(now);
     return;
   }
 
   lastValidTouchMs = now;
-  touchFastPollUntilMs =
-      now + waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS;
+  touchReadWindow.arm(
+      now, waveshare_board::touch::TOUCH_FAST_POLL_WINDOW_MS);
   updatePrimaryTouch(activeFrame);
   previousRawTouchFrame = activeFrame;
   publishTouchFrame(activeFrame, now);
@@ -1135,8 +1256,33 @@ void setupDisplay() {
   drawDisplayTestPatterns(rotation);
 #endif
 
-  // Clear screen for LVGL
+  // Establish the background before the first UI frame.
   gfx->fillScreen(0x0000); // BLACK
+#if defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_DISPLAY_TEST) && \
+    !defined(WAVESHARE_DISPLAY_PROBE)
+  // Give immediate visual feedback while storage/map recovery and application
+  // services initialize. Reuse the canonical wordmark, with native-panel
+  // rotation and alpha composited onto black. LVGL later replaces this image
+  // through its unchanged full-screen flush; boot readiness is unchanged.
+  const uint32_t logoStartUs = micros();
+  const early_boot_logo::Image logo{
+      bicino_logo.data, bicino_logo.data_size,
+      static_cast<uint16_t>(bicino_logo.header.w),
+      static_cast<uint16_t>(bicino_logo.header.h),
+      static_cast<uint16_t>(bicino_logo.header.stride)};
+  const bool logoDrawn =
+      bicino_logo.header.cf == LV_COLOR_FORMAT_RGB565A8 &&
+      early_boot_logo::drawCentered(
+          logo, SCREEN_WIDTH, SCREEN_HEIGHT,
+          rotation == waveshare_board::display::ROTATION_90,
+          [](uint16_t x, uint16_t y, uint16_t *pixels, uint16_t width) {
+            gfx->draw16bitRGBBitmap(x, y, pixels, width, 1);
+          });
+  Serial.printf("BOOT_VISUAL schema=1 milestone=logo drawn=%u uptimeMs=%lu "
+                "drawUs=%lu\n", logoDrawn ? 1U : 0U,
+                static_cast<unsigned long>(millis()),
+                static_cast<unsigned long>(micros() - logoStartUs));
+#endif
   Serial.println("Arduino_GFX display ready");
 }
 

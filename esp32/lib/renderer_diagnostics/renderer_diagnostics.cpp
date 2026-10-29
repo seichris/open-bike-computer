@@ -3,6 +3,7 @@
 #if FIRMWARE_DIAGNOSTICS
 
 #include "../ble_navigation/device_ownership_crypto_resource.hpp"
+#include "../status_json/json_builder.hpp"
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -11,11 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
-#include <cstdio>
 #include <new>
-#include <string_view>
-#include <type_traits>
 
 namespace renderer_diagnostics {
 namespace {
@@ -37,95 +34,7 @@ State *allocateDiagnosticsState() {
   return storage == nullptr ? nullptr : new (storage) State();
 }
 
-// Renderer snapshots are a little over 3 KiB. Reserving above Arduino's
-// ALWAYSINTERNAL threshold gives the returned std::string one stable PSRAM
-// allocation instead of several small internal stream-buffer allocations and
-// a final copy.
-class JsonBuilder {
-public:
-  JsonBuilder() { body_.reserve(4096); }
-
-  JsonBuilder &operator<<(const char *value) {
-    if (value != nullptr)
-      body_.append(value);
-    return *this;
-  }
-
-  JsonBuilder &operator<<(const std::string &value) {
-    body_.append(value);
-    return *this;
-  }
-
-  JsonBuilder &operator<<(std::string_view value) {
-    body_.append(value.data(), value.size());
-    return *this;
-  }
-
-  JsonBuilder &operator<<(char value) {
-    body_.push_back(value);
-    return *this;
-  }
-
-  struct EscapedText {
-    const char *value = nullptr;
-  };
-
-  JsonBuilder &operator<<(EscapedText escaped) {
-    if (escaped.value == nullptr)
-      return *this;
-    for (const unsigned char character : std::string_view(escaped.value)) {
-      switch (character) {
-      case '"':
-        body_.append("\\\"");
-        break;
-      case '\\':
-        body_.append("\\\\");
-        break;
-      case '\b':
-        body_.append("\\b");
-        break;
-      case '\f':
-        body_.append("\\f");
-        break;
-      case '\n':
-        body_.append("\\n");
-        break;
-      case '\r':
-        body_.append("\\r");
-        break;
-      case '\t':
-        body_.append("\\t");
-        break;
-      default:
-        if (character < 0x20) {
-          char encoded[7] = {};
-          std::snprintf(encoded, sizeof(encoded), "\\u%04x", character);
-          body_.append(encoded);
-        } else {
-          body_.push_back(static_cast<char>(character));
-        }
-        break;
-      }
-    }
-    return *this;
-  }
-
-  template <typename Integer,
-            typename = std::enable_if_t<std::is_integral_v<Integer> &&
-                                        !std::is_same_v<Integer, bool>>>
-  JsonBuilder &operator<<(Integer value) {
-    char digits[32] = {};
-    const auto converted = std::to_chars(digits, digits + sizeof(digits), value);
-    if (converted.ec == std::errc())
-      body_.append(digits, converted.ptr);
-    return *this;
-  }
-
-  std::string take() { return std::move(body_); }
-
-private:
-  std::string body_;
-};
+using status_json::JsonBuilder;
 
 MemorySample memorySample() {
   constexpr uint32_t kInternalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -605,6 +514,14 @@ std::string toJson(const Snapshot &value) {
     appendTiming(body, value.buildingDraw);
     body << ",\"buildingTotal\":";
     appendTiming(body, value.buildingTotal);
+    body << ",\"poiGather\":";
+    appendTiming(body, value.poiGather);
+    body << ",\"poiLayout\":";
+    appendTiming(body, value.poiLayout);
+    body << ",\"poiDraw\":";
+    appendTiming(body, value.poiDraw);
+    body << ",\"poiTotal\":";
+    appendTiming(body, value.poiTotal);
     body << "},\"buildings\":{\"candidates\":" << value.buildings.candidates
        << ",\"selected\":" << value.buildings.selected
        << ",\"extruded\":" << value.buildings.extruded
@@ -626,6 +543,18 @@ std::string toJson(const Snapshot &value) {
        << ",\"extrudedRecords\":" << value.limiterPasses[3]
        << ",\"extrudedPoints\":" << value.limiterPasses[4]
        << ",\"extrudedPixels\":" << value.limiterPasses[5] << "}}"
+       << ",\"pois\":{\"candidates\":" << value.pois.candidates
+       << ",\"accepted\":" << value.pois.accepted
+       << ",\"collisionRejected\":" << value.pois.collisionRejected
+       << ",\"offscreen\":" << value.pois.offscreen
+       << ",\"capacityDeferred\":" << value.pois.capacityDeferred
+       << ",\"decodedRecords\":" << value.pois.decodedRecords
+       << ",\"decodedBytes\":" << value.pois.decodedBytes
+       << ",\"acceptedCategories\":[" << value.pois.acceptedCategories[0]
+       << ',' << value.pois.acceptedCategories[1] << ','
+       << value.pois.acceptedCategories[2] << ','
+       << value.pois.acceptedCategories[3] << ','
+       << value.pois.acceptedCategories[4] << "]}"
        << ",\"jobs\":{\"requested\":" << value.jobs.requested
        << ",\"started\":" << value.jobs.started
        << ",\"completed\":" << value.jobs.completed

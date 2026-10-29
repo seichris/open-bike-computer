@@ -26,12 +26,30 @@ enum class NetworkStartStep : uint8_t {
 // 14,836-byte largest internal/DMA block, and another attempt panicked in the
 // Wi-Fi AP task. This is a conservative rejection floor for known unsafe
 // headroom, not a qualification threshold for a successful transfer.
+inline constexpr uint32_t kWifiStartupInternalFree = 60U * 1024U;
+inline constexpr uint32_t kWifiStartupInternalLargest = 32U * 1024U;
+inline constexpr uint32_t kWifiStartupDmaFree = 48U * 1024U;
+inline constexpr uint32_t kWifiStartupDmaLargest = 32U * 1024U;
+
 inline bool wifiStartupMemoryAboveObservedFailure(
     const NetworkMemorySnapshot &memory) {
-  return memory.internalFree >= 60U * 1024U &&
-         memory.internalLargest >= 32U * 1024U &&
-         memory.dmaFree >= 48U * 1024U &&
-         memory.dmaLargest >= 32U * 1024U;
+  return memory.internalFree >= kWifiStartupInternalFree &&
+         memory.internalLargest >= kWifiStartupInternalLargest &&
+         memory.dmaFree >= kWifiStartupDmaFree &&
+         memory.dmaLargest >= kWifiStartupDmaLargest;
+}
+
+// A resident driver already owns the blocks that first-use initialization
+// allocated under the floor above, so its radio start does not repeat the
+// largest-block clauses. The start still needs headroom: the panic in
+// ieee80211_hostap_attach/wifi_softap_start followed a low-memory
+// initialization. Require the total internal and DMA headroom that a
+// floor-passing first use would have left after allocating the driver;
+// `resident` is the allocation measured when the driver was prepared.
+inline bool wifiRadioStartMemoryAboveObservedFailure(
+    const NetworkMemorySnapshot &memory, const NetworkMemorySnapshot &resident) {
+  return uint64_t{memory.internalFree} + resident.internalFree >= kWifiStartupInternalFree &&
+         uint64_t{memory.dmaFree} + resident.dmaFree >= kWifiStartupDmaFree;
 }
 
 struct NetworkStartResult {
@@ -62,12 +80,38 @@ inline const char *networkStartCode(NetworkStartStep step) {
 // driver configuration on an internal-RAM stack. Transfer protocol and TLS
 // work can then remain on a PSRAM-backed worker without becoming the caller
 // of an indirect flash-cache-disabling operation.
+enum class StationState : uint8_t { Connecting, Connected, NoSSID, AuthenticationFailed };
+
+// Observations only: driver return status is distinct from event-loop/netif
+// readiness. Counters retain transient edges without recording client identity.
+struct NetworkReadinessSnapshot {
+  bool available = false;
+  bool radioStarted = false;
+  bool station = false;
+  bool apEventStarted = false;
+  bool netifUp = false;
+  bool hasIP = false;
+  int32_t dhcpStatus = -1;
+  int32_t dhcpError = 0;
+  int32_t disconnectReason = 0;
+  uint32_t eventSequence = 0;
+  uint32_t eventUptimeMs = 0;
+  uint32_t apStarts = 0;
+  uint32_t apStops = 0;
+  uint32_t clientJoins = 0;
+  uint32_t clientLeaves = 0;
+  uint32_t dhcpLeases = 0;
+  uint8_t clients = 0;
+};
+
 class NetworkOperationOwner {
 public:
   virtual ~NetworkOperationOwner() = default;
 
   virtual bool startStation(const std::string &ssid,
                             const std::string &password) = 0;
+  virtual NetworkStartResult startStationDetailed(
+      const std::string &ssid, const std::string &password) = 0;
   virtual bool disconnectStation(bool wifiOff) = 0;
   virtual bool startAccessPoint(const std::string &ssid,
                                 const std::string &passphrase) = 0;
@@ -75,10 +119,21 @@ public:
       const std::string &ssid, const std::string &passphrase) = 0;
   virtual bool stopAccessPoint(bool wifiOff) = 0;
   virtual bool stopWiFi() = 0;
+  virtual StationState stationState() const { return StationState::Connecting; }
+  virtual uint32_t stationIPAddress() const { return 0; }
+  virtual uint32_t accessPointIPAddress() const { return 0; }
+  virtual uint8_t accessPointClientCount() const { return 0; }
+  virtual NetworkReadinessSnapshot networkReadiness() const { return {}; }
   virtual bool healthy() const = 0;
   virtual uint32_t stackHighWaterBytes() const = 0;
-  // Called after the HTTP worker has stopped using the network. A poisoned
-  // owner must retain its task and staging buffers for the rest of this boot.
+  virtual bool stackSampleAvailable() const { return false; }
+  // Runs one bounded call on the owner's internal-RAM stack and returns after
+  // it completes. PSRAM-stack handlers use this before reading flash-backed
+  // storage such as FFat. An owner without that stack refuses the call.
+  virtual bool runOnInternalStack(void (*)(void *), void *) { return false; }
+  // Called after the HTTP worker has stopped using the network. Quiesces the
+  // owner and clears staging data; its fixed internal stack remains reserved.
+  // A poisoned owner cannot acknowledge quiescence for the rest of this boot.
   virtual bool release() = 0;
 };
 

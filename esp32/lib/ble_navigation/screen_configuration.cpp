@@ -2,6 +2,8 @@
 
 #include "ble_navigation.hpp"
 #include "map_profile_persistence.hpp"
+#include "../utils/src/startup_constructed.hpp"
+#include "../utils/src/task_data_placement.hpp"
 
 #include <Preferences.h>
 
@@ -31,6 +33,7 @@ constexpr std::size_t kReplayWindow = 4;
 
 struct SlotRecord {
   bool valid = false;
+  bool normalized = false;
   char slot = 'A';
   uint32_t revision = 0;
   uint32_t legacyDigest = 0;
@@ -47,7 +50,8 @@ struct ReplayRecord {
 };
 
 Preferences preferences;
-Snapshot active{};
+StartupConstructed<Snapshot> activeStorage;
+Snapshot &active = activeStorage.value;
 bool ready = false;
 char activeSlot = 'A';
 uint32_t activeLegacyDigest = 0;
@@ -56,8 +60,11 @@ bool legacyChangePending = false;
 bool legacyMaskPending = false;
 bool legacyDefaultPending = false;
 uint32_t internalRequestID = 0x40000000UL;
-std::array<uint8_t, kMaximumSlotBytes> slotBuffer{};
-std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
+// Preferences runs on the existing internal caller stack. The pinned SDK
+// bounces external read/write data through internal memory while flash cache
+// is disabled; all lengths and readback failures retain their existing checks.
+BICINO_TASK_DATA std::array<uint8_t, kMaximumSlotBytes> slotBuffer{};
+BICINO_TASK_DATA std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
     documentBuffer{};
 std::array<ReplayRecord, kReplayWindow> replayRecords{};
 std::size_t nextReplayRecord = 0;
@@ -72,7 +79,8 @@ MapProfile captureProfile(const ScreenMapRenderSettings &source,
   profile.positionMarkerScale = source.positionMarkerScale;
   profile.zoomLevel = source.zoomLevel;
   profile.visibilityMask =
-      source.visibilityMask | legacy.navigationOverlayVisibilityMask;
+      (source.visibilityMask | legacy.navigationOverlayVisibilityMask) &
+      screen_configuration_protocol::ALLOWED_VISIBILITY_MASK;
   profile.labelDensity = source.labelDensity;
   profile.labelLanguageMode = source.labelLanguageMode;
   profile.labelTextSize = source.labelTextSize;
@@ -307,7 +315,8 @@ bool decodeSlot(const char *key, char slot, SlotRecord &record) {
       storedCRC)
     return false;
   const auto result = screen_configuration_protocol::decodeDocument(
-      slotBuffer.data() + kSlotHeaderBytes, documentLength, record.document);
+      slotBuffer.data() + kSlotHeaderBytes, documentLength, record.document,
+      true, &record.normalized);
   if (result != screen_configuration_protocol::DecodeResult::Complete)
     return false;
   record.valid = true;
@@ -421,7 +430,8 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
       instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
   };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  bool represented[6]{};
+  constexpr uint8_t SCREEN_TYPE_COUNT = static_cast<uint8_t>(ScreenType::Nearby) + 1;
+  bool represented[SCREEN_TYPE_COUNT]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
     const uint8_t rawType = static_cast<uint8_t>(instance.type);
@@ -429,7 +439,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     if (importMask)
       instance.enabled = (mask & (1U << rawType)) != 0;
   }
-  for (uint8_t rawType = 0; rawType < 6 &&
+  for (uint8_t rawType = 0; rawType < SCREEN_TYPE_COUNT &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {
@@ -448,6 +458,8 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     case ScreenType::MapNavigation: name = "Map + Navigation"; break;
     case ScreenType::BatteryStatus: name = "Battery Status"; break;
     case ScreenType::WorldRadio: name = "World Radio"; break;
+    case ScreenType::Elevation: name = "Elevation"; break;
+    case ScreenType::Nearby: name = "Nearby"; break;
     }
     (void)screen_configuration_protocol::setName(instance, name,
                                                   std::strlen(name));
@@ -516,6 +528,14 @@ Document makeMigratedDocument(const MapRenderSettings &legacy) {
     radio.enabled = true;
     (void)screen_configuration_protocol::setName(radio, "World Radio", 11);
   }
+  if (route_elevation_config::ENABLED &&
+      (legacy.enabledScreensMask & screen_configuration_protocol::screenTypeBit(ScreenType::Elevation))) {
+    auto &elevation = document.instances[document.instanceCount++];
+    elevation.id = 7;
+    elevation.type = ScreenType::Elevation;
+    elevation.enabled = true;
+    (void)screen_configuration_protocol::setName(elevation, "Elevation", 9);
+  }
   const ScreenType requestedDefault =
       screen_configuration_protocol::isSupportedScreenType(static_cast<ScreenType>(legacy.defaultScreen))
           ? static_cast<ScreenType>(legacy.defaultScreen)
@@ -582,6 +602,22 @@ bool initialize(const MapRenderSettings &legacy) {
     Serial.printf("BLE screens: migrated legacy settings revision=1 count=%u\n",
                   migrated.instanceCount);
     return true;
+  }
+
+  if (selected->normalized) {
+    // Migrate through the other slot before changing the head. Preserve the
+    // revision and every supported setting, even after a diagnostics downgrade.
+    MapRenderSettings projected = legacy;
+    projectDocument(selected->document, projected);
+    const auto length = screen_configuration_protocol::encodeDocument(
+        selected->document, documentBuffer.data(), documentBuffer.size());
+    SlotRecord *normalizedSlot = selected->slot == 'A' ? &slotB : &slotA;
+    const char destination = normalizedSlot->slot;
+    if (!length || !writeSlot(destination, selected->revision, legacyDigest(projected),
+                              documentBuffer.data(), length, *normalizedSlot) ||
+        !writeMirrorTransaction(true))
+      return false;
+    selected = normalizedSlot;
   }
 
   active = {selected->revision, selected->document};

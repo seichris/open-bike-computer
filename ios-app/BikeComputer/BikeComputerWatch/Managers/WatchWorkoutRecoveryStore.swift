@@ -734,7 +734,7 @@ nonisolated final class WatchWorkoutRecoveryStore {
         guard date.timeIntervalSinceReferenceDate.isFinite,
               detectorProfileVersion.map({ $0 > 0 }) ?? true,
               origin != .automatic || detectorProfileVersion != nil,
-              var identity else {
+              var identity, date >= identity.startDate else {
             throw RecoveryStoreError.missingOrInvalidIdentity
         }
         identity.pauseOrigin = paused ? origin : nil

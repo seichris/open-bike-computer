@@ -2,11 +2,17 @@
 
 import configparser
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
 project_dir = Path(__file__).resolve().parents[2]
 repo_root = project_dir.parent
+sys.path.insert(0, str(project_dir / "tools"))
+import partition_layouts  # noqa: E402
 config = configparser.ConfigParser(interpolation=None)
 config.read(project_dir / "platformio.ini")
 
@@ -19,7 +25,11 @@ def inherited_option(section: str, option: str) -> str:
         assert current not in visited, f"cyclic PlatformIO inheritance at {current}"
         visited.add(current)
         if config.has_option(current, option):
-            return config.get(current, option)
+            return re.sub(
+                r"\$\{([^.}]+)\.([^}]+)\}",
+                lambda match: inherited_option(match[1], match[2]),
+                config.get(current, option),
+            )
         current = config.get(current, "extends", fallback="").strip()
     raise AssertionError(f"{section} does not resolve {option}")
 
@@ -30,8 +40,83 @@ for section in config.sections():
         sdk = inherited_option(section, "custom_sdkconfig")
         assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
         assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
+        ipc_sizes = re.findall(r"^CONFIG_ESP_IPC_TASK_STACK_SIZE=(\d+)$", sdk, re.M)
+        assert ipc_sizes == ["1536"], (section, ipc_sizes)
 main_source = (project_dir / "src/main.cpp").read_text()
+assert '#include "ipc_stack_budget.hpp"' in main_source
+# Exercise effective SDK values, including the failing pinned-Arduino value
+# and the S3 default that leaves too little reserve on the observed crash path.
+compiler = shutil.which("c++") or shutil.which("g++")
+assert compiler, "a C++ compiler is required for the effective IPC config gate"
+with tempfile.TemporaryDirectory() as temporary:
+    stub_dir = Path(temporary)
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "LEGACY_BOARD"):
+        for size in (None, 1024, 1280, 1536, 2048):
+            (stub_dir / "sdkconfig.h").write_text(
+                "" if size is None else f"#define CONFIG_ESP_IPC_TASK_STACK_SIZE {size}\n"
+            )
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", "-x", "c++",
+                 f"-D{board}", "-I", str(stub_dir), "-I", str(project_dir / "include"), "-"],
+                input='#include "ipc_stack_budget.hpp"\n', text=True, capture_output=True,
+            )
+            accepted = board == "LEGACY_BOARD" or (size is not None and size >= 1536)
+            assert (result.returncode == 0) == accepted, (board, size, result.stderr)
+            if not accepted:
+                assert "Waveshare Bluetooth IPC stack requires" in result.stderr
 lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
+
+# External BSS is used before setup(). Reject a core that only initializes
+# PSRAM later in Arduino, or silently expands the placement attribute away.
+external_bss_requirements = (
+    "CONFIG_SPIRAM_BOOT_HW_INIT", "CONFIG_SPIRAM_BOOT_INIT",
+    "CONFIG_SPIRAM_MEMTEST", "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
+)
+for environment in config.sections():
+    if environment.startswith("env:WAVESHARE_AMOLED_"):
+        sdkconfig = inherited_option(environment, "custom_sdkconfig")
+        for requirement in external_bss_requirements:
+            assert requirement + "=y" in sdkconfig, (environment, requirement)
+
+with tempfile.TemporaryDirectory(prefix="task-data-placement-") as temporary:
+    stub_dir = Path(temporary)
+    # Portable stand-in for the SDK attribute; the final target ELF, not this
+    # host compiler, proves external placement. Check forwarding and defaults.
+    (stub_dir / "esp_attr.h").write_text(
+        '#define EXT_RAM_BSS_ATTR __attribute__((aligned(64)))\n'
+    )
+    source = '''
+#include "task_data_placement.hpp"
+#include "startup_constructed.hpp"
+#include <cstdint>
+struct State { unsigned zero = 0; unsigned sentinel = 255; };
+static BICINO_TASK_DATA StartupConstructed<State> state;
+int main() {
+  return state.value.zero != 0 || state.value.sentinel != 255 ||
+         reinterpret_cast<std::uintptr_t>(&state) % 64 != 0;
+}
+'''
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"):
+        for missing in (None, *external_bss_requirements):
+            (stub_dir / "sdkconfig.h").write_text("".join(
+                f"#define {name} {int(name != missing)}\n"
+                for name in external_bss_requirements
+            ))
+            executable = stub_dir / "placement"
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-DESP_PLATFORM", f"-D{board}",
+                 "-I", str(stub_dir), "-I", str(project_dir / "lib/utils/src"),
+                 "-x", "c++", "-", "-o", str(executable)],
+                input=source, text=True, capture_output=True,
+            )
+            assert (result.returncode == 0) == (missing is None), (
+                board, missing, result.stderr
+            )
+            if missing is None:
+                subprocess.run([str(executable)], check=True)
+            else:
+                assert "boot-initialized external BSS" in result.stderr
+
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source
 assert "SOURCE_DATE_EPOCH" in prebuild_source
@@ -56,6 +141,16 @@ assert main_source.index("std::fflush(stdout)") < main_source.index(
 assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
+qualification_sdkconfig = inherited_option(
+    "env:WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in qualification_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in qualification_sdkconfig
+assert qualification_sdkconfig == inherited_option(
+    "env:WAVESHARE_AMOLED_175_PRODUCTION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" not in inherited_option(
+    "env:WAVESHARE_AMOLED_206_PRODUCTION", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
@@ -251,20 +346,53 @@ for environment in large_diagnostic_profiles:
         == "partitions_remote_debug.csv"
     )
 
-for partition_name in ("partitions.csv", "partitions_remote_debug.csv"):
-    partition_rows = [
-        [field.strip() for field in line.split(",")]
-        for line in (project_dir / partition_name).read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    assert partition_rows[-2][0] == "ffat"
-    assert partition_rows[-1][:5] == [
-        "coredump",
-        "data",
-        "coredump",
-        "",
-        "0x0F0000",
-    ]
+# esp32/partition_layouts.json is the numeric source of truth. Each current
+# CSV must render exactly its registered table, and only current layouts have
+# CSVs: the legacy generation is kept for recovery and migration recipes.
+layouts = partition_layouts.load()
+production_layout = layouts.current("production")
+development_layout = layouts.current("development")
+assert production_layout.csv == "partitions.csv"
+assert development_layout.csv == "partitions_remote_debug.csv"
+assert sorted(path.name for path in project_dir.glob("*.csv")) == [
+    "partitions.csv",
+    "partitions_remote_debug.csv",
+]
+for layout in (production_layout, development_layout):
+    rows = partition_layouts.parse_csv(project_dir / layout.csv)
+    assert rows == layout.partitions, layout.csv
+    assert partition_layouts.encode_table(rows) == layout.table_bytes()
+# Profile switching within the current generation never relocates FFat, and the
+# coredump keeps its retained panic evidence at the same place in every layout.
+assert production_layout.ffat == development_layout.ffat
+assert production_layout.ffat.offset == 0x810000
+assert production_layout.ffat.size == 0x700000
+assert [slot.size for slot in production_layout.application_slots] == [
+    0x400000,
+    0x400000,
+]
+assert [slot.size for slot in development_layout.application_slots] == [0x800000]
+for layout in layouts.layouts:
+    assert layout.partition("coredump").record() == (
+        "coredump", 0x01, 0x03, 0xF10000, 0xF0000
+    )
+production_behaviour = (
+    "_PRODUCTION",
+    "_LIFECYCLE_QUALIFICATION",
+    "_PERSONAL",
+    "_USB_RECOVERY_VALIDATION",
+)
+waveshare_profiles = [
+    section
+    for section in config.sections()
+    if re.match(r"env:WAVESHARE_(AMOLED|EPAPER)_", section)
+]
+assert waveshare_profiles
+for section in waveshare_profiles:
+    layout = layouts.for_csv(inherited_option(section, "board_build.partitions"))
+    assert layout.status == "current", section
+    if section.endswith(production_behaviour):
+        assert layout is production_layout, section
 
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
@@ -496,10 +624,14 @@ assert not raw_write_offenders, (
 release_candidate_workflow = (
     repo_root / ".github/workflows/firmware-release-candidate.yml"
 ).read_text()
-assert (
-    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
-    in release_candidate_workflow
-)
+# Production is built once in the required CI workflow. The candidate consumes
+# its checked bytes only after that workflow has completed successfully.
+canonical_ci = (repo_root / ".github/workflows/ci.yml").read_text()
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in canonical_ci
+assert "name: verified-production-${{ matrix.target }}" in canonical_ci
+assert "needs: validate" in release_candidate_workflow
+assert "name: verified-production-${{ matrix.environment }}" in release_candidate_workflow
+assert "firmware_release_candidate.py record" in release_candidate_workflow
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment in personal_profiles:
@@ -510,5 +642,19 @@ for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
     assert mapping in release_candidate_workflow
+
+isolated_poi = "env:WAVESHARE_AMOLED_175_POI_ISOLATED_LIFECYCLE_QUALIFICATION"
+assert isolated_poi.endswith("_LIFECYCLE_QUALIFICATION")  # Retain reserve gate.
+assert config.get(isolated_poi, "extends") == (
+    "env:WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION"
+)
+assert inherited_option(isolated_poi, "board_build.partitions") == "partitions.csv"
+assert "-DMAP_POIS_RUNTIME_ENABLED=1" in inherited_option(isolated_poi, "build_flags")
+for section in config.sections():
+    if section.startswith("env:"):
+        flags = inherited_option(section, "build_flags")
+        assert ("-DMAP_STREAM_QUALIFICATION_TRUST=1" in flags) == (section == isolated_poi), section
+assert isolated_poi.removeprefix("env:") not in release_candidate_workflow
+assert isolated_poi.removeprefix("env:") not in firmware_routing
 
 print("firmware production profile contracts passed")

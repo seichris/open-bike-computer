@@ -1,10 +1,17 @@
 #pragma once
 
 #include <stdint.h>
+#include "firmware_diagnostics_config.hpp"
 
 // Development qualification only. Production profiles deliberately omit this.
 #ifndef MAP_STABLE_CAMERA
 #define MAP_STABLE_CAMERA 0
+#endif
+
+// Nearby remains a development qualification path until both physical board
+// families have passed the signed-map, query, touch, and edge-layout gates.
+#ifndef MAP_POIS_RUNTIME_ENABLED
+#define MAP_POIS_RUNTIME_ENABLED 0
 #endif
 
 namespace map_profile_protocol {
@@ -33,6 +40,7 @@ constexpr uint8_t MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID = 34;
 constexpr uint8_t MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID = 35;
 constexpr uint8_t MAP_NAVIGATION_ROTATION_SETTING_ID = 37;
 constexpr bool STABLE_CAMERA_ENABLED = MAP_STABLE_CAMERA != 0;
+constexpr bool POIS_RUNTIME_ENABLED = MAP_POIS_RUNTIME_ENABLED != 0;
 
 inline uint8_t navigationRotation(int32_t value) {
   return value == 0 ? 0 : 1;
@@ -68,12 +76,34 @@ constexpr uint32_t VISIBILITY_SERVICE_ROADS = 1u << 10;
 constexpr uint32_t VISIBILITY_TRACKS = 1u << 11;
 constexpr uint32_t VISIBILITY_EXTENDED_MARKER = 1u << 12;
 constexpr uint32_t VISIBILITY_CONTOURS = 1u << 13;
+constexpr uint32_t TERRAIN_EXPERIMENT_MASK = 0x3c000;
+#if FIRMWARE_DIAGNOSTICS
+constexpr uint32_t VISIBILITY_TERRAIN = TERRAIN_EXPERIMENT_MASK;
+#else
+constexpr uint32_t VISIBILITY_TERRAIN = 0;
+#endif
+constexpr uint32_t VISIBILITY_POI_SHOPS = 1u << 18;
+constexpr uint32_t VISIBILITY_POI_RESTAURANTS_AND_CAFES = 1u << 19;
+constexpr uint32_t VISIBILITY_POI_PUBLIC_TOILETS = 1u << 20;
+constexpr uint32_t VISIBILITY_POI_GAS_STATIONS = 1u << 21;
+constexpr uint32_t VISIBILITY_POI_BICYCLE_SERVICES = 1u << 22;
+constexpr uint32_t VISIBILITY_POI_MASK =
+    VISIBILITY_POI_SHOPS | VISIBILITY_POI_RESTAURANTS_AND_CAFES |
+    VISIBILITY_POI_PUBLIC_TOILETS | VISIBILITY_POI_GAS_STATIONS |
+    VISIBILITY_POI_BICYCLE_SERVICES;
 constexpr uint32_t VISIBILITY_LEGACY_FEATURE_MASK = 0xFF;
 constexpr uint32_t VISIBILITY_EXTENDED_FEATURE_MASK =
     VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_SERVICE_ROADS |
-    VISIBILITY_TRACKS;
+    VISIBILITY_TRACKS | VISIBILITY_POI_MASK;
 constexpr uint32_t VISIBILITY_RENDER_FEATURE_MASK =
-    VISIBILITY_EXTENDED_FEATURE_MASK | VISIBILITY_CONTOURS;
+    (VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK) |
+    VISIBILITY_CONTOURS | VISIBILITY_TERRAIN |
+    (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U);
+constexpr uint32_t MAP_DEFAULT_VISIBILITY_MASK =
+    VISIBILITY_EXTENDED_FEATURE_MASK &
+    ~(POIS_RUNTIME_ENABLED ? 0U : VISIBILITY_POI_MASK);
+constexpr uint32_t MAP_DEFAULT_PERSISTED_VISIBILITY_MASK =
+    MAP_DEFAULT_VISIBILITY_MASK | VISIBILITY_EXTENDED_MARKER;
 constexpr uint32_t VISIBILITY_OVERLAY_MASK =
     VISIBILITY_ROUTE_OVERLAY | VISIBILITY_POSITION_MARKER;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL = 0;
@@ -113,9 +143,11 @@ inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
-  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS);
+  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS | VISIBILITY_TERRAIN);
   if ((mask & VISIBILITY_EXTENDED_MARKER) != 0) {
-    normalized |= mask & (VISIBILITY_SERVICE_ROADS | VISIBILITY_TRACKS);
+    normalized |= mask &
+                  (VISIBILITY_SERVICE_ROADS | VISIBILITY_TRACKS |
+                   (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U));
   } else {
     if ((normalized & VISIBILITY_LOCAL_STREETS) != 0)
       normalized |= VISIBILITY_SERVICE_ROADS;
@@ -129,6 +161,8 @@ inline uint32_t visibilityMaskForMapVersion(uint32_t mask,
                                             uint8_t mapVersion) {
   if (mapVersion < 5)
     mask &= ~VISIBILITY_CONTOURS;
+  if (mapVersion < 6 || !POIS_RUNTIME_ENABLED)
+    mask &= ~VISIBILITY_POI_MASK;
   if (mapVersion >= 2)
     return mask;
 

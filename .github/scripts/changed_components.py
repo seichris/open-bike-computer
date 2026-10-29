@@ -7,9 +7,13 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from collections.abc import Iterable, Sequence
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ci_scopes
 
 COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
 FIRMWARE_TARGETS = {
@@ -17,18 +21,30 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_175",
         "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_175_PRODUCTION",
+        "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
+        "WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION",
     ),
     "206": (
         "WAVESHARE_AMOLED_206",
         "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_206_PRODUCTION",
+        "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
+        "WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION",
     ),
 }
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
+    ".github/scripts/ci_scopes.py",
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
+# This host renderer runs after a firmware build supplies pinned LVGL sources.
+FIRMWARE_RENDER_TEST_PATHS = {
+    "esp32/tools/tests/test_social_riders_render.cpp",
+    "esp32/tools/run_social_riders_render_test.py",
+    "tools/generate_ride_stats_preview.py",
+    "tools/ride_stats_preview/lvgl-source.lock.json",
+}
 FIRMWARE_HOST_PATH_PREFIXES = (
     ".github/actions/firmware-build-cache/",
     ".github/actions/require-immutable-releases/",
@@ -36,7 +52,10 @@ FIRMWARE_HOST_PATH_PREFIXES = (
 )
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/scripts/diagnostic_changes.py",
+    ".github/workflows/workout-zone-contracts.yml",
     ".github/workflows/firmware-cache-qualification.yml",
+    ".github/workflows/firmware-core-warm.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
@@ -46,7 +65,15 @@ FIRMWARE_WORKFLOW_PATHS = {
 }
 MAP_WORKFLOW_PATHS = {
     ".github/workflows/map-platform-ci.yml",
+    ".github/scripts/dispatch_promotion_ci.py",
     ".github/workflows/map-platform-image.yml",
+}
+# Native POI equivalence imports the backend shard producer/selector. Keep its
+# product-container gate active even when no extractor file changes.
+OSM_BACKEND_PATHS = {
+    "map-platform/backend/map_platform/__init__.py",
+    "map-platform/backend/map_platform/source_shards.py",
+    "map-platform/backend/tests/test_source_shards.py",
 }
 FIRMWARE_CONTRACT_PATHS = {
     "docs/device-ownership-test-vectors.json",
@@ -61,11 +88,15 @@ FIRMWARE_CONTRACT_PATHS = {
 FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
     "tools/tests/test_firmware_manifest.py",
+    # Host contract tests pin its slot sizes and pre-write ordering.
+    "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
 }
-RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py"}
+RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py", "tools/bicino"}
 SHARED_RIDE_BLE_CONTRACT_PATHS = {
     "protocol/ride-ble-contract-v1.json",
     "tools/generate_ride_ble_contract.py",
+    "protocol/diagnostics/registry-v2.json",
+    "tools/generate_diagnostics_contract.py",
 }
 FIRMWARE_RELEASE_TOOL_PATHS = {
     ".github/firmware-release-authority.json",
@@ -77,7 +108,10 @@ FIRMWARE_RELEASE_TOOL_PATHS = {
     "tools/firmware_release_candidate.py",
     "tools/firmware-signing-requirements.txt",
     "tools/verify_github_release_assets.py",
+    "tools/web_flasher_manifest.py",
 }
+# Signed USB recovery/migration/identity vectors; the website copies them byte-for-byte.
+FIRMWARE_WEB_FLASHER_PREFIX = "tools/web-flasher/"
 IOS_CONTRACT_PATHS = {
     "docs/app-store-privacy-disclosures.md",
     "docs/device-ownership-test-vectors.json",
@@ -86,6 +120,28 @@ IOS_CONTRACT_PATHS = {
 SHARED_FMB_FIXTURE_PREFIX = "tools/tests/fixtures/fmb/"
 SHARED_MAP_STREAM_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
+)
+SHARED_CONTOUR_COMPANION_FIXTURE_PATH = (
+    "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
+)
+# Durable map contract inputs and their readers. Every map-platform/ path also
+# selects the backend (and so the catalog Worker) below.
+SHARED_MAP_COMPATIBILITY_CORPUS_PREFIX = (
+    "map-platform/backend/tests/fixtures/map-compatibility-v"
+)
+SHARED_MAP_COMPATIBILITY_CONTRACT_PREFIX = "map-platform/config/map-compatibility-contract-v"
+SHARED_MAP_READER_CAPABILITY_FIXTURE_PREFIX = "protocol/fixtures/map-reader-capabilities-v"
+# Client map-stream trust. The backend checks that these still match the trust
+# registry and keep every durable map signer trusted.
+MAP_STREAM_CLIENT_TRUST_PATHS = {
+    "esp32/lib/map_transfer/map_stream_compiled_keys.generated.inc",
+    "esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc",
+    "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+    "ios-app/BikeComputer/Configuration/Development.xcconfig",
+}
+SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
+    "protocol/fixtures/route-elevation-v1/",
+    "tools/generate_route_elevation_fixtures.py",
 )
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
@@ -132,7 +188,7 @@ def registry_changed_components(base, head=None):
 
 
 def native_ios_required(paths, *, run_all=False, registry_components=None):
-    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
+    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and p not in ci_scopes.SHARED_FAST_CHECKS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
                     and not (p == CHECK_REGISTRY and registry_components is not None and "ios_native" not in registry_components)]
     return classify_paths(native_paths, run_all=run_all, registry_components=registry_components)["ios"]
 
@@ -140,6 +196,22 @@ def native_ios_required(paths, *, run_all=False, registry_components=None):
 def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_components=None) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
 
+    paths = tuple(paths)
+    selected = _classify_known_paths(paths, run_all=run_all, registry_components=registry_components)
+    if not run_all:
+        for path in paths:
+            # Stop before expensive jobs when ownership is unknown. An explicit
+            # consumer mapping is required; neither a green skip nor full CI is
+            # a substitute for that decision.
+            if (path.startswith(("tools/", "protocol/", ".github/"))
+                    and not path.endswith(".md") and path != CHECK_REGISTRY
+                    and not path.startswith(("tools/development/tests/", ".github/scripts/tests/"))
+                    and not any(_classify_known_paths([path], registry_components=registry_components).values())):
+                raise ValueError(f'unclassified CI input: {path}; add an explicit consumer mapping')
+    return selected
+
+
+def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_components=None) -> dict[str, bool]:
     selected = {component: run_all for component in COMPONENTS}
     if run_all:
         return selected
@@ -149,7 +221,16 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         if not path:
             continue
 
-        if path in FULL_CI_PATHS or path in {"tools/dev-check", "tools/dev_check.py"}:
+        if path in ci_scopes.SHARED_FAST_CHECKS:
+            checks = {c['id']: c for c in ci_scopes.registry_checks()}
+            for identifier in ci_scopes.SHARED_FAST_CHECKS[path]:
+                if identifier not in checks:
+                    raise ValueError(f'unknown shared-input check: {identifier}')
+                selected[checks[identifier]['component']] = True
+            continue
+
+        # Runner/environment entry points route like their tools/development/ code.
+        if path in FULL_CI_PATHS or path in {"tools/dev-check", "tools/dev_check.py", "tools/dev-setup", "tools/dev-env"}:
             return {component: True for component in COMPONENTS}
 
         if path == CHECK_REGISTRY:
@@ -165,7 +246,9 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         elif path.startswith("tools/development/") and not path.startswith("tools/development/tests/"):
             return {component: True for component in COMPONENTS}
 
-        if path.startswith(".github/actions/firmware-build-cache/"):
+        if (path.startswith(".github/actions/firmware-build-cache/")
+                or path == ".github/scripts/firmware_core_artifact.py"):
+            # Every firmware build restores through these; host tests cover their unit tests.
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 
@@ -177,6 +260,10 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
             ):
                 selected["firmware_build"] = True
 
+        if path in FIRMWARE_RENDER_TEST_PATHS or path.startswith('tools/ride_stats_preview/'):
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
+
         if (
             path.startswith("tools/tests/")
             or path.startswith(FIRMWARE_HOST_PATH_PREFIXES)
@@ -184,6 +271,8 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
             or path in FIRMWARE_CONTRACT_PATHS
             or path in FIRMWARE_RELEASE_TOOL_PATHS
             or path in RIDE_DIAGNOSTICS_TOOL_PATHS
+            or path.startswith("tools/bicino_diagnostics/")
+            or path.startswith(FIRMWARE_WEB_FLASHER_PREFIX)
         ):
             selected["firmware_host"] = True
 
@@ -214,6 +303,9 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         if path == ".dockerignore" or path.startswith("map-platform/"):
             selected["map_backend"] = True
 
+        if path in OSM_BACKEND_PATHS:
+            selected["osm"] = True
+
         if path.startswith("tools/OSM_Extract/"):
             # The production backend image copies the extractor into its image.
             selected["map_backend"] = True
@@ -227,6 +319,34 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
 
         if path == SHARED_MAP_STREAM_FIXTURE_PATH:
             # The same signed-stream bytes are parsed by backend, iOS, and firmware.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path == SHARED_CONTOUR_COMPANION_FIXTURE_PATH:
+            # Backend-produced signed maps and companions drive the iPhone
+            # delivery contract tests.
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path.startswith(SHARED_MAP_COMPATIBILITY_CORPUS_PREFIX):
+            # The frozen producer corpus is read by the backend, catalog,
+            # iPhone and firmware compatibility tests.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+        if path.startswith(SHARED_MAP_COMPATIBILITY_CONTRACT_PREFIX):
+            # The worker and the iPhone reader test both load the contract.
+            selected["ios"] = True
+        if path.startswith(SHARED_MAP_READER_CAPABILITY_FIXTURE_PREFIX):
+            # Firmware must report these bytes; the iPhone decodes them.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+        if path in MAP_STREAM_CLIENT_TRUST_PATHS:
+            selected["map_backend"] = True
+
+        if path.startswith(SHARED_ROUTE_ELEVATION_FIXTURE_PATHS):
+            # Backend processing, the Swift codec and the firmware decoder all
+            # assert the same route elevation fixtures.
             selected["firmware_host"] = True
             selected["ios"] = True
             selected["map_backend"] = True
@@ -375,13 +495,14 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        paths = None
         selected = select_scope(args.scope)
         native_ios = selected["ios"] if selected is not None else False
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
             affected = registry_changed_components(args.base, args.head) if paths and CHECK_REGISTRY in paths else None
-            selected = classify_paths(paths or (), run_all=paths is None, registry_components=affected)
-            native_ios = native_ios_required(paths or (), run_all=paths is None, registry_components=affected)
+            selected = classify_paths(paths or (), run_all=not paths, registry_components=affected)
+            native_ios = native_ios_required(paths or (), run_all=not paths, registry_components=affected)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -389,11 +510,18 @@ def main() -> int:
         value = "true" if selected[component] else "false"
         print(f"{component}={value}")
     firmware_targets = json.dumps(
-        select_firmware_targets(args.firmware_hardware),
+        ci_scopes.firmware_targets(paths, select_firmware_targets(args.firmware_hardware)),
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
     print(f"ios_native={'true' if native_ios else 'false'}")
+    details = {**ci_scopes.map_scopes(paths, selected=selected["map_backend"]),
+               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"]),
+               'firmware_host_checks': ci_scopes.firmware_host_checks(paths, selected=selected['firmware_host']),
+               'firmware_renderer': ci_scopes.firmware_renderer_required(paths),
+               'zone_contracts': ci_scopes.zone_contracts_required(paths, ios=selected['ios'], firmware_host=selected['firmware_host'])}
+    for key, value in details.items():
+        print(f"{key}={json.dumps(value, separators=(',', ':'))}")
     return 0
 
 

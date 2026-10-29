@@ -400,6 +400,28 @@ class RideDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(gap["fields"]["storageErrorCount"], 2)
 
+    def test_lifecycle_resource_fields_preserve_types_and_privacy(self):
+        fields = {
+            "bootSequence": 7, "firmwareFingerprint": "A1B2C3D4",
+            "operationId": "123456781234abcdABCD123456789abc",
+            "cleanupFailed": False, "freeBytes": 0xffffffff,
+            "largestBytes": 500, "minimumFreeBytes": 600,
+            "minimumLargestBytes": 400, "tlsStackBytes": 0,
+            "ownerStackBytes": 1024, "rendererStackBytes": 2048,
+            "stackAvailableMask": 7,
+        }
+        self.assertEqual(ride_diagnostics.validate_event(firmware_event(fields=fields))["fields"], fields)
+        for key, invalid in (("operationId", 123), ("cleanupFailed", 0),
+                             ("freeBytes", True), ("largestBytes", "500"),
+                             ("minimumFreeBytes", {}), ("minimumLargestBytes", []),
+                             ("tlsStackBytes", "0"), ("ownerStackBytes", False),
+                             ("rendererStackBytes", "2048"), ("stackAvailableMask", True),
+                             ("operationId", "Bearer private"), ("operationId", "x" * 257),
+                             ("sessionToken", "private"), ("password", "private")):
+            invalid_fields = dict(fields, **{key: invalid})
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ride_diagnostics.DiagnosticError):
+                ride_diagnostics.validate_event(firmware_event(fields=invalid_fields))
+
     def test_rejects_source_specific_field_type_mismatches(self):
         with self.assertRaises(ride_diagnostics.DiagnosticError):
             ride_diagnostics.validate_event(
@@ -584,6 +606,64 @@ class RideDiagnosticsTests(unittest.TestCase):
                 archive.writestr("checksums.sha256", checksums)
             _, streams = ride_diagnostics.validate_bundle(bundle)
             self.assertEqual(streams[1].dropped_sequences, 2)
+
+    def test_reports_unretained_leading_ios_history_separately_from_gaps(self):
+        def write_bundle(path, source):
+            manifest = bundle_manifest(source)
+            members = {
+                "manifest.json": json.dumps(manifest).encode(),
+                **source,
+                **required_sidecars(manifest),
+            }
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+                for name, payload in members.items():
+                    archive.writestr(name, payload)
+                archive.writestr(
+                    "checksums.sha256",
+                    "".join(
+                        f"{hashlib.sha256(payload).hexdigest()}  {name}\n"
+                        for name, payload in members.items()
+                    ),
+                )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Rolling retention removed chunks 1-3 of this iPhone process.
+            rolled = f"app/{APP_PROCESS_ID}/events-000004.jsonl"
+            device = device_stream_path(7, 2, "b")
+            source = {
+                rolled: b"".join(
+                    (json.dumps(event(sequence=value)) + "\n").encode()
+                    for value in (1500, 1501)
+                ),
+                device: (json.dumps(firmware_event(sequence=40)) + "\n").encode(),
+            }
+            bundle = root / "rolled.zip"
+            write_bundle(bundle, source)
+            _, streams = ride_diagnostics.validate_bundle(bundle)
+            by_path = {stream.path: stream for stream in streams}
+            self.assertEqual(by_path[rolled].unretained_leading_sequences, 1500)
+            self.assertEqual(by_path[rolled].dropped_sequences, 0)
+            # Firmware boots do not have a known first sequence here.
+            self.assertEqual(by_path[device].unretained_leading_sequences, 0)
+            output = root / "summary"
+            ride_diagnostics.summarize(bundle, output)
+            summary = json.loads((output / "summary.json").read_text())
+            reported = {
+                stream["path"]: stream["unretainedLeadingSequences"]
+                for stream in summary["streams"]
+            }
+            self.assertEqual(reported[rolled], 1500)
+
+            complete = root / "complete.zip"
+            write_bundle(complete, {
+                APP_STREAM_PATH: b"".join(
+                    (json.dumps(event(sequence=value)) + "\n").encode()
+                    for value in (0, 1)
+                ),
+            })
+            _, streams = ride_diagnostics.validate_bundle(complete)
+            self.assertEqual(streams[0].unretained_leading_sequences, 0)
 
     def test_rejects_manifest_stream_coverage_mismatch(self):
         with TemporaryDirectory() as directory:
@@ -863,7 +943,11 @@ class RideDiagnosticsTests(unittest.TestCase):
         anchor["event"] = "clock_anchor"
         anchor["uptimeMs"] = 200
         correlated = ride_diagnostics._correlate_events([before, anchor])
-        self.assertEqual(correlated[0]["clockUncertaintyMs"], 1000)
+        self.assertIsNone(correlated[0]["clockUncertaintyMs"])
+        self.assertIsNone(correlated[1]["clockUncertaintyMs"])
+        self.assertEqual(correlated[1]["clockResolutionMs"], 1000)
+        distant = dict(before, uptimeMs=3_600_200)
+        self.assertIsNone(ride_diagnostics._correlate_events([distant, anchor])[0]["clockUncertaintyMs"])
         self.assertLess(
             ride_diagnostics._event_timestamp(correlated[0]),
             ride_diagnostics._event_timestamp(correlated[1]),
