@@ -1,22 +1,46 @@
-# Production map client compatibility release
+# Production map controller approval release
 
-This controller-only image admits exact approved App Store app identities while retaining the qualified generation worker.
+This registry-only image now starts from the attested contract-1 runtime
+`sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9`
+(source `8104250ca68499a50c9ec68b9102f13fe1ab5965`). This is an intentional
+production backend upgrade from the previous controller, not merely an app
+allowlist extension. The base is the unchanged runtime already used to generate
+the development contract-1 Shanghai maps. Its recomputed producer identity is
+`fabfedc35cbb2443b442d2b64753e438c40559b1eac0c98db6d3f675e9cd3d9f`.
 
-The runtime starts from production controller `sha256:a007eb1beeeba69e51a287394aa2741879598d55a7586fff1d13f3e0004e29f0` (source `2e4d28554061f3b7243fd7f8d21fe628a407f67b`). Only the public approval registry under `/app` is replaced. The API, rollout implementation, authentication, jobs, storage, converters, signing, maintenance and producer identity stay byte-identical to that base. The entrypoint rejects generation and inline-worker commands. Runtime validation checks the complete file inventory and uses the frozen base image's rollout tests, plus exact-client and artifact rejection cases. Current main's newer rollout implementation is not overlaid onto the older production API.
+Only the public approval registry under `/app` is overlaid. Validation compares
+the entire runtime inventory to that immutable base, runs its own rollout tests,
+and checks durable delivery across client upgrades, wrong signer/producer
+rejection, and preservation of the legacy build-104 anchor. The entrypoint rejects
+generation and inline-worker commands. The actual generation worker remains the
+exact base image, independently pinned; do not use the controller as a worker.
 
-Each admitted client has an independent exact approval. Compatibility requires equality of candidate source, producer digest, worker image digest, firmware version/build/source, requirements hash, and the complete approved signing-key set. The current rollout promotion remains the cohort selector and hardware anchor. Unknown or mixed client identities remain rejected.
+Approval `msr-20261029-durable-contract1` retains all previous approvals. For
+marked contract-1 artifacts, the backend checks the approved producer and signer
+without requiring the requesting app or firmware's exact build. Legacy unmarked
+maps retain the existing firmware-104 anchor. Standard format-3 maps are covered;
+legacy formats 1/2 are not retroactively classified, and this rollout does not
+enable production contour/POI generation.
 
-## Bicino 1.11 (30)
+The approval records software review under Chris's 2026-10-29 instruction to
+proceed with merges and releases after recording the incomplete USB cold capture
+and pending production qualification. No optional physical production runs are
+claimed. Diagnostic 1.75 evidence is distinct from production on either board.
 
-The exact signed Release archive comes from GitHub main `25107bf69edab1a62b092ee16bd5500ebe9bbdeb`, with map component `95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05`. Approval `msr-20261026-worker-social-ios30` adds that identity alongside builds 24, 25, 28 and 29 for the existing production worker and firmware.
-
-The approval records software qualification under the maintainer's app-publication request. The checked-in hardware matrix is optional and unchanged; no physical map-transfer, Watch ride, power-loss, battery or thermal acceptance is claimed. Raw qualification notes remain in operator release artifacts. Keep `msr-20261022-worker-social-ios28` selected as the rollout promotion and require production health to advertise `24,25,28,29,30` before App Store submission.
-
-After this preparation merges and no image workflow is active, publish the candidate:
+After merge, publish using the existing isolated profile:
 
 ```sh
 gh workflow run map-platform-image.yml --ref main \
   -f release_profile=production-map-client-compatibility
 ```
 
-Review a Compose-lock PR that advances only the controller digest/source. Preserve the generation worker and promotion scheduler pins. Require CI Gate and image attestation verification before merging the lock. Verify the public API remains in `all` mode, requires App Attest, and admits builds 24, 25, 28, 29 and 30. Health is configuration evidence, not physical transfer qualification. Roll back using the previous complete Compose lock.
+Publish the updated dedicated promotion scheduler separately with
+`release_profile=production-map-promotion`. Then prepare one reviewed production
+Compose lock: controller from this profile, worker at the base digest above,
+promotion scheduler at its new attested digest and converter identity at the same
+base. Select `msr-20261029-durable-contract1` for API and worker. Preserve existing
+production credentials, volumes, generation policy and enabled integrations.
+Require image provenance and CI Gate before merging the lock. Verify live health,
+worker identity, scheduler health and contract-aware delivery before publishing
+firmware build 105. Roll back the complete previous lock; never remove approval
+history or mutate already signed map bytes.

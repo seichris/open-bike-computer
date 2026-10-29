@@ -25,12 +25,16 @@ Successful publication is idempotent if its response is lost.
 ## Release and activation
 
 The dedicated Dockerfile puts the scheduling module under `/opt/bicino-promotion`,
-outside the qualified converter's hashed `/app` source tree. Its validation stage
+outside the approved converter's hashed `/app` source tree. Its validation stage
 requires every `/app` file to match the base, runs the real converter identity
-check, and runs both scheduler and existing promotion tests. The new format-4
-companion test runs in the backend suite; it is skipped only in this pinned
-format-3 converter validation image. The original
-converter/signer producer identity remains accurate because that code is unchanged.
+check, and runs both scheduler and existing promotion tests. The converter base is now the attested contract-1 runtime from source
+`8104250ca68499a50c9ec68b9102f13fe1ab5965`, digest
+`sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9`.
+Its converter source remains byte-identical inside this scheduler image. Full
+companion and production POI-rejection tests run without the former format-3
+compatibility skip. Newly promoted covered maps carry contract 1; old signed
+artifacts are not rewritten. The runtime converter identity must match this base,
+not the outer scheduler image.
 No API or map-generation worker image is replaced by this candidate.
 
 Run local validation using OrbStack:
