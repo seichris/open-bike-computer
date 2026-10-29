@@ -1,10 +1,13 @@
+import Combine
 import CoreLocation
 import Foundation
 
-/// Saved-route archives store WGS-84, but favorites hold MapKit coordinates
-/// (GCJ-02 in mainland China): map pins and search create them that way, and
-/// route planning, device destination requests and the Watch favorite sync
-/// all read them that way.
+/// Saved-route archives store WGS-84, but favorites and recents hold MapKit
+/// coordinates: map pins create them that way, and route planning, device
+/// destination requests and the Watch favorite sync all read them that way.
+/// Like every other conversion in the app, MapKit space here means GCJ-02
+/// inside `RouteCoordinateNormalizationV1.isInMainlandChina`'s region.
+@MainActor
 enum SavedRouteFavoritePolicy {
     /// The favorite for a saved route's destination, in MapKit coordinates.
     static func favorite(for route: PlannedRouteSummaryV1) -> SavedDestination {
@@ -14,31 +17,53 @@ enum SavedRouteFavoritePolicy {
         )
     }
 
-    /// New coordinates, by favorite ID, for favorites that were starred from a
-    /// saved route before `favorite(for:)` converted. Such a favorite holds
-    /// exactly its route's WGS-84 destination; only the ones still linked to
-    /// an installed route can be told apart from a pin or search result, and
-    /// only where MapKit's coordinates differ, in mainland China, are wrong.
+    /// New coordinates, by ID, for destinations that came from starring a saved
+    /// route before `favorite(for:)` converted: the favorite itself and the
+    /// copies using it left in recents. Each holds exactly its linked route's
+    /// WGS-84 destination; only those still linked to an installed route can be
+    /// told apart from a map pin, and only where the conversion moves the
+    /// point are they wrong.
     static func legacyCoordinateRepairs(
-        favorites: [SavedDestination],
+        destinations: [SavedDestination],
         routes: [PlannedRouteSummaryV1]
     ) -> [UUID: CLLocationCoordinate2D] {
-        let destinations = Dictionary(
+        let routeDestinations = Dictionary(
             routes.map { ($0.id, $0.destination.coordinate) },
             uniquingKeysWith: { first, _ in first }
         )
         var repairs: [UUID: CLLocationCoordinate2D] = [:]
-        for favorite in favorites {
-            guard let routeID = favorite.savedRouteID,
-                  let destination = destinations[routeID],
-                  favorite.latitude == destination.latitude,
-                  favorite.longitude == destination.longitude else { continue }
-            let mapKit = mapKitCoordinate(destination)
-            guard mapKit.latitude != destination.latitude ||
-                    mapKit.longitude != destination.longitude else { continue }
-            repairs[favorite.id] = mapKit
+        for destination in destinations {
+            guard let routeID = destination.savedRouteID,
+                  let routeDestination = routeDestinations[routeID],
+                  destination.latitude == routeDestination.latitude,
+                  destination.longitude == routeDestination.longitude else { continue }
+            let mapKit = mapKitCoordinate(routeDestination)
+            guard mapKit.latitude != routeDestination.latitude ||
+                    mapKit.longitude != routeDestination.longitude else { continue }
+            repairs[destination.id] = mapKit
         }
         return repairs
+    }
+
+    static func repairLegacyCoordinates(
+        in store: SavedDestinationStore,
+        routes: [PlannedRouteSummaryV1]
+    ) {
+        store.replaceCoordinates(
+            favorites: legacyCoordinateRepairs(destinations: store.favoriteDestinations, routes: routes),
+            recents: legacyCoordinateRepairs(destinations: store.recentDestinations, routes: routes)
+        )
+    }
+
+    /// Repairs `store` with the installed routes now and whenever they change.
+    static func repairLegacyCoordinates(
+        in store: SavedDestinationStore,
+        whenever routes: Published<[PlannedRouteSummaryV1]>.Publisher
+    ) -> AnyCancellable {
+        routes.sink { [weak store] routes in
+            guard let store else { return }
+            repairLegacyCoordinates(in: store, routes: routes)
+        }
     }
 
     private static func mapKitCoordinate(_ coordinate: RouteCoordinateV1) -> CLLocationCoordinate2D {

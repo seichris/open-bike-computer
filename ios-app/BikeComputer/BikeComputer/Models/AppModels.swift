@@ -176,21 +176,36 @@ final class SavedDestinationStore: ObservableObject {
         return cleaned
     }
 
-    /// Rewrites stored favorite coordinates by favorite ID, keeping each
-    /// favorite's name, order and saved-route link.
-    func replaceFavoriteCoordinates(_ coordinates: [UUID: CLLocationCoordinate2D]) {
-        guard !coordinates.isEmpty else { return }
-        let replaced = favoriteDestinations.map { favorite in
-            guard let coordinate = coordinates[favorite.id] else { return favorite }
-            return SavedDestination(
-                id: favorite.id,
-                name: favorite.name,
-                coordinate: coordinate,
-                savedRouteID: favorite.savedRouteID
-            )
+    /// Rewrites stored coordinates by destination ID, keeping each entry's
+    /// name, order and saved-route link; both lists are persisted together.
+    func replaceCoordinates(
+        favorites: [UUID: CLLocationCoordinate2D],
+        recents: [UUID: CLLocationCoordinate2D]
+    ) {
+        func replacing(
+            _ destinations: [SavedDestination],
+            _ coordinates: [UUID: CLLocationCoordinate2D]
+        ) -> [SavedDestination] {
+            destinations.map { destination in
+                guard let coordinate = coordinates[destination.id] else { return destination }
+                return SavedDestination(
+                    id: destination.id,
+                    name: destination.name,
+                    coordinate: coordinate,
+                    savedRouteID: destination.savedRouteID
+                )
+            }
         }
-        guard replaced != favoriteDestinations else { return }
-        favoriteDestinations = replaced
+        let replacedFavorites = replacing(favoriteDestinations, favorites)
+        let replacedRecents = replacing(recentDestinations, recents)
+        guard replacedFavorites != favoriteDestinations ||
+                replacedRecents != recentDestinations else { return }
+        if replacedFavorites != favoriteDestinations {
+            favoriteDestinations = replacedFavorites
+        }
+        if replacedRecents != recentDestinations {
+            recentDestinations = replacedRecents
+        }
         persist()
     }
 

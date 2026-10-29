@@ -181,6 +181,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             social?.live.updateLocation(location)
             social?.friendLive.updateLocation(location)
         }.store(in: &cancellables)
+        // Favorites once starred from saved routes stored their WGS-84
+        // destinations. Repair them before the Watch first syncs favorites.
+        SavedRouteFavoritePolicy.repairLegacyCoordinates(
+            in: destinationStore,
+            whenever: routeLibrary.$routes
+        )
+        .store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
@@ -205,19 +212,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .sink { [weak watchConnectivityCoordinator] favorites in
                 try? watchConnectivityCoordinator?.updateCoordinateFavorites(
                     favorites
-                )
-            }
-            .store(in: &cancellables)
-        // Favorites once starred from a saved route stored its WGS-84
-        // destination; move them into the MapKit space every reader expects.
-        routeLibrary.$routes
-            .sink { [weak destinationStore] routes in
-                guard let destinationStore else { return }
-                destinationStore.replaceFavoriteCoordinates(
-                    SavedRouteFavoritePolicy.legacyCoordinateRepairs(
-                        favorites: destinationStore.favoriteDestinations,
-                        routes: routes
-                    )
                 )
             }
             .store(in: &cancellables)
