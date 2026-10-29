@@ -161,9 +161,10 @@ needed. Empty diffs run full coverage. Deletions and renames retain old/new path
 | iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
 | iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
 | Production firmware libraries | Production, lifecycle and the POI lifecycle budget image, with extra ordinary/debug profiles for their conditional features |
-| BLE navigation or map-transfer libraries | Production, remote-debug and the POI lifecycle budget image (3 builds per selected board); the plain lifecycle and ordinary profiles add no branch there. A preprocessor coverage test checks all five regular profiles on both boards and rejects uncovered ordinary/lifecycle-only branches. Remote-debug also compiles nearby-POI code, but only the POI image builds it diagnostics-off in the 3 MiB production slot |
+| BLE navigation or map-transfer libraries | Production, remote-debug and the POI lifecycle budget image (3 builds per selected board, plus the e-paper pair); the plain lifecycle and ordinary profiles add no branch there. A preprocessor coverage test checks all five regular profiles on both boards and rejects uncovered ordinary/lifecycle-only branches. Remote-debug also compiles nearby-POI code, but only the POI image builds it diagnostics-off in the 3 MiB production slot |
 | Firmware board/runtime/build configuration | Every regular profile for both boards; board-specific 206 files retain 206 selection |
 | CI/shared-runner configuration | Every regular profile for the requested board family (175 by default); full manual/release requests still select both families |
+| Experimental e-paper board (automatic runs only) | Any firmware, build or CI input that can reach its image adds `WAVESHARE_EPAPER_397` and `_PRODUCTION`: diagnostics on and off, and both partition layouts including the 3 MiB production slot. E-paper-named sources alone select all six e-paper profiles and no AMOLED image; 206-named sources alone add none. A coverage test checks this pair against all six e-paper profiles in the BLE and map-transfer libraries, and keeps every e-paper-named translation unit and include behind its board guard. Manual, core-warm and release requests keep exactly their matrix, so `all` and release CI stay AMOLED-only |
 
 Ordinary source-only PRs no longer prove Release compilation. Before release, use
 full CI; the release candidate always requests all components and both board families.
@@ -179,6 +180,6 @@ relaxed. Unknown product sources keep their component fallback; unmapped shared 
 
 The host job validates its nonempty check-ID selection before executing named registry steps. A missing/failed selected job still fails the aggregate gate. The rider-badge renderer runs for potentially rendering-related changes; BLE/transfer-only edits skip that unrelated benchmark. Documentation and CI unit-test edits accompanying firmware do not expand the hardware matrix. Lifecycle adapters under `firmware_update` and `map_transfer_http`, shared board/build inputs, and explicit manual/release scopes retain broader qualification. The preprocessor guard establishes source-branch coverage, not linking, runtime equivalence or physical acceptance.
 
-Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. Tighten routing if a
+Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. The e-paper pair adds two parallel builds to firmware PRs; cold e-paper builds took 11–17 minutes, like cold AMOLED builds. Tighten routing if a
 full/manual/release lane finds an omitted relevant failure. Revert the selector and
 workflow changes to restore the broad policy; do not raise runner resource limits.

@@ -213,9 +213,12 @@ reserve, the 1536-byte IPC stack and boot-initialized external BSS for task
 workspaces. Measure largest free blocks under concurrent map, display and
 transfer load before release.
 
-CI's explicit `397` selector compiles all six e-paper profiles. Default automatic
-CI and the existing `all` release selection remain
-the AMOLED families. Release-candidate/history and factory-package allowlists
+Automatic PR and merge-group CI compiles the ordinary and production e-paper
+profiles for any firmware, build or CI change that can reach this image, and all
+six when e-paper-named sources change. The explicit `397` selector compiles all
+six on demand. The `all` release selection remains the AMOLED families, and a
+green automatic build is compile and size evidence, not physical qualification.
+Release-candidate/history and factory-package allowlists
 exclude e-paper; changing them requires a separate qualification change.
 The companion and firmware still compare exact canonical update targets, and
 historical short-SHA exceptions remain restricted to old AMOLED releases.

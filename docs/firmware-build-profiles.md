@@ -95,7 +95,9 @@ These opt-in features are excluded from ordinary and production firmware.
 Production is a compile/size qualification profile, not a publishable release.
 Factory/release allowlists deliberately exclude this board.
 
-Use manual CI hardware selector `397` for these six builds. Automatic CI and
-`all` retain their existing AMOLED selection. See
+Automatic pull-request and merge-group CI builds the ordinary and production
+profiles whenever a firmware, build or CI change can reach this image, and all
+six when e-paper-named sources change. Manual CI hardware selector `397` builds
+all six on demand; `all` and release CI remain AMOLED-only. See
 [e-paper board notes](../hardware/waveshare-epaper-397.md) for diagnostic
 controls, disabled peripherals, candidate refresh limits and physical gates.
