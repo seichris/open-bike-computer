@@ -227,6 +227,10 @@ static void testUnauthenticatedDeadline() {
   const uint32_t lateRegistrationMs = connectedMs + 110000;
   assert(unauthenticatedDeadlinePassed(lateRegistrationMs + 12001,
                                        lateRegistrationMs, false));
+  // A restart stored by another task after `now` was read is a window that
+  // just began, not one that expired 49 days ago.
+  assert(!unauthenticatedDeadlinePassed(registeredMs, registeredMs + 5, false));
+  assert(!unauthenticatedDeadlinePassed(registeredMs, registeredMs + 5, true));
   // millis() wraps after about 49.7 days.
   const uint32_t beforeWrapMs = 0xFFFFF000u;
   assert(!unauthenticatedDeadlinePassed(beforeWrapMs + 12000u, beforeWrapMs,

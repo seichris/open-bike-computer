@@ -7421,8 +7421,10 @@ void BLENavigationServer::process() {
   // The unauthenticated deadline uses the pairing state read under the
   // ownership lock, never the snapshot another task may have just cleared: a
   // registration clears the pairing and restarts the window together. A busy
-  // lock defers the check to the next pass.
-  bool deadlineStateRead = !deviceOwnershipReady;
+  // lock defers the check to the next pass; without a lock it runs as before.
+  // The window start is loaded before the clock is read, so a restart stored
+  // in between is never measured against an earlier `now`.
+  bool deadlineStateRead = !deviceOwnershipReady || deviceOwnershipMutex == nullptr;
   bool deadlinePairingActive = false;
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
@@ -7456,12 +7458,12 @@ void BLENavigationServer::process() {
         pServer->disconnect(activeConnHandle);
       }
     }
+    const uint32_t windowStartMs =
+        unauthenticatedWindowStartMs.load(std::memory_order_acquire);
     if (deadlineStateRead && connected && !bleSessionAuthenticated &&
         !unauthTimeoutDisconnectRequested &&
         ble_connection_policy::unauthenticatedDeadlinePassed(
-            millis(),
-            unauthenticatedWindowStartMs.load(std::memory_order_acquire),
-            deadlinePairingActive)) {
+            millis(), windowStartMs, deadlinePairingActive)) {
       unauthTimeoutDisconnectRequested = true;
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
@@ -7559,11 +7561,12 @@ void BLENavigationServer::process() {
       pServer->disconnect(activeConnHandle);
     }
   }
+  const uint32_t windowStartMs =
+      unauthenticatedWindowStartMs.load(std::memory_order_acquire);
   if (deadlineStateRead && connected && !bleSessionAuthenticated &&
       !unauthTimeoutDisconnectRequested &&
       ble_connection_policy::unauthenticatedDeadlinePassed(
-          millis(), unauthenticatedWindowStartMs.load(std::memory_order_acquire),
-          deadlinePairingActive)) {
+          millis(), windowStartMs, deadlinePairingActive)) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {

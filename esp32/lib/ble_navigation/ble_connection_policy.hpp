@@ -45,11 +45,18 @@ bool endSession(uint16_t &activeHandle, uint16_t disconnectedHandle,
 constexpr uint32_t pairingUnauthenticatedLimitMs = 120000;
 constexpr uint32_t unauthenticatedLimitMs = 12000;
 
-// Unsigned subtraction keeps the comparison correct across millis() wrap.
+// Unsigned subtraction keeps the comparison correct across millis() wrap. A
+// start later than `nowMs` (a restart stored by another task after `nowMs` was
+// read) wraps past half the range and is a window that just began, never a
+// long-expired one: no window lasts anywhere near 24 days.
 inline bool unauthenticatedDeadlinePassed(uint32_t nowMs, uint32_t windowStartMs,
                                           bool pairingActive) {
-  return nowMs - windowStartMs > (pairingActive ? pairingUnauthenticatedLimitMs
-                                                : unauthenticatedLimitMs);
+  const uint32_t elapsedMs = nowMs - windowStartMs;
+  if (elapsedMs > UINT32_MAX / 2) {
+    return false;
+  }
+  return elapsedMs > (pairingActive ? pairingUnauthenticatedLimitMs
+                                    : unauthenticatedLimitMs);
 }
 
 } // namespace ble_connection_policy
