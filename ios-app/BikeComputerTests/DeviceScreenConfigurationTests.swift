@@ -151,6 +151,13 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         ) == nil,
         "screen capability TLV rejects the wrong length"
     )
+    let newMap = DeviceScreenInstance.defaults(id: 1, type: .map)
+    let newNavigation = DeviceScreenInstance.defaults(id: 2, type: .mapPlusNavigation)
+    assertEqual(newMap.mapProfile?.routeLineWidth, 10, "new Map route width")
+    assertEqual(newMap.mapProfile?.zoomLevel, 3, "new Map zoom stays unchanged")
+    assertEqual(newNavigation.mapProfile?.routeLineWidth, 10, "new Map + Navigation route width")
+    assertEqual(newNavigation.mapProfile?.zoomLevel, 2, "new Map + Navigation zoom")
+    assertEqual(DeviceScreenMapProfile.nearbyDefault.routeLineWidth, 4, "Nearby keeps its own default")
     var profile = DeviceScreenMapProfile.mapDefault
     profile.visibilityMask |= DeviceScreenMapProfile.contoursVisibilityMask
     profile.labelDensity = 3
