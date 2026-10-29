@@ -118,7 +118,12 @@ committed that same key. Automatic promotion never overwrites a different final
 credential; the explicit replacement action is persisted so recovery remains
 possible if the final notification is lost.
 
-Pairing expires after 120 seconds. Names are non-empty UTF-8, exclude control
+Pairing expires after 120 seconds. Until its owner session authenticates, a
+client may hold the single link for 120 seconds from connecting while a pairing
+code is open and 12 seconds otherwise; ESP32 then disconnects it. Registration
+(`PAIRED`) restarts the 12-second window, because the human confirmation may
+have taken longer than that, and the owner-session handshake below has to
+follow within it. Names are non-empty UTF-8, exclude control
 characters and `|`, and are limited to 24 bytes. The app starts with the
 privacy-safe editable suggestion `My bike`; iOS does not expose the Apple ID
 owner name to apps.
