@@ -932,6 +932,7 @@ struct ContentView: View {
             SavedRoutesLibraryView(library: routeLibrary,
                 stravaCoordinator: stravaIntegrationCoordinator,
                 destinationStore: coordinator.destinationStore,
+                currentLocation: coordinator.currentLocation,
                 onSaveOnlineRoute: openOfflineRouteSearch)
                 .environment(\.savedRouteMapAction, SavedRouteMapAction(
                     isNavigationActive: coordinator.isNavigating,

@@ -15,6 +15,7 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
     case gpxRouteImport(OfflineRouteSaveDraft)
+    case routeCreator
     case savedMapShare(URL)
 
     var id: String {
@@ -25,6 +26,8 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "strava-route-import"
         case .gpxRouteImport(let draft):
             return "gpx-route-import:\(draft.id.uuidString)"
+        case .routeCreator:
+            return "route-creator"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -229,6 +232,10 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     destinationStore: destinationStore,
                     onSaveOnlineRoute: onSaveOnlineRoute,
+                    onCreateRoute: {
+                        routeImportFeedback = nil
+                        presentedSheet = .routeCreator
+                    },
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
                     },
@@ -374,6 +381,15 @@ struct SettingsView: View {
             )
         case .gpxRouteImport(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                routeImportFeedback = result.message
+                presentedSheet = nil
+            }
+        case .routeCreator:
+            RouteCreatorView(
+                library: routeLibrary,
+                destinationStore: destinationStore,
+                currentLocation: currentLocation
+            ) { result in
                 routeImportFeedback = result.message
                 presentedSheet = nil
             }

@@ -80,6 +80,24 @@ This records the maintainer's implementation-policy decision, not written Apple
 permission or a legal approval. The separate distribution resolution above
 remains open. Strava's elevation-service policy is unchanged.
 
+## 29 October 2026: multi-stop Create a Route
+
+The maintainer requested multi-point route creation, limited to Settings >
+Saved Routes > Create a Route. The rider orders a start, up to eight stops and
+a destination. The app requests one ordinary active-only MapKit route per pair
+of consecutive stops and keeps the legs only in memory while the creator is
+open. It joins them in stop order into one `apple.mapkit` route: geometry, step
+distances, ETA and instructions are kept, except that each intermediate
+arrival step is renamed "Arrive at <stop>" with a non-finishing maneuver. Joins
+wider than 500 m are rejected instead of bridged. Only the existing explicit
+save confirmation turns the joined route into a `phoneOnly` archive with
+`Apple Maps` attribution. Watch transfer stays rejected; offline navigation,
+preview, elevation and group sharing follow the saved Apple Maps rules above.
+Direct navigation search and the favorite-row planner are unchanged.
+
+This extends the implementation policy above; it is not written Apple
+permission or a legal approval. The distribution resolution remains open.
+
 ## Verification expectations
 
 Run the focused offline-save, full navigation, saved-map, shared route and

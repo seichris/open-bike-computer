@@ -364,7 +364,10 @@
         "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
         "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
         "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
-        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift"
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/MultiStopRoute.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/MultiStopRoutePlanner.swift",
+        "ios-app/BikeComputerTests/MultiStopRouteTests.swift"
       ],
       "groups": [
         "common-1",
