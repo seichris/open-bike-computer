@@ -18,11 +18,10 @@ enum SavedRouteFavoritePolicy {
     }
 
     /// New coordinates, by ID, for destinations that came from starring a saved
-    /// route before `favorite(for:)` converted: the favorite itself and the
-    /// copies using it left in recents. Each holds exactly its linked route's
-    /// WGS-84 destination; only those still linked to an installed route can be
-    /// told apart from a map pin, and only where the conversion moves the
-    /// point are they wrong.
+    /// route before `favorite(for:)` converted. Each holds exactly its linked
+    /// route's WGS-84 destination; only those still linked to an installed
+    /// route can be told apart from a map pin, and only where the conversion
+    /// moves the point are they wrong.
     static func legacyCoordinateRepairs(
         destinations: [SavedDestination],
         routes: [PlannedRouteSummaryV1]
@@ -49,10 +48,29 @@ enum SavedRouteFavoritePolicy {
         in store: SavedDestinationStore,
         routes: [PlannedRouteSummaryV1]
     ) {
-        store.replaceCoordinates(
-            favorites: legacyCoordinateRepairs(destinations: store.favoriteDestinations, routes: routes),
-            recents: legacyCoordinateRepairs(destinations: store.recentDestinations, routes: routes)
+        let favorites = Dictionary(
+            store.favoriteDestinations.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
         )
+        let favoriteRepairs = legacyCoordinateRepairs(
+            destinations: store.favoriteDestinations,
+            routes: routes
+        )
+        // A recent with a favorite's ID is the copy planning to it left. It
+        // moves only together with that favorite, even after the favorite was
+        // re-linked to another route, so the two never come apart.
+        var recentRepairs = legacyCoordinateRepairs(
+            destinations: store.recentDestinations.filter { favorites[$0.id] == nil },
+            routes: routes
+        )
+        for recent in store.recentDestinations {
+            guard let favorite = favorites[recent.id],
+                  let coordinate = favoriteRepairs[recent.id],
+                  recent.latitude == favorite.latitude,
+                  recent.longitude == favorite.longitude else { continue }
+            recentRepairs[recent.id] = coordinate
+        }
+        store.replaceCoordinates(favorites: favoriteRepairs, recents: recentRepairs)
     }
 
     /// Repairs `store` with the installed routes now and whenever they change.

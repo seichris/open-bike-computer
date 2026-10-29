@@ -38,6 +38,7 @@ extension OfflineRouteSaveTests {
         let jingAn = try installer.importGPX(gpx("Jing'an", 31.2286, 121.4480), fileName: "JingAn.gpx")
         let chengdu = try installer.importGPX(gpx("Chengdu", 30.6586, 104.0648), fileName: "Chengdu.gpx")
         let london = try installer.importGPX(gpx("Westminster", 51.5072, -0.1276), fileName: "Westminster.gpx")
+        let pudong = try installer.importGPX(gpx("Pudong", 31.2397, 121.4998), fileName: "Pudong.gpx")
         let wgs84 = bund.destination.coordinate
         let mapKit = RouteCoordinateNormalizationV1.wgs84ToMapKit(wgs84)
 
@@ -72,16 +73,24 @@ extension OfflineRouteSaveTests {
         earlier.addFavorite(SavedDestination(name: "Deleted route",
             coordinate: CLLocationCoordinate2D(latitude: 31.1, longitude: 121.3)), savedRouteID: UUID())
         earlier.addFavorite(SavedDestination(name: "Chengdu", coordinate: point(chengdu.destination.coordinate)))
-        check(earlier.recentDestinations.first?.id == legacy.id &&
-            earlier.recentDestinations.first?.savedRouteID == bund.id &&
-            !earlier.nonFavoriteRecentDestinations.contains { $0.id == legacy.id },
-            "Before the repair the recent copy shares the favorite's ID, link and point, so it stays hidden")
+        // Starred, planned to, then re-linked by Create a Route to a new route.
+        let relinked = SavedDestination(name: "Pudong", coordinate: point(pudong.destination.coordinate))
+        earlier.addFavorite(relinked, savedRouteID: pudong.id)
+        earlier.addRecent(earlier.favoriteDestinations[0])
+        earlier.addFavorite(earlier.favoriteDestinations[0], savedRouteID: jingAn.id)
+        let legacyCopy = earlier.recentDestinations.first { $0.id == legacy.id }
+        let relinkedCopy = earlier.recentDestinations.first { $0.id == relinked.id }
+        check(legacyCopy?.savedRouteID == bund.id && stored(legacyCopy) == wgs84 &&
+            relinkedCopy?.savedRouteID == pudong.id &&
+            earlier.favorite(savedRouteID: jingAn.id)?.id == relinked.id &&
+            earlier.nonFavoriteRecentDestinations.isEmpty,
+            "Before the repair each recent copy shares its favorite's ID and point, so both stay hidden")
 
         // A relaunch reads everything back from storage before the repair runs.
         let store = SavedDestinationStore(defaults: defaults)
         let routes = library()
         let before = store.favoriteDestinations
-        check(routes.routes.count == 4 && before == earlier.favoriteDestinations &&
+        check(routes.routes.count == 5 && before == earlier.favoriteDestinations &&
             store.recentDestinations == earlier.recentDestinations,
             "The relaunched stores hold the earlier favorites, recents and routes")
         let repairs = SavedRouteFavoritePolicy.legacyCoordinateRepairs(destinations: before, routes: routes.routes)
@@ -90,19 +99,25 @@ extension OfflineRouteSaveTests {
             "Only a favorite holding its linked route's exact WGS-84 destination in the GCJ-02 region is repaired")
 
         var publications = 0
+        var recentPublications = 0
         let observation = store.$favoriteDestinations.dropFirst().sink { _ in publications += 1 }
-        defer { observation.cancel() }
+        let recentObservation = store.$recentDestinations.dropFirst().sink { _ in recentPublications += 1 }
+        defer {
+            observation.cancel()
+            recentObservation.cancel()
+        }
         let persisted = defaults.data(forKey: "routeInput.favoriteDestinations")
         store.replaceCoordinates(favorites: [:], recents: [:])
         store.replaceCoordinates(favorites: [UUID(): point(mapKit)], recents: [UUID(): point(mapKit)])
-        check(publications == 0 && store.favoriteDestinations == before &&
+        check(publications == 0 && recentPublications == 0 && store.favoriteDestinations == before &&
             defaults.data(forKey: "routeInput.favoriteDestinations") == persisted,
             "A repair with nothing to change neither publishes nor persists")
 
         let binding = SavedRouteFavoritePolicy.repairLegacyCoordinates(in: store, whenever: routes.$routes)
         defer { binding.cancel() }
         let repaired = store.favoriteDestinations
-        check(publications == 1 && stored(store.favorite(savedRouteID: bund.id)) == mapKit,
+        check(publications == 1 && recentPublications == 1 &&
+            stored(store.favorite(savedRouteID: bund.id)) == mapKit,
             "Observing the installed routes repairs the favorite immediately")
         check(repaired.map(\.id) == before.map(\.id) && repaired.map(\.name) == before.map(\.name) &&
             repaired.map(\.savedRouteID) == before.map(\.savedRouteID) &&
@@ -112,6 +127,10 @@ extension OfflineRouteSaveTests {
         check(stored(copy) == mapKit && copy?.savedRouteID == bund.id &&
             !store.nonFavoriteRecentDestinations.contains { $0.id == legacy.id },
             "Its copy in recents moves too, so no stale point resurfaces under Recent Searches")
+        let unmoved = store.recentDestinations.first { $0.id == relinked.id }
+        check(stored(unmoved) == stored(store.favorite(savedRouteID: jingAn.id)) &&
+            stored(unmoved) == pudong.destination.coordinate && store.nonFavoriteRecentDestinations.isEmpty,
+            "A copy whose favorite was re-linked elsewhere stays with that favorite instead of moving alone")
         let synced = store.favoriteDestinations.compactMap { destination -> SyncedCoordinateFavoriteV1? in
             guard let coordinate = destination.coordinate else { return nil }
             return SyncedCoordinateFavoriteV1(id: destination.id, name: destination.name,
@@ -125,12 +144,12 @@ extension OfflineRouteSaveTests {
             } == true,
             "The Watch favorite envelope stays valid and receives the saved route's own destination")
 
+        let repairedRecents = store.recentDestinations
         _ = try routes.importGPX(gpx("Later", 51.52, -0.1), fileName: "Later.gpx")
         routes.reload()
-        check(publications == 1 && store.favoriteDestinations == repaired &&
-            SavedRouteFavoritePolicy.legacyCoordinateRepairs(
-                destinations: store.recentDestinations, routes: routes.routes).isEmpty,
-            "Later route changes never move a repaired favorite or recent again")
+        check(publications == 1 && recentPublications == 1 && store.favoriteDestinations == repaired &&
+            store.recentDestinations == repairedRecents,
+            "Later route changes never move a favorite or recent again")
         let relaunched = SavedDestinationStore(defaults: defaults)
         check(relaunched.favoriteDestinations == repaired &&
             relaunched.recentDestinations == store.recentDestinations,
@@ -141,11 +160,21 @@ extension OfflineRouteSaveTests {
         check(section.contains("SavedRouteFavoritePolicy.favorite(for: route)") &&
             !section.contains("latitude: route.destination.coordinate.latitude"),
             "Starring a saved route creates its favorite in MapKit space")
-        guard let repair = app.range(of: "SavedRouteFavoritePolicy.repairLegacyCoordinates(\n            in: destinationStore,\n            whenever: routeLibrary.$routes\n        )\n        .store(in: &cancellables)"),
+        guard let repair = app.range(of: "SavedRouteFavoritePolicy.repairLegacyCoordinates("),
+              let observed = app.range(of: "whenever: routeLibrary.$routes", range: repair.upperBound..<app.endIndex),
+              let retained = app.range(of: ".store(in: &cancellables)", range: observed.upperBound..<app.endIndex),
               let watchSync = app.range(of: "destinationStore.$favoriteDestinations") else {
             preconditionFailure("The app delegate must keep the repair binding and the Watch favorite sync")
         }
-        check(repair.lowerBound < watchSync.lowerBound,
-            "The app repairs favorites before the Watch first syncs them")
+        check(retained.upperBound <= watchSync.lowerBound,
+            "The app retains the repair binding and runs it before the Watch first syncs favorites")
+
+        let replacing = SavedDestinationStore(defaults: defaults)
+        let count = replacing.favoriteDestinations.count
+        replacing.addFavorite(SavedDestination(id: legacy.id, name: "Bund",
+            coordinate: CLLocationCoordinate2D(latitude: 31.3, longitude: 121.5)), savedRouteID: bund.id)
+        check(replacing.favoriteDestinations.count == count &&
+            replacing.favoriteDestinations.filter { $0.id == legacy.id }.count == 1,
+            "Adding a favorite with an existing ID replaces it, so favorite IDs stay unique")
     }
 }

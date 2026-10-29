@@ -170,7 +170,8 @@ final class SavedDestinationStore: ObservableObject {
         guard let cleaned = cleaned(destination, savedRouteID: savedRouteID) else {
             return nil
         }
-        favoriteDestinations.removeAll { $0.matches(cleaned) }
+        // An ID names one favorite; the Watch favorite sync rejects duplicates.
+        favoriteDestinations.removeAll { $0.id == cleaned.id || $0.matches(cleaned) }
         favoriteDestinations.insert(cleaned, at: 0)
         persist()
         return cleaned
