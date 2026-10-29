@@ -58,6 +58,29 @@ registered production table. Future partition/toolchain changes must update
 `esp32/partition_layouts.json` and this contract before using the release
 workflow. No migration is inferred from a larger application binary.
 
+## Signed image identity records
+
+The same publisher step also emits `<TARGET>.image-identity.json`, so the website
+can recognize a release's application bytes on a device without reading whole
+OTA slots and without a website catalog change per release. It uses the same
+envelope and key as the recovery recipe, but signs `bicino-image-identity-v1\n`
+followed by the canonical payload, so neither document type can verify as the
+other. The payload binds target, production environment, version, build, full
+Git SHA and release tag to the exact application image: `size`, `sha256`,
+`headLength` (4096, or the whole image if shorter), `headSha256` of those first
+bytes, and `tail`, the last 32 bytes (the ESP-IDF appended image digest). It is
+derived from the dual-4-MiB rescue recipe, which every release carries; the
+dual-3-MiB rescue is omitted once the image outgrows a 3 MiB slot. The publisher
+refuses an image that differs from that recipe's signed application write. `descriptor` repeats the app description's version, project name and ELF
+SHA-256 as read by the publisher; it is informational and never identity.
+
+The website rules an image out of a slot exactly when the slot's first 4 KiB or
+its 32 bytes at `size - 32` differ, and calls a slot recognized only after a
+SHA-256 of the whole image. Releases published before this record existed are
+recognized from their signed OTA manifests and a reviewed website catalog.
+`tools/web-flasher/identity-test-vector.json` is the public test-key fixture for
+this record, shared byte-for-byte with the website.
+
 ## Quiet status protocol (qualification profiles only)
 
 `USB_RECOVERY_STATUS` defaults to zero. Ordinary production and developer profiles

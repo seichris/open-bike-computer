@@ -249,6 +249,20 @@ removable storage or installed maps are available. The exact observed behavior
 and remaining matrix are recorded in
 [`hardware/README.md`](../hardware/README.md#8-sd-card--map-io).
 
+The first release after the dual-4-MiB layout change
+([PR #662](https://github.com/seichris/open-bike-computer/pull/662), issue #461)
+changes two production paths at once. Its factory images carry the new
+production partition table, and legacy devices that update over the air run the
+new internal-FFat ownership policy on their unchanged dual-3-MiB table. The
+per-board gates are listed in
+[partition layouts](partition-layout-migration.md#physical-qualification-gates-each-board-separately);
+none had run on hardware when the change merged. That release must not be
+tagged or published until the production-path gates pass on both boards: FFat,
+OTA on the new layout, true cold boot and the legacy-device update. Accepting
+residual risk to merge the change does not cover publishing it. The signed
+migration package stays unadmitted, with no website catalog entry, until every
+gate passes with that release's exact bytes.
+
 ## Release outputs
 
 For each production target, the candidate and protected publisher together
