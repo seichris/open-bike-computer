@@ -266,6 +266,21 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
             ["receiving", "prepared"].contains(freshReceipt.phase ?? "")
     }
 
+    // Transport completion can arrive after query/cancel has advanced the same
+    // operation. Keep the newer receipt while recording that this OS task ended.
+    // Conflicting identities, revisions and terminal outcomes still fail closed.
+    func supersedesProgressReceipt(_ receipt: DeviceMapOperationReceipt) -> Bool {
+        guard matches(receipt), receipt.status == nil,
+              let revision = receipt.revision, revision > 0,
+              let current = lastReceipt, revision < (current.revision ?? 0) else { return false }
+        switch receipt.phase {
+        case "receiving": return ["receiving", "prepared", "accepted", "installed", "failed", "cancelled"].contains(current.phase ?? "")
+        case "prepared": return ["prepared", "accepted", "installed", "failed", "cancelled"].contains(current.phase ?? "")
+        case "accepted": return ["accepted", "installed", "failed"].contains(current.phase ?? "")
+        default: return false
+        }
+    }
+
     var wireOperationID: String {
         operationID.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
@@ -587,7 +602,9 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
             struct Envelope: Decodable { let operation: DeviceMapOperationReceipt? }
             if let envelope = try? JSONDecoder().decode(Envelope.self, from: responseBody),
                let receipt = envelope.operation {
-                guard record.apply(receipt) else { throw StoreError.conflict }
+                guard record.apply(receipt) || record.supersedesProgressReceipt(receipt) else {
+                    throw StoreError.conflict
+                }
             }
         }
         record.uploadCompletedAt = now

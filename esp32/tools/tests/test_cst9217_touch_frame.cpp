@@ -22,17 +22,70 @@ void encodeContact(uint8_t *data, std::size_t offset, uint8_t id,
 } // namespace
 
 int main() {
-  using waveshare_board::touch_sampling_policy::shouldAttemptRead;
+  using waveshare_board::touch_sampling_policy::ReadWindow;
 
-  assert(shouldAttemptRead(true, false, false, false, 1000, 0));
-  assert(!shouldAttemptRead(false, false, false, false, 1000, 0));
-  assert(shouldAttemptRead(false, true, false, false, 1000, 0));
-  assert(shouldAttemptRead(false, false, true, false, 1000, 0));
-  assert(shouldAttemptRead(false, false, false, true, 1000, 0));
-  assert(shouldAttemptRead(false, false, false, false, 999, 1000));
-  assert(!shouldAttemptRead(false, false, false, false, 1000, 1000));
-  assert(shouldAttemptRead(false, false, false, false, UINT32_MAX - 2, 2));
-  assert(!shouldAttemptRead(false, false, false, false, 2, UINT32_MAX - 2));
+  ReadWindow reads;
+  // A cold, untouched controller stays quiet, including after long uptime.
+  for (uint32_t now : {0U, 400U, 10000U, 0x80000000U, UINT32_MAX}) {
+    assert(!reads.shouldAttemptRead(false, false, false, now));
+  }
+  // A pulse that ended during rendering still starts an immediate attempt.
+  assert(reads.shouldAttemptRead(false, false, true, 1000));
+  reads.arm(1000, 700);
+  // Failure/no-frame on the first attempt must not strand the latched event.
+  assert(reads.shouldAttemptRead(false, false, false, 1100));
+  assert(reads.shouldAttemptRead(false, false, false, 1699));
+  assert(!reads.shouldAttemptRead(false, false, false, 1700));
+  assert(!reads.shouldAttemptRead(false, false, false, UINT32_MAX));
+  // Sparse interrupts cannot stop a held/dragged contact. Release ends that
+  // exemption; only genuine activity rearms the follow-up window.
+  assert(reads.shouldAttemptRead(false, true, false, 1800));
+  assert(reads.shouldAttemptRead(true, false, false, 1800));
+  reads.arm(1800, 700);
+  assert(reads.shouldAttemptRead(false, false, false, 2499));
+  assert(!reads.shouldAttemptRead(false, false, false, 2500));
+  // The window expires across millis rollover and cannot resurrect later.
+  reads.arm(UINT32_MAX - 99, 700);
+  assert(reads.shouldAttemptRead(false, false, false, 599));
+  assert(!reads.shouldAttemptRead(false, false, false, 600));
+  assert(!reads.shouldAttemptRead(false, false, false, UINT32_MAX - 99));
+
+  // Replay the observed post-release failure times. Completing a release must
+  // remove the old window, not keep issuing reads for another 437-454ms.
+  for (const auto releaseMs : {145351U, 148420U}) {
+    reads.arm(releaseMs, 700);
+    reads.confirmRelease();
+    assert(!reads.shouldAttemptRead(false, false, false, releaseMs + 1));
+    assert(!reads.shouldAttemptRead(false, false, false, releaseMs + 437));
+    assert(!reads.shouldAttemptRead(false, false, false, releaseMs + 454));
+    assert(!reads.shouldAttemptRead(false, false, false, releaseMs + 701));
+  }
+
+  // A new short pulse can arrive while the old release is being read/ACKed.
+  // Closing its window must not consume that newer generation or lose retouch.
+  uint32_t generated = 61;
+  uint32_t attempted = generated;
+  reads.arm(150000, 700);
+  ++generated;
+  reads.confirmRelease();
+  bool pending =
+      touch_interrupt_gate::hasUnattemptedGeneration(generated, attempted);
+  assert(pending);
+  assert(reads.shouldAttemptRead(false, false, pending, 150001));
+  attempted = generated;
+  reads.arm(150001, 700); // The next IRQ attempt starts; assume it fails.
+  pending = touch_interrupt_gate::hasUnattemptedGeneration(generated, attempted);
+  assert(!pending);
+  assert(reads.shouldAttemptRead(false, false, pending, 150101));
+  assert(!reads.shouldAttemptRead(false, false, pending, 150701));
+  // A still-asserted line and a held finger remain independent reasons to read.
+  assert(reads.shouldAttemptRead(true, false, false, 150702));
+  assert(reads.shouldAttemptRead(false, true, false, 150702));
+  reads.arm(UINT32_MAX - 99, 700);
+  reads.confirmRelease();
+  assert(!reads.shouldAttemptRead(false, false, false, 5));
+  reads.arm(5, 700);
+  assert(reads.shouldAttemptRead(false, false, false, 6));
 
   // Both CST9217 and FT3168 use the same generation gate. A new edge bypasses
   // throttling once, failure on that attempt does not create a busy retry
@@ -59,6 +112,12 @@ int main() {
   assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==
          Cst9217DecodeStatus::Ok);
   assert(frame.count == 0);
+  reads.arm(200000, 700);
+  // An ACK failure must not close the window, even for an empty packet: the
+  // caller has not yet finished consuming the controller's release event.
+  assert(reads.shouldAttemptRead(false, false, false, 200025));
+  reads.confirmRelease(); // Valid empty packet, after its ACK succeeds.
+  assert(!reads.shouldAttemptRead(false, false, false, 200026));
 
   packet[5] = 1;
   encodeContact(packet, 0, 1, CST9217_STATUS_PRESSED, 123, 456);
@@ -84,12 +143,19 @@ int main() {
   assert(active.count == 1);
   assert(active.contacts[0].id == 0);
   assert(active.contacts[0].x == 30);
+  reads.arm(201000, 700);
+  // Releasing one finger of a pinch leaves the other active. This frame must
+  // not go through the all-contacts-released path.
+  assert(active.count != 0);
+  assert(reads.shouldAttemptRead(false, true, false, 201800));
 
   packet[5] = 1;
   encodeContact(packet, 0, 0, CST9217_STATUS_RELEASED, 30, 440);
   assert(decodeCst9217Frame(packet, sizeof(packet), 466, 466, frame) ==
          Cst9217DecodeStatus::Ok);
   assert(activeCst9217Contacts(frame).count == 0);
+  reads.confirmRelease(); // Valid explicit final-finger release, ACKed.
+  assert(!reads.shouldAttemptRead(false, false, false, 201801));
 
   TouchContact rotated = rotateTouchContact(active.contacts[0], 1, 465, 465);
   assert(rotated.x == 440);

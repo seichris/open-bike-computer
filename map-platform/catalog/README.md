@@ -99,7 +99,10 @@ passes, following
 - Artifact generations are bounded by an exact compatibility class containing
   bucket/channel, delivery tier, format, signer ID and fingerprint, canonical
   reader requirements, and any firmware gate. Producer/build identity is not
-  part of the class. Publishing a verified replacement tombstones older rows
+  part of the class. [Durable maps](../../docs/map-compatibility-contract.md)
+  never carry a firmware gate, so a key rotation keeps a parallel generation
+  for each trusted signer and a worker update supersedes within its class
+  without stranding saved copies. Publishing a verified replacement tombstones older rows
   in that class; an active download grant or promotion lease delays the
   transition until maintenance observes expiry. Superseded bytes become
   deletion-lease eligible after `RETENTION_GRACE_DAYS` even while the map stays

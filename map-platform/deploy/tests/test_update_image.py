@@ -36,12 +36,17 @@ class UpdateImageTests(unittest.TestCase):
         result = update_image.validate_manifest_text(candidate)
         self.assertEqual(result.promotion_reference, reference)
         self.assertEqual(result.promotion_source_commit, source)
+        self.assertEqual(result.promotion_converter_reference, converter)
+        durable = update_image.IMAGE_REPOSITORY + "@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9"
+        self.assertEqual(update_image.validate_manifest_text(
+            candidate.replace(converter, durable)).promotion_converter_reference, durable)
         for invalid in (
             candidate.replace(reference, "image:latest"),
             candidate.replace("MAP_PLATFORM_CATALOG_CHANNEL: production", "MAP_PLATFORM_CATALOG_CHANNEL: development"),
             candidate.replace("MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'", "MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '0'"),
             candidate.replace(f"    image: {reference}", f"    image: {reference}\n    command: worker-loop"),
             candidate.replace(converter, "*map-platform-worker-image"),
+            candidate.replace(converter, update_image.IMAGE_REPOSITORY + "@sha256:" + "c" * 64),
         ):
             with self.assertRaises(ValueError):
                 update_image.validate_manifest_text(invalid)

@@ -29,8 +29,12 @@ class MapOperationCompositionTests(unittest.TestCase):
 
     def test_boot_binds_the_same_physical_identity_before_recovery_and_render(self):
         main = (ROOT / 'src/main.cpp').read_text()
-        start = main.index('map_transfer::MapTransferInstaller mapInstaller("/sdcard");')
-        block = main[start:]
+        setup = main[main.index('void setup()'):main.index('void loop()')]
+        # The HTTP server keeps its identity even when no card holds maps.
+        self.assertLess(setup.index('mapTransferHttp.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());'),
+                        setup.index('if (!storage.mapStorageAvailable()) {'))
+        start = setup.index('map_transfer::MapTransferInstaller mapInstaller(storage.mapStorageRoot());')
+        block = setup[start:]
         self.assertLess(block.index('setOperationDeviceID(device_ownership::hardwareDeviceIdHex())'),
                         block.index('mapInstaller.recoverInterruptedActivation()'))
         self.assertLess(block.index('mapInstaller.recoverInterruptedActivation()'),

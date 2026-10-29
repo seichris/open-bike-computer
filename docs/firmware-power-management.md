@@ -254,15 +254,19 @@ The two display boards cannot share an identical touch-wake implementation:
 
 | Board | BOOT wake | Touch wake | Status |
 | --- | --- | --- | --- |
-| 1.75-inch / CST9217 | Active-low RTC GPIO0 via EXT1 | Active-low RTC GPIO21 via EXT1, plus throttled decoded frame sampling | Physically validated |
+| 1.75-inch / CST9217 | Active-low RTC GPIO0 via EXT1 | Active-low RTC GPIO11 via EXT1, plus active-contact/bounded follow-up frame sampling | Corrected pin candidate; physical retest pending |
 | 2.06-inch / FT3168 | Active-low RTC GPIO0 via EXT1 | Active-low digital GPIO38 wake with a one-shot low-level interrupt that rearms after release | Build-tested only |
 
-On the 1.75-inch board, the CST9217 interrupt is a transient hint rather than a
-stable assertion. Firmware therefore continues a PM-locked decoded touch-frame
-sample on an idle deadline, currently every 400 ms, while the display is dimmed
-or off. Tickless idle can still sleep between those deadlines. A frame is
-acknowledged only when the controller reports the ready marker `0xAB`; an idle
-or invalid marker is not acknowledged.
+On the 1.75-inch board, the CST9217 interrupt is GPIO11 (`TP_INT`). Earlier
+firmware incorrectly listened on GPIO21 (`QMI_INT2`) and relied on 400 ms idle
+polling to keep touch usable. Removing that polling without correcting the pin
+failed both wake and active-touch tests on October 28. The corrected candidate
+latches GPIO11 edges and retains PM-locked, throttled active-contact sampling and
+a 700 ms follow-up window; it does not poll an untouched controller indefinitely.
+Both ordinary and automatic-light-sleep profiles need fresh physical wake and
+gesture acceptance with this mapping. A frame is acknowledged only when the
+controller reports the ready marker `0xAB`; an idle or invalid marker is not
+acknowledged.
 
 Normal live touch remains interrupt-gated. Do not reintroduce rapid polling:
 attempting an I2C read when the CST9217 has no ready data can fail inside the

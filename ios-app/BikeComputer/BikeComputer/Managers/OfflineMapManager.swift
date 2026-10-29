@@ -1601,6 +1601,11 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     /// The companion this map was saved with, fixed at download time. Later
     /// catalog attachment never changes which companion belongs to the map.
     var topographyCompanion: TopographyCompanionReceipt? = nil
+    /// The bike `streamTrust` this catalog copy was chosen for; nil when no
+    /// bike had reported one. While no bike reports, the copy is judged and
+    /// re-downloaded for that bike, so a production copy chosen for stock
+    /// firmware is not traded back for a development copy.
+    var catalogDeviceStreamTrust: [String]? = nil
 }
 
 /// Resolves the iPhone contour companion of each saved map from the map's own
@@ -1708,9 +1713,14 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         containsTerrain: Bool = false,
         supportsTerrainExperiments: Bool = false,
         supportsMapPois: Bool = false,
-        includesContours: Bool = false
+        includesContours: Bool = false,
+        compatibilityContract: Int? = nil
     ) -> Bool {
-        guard !containsTerrain || supportsTerrainExperiments else { return false }
+        // A durable map's optional terrain layer is checked against the bike's
+        // mapReader report at install time (MapInstallProtocolSelector).
+        guard !containsTerrain || supportsTerrainExperiments || compatibilityContract != nil else {
+            return false
+        }
         switch rendererFormatVersion {
         case nil, 1:
             return true
@@ -2134,6 +2144,53 @@ nonisolated enum SavedMapRemovalPolicy {
     }
 }
 
+/// A library download saves its copy as `catalog-<mapEntryId>.bmap`. Any other
+/// saved copy attached to the same library entry, such as the direct-job file
+/// that inventory sync attached, is the version it replaces, unless something
+/// still uses it.
+nonisolated enum SupersededLibraryCopyPolicy {
+    /// What can still use a saved copy when a library download lands. Every
+    /// field is required so that no source of use is left out by accident.
+    struct Usage: Equatable {
+        let transferRunning: Bool
+        /// Files named by device operations that have not finished.
+        let operationFilenames: Set<String>
+        let pausedUploadFilenames: Set<String>
+        /// The downloaded file of a direct job that still waits to install.
+        let pendingInstallFilename: String?
+        let lastTransferFilename: String?
+        let lastTransferOutcome: String
+    }
+
+    /// Outcomes after which the last transfer no longer needs its file. Any
+    /// other outcome, including one added later, keeps it.
+    static let settledTransferOutcomes: Set<String> = [
+        "", "installed", "failed", "cancelled", "unknown",
+    ]
+
+    static func retirableCopies(
+        of mapEntryID: String,
+        keeping kept: URL,
+        in records: [SavedMapLocalRecord],
+        usage: Usage
+    ) -> [URL] {
+        guard !usage.transferRunning else { return [] }
+        return records.compactMap { record in
+            let filename = record.packURL.lastPathComponent
+            guard record.catalogMapEntryID == mapEntryID,
+                  record.packURL.standardizedFileURL.path != kept.standardizedFileURL.path,
+                  !usage.operationFilenames.contains(filename),
+                  !usage.pausedUploadFilenames.contains(filename),
+                  filename != usage.pendingInstallFilename,
+                  filename != usage.lastTransferFilename ||
+                    settledTransferOutcomes.contains(usage.lastTransferOutcome) else {
+                return nil
+            }
+            return record.packURL
+        }
+    }
+}
+
 @MainActor
 final class OfflineMapManager: ObservableObject {
     private static let maximumInMemoryDetailPreviewCount = 3
@@ -2226,8 +2283,16 @@ final class OfflineMapManager: ObservableObject {
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
+    // Discovery has no selected job yet. A completed job/cache selection may
+    // still be retained for other UI, but must not masquerade as pending work.
+    var isCheckingForServerMaps: Bool {
+        isServerRecoveryCheckPending &&
+            OfflineMapJobPersistence.activeJobId(defaults: defaults) == nil
+    }
+
     var activityProgress: Double? {
-        OfflineMapProgressPresentation.value(
+        guard !isCheckingForServerMaps else { return nil }
+        return OfflineMapProgressPresentation.value(
             job: currentJob,
             downloadProgress: downloadProgress
         )
@@ -2239,7 +2304,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasTerminalMapJobFailure: Bool {
-        ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
+        guard !isCheckingForServerMaps else { return false }
+        return ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
     }
 
     var hasPendingDeviceActivation: Bool {
@@ -2292,6 +2358,7 @@ final class OfflineMapManager: ObservableObject {
     private var fencedRetirementCleanupForTesting: ((BLEManager) async -> Bool)?
 #endif
     @Published private var packDisplayNames: [String: String]
+    private var nonDurableSavedMaps: [String: (revision: String, nonDurable: Bool)] = [:]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
     private var inventorySyncTask: Task<Void, Never>?
@@ -2769,6 +2836,63 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func selectInstalledMap(_ map: DeviceInstalledMap, bleManager: BLEManager) {
+        startInstalledMapAction("select", map: map, bleManager: bleManager)
+    }
+
+    func removeInstalledMap(_ map: DeviceInstalledMap, bleManager: BLEManager) {
+        startInstalledMapAction("remove", map: map, bleManager: bleManager)
+    }
+
+    private func startInstalledMapAction(
+        _ action: String, map: DeviceInstalledMap, bleManager: BLEManager
+    ) {
+        let deviceID = bleManager.activeDeviceID
+        let epoch = bleManager.transferConnectionEpoch
+        startDeviceTransfer { manager in
+            try await manager.performInstalledMapAction(action, map: map, bleManager: bleManager,
+                deviceID: deviceID, connectionEpoch: epoch)
+        }
+    }
+
+    private func performInstalledMapAction(
+        _ action: String, map: DeviceInstalledMap, bleManager: BLEManager,
+        deviceID: String?, connectionEpoch: UInt64
+    ) async throws {
+        guard deviceID == bleManager.activeDeviceID,
+              connectionEpoch == bleManager.transferConnectionEpoch else {
+            throw OfflineMapPlatformError.deviceMapLibraryCommandFailed("The connection changed before the map action started. Reconnect and try again.")
+        }
+        let pending = try deviceMapOperationStore.records().contains {
+            $0.deviceID == deviceID && $0.blocksNewTransfer(
+                connectionEpoch: connectionEpoch,
+                processID: DeviceMapOperationStore.observationProcessID)
+        }
+        guard !hasActiveBackgroundUpload, !pending else {
+            throw OfflineMapPlatformError.backgroundMapUploadInProgress
+        }
+        if action == "select", bleManager.hasFreshMapTransferStatus,
+           let library = bleManager.deviceMapLibrary, library.isComplete,
+           library.selectedSessionID == map.sessionID,
+           library.installed(mapID: map.mapID, manifestReceipt: map.manifestReceipt,
+                             signedManifestReceipt: map.signedManifestReceipt) == map {
+            statusMessage = "map already in use"
+            transferProgress = 1
+            return
+        }
+        statusMessage = action == "select" ? "selecting installed map" : "removing installed map"
+        transferProgress = 0
+        activationProgress = nil
+        do {
+            try await bleManager.performDeviceMapLibraryCommand(action, map: map)
+            statusMessage = action == "select" ? "map selected" : "map removed from SD card"
+            transferProgress = 1
+        } catch {
+            statusMessage = ""
+            throw error
+        }
+    }
+
     func installedDeviceMap(for packURL: URL, library: DeviceMapLibrary?) -> DeviceInstalledMap? {
         guard let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
               let artifact = metadata.primaryArtifact,
@@ -2870,30 +2994,66 @@ final class OfflineMapManager: ObservableObject {
 
     func deleteCachedPack(at packURL: URL) {
         do {
-            let mapID = savedMapID(for: packURL)
-            let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
-            let deletesLastTransferArtifact = defaults.string(
-                forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
-            ) == packURL.lastPathComponent
-            if FileManager.default.fileExists(atPath: packURL.path) {
-                try FileManager.default.removeItem(at: packURL)
-            }
-            if deletesLastTransferArtifact {
-                invalidateLastTransferForDeletedArtifact()
-            }
-            invalidateCachedPreview(for: packURL)
-            try SavedMapArtifactMetadataStore.delete(for: packURL)
-            try deleteTopographyCompanions(matching: metadata)
-            try deleteCompatibilityArtifacts(mapID: mapID)
-            packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
-            persistPackDisplayNames()
-            if downloadedPackURL == packURL {
-                downloadedPackURL = nil
-                transferProgress = 0
-            }
-            refreshCachedPacks()
+            try removeCachedPack(at: packURL)
         } catch {
             errorMessage = diagnosticMessage(for: error)
+        }
+    }
+
+    private func removeCachedPack(at packURL: URL) throws {
+        let mapID = savedMapID(for: packURL)
+        let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
+        let deletesLastTransferArtifact = defaults.string(
+            forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+        ) == packURL.lastPathComponent
+        if FileManager.default.fileExists(atPath: packURL.path) {
+            try FileManager.default.removeItem(at: packURL)
+        }
+        if deletesLastTransferArtifact {
+            invalidateLastTransferForDeletedArtifact()
+        }
+        invalidateCachedPreview(for: packURL)
+        try SavedMapArtifactMetadataStore.delete(for: packURL)
+        try deleteTopographyCompanions(matching: metadata)
+        try deleteCompatibilityArtifacts(mapID: mapID)
+        packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
+        persistPackDisplayNames()
+        if downloadedPackURL == packURL {
+            downloadedPackURL = nil
+            transferProgress = 0
+        }
+        refreshCachedPacks()
+    }
+
+    /// After a library download is saved, removes the copies it superseded so
+    /// the library entry keeps one Saved Maps row (see
+    /// `SupersededLibraryCopyPolicy` for what keeps a copy).
+    private func retireSupersededLibraryCopies(of mapEntryID: String, keeping kept: URL) {
+        guard let operations = try? deviceMapOperationStore.records() else { return }
+        let usage = SupersededLibraryCopyPolicy.Usage(
+            transferRunning: isDeviceTransferBusy || hasActiveBackgroundUpload,
+            operationFilenames: Set(operations.filter { !$0.isTerminal }.map(\.artifactFilename)),
+            pausedUploadFilenames: Set(cachedMapRecords.map(\.packURL).filter {
+                isPausedMapUpload($0)
+            }.map(\.lastPathComponent)),
+            pendingInstallFilename: hasLocallySavedPendingMap
+                ? OfflineMapJobPersistence.downloadedMapId(defaults: defaults)
+                    .flatMap { try? cachedPackURL(mapId: $0) }?.lastPathComponent
+                : nil,
+            lastTransferFilename: defaults.string(
+                forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
+            ),
+            lastTransferOutcome: lastTransferOutcome
+        )
+        let retirable = SupersededLibraryCopyPolicy.retirableCopies(
+            of: mapEntryID,
+            keeping: kept,
+            in: cachedMapRecords,
+            usage: usage
+        )
+        for packURL in retirable {
+            // The new copy is already saved; a leftover row is the only cost.
+            try? removeCachedPack(at: packURL)
         }
     }
 
@@ -3664,12 +3824,19 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
-    func catalogArtifactNeedsRefresh(for item: SavedMapListItem) -> Bool {
+    /// `deviceStreamTrust` is the connected bike's reported signer list, so a
+    /// saved copy that bike cannot install is offered as an update. Without a
+    /// report, the copy is judged for the bike it was chosen for.
+    func catalogArtifactNeedsRefresh(
+        for item: SavedMapListItem,
+        deviceStreamTrust: [String]?
+    ) -> Bool {
         guard let record = item.localRecord,
               let map = item.catalogMap else {
             return false
         }
         let metadata = SavedMapArtifactMetadataStore.load(for: record.packURL)
+        let deviceStreamTrust = deviceStreamTrust ?? metadata?.catalogDeviceStreamTrust
         let localArtifactSHA256s: Set<String> = Set([
             metadata?.primaryArtifact?.sha256,
             metadata?.legacyArtifact?.sha256,
@@ -3684,7 +3851,24 @@ final class OfflineMapManager: ObservableObject {
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString
             ),
-            trustStore: mapStreamTrustStore
+            trustStore: catalogSelectionTrustStore(
+                for: map,
+                deviceStreamTrust: deviceStreamTrust
+            )
+        )
+    }
+
+    private func catalogSelectionTrustStore(
+        for map: OfflineMapCatalogMap,
+        deviceStreamTrust: [String]?
+    ) -> BikeMapStreamTrustStore {
+        OfflineMapCatalogAvailabilityPolicy.selectionTrustStore(
+            for: map,
+            channel: OfflineMapCatalogConfig.channel(
+                generationServerURLString: serverURLString
+            ),
+            trustStore: mapStreamTrustStore,
+            deviceStreamTrust: deviceStreamTrust
         )
     }
 
@@ -3878,7 +4062,7 @@ final class OfflineMapManager: ObservableObject {
         pendingSharePreview = nil
     }
 
-    func claimPendingShare() {
+    func claimPendingShare(deviceStreamTrust: [String]?) {
         guard let token = pendingShareToken,
               let preview = pendingSharePreview else { return }
         Task { [weak self] in
@@ -3904,6 +4088,7 @@ final class OfflineMapManager: ObservableObject {
                 try await self.downloadCatalogMap(
                     map,
                     sourceShareID: preview.shareId,
+                    deviceStreamTrust: deviceStreamTrust,
                     client: client,
                     credential: credential
                 )
@@ -3911,7 +4096,12 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    func downloadCatalogMap(_ map: OfflineMapCatalogMap) {
+    /// Downloads the copy the connected bike can install when the library has
+    /// one; `deviceStreamTrust` is that bike's reported signer list.
+    func downloadCatalogMap(
+        _ map: OfflineMapCatalogMap,
+        deviceStreamTrust: [String]?
+    ) {
         let availability = catalogAvailability(for: map)
         guard availability.canDownload else {
             statusMessage = availability.statusText ?? "shared map is unavailable"
@@ -3927,6 +4117,7 @@ final class OfflineMapManager: ObservableObject {
                 try await self.downloadCatalogMap(
                     map,
                     sourceShareID: nil,
+                    deviceStreamTrust: deviceStreamTrust,
                     client: client,
                     credential: credential
                 )
@@ -3937,23 +4128,37 @@ final class OfflineMapManager: ObservableObject {
     private func downloadCatalogMap(
         _ map: OfflineMapCatalogMap,
         sourceShareID: String?,
+        deviceStreamTrust: [String]?,
         client: OfflineMapCatalogClient,
         credential: OfflineMapCatalogCredential
     ) async throws {
         guard catalogAvailability(for: map).canDownload else {
             throw OfflineMapCatalogError.missingCompatibleArtifact
         }
+        // Without a report, an update keeps choosing for the bike that the
+        // saved copy was chosen for.
+        let deviceStreamTrust = deviceStreamTrust ?? (try? cachedCatalogPackURL(
+            mapEntryID: map.mapEntryId,
+            fileExtension: "bmap"
+        )).flatMap(SavedMapArtifactMetadataStore.load(for:))?.catalogDeviceStreamTrust
+        let selectionTrustStore = catalogSelectionTrustStore(
+            for: map,
+            deviceStreamTrust: deviceStreamTrust
+        )
         let grant = try await client.downloadGrant(
             mapEntryId: map.mapEntryId,
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString
             ),
-            trustStore: mapStreamTrustStore,
+            trustStore: selectionTrustStore,
             appIdentity: catalogAppIdentity,
             credential: credential.credential
         )
         let artifact = grant.artifact.platformArtifact
         guard artifact.isBikeMapStream,
+              let keyID = grant.artifact.signatureKeyId,
+              let keySHA256 = grant.artifact.signatureKeySha256,
+              selectionTrustStore.capability(for: keyID) == "\(keyID)=\(keySHA256)",
               OfflineMapReaderCompatibilityPolicy.isCompatible(
                 artifact: grant.artifact,
                 map: map
@@ -4099,7 +4304,8 @@ final class OfflineMapManager: ObservableObject {
             readerRequirements: verifiedReaderRequirements,
             catalogContentReceipt: map.contentReceipt,
             topography: verifiedTopography,
-            topographyCompanion: topographyDownload?.association.receipt
+            topographyCompanion: topographyDownload?.association.receipt,
+            catalogDeviceStreamTrust: deviceStreamTrust
         )
         try saveDownloadedMap(
             at: temporaryURL,
@@ -4115,12 +4321,29 @@ final class OfflineMapManager: ObservableObject {
         persistPackDisplayNames()
         downloadedPackURL = destination
         refreshCachedPacks()
+        retireSupersededLibraryCopies(of: map.mapEntryId, keeping: destination)
 #if canImport(UIKit)
         loadPreviewIfNeeded(forCachedPack: destination)
 #endif
         downloadProgress = 1
         downloadByteProgress = nil
         statusMessage = "shared map downloaded"
+    }
+
+    /// Cached per file revision: Saved Maps renders this for every row.
+    func savedMapLacksDurableContract(_ packURL: URL) -> Bool {
+        let values = try? packURL.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]
+        )
+        let revision = "\(values?.fileSize ?? -1):" +
+            "\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        let key = packURL.lastPathComponent
+        if let cached = nonDurableSavedMaps[key], cached.revision == revision {
+            return cached.nonDurable
+        }
+        let nonDurable = SavedMapCompatibilityPolicy.lacksDurableContract(packURL: packURL)
+        nonDurableSavedMaps[key] = (revision, nonDurable)
+        return nonDurable
     }
 
     func isCachedPackInstalled(_ packURL: URL,
@@ -4521,6 +4744,30 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func restorePendingDurableTransfer(bleManager: BLEManager) {
+        // The atomic journal is the recovery authority. UserDefaults may retain
+        // an older selection (or no pointer) when the app is terminated.
+        let referenced = currentDeviceMapOperation
+        if let deviceID = bleManager.activeDeviceID,
+           defaults.string(forKey: "offlineMap.deviceOperationID") == nil ||
+            referenced.map({ $0.deviceID != deviceID || !$0.usesDurableProtocol ||
+                $0.isTerminal || $0.isRetiredUnknown }) == true {
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier)
+            do {
+                let pending = try deviceMapOperationStore.records().filter {
+                    $0.deviceID == deviceID && $0.appNamespace == namespace &&
+                        $0.usesDurableProtocol && !$0.isTerminal && !$0.isRetiredUnknown
+                }
+                // Multiple unresolved records need reconciliation, never an
+                // arbitrary choice. An unreadable store is likewise retained.
+                if pending.count == 1 {
+                    defaults.set(pending[0].operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+                }
+            } catch {
+                statusMessage = "Saved map operation needs recovery before its result can be confirmed"
+                return
+            }
+        }
         guard let record = currentDeviceMapOperation,
               record.usesDurableProtocol, !record.isTerminal, !record.isRetiredUnknown,
               record.deviceID == bleManager.activeDeviceID,
@@ -6136,8 +6383,9 @@ final class OfflineMapManager: ObservableObject {
                supportsMapPois: bleManager.supportsMapPois,
                includesContours: metadata.topography != nil
            ) {
-            throw OfflineMapPlatformError.invalidPack(
-                "This saved map is not compatible with the connected device. Regenerate it for this firmware."
+            throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                bleManager.hasReceivedDeviceCapabilities
+                    ? .deviceReaderUnsupported : .deviceReaderUnknown
             )
         }
         statusMessage = "preparing transfer"
@@ -6190,10 +6438,12 @@ final class OfflineMapManager: ObservableObject {
                containsTerrain: prepared.artifact.containsTerrain,
                supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
                supportsMapPois: bleManager.supportsMapPois,
-               includesContours: prepared.artifact.topography != nil
+               includesContours: prepared.artifact.topography != nil,
+               compatibilityContract: prepared.artifact.compatibilityContract
            ) {
-            throw OfflineMapPlatformError.invalidPack(
-                "This saved map is not compatible with the connected device. Regenerate it for this firmware."
+            throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                bleManager.hasReceivedDeviceCapabilities
+                    ? .deviceReaderUnsupported : .deviceReaderUnknown
             )
         }
         guard transferDeviceID == bleManager.activeDeviceID,
@@ -6302,34 +6552,9 @@ final class OfflineMapManager: ObservableObject {
             if let installed = library.installed(mapID: prepared.mapID,
                 manifestReceipt: prepared.artifact.manifestReceipt,
                 signedManifestReceipt: prepared.artifact.signedManifestReceipt) {
-                let pending = try deviceMapOperationStore.records().contains {
-                    $0.deviceID == transferDeviceID && $0.blocksNewTransfer(
-                        connectionEpoch: transferEpoch, processID: DeviceMapOperationStore.observationProcessID)
-                }
-                guard !pending else { throw OfflineMapPlatformError.backgroundMapUploadInProgress }
-                if library.selectedSessionID == installed.sessionID {
-                    statusMessage = "map already in use"; transferProgress = 1; return
-                }
-                guard bleManager.requestDeviceMapLibrary("select", map: installed) else {
-                    throw OfflineMapPlatformError.invalidPack("The Bike Computer is busy. Try selecting the map again.")
-                }
-                let requestID = bleManager.lastMapLibraryRequestID
-                statusMessage = "selecting installed map"
-                for attempt in 0..<1200 {
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                    guard transferDeviceID == bleManager.activeDeviceID,
-                          transferEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
-                    if let current = bleManager.deviceMapLibrary, current.commandID == requestID {
-                        if let error = current.commandError, !error.isEmpty {
-                            throw OfflineMapPlatformError.mapActivationFailed(error)
-                        }
-                        if current.isComplete && current.selectedSessionID == installed.sessionID {
-                            statusMessage = "map selected"; transferProgress = 1; return
-                        }
-                    }
-                    if attempt % 4 == 0 { bleManager.requestMapTransferStatus() }
-                }
-                throw OfflineMapPlatformError.mapActivationFailed("Map selection was not confirmed. Reconnect to the Bike Computer and check its active map.")
+                try await performInstalledMapAction("select", map: installed, bleManager: bleManager,
+                    deviceID: transferDeviceID, connectionEpoch: transferEpoch)
+                return
             }
         }
 
@@ -6540,9 +6765,23 @@ final class OfflineMapManager: ObservableObject {
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
                        readerRequirements: artifact.readerRequirements,
+                       compatibilityContract: artifact.compatibilityContract,
+                       deviceReaderCapabilities: DeviceMapReaderCapabilityPolicy.capabilities(
+                           reported: initialDeviceStatus.mapReader,
+                           legacyFeatures: bleManager.hasReceivedDeviceCapabilities
+                               ? LegacyDeviceRendererFeatures(
+                                   streetLabels: bleManager.supportsStreetLabels,
+                                   buildings3D: bleManager.supports3DBuildings,
+                                   contours: bleManager.supportsTopographicContours,
+                                   mapPois: bleManager.supportsMapPois
+                               )
+                               : nil
+                       ),
                        requiredFirmwareVersion: artifact.requiredFirmwareVersion,
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
+                       containsTerrain: artifact.containsTerrain,
+                       supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
                        deviceStatus: initialDeviceStatus
                    )
                 if let rejection = protocolEvaluation.rejection {

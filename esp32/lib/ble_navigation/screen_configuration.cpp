@@ -3,6 +3,7 @@
 #include "ble_navigation.hpp"
 #include "map_profile_persistence.hpp"
 #include "../utils/src/startup_constructed.hpp"
+#include "../utils/src/task_data_placement.hpp"
 
 #include <Preferences.h>
 
@@ -59,8 +60,11 @@ bool legacyChangePending = false;
 bool legacyMaskPending = false;
 bool legacyDefaultPending = false;
 uint32_t internalRequestID = 0x40000000UL;
-std::array<uint8_t, kMaximumSlotBytes> slotBuffer{};
-std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
+// Preferences runs on the existing internal caller stack. The pinned SDK
+// bounces external read/write data through internal memory while flash cache
+// is disabled; all lengths and readback failures retain their existing checks.
+BICINO_TASK_DATA std::array<uint8_t, kMaximumSlotBytes> slotBuffer{};
+BICINO_TASK_DATA std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
     documentBuffer{};
 std::array<ReplayRecord, kReplayWindow> replayRecords{};
 std::size_t nextReplayRecord = 0;

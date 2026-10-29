@@ -420,8 +420,12 @@ treated as an empty queue, because a producer that then finds the queue full
 does not notify. This reduces scheduling pressure but cannot guarantee lossless
 recording under sustained overload or arbitrarily slow storage. Queue loss and
 storage failures continue to be counted separately.
-Explicit storage transitions fence ordinary admission (`storage_transition`),
-seal the old medium and park its writer before remount. If the old medium is
+The firmware pins the storage backend mounted at boot and never remounts it at
+runtime, so the recorder keeps one medium for the whole boot; a card inserted
+or replaced later is used after a restart. No runtime path calls the
+storage-transition API any more. It is kept for an explicit remount: it fences
+ordinary admission (`storage_transition`), then seals the old medium and parks
+its writer before the remount. If the old medium is
 unavailable, queued losses become a fault capsule before changing identity.
 A remount allocates a namespace above both media's retained boot IDs. Existing
 nonempty chunks are never reopened for append. Failed fault-capsule writes
@@ -547,3 +551,21 @@ The firmware index stays bounded to 256 chunks and 64 KiB. If a snapshot lease
 or deferred pruning exposes more closed chunks, the index fails explicitly with
 `diagnostics_index_unreadable`; it never advertises a truncated subset as a
 complete inventory. Retry after the lease ends and retention runs.
+
+## I2C retry attribution on remote-debug firmware
+
+The Waveshare remote-debug profiles emit `I2C_RETRY schema=1` on USB serial
+after a retried transaction settles. Records include the 7-bit device address,
+register (`regKnown=0` for probes), operation, `recovered` or `exhausted` outcome,
+attempt count, failed-attempt count and elapsed milliseconds. They contain no
+register values or sensor payloads. Each address/outcome can emit at most once
+per five seconds after its first record; `suppressed` counts intervening outcomes.
+This is sampled USB evidence, not retained diagnostics or a complete event log.
+A recovered transaction with three attempts contributes two failed attempts but
+one recovery to the existing counters. Bus-lock admission failures retain the
+existing separate log; passive one-shot inspection reads do not enter retries.
+
+The limiter uses fixed storage only in `DEVICE_REMOTE_DEBUG` builds. Production
+logging, retry count/delay, shared-bus locking, touch interrupt gating and PMIC
+write policy remain unchanged. Debug logging has timing/memory cost; compare
+exact images and preserve the separate physical acceptance gate.

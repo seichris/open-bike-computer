@@ -72,6 +72,55 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
                             "-I", str(ROOT / "tools/tests"), str(unit), "-o", str(binary)], check=True)
             self.assertEqual(subprocess.run([str(binary)]).returncode, 42)
 
+    def test_actual_internal_stack_calls_wait_on_owner_and_never_run_on_psram(self):
+        header = source("lib/firmware_update/device_operation_owner.hpp")
+        header = "\n".join(line for line in header.splitlines()
+                           if not line.startswith(("#include", "#pragma")))
+        header = header.replace(" : public device_transfer::NetworkOperationOwner", "")
+        header = header.replace(" override", "").replace("private:", "public:")
+        text = source("lib/firmware_update/device_operation_owner.cpp")
+        methods = text[text.index("bool DeviceOperationOwner::runOnInternalStack("):
+                       text.index("bool DeviceOperationOwner::stopAccessPoint(")]
+        methods += text[text.index("bool DeviceOperationOwner::callerStackIsInternal()"):
+                        text.index("esp_err_t DeviceOperationOwner::protectMetadataReaderFloor(")]
+        case = text[text.index("    case Operation::InternalStackCall:"):
+                    text.index("    case Operation::Quiesce:")]
+        harness = source("tools/tests/device_operation_internal_call_harness.cpp")
+        harness = harness.replace("// PRODUCTION_HEADER", header)
+        harness = harness.replace("// PRODUCTION_METHODS", "namespace firmware_update {\n" + methods + "\n}")
+        harness = harness.replace("// PRODUCTION_CASE", case)
+        with tempfile.TemporaryDirectory() as directory:
+            unit = Path(directory) / "internal_call.cpp"
+            binary = Path(directory) / "internal_call"
+            compile_command = ["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                               "-I", str(ROOT / "tools/tests"), str(unit), "-o", str(binary)]
+            unit.write_text(harness)
+            subprocess.run(compile_command, check=True)
+            subprocess.run([str(binary)], check=True)
+            # Dropping the stack check in a temporary copy must reach the fake
+            # flash fault, not merely fail to compile or trip another assert.
+            unsafe = harness.replace("if (callerStackIsInternal()) {", "if (true) {", 1)
+            self.assertNotEqual(unsafe, harness)
+            unit.write_text(unsafe)
+            subprocess.run(compile_command, check=True)
+            self.assertEqual(subprocess.run([str(binary)]).returncode, 42)
+
+    def test_diagnostics_http_reads_ffat_through_the_internal_owner(self):
+        # The TLS worker's stack stays in PSRAM. Its only flash-backed storage
+        # is the FFat fallback, so the network owner provides the call path.
+        http = source("lib/device_transfer/device_transfer_http.cpp")
+        server = http[http.index("bool HttpTransferServer::runOnInternalStack("):
+                      http.index("bool HttpTransferServer::registerHandler(")]
+        # The call may need the state lock, so it is never held across it.
+        self.assertLess(server.index("unlockState();"),
+                        server.index("owner->runOnInternalStack(call, context)"))
+        self.assertIn('requestedMode == "diagnostics"', http)
+        owner = source("lib/device_transfer/device_transfer_network_owner.hpp")
+        self.assertIn("virtual bool runOnInternalStack(void (*)(void *), void *) { return false; }",
+                      owner)
+        self.assertIn("bool runOnInternalStack(void (*call)(void *), void *context) override;",
+                      source("lib/firmware_update/device_operation_owner.hpp"))
+
     def test_actual_wifi_runtime_reuses_driver_with_radio_off_and_credentials_erased(self):
         header = source("lib/firmware_update/device_wifi_runtime.hpp")
         methods = source("lib/firmware_update/device_wifi_runtime.cpp")

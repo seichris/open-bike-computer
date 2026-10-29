@@ -29,3 +29,13 @@ There are no protocol layout or version changes in the reuse refactor.
   answer the Swift decoder validates.
 
 Terrain values are synthetic; no case claims measured accuracy.
+
+# Map reader capability fixture
+
+`map-reader-capabilities-v1.txt` holds the exact `mapReader` objects that
+firmware reports in its authenticated map transfer status: `production` for
+profiles without the POI reader and `map_pois` for profiles with it.
+`test_map_compatibility_corpus.cpp` requires the firmware string to match for
+both builds; `MapCompatibilityContractTests.swift` decodes both lines and
+installs the frozen durable map corpus against them. See
+[durable map compatibility](../../docs/map-compatibility-contract.md).

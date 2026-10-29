@@ -12,6 +12,7 @@ extern Power power;
 #include "ble_navigation.hpp"
 #include "../utils/src/runtime_ownership.hpp"
 #include "../utils/src/startup_constructed.hpp"
+#include "../utils/src/task_data_placement.hpp"
 #include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -63,6 +64,7 @@ extern Power power;
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
+#include "../map_transfer/map_reader_capabilities.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
@@ -350,20 +352,20 @@ struct OutgoingScreenConfigurationSnapshot {
 
 static StaticSemaphore_t screenConfigurationMutexStorage;
 static SemaphoreHandle_t screenConfigurationMutex = nullptr;
-static screen_configuration_protocol::UploadReassembler
+static BICINO_TASK_DATA screen_configuration_protocol::UploadReassembler
     screenConfigurationUpload;
-static StartupConstructed<PendingScreenConfigurationControl>
+static BICINO_TASK_DATA StartupConstructed<PendingScreenConfigurationControl>
     pendingScreenConfigurationStorage;
 static PendingScreenConfigurationControl &pendingScreenConfiguration =
     pendingScreenConfigurationStorage.value;
-static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
+static BICINO_TASK_DATA OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
 static std::atomic<bool> screenConfigurationSnapshotActive{false};
 static std::atomic<bool> screenConfigurationResetRequested{false};
 static bool screenConfigurationAckPending = false;
 static uint32_t screenConfigurationAckRequestID = 0;
 static screen_configuration::CommitOutcome screenConfigurationAckOutcome{};
 static NimBLECharacteristic *screenConfigurationCharacteristic = nullptr;
-static std::array<uint8_t,
+static BICINO_TASK_DATA std::array<uint8_t,
                   screen_configuration_protocol::MAX_DOCUMENT_BYTES>
     processingScreenConfigurationDocument{};
 
@@ -1680,9 +1682,24 @@ sendWireNotification(NimBLECharacteristic *characteristic,
     return TransportResult::Drop;
   }
 
+  if (!ble_notification_dispatch_policy::canAllocateNotification(
+          os_msys_num_free())) {
+    xSemaphoreGive(notificationTransportMutex);
+    return TransportResult::Retry;
+  }
   os_mbuf *payload =
       ble_hs_mbuf_from_flat(data, static_cast<uint16_t>(length));
   if (payload == nullptr) {
+    xSemaphoreGive(notificationTransportMutex);
+    return TransportResult::Retry;
+  }
+
+  // Recheck after allocation: a large frame may consume a chain, and RX can
+  // allocate concurrently. Keep the exact authenticated frame in our queue
+  // until the host has room, without starving acknowledged control writes.
+  if (!ble_notification_dispatch_policy::canDispatchNotification(
+          os_msys_num_free())) {
+    os_mbuf_free_chain(payload);
     xSemaphoreGive(notificationTransportMutex);
     return TransportResult::Retry;
   }
@@ -2679,7 +2696,15 @@ readActiveMapStatusSnapshot() {
   static ActivePresentationCache activePresentationCache;
   static ActiveMapStatusSnapshot snapshot;
 
-  map_transfer::MapTransferInstaller installer("/sdcard");
+  if (!storage.mapStorageAvailable()) {
+    // Without a card there is no active map, and FFat is never searched for
+    // one. The app shows the no-card state from "sdPresent".
+    activePresentationCache.clear();
+    snapshot.available = false;
+    snapshot.errorCode = "active_missing";
+    return snapshot;
+  }
+  map_transfer::MapTransferInstaller installer(storage.mapStorageRoot());
   map_transfer::ActiveMapSelection activeMap;
   map_transfer::InstallStatus activeStatus =
       installer.readActiveMap(activeMap);
@@ -2773,7 +2798,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (streamSupported ? "[2]" : "[]") +
                      (streamSupported
                           ? ",\"streamFormatVersions\":[1],\"streamTrust\":" +
-                                map_transfer::compiledMapStreamTrustCapabilitiesJson()
+                                map_transfer::compiledMapStreamTrustCapabilitiesJson() +
+                                ",\"mapReader\":" +
+                                map_transfer::mapReaderCapabilitiesJson()
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +
@@ -3992,38 +4019,36 @@ static void processPendingTransferControl() {
       Serial.println(
           "BLE Map Transfer: enter rejected, transfer worker is stopping");
     } else {
-      const bool transitionReady =
-          ride_diagnostics::beginStorageTransition();
-      if (!transitionReady) {
+      // Only validates the card this boot mounted. Storage never remounts or
+      // falls back to FFat here, so the recorder needs no checkpoint; a card
+      // that was missing, failed or replaced is used after a restart.
+      const bool mounted = storage.ensureSdMounted();
+      if (!mounted) {
         mapTransferHttp.setLastError(
             "sd_unavailable",
-            "diagnostic storage could not checkpoint before remounting SD");
+            storage.mapStorageAvailable()
+                ? "SD card is not readable; reinsert it and restart the device"
+                : "no SD card was mounted at startup; insert one and restart "
+                  "the device");
         Serial.println(
-            "BLE Map Transfer: enter rejected, diagnostics checkpoint failed");
+            "BLE Map Transfer: enter rejected, SD card is not mounted");
+      } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
+        // The card validated; only its map namespace is not writable (full,
+        // locked or blocked). It stays in use for maps and diagnostics, and
+        // the next request probes it again.
+        mapTransferHttp.setLastError(
+            "sd_unwritable", "SD card map storage is not writable");
+        Serial.println(
+            "BLE Map Transfer: enter rejected, SD card is not writable");
       } else {
-        const bool mounted = storage.ensureSdMounted();
-        if (!mounted) {
-          mapTransferHttp.setLastError("sd_unavailable",
-                                       "SD card is not mounted");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not mounted");
-        } else if (!mapTransferHttp.refreshStreamStorageCapability(true)) {
-          storage.markSdUnavailable();
-          mapTransferHttp.setLastError(
-              "sd_unwritable", "SD card map storage is not writable");
-          Serial.println(
-              "BLE Map Transfer: enter rejected, SD card is not writable");
-        } else {
-          const bool enabled = mapTransferHttp.setEnabled(true);
-          Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
-                        enabled);
-          (void)ride_diagnostics::record(
-              enabled ? ride_diagnostics::Level::Info
-                      : ride_diagnostics::Level::Warning,
-              "map", "transfer_entered",
-              enabled ? "{\"active\":true}" : "{\"active\":false}");
-        }
-        ride_diagnostics::endStorageTransition();
+        const bool enabled = mapTransferHttp.setEnabled(true);
+        Serial.printf("BLE Map Transfer: enter applied, enabled=%d\n",
+                      enabled);
+        (void)ride_diagnostics::record(
+            enabled ? ride_diagnostics::Level::Info
+                    : ride_diagnostics::Level::Warning,
+            "map", "transfer_entered",
+            enabled ? "{\"active\":true}" : "{\"active\":false}");
       }
     }
     break;
@@ -5894,28 +5919,23 @@ static void processPendingMapInputs() {
                            route.delivery.leaseGeneration);
   }
   processInput(takeSlot(pendingGpsInput));
-  while (true) {
+  // Bound each UI turn even when callbacks continuously refill settings.
+  // Round-robin selection also prevents a busy low ID starving older slots.
+  constexpr size_t kSettingsPerTurn = 4;
+  static size_t nextSettingId = 0; // Main-loop owner only.
+  for (size_t applied = 0; applied < kSettingsPerTurn; ++applied) {
     PendingMapInput input{};
     if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
       break;
     }
     int16_t pendingSettingId = -1;
-    for (size_t byteIndex = 0; byteIndex < MAP_SETTING_MASK_BYTES;
-         ++byteIndex) {
-      const uint8_t bits = pendingSettingMask[byteIndex];
-      if (bits == 0) {
-        continue;
-      }
-      for (uint8_t bit = 0; bit < 8; ++bit) {
-        if ((bits & static_cast<uint8_t>(1U << bit)) != 0) {
-          pendingSettingId =
-              static_cast<int16_t>(byteIndex * 8 + bit);
-          pendingSettingMask[byteIndex] &=
-              static_cast<uint8_t>(~(1U << bit));
-          break;
-        }
-      }
-      if (pendingSettingId >= 0) {
+    for (size_t offset = 0; offset < MAP_SETTING_SLOT_COUNT; ++offset) {
+      const size_t id = (nextSettingId + offset) % MAP_SETTING_SLOT_COUNT;
+      const uint8_t bit = static_cast<uint8_t>(1U << (id % 8));
+      if ((pendingSettingMask[id / 8] & bit) != 0) {
+        pendingSettingId = static_cast<int16_t>(id);
+        pendingSettingMask[id / 8] &= static_cast<uint8_t>(~bit);
+        nextSettingId = (id + 1) % MAP_SETTING_SLOT_COUNT;
         break;
       }
     }
@@ -5934,6 +5954,9 @@ static void processPendingMapInputs() {
       break;
     }
     processInput(input);
+  }
+  if (pendingMapInputCount.load(std::memory_order_acquire) != 0) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   }
 }
 

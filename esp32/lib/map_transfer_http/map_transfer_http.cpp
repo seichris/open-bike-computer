@@ -5,6 +5,7 @@
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "map_stream_compiled_trust.hpp"
+#include "map_reader_capabilities.hpp"
 #include "map_activation_workspace.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -146,14 +147,16 @@ static std::string jsonEscape(const std::string &value) {
 
 } // namespace
 
-void MapTransferHttpServer::configure(
-    std::string storageRoot, uint16_t port,
-    device_transfer::HttpTransferServer *sharedServer) {
+void MapTransferHttpServer::bindStorageRoot(std::string storageRoot) {
   storageRoot_ = std::move(storageRoot);
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
   installer_ = MapTransferInstaller(storageRoot_);
   installer_.setOperationDeviceID(operationDeviceID_);
+}
+
+void MapTransferHttpServer::configure(
+    uint16_t port, device_transfer::HttpTransferServer *sharedServer) {
   installer_.setStorageProgressCallback([](void *context) {
     auto *server = static_cast<MapTransferHttpServer *>(context);
     server->storageProgressSequence_.fetch_add(1, std::memory_order_relaxed);
@@ -1671,7 +1674,8 @@ void MapTransferHttpServer::handleStatus(device_transfer::TransferClient &client
                      (streamSupported ? "[2]" : "[]");
   if (streamSupported) {
     body += ",\"streamFormatVersions\":[1],\"streamTrust\":" +
-            compiledMapStreamTrustCapabilitiesJson();
+            compiledMapStreamTrustCapabilitiesJson() +
+            ",\"mapReader\":" + mapReaderCapabilitiesJson();
   }
   if (!transferStatus.baseUrl.empty()) {
     body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";

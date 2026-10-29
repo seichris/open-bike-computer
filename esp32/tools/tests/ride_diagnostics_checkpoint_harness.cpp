@@ -17,25 +17,25 @@ unsigned nowMs=100, syncs=0, faults=0, persisted=0, pending=0;
 struct StorageMock {
  bool getDiagnosticsSdLoaded() { return true; }
  void markDiagnosticsSdUnavailable() {}
- size_t write(FILE*,const uint8_t*,size_t length) { pending+=length; return length; }
- int sync(FILE*) { ++syncs; if(failSync) return -1; persisted=pending; return 0; }
+ size_t writeDescriptor(int,const uint8_t*,size_t length) { pending+=length; return length; }
+ int syncDescriptor(int) { ++syncs; if(failSync) return -1; persisted=pending; return 0; }
 } instance;
 StorageMock *storage=&instance;
-FILE *activeFile=nullptr;
+int activeDescriptor=-1;
 unsigned activeFileBytes=0,activeFirstSequence=0,activeLastSequence=0,lastCheckpointMs=0;
 bool activeHashValid=false;
 int activeHash=0;
 std::atomic<unsigned> written{0}, storageErrors{0},faultCapsuleGeneration{0},faultCapsuleQueuedGeneration{0},
  pendingFaultCapsuleQueuedChecksum{123}, currentFaultCapsuleQueuedChecksum{123};
 std::atomic<bool> retentionPrunedThisBoot{false};
-void abandonActiveChunkAfterUncertainWrite(){ activeFile=nullptr; }
+void abandonActiveChunkAfterUncertainWrite(){ activeDescriptor=-1; }
 void updateFaultCapsule(Level,const char*,const char*,bool){++faults;}
 const char *closeFailureEvent(ActiveFileCloseResult) { return "close_failed"; }
 ActiveFileCloseResult closeAndAdvanceActiveChunk() {
- activeFile=nullptr; return failClose ? ActiveFileCloseResult::CloseFailed : ActiveFileCloseResult::Ready;
+ activeDescriptor=-1; return failClose ? ActiveFileCloseResult::CloseFailed : ActiveFileCloseResult::Ready;
 }
 bool prepareChunkWriteReserve() { return true; }
-bool openActiveFile() { activeFile=reinterpret_cast<FILE*>(1); return true; }
+bool openActiveFile() { activeDescriptor=3; return true; }
 int mbedtls_sha256_update(int*, const uint8_t*, size_t) { return 0; }
 unsigned millis() { return nowMs; }
 void pruneRetention() {}
@@ -44,7 +44,7 @@ bool flushFaultCapsulesIfPossible() { return true; }
 // PRODUCTION_FUNCTIONS
 void reset() {
  failSync=failClose=cleared=false; syncs=faults=persisted=pending=activeFileBytes=lastCheckpointMs=0;
- activeFile=nullptr; nowMs=100; pendingFaultCapsuleQueuedChecksum=123; currentFaultCapsuleQueuedChecksum=123;
+ activeDescriptor=-1; nowMs=100; pendingFaultCapsuleQueuedChecksum=123; currentFaultCapsuleQueuedChecksum=123;
 }
 int main() {
  QueuedEvent event; event.clearsFaultCapsule=true;

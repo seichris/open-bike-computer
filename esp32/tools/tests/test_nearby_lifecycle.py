@@ -456,6 +456,7 @@ struct MapBlock {};
 struct Cache { std::vector<MapBlock *> blocks{nullptr}; };
 struct Scene { bool invalidated = false; void invalidate() { invalidated = true; } };
 struct Clearable { unsigned clears=0; void clear() { ++clears; } };
+bool mapFilesAvailable() { return true; } // An SD boot; see test_sd_only_map_storage.
 class Maps {
 public:
   String vectorMapFolder = "/old/";

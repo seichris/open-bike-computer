@@ -74,6 +74,46 @@ struct DeviceMapOperationTests {
                       !resolved.blocksNewTransfer(connectionEpoch: record.connectionEpoch, processID: UUID()),
                       "a full-card refusal leaves no pending client installation")
         }
+        // A query/cancel may settle an operation before the OS delivers the
+        // original PUT response. End transport without regressing device state.
+        for (currentPhase, delayedPhase) in [("prepared", "receiving"), ("accepted", "prepared"),
+            ("installed", "prepared"), ("failed", "accepted"), ("cancelled", "prepared")] {
+            let late = DeviceMapOperationStore(url: directory.appendingPathComponent("late-\(currentPhase).json"))
+            try late.save(record)
+            let attempt = UUID()
+            try late.beginUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, uploadAttemptID: attempt)
+            let newest = try receipt(currentPhase, 5)
+            try check(try late.ingest(newest) != nil)
+            let body = try JSONSerialization.data(withJSONObject: ["operation":
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt(delayedPhase, 2)))])
+            try check(try late.completeUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                uploadAttemptID: attempt, responseBody: body, httpStatus: 200, errorCode: nil))
+            let persisted = try DeviceMapOperationStore(url: directory.appendingPathComponent("late-\(currentPhase).json")).records()[0]
+            try check(persisted.lastReceipt == newest && persisted.uploadCompletedAt != nil &&
+                      persisted.uploadResponseBody == body, "late progress cannot strand transport or replace a newer receipt")
+        }
+        for conflict in ["identity", "same-revision", "future", "terminal", "accepted-after-cancel"] {
+            let late = DeviceMapOperationStore(url: directory.appendingPathComponent("late-conflict-\(conflict).json"))
+            try late.save(record)
+            let attempt = UUID()
+            try late.beginUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, uploadAttemptID: attempt)
+            let newest = try receipt("cancelled", 5)
+            try check(try late.ingest(newest) != nil)
+            let phase = conflict == "terminal" ? "installed" : conflict == "accepted-after-cancel" ? "accepted" : "prepared"
+            let revision: UInt64 = conflict == "same-revision" ? 5 : conflict == "future" ? 6 : 2
+            let delayed = try receipt(phase, revision, overrides: conflict == "identity" ? ["deviceID": "foreign"] : [:])
+            let body = try JSONSerialization.data(withJSONObject: ["operation":
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(delayed))])
+            expectFailure({ _ = try late.completeUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                uploadAttemptID: attempt, responseBody: body, httpStatus: 200, errorCode: nil) },
+                "\(conflict) must not pass as superseded progress")
+            try check(try late.records()[0].lastReceipt == newest && late.records()[0].uploadCompletedAt == nil,
+                      "conflicting receipt leaves exact operation evidence intact")
+        }
         let completionURL = directory.appendingPathComponent("completion.json")
         let completionStore = DeviceMapOperationStore(url: completionURL)
         try completionStore.save(record)
