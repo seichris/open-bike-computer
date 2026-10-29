@@ -121,7 +121,7 @@ def firmware_targets(paths, full_targets):
         if path.startswith(('esp32/lib/ble_navigation/', 'esp32/lib/map_transfer/')):
             # Remote-debug inherits ordinary diagnostics and adds debug/trust
             # branches; production exercises their disabled branches. The POI
-            # budget profile is the only diagnostics-off, 3 MiB-slot image of
+            # budget profile is the only diagnostics-off, production-slot image of
             # their nearby-POI code. Neither library contains the lifecycle-only
             # adapter implementation.
             profiles.update(('_REMOTE_DEBUG', '_POI_LIFECYCLE_QUALIFICATION'))

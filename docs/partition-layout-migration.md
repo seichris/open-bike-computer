@@ -84,21 +84,26 @@ explicit acknowledgement; it offers no partial preservation.
 
 Firmware never lets an FFat mount silently perform a migration.
 `Storage::initSPIFFS()` classifies the raw partition before the first mount
-attempt, because a wear-levelling mount rewrites metadata it does not recognise:
+attempt, because even a mount without format rewrites wear-levelling metadata
+it does not recognise:
 
-| Raw state | Geometry record in NVS | Action |
+| Raw state | Ownership evidence | Action |
 |---|---|---|
-| fully erased | any | format (nothing can be lost), record geometry |
-| data | this exact offset/size | mount; on failure reformat (previous corruption recovery) |
-| data | none | mount only; on failure leave the bytes and run without FFat |
-| data | another offset/size | do not mount; run without FFat |
+| fully erased | any | record the geometry in NVS, then format; no format if the record cannot be written |
+| data | NVS record for this exact offset/size | mount; on failure reformat (previous corruption recovery) |
+| data | no record, but a valid wear-levelling state at this geometry | adopt: mount, record; on failure reformat |
+| data | no record and no valid state at this geometry | do not mount; run without FFat |
+| data | record for another offset/size | do not mount; run without FFat |
 
-The record is `ffat_layout/geometry` in NVS, written after a successful mount.
-A device that has mounted FFat with this firmware therefore keeps corruption
-recovery at that geometry, while old data shifted under a replaced table or
-vendor leftovers are never formatted. A volume this firmware has never mounted
-is not reformatted after a mount failure; recreate it explicitly. The `STORAGE_FFAT` log line reports the
-decision. Factory programming must start from an erased chip or erase FFat.
+The record is `ffat_layout/geometry` in NVS. Recording before the first format
+means an interrupted first format is recognised as this device's volume and
+reformatted on the next boot. Wear-levelling state is read exactly as ESP-IDF
+5.5 writes it (`esp32/lib/storage/wear_levelling_state.hpp`, cross-checked with
+states built like IDF's `wl_fatfsgen.py`). A dual-3-MiB device updated over the
+air therefore adopts its existing volume, while old data shifted under a
+replaced table (its state lies at other offsets) and vendor leftovers are
+neither mounted nor formatted. The `STORAGE_FFAT` log line reports the decision.
+Factory programming must start from an erased chip or erase FFat.
 
 ## OTA on existing devices
 
@@ -117,10 +122,14 @@ The protected publisher stages two GitHub Pages channels per target with
   dual-3-MiB slot with its reserve. Apps that predate this change read only this
   path and keep receiving compatible updates.
 
-When an image outgrows 3,080,192 bytes, the legacy channel keeps the newest
-fitting published release (read from immutable, digest-verified release assets)
-instead of the oversized manifest. Pages recovery stages both channels the same
-way and never points the legacy channel past the recovered build.
+When an image outgrows 3,080,192 bytes, the legacy channel keeps serving exactly
+the manifest it serves now. The publisher reads it back from Pages and requires
+it to equal a fitting, digest-verified manifest of an immutable published
+release, so a channel rolled back with Pages recovery is never re-advanced to a
+withdrawn release; otherwise publication fails closed. Pages recovery stages
+both channels the same way and never points the legacy channel past the
+recovered build. To recover an oversized release while the legacy channel is
+broken, first recover the intended fitting release.
 
 The app selects a channel from the device's fresh `DSTS` capacity, never from
 its version or build: a 4 MiB slot prefers `dual4m` and falls back to the legacy

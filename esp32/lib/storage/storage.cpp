@@ -844,20 +844,26 @@ esp_err_t Storage::initSPIFFS() {
   const internal_storage::Assessment assessment =
       internal_storage::assess("ffat");
   const InternalMountPlan plan = storage_mount_policy::internalMountPlan(
-      assessment.erased, assessment.record);
+      assessment.erased, assessment.record, assessment.wearLevellingValid);
   bool mounted = false;
-  if (assessment.partitionFound && plan != InternalMountPlan::RefuseRelocated) {
-    mounted = FFat.begin(plan == InternalMountPlan::FormatErased, "/sdcard", 20,
-                         "ffat");
-    if (!mounted && plan == InternalMountPlan::MountExisting &&
-        storage_mount_policy::internalMountFailure(assessment.record) ==
-            storage_mount_policy::InternalMountFailure::ReformatOwned)
+  if (assessment.partitionFound && plan == InternalMountPlan::FormatErased) {
+    // Own the geometry first: an interrupted first format is then this
+    // device's volume on the next boot and is reformatted, not refused.
+    if (internal_storage::recordGeometry(assessment))
       mounted = FFat.begin(true, "/sdcard", 20, "ffat");
+  } else if (assessment.partitionFound &&
+             plan == InternalMountPlan::MountExisting) {
+    // Owned volume: a failed mount is reformatted, as before this policy.
+    mounted = FFat.begin(false, "/sdcard", 20, "ffat") ||
+              FFat.begin(true, "/sdcard", 20, "ffat");
+    if (mounted)
+      (void)internal_storage::recordGeometry(assessment);
   }
   ESP_LOGI(TAG,
-           "STORAGE_FFAT found=%d erased=%d record=%u plan=%u mounted=%d "
-           "offset=0x%lx size=0x%lx",
+           "STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
+           "mounted=%d offset=0x%lx size=0x%lx",
            assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
+           assessment.wearLevellingValid ? 1 : 0,
            static_cast<unsigned>(assessment.record),
            static_cast<unsigned>(plan), mounted ? 1 : 0,
            static_cast<unsigned long>(assessment.address),
@@ -868,7 +874,6 @@ esp_err_t Storage::initSPIFFS() {
     mountedBackend = StorageBackend::Unavailable;
     return ESP_FAIL;
   }
-  (void)internal_storage::recordGeometry(assessment);
 
   size_t total = FFat.totalBytes();
   size_t used = FFat.usedBytes();

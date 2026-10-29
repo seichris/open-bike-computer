@@ -24,41 +24,36 @@ constexpr bool shouldReprobeDiagnostics(bool recorderHealthy,
   return !recorderHealthy && backendMounted;
 }
 
-// The FFat geometry this device last mounted, kept in NVS by the firmware.
+// The FFat geometry this device owns, kept in NVS by the firmware.
 enum class InternalGeometryRecord : uint8_t { Absent, Matches, Differs };
 
 enum class InternalMountPlan : uint8_t {
-  FormatErased,    // nothing to lose: initialise the erased partition
-  MountExisting,   // mount without formatting
-  RefuseRelocated, // FFat moved since its last mount: bytes are not ours
-};
-
-enum class InternalMountFailure : uint8_t {
-  ReformatOwned, // our filesystem at this geometry: keep corruption recovery
-  Refuse,        // unknown provenance: leave the bytes, run without FFat
+  FormatErased,       // nothing to lose: own the geometry, then format
+  MountExisting,      // ours: mount, and reformat after a failed mount
+  RefuseRelocated,    // FFat moved since this device owned it
+  RefuseUnrecognized, // no ownership evidence: leave every byte untouched
 };
 
 // FFat may hold another layout's data: a dual-3-MiB device whose partition
 // table was replaced without the signed migration's erase still has the old
-// filesystem shifted underneath, and vendor images leave their own data. A
-// mount must never silently format such bytes. Formatting is allowed only for
-// a fully erased partition, or for this device's own filesystem at the same
-// geometry. Decide from raw pre-mount facts: a wear-levelling mount rewrites
-// its metadata when it does not recognise the contents.
-constexpr InternalMountPlan internalMountPlan(bool partitionErased,
-                                              InternalGeometryRecord record) {
+// filesystem shifted underneath, and vendor images leave their own data. Even
+// a mount without format rewrites wear-levelling metadata it does not
+// recognise. So decide from raw pre-mount facts, and mount only with evidence
+// that the volume belongs to this exact geometry: the NVS record, or (for a
+// volume formatted before the record existed) wear-levelling state that is
+// valid at this geometry. Owned volumes keep the previous recovery: a failed
+// mount is reformatted. A fully erased partition is formatted after the
+// geometry is recorded, so a torn first format is recognised on the next boot.
+constexpr InternalMountPlan
+internalMountPlan(bool partitionErased, InternalGeometryRecord record,
+                  bool wearLevellingStateValid) {
   if (partitionErased)
     return InternalMountPlan::FormatErased;
-  return record == InternalGeometryRecord::Differs
-             ? InternalMountPlan::RefuseRelocated
-             : InternalMountPlan::MountExisting;
-}
-
-constexpr InternalMountFailure
-internalMountFailure(InternalGeometryRecord record) {
-  return record == InternalGeometryRecord::Matches
-             ? InternalMountFailure::ReformatOwned
-             : InternalMountFailure::Refuse;
+  if (record == InternalGeometryRecord::Differs)
+    return InternalMountPlan::RefuseRelocated;
+  if (record == InternalGeometryRecord::Absent && !wearLevellingStateValid)
+    return InternalMountPlan::RefuseUnrecognized;
+  return InternalMountPlan::MountExisting;
 }
 
 } // namespace storage_mount_policy

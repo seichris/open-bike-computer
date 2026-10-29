@@ -1,4 +1,5 @@
 #include "internal_storage_identity.hpp"
+#include "wear_levelling_state.hpp"
 
 #include <algorithm>
 #include <esp_memory_utils.h>
@@ -38,6 +39,19 @@ bool fullyErased(const esp_partition_t *partition) {
   return true;
 }
 
+bool wearLevellingStateValid(const esp_partition_t *partition) {
+  for (unsigned copy = 0; copy < 2; ++copy) {
+    uint8_t state[wear_levelling_state::kStateBytes];
+    if (esp_partition_read(
+            partition,
+            wear_levelling_state::stateOffset(partition->size, copy), state,
+            sizeof(state)) == ESP_OK &&
+        wear_levelling_state::stateValid(state))
+      return true;
+  }
+  return false;
+}
+
 } // namespace
 
 Assessment assess(const char *label) {
@@ -52,6 +66,8 @@ Assessment assess(const char *label) {
   result.address = partition->address;
   result.size = partition->size;
   result.erased = fullyErased(partition);
+  result.wearLevellingValid =
+      !result.erased && wearLevellingStateValid(partition);
   // A missing or unreadable record is Absent: it permits a mount attempt but
   // never a format of non-erased bytes.
   nvs_handle_t handle;

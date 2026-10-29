@@ -397,7 +397,8 @@ requires the repository verifier and GitHub release attestation to accept the
 immutable release, verifies every downloaded asset against that attestation,
 and deploys only exact signed OTA manifests: the release's own manifest in each
 target's `dual4m` channel and, in the legacy `manifest.json` channel, that
-manifest or the newest older published one still fitting dual-3-MiB slots
+manifest when it fits dual-3-MiB slots, otherwise the live legacy manifest after
+verifying it against an immutable published release
 (`tools/firmware_ota_channels.py`). A mutable, incomplete, or unattested release
 fails closed. This manual path is for OTA Pages recovery
 only; failed or partial asset publication still requires a new release tag.

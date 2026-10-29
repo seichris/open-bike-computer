@@ -195,21 +195,32 @@ class BootPinnedStorageTests(unittest.TestCase):
 
     def test_ffat_never_formats_bytes_of_unknown_provenance(self):
         mutations = {
-            "format on every mount failure": lambda methods: mutated(
+            "format without a durable ownership record": lambda methods: mutated(
                 methods,
-                "mounted = FFat.begin(plan == InternalMountPlan::FormatErased, "
-                '"/sdcard", 20,\n                         "ffat");',
-                'mounted = FFat.begin(true, "/sdcard", 20, "ffat");'),
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                "    (void)internal_storage::recordGeometry(assessment);\n"
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat");'),
+            "format before recording ownership": lambda methods: mutated(
+                methods,
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat") &&\n'
+                "              internal_storage::recordGeometry(assessment);"),
+            "mount without wear-levelling evidence": lambda methods: mutated(
+                methods,
+                "assessment.erased, assessment.record, assessment.wearLevellingValid",
+                "assessment.erased, assessment.record, true"),
             "relocated volume mounted": lambda methods: mutated(
+                methods, "plan == InternalMountPlan::MountExisting",
+                "plan != InternalMountPlan::FormatErased"),
+            "owned volume not reformatted": lambda methods: mutated(
                 methods,
-                "assessment.partitionFound && plan != InternalMountPlan::RefuseRelocated",
-                "assessment.partitionFound"),
-            "reformat without ownership": lambda methods: mutated(
+                ' ||\n              FFat.begin(true, "/sdcard", 20, "ffat");', ";"),
+            "adopted volume never recorded": lambda methods: mutated(
                 methods,
-                "storage_mount_policy::internalMountFailure(assessment.record) ==",
-                "storage_mount_policy::internalMountFailure(assessment.record) !="),
-            "geometry never recorded": lambda methods: mutated(
-                methods, "  (void)internal_storage::recordGeometry(assessment);\n", ""),
+                "    if (mounted)\n      (void)internal_storage::recordGeometry(assessment);\n",
+                ""),
         }
         for name, mutate in mutations.items():
             with self.subTest(name):

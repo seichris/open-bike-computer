@@ -10,6 +10,8 @@ namespace internal_storage {
 struct Assessment {
   bool partitionFound = false;
   bool erased = false;
+  // A wear-levelling state copy that WL_Flash::init accepts at this geometry.
+  bool wearLevellingValid = false;
   storage_mount_policy::InternalGeometryRecord record =
       storage_mount_policy::InternalGeometryRecord::Absent;
   uint32_t address = 0;
@@ -20,8 +22,8 @@ struct Assessment {
 // run on an internal-RAM stack; elsewhere it reports no partition.
 Assessment assess(const char *label);
 
-// Records the geometry after a successful mount, so a later mount failure at
-// the same place is recognised as this device's own filesystem.
+// Records that this device owns the geometry: before formatting an erased
+// partition, and after mounting a volume adopted by its wear-levelling state.
 bool recordGeometry(const Assessment &assessment);
 
 } // namespace internal_storage
