@@ -50,7 +50,8 @@ class ClientCompatibilityRuntimeTests(unittest.TestCase):
             )
 
         for identity in ((active.ios_build, active.ios_git_sha, active.ios_build_sha256),
-                         ("33", "a" * 40, "b" * 64), ("999", "c" * 40, "d" * 64)):
+                         ("33", "a" * 40, "b" * 64), ("999", "c" * 40, "d" * 64),
+                         (None, None, None)):
             self.assertTrue(allowed(identity))
             self.assertEqual(policy.artifact_delivery_requirements(
                 *identity, compatibility_contract=1), {})
@@ -60,6 +61,21 @@ class ClientCompatibilityRuntimeTests(unittest.TestCase):
         # Legacy maps retain an explicit build-104 anchor. No old approval is removed.
         self.assertEqual(policy.artifact_delivery_requirements()["requiredFirmwareBuild"], 104)
         self.assertIn("msr-20261026-worker-social-ios30", approvals)
+        previous = approvals["msr-20261026-worker-social-ios30"]
+        identities = {(p.ios_build, p.ios_git_sha, p.ios_build_sha256)
+                      for p in approvals.values()
+                      if p.producer_build_sha256 == previous.producer_build_sha256
+                      and p.worker_image_digest == previous.worker_image_digest}
+        self.assertTrue({"24", "25", "28", "29", "30"}.issubset({i[0] for i in identities}))
+        for identity in identities:
+            # Retained approvals preserve durable artifacts from past producers.
+            self.assertTrue(allowed(identity, producer=previous.producer_build_sha256,
+                                    worker=previous.worker_image_digest))
+            # Unmarked historical maps are outside the requested durable baseline.
+            self.assertFalse(policy.allows_artifact(
+                installation, key_id, key_hash, previous.producer_build_sha256,
+                previous.worker_image_digest, previous.approved_signing_keys,
+                *identity))
         self.assertFalse(policy.allows_artifact(
             "invalid-installation", key_id, key_hash, active.producer_build_sha256,
             active.worker_image_digest, active.approved_signing_keys,

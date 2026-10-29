@@ -35,6 +35,9 @@ companion and production POI-rejection tests run without the former format-3
 compatibility skip. Newly promoted covered maps carry contract 1; old signed
 artifacts are not rewritten. The runtime converter identity must match this base,
 not the outer scheduler image.
+CI verifies the attested scheduler's `org.bicino.converter-image` label against
+the Compose converter reference. Only the exact previous scheduler/converter
+pair is exempt from the new label for rollback; mixed old/new pairs fail.
 No API or map-generation worker image is replaced by this candidate.
 
 Run local validation using OrbStack:

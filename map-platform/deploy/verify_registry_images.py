@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from update_image import DeploymentImages, validate_manifest
+from update_image import DeploymentImages, IMAGE_REPOSITORY, validate_manifest
 
 
 SOURCE_REPOSITORY = "seichris/open-bike-computer"
@@ -20,6 +20,10 @@ SIGNER_WORKFLOW = (
 REQUIRED_OS = "linux"
 REQUIRED_ARCHITECTURE = "amd64"
 REQUIRED_SOURCE_REF = "refs/heads/main"
+# The deployed scheduler predates the converter-image label. Retain only its
+# exact immutable pairing for a complete rollback, never a general fallback.
+LEGACY_PROMOTION_REFERENCE = IMAGE_REPOSITORY + "@sha256:0184002724c7ec96f2c7edd60662af2527fcbbebcb505229b082e919e7c09bb8"
+LEGACY_CONVERTER_REFERENCE = IMAGE_REPOSITORY + "@sha256:142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8"
 
 
 def _run(command: Sequence[str], attempts: int = 3) -> str:
@@ -91,6 +95,31 @@ def verify_image(reference: str, source_commit: str) -> None:
     )
 
 
+def verify_promotion_pairing(reference: str, converter_reference: str | None) -> None:
+    if reference == LEGACY_PROMOTION_REFERENCE:
+        if converter_reference != LEGACY_CONVERTER_REFERENCE:
+            raise ValueError("legacy scheduler must retain its exact converter")
+        return
+    raw_config = _run([
+        "docker", "buildx", "imagetools", "inspect", reference,
+        "--format", "{{json .Image}}",
+    ])
+    try:
+        image = json.loads(raw_config)
+        labels = image["config"]["Labels"]
+        valid = (
+            image["os"] == REQUIRED_OS
+            and image["architecture"] == REQUIRED_ARCHITECTURE
+            and labels["org.bicino.release-profile"] == "production-map-promotion"
+            and converter_reference is not None
+            and labels["org.bicino.converter-image"] == converter_reference
+        )
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise ValueError("scheduler image must bind its exact converter identity")
+
+
 def verify_deployment(deployment: DeploymentImages) -> None:
     verify_image(
         deployment.control_plane_reference,
@@ -99,6 +128,9 @@ def verify_deployment(deployment: DeploymentImages) -> None:
     verify_image(deployment.worker_reference, deployment.worker_source_commit)
     if deployment.promotion_reference is not None:
         verify_image(deployment.promotion_reference, deployment.promotion_source_commit)
+        verify_promotion_pairing(
+            deployment.promotion_reference, deployment.promotion_converter_reference,
+        )
 
 
 def main() -> int:

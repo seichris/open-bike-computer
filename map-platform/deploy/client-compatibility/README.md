@@ -18,7 +18,13 @@ exact base image, independently pinned; do not use the controller as a worker.
 Approval `msr-20261029-durable-contract1` retains all previous approvals. For
 marked contract-1 artifacts, the backend checks the approved producer and signer
 without requiring the requesting app or firmware's exact build. Legacy unmarked
-maps retain the existing firmware-104 anchor. Standard format-3 maps are covered;
+maps from the selected producer retain the existing firmware-104 anchor.
+Historical unmarked direct-job artifacts from a different producer are no longer
+downloadable through this policy after the switch, even by previously approved
+apps 24–30. Already installed maps are not deleted or rewritten. This is the
+maintainer's explicit forward-only scope, not a promise of legacy redelivery.
+Contract-1 artifacts from retained, trusted prior approvals stay deliverable.
+Standard format-3 maps are covered;
 legacy formats 1/2 are not retroactively classified, and this rollout does not
 enable production contour/POI generation.
 

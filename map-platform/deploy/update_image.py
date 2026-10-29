@@ -63,6 +63,7 @@ class DeploymentImages:
     worker_reference: str
     promotion_source_commit: str | None = None
     promotion_reference: str | None = None
+    promotion_converter_reference: str | None = None
 
     @staticmethod
     def _digest(reference: str) -> str:
@@ -173,6 +174,7 @@ def validate_manifest_text(text: str) -> DeploymentImages:
         raise ValueError("only the worker service may use the worker image")
     promotion_source = None
     promotion_reference = None
+    promotion_converter_reference = None
     has_promotion = "  map-platform-promotion:" in text
     if has_promotion:
         promotion = _service_body(text, "map-platform-promotion")
@@ -184,9 +186,9 @@ def validate_manifest_text(text: str) -> DeploymentImages:
             rf"^    image: (?P<reference>{re.escape(IMAGE_REPOSITORY)}@sha256:[0-9a-f]{{64}})$",
             re.MULTILINE,
         ), promotion, "pinned promotion image").group("reference")
-        _require_service_line(promotion_environment, re.compile(
-            rf"^      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: {re.escape(IMAGE_REPOSITORY)}@sha256:(?:{'|'.join(PROMOTION_CONVERTER_DIGESTS)})$", re.MULTILINE,
-        ), "promotion must retain the qualified converter identity")
+        promotion_converter_reference = _single_match(re.compile(
+            rf"^      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: (?P<reference>{re.escape(IMAGE_REPOSITORY)}@sha256:(?:{'|'.join(PROMOTION_CONVERTER_DIGESTS)}))$", re.MULTILINE,
+        ), promotion_environment, "qualified promotion converter identity").group("reference")
         if "    command:" in promotion or "    entrypoint:" in promotion:
             raise ValueError("promotion must use its fixed scheduler entrypoint")
         if "      MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'" not in promotion_environment:
@@ -213,6 +215,7 @@ def validate_manifest_text(text: str) -> DeploymentImages:
         worker_reference=worker_reference,
         promotion_source_commit=promotion_source,
         promotion_reference=promotion_reference,
+        promotion_converter_reference=promotion_converter_reference,
     )
 
 
