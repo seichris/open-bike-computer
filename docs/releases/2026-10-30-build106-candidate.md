@@ -1,9 +1,14 @@
 # Build 106 candidate and remaining acceptance
 
-Status: candidate preparation. The **release is held** until the 2.06 gates
-under "Before tagging" pass; the 1.75 gates passed on the exact candidate on
-2026-10-30. Record every result against the actual commit, profile, binary hash,
-device and new boot. Acceptance does not carry over to a different binary.
+Status: **release authorized** on 2026-10-30 as tag `v0.3.4-release.14` on
+`1c70b556`.
+
+- The 1.75 gates passed on the exact candidate.
+- The 2.06 gates were not run. The maintainer accepted that residual risk; see
+  "Decisions recorded".
+
+Record every result against the actual commit, profile, binary hash, device and
+new boot. Acceptance does not carry over to a different binary.
 
 ## Candidate scope
 
@@ -141,6 +146,27 @@ only, and the 2.06 still needs the candidate's own acceptance.
 - On 2026-10-30, the 1.75 cold boot and FFat checks were re-run on the candidate
   instead of carrying over the `6463676a` results. The legacy-table adoption lab
   test was run instead of accepting the risk.
+- Later on 2026-10-30, the maintainer authorized publication without the 2.06
+  gates: "dont hold the release. we dont need to verify it working on the 2.06
+  board".
+  - For this candidate the 2.06 has no first-boot, cold-boot, FFat, startup or
+    legacy-adoption result.
+  - Its image reaches new 2.06 devices with the dual 4 MiB table and older 2.06
+    devices over the legacy channel.
+  - Containment and recovery if a 2.06 fails:
+    - An over-the-air install confirms its trial only after setup finishes
+      (`markRunningAppValid` in `esp32/src/main.cpp`). Setup includes display,
+      storage and the FFat ownership decision. A reset, crash, safe mode or
+      failed confirmation before that point rolls back to the previous slot.
+    - A failure after confirmation is not rolled back. For example, a refused
+      FFat volume leaves the device running without internal storage. The device
+      needs a higher build or the website's signed USB rescue (see "Recovery").
+    - Factory images flashed over USB have no previous slot. They recover only
+      through the USB rescue.
+    - Redeploying release 13's OTA manifests stops further distribution. It
+      pauses both boards.
+    - The signals are owner-exported support bundles from 2.06 devices
+      (`boot/acceptance`, `boot/confirmation_failed`) and field reports.
 
 ## Before tagging
 
@@ -151,7 +177,8 @@ only, and the 2.06 still needs the candidate's own acceptance.
 - [x] Legacy-table FFat adoption: the lab test passed on the 1.75 (above).
 - [x] 2.06 production image size: 3,007,728 bytes, under the legacy limit. The
   2.06 legacy devices therefore receive this release too.
-- [ ] 2.06, separately:
+- [ ] 2.06, separately. Not run: publication was authorized without these
+  checks (see "Decisions recorded"), so they remain residual risk for the 2.06.
   - first-boot acceptance;
   - true cold boot;
   - FFat format-once with diagnostics export;
