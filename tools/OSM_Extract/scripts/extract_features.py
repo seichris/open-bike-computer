@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from funcs import (
+    BlockFeatureIndex,
     GenericGeometryError,
     clip_lines,
     clip_polygons,
@@ -824,6 +825,10 @@ building_totals = {
 building_block_encoding_started = (
     time.perf_counter() if includes_buildings else None
 )
+# Each block clips only the features whose envelopes reach it, so the loop no
+# longer scans every feature of the whole map once per block.
+line_index = BlockFeatureIndex.for_lines(lines)
+polygon_index = BlockFeatureIndex.for_polygons(polygons)
 debug_images_rendered = 0
 for init_x, init_y in progress.track(block_positions):
         # print("--------------------")
@@ -835,13 +840,13 @@ for init_x, init_y in progress.track(block_positions):
 
         # clip features to the block area
         clipped_lines = clip_lines(
-            lines,
+            line_index.candidates(mapblock_bbox),
             mapblock_bbox,
             label_diagnostics=label_diagnostics if font_builder is not None else None,
         )
         try:
             clipped_polygons = clip_polygons(
-                polygons,
+                polygon_index.candidates(mapblock_bbox),
                 mapblock_bbox,
                 geometry_diagnostics=geometry_diagnostics,
             )
