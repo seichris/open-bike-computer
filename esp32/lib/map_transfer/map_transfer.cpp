@@ -2582,8 +2582,12 @@ InstallStatus MapTransferInstaller::selectReadyStreamMap(
     return manifestStatus;
   if (readyManifest.mapId!=ready.mapId)
     return fail("stream_manifest_identity","ready metadata map ID does not match signed content");
+  // The block cross-check fills the first third of the final step.
+  const auto scanProgress = [&onProgress](const ActivationProgress &scan) {
+    if (onProgress) onProgress({3, 3, scan.completed, scan.total * 3});
+  };
   const InstallStatus labelStatus = validateLabelContracts(
-      joinPath(storageRoot_, ready.root), readyManifest, false);
+      joinPath(storageRoot_, ready.root), readyManifest, false, scanProgress);
   if (!labelStatus.ok)
     return labelStatus;
   workspace->target = targetMetadata(readyManifest);
@@ -2699,6 +2703,42 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
   const auto pending = resolvePendingStreamActivation(sessionId);
   if (!pending.ok || sessionId.empty()) return pending;
   return activateReadyStreamMap(sessionId, onProgress, onRecovery, recoveryContext);
+}
+
+InstallStatus MapTransferInstaller::settleSelectedStreamMap() const try {
+  // An interrupted switch belongs to journal recovery. Operation-backed roots
+  // keep their ready state until finalizeOperation persists the receipt.
+  if (hasInterruptedActivation()) return {true, "stream_settle_deferred", ""};
+  struct Workspace { ActiveMapSelection active; ReadyStreamMap ready; std::string pending; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &active = workspace->active;
+  auto &ready = workspace->ready;
+  if (!readActiveMap(active).ok || !safeId(active.sessionId) ||
+      active.root != std::string("/VECTMAP/.maps/") + active.sessionId ||
+      !readReadyStreamMap(active.sessionId, ready).ok || !ready.operationID.empty() ||
+      ready.root != active.root || ready.mapId != active.mapId ||
+      ready.manifestReceipt != active.manifestReceipt ||
+      ready.signedManifestReceipt != active.signedManifestReceipt ||
+      preparationBlocksActivation(ready))
+    return {true, "stream_settle_none", ""};
+  const std::string root = joinPath(storageRoot_, ready.root);
+  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
+                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  auto &pending = workspace->pending;
+  const std::string pendingPath = joinPath(storageRoot_, kPendingStreamActivationFile);
+  const bool pendingSelected =
+      (readTextFile(pendingPath, pending, 2048) || readTextFile(pendingPath + ".bak", pending, 2048)) &&
+      jsonStringValue(pending, "sessionId") == ready.sessionId;
+  if (consumed && !pendingSelected) return {true, "stream_settle_none", ""};
+  // The same cleanup as an activation of the already selected root.
+  if ((!consumed && !markStreamActivationConsumed(ready)) ||
+      (pendingSelected && !clearPendingStreamActivation(ready.sessionId)) ||
+      !removeTree(joinPath(root, kStreamCheckpointFile)) ||
+      !removeTree(joinPath(root, kStreamInstallingFile)))
+    return fail("stream_settle_cleanup", "selected map cleanup will retry");
+  return {true, "stream_installed", ""};
+} catch (const std::bad_alloc &) {
+  return {false, "out_of_memory", ""};
 }
 
 InstallStatus MapTransferInstaller::resolvePendingStreamActivation(
@@ -4479,7 +4519,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
-    bool useManifestPaths) const try {
+    bool useManifestPaths, const ActivationProgressCallback &onProgress) const try {
   if (manifest.formatVersion != 2 && manifest.formatVersion != 3 &&
       manifest.formatVersion != 4 && manifest.formatVersion != 5)
     return {true, "ok", ""};
@@ -4522,6 +4562,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
   std::vector<map_poi_index::Entry> expectedPoiIndex;
   const ManifestFile *poiIndexFile = nullptr;
 #endif
+  // This pass reads every block again, which takes minutes on a large map.
+  // Report it, and feed the storage heartbeat that keeps an owner waiting.
+  uint64_t blocks = 0, validated = 0, reportedPercent = 0;
+  for (const ManifestFile &file : manifest.files)
+    if (file.path.size() >= 4 && file.path.compare(file.path.size() - 4, 4, ".fmb") == 0)
+      ++blocks;
 
   for (const ManifestFile &file : manifest.files) {
 #if MAP_POIS_RUNTIME_ENABLED
@@ -4619,6 +4665,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       }
       contourRecords += contours.records.size();
       contourPoints += contours.points.size();
+    }
+    ++validated;
+    if (storageProgressCallback_) storageProgressCallback_(storageProgressContext_);
+    if (onProgress && validated * 100 / blocks != reportedPercent) {
+      reportedPercent = validated * 100 / blocks;
+      onProgress({1, 1, validated, blocks});
     }
   }
   if (manifest.formatVersion >= 3) {

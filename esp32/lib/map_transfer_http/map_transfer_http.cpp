@@ -694,6 +694,12 @@ void MapTransferHttpServer::submitPendingRollback() {
   unlockState();
 }
 
+void MapTransferHttpServer::setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
+  operationOwner_ = owner;
+  // Verified storage progress keeps a long map command's caller waiting.
+  if (owner != nullptr) owner->setMapActivationProgress(&storageProgressSequence_);
+}
+
 void MapTransferHttpServer::setOperationDeviceID(const std::string &device) {
   // Called once after ownership initialization, before request admission.
   StateGuard guard(*this);
@@ -756,7 +762,8 @@ bool MapTransferHttpServer::takeOperationStatusNotification() {
 }
 void MapTransferHttpServer::submitPendingOperationTask() {
   lockState();
-  if ((!operationQuery_.empty() || !terminalOperationID_.empty() || commitRecovery_.armed) &&
+  if ((!operationQuery_.empty() || !terminalOperationID_.empty() ||
+       (commitRecovery_.armed && commitRecoveryDue())) &&
       !operationTaskSubmitted_ && storageControlSubmit_ != nullptr)
     operationTaskSubmitted_ = storageControlSubmit_(operationTask,this);
   unlockState();
@@ -767,10 +774,11 @@ void MapTransferHttpServer::operationTask(void *context) {
 void MapTransferHttpServer::executeOperationTask() try {
   CommitRecovery recovery;
   std::string terminal, session, map, query;
-  bool automaticExit = false, failed = false;
+  bool automaticExit = false, failed = false, recoveryDue = false;
   {
     StateGuard guard(*this);
     recovery = commitRecovery_;
+    recoveryDue = recovery.armed && commitRecoveryDue();
     terminal = terminalOperationID_;
     session = terminalSessionID_;
     map = terminalMapID_;
@@ -778,7 +786,7 @@ void MapTransferHttpServer::executeOperationTask() try {
     failed = terminalFailed_;
     query = operationQuery_;
   }
-  const bool recoveryCompleted = recovery.armed && recoverCommitDisposition(recovery);
+  const bool recoveryCompleted = recoveryDue && recoverCommitDisposition(recovery);
   bool completed=terminal.empty();
   std::string body;
   if (!terminal.empty()) {
@@ -849,6 +857,8 @@ void MapTransferHttpServer::executeOperationTask() try {
   if (!query.empty() && operationQuery_==query) operationQuery_.clear();
   if (recoveryCompleted && commitRecovery_.identity == recovery.identity)
     commitRecovery_ = {};
+  else if (recoveryDue && commitRecovery_.armed && commitRecovery_.identity == recovery.identity)
+    scheduleCommitRecoveryRetry();
   operationTaskSubmitted_=false;
   unlockState();
   if (completed && !terminal.empty()) {
@@ -887,6 +897,31 @@ void MapTransferHttpServer::armCommitRecovery(
   }
 }
 
+namespace {
+// Accepted work gets this many activation attempts, then resolves as failed.
+constexpr uint8_t kCommitRecoveryAttempts = 3;
+constexpr uint32_t kCommitRecoveryBackoffMs = 5000U;
+constexpr uint32_t kCommitRecoveryMaximumBackoffMs = 60000U;
+} // namespace
+
+// Each failed attempt waits longer (5, 10, 20 s, up to a minute) before the
+// storage worker retries, instead of rereading a large map back to back.
+void MapTransferHttpServer::scheduleCommitRecoveryRetry() {
+  if (commitRecovery_.failures < UINT8_MAX) ++commitRecovery_.failures;
+  const uint32_t shift = commitRecovery_.failures - 1U < 4U ? commitRecovery_.failures - 1U : 4U;
+  const uint32_t delay = std::min<uint32_t>(kCommitRecoveryBackoffMs << shift,
+                                            kCommitRecoveryMaximumBackoffMs);
+  commitRecovery_.retryAfterMs = millis() + delay;
+  if (!commitRecovery_.retryAfterMs) commitRecovery_.retryAfterMs = 1;
+}
+
+// Wrap-safe: a deadline is pending only inside its bounded future window.
+bool MapTransferHttpServer::commitRecoveryDue() const {
+  if (!commitRecovery_.retryAfterMs) return true;
+  const uint32_t remaining = commitRecovery_.retryAfterMs - millis();
+  return !remaining || remaining > kCommitRecoveryMaximumBackoffMs;
+}
+
 void MapTransferHttpServer::retryAcceptedActivation(const std::string &sessionId) {
   StateGuard guard(*this);
   if (commitRecovery_.pending() && commitRecovery_.identity.session == sessionId &&
@@ -896,6 +931,7 @@ void MapTransferHttpServer::retryAcceptedActivation(const std::string &sessionId
     // merely because dispatch timed out while its owner might still be writing.
     commitRecovery_.responseCompleted = true;
     commitRecovery_.armed = true;
+    scheduleCommitRecoveryRetry();
     ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
   }
 }
@@ -933,13 +969,18 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
       ready.operationID == identity.operation && ready.mapId == identity.map &&
       ready.manifestReceipt == identity.manifest &&
       ready.signedManifestReceipt == identity.signedManifest;
-  if (accepted && readyMatches) {
+  // After the last allowed attempt the accepted work fails, so the phone can
+  // retry, instead of rereading the map forever.
+  const bool exhausted = recovery.failures >= kCommitRecoveryAttempts;
+  if (accepted && readyMatches && !exhausted) {
     // This is the same serialized storage owner used by rollback and receipt
     // writes. Hand off to the renderer only after exact ready identity agrees.
     {
       StateGuard guard(*this);
       const auto begun = activationState_.begin(identity.session, 3);
       if (begun == ActivationBeginResult::Busy) return false;
+      // Report the activation step, as the first attempt does, not step 1.
+      activationState_.updateProgress({3, 3, 0, 1});
       streamStatusActive_ = false;
     }
     return runStreamActivationTask(identity.session, false);
@@ -947,7 +988,12 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
   // No pointer mutation was issued by the upload finalizer. Discard checks both
   // active and rollback roots and fails closed on unreadable selection metadata.
   // Cleanup precedes a failed receipt so reboot cannot reactivate a ready root.
-  if (!installer_.discardUnselectedStreamMap(identity.session).ok) return false;
+  // A legacy retry of the map that is still selected keeps that map; only
+  // this attempt fails.
+  const auto discarded = installer_.discardUnselectedStreamMap(identity.session);
+  if (!discarded.ok &&
+      (!identity.operation.empty() || discarded.code != "stream_discard_active"))
+    return false;
   if (hasRecord && record.phase != operation::Phase::Failed &&
       record.phase != operation::Phase::Cancelled) {
     const auto result = store.fail(identity);
@@ -959,8 +1005,12 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
     StateGuard guard(*this);
     streamStatusActive_ = false;
   }
-  finishActivation("failed", identity.map, "stream_finalization",
-                   "map finalization failed; unselected staging was removed");
+  if (exhausted)
+    finishActivation("failed", identity.map, "activation_retry_limit",
+                     "map activation kept failing; upload the map again");
+  else
+    finishActivation("failed", identity.map, "stream_finalization",
+                     "map finalization failed; unselected staging was removed");
   releaseCommitGrant();
   return true;
 }
@@ -1396,7 +1446,9 @@ bool MapTransferHttpServer::handleInstallStream(
     }
   }
   lockState();
-  const bool acceptsUploads = pendingCommitGrant_ == 0 &&
+  // Accepted work that is still being retried owns the card, even between
+  // attempts and after a reboot released its grant.
+  const bool acceptsUploads = pendingCommitGrant_ == 0 && !commitRecovery_.pending() &&
                               activationState_.acceptsUploads() &&
                               rollbackKind_ == RollbackKind::None && !librarySubmitted_;
   MapStreamTrustStore trustStore = streamTrustStore_;
@@ -1411,9 +1463,25 @@ bool MapTransferHttpServer::handleInstallStream(
     sendError(client, 503, recovered.code, recovered.message);
     return true;
   }
+  // The selected map is installed even when its consumed marker failed, so it
+  // must not count as another pending upload. The scan skips it either way,
+  // as boot recovery does, if this cleanup fails again.
+  (void)installer_.settleSelectedStreamMap();
   MapStreamInstallSnapshot recoverableStream;
-  const MapStreamRecoveryResult streamRecovery =
-      readRecoverableMapStreamInstall(storageRoot_, recoverableStream);
+  MapStreamRecoveryResult streamRecovery = MapStreamRecoveryResult::None;
+  {
+    // Scoped: the receive loop below should not carry this selection.
+    ActiveMapSelection selection;
+    const bool selectionKnown = installer_.readActiveMap(selection).ok;
+    streamRecovery = readRecoverableMapStreamInstall(
+        storageRoot_, recoverableStream, [&](const MapStreamInstallSnapshot &ready) {
+          const std::string root = "/VECTMAP/.maps/" + ready.sessionId;
+          return selectionKnown &&
+                 ((selection.root == root &&
+                   selection.signedManifestReceipt == ready.signedManifestReceipt) ||
+                  selection.previousRoot == root);
+        });
+  }
   if (streamRecovery == MapStreamRecoveryResult::Invalid) {
     const InstallStatus discarded =
         installer_.discardAllUnselectedStreamMaps();
@@ -2058,6 +2126,23 @@ bool MapTransferHttpServer::resumePendingStreamActivation(
   if (snapshot.state != MapStreamInstallState::Ready)
     return false;
 
+  // A legacy upload has no grant after a reboot. Reserve the same bounded
+  // disposition, so a failed resume retries and finally discards this
+  // unselected root instead of refusing every other upload until next boot.
+  CommitRecovery recovery;
+  {
+    const std::string root = "/VECTMAP/.maps/" + snapshot.sessionId;
+    ActiveMapSelection selected;
+    ReadyStreamMap ready;
+    const bool selectedRoot = installer_.readActiveMap(selected).ok &&
+        (selected.root == root || selected.previousRoot == root);
+    if (!selectedRoot && installer_.readReadyStreamMap(snapshot.sessionId, ready).ok &&
+        ready.operationID.empty()) {
+      recovery.identity = {operationDeviceID_, "", ready.manifestReceipt,
+          ready.signedManifestReceipt, "", 0, ready.sessionId, ready.mapId};
+      recovery.responseCompleted = true;
+    }
+  }
   lockState();
   const ActivationBeginResult beginResult =
       activationState_.begin(
@@ -2066,12 +2151,15 @@ bool MapTransferHttpServer::resumePendingStreamActivation(
   if (beginResult == ActivationBeginResult::Started) {
     activationState_.updateProgress({3, 3, 0, 1});
     streamStatusActive_ = false;
+    if (recovery.pending() && !commitRecovery_.pending())
+      commitRecovery_ = std::move(recovery);
   }
   unlockState();
   if (beginResult == ActivationBeginResult::Started) {
     Serial.printf("MAP_TRANSFER_HTTP: resuming ready stream session=%s\n",
                   snapshot.sessionId.c_str());
-    return startActivationTask(snapshot.sessionId, true);
+    if (startActivationTask(snapshot.sessionId, true)) return true;
+    retryAcceptedActivation(snapshot.sessionId);
   }
   return false;
 }
@@ -2117,6 +2205,9 @@ void MapTransferHttpServer::resumePendingActivations() {
       }
     }
   }
+  // A selected map whose consumed marker failed needs cleanup, not another
+  // activation with a full block scan.
+  (void)installer_.settleSelectedStreamMap();
   MapStreamInstallSnapshot streamSnapshot;
   const MapStreamRecoveryResult streamRecovery =
       readRecoverableMapStreamInstall(storageRoot_, streamSnapshot);

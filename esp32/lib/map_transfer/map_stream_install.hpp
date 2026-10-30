@@ -65,9 +65,12 @@ struct MapStreamInstallSnapshot {
 
 enum class MapStreamRecoveryResult { None, Found, Ambiguous, Invalid };
 
+// skipReady drops a Ready root the caller knows is not pending, such as the
+// selected map whose consumed marker failed. Other states are never skipped.
 MapStreamRecoveryResult
-readRecoverableMapStreamInstall(const std::string &storageRoot,
-                                MapStreamInstallSnapshot &snapshot);
+readRecoverableMapStreamInstall(
+    const std::string &storageRoot, MapStreamInstallSnapshot &snapshot,
+    const std::function<bool(const MapStreamInstallSnapshot &)> &skipReady = {});
 
 using MapStreamNowCallback = std::function<uint64_t()>;
 using MapStreamFreeSpaceProbe = std::function<std::optional<uint64_t>()>;
