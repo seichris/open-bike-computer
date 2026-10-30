@@ -846,28 +846,36 @@ esp_err_t Storage::initSPIFFS() {
   const InternalMountPlan plan = storage_mount_policy::internalMountPlan(
       assessment.erased, assessment.record, assessment.wearLevellingValid);
   bool mounted = false;
+  // FFat.begin(true) formats only after its own mount attempt fails, so a
+  // mount that needed it is reported as a format.
+  bool formatted = false;
   if (assessment.partitionFound && plan == InternalMountPlan::FormatErased) {
     // Own the geometry first: an interrupted first format is then this
     // device's volume on the next boot and is reformatted, not refused.
     if (internal_storage::recordGeometry(assessment))
       mounted = FFat.begin(true, "/sdcard", 20, "ffat");
+    // An erased partition has no volume to mount without formatting.
+    formatted = mounted;
   } else if (assessment.partitionFound &&
              plan == InternalMountPlan::MountExisting) {
     // Owned volume: a failed mount is reformatted, as before this policy.
-    mounted = FFat.begin(false, "/sdcard", 20, "ffat") ||
-              FFat.begin(true, "/sdcard", 20, "ffat");
+    const bool plainMount = FFat.begin(false, "/sdcard", 20, "ffat");
+    mounted = plainMount || FFat.begin(true, "/sdcard", 20, "ffat");
+    formatted = mounted && !plainMount;
     if (mounted)
       (void)internal_storage::recordGeometry(assessment);
   }
-  ESP_LOGI(TAG,
-           "STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
-           "mounted=%d offset=0x%lx size=0x%lx",
-           assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
-           assessment.wearLevellingValid ? 1 : 0,
-           static_cast<unsigned>(assessment.record),
-           static_cast<unsigned>(plan), mounted ? 1 : 0,
-           static_cast<unsigned long>(assessment.address),
-           static_cast<unsigned long>(assessment.size));
+  // Printed like the SDIO lines: AMOLED profiles compile out ESP_LOGI, and
+  // the partition-layout gates read this decision from serial.
+  Serial.printf("STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
+                "formatted=%d mounted=%d offset=0x%lx size=0x%lx\n",
+                assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
+                assessment.wearLevellingValid ? 1 : 0,
+                static_cast<unsigned>(assessment.record),
+                static_cast<unsigned>(plan), formatted ? 1 : 0,
+                mounted ? 1 : 0,
+                static_cast<unsigned long>(assessment.address),
+                static_cast<unsigned long>(assessment.size));
   if (!mounted) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;
