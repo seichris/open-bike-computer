@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 
 import yaml
 from shapely.geometry import (
+    GeometryCollection,
     LineString,
     MultiLineString,
     MultiPolygon,
@@ -1089,10 +1090,19 @@ def _local_median(
 
 
 def _polygons(geometry) -> list[Polygon]:
+    """Return the polygon members of a geometry, in GEOS order.
+
+    A building whose other lobe touches the block boundary from outside
+    clips to a GeometryCollection holding the polygon beside that line or
+    point contact; only the polygons are building fragments.
+    """
     if isinstance(geometry, Polygon):
         return [geometry]
-    if isinstance(geometry, MultiPolygon):
-        return list(geometry.geoms)
+    if isinstance(geometry, (MultiPolygon, GeometryCollection)):
+        polygons = []
+        for member in geometry.geoms:
+            polygons.extend(_polygons(member))
+        return polygons
     return []
 
 

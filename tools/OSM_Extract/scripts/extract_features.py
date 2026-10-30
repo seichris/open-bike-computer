@@ -843,6 +843,7 @@ for init_x, init_y in progress.track(block_positions):
             line_index.candidates(mapblock_bbox),
             mapblock_bbox,
             label_diagnostics=label_diagnostics if font_builder is not None else None,
+            geometry_diagnostics=geometry_diagnostics,
         )
         try:
             clipped_polygons = clip_polygons(
