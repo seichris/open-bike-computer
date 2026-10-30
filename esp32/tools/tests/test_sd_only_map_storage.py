@@ -216,8 +216,7 @@ class BootPinnedStorageTests(unittest.TestCase):
                 methods, "plan == InternalMountPlan::MountExisting",
                 "plan != InternalMountPlan::FormatErased"),
             "owned volume not reformatted": lambda methods: mutated(
-                methods,
-                ' ||\n              FFat.begin(true, "/sdcard", 20, "ffat");', ";"),
+                methods, ' || FFat.begin(true, "/sdcard", 20, "ffat");', ";"),
             "adopted volume never recorded": lambda methods: mutated(
                 methods,
                 "    if (mounted)\n      (void)internal_storage::recordGeometry(assessment);\n",
@@ -226,6 +225,25 @@ class BootPinnedStorageTests(unittest.TestCase):
         for name, mutate in mutations.items():
             with self.subTest(name):
                 result = run_harness(storage_harness(mutate), "storage_ffat_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_ffat_decision_line_reports_every_format(self):
+        # The partition-layout gates read STORAGE_FFAT from serial: AMOLED
+        # profiles compile out ESP_LOGI, and a reformat after a failed mount
+        # must not read as a plain mount.
+        mutations = {
+            "decision logged with ESP_LOGI": lambda methods: mutated(
+                methods, 'Serial.printf("STORAGE_FFAT',
+                'ESP_LOGI(TAG, "STORAGE_FFAT'),
+            "first format not reported": lambda methods: mutated(
+                methods, "    formatted = mounted;\n", "    formatted = false;\n"),
+            "reformat reported as a plain mount": lambda methods: mutated(
+                methods, "formatted = mounted && !plainMount;",
+                "formatted = false;"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate), "storage_ffat_log_mutant")
                 self.assertEqual(result.returncode, 42, result.stderr)
 
     def test_live_backend_switch_or_ffat_map_root_is_detected(self):
