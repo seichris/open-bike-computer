@@ -10942,6 +10942,42 @@ extension NavigationProtocolTests {
         assert(assembled.library?.isComplete == true && assembled.nextOffset == nil,
                "only a complete snapshot enables commands")
         assertEqual(pages.ingest(firstPage).library?.maps.count, 6, "late duplicate pages cannot replace a complete snapshot")
+        // A busy device serves one four-map BLE page from whatever offset it
+        // last served; the HTTPS status lists every map. Neither may reshape
+        // Saved Maps while the device stays busy.
+        func busyPage(_ page: DeviceMapLibrary, revision: UInt32 = 9, error: String = "library_owner") -> DeviceMapLibrary {
+            DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: true,
+                revision: revision, error: error, selectedSessionID: "", maps: page.maps,
+                offset: page.offset, total: page.total)
+        }
+        var wholeInventory = firstPage; wholeInventory.maps = pagedMaps; wholeInventory.total = 6
+        for busy in [busyPage(lastPage), busyPage(firstPage), busyPage(wholeInventory)] {
+            let shown = pages.ingest(busy)
+            assertEqual(shown.library?.maps.map(\.sessionID), pagedMaps.map(\.sessionID),
+                        "busy pages keep the last whole inventory in Saved Maps")
+            assert(shown.library?.busy == true && shown.library?.isComplete == false && shown.nextOffset == nil,
+                   "a busy inventory is never reuse authority and does not page")
+            assertEqual(shown.library?.error, "library_owner", "busy pages still report the device's state")
+        }
+        let settled = pages.ingest(lastPage)
+        assert(settled.library?.isComplete == true && settled.library?.maps.count == 6 && settled.nextOffset == nil,
+               "the same revision settles without reassembling pages")
+        assertEqual(pages.ingest(busyPage(firstPage, revision: 10)).library?.maps.count, 6,
+                    "a busy revision change keeps the list until the device settles")
+        let nextFirst = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 11, error: "", selectedSessionID: "", maps: Array(pagedMaps.prefix(4)), offset: 0, total: 5)
+        let reassembling = pages.ingest(nextFirst)
+        assert(reassembling.library?.maps.count == 6 && reassembling.library?.isComplete == false &&
+               reassembling.nextOffset == 4, "a new revision keeps the previous list visible while it pages")
+        let nextLast = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 11, error: "", selectedSessionID: "", maps: [pagedMaps[5]], offset: 4, total: 5)
+        let replaced = pages.ingest(nextLast)
+        assert(replaced.library?.isComplete == true && replaced.library?.maps.map(\.sessionID) ==
+               (Array(pagedMaps.prefix(4)) + [pagedMaps[5]]).map(\.sessionID), "the next whole snapshot replaces the list")
+        pages = DeviceMapLibraryPages()
+        let unlisted = pages.ingest(busyPage(lastPage))
+        assert(unlisted.library?.known == false && unlisted.library?.maps.isEmpty == true &&
+               unlisted.library?.busy == true, "one busy page is never shown as the whole SD card")
         pages = DeviceMapLibraryPages()
         assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
 
@@ -10969,6 +11005,21 @@ extension NavigationProtocolTests {
                 .localizedDescription.contains("damaged"), "a damaged SD copy is repaired by removal, then reinstall")
         assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_session_conflict\"}}")
                 .localizedDescription.contains("Another copy"), "a protected or different copy needs an explicit choice")
+        let readyPending = OfflineMapPlatformError.serverStatus(409,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_ready_pending\",\"message\":\"another verified stream is pending activation\"}}")
+            .localizedDescription
+        assert(readyPending.contains("Restart the Bike Computer") && !readyPending.contains("{"),
+               "a stranded verified upload names the restart remedy instead of raw JSON")
+        for code in ["activation_busy", "operation_busy"] {
+            let busy = OfflineMapPlatformError.serverStatus(409, "{\"ok\":false,\"error\":{\"code\":\"\(code)\"}}")
+                .localizedDescription
+            assert(busy.contains("still installing another map") && !busy.contains("{"),
+                   "\(code) explains that another installation must finish first")
+        }
+        assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
+            "{\"error\":{\"code\":\"stream_ready_pending\"}}")), "a pending installation is not an SD-library action")
+        assert(DeviceMapLibrary.errorDescription("library_owner").contains("restart the Bike Computer"),
+               "an owner refusal says the device retries and how to clear it")
         assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
             "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")), "repair refusals are not resumable")
         assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(500, "{}")) &&
