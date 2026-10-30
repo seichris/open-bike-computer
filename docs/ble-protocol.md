@@ -314,7 +314,10 @@ The handback ends when iPhone accepts a later preparation, when ride demand ends
 or when the selected Bicino changes. It survives a Watch app relaunch; restoring
 no ride demand clears it. A preparation request that cannot be delivered, a
 failed reply or an unreachable iPhone suspends the hold so the ride is not
-stranded, while a five-second response timeout only retries. iPhone's next
+stranded. A five-second response timeout only retries, a Watch session that is
+still activating waits for activation, and a reachability change asks at once.
+Before ride restoration a relaunched Watch keeps a link it already holds; iPhone
+may be answering for its own workout recovery. iPhone's next
 `phone_navigation_active` answer during the same handback restores the hold and
 returns a link won in the meantime. Outside a handback, a
 `phone_navigation_active` rejection never makes an established Watch link stop:

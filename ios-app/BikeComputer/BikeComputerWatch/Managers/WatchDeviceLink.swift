@@ -269,6 +269,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         selectedBikeComputerEnvelope = incoming
         defaults.set(data, forKey: selectedBikeComputerKey)
         guard previousDeviceID != incoming.deviceID else { return }
+        defer { completeDeferredRestorationIfNeeded() }
 
         releasePhonePreparationIfNeeded()
         phoneNavigationHandback = nil
@@ -323,6 +324,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     /// credential must not remain usable merely because its BLE session was
     /// already authenticated before Keychain deletion.
     func controllerCredentialsDidChange() {
+        defer { completeDeferredRestorationIfNeeded() }
         let refreshed: [WatchControllerCredentialV1]
         do {
             refreshed = try credentialStore.allActiveCredentials()
@@ -432,11 +434,14 @@ final class WatchDeviceLink: NSObject, ObservableObject {
            response.errorCode == "phone_navigation_active" {
             // The phone still navigates after it stopped answering. Restore
             // the hold, and return a link this ride won in the meantime.
-            if transportStateMachine.isReady {
+            // Before ride restoration a relaunched Watch keeps its link: the
+            // phone may be answering for its own workout recovery.
+            if !transportStateMachine.isReady {
+                phoneNavigationHandback = .deferring
+            } else if initialDemandRestorationCompleted {
                 deferToPhoneNavigation()
                 return
             }
-            phoneNavigationHandback = .deferring
         }
         // Outside a handback the phone also reports `phone_navigation_active`
         // while its own workout recording or recovery blocks a handoff, so a
@@ -462,6 +467,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         disconnectingForBusyLease = peripheral != nil
         fail(message, reason: .leaseBusy)
         state = .busy
+        // A held ride waits for the preparation backoff, not the reconnect
+        // timer as well; both reach 30 s and would add up.
+        if phoneNavigationHandback == .deferring {
+            schedulePhonePreparationRetry()
+        }
     }
 
     func directRidePreparationSubmissionDidFail(
@@ -484,6 +494,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         guard !gracefulStopPending else { return }
         reconcilePendingPhonePreparationRequest()
         if hasDemand {
+            // Reachability changed: ask now, so a held ride learns at once
+            // that the phone is gone (or back) instead of after its backoff.
+            deferredPreparationRetryDue = true
             reconcileDemand()
         } else if phonePreparationReleasePending {
             releasePhonePreparationIfNeeded()
@@ -512,6 +525,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         // A hold persisted by a ride that did not survive the relaunch.
         if !hasDemand { phoneNavigationHandback = nil }
         reconcilePendingPhonePreparationRequest()
+    }
+
+    /// Every way a graceful stop ends, including a reset that abandons it,
+    /// finishes the restoration it deferred.
+    private func completeDeferredRestorationIfNeeded() {
+        guard initialDemandRestorationDeferred, !gracefulStopPending else {
+            return
+        }
+        completeInitialDemandRestoration()
     }
 
     func requestPhonePreparationReconciliation(
@@ -792,8 +814,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .submitted:
             phonePreparationSubmissionOutstanding = true
             startPhonePreparationResponseTimeout()
-        case .transportUnavailable, .activationPending,
-                .counterpartUnreachable, .encodingFailed:
+        case .activationPending:
+            // This Watch's own session is still activating, typically right
+            // after a relaunch; completion asks again. The phone is not gone.
+            phonePreparationSubmissionOutstanding = false
+            schedulePhonePreparationRetry()
+        case .transportUnavailable, .counterpartUnreachable, .encodingFailed:
             phonePreparationSubmissionOutstanding = false
             suspendPhoneNavigationDeferral()
             schedulePhonePreparationRetry()
@@ -976,6 +1002,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         releasePhonePreparationIfNeeded()
         phoneNavigationHandback = nil
         state = .failed(message)
+        completeDeferredRestorationIfNeeded()
     }
 
     private func startScan() {
@@ -1110,9 +1137,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         resetTransport(keepingPeripheral: false)
         state = .idle
         lastError = nil
-        if initialDemandRestorationDeferred {
-            completeInitialDemandRestoration()
-        }
+        completeDeferredRestorationIfNeeded()
         // No subsequent navigation location callback is needed to make progress.
         // An old release remains persisted until the existing WC/outbox path
         // admits it. Only then may the successor persist a fresh preparation.
