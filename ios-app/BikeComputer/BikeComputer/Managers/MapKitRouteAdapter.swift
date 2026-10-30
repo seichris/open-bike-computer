@@ -3,7 +3,7 @@ import Foundation
 import MapKit
 
 enum MapKitRouteAdapter {
-    static let normalizationVersion: UInt16 = 1
+    static let normalizationVersion = RouteCoordinateNormalizationV1.mapKitVersion
 
     static func route(
         from mapKitRoute: MKRoute,

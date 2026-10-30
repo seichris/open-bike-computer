@@ -6029,16 +6029,30 @@ struct NavigationProtocolTests {
     }
 
     static func testNonChinaCoordinatesPassThroughUnchanged() {
-        let coordinate = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-
-        assertCoordinate(CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate),
-                         latitude: coordinate.latitude,
-                         longitude: coordinate.longitude,
-                         "non-China WGS->GCJ should pass through")
-        assertCoordinate(CoordinateConverter.gcj02ToWGS84(coordinate: coordinate),
-                         latitude: coordinate.latitude,
-                         longitude: coordinate.longitude,
-                         "non-China GCJ->WGS should pass through")
+        // Apple Maps uses WGS-84 everywhere outside mainland China, including
+        // its neighbours inside the coarse rectangle the app once used.
+        for coordinate in [
+            CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+            CLLocationCoordinate2D(latitude: 22.2810, longitude: 114.1600),
+            CLLocationCoordinate2D(latitude: 1.3050, longitude: 103.8550),
+            CLLocationCoordinate2D(latitude: 25.0330, longitude: 121.5654),
+        ] {
+            assert(!CoordinateConverter.isInChina(lat: coordinate.latitude, lon: coordinate.longitude),
+                   "non-China coordinate is outside the GCJ-02 region")
+            assertCoordinate(CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate),
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China WGS->GCJ should pass through")
+            assertCoordinate(CoordinateConverter.gcj02ToWGS84(coordinate: coordinate),
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China GCJ->WGS should pass through")
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            assertCoordinate(CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate,
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China GPS is already in MapKit route space")
+        }
     }
 
     static func testSourceEndpointSelection() {

@@ -157,7 +157,7 @@ private enum WatchMapKitRouteAdapter {
             name: mapKitRoute.name.isEmpty ? nil : mapKitRoute.name,
             points: points,
             steps: steps,
-            normalizationVersion: 1
+            normalizationVersion: RouteCoordinateNormalizationV1.mapKitVersion
         )
         try route.validate()
         return route

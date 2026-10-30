@@ -34,6 +34,10 @@ struct TopographyMapKitTileWarpTests {
             z: 12, x: 2048, y: 1362, scale: 1
         ) { _, _, _, _ in unchanged }
         precondition(outside == unchanged, "non-China tiles must retain their signed bytes")
+        let hongKong = try await TopographyMapKitTileWarp.tile(
+            z: 12, x: 3346, y: 1787, scale: 1
+        ) { _, _, _, _ in unchanged }
+        precondition(hongKong == unchanged, "Hong Kong uses WGS-84 in Apple Maps, so its tiles are not warped")
         print("TopographyMapKitTileWarpTests passed")
     }
 

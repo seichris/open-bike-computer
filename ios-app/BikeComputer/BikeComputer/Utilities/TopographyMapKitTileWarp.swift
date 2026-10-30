@@ -4,9 +4,10 @@ import ImageIO
 
 /// The signed contour companion uses WGS-84 XYZ pixels. Mainland-China Apple
 /// Maps uses GCJ-02 coordinates for overlays, so each requested MapKit pixel
-/// must look up its contour colour at the corresponding WGS-84 pixel. This
-/// changes only the iPhone presentation; the saved and device artifacts stay
-/// in WGS-84.
+/// must look up its contour colour at the corresponding WGS-84 pixel. Only
+/// overlays wholly inside `MainlandChinaRegion` are warped, so every pixel uses
+/// GCJ-02. This changes only the iPhone presentation; the saved and device
+/// artifacts stay in WGS-84.
 nonisolated enum TopographyMapKitTileWarp {
     typealias TileLoader = @Sendable (_ z: Int, _ x: Int, _ y: Int, _ scale: Int) async throws -> Data?
 
@@ -24,10 +25,10 @@ nonisolated enum TopographyMapKitTileWarp {
         let world = Double(tileSide * scale) * Double(1 << zoom)
         let longitude = x / world * 360 - 180
         let latitude = atan(sinh(.pi * (1 - 2 * y / world))) * 180 / .pi
-        let wgs = CoordinateConverter.gcj02ToWGS84(lat: latitude, lon: longitude)
-        let radians = wgs.lat * .pi / 180
+        let wgs = GCJ02.toWGS84(latitude: latitude, longitude: longitude)
+        let radians = wgs.latitude * .pi / 180
         return (
-            (wgs.lon + 180) / 360 * world,
+            (wgs.longitude + 180) / 360 * world,
             (1 - asinh(tan(radians)) / .pi) / 2 * world
         )
     }
@@ -47,13 +48,19 @@ nonisolated enum TopographyMapKitTileWarp {
         let count = side / step
         let originX = Double(x * side)
         let originY = Double(y * side)
-        let centerLongitude = (originX + Double(side) / 2) /
-            (Double(side) * Double(1 << z)) * 360 - 180
-        let centerLatitude = atan(sinh(.pi * (
-            1 - 2 * (originY + Double(side) / 2) /
-                (Double(side) * Double(1 << z))
-        ))) * 180 / .pi
-        guard CoordinateConverter.isInChina(lat: centerLatitude, lon: centerLongitude) else {
+        let world = Double(side) * Double(1 << z)
+        func latitude(_ pixelY: Double) -> Double {
+            atan(sinh(.pi * (1 - 2 * pixelY / world))) * 180 / .pi
+        }
+        // Tiles away from mainland China keep their signed bytes. The tile is
+        // in MapKit space, so widen it by more than GCJ-02's largest offset.
+        let margin = 0.02
+        guard MainlandChinaRegion.coverage(
+            south: latitude(originY + Double(side)) - margin,
+            west: originX / world * 360 - 180 - margin,
+            north: latitude(originY) + margin,
+            east: (originX + Double(side)) / world * 360 - 180 + margin
+        ) != .none else {
             return try await loader(z, x, y, scale)
         }
 
