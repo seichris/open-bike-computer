@@ -416,6 +416,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261030-block-clip-worker",
+      "candidateGitSha": "7bc631125b80abf6ec55092d76ea56c0e3de4a82",
+      "producerBuildSha256": "4515531e5b0c818bf93a05e8f553c7dfdda77f17ce8fb12678c779e92e94cd05",
+      "workerImageDigest": "sha256:488559ec0ea38282168752ae6ed34f69bbc1cc7d6c637090b12cd90485206cd3",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 104,
+      "firmwareGitSha": "483ac42937fa3d982410d82b591f2c2ec13a39f0",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "dd34fc09debf41c00b595c2f444929b946bc9271761c701119c71271edd09b9c",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T04:43:04Z",
+      "approvedBy": "seichris (2026-10-30 instruction to merge and deploy the map worker for dev and prod; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
