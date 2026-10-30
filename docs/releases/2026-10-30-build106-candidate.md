@@ -59,12 +59,25 @@ only: the candidate needs its own boot acceptance on each board.
 ## Before tagging
 
 - [ ] Exact-candidate CI Gate on the merge commit.
-- [ ] 1.75: flash the candidate's production image over USB and verify its first
-  boot with `--build 106` and the release SHA.
+- [ ] 1.75, on the candidate's exact production image: first-boot acceptance
+  with `--build 106` and the release SHA, true cold boot, and FFat format-once
+  with diagnostics export. The `6463676a` results above differ from the candidate
+  only in the revision constant, but they carry over only by a recorded
+  maintainer decision.
 - [ ] 2.06, separately: first-boot acceptance, true cold boot, FFat format-once
   with diagnostics export, and the startup comparison
   (`WAVESHARE_AMOLED_206_PRODUCTION`, main before #664 against the candidate).
 - [ ] Record the 2.06 production image size against the legacy limit.
+- [ ] Legacy-table FFat adoption. The 1.75 image fits the legacy limit, so this
+  release reaches legacy dual 3 MiB devices over the legacy channel. There it
+  runs the new FFat ownership policy against a volume at `0x610000` that release
+  13 formatted, with no ownership record. Every result above comes from the dual
+  4 MiB table. Either run a lab test on a 1.75 before tagging, or record the
+  maintainer's acceptance that the field is the first run:
+  - restore release 13 with the website's legacy rescue;
+  - record diagnostics on FFat with no SD card;
+  - write only the candidate application to app0;
+  - confirm a no-card boot adopts the volume and keeps those diagnostics.
 
 ## After publication
 
@@ -82,9 +95,14 @@ only: the candidate needs its own boot acceptance on each board.
 
 ## Recovery
 
-Stop on a new failure and keep the raw support bundle and physical notes. A bad
-publication is recovered by redeploying an earlier immutable release's OTA
-manifests with `firmware-release.yml`; reverting the implementation needs a new,
-higher build. A device stays recoverable over USB through the signed rescue
-packages on the website. Do not erase NVS or SD, rotate trust keys or bypass
-anti-rollback to recover a test.
+Stop on a new failure and keep the raw support bundle and physical notes.
+Redeploying an earlier immutable release's OTA manifests with
+`firmware-release.yml` only stops further distribution. It does not recover
+devices that already installed build 106: OTA only moves to a higher build. Those
+devices recover in one of two ways:
+- a new, higher build with the fix, which the firmware release owner (Chris)
+  publishes through the normal release workflow;
+- the website's signed USB rescue, which the owner of each device runs.
+
+Do not erase NVS or SD, rotate trust keys or bypass anti-rollback to recover a
+test.
