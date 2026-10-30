@@ -10,9 +10,16 @@ constexpr uint32_t waveformRestMs = 250;
 constexpr uint32_t fullWaveformRestMs = 1000;
 // The panel documentation specifies waveform timings but no safe elapsed-time
 // cleaning interval. Count successful partial waveforms instead of refreshing
-// static glass on a timer. The provisional count remains a qualification item.
+// static glass on a timer. The owner chose 160 on 2026-10-30 after seeing only
+// very slight ghosting at that count on one panel at room temperature; cold,
+// heat and a second panel remain qualification items. The panel diagnostic
+// keeps 20 so its pattern cycles still reach a count-driven cleaning.
 constexpr uint32_t busyTimeoutMs = 10000;
+#ifdef EPAPER_DISPLAY_TEST
 constexpr uint16_t partialLimit = 20;
+#else
+constexpr uint16_t partialLimit = 160;
+#endif
 constexpr uint32_t panelIdleSleepMs = 60000;
 
 enum class RefreshReason : uint8_t { Startup, Partial, Cleaning, Wake, Recovery };

@@ -86,8 +86,8 @@ Candidate scheduling defaults are one second **start-to-start** between routine
 presentations, with at least 250 ms rest after a partial waveform and one second
 after a full waveform. Priority changes may bypass the routine interval but not
 the rest floor. Slow panels extend the interval rather than losing their rest.
-There is still a full cleaning after 20 successful
-partial waveforms. The vendor documentation does not specify an elapsed-time
+There is still a full cleaning after 160 successful
+partial waveforms (20 in `DISPLAY_TEST`, so its pattern cycles reach one). The vendor documentation does not specify an elapsed-time
 cleaning interval, so static content does not trigger a cleaning waveform. These
 are **unqualified values**, not panel lifetime or visible-latency promises. The
 panel controller enters deep sleep after 60 seconds without a waveform; the
@@ -95,13 +95,15 @@ panel datasheet states that deep sleep does not retain RAM, so changed content
 reinitializes it with a full base frame while unchanged content remains visible
 without waking it.
 
-This cleaning cap is the remaining cause of the reported black/white flash.
-Any screen whose content changes every second (a moving map, a ticking ride
-clock, live speed) reaches 20 partial waveforms in roughly 20–25 seconds at the
-one-second routine cadence, then performs one full cleaning (about 2.5–3 s at
-23 °C). Waking after a minute without a waveform adds another full frame. Do not
-raise the cap, disable cleaning or switch to the vendor's 1.5 s fast-full
-waveform without the ghosting and temperature evidence in the
+This cleaning is the remaining black/white flash. Until 2026-10-30 it came
+after 20 partials, so any screen whose content changes every second (a moving
+map, a ticking ride clock, live speed) flashed every 20–25 seconds. The owner
+then ran 160 partials on unit `44:B1:76:B7:69:68` at room temperature, saw only
+very slight ghosting, and chose 160 as the limit. While the map moves, a
+cleaning now comes about every 3.5–4 minutes and still takes about 2.5–3 s at
+23 °C. Waking after a minute without a waveform adds another full frame. Cold,
+heat and a second panel are untested at this limit; do not disable cleaning or
+switch to the vendor's 1.5 s fast-full waveform without the evidence in the
 [qualification checklist](../docs/epaper-refresh-qualification.md). The
 `EPAPER_FRAME` reason field attributes every flash.
 

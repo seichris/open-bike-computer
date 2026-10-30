@@ -164,23 +164,26 @@ int main() {
     assert(!policy.ready(start + 999, false));
     assert(policy.ready(start + 1000, false));
   }
-  assert(policy.fullRequired(22000));
+  // Cleaning follows the last of partialLimit successful partials.
+  const uint32_t cleanAt = 1100 + partialLimit * 1000;
+  assert(policy.fullRequired(cleanAt));
   assert(policy.nextReason() == RefreshReason::Cleaning);
-  policy.start(27510);
-  policy.complete(30000, true);
-  assert(!policy.fullRequired(90000)); // Static glass does not force cleaning.
-  assert(!policy.shouldSleep(89999));
-  assert(policy.shouldSleep(90000));
+  policy.start(cleanAt + 5510);
+  policy.complete(cleanAt + 8000, true);
+  const uint32_t idle = cleanAt + 8000 + panelIdleSleepMs;
+  assert(!policy.fullRequired(idle)); // Static glass does not force cleaning.
+  assert(!policy.shouldSleep(idle - 1));
+  assert(policy.shouldSleep(idle));
   policy.sleep();
   assert(policy.sleeping());
-  assert(!policy.ready(90000, true));
-  assert(policy.ready(90000, true, true));
+  assert(!policy.ready(idle, true));
+  assert(policy.ready(idle, true, true));
   policy.wake();
   assert(policy.nextReason() == RefreshReason::Wake);
   assert(policy.fail());
   assert(policy.nextReason() == RefreshReason::Recovery);
   assert(!policy.fail() && policy.fault());
-  assert(!policy.ready(99999, true));
+  assert(!policy.ready(idle + 9999, true));
   policy.wake(); assert(policy.fullRequired(0));
   policy.sleep(); assert(!policy.ready(0, true));
 

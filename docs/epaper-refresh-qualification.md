@@ -40,6 +40,7 @@ not sufficient. Use the profile's up/down clicks to select these patterns:
 | 6/7/8: left/center/right | Square appears under the corresponding bars; all fixed landmarks stay put |
 
 Cycle 5→6→7→8→7→6→5 at least five times, including the count-driven full cleaning.
+`DISPLAY_TEST` keeps a 20-partial cleaning for this; other profiles clean after 160.
 Require no displaced/mirrored square, untouched-region movement or accumulating
 ghosts. Repeat after explicit sleep/wake and a deliberate BUSY fault/recovery.
 Test full-frame orientation too: the previous source used inconsistent full and
@@ -83,9 +84,9 @@ and 1000 ms rest after fulls. These are lower bounds, not a guaranteed frame rat
 Coalescing may intentionally skip superseded samples.
 
 Full flashes remain intentional: startup, wake, bounded recovery, or cleaning
-after 20 successful partials. Check the recorded reason for every flash. Do not
-raise that limit or remove full cleaning without repeated-panel ghosting and
-temperature evidence. Count unchanged frames separately; no static timer should
+after 160 successful partials. Check the recorded reason for every flash. Do
+not raise that limit further or remove full cleaning without repeated-panel
+ghosting and temperature evidence. Count unchanged frames separately; no static timer should
 force a cleaning refresh. Keep ghosting/contrast observations before and after
 every cleaning and run longer endurance/temperature tests before production.
 
@@ -95,15 +96,16 @@ distance flipped between two older images on every partial until the next
 cleaning. A higher cleaning cap made that obvious. Ghosting observations taken
 with a cap above 20 before that fix are confounded by it and need repeating.
 
-Expected flash cadence with the provisional cap: any screen whose content changes
-every second (moving map, ticking ride clock, live speed) reaches 20 partials in
-roughly 20–25 s, then cleans for about 2.5–3 s; a stop of a minute or more adds a
-wake frame. This is the reported navigation flash, not a regression. To qualify a
-higher cap, record ghost ∆L (or photographed residual contrast) for the
-moving-map and workout screens after 20, 40, 80 and 160 partials at 5, 23 and
-40 °C, on at least two panels, before and after each cleaning. A higher cap or
-the vendor's 1.5 s fast-full waveform then needs its own tracked qualification
-profile and a reviewed policy change.
+Expected flash cadence: any screen whose content changes every second (moving
+map, ticking ride clock, live speed) reaches 160 partials in about 3.5–4 minutes,
+then cleans for about 2.5–3 s; a stop of a minute or more adds a wake frame. The
+limit was 20 until 2026-10-30, which flashed every 20–25 s. With the E397-11
+fix in place, the owner saw only very slight ghosting after 160 partials while
+navigating, on one panel at room temperature, and chose 160. Still open: ghost
+∆L (or photographed residual contrast) for the moving-map and workout screens
+after 20, 40, 80 and 160 partials at 5 and 40 °C and on a second panel, before
+and after each cleaning. The vendor's 1.5 s fast-full waveform needs its own
+tracked qualification profile and a reviewed policy change.
 
 ## Capability, map and navigation checks
 
