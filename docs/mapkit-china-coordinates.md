@@ -85,8 +85,8 @@ behave as follows:
   usable reference, such as a searched start or a favorite synced to the
   Watch, takes the mainland reading. A searched mainland start takes the
   other reading if the rider happens to stand at that reading, within about
-  240 m of it near Shenzhen. A route crossing the border is misread until it
-  leaves the strip. The RideShared and navigation tests pin these cases near
+  240 m of it near Shenzhen, and the route's section in the strip follows the
+  start. A route crossing the border is misread until it leaves the strip. The RideShared and navigation tests pin these cases near
   Luohu, Lok Ma Chau and Shenzhen Railway Station.
 
 Inside a mainland-China topography overlay, every pixel uses GCJ-02, because
