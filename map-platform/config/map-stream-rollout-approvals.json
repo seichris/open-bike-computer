@@ -444,6 +444,32 @@
       ]
     },
     {
+      "promotionId": "msr-20261030-clip-diagnostics",
+      "candidateGitSha": "c2d2985fd638e6be5272bc3049ef058deb4ca24e",
+      "producerBuildSha256": "88993a97067fb2dc64e4fb8fce69d7a3db52bfb2914af83ff0afdb162a1a31b1",
+      "workerImageDigest": "sha256:7143012f9f48be43ab80389546c4f29acb8f7b5a1d4ce09ff16dd84a15eef697",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "1bf20b964aff1062581cd8407b8da6084076f0c59058f40af72a63094bbef878",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T15:51:39Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 'Yes, do them' for the two P3 cleanups from the #681 review; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
       "promotionId": "msr-20261030-clip-edge-cases",
       "candidateGitSha": "1d5b19240fa6741aa1030eb4e2d7de0115862d11",
       "producerBuildSha256": "97ed61023ed1a989a1399cd36fd0f265be7563ddfd254834fd7b61dddf4da027",
