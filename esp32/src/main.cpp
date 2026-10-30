@@ -2248,8 +2248,7 @@ void setup() {
 
   createGpxFolders();
 
-#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && \
-    !defined(WAVESHARE_EPAPER_397)
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && !defined(WAVESHARE_EPAPER_397)
   // Other boards keep the original order: their splash screen preloads the
   // recovered map before the waiting screen is shown.
   startUserInterface();
@@ -2332,8 +2331,7 @@ void setup() {
   }
 #endif
 
-#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && \
-    !defined(WAVESHARE_EPAPER_397)
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && !defined(WAVESHARE_EPAPER_397)
   log_i("Loading Splash Screen...");
   splashScreen();
 #else
