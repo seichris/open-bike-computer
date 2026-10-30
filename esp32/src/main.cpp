@@ -553,7 +553,8 @@ static void recordMapDiagnostic(
     const RendererMapDiagnosticIdentity *identity = nullptr,
     bool fallback = false, uint32_t durationMs = 0,
     uint32_t detail = 0, uint8_t formatVersion = 0,
-    MapDiagnosticMetrics metrics = MapDiagnosticMetrics::None) {
+    MapDiagnosticMetrics metrics = MapDiagnosticMetrics::None,
+    uint32_t blockLoadMs = 0) {
   const char *mapId = identity != nullptr && !identity->mapId.empty()
                           ? identity->mapId.c_str()
                           : "none";
@@ -563,6 +564,8 @@ static void recordMapDiagnostic(
           : "none";
   const bool sessionPresent =
       identity != nullptr && identity->sessionPresent;
+  // The recorder rejects fields of 320 bytes or more; overflow below becomes
+  // an explicit diagnostic_fields_too_large record instead.
   char fields[320] = {};
   const int prefixLength = snprintf(
       fields, sizeof(fields),
@@ -585,13 +588,16 @@ static void recordMapDiagnostic(
           static_cast<unsigned long>(durationMs));
       break;
     case MapDiagnosticMetrics::Probe:
+      // blockLoadMs splits the single map block read from the rest of the
+      // activation (label-font validation and the root switch).
       suffixLength = snprintf(
           fields + prefixLength, remaining,
           ",\"durationMs\":%lu,\"visitedEntries\":%lu,"
-          "\"formatVersion\":%u}",
+          "\"formatVersion\":%u,\"blockLoadMs\":%lu}",
           static_cast<unsigned long>(durationMs),
           static_cast<unsigned long>(detail),
-          static_cast<unsigned>(formatVersion));
+          static_cast<unsigned>(formatVersion),
+          static_cast<unsigned long>(blockLoadMs));
       break;
     case MapDiagnosticMetrics::Render:
       suffixLength = snprintf(
@@ -613,6 +619,29 @@ static void recordMapDiagnostic(
     return;
   }
   (void)ride_diagnostics::record(level, "map", event, fields);
+}
+
+// Diagnostic builds print where one map activation spent its storage-owner
+// time. Release builds retain only the probe event's duration and block load.
+static void logMapActivationTiming(const char *source,
+                                   const map_probe_diagnostics::Result &probe) {
+#if FIRMWARE_DIAGNOSTICS
+  Serial.printf("MAP_ACTIVATION_TIMING schema=1 source=%s code=%s totalMs=%lu "
+                "lookupMs=%lu blockMs=%lu fontMs=%lu fontReused=%u "
+                "switchMs=%lu visited=%lu format=%u\n",
+                source, map_probe_diagnostics::name(probe.code),
+                static_cast<unsigned long>(probe.elapsedMs),
+                static_cast<unsigned long>(probe.blockLookupMs),
+                static_cast<unsigned long>(probe.blockLoadMs),
+                static_cast<unsigned long>(probe.fontValidationMs),
+                probe.fontValidationReused ? 1U : 0U,
+                static_cast<unsigned long>(probe.rootSwitchMs),
+                static_cast<unsigned long>(probe.visitedEntries),
+                static_cast<unsigned>(probe.formatVersion));
+#else
+  (void)source;
+  (void)probe;
+#endif
 }
 #if FIRMWARE_DIAGNOSTICS
 static bool ordinaryRendererSessionActive = false;
@@ -1570,6 +1599,20 @@ static void processDisconnectedShutdown() {
   power.deviceShutdown();
 }
 
+// Builds the LVGL interface from preferences alone: the map viewport is sized
+// but no map storage is read, so this may precede map recovery.
+static void startUserInterface() {
+  mapView.initMap(gui_layout::mapViewportHeight(TFT_HEIGHT), TFT_WIDTH,
+                  TFT_HEIGHT);
+  loadPreferences();
+#ifdef HAS_HARDWARE_GPS
+  gps.init();
+#endif
+  initLVGL();
+  prepareShutdownDeferredNotice();
+  log_i("Checkpoint A: LVGL Init Done");
+}
+
 /**
  * @brief Setup
  *
@@ -1913,6 +1956,19 @@ void setup() {
                             : "{\"available\":false}");
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);
+  // Present the real waiting screen before map recovery. Recovery validates
+  // map-wide assets on this task, so it takes longer as the installed map
+  // grows, while the waiting screen needs neither the map nor BLE. Render one
+  // frame without running LVGL timers or input; the screen stays static until
+  // loop(). Recovery still precedes the diagnostics writer, Wi-Fi preparation,
+  // BLE and boot acceptance, so map failures keep OTA rollback and safe mode.
+  boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
+  startUserInterface();
+  lv_screen_load(waitingScreen);
+  lv_refr_now(display);
+  (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
+                                 "waiting_screen", "{}");
+  boot_diagnostics::completeStage(boot_diagnostics::Stage::UserInterface);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);
 #endif
 
@@ -1968,19 +2024,16 @@ void setup() {
           return mapDiagnosticIdentity(selection, contentReceipt);
         };
     const auto loadSelection =
-        [&](const map_transfer::ActiveMapSelection &selection) {
-          const uint32_t startedMs = millis();
+        [&](const map_transfer::ActiveMapSelection &selection,
+            const char *timingSource) {
           const std::string root =
               std::string(storage.mapStorageRoot()) + selection.root;
           MapLoadAttempt attempt;
-          attempt.probe = mapView.probeVectorMapFolderDetailed(root);
+          // Probe and root switch validate the label font once. A failed
+          // switch reports RootSwitchFailed and keeps the previous root.
+          attempt.probe = mapView.activateVectorMapFolderDetailed(root);
           attempt.loaded = attempt.probe.loaded();
-          if (attempt.loaded && !mapView.setVectorMapFolder(root)) {
-            attempt.loaded = false;
-            attempt.probe.code =
-                map_probe_diagnostics::Code::RootSwitchFailed;
-          }
-          attempt.probe.elapsedMs = millis() - startedMs;
+          logMapActivationTiming(timingSource, attempt.probe);
           return attempt;
         };
 
@@ -1994,7 +2047,7 @@ void setup() {
       recordMapDiagnostic(ride_diagnostics::Level::Info, "active_selection",
                           "selection", "available", activeStatus.code.c_str(),
                           &activeIdentity);
-      const MapLoadAttempt activeAttempt = loadSelection(activeMap);
+      const MapLoadAttempt activeAttempt = loadSelection(activeMap, "boot");
       recordMapDiagnostic(
           activeAttempt.loaded ? ride_diagnostics::Level::Info
                                : ride_diagnostics::Level::Warning,
@@ -2003,7 +2056,8 @@ void setup() {
           map_probe_diagnostics::name(activeAttempt.probe.code),
           &activeIdentity, false, activeAttempt.probe.elapsedMs,
           activeAttempt.probe.visitedEntries,
-          activeAttempt.probe.formatVersion, MapDiagnosticMetrics::Probe);
+          activeAttempt.probe.formatVersion, MapDiagnosticMetrics::Probe,
+          activeAttempt.probe.blockLoadMs);
       if (activeAttempt.loaded) {
         finalIdentity = activeIdentity;
         finalCode = map_probe_diagnostics::name(activeAttempt.probe.code);
@@ -2021,7 +2075,7 @@ void setup() {
             restoredStatus.ok ? identifySelection(restored) : activeIdentity;
         MapLoadAttempt restoredAttempt;
         if (rollback.ok && restoredStatus.ok) {
-          restoredAttempt = loadSelection(restored);
+          restoredAttempt = loadSelection(restored, "boot_rollback");
           recordMapDiagnostic(
               restoredAttempt.loaded ? ride_diagnostics::Level::Info
                                      : ride_diagnostics::Level::Warning,
@@ -2031,7 +2085,7 @@ void setup() {
               &restoredIdentity, true, restoredAttempt.probe.elapsedMs,
               restoredAttempt.probe.visitedEntries,
               restoredAttempt.probe.formatVersion,
-              MapDiagnosticMetrics::Probe);
+              MapDiagnosticMetrics::Probe, restoredAttempt.probe.blockLoadMs);
         }
         const bool restoredLoaded = rollback.ok && restoredStatus.ok &&
                                     restoredAttempt.loaded;
@@ -2054,7 +2108,8 @@ void setup() {
             restoredAttempt.probe.visitedEntries,
             restoredAttempt.probe.formatVersion,
             rollback.ok && restoredStatus.ok ? MapDiagnosticMetrics::Probe
-                                             : MapDiagnosticMetrics::None);
+                                             : MapDiagnosticMetrics::None,
+            restoredAttempt.probe.blockLoadMs);
         if (restoredLoaded) {
           finalSelection = restored;
           finalIdentity = restoredIdentity;
@@ -2132,21 +2187,11 @@ void setup() {
 
   createGpxFolders();
 
-  mapView.initMap(gui_layout::mapViewportHeight(TFT_HEIGHT), TFT_WIDTH,
-                  TFT_HEIGHT);
-
-  loadPreferences();
-#ifdef HAS_HARDWARE_GPS
-  gps.init();
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
+  // Other boards keep the original order: their splash screen preloads the
+  // recovered map before the waiting screen is shown.
+  startUserInterface();
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  boot_diagnostics::completeStage(
-      boot_diagnostics::Stage::ApplicationServices);
-  boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
-#endif
-  initLVGL();
-  prepareShutdownDeferredNotice();
-  log_i("Checkpoint A: LVGL Init Done");
 
   // Get init Latitude and Longitude
   gps.gpsData.latitude = gps.getLat();
@@ -2225,10 +2270,14 @@ void setup() {
   }
 #endif
 
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
   log_i("Loading Splash Screen...");
   splashScreen();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::UserInterface);
+#else
+  // The splash draws outside LVGL and is compiled out for Arduino_GFX
+  // panels; the waiting screen was already presented before map recovery.
+  boot_diagnostics::completeStage(
+      boot_diagnostics::Stage::ApplicationServices);
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -2259,11 +2308,13 @@ void setup() {
   log_i("Default map center set while waiting for app GPS");
 #endif
 
-  // Show waiting screen - will transition to map when GPS is received via BLE
-  log_i("Loading Waiting Screen...");
-  lv_screen_load(waitingScreen);
+  // Show waiting screen - will transition to map when GPS is received via BLE.
+  // Waveshare boards presented it before map recovery.
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   displayInactivityPolicy.begin(millis());
+#else
+  log_i("Loading Waiting Screen...");
+  lv_screen_load(waitingScreen);
 #endif
 
   mapTransferHttp.resumePendingActivations();
@@ -2437,7 +2488,10 @@ void loop() {
           &pendingMapRendererActivation.identity, labelRollback,
           rendererResult.probe.elapsedMs,
           rendererResult.probe.visitedEntries,
-          rendererResult.probe.formatVersion, MapDiagnosticMetrics::Probe);
+          rendererResult.probe.formatVersion, MapDiagnosticMetrics::Probe,
+          rendererResult.probe.blockLoadMs);
+      logMapActivationTiming(labelRollback ? "runtime_rollback" : "runtime",
+                             rendererResult.probe);
       if (loaded)
         rendererMapDiagnosticIdentity = pendingMapRendererActivation.identity;
       else if (labelRollback)
