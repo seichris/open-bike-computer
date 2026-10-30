@@ -136,15 +136,37 @@ enum class RuntimeError { None };
 unsigned opens = 0;
 // Production calls Asset::open(); the counting macro renames that call site.
 struct Asset {
+  Asset() = default;
+  Asset(Asset &&other) noexcept : file(other.file) { other.file = nullptr; }
+  Asset &operator=(Asset &&other) noexcept {
+    if (this != &other) {
+      reset();
+      file = other.file;
+      other.file = nullptr;
+    }
+    return *this;
+  }
+  ~Asset() { reset(); }
   bool countedOpen(const std::string &path) {
     ++opens;
     ++fsCalls;
-    return std::fopen(path.c_str(), "rb") != nullptr;
+    reset();
+    file = std::fopen(path.c_str(), "rb");
+    return file != nullptr;
   }
+  bool isOpen() const { return file != nullptr; }
   uint32_t profileFingerprint() const { return 7; }
   uint16_t glyphCount() const { return 1; }
   uint8_t languageCount() const { return 1; }
   bool healthy() const { return true; }
+
+private:
+  void reset() {
+    if (file != nullptr)
+      std::fclose(file);
+    file = nullptr;
+  }
+  std::FILE *file = nullptr;
 };
 } // namespace map_font_asset
 
@@ -171,8 +193,7 @@ struct SearchResult {
 };
 bool invalidatesHealth(Status status) { return status == Status::Corrupt; }
 unsigned indexReads = 0, cursors = 0;
-bool readIndex(const std::string &, MapNearbyVector<map_poi_index::Entry> &,
-               Cancel, void *, Status &status) {
+bool validateIndex(const std::string &, Cancel, void *, Status &status) {
   ++indexReads;
   ++fsCalls;
   status = Status::Ok;
@@ -325,8 +346,12 @@ public:
 
   MapBlock *readMapBlock(String fileName);
   map_probe_diagnostics::Result
-  probeVectorMapFolderOnStorageOwner(const std::string &folder);
-  bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
+  probeVectorMapFolderOnStorageOwner(const std::string &folder,
+                                     map_font_asset::Asset *validatedFont = nullptr);
+  bool switchVectorMapFolderOnStorageOwner(
+      const std::string &folder, map_font_asset::Asset *validatedFont = nullptr);
+  map_probe_diagnostics::Result
+  activateVectorMapFolderOnStorageOwner(const std::string &folder);
   bool requestStorageControl(void (*work)(void *), void *context);
   bool requestVectorMapFolderActivation(const std::string &folder);
   bool processPendingNearbySearch();
@@ -353,6 +378,10 @@ struct Outcome {
   bool activationAdmitted = false;
   map_nearby_storage::Status nearby = map_nearby_storage::Status::Corrupt;
   unsigned workerStarts = 0;
+  map_probe_diagnostics::Code activation = map_probe_diagnostics::Code::NotRun;
+  unsigned activationFontOpens = 0;
+  bool activationReusedFont = false;
+  bool activationSwitched = false;
 };
 
 Outcome exercise(const std::string &root, bool mapStorage) {
@@ -380,6 +409,19 @@ Outcome exercise(const std::string &root, bool mapStorage) {
   outcome.switched = maps.switchVectorMapFolderOnStorageOwner(tree);
   if (!outcome.switched)
     CHECK(std::string(maps.vectorMapFolder.c_str()) == root + "/VECTMAP/");
+
+  // Boot and runtime activation probe then switch on one owner, handing the
+  // validated label font across instead of validating it twice.
+  Maps activated;
+  activated.bindMapStorageRoot(root.c_str());
+  const unsigned opensBeforeActivation = map_font_asset::opens;
+  const map_probe_diagnostics::Result activation =
+      activated.activateVectorMapFolderOnStorageOwner(tree);
+  outcome.activation = activation.code;
+  outcome.activationFontOpens = map_font_asset::opens - opensBeforeActivation;
+  outcome.activationReusedFont = activation.fontValidationReused;
+  outcome.activationSwitched =
+      std::string(activated.vectorMapFolder.c_str()) == tree + "/";
 
   int context = 0;
   outcome.controlAdmitted = maps.requestStorageControl(queuedWork, &context);
@@ -411,9 +453,13 @@ int main(int argc, char **argv) {
   CHECK(sd.blockFound && !sd.missingFound && sd.directoryFound);
   CHECK(sd.probe == map_probe_diagnostics::Code::Ok);
   CHECK(sd.switched && map_font_asset::opens >= 2);
+  CHECK(sd.activation == map_probe_diagnostics::Code::Ok);
+  CHECK(sd.activationSwitched && sd.activationReusedFont);
+  CHECK(sd.activationFontOpens == 1);
   CHECK(sd.controlAdmitted && sd.activationAdmitted);
   CHECK(sd.nearby == map_nearby_storage::Status::Ok);
-  CHECK(map_nearby_storage::cursors == 1 && map_nearby_storage::indexReads == 2);
+  // Index and coverage once for the separate switch, once for the activation.
+  CHECK(map_nearby_storage::cursors == 1 && map_nearby_storage::indexReads == 4);
   CHECK(fsCalls > 0);
 
   // No-card boot: the same complete tree stands in for files on FFat. No
@@ -422,6 +468,8 @@ int main(int argc, char **argv) {
   CHECK(!noCard.blockFound && !noCard.missingFound && !noCard.directoryFound);
   CHECK(noCard.probe == map_probe_diagnostics::Code::RootUnavailable);
   CHECK(!noCard.switched);
+  CHECK(noCard.activation == map_probe_diagnostics::Code::RootUnavailable);
+  CHECK(!noCard.activationSwitched && noCard.activationFontOpens == 0);
   CHECK(!noCard.controlAdmitted && !noCard.activationAdmitted);
   CHECK(noCard.workerStarts == 0);
   CHECK(noCard.nearby == map_nearby_storage::Status::Unavailable);

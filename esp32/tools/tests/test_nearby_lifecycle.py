@@ -410,10 +410,12 @@ int main() {
         fixture = r'''
 #include <atomic>
 #include <cassert>
+#include <cstdio>
 #include <new>
 #include <string>
 #include <vector>
 #include <sys/stat.h>
+#include <unistd.h>
 #define ESP_LOGE(...) ((void)0)
 struct String : std::string {
   using std::string::string;
@@ -428,8 +430,19 @@ struct ScopedLock { explicit ScopedLock(LockDomain) {} };
 }
 namespace map_font_asset {
 enum class RuntimeError { None };
-struct Asset { bool open(const std::string &) { return true; }
-               bool healthy() const { return true; } };
+static unsigned opens;
+// A move-only descriptor stand-in: a font is "validated" once opened.
+struct Asset {
+  int file = -1;
+  Asset() = default;
+  Asset(Asset &&other) noexcept : file(other.file) { other.file = -1; }
+  Asset &operator=(Asset &&other) noexcept {
+    file = other.file; other.file = -1; return *this;
+  }
+  bool open(const std::string &) { ++opens; file = 3; return true; }
+  bool isOpen() const { return file >= 0; }
+  bool healthy() const { return file >= 0; }
+};
 }
 namespace map_poi_index { struct Entry {}; }
 namespace map_nearby_coverage { struct Block { int x, y; }; }
@@ -438,8 +451,7 @@ namespace map_nearby_storage {
 enum class Status { Ok, Unavailable, Corrupt, ReadFailed, Cancelled, ResourceRejected };
 static Status indexStatus, coverageStatus;
 static bool failIndexAllocation, failCoverageAllocation;
-bool readIndex(const std::string &, std::vector<map_poi_index::Entry> &,
-               void *, void *, Status &status) {
+bool validateIndex(const std::string &, void *, void *, Status &status) {
   if (failIndexAllocation) throw std::bad_alloc();
   status = indexStatus;
   return status == Status::Ok;
@@ -472,7 +484,8 @@ public:
   unsigned cancellations=0;
   bool isMapFound=true;
   void cancelNearbySearch() { ++cancellations; }
-  bool switchVectorMapFolderOnStorageOwner(const std::string &);
+  bool switchVectorMapFolderOnStorageOwner(
+      const std::string &, map_font_asset::Asset *validatedFont = nullptr);
 };
 '''
         fixture += fragment(source, "bool Maps::switchVectorMapFolderOnStorageOwner(")
@@ -480,6 +493,13 @@ public:
 int main(int argc, char **argv) {
   assert(argc == 2);
   using namespace map_nearby_storage;
+  const std::string assets = std::string(argv[1]) + "/assets";
+  assert(::mkdir(assets.c_str(), 0700) == 0);
+  std::FILE *font = std::fopen((assets + "/street-labels.fma").c_str(), "wb");
+  assert(font != nullptr && std::fclose(font) == 0);
+  // 0: the switch validates the font itself. 1: it receives the font the probe
+  // validated. 2: the probe found no font to hand over (format 1/2 maps).
+  for (int handoff=0; handoff<3; ++handoff) {
   for (int fault=0; fault<8; ++fault) {
     indexStatus=Status::Ok; coverageStatus=Status::Ok;
     failIndexAllocation=false; failCoverageAllocation=false;
@@ -491,7 +511,14 @@ int main(int argc, char **argv) {
     if (fault == 5) indexStatus=Status::Unavailable; // a legacy map has no index
     if (fault == 6) indexStatus=Status::Corrupt; // degrade POIs, preserve base map
     Maps maps;
-    const bool committed=maps.switchVectorMapFolderOnStorageOwner(argv[1]);
+    maps.labelFontAsset.file = 9; // the active map's font
+    map_font_asset::Asset validated;
+    if (handoff == 1) validated.file = 5;
+    map_font_asset::opens = 0;
+    const bool committed=maps.switchVectorMapFolderOnStorageOwner(
+        argv[1], handoff == 0 ? nullptr : &validated);
+    // A handed-over font is adopted, never validated a second time.
+    assert(map_font_asset::opens == (handoff == 1 ? 0U : 1U));
     if (fault < 5) {
       assert(!committed);
       assert(maps.vectorMapFolder == "/old/");
@@ -500,14 +527,21 @@ int main(int argc, char **argv) {
       assert(maps.nearbyPoiIndexHealthy.load());
       assert(maps.nearbyCoverageBlocks.size()==1 && maps.nearbyCoverageBlocks[0].x==7);
       assert(maps.labelLayoutCache.clears==0 && maps.isMapFound);
+      assert(maps.labelFontAsset.file == 9);
     } else {
       assert(committed);
       assert(maps.vectorMapFolder == std::string(argv[1])+"/");
       assert(maps.memCache.blocks.empty() && maps.cachedBlockCount.load()==0);
       assert(maps.preparedScene.invalidated && maps.cancellations==1);
       assert(maps.nearbyPoiIndexHealthy.load() == (fault==7));
+      assert(maps.labelFontAsset.file == (handoff == 1 ? 5 : 3));
+      assert(!validated.isOpen());
+      assert(maps.streetLabelFontHealthy.load());
     }
   }
+  }
+  assert(std::remove((assets + "/street-labels.fma").c_str()) == 0);
+  assert(::rmdir(assets.c_str()) == 0);
 }
 '''
         self.run_fixture(fixture)
