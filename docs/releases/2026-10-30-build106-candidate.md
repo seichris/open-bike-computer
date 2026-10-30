@@ -153,6 +153,20 @@ only, and the 2.06 still needs the candidate's own acceptance.
     legacy-adoption result.
   - Its image reaches new 2.06 devices with the dual 4 MiB table and older 2.06
     devices over the legacy channel.
+  - Containment and recovery if a 2.06 fails:
+    - An over-the-air install confirms its trial only after setup finishes
+      (`markRunningAppValid` in `esp32/src/main.cpp`). Setup includes display,
+      storage and the FFat ownership decision. A reset, crash, safe mode or
+      failed confirmation before that point rolls back to the previous slot.
+    - A failure after confirmation is not rolled back. For example, a refused
+      FFat volume leaves the device running without internal storage. The device
+      needs a higher build or the website's signed USB rescue (see "Recovery").
+    - Factory images flashed over USB have no previous slot. They recover only
+      through the USB rescue.
+    - Redeploying release 13's OTA manifests stops further distribution. It
+      pauses both boards.
+    - The signals are owner-exported support bundles from 2.06 devices
+      (`boot/acceptance`, `boot/confirmation_failed`) and field reports.
 
 ## Before tagging
 
