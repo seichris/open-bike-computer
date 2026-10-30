@@ -1440,6 +1440,14 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             if body.contains("\"library_busy\"") {
                 return "The Bike Computer is finishing a map switch. Try again shortly."
             }
+            // The Bike Computer keeps one verified upload until it is installed.
+            // Firmware resumes that installation when it starts.
+            if body.contains("\"stream_ready_pending\"") {
+                return "Another map is still waiting to finish installing on the Bike Computer. Restart the Bike Computer to finish it, then try again."
+            }
+            if body.contains("\"activation_busy\"") || body.contains("\"operation_busy\"") {
+                return "The Bike Computer is still installing another map. Wait for it to finish, then try again."
+            }
             if status == 429,
                let data = body.data(using: .utf8),
                let envelope = try? JSONDecoder().decode(OfflineMapAPIErrorEnvelope.self, from: data) {
@@ -1802,6 +1810,8 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
             return "A map installation on the Bike Computer is still pending. Resume it, or cancel the map installation, then try again."
         case "library_policy_write":
             return "The Bike Computer could not save the map choice yet. It keeps the choice and retries; refresh to check."
+        case "library_owner":
+            return "The Bike Computer is busy with another map task and updates its saved maps when it finishes. If this does not clear, restart the Bike Computer."
         default:
             return "Could not update the device maps. Refresh and try again."
         }
@@ -1818,38 +1828,62 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
 
 // Connection-scoped snapshot assembly. A page is never reuse/removal authority
 // until every entry belongs to the same revision and selection snapshot.
+// While the device is busy or the next snapshot pages, Saved Maps keeps the
+// last whole inventory instead of whichever four maps the latest page holds.
 nonisolated struct DeviceMapLibraryPages {
     private var first: DeviceMapLibrary?
     private var entries: [DeviceInstalledMap] = []
     private var complete: DeviceMapLibrary?
+    private var listed: [DeviceInstalledMap]?
 
     mutating func ingest(_ page: DeviceMapLibrary) -> (library: DeviceMapLibrary?, nextOffset: Int?) {
         guard page.isValid else { self = Self(); return (nil, nil) }
-        guard page.known, !page.busy else { self = Self(); return (page, nil) }
+        guard page.known else { self = Self(); return (page, nil) }
+        if page.busy {
+            // A busy device reports one page from whatever offset it last
+            // served. Inventory changes always bump the revision, so the
+            // completed snapshot stays valid for when the same revision settles.
+            first = nil; entries = []
+            if (page.offset ?? 0) == 0, page.maps.count == (page.total ?? page.maps.count) {
+                listed = page.maps
+            }
+            return (pending(page), nil)
+        }
         let same: (DeviceMapLibrary, DeviceMapLibrary) -> Bool = { a, b in
             a.revision == b.revision && a.total == b.total && a.automatic == b.automatic &&
                 a.error == b.error && a.selectedSessionID == b.selectedSessionID &&
                 a.commandID == b.commandID && a.commandError == b.commandError && a.coverage == b.coverage
         }
         if let complete, same(complete, page) { return (complete, nil) }
-        if page.isComplete { self = Self(); complete = page; return (page, nil) }
+        if page.isComplete {
+            first = nil; entries = []; complete = page; listed = page.maps
+            return (page, nil)
+        }
         let offset = page.offset ?? 0
         if offset == 0 { first = page; entries = [] }
         guard let first, same(first, page), offset == entries.count else {
-            self = Self(); return (nil, 0)
+            self.first = nil; entries = []; complete = nil
+            return (pending(page), 0)
         }
         entries += page.maps
         guard Set(entries.map(\.sessionID)).count == entries.count else {
-            self = Self(); return (nil, 0)
+            self.first = nil; entries = []; complete = nil
+            return (pending(page), 0)
         }
         if entries.count == (page.total ?? page.maps.count) {
             var result = page; result.maps = entries; result.offset = 0
-            complete = result; self.first = nil; entries = []
+            complete = result; listed = entries; self.first = nil; entries = []
             return (result, nil)
         }
-        let loading = DeviceMapLibrary(schemaVersion: 1, known: false, automatic: page.automatic,
-            busy: true, revision: page.revision, error: page.error, selectedSessionID: "", maps: [])
-        return (loading, entries.count)
+        return (pending(page), entries.count)
+    }
+
+    /// Display-only: never complete, so it cannot authorize reuse or removal.
+    private func pending(_ page: DeviceMapLibrary) -> DeviceMapLibrary {
+        DeviceMapLibrary(schemaVersion: 1, known: listed != nil, automatic: page.automatic,
+            busy: true, revision: page.revision, error: page.error,
+            selectedSessionID: page.selectedSessionID, maps: listed ?? [],
+            commandID: page.commandID, commandError: page.commandError, coverage: page.coverage)
     }
 }
 

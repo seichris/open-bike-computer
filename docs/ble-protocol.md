@@ -2926,7 +2926,9 @@ subsequent cached pages only after assembling the current one, and restarts at
 zero if a revision, selection, policy, count, or ordering changes. Duplicate
 sessions or malformed pages are rejected. A partial or connection-stale inventory
 cannot drive reuse or removal. This keeps a full SD library from exceeding the
-255-chunk status limit at reduced ATT MTUs.
+255-chunk status limit at reduced ATT MTUs. Busy pages are never assembled: while
+the device is busy or the next snapshot pages, the app keeps showing the last
+complete inventory from this connection (or none), never one page as the whole card.
 
 Library follow-up semantics: `library-select|session|receipt|requestID` and
 `library-remove|session|receipt|requestID` accept an optional 32-lowercase-hex client

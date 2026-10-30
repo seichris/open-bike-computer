@@ -30,7 +30,10 @@ BUILDING_NORMALIZATION_ALGORITHM_VERSION = 2
 # v2 raises the synchronized FMB v4 building-record ceiling. Existing cache
 # sections remain byte-compatible, but a v1 cache must not claim it was built
 # under the reviewed dense-block admission contract.
-BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION = 2
+# v3 keeps a building in a block when another lobe of it touches the block
+# boundary from outside, where the clip is a GeometryCollection. A v2 cache
+# omits such buildings from those blocks and must not be reused.
+BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION = 3
 BUILDING_FMB_VERSION = 4
 BUILDING_GEOMETRY_ENGINE_VERSION = "2.0.7"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
