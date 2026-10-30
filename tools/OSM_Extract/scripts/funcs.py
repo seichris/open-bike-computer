@@ -336,6 +336,25 @@ def style_features( features, styles):
     return styled_features
 
 
+def _linear_parts(value):
+    """Return the drawable lines of a line/block intersection, in GEOS order.
+
+    A line that enters the block and also touches its boundary at an isolated
+    point comes back as a GeometryCollection holding that point beside the
+    line parts. A point has no length to draw, so it is dropped; any other
+    unexpected geometry still fails closed.
+    """
+    if type(value) == LineString:
+        return [value]
+    if type(value) in (Point, shapely.MultiPoint):
+        return []
+    assert type(value) in (MultiLineString, GeometryCollection), type(value)
+    parts = []
+    for child in value.geoms:
+        parts.extend(_linear_parts(child))
+    return parts
+
+
 def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove feats that are fully contained, return remaining
     """ Clip lines to the box area. Each line can be splitted into one or several lines.
         Returns a list of LineStrings
@@ -348,10 +367,9 @@ def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove f
         assert type( line) == LineString, type(line)
         if not bbox.intersects( line) or bbox.touches( line): continue
         parts = intersection( line, bbox)
-        assert type( parts) in (LineString, MultiLineString), type( parts)
+        line_parts = _linear_parts( parts)
         if not parts.is_valid: continue
-        for p in parts.geoms if type(parts) == MultiLineString else [parts,]:
-            assert type( p) == LineString, type( p)
+        for p in line_parts:
             if p.is_valid:
                 new_feat = dict( feat)
                 new_feat['geom'] = p
