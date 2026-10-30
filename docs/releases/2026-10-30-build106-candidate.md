@@ -259,12 +259,12 @@ Publication (2026-10-30):
       release 13.
   - The board was then returned to release 14's signed factory images on the
     dual 4 MiB table (app0 `ebc85e6f…`, NVS kept), at 14:49 UTC.
-- [ ] Still open:
-  - back into app0: skipped by the maintainer until the next release;
-  - the 2.06: waived;
-  - the production Bicino app family. Only Bicino Dev was installed;
+- Skipped by the maintainer on 2026-10-30, so not run for this release:
+  - updating back into app0, deferred to the next release;
+  - the 2.06 checks, waived;
+  - the production Bicino app family; only Bicino Dev was installed;
   - the app's rejection and notice for an oversized image, the second half of
-    partition-layout gate 7. No oversized release exists.
+    partition-layout gate 7, since no oversized release exists.
 - [ ] Migration gates 1, 2 and 6 with the release's exact bytes, with read-only
   website inspections before and after; then the catalog admission PR.
 
