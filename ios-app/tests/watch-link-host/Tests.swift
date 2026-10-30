@@ -828,7 +828,7 @@ enum Tests {
                    "no handoff is released and the link is not cancelled")
         }
         for failure in ["reply error", "unreachable"] {
-            await run("a phone that stops answering ends the deferral: \(failure)") {
+            await run("a phone that stops answering suspends the deferral: \(failure)") {
                 let f = Fixture(); defer { f.close() }
                 f.link.completeInitialDemandRestoration()
                 f.link.setDemand(navigation: false, workout: true)
@@ -852,6 +852,56 @@ enum Tests {
                 expect(f.link.testCentral.connections.count == 1,
                        "an unanswering phone cannot strand the Watch ride")
             }
+        }
+        await run("the navigating phone's next answer restores a suspended deferral") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationSubmissionDidFail(request: successor)
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            expect(f.link.testCentral.connections.count == 1,
+                   "one failed reply lets the ride try the Bicino")
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.testCentral.cancellations.contains(f.peer.identifier),
+                   "the phone's navigation answer cancels the pending connect")
+            f.link.testDrop(f.peer)
+            await settle(); f.clock.advance(by: .seconds(30)); await settle()
+            expect(f.link.testCentral.connections.count == 1 && f.link.state == .busy,
+                   "the restored hold keeps the ride off the Bicino")
+        }
+        await run("a ride that won the link while the phone was silent returns it") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationSubmissionDidFail(request: successor)
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            expect(f.link.state.isReady, "the ride reconnected while the phone was silent")
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.transportPhase == .stopping,
+                   "the still-navigating phone gets the link back")
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            f.link.testDrop(f.peer)
+            expect(f.releases == [f.id, successorID],
+                   "the rejected successor handoff is retired")
+            expect(f.link.state == .busy && f.link.testCentral.connections.count == 1,
+                   "the ride defers to phone navigation again")
         }
         await run("a ride withdrawn while deferred does not defer the next ride") {
             let f = Fixture(); defer { f.close() }
