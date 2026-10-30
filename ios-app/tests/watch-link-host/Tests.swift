@@ -52,6 +52,22 @@ enum Tests {
         var result = NavigationSnapshotV1(); result.routeWindow = Data([marker]); result.instruction = "new-\(marker)"; return result
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
+    static let device = "00112233445566778899aabbccddeeff"
+    static func prepare(_ id: UUID) -> WatchDirectRidePreparationRequestV1 {
+        try! .init(preparationID: id, operation: .prepare, deviceID: device)
+    }
+    #if FIXED_LIFECYCLE
+    static func handback(_ id: UUID) -> WatchDirectRideReconciliationRequestV1 {
+        try! .init(preparationID: id, deviceID: device, purpose: .phoneNavigation)
+    }
+    /// Delivers the phone's navigation handback to a ready ride and lets its
+    /// graceful stop finish by lease acknowledgement and disconnect.
+    static func handBack(_ f: Fixture) {
+        f.link.requestPhonePreparationReconciliation(handback(f.id))
+        f.link.testAuth("LEASE_RELEASED", on: f.peer)
+        f.link.testDrop(f.peer)
+    }
+    #endif
     static func motion(_ sequence: UInt32, epoch: UInt16 = 1, token: UInt16 = 1) -> Data {
         // Valid kind-4 wire fixture; age and phase flags are not sample identity.
         var frame = Data([4, 15, UInt8(truncatingIfNeeded: token), UInt8(token >> 8)])
@@ -717,6 +733,213 @@ enum Tests {
                    "the Watch releases only the stale requested identity")
             expect(f.link.testPreparationID == f.id && f.link.testIntent?.operation == .prepare,
                    "the active successor preparation remains intact")
+        }
+        // Workout first, then iPhone navigation: the phone had yielded the
+        // single link, so its navigation only reaches the Bicino if the Watch
+        // ride hands the link back without ending.
+        for kind in ["workout", "navigation", "combined"] {
+            await run("phone navigation handback returns a Watch \(kind) ride's link") {
+                let f = Fixture(); defer { f.close() }
+                f.link.completeInitialDemandRestoration()
+                let nav = kind != "workout", workout = kind != "navigation"
+                f.link.setDemand(navigation: nav, workout: workout)
+                if workout { f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil) }
+                f.link.testDrainATT(on: f.peer)
+                f.link.requestPhonePreparationReconciliation(handback(f.id))
+                expect(f.link.transportPhase == .stopping && !f.link.state.isReady,
+                       "the handback gracefully stops the Watch link")
+                expect(f.peer.writes.last?.data == Data("LEASE_RELEASE".utf8),
+                       "the Watch gives up its controller lease")
+                f.link.testAuth("LEASE_RELEASED", on: f.peer)
+                expect(f.releases == [f.id],
+                       "the exact yielded preparation is released so the phone reconnects")
+                f.link.testDrop(f.peer)
+                expect(f.link.testDemand.navigationActive == nav && f.link.testDemand.workoutActive == workout,
+                       "the Watch ride keeps its demand")
+                expect(f.prepares.count == 1 && f.prepares[0] != f.id,
+                       "the retained ride asks for a fresh preparation")
+                expect(f.link.state == .busy && f.link.lastError == "Bicino is controlled by iPhone navigation",
+                       "the Watch shows that iPhone navigation drives the Bicino")
+                expect(f.link.testCentral.connections.isEmpty && f.link.testCentral.scans == 0,
+                       "the Watch neither scans nor connects against the phone")
+                expect(f.link.testPendingReconciliation == nil,
+                       "the completed handback is not replayed")
+            }
+        }
+        await run("navigation handback waits for restored demand") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.link.requestPhonePreparationReconciliation(handback(f.id))
+            expect(f.link.state.isReady &&
+                   f.link.testPendingReconciliation?.purpose == .phoneNavigation,
+                   "the persisted request waits for ride restoration")
+            f.link.completeInitialDemandRestoration()
+            expect(f.link.transportPhase == .stopping,
+                   "restoration hands the retained ride's link back")
+        }
+        await run("phone acceptance ends a navigation handback and replays the ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+            f.link.testDrainATT(on: f.peer)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.state == .busy, "a navigating phone keeps the ride deferred")
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            expect(f.prepares == [successorID, successorID],
+                   "the deferred ride keeps asking with the same identity")
+            expect(f.link.testCentral.connections.isEmpty && f.link.testCentral.scans == 0,
+                   "a rejected retry still waits for the phone")
+            let writes = f.peer.writes.count
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: true))
+            expect(f.link.testCentral.connections.count == 1,
+                   "phone acceptance after navigation reconnects the Watch ride")
+            f.link.testFinishReconnect(f.peer)
+            expect(f.link.state.isReady, "the Watch ride takes the Bicino back")
+            expect(f.peer.writes.dropFirst(writes).contains {
+                String(data: $0.data, encoding: .utf8)?.contains("running") == true
+            }, "the retained workout is replayed on the new link")
+        }
+        // A phone woken at ride start reports `phone_navigation_active` while
+        // its workout recovery is incomplete. That late answer must not make
+        // an established ride drop the Bicino.
+        await run("a late preparation rejection leaves a ready ride connected") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            let request = prepare(f.id)
+            for code in ["phone_navigation_active", "device_transfer_active"] {
+                f.link.directRidePreparationDidRespond(request: request,
+                    response: .init(requestID: request.requestID, accepted: false,
+                                    errorCode: code))
+                expect(f.link.state.isReady && f.link.transportPhase == .ready,
+                       "\(code) leaves an established ride on its link")
+            }
+            expect(f.releases.isEmpty && f.link.testCentral.cancellations.isEmpty,
+                   "no handoff is released and the link is not cancelled")
+        }
+        for failure in ["reply error", "unreachable"] {
+            await run("a phone that stops answering suspends the deferral: \(failure)") {
+                let f = Fixture(); defer { f.close() }
+                f.link.completeInitialDemandRestoration()
+                f.link.setDemand(navigation: false, workout: true)
+                handBack(f)
+                guard let successorID = f.prepares.first else {
+                    expect(false, "the retained ride requests a successor preparation")
+                    return
+                }
+                if failure == "reply error" {
+                    f.link.directRidePreparationSubmissionDidFail(request: prepare(successorID))
+                } else {
+                    f.disposition = .counterpartUnreachable
+                    let successor = prepare(successorID)
+                    f.link.directRidePreparationDidRespond(request: successor,
+                        response: .init(requestID: successor.requestID, accepted: false,
+                                        errorCode: "phone_navigation_active"))
+                }
+                expect(f.link.testCentral.connections.isEmpty,
+                       "the Watch does not connect before its retry")
+                await settle(); f.clock.advance(by: .seconds(1)); await settle()
+                expect(f.link.testCentral.connections.count == 1,
+                       "an unanswering phone cannot strand the Watch ride")
+            }
+        }
+        await run("the navigating phone's next answer restores a suspended deferral") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationSubmissionDidFail(request: successor)
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            expect(f.link.testCentral.connections.count == 1,
+                   "one failed reply lets the ride try the Bicino")
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.testCentral.cancellations.contains(f.peer.identifier),
+                   "the phone's navigation answer cancels the pending connect")
+            f.link.testDrop(f.peer)
+            await settle(); f.clock.advance(by: .seconds(30)); await settle()
+            expect(f.link.testCentral.connections.count == 1 && f.link.state == .busy,
+                   "the restored hold keeps the ride off the Bicino")
+        }
+        await run("a ride that won the link while the phone was silent returns it") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationSubmissionDidFail(request: successor)
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            expect(f.link.state.isReady, "the ride reconnected while the phone was silent")
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.transportPhase == .stopping,
+                   "the still-navigating phone gets the link back")
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            f.link.testDrop(f.peer)
+            expect(f.releases == [f.id, successorID],
+                   "the rejected successor handoff is retired")
+            expect(f.link.state == .busy && f.link.testCentral.connections.count == 1,
+                   "the ride defers to phone navigation again")
+        }
+        await run("a ride withdrawn while deferred does not defer the next ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            f.stop()
+            expect(f.link.state == .idle && f.releases == [f.id, successorID],
+                   "withdrawn demand retires the deferred successor handoff")
+            f.link.setWorkoutDemand(true)
+            expect(f.link.testCentral.connections.count == 1,
+                   "the next ride connects without inheriting the deferral")
+        }
+        await run("a deferred ride still reports radio loss") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            f.link.testRadio(.poweredOff)
+            f.link.setWorkoutDemand(true)
+            expect(f.link.state == .bluetoothUnavailable,
+                   "deferral to the phone does not hide a radio that is off")
+            f.link.testRadio(.poweredOn)
+            expect(f.link.state == .busy && f.link.testCentral.connections.isEmpty,
+                   "radio recovery keeps waiting for the phone")
+        }
+        await run("a stale navigation handback cannot interrupt a successor ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            let oldID = UUID()
+            f.link.requestPhonePreparationReconciliation(handback(oldID))
+            expect(f.link.state.isReady && f.link.testPreparationID == f.id,
+                   "the current ride keeps its link")
+            expect(f.releases == [oldID], "only the stale requested identity is released")
         }
         #endif
         #if FIXED_LIFECYCLE
