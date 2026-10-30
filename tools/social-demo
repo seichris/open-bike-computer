@@ -40,6 +40,90 @@ def safe_error(error):
 
 RIDERS = (('ava', 'Demo Ava', 5.5), ('ben', 'Demo Ben', 3.7), ('cleo', 'Demo Cleo', 0.0))
 EMOJIS = {'ava': '🚴', 'ben': '🚴‍♂️', 'cleo': '🚴‍♀️'}
+# Metres forward and right relative to the receiving rider's travel direction.
+FORMATION = {'ava': (0, 25), 'ben': (-65, -12), 'cleo': (-140, 30)}
+
+
+class FollowingTrack:
+    """Only consume the target's currently consented, fresh friend snapshot."""
+    def __init__(self):
+        self.course = 0.0
+
+    def anchor(self, snapshot, target_id):
+        own = next((r for r in snapshot['riders'] if r['profile']['id'] == target_id), None)
+        if own is None: return None
+        values = [own.get(key) for key in ('latitude', 'longitude', 'age')]
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values): return None
+        latitude, longitude, age = values
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180 and 0 <= age <= 15): return None
+        course = own.get('course')
+        if isinstance(course, (int, float)) and math.isfinite(course) and 0 <= course < 360:
+            self.course = course
+        return own
+
+    def sample(self, slug, anchor, elapsed, captured_at, sequence, epoch, target_id):
+        forward, right = FORMATION[slug]
+        bearing = math.radians(self.course + math.degrees(math.atan2(right, forward)))
+        distance = math.hypot(forward, right) / 6371000
+        lat, lon = math.radians(anchor['latitude']), math.radians(anchor['longitude'])
+        target_lat = math.asin(max(-1, min(1, math.sin(lat)*math.cos(distance) +
+                              math.cos(lat)*math.sin(distance)*math.cos(bearing))))
+        target_lon = lon + math.atan2(math.sin(bearing)*math.sin(distance)*math.cos(lat),
+                                     math.cos(distance)-math.sin(lat)*math.sin(target_lat))
+        speed = anchor.get('speed', 0)
+        if not isinstance(speed, (int, float)) or not math.isfinite(speed): speed = 0
+        speed = max(0, min(60, speed))
+        return {'latitude': math.degrees(target_lat), 'longitude': (math.degrees(target_lon)+180) % 360-180,
+                'horizontalAccuracy': 5, 'capturedAt': captured_at, 'sequence': sequence,
+                'epochs': {target_id: epoch}, 'course': self.course, 'speed': speed,
+                'elapsedSeconds': min(604800, max(0, elapsed))}
+
+
+def publish_tick(accounts, target_id, elapsed, track=None):
+    """A missing/revoked anchor clears every demo stream; never reuse a cached fix."""
+    anchor, anchor_error = None, None
+    requested_at = time.monotonic()
+    if track is not None:
+        try:
+            anchor = track.anchor(accounts[0].call('GET', '/friend-sharing'), target_id)
+        except Exception as error:
+            anchor_error = safe_error(error)
+    outcomes = []
+    for account in accounts:
+        if STOPPED: break
+        state = {'username': account.username, 'displayName': account.name, 'publishing': False}
+        try:
+            if track is None or (anchor is not None and anchor['age'] + time.monotonic()-requested_at <= 15):
+                if account.epoch is None or time.monotonic() >= account.lease_deadline:
+                    account.change_consent(target_id, True)
+            # Authentication and consent renewal can block; check freshness again afterwards.
+            if track is not None and (anchor is None or anchor['age'] + time.monotonic()-requested_at > 15):
+                if account.epoch is not None: account.change_consent(target_id, False)
+                state.update(scenario='waiting_for_your_location', seesYourSharing=False, receivesStats=False)
+                if anchor_error: state['error'] = anchor_error
+            else:
+                fix = (track.sample(account.slug, anchor, elapsed, time.time(), account.sequence, account.epoch, target_id)
+                       if track is not None else
+                       sample(account.slug, elapsed, time.time(), account.sequence, account.epoch, target_id))
+                if fix:
+                    account.sequence += 1  # Never reuse a sequence after a lost reply.
+                    reply = account.call('POST', '/friend-sharing/state', fix)
+                    if target_id not in reply['accepted']:
+                        account.epoch = None
+                        raise DemoError('sharing_revoked')
+                if track is None:
+                    incoming = account.call('GET', '/friend-sharing')['riders']
+                    own = next((r for r in incoming if r['profile']['id'] == target_id), None)
+                else:
+                    own = anchor if account.slug == 'ava' else None
+                state.update(publishing=fix is not None, seesYourSharing=own is not None,
+                             receivesStats=own is not None and 'distanceMeters' in own,
+                             scenario='following' if track is not None else
+                             'intermittent' if account.slug == 'cleo' else 'moving')
+        except Exception as error:
+            state['error'] = safe_error(error)
+        outcomes.append(state)
+    return outcomes
 
 
 def render_avatars():
@@ -123,6 +207,7 @@ class DemoAccount:
         self.slug, self.name = slug, name
         self.token, self.token_deadline = None, 0
         self.profile_id, self.epoch, self.sequence = None, None, 0
+        self.lease_deadline = 0
 
     def authenticate(self):
         from firebase_admin import auth
@@ -184,6 +269,8 @@ class DemoAccount:
         current = self.call('GET', path)
         result = self.call('POST', path, {'epoch': current['epoch'], 'location': enabled, 'stats': enabled})
         self.epoch = result['epoch'] if enabled and result['sharing'] else None
+        self.lease_deadline = (time.monotonic() + max(0, result['sharingExpiresAt']-result['serverTime']-30)
+                               if self.epoch else 0)
         self.sequence = 0
         return result
 
@@ -239,34 +326,17 @@ def run_inside(args):
             STOPPED = True
         signal.signal(signal.SIGTERM, stop_signal); signal.signal(signal.SIGINT, stop_signal)
         started = time.monotonic()
-        outcomes = {}
+        outcomes = []
+        track = FollowingTrack() if args.follow_me else None
         try:
-            while not STOPPED and time.monotonic()-started < args.duration:
+            while not STOPPED and (args.until_stopped or time.monotonic()-started < args.duration):
                 elapsed = time.monotonic()-started
-                for account in accounts:
-                    if STOPPED: break
-                    state = {'username': account.username, 'displayName': account.name}
-                    try:
-                        if account.epoch is None:
-                            account.change_consent(target['id'], True)
-                        fix = sample(account.slug, elapsed, time.time(), account.sequence, account.epoch, target['id'])
-                        if fix:
-                            account.sequence += 1  # Never reuse a sequence after a lost reply.
-                            reply = account.call('POST', '/friend-sharing/state', fix)
-                            if target['id'] not in reply['accepted']:
-                                account.epoch = None
-                                raise DemoError('sharing_revoked')
-                        incoming = account.call('GET', '/friend-sharing')['riders']
-                        own = next((r for r in incoming if r['profile']['id'] == target['id']), None)
-                        state.update(publishing=fix is not None, seesYourSharing=own is not None,
-                                     receivesStats=own is not None and 'distanceMeters' in own,
-                                     scenario='intermittent' if account.slug == 'cleo' else 'moving')
-                    except Exception as error:
-                        # Only our bounded error codes, never provider payloads/URLs.
-                        state['error'] = safe_error(error)
-                    outcomes[account.slug] = state
+                outcomes = publish_tick(accounts, target['id'], elapsed, track)
                 atomic_json(STATUS, {'running': True, 'pid': os.getpid(), 'targetUsername': config['target'],
-                    'elapsedSeconds': int(elapsed), 'remainingSeconds': max(0, int(args.duration-elapsed)), 'riders': list(outcomes.values())})
+                    'mode': 'follow-me' if track is not None else 'shanghai-loop',
+                    'elapsedSeconds': int(elapsed),
+                    'remainingSeconds': None if args.until_stopped else max(0, int(args.duration-elapsed)),
+                    'riders': outcomes})
                 for _ in range(30):
                     if STOPPED: break
                     time.sleep(0.1)
@@ -276,7 +346,8 @@ def run_inside(args):
                     try: account.change_consent(target['id'], False)
                     except Exception: pass
             Path(PID).unlink(missing_ok=True)
-            atomic_json(STATUS, {'running': False, 'targetUsername': config['target'], 'riders': list(outcomes.values())})
+            for state in outcomes: state['publishing'] = False
+            atomic_json(STATUS, {'running': False, 'targetUsername': config['target'], 'riders': outcomes})
 
 
 def process_alive():
@@ -289,7 +360,8 @@ def process_alive():
 
 def operate(args):
     source = Path(__file__).read_text()
-    payload = {'action': args.action, 'duration': args.duration, 'program': source, 'replace': args.replace}
+    payload = {'action': args.action, 'duration': args.duration, 'program': source, 'replace': args.replace,
+               'followMe': args.follow_me, 'untilStopped': args.until_stopped}
     if args.action == 'avatars': payload['avatars'] = render_avatars()
     if args.action == 'seed':
         if not args.xcconfig or not args.target: raise DemoError('seed requires --xcconfig and --target')
@@ -332,9 +404,12 @@ if p["action"]=="run":
  if current.get("processAlive"):
   print(json.dumps(current));raise SystemExit(0)
  # Fixed shell text; duration is a validated integer and no user text enters shell code.
- command="exec python /tmp/bicino-social-demo.py --inside-container run --duration "+str(int(p["duration"]))+" > /tmp/bicino-social-demo.log 2>&1"
+ command="exec python /tmp/bicino-social-demo.py --inside-container run --duration "+str(int(p["duration"]))
+ if p.get("followMe") is True:command+=" --follow-me"
+ if p.get("untilStopped") is True:command+=" --until-stopped"
+ command+=" > /tmp/bicino-social-demo.log 2>&1"
  subprocess.run(["docker","exec","-d","--user","0","bicino-social-dev-social-api-1","sh","-c",command],check=True)
- print(json.dumps({"started":True,"durationSeconds":p["duration"]}))
+ print(json.dumps({"started":True,"mode":"follow-me" if p.get("followMe") else "shanghai-loop","durationSeconds":None if p.get("untilStopped") else p["duration"]}))
 else:subprocess.run(cmd,check=True)
 '''
     command = 'python3 -c ' + __import__('shlex').quote(bootstrap)
@@ -351,8 +426,12 @@ def main():
     parser.add_argument('--target', help='Your Dev username, for seed')
     parser.add_argument('--xcconfig', help='Bicino Dev native client configuration, for seed')
     parser.add_argument('--duration', type=int, default=3600, help='Simulation seconds, at most four hours (default: one hour)')
+    parser.add_argument('--follow-me', action='store_true', help='Keep all three riders near your fresh location shared to Demo Ava (run only)')
+    parser.add_argument('--until-stopped', action='store_true', help='Run follow-me until stop, with no duration limit')
     parser.add_argument('--ssh-host', default='cool-ts', help='Existing development server SSH alias')
     args = parser.parse_args()
+    if args.follow_me and args.action != 'run': parser.error('--follow-me requires run')
+    if args.until_stopped and not (args.action == 'run' and args.follow_me): parser.error('--until-stopped requires run --follow-me')
     if args.replace and args.action != 'avatars': parser.error('--replace requires avatars')
     if not 30 <= args.duration <= 4*3600: parser.error('duration must be between 30 and 14400 seconds')
     try:

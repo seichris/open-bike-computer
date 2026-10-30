@@ -54,6 +54,41 @@ same **Friends → Friend Marker Size** control. Changing it anywhere changes it
 everywhere, and the device keeps the size after a restart. It appears only for
 developer firmware that can draw friends.
 
+## Filming with riders following you
+
+In **Bicino Dev → Settings → your profile → Friends**, enable your outgoing
+location sharing to **Demo Ava**, then keep a live GPS fix. Start the server-side
+filming demo from the Mac:
+
+```sh
+tools/social-demo run --follow-me --until-stopped
+tools/social-demo status
+tools/social-demo stop
+```
+
+All three riders publish continuously, including Cleo. Ava stays 25 m to your
+right, Ben 65 m behind and 12 m to your left, and Cleo 140 m behind and 30 m to
+your right. The formation turns with your GPS course; while no course is
+available it holds the last direction (north initially). These are geometric
+offsets, so markers are not snapped to roads. They follow your live position
+without accumulating drift. Your existing Dev app and friend-capable firmware
+receive the ordinary friend streams; no app or firmware update is required.
+
+Only Ava's normal, consented friend snapshot supplies your anchor. Its position
+stays in process memory, and neither coordinates nor your stats enter operator
+logs or status. A fix older than 15 seconds, disabled sharing, or a failed
+snapshot read pauses the formation and clears the demo riders' outgoing
+streams. Fresh sharing resumes them. `status` reports `following` or
+`waiting_for_your_location` for each rider. Turning off your sharing to Ava is
+also a convenient way to pause filming from the phone.
+
+`--until-stopped` runs on the Dev server until `stop` or a container replacement,
+even after the Mac disconnects. Demo outgoing leases are renewed automatically.
+Your phone's normal sharing permission still expires after four hours; enable it
+again if filming that long. For a bounded filming session instead, use
+`run --follow-me --duration 3600`. If an older demo is already running, stop it
+before starting the new mode. After stopping, turn off your sharing to Ava too.
+
 Run defaults to one hour and accepts 30 seconds through four hours. The test
 riders share **synthetic** locations with your accepted Dev account. Ava moves
 faster, Ben moves slower, and Cleo stops publishing for 90 seconds in each
