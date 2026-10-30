@@ -473,9 +473,10 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 1 && FFat.formats == 1 && geometryRecords == 1);
   CHECK(formatsWhenRecorded == 0);
-  // The physical gate reads this line from a developer profile's serial.
+  // The physical gate reads this line from a developer profile's serial, and
+  // every format, including a reformat after a failed mount, must show in it.
   CHECK(serialLogged("STORAGE_FFAT found=1 erased=1 wl=0 record=0 plan=0 "
-                     "mounted=1 offset=0x810000 size=0x700000\n"));
+                     "formatted=1 mounted=1 offset=0x810000 size=0x700000\n"));
 
   // Without a durable ownership record an erased partition stays erased.
   resetHardware();
@@ -484,6 +485,7 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   geometryRecordFails = true;
   CHECK(noCardBoot() != ESP_OK);
   CHECK(FFat.begins == 0 && FFat.formats == 0);
+  CHECK(serialLogged("plan=0 formatted=0 mounted=0"));
 
   // A torn first format left a recorded but unmountable volume: reformat.
   resetHardware();
@@ -492,17 +494,19 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   ffatAssessment.record = InternalGeometryRecord::Matches;
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 2 && FFat.formats == 1);
+  CHECK(serialLogged("record=1 plan=1 formatted=1 mounted=1"));
 
   // A volume with valid wear-levelling state at this geometry is adopted,
   // recorded, and keeps the previous corruption recovery.
   resetHardware();
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 1 && FFat.formats == 0 && geometryRecords == 1);
-  CHECK(serialLogged("wl=1 record=0 plan=1 mounted=1"));
+  CHECK(serialLogged("wl=1 record=0 plan=1 formatted=0 mounted=1"));
   resetHardware();
   FFat.canMount = false;
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 2 && FFat.formats == 1 && geometryRecords == 1);
+  CHECK(serialLogged("wl=1 record=0 plan=1 formatted=1 mounted=1"));
 
   // Old data shifted under a replaced table, or vendor data: no ownership
   // evidence, so not even a mount attempt may rewrite its metadata.
@@ -510,14 +514,14 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   ffatAssessment.wearLevellingValid = false;
   CHECK(noCardBoot() != ESP_OK);
   CHECK(FFat.begins == 0 && FFat.formats == 0 && geometryRecords == 0);
-  CHECK(serialLogged("wl=0 record=0 plan=3 mounted=0"));
+  CHECK(serialLogged("wl=0 record=0 plan=3 formatted=0 mounted=0"));
 
   // FFat moved since this device owned it: untouched, even if WL looks valid.
   resetHardware();
   ffatAssessment.record = InternalGeometryRecord::Differs;
   CHECK(noCardBoot() != ESP_OK);
   CHECK(FFat.begins == 0 && FFat.formats == 0 && geometryRecords == 0);
-  CHECK(serialLogged("wl=1 record=2 plan=2 mounted=0"));
+  CHECK(serialLogged("wl=1 record=2 plan=2 formatted=0 mounted=0"));
 
   // After the migration's erase the new geometry is owned, then formatted.
   resetHardware();

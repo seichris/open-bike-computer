@@ -104,8 +104,9 @@ air therefore adopts its existing volume, while old data shifted under a
 replaced table (its state lies at other offsets) and vendor leftovers are
 neither mounted nor formatted. The `STORAGE_FFAT` serial line reports the
 decision: `plan=0` formats, `1` mounts, `2` and `3` refuse a relocated or
-unrecognised volume. Developer profiles print it on USB, like the `SDIO:`
-lines; production routes serial to UART0.
+unrecognised volume. `formatted=1` marks every boot that formatted, including
+an owned volume reformatted after its plain mount failed. Developer profiles
+print it on USB, like the `SDIO:` lines; production routes serial to UART0.
 Factory programming must start from an erased chip or erase FFat.
 
 ## OTA on existing devices
@@ -225,10 +226,10 @@ website catalog entry) until all of these pass on both the 1.75-inch and
    read-only verification of the destination table and bootloader.
 2. Preservation: owner authentication, TLS identity and settings work after
    migration; SD maps and files are intact.
-3. FFat: the first no-card boot formats (`STORAGE_FFAT erased=1 plan=0`) and
-   the next one mounts (`plan=1`), and diagnostics record and export
-   afterwards; a no-card boot without data loss on a device that kept its
-   legacy layout.
+3. FFat: no-card boots format exactly once (`STORAGE_FFAT erased=1 plan=0
+   formatted=1`, then `plan=1 formatted=0` on the next no-card boot), and
+   diagnostics record and export afterwards; a no-card boot without data loss
+   on a device that kept its legacy layout.
 4. OTA into app1 (`0x410000`) and back into app0 on the new layout, with
    boot confirmation and forced rollback.
 5. True cold boot (USB and battery disconnected) on the migrated layout.
