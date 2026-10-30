@@ -67,15 +67,29 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let store = TopographyCompanionStore(url: url, receipt: receipt)
     let metadata = try await store.validate()
     try Task.checkCancellation()
-    let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
-    let coverage = MainlandChinaRegion.coverage(
-      south: bounds[1], west: bounds[0], north: bounds[3], east: bounds[2])
-    guard coverage != .partial else {
-      throw TopographyMapKitTileWarp.WarpError.extent
-    }
     return BicinoTopographyTileOverlay(
-      store: store, metadata: metadata, alignsChina: coverage == .all
+      store: store, metadata: metadata,
+      alignsChina: try alignsChina(boundsE7: metadata.boundsE7)
     )
+  }
+
+  /// Apple Maps switches between WGS-84 and GCJ-02 at mainland China's
+  /// border, and contours are not yet aligned across it.
+  enum AlignmentError: Error, Equatable {
+    case crossesMainlandChinaBorder
+  }
+
+  /// Whether a selection's contours need GCJ-02, which holds only when the
+  /// whole selection lies in mainland China.
+  static func alignsChina(boundsE7: [Int]) throws -> Bool {
+    let bounds = boundsE7.map { Double($0) / 10_000_000 }
+    switch MainlandChinaRegion.coverage(
+      south: bounds[1], west: bounds[0], north: bounds[3], east: bounds[2])
+    {
+    case .none: return false
+    case .all: return true
+    case .partial: throw AlignmentError.crossesMainlandChinaBorder
+    }
   }
 
   func coordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D {

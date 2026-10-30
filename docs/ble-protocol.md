@@ -546,9 +546,8 @@ SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 All GPS packet versions reject latitude outside -90...90 degrees or longitude
 outside -180...180 degrees before updating map state or arrival freshness.
 
-Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
-coordinates in mainland China are converted from GCJ-02 to WGS-84 before
-writing. Firmware accepts
+Live CoreLocation coordinates are sent as WGS-84. Simulated positions follow
+the route's WGS-84 geometry and are sent unchanged. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. A
 client that negotiated CAP2 bit `17` appends the six-byte quality-v1 tail for a

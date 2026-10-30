@@ -67,9 +67,9 @@ companion pairs. No provider has thereby gained production approval.
   ([details](mapkit-china-coordinates.md)), the iPhone resamples the WGS-84
   companion tiles into MapKit's GCJ-02 pixel space on demand. The signed
   companion and ESP32 map remain WGS-84. A selection crossing that region's
-  boundary, such as Shenzhen with Hong Kong, suppresses the iPhone overlay
-  until regional alignment is qualified; no uniform geographic offset is
-  applied.
+  boundary, such as most selections of Shenzhen or Xiamen, suppresses the
+  iPhone overlay until regional alignment is qualified, and Saved Maps says
+  so; no uniform geographic offset is applied.
 - CAP2 bit 30/client version 28, visibility bit 13, independent Map/Map +
   Navigation preferences, configurable-screen persistence, and active-map
   health gate the device toggle. Contours default off.

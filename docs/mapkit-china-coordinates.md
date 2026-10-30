@@ -32,8 +32,9 @@ rings and 6,263 vertices at 0.00001° resolution, about 25 KB. It also writes
 `ios-app/BikeComputerTests/Fixtures/mainland-china-region-probes.json`. The
 RideShared tests check every probe and the named border pairs. The generator
 needs shapely 2.1 or later, which the development environment does not
-install; its docstring gives the regeneration command. Natural Earth is in
-the public domain.
+install; its docstring gives the regeneration command, and the generated file
+records the shapely, GEOS and numpy versions used. No check regenerates it, so
+review a regenerated file's diff. Natural Earth is in the public domain.
 
 Lookups reject points outside the bounding box at once. Inside it, a lookup
 casts a ray against the edges in one 0.1° latitude band.
@@ -51,7 +52,8 @@ casts a ray against the edges in one 0.1° latitude band.
   Sheung Shui, Zhuhai, Macau, Xiamen, Kinmen, Lieyu, Matsu, Tung Ping Chau,
   Dandong, Sinuiju, Taipei, Singapore, Seoul or Bangkok, among others.
 - **Apple's own boundary** is not published. Where it differs from this one,
-  the app and Apple Maps disagree by one GCJ-02 offset, 130 to 620 m.
+  the app and Apple Maps disagree by one GCJ-02 offset, about 140 to 700 m
+  along this region's edge.
 
 A more precise source, such as OpenStreetMap's boundaries, would bring
 ODbL obligations into the app's source and needs a licensing decision first.
@@ -64,17 +66,29 @@ Apple Maps coordinates that also belong to Hong Kong. The two directions
 behave as follows:
 
 - **WGS-84 to Apple Maps** tests the WGS-84 position, which is exact.
-- **Apple Maps to WGS-84** first computes the GCJ-02 preimage and converts
-  only when that preimage lies in the region. Every mainland position
-  therefore round-trips. A Hong Kong or Macau position within one offset of
-  the border can be read as the mainland position that shares its Apple Maps
-  coordinate. The RideShared tests pin both cases with points near Luohu and
-  Lok Ma Chau.
+- **Apple Maps to WGS-84** computes the GCJ-02 preimage. A coordinate outside
+  the region whose preimage lies inside it has two readings, in a strip up to
+  about 1 km deep beside the border. A known WGS-84 position nearby settles
+  it:
+  - a location the phone derived from GPS, such as the start of navigation, a
+    reroute or the deviation check, uses the rider's latest fix, so it comes
+    back exactly;
+  - Apple route geometry is read in order, each point near the one before,
+    starting from where the route was requested, so a route keeps to its own
+    side. The iPhone and the Watch both do this.
+
+  With no reference, as for favorites synced to the Watch, the mainland
+  reading wins: a Hong Kong or Macau place within that strip can then be
+  read as the mainland position sharing its coordinate. The RideShared and
+  navigation tests pin these cases near Luohu and Lok Ma Chau.
 
 Inside a mainland-China topography overlay, every pixel uses GCJ-02, because
 `MainlandChinaRegion.coverage` admits only selections wholly inside the
-region. A selection that crosses the region's edge, such as Shenzhen together
-with Hong Kong, shows no overlay rather than a partly misaligned one.
+region. A selection that crosses the region's edge shows no overlay rather
+than a partly misaligned one. Saved Maps then says "Offline contours aren't
+shown for maps that cross mainland China's border." instead of asking for
+another download. This includes most selections of Shenzhen and Zhuhai,
+Xiamen with Kinmen's waters, Fuzhou with Matsu, Dandong and Ruili.
 
 ## Where the app converts
 
@@ -85,7 +99,7 @@ with Hong Kong, shows no overlay rather than a partly misaligned one.
 | Saved, offline, social and live positions drawn on Apple Maps (`SavedRouteMapPreview`, `BikeComputerCoordinator`, `SocialMapLayer`, `SocialHubView`, `SocialInvitePreview`, `MapView`) | WGS-84 to Apple Maps |
 | Favorites synced to the Watch (`BikeComputerApp`) | Apple Maps to WGS-84 |
 | Watch online routing endpoints | WGS-84 to Apple Maps |
-| Simulated positions sent to the Bicino (`NavigationEngine`) | Apple Maps to WGS-84 |
+| Simulated positions shown on Apple Maps (`NavigationEngine`) | WGS-84 to Apple Maps |
 | Topography overlay (`BicinoTopographyTileOverlay`, `TopographyMapKitTileWarp`) | whole overlay, or none |
 
 The firmware and the map backend never convert.
@@ -97,9 +111,10 @@ reached WGS-84. Routes normalized from Apple Maps now carry version 2
 (`RouteCoordinateNormalizationV1.mapKitVersion`). Version 1 treated a
 rectangle from 0.8293 to 55.8271° N and 72.004 to 135.5° E as GCJ-02. That
 rectangle also covers Hong Kong, Macau, Taiwan, the Koreas, western Japan,
-mainland Southeast Asia, most of India and southern Siberia. There, version 1
-shifted Apple Maps routes by 130 to 620 m, and the phone shifted GPS by the
-same amount before comparing it with the route. As a result, live navigation
+most of Southeast Asia, most of India and southern Siberia. There, version 1
+shifted Apple Maps routes by up to about 730 m, typically 130 to 620 m in the
+cities affected, and the phone shifted GPS by the same amount before
+comparing it with the route. As a result, live navigation
 measured a rider as off the route there.
 
 Archives saved before this change keep their bytes. Rewriting them would
@@ -108,7 +123,7 @@ on the Watch, in elevation profiles and in social shares. Affected archives
 are those with the `apple.mapkit` provider, normalization version 1, and
 geometry outside mainland China but inside the old rectangle. Before this
 change the phone drew them on Apple Maps, but navigation and the Bicino
-followed a line 130 to 620 m away. Now the phone draws them where navigation
+followed a line up to about 730 m away. Now the phone draws them where navigation
 and the Bicino already put them. Planning such a route again replaces it.
 
 The version-1 shift is a fixed function, so a later migration could rebuild

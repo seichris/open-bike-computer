@@ -953,6 +953,7 @@ struct NavigationProtocolTests {
         testRouteGeometryTransmissionPolicy()
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
+        testHongKongBorderStartKeepsGPSFix()
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -7152,6 +7153,33 @@ struct NavigationProtocolTests {
         assertEqual(testEngine.routeCoordinateExtractionCount, 1,
                     "test navigation uses the same cached MKRoute polyline")
         testEngine.stopNavigation()
+    }
+
+    @MainActor
+    static func testHongKongBorderStartKeepsGPSFix() {
+        // Lok Ma Chau is in Hong Kong, where Apple Maps uses WGS-84, but GCJ-02
+        // also moves a Shenzhen position about 600 m away onto its coordinate.
+        let fix = CLLocation(latitude: 22.5143, longitude: 114.0657)
+        let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: fix)
+        let unhinted = CoordinateConverter.gcj02ToWGS84(coordinate: routeLocation.coordinate)
+        assert(routeLocation.distance(from: fix) < 0.01 &&
+               CLLocation(latitude: unhinted.latitude, longitude: unhinted.longitude).distance(from: fix) > 500,
+               "the start's Apple Maps coordinate is shared across the border")
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                fix.coordinate,
+                CLLocationCoordinate2D(latitude: 22.5083, longitude: 114.0717)
+            ]
+        )
+        let engine = NavigationEngine()
+        engine.processExternalLocation(fix)
+        engine.startNavigation(with: route, initialLocation: routeLocation)
+        assert(engine.processExternalLocation(fix),
+               "the rider's own fix passes the start gate")
+        assert((engine.distanceToCurrentStep(from: routeLocation) ?? .infinity) < 1,
+               "the route and the rider stay in Hong Kong")
+        engine.stopNavigation()
     }
 
     @MainActor

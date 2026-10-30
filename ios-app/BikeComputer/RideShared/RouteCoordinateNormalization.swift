@@ -17,17 +17,37 @@ nonisolated enum RouteCoordinateNormalizationV1 {
         )
     }
 
+    /// `reference` is a known WGS-84 position near the coordinate, such as the
+    /// rider's fix, which settles coordinates shared across a mainland border.
     static func mapKitToWGS84(
-        _ coordinate: RouteCoordinateV1
+        _ coordinate: RouteCoordinateV1,
+        near reference: RouteCoordinateV1? = nil
     ) -> RouteCoordinateV1 {
         let converted = GCJ02.wgs84(
             fromMapKit: coordinate.latitude,
-            longitude: coordinate.longitude
+            longitude: coordinate.longitude,
+            near: reference.map { (latitude: $0.latitude, longitude: $0.longitude) }
         )
         return RouteCoordinateV1(
             latitude: converted.latitude,
             longitude: converted.longitude
         )
+    }
+
+    /// Normalizes Apple route geometry in order. A coordinate that a mainland
+    /// border makes ambiguous takes the reading nearer the point before it, so
+    /// a route keeps to its own side of the border; `start`, where the route
+    /// was requested from, settles the first point.
+    static func mapKitToWGS84(
+        _ coordinates: [RouteCoordinateV1],
+        startingNear start: RouteCoordinateV1?
+    ) -> [RouteCoordinateV1] {
+        var reference = start
+        return coordinates.map { coordinate in
+            let point = mapKitToWGS84(coordinate, near: reference)
+            reference = point
+            return point
+        }
     }
 
     static func wgs84ToMapKit(

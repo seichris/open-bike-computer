@@ -112,7 +112,9 @@ nonisolated enum MainlandChinaRegion {
         }
 
         func band(_ latitude: Double) -> Int {
-            min(max(Int(((latitude - bandSouth) / Self.bandHeight).rounded(.down)), 0), bands.count - 1)
+            // Clamp before converting, so a huge finite latitude cannot trap.
+            let index = ((latitude - bandSouth) / Self.bandHeight).rounded(.down)
+            return Int(min(max(index, 0), Double(bands.count - 1)))
         }
 
         func contains(latitude: Double, longitude: Double) -> Bool {
@@ -216,13 +218,16 @@ nonisolated enum GCJ02 {
 
     /// The WGS-84 position for an Apple Maps coordinate. Near a mainland
     /// border GCJ-02 moves mainland positions a few hundred metres, onto
-    /// coordinates that positions across the border keep unchanged. Such a
-    /// coordinate is read as GCJ-02 whenever its GCJ-02 preimage lies in the
-    /// region, so every mainland position round-trips exactly; a position
-    /// across the border within that distance may be read as mainland.
+    /// coordinates that positions across the border keep unchanged, so such a
+    /// coordinate has two readings. The one nearer `reference`, a known
+    /// WGS-84 position such as the rider's latest fix or a route's start,
+    /// wins; without a reference the mainland reading does. A position
+    /// converted near its reference, and every mainland position, therefore
+    /// round-trips.
     static func wgs84(
         fromMapKit latitude: Double,
-        longitude: Double
+        longitude: Double,
+        near reference: (latitude: Double, longitude: Double)? = nil
     ) -> (latitude: Double, longitude: Double) {
         // GCJ-02 offsets stay below 0.02 degrees, so nothing farther from the
         // region can have its preimage inside it.
@@ -233,7 +238,23 @@ nonisolated enum GCJ02 {
         guard MainlandChinaRegion.contains(latitude: preimage.latitude, longitude: preimage.longitude) else {
             return (latitude, longitude)
         }
-        return preimage
+        guard let reference,
+              !MainlandChinaRegion.contains(latitude: latitude, longitude: longitude) else {
+            return preimage
+        }
+        let unchanged = (latitude: latitude, longitude: longitude)
+        return squaredDistance(preimage, reference) <= squaredDistance(unchanged, reference)
+            ? preimage : unchanged
+    }
+
+    private static func squaredDistance(
+        _ a: (latitude: Double, longitude: Double),
+        _ b: (latitude: Double, longitude: Double)
+    ) -> Double {
+        let longitudeScale = cos(b.latitude * .pi / 180)
+        let latitudeDelta = a.latitude - b.latitude
+        let longitudeDelta = (a.longitude - b.longitude) * longitudeScale
+        return latitudeDelta * latitudeDelta + longitudeDelta * longitudeDelta
     }
 
     /// GCJ-02 for any WGS-84 position, without checking the region. Only

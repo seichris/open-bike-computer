@@ -2,6 +2,7 @@
 // Source: Natural Earth 1:10m Admin 0 - Countries, version 5.1.2 (public domain),
 // https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_admin_0_countries.geojson
 // SHA-256 239eec57ac17f100a11e2536cffc56752c318b50ae765b0918ff7aab4ce8f255.
+// Built with shapely 2.1.2, GEOS 3.13.1 and numpy 2.5.4.
 // Land borders are Natural Earth's, simplified by at most 30 m; the sea is
 // split by the nearest coastline (48164 mainland and 82730 other coastline samples).
 

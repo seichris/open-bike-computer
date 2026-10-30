@@ -365,6 +365,7 @@ def swift_source(encoded, rings, bounds, counts):
 // Source: {SOURCE_NAME} (public domain),
 // {SOURCE_URL}
 // SHA-256 {SOURCE_SHA256}.
+// Built with shapely {shapely.__version__}, GEOS {shapely.geos_version_string} and numpy {np.__version__}.
 // Land borders are Natural Earth's, simplified by at most {SIMPLIFY_METERS:g} m; the sea is
 // split by the nearest coastline ({counts[0]} mainland and {counts[1]} other coastline samples).
 

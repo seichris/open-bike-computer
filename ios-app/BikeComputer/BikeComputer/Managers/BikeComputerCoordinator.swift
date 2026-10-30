@@ -1676,7 +1676,8 @@ extension BikeComputerCoordinator {
                         do {
                             let normalizedInitialLocation =
                                 MapKitRouteAdapter.normalizedLocation(
-                                    initialLocation
+                                    initialLocation,
+                                    near: self.currentLocation
                                 )
                             canonical = try MapKitRouteAdapter.route(
                                 from: candidate,

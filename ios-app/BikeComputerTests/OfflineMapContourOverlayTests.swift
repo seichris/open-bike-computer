@@ -187,6 +187,33 @@ struct OfflineMapContourOverlayTests {
         }
         check(settled, "a tampered companion is rejected: \(rejected.topographyOverlayStatus)")
         check(rejected.topographyOverlay == nil, "a tampered companion shows no overlay")
+
+        // Apple Maps changes coordinate systems at mainland China's border, so
+        // a selection across it shows no contours and says why.
+        func alignsChina(_ west: Double, _ south: Double, _ east: Double, _ north: Double) throws -> Bool {
+            try BicinoTopographyTileOverlay.alignsChina(
+                boundsE7: [west, south, east, north].map { Int(($0 * 10_000_000).rounded()) }
+            )
+        }
+        check((try? alignsChina(113.2, 23.0, 113.5, 23.2)) == true,
+              "a Guangzhou selection is drawn in GCJ-02")
+        check((try? alignsChina(114.13, 22.24, 114.22, 22.29)) == false,
+              "a Hong Kong Island selection stays in WGS-84")
+        do {
+            _ = try alignsChina(113.9, 22.45, 114.2, 22.6)
+            check(false, "a Shenzhen selection reaching Hong Kong is not aligned")
+        } catch {
+            check(
+                OfflineMapManager.topographyOverlayFailureStatus(error) ==
+                    "Offline contours aren't shown for maps that cross mainland China's border.",
+                "a border-crossing selection explains itself instead of asking for a download: \(error)"
+            )
+        }
+        check(
+            OfflineMapManager.topographyOverlayFailureStatus(CocoaError(.fileReadCorruptFile))
+                .contains("could not be verified"),
+            "other failures still ask for a fresh download"
+        )
         print("Offline map contour overlay tests passed")
     }
 }
