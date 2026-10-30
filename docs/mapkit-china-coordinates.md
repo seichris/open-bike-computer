@@ -67,20 +67,27 @@ behave as follows:
 
 - **WGS-84 to Apple Maps** tests the WGS-84 position, which is exact.
 - **Apple Maps to WGS-84** computes the GCJ-02 preimage. A coordinate outside
-  the region whose preimage lies inside it has two readings, in a strip up to
-  about 1 km deep beside the border. A known WGS-84 position nearby settles
-  it:
+  the region whose preimage lies inside it has two readings, one on each side,
+  in strips up to about 1.2 km deep beside the border. The mainland reading
+  wins unless something better is known:
   - a location the phone derived from GPS, such as the start of navigation, a
-    reroute or the deviation check, uses the rider's latest fix, so it comes
-    back exactly;
-  - Apple route geometry is read in order, each point near the one before,
-    starting from where the route was requested, so a route keeps to its own
-    side. The iPhone and the Watch both do this.
+    reroute or the deviation check, passes the rider's latest fix as a
+    reference. The reference counts only when it lies within 40% of the gap
+    between the two readings, as a fix does at the position it came from, so
+    the fix comes back exactly while a rider far from a searched start changes
+    nothing;
+  - Apple route geometry is read in order and keeps the side of the point
+    before it, so a route that stays on one side reads correctly however far
+    apart its points are. The first point uses the position the route was
+    requested from as its reference. The iPhone and the Watch both do this.
 
-  With no reference, as for favorites synced to the Watch, the mainland
-  reading wins: a Hong Kong or Macau place within that strip can then be
-  read as the mainland position sharing its coordinate. The RideShared and
-  navigation tests pin these cases near Luohu and Lok Ma Chau.
+  Some cases stay wrong. A Hong Kong or Macau place in the strip with no
+  usable reference, such as a searched start or a favorite synced to the
+  Watch, takes the mainland reading. A searched mainland start takes the
+  other reading if the rider happens to stand at that reading, within about
+  240 m of it near Shenzhen. A route crossing the border is misread until it
+  leaves the strip. The RideShared and navigation tests pin these cases near
+  Luohu, Lok Ma Chau and Shenzhen Railway Station.
 
 Inside a mainland-China topography overlay, every pixel uses GCJ-02, because
 `MainlandChinaRegion.coverage` admits only selections wholly inside the

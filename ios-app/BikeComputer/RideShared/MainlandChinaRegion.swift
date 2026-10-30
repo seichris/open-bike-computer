@@ -219,42 +219,80 @@ nonisolated enum GCJ02 {
     /// The WGS-84 position for an Apple Maps coordinate. Near a mainland
     /// border GCJ-02 moves mainland positions a few hundred metres, onto
     /// coordinates that positions across the border keep unchanged, so such a
-    /// coordinate has two readings. The one nearer `reference`, a known
-    /// WGS-84 position such as the rider's latest fix or a route's start,
-    /// wins; without a reference the mainland reading does. A position
-    /// converted near its reference, and every mainland position, therefore
-    /// round-trips.
+    /// coordinate has two readings, one on each side. The mainland reading
+    /// wins unless `reference`, a known WGS-84 position, lies at the other
+    /// one: a GPS fix converted to Apple Maps and back therefore returns
+    /// exactly, while a reference elsewhere, such as a rider far from a
+    /// searched place, changes nothing.
     static func wgs84(
         fromMapKit latitude: Double,
         longitude: Double,
         near reference: (latitude: Double, longitude: Double)? = nil
     ) -> (latitude: Double, longitude: Double) {
+        switch readings(fromMapKit: latitude, longitude: longitude) {
+        case .one(let reading):
+            return reading
+        case .two(let mainland, let outside):
+            // A reference within 40% of the gap between the readings is
+            // clearly at the outside one, never at the mainland one.
+            guard let reference,
+                  meters(reference, outside) < 0.4 * meters(mainland, outside) else {
+                return mainland
+            }
+            return outside
+        }
+    }
+
+    /// The reading of an Apple Maps coordinate on one side of a mainland
+    /// border, where it has one there, as when a route stays on its side.
+    static func wgs84(
+        fromMapKit latitude: Double,
+        longitude: Double,
+        inMainland: Bool
+    ) -> (latitude: Double, longitude: Double) {
+        switch readings(fromMapKit: latitude, longitude: longitude) {
+        case .one(let reading):
+            return reading
+        case .two(let mainland, let outside):
+            return inMainland ? mainland : outside
+        }
+    }
+
+    private enum Readings {
+        case one((latitude: Double, longitude: Double))
+        case two(
+            mainland: (latitude: Double, longitude: Double),
+            outside: (latitude: Double, longitude: Double)
+        )
+    }
+
+    private static func readings(fromMapKit latitude: Double, longitude: Double) -> Readings {
+        let unchanged = (latitude: latitude, longitude: longitude)
         // GCJ-02 offsets stay below 0.02 degrees, so nothing farther from the
         // region can have its preimage inside it.
         guard MainlandChinaRegion.boundsContain(latitude: latitude, longitude: longitude, margin: 0.05) else {
-            return (latitude, longitude)
+            return .one(unchanged)
         }
         let preimage = toWGS84(latitude: latitude, longitude: longitude)
         guard MainlandChinaRegion.contains(latitude: preimage.latitude, longitude: preimage.longitude) else {
-            return (latitude, longitude)
+            return .one(unchanged)
         }
-        guard let reference,
-              !MainlandChinaRegion.contains(latitude: latitude, longitude: longitude) else {
-            return preimage
+        guard !MainlandChinaRegion.contains(latitude: latitude, longitude: longitude) else {
+            return .one(preimage)
         }
-        let unchanged = (latitude: latitude, longitude: longitude)
-        return squaredDistance(preimage, reference) <= squaredDistance(unchanged, reference)
-            ? preimage : unchanged
+        return .two(mainland: preimage, outside: unchanged)
     }
 
-    private static func squaredDistance(
+    /// Metres between nearby positions; GCJ-02 readings are under 1 km apart.
+    private static func meters(
         _ a: (latitude: Double, longitude: Double),
         _ b: (latitude: Double, longitude: Double)
     ) -> Double {
-        let longitudeScale = cos(b.latitude * .pi / 180)
-        let latitudeDelta = a.latitude - b.latitude
-        let longitudeDelta = (a.longitude - b.longitude) * longitudeScale
-        return latitudeDelta * latitudeDelta + longitudeDelta * longitudeDelta
+        let metersPerDegree = 111_320.0
+        let latitudeDelta = (a.latitude - b.latitude) * metersPerDegree
+        let longitudeDelta = (a.longitude - b.longitude) * metersPerDegree *
+            cos(b.latitude * .pi / 180)
+        return (latitudeDelta * latitudeDelta + longitudeDelta * longitudeDelta).squareRoot()
     }
 
     /// GCJ-02 for any WGS-84 position, without checking the region. Only

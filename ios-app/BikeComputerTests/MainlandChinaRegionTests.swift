@@ -92,28 +92,62 @@ extension RideSharedTests {
                 to: lanzhou) < 0.5,
             "A reference never changes an unambiguous coordinate")
 
-        // Route geometry is read in order, each point near the one before it.
-        // Heading south-east, the way GCJ-02 shifts, a Hong Kong route keeps
-        // to Hong Kong even where its points are far from the start.
-        let hongKongRoute = (0...30).map {
-            RouteCoordinateV1(latitude: 22.5143 - Double($0) * 0.0003, longitude: 114.0657 + Double($0) * 0.0003)
+        // A reference elsewhere says nothing: a searched start beside Shenzhen
+        // Railway Station keeps its mainland reading wherever the rider is.
+        let station = RouteCoordinateV1(latitude: 22.5318, longitude: 114.1175)
+        let stationMapKit = RouteCoordinateNormalizationV1.wgs84ToMapKit(station)
+        let farRiders = stride(from: 0.0, to: 360, by: 45).map { bearing -> RouteCoordinateV1 in
+            let radians = bearing * .pi / 180
+            return RouteCoordinateV1(latitude: station.latitude + 5_000 * cos(radians) / 111_320,
+                longitude: station.longitude + 5_000 * sin(radians) / (111_320 * cos(station.latitude * .pi / 180)))
+        }
+        require(!RouteCoordinateNormalizationV1.isInMainlandChina(stationMapKit) &&
+            ([station] + farRiders).allSatisfy {
+                NavigationGeometryV1.distance(
+                    from: RouteCoordinateNormalizationV1.mapKitToWGS84(stationMapKit, near: $0), to: station) < 0.5
+            },
+            "A reference that is not at the other reading never moves a mainland start across the border")
+
+        // Route geometry is read in order and keeps the side of the point
+        // before it. This Hong Kong route runs along the border inside the
+        // strip where both readings exist, far beyond its start.
+        let hongKongRoute = (0..<25).map {
+            RouteCoordinateV1(latitude: 22.502 + Double($0) * 0.0002, longitude: 114.049 + Double($0) * 0.0004)
         }
         let shenzhenRoute = (0...30).map {
             RouteCoordinateV1(latitude: 22.5320 + Double($0) * 0.0002, longitude: 114.1180 + Double($0) * 0.0003)
         }
         let shenzhenMapKit = shenzhenRoute.map(RouteCoordinateNormalizationV1.wgs84ToMapKit)
         require(hongKongRoute.allSatisfy { !RouteCoordinateNormalizationV1.isInMainlandChina($0) } &&
-            hongKongRoute.contains {
-                RouteCoordinateNormalizationV1.isInMainlandChina(RouteCoordinateNormalizationV1.mapKitToWGS84($0))
-            } &&
+            hongKongRoute.filter {
+                RouteCoordinateNormalizationV1.isInMainlandChina(RouteCoordinateNormalizationV1.mapKitToWGS84($0)) &&
+                    NavigationGeometryV1.distance(from: $0, to: hongKongRoute[0]) > 400
+            }.count > 10 &&
             shenzhenRoute.allSatisfy(RouteCoordinateNormalizationV1.isInMainlandChina) &&
             shenzhenMapKit.contains { !RouteCoordinateNormalizationV1.isInMainlandChina($0) },
             "Both routes pass coordinates shared across the border")
-        require(RouteCoordinateNormalizationV1.mapKitToWGS84(hongKongRoute, startingNear: lokMaChau) == hongKongRoute,
-            "A Hong Kong route read from its start stays in Hong Kong")
+        require(RouteCoordinateNormalizationV1.mapKitToWGS84(hongKongRoute, startingNear: hongKongRoute[0]) == hongKongRoute &&
+            hongKongRoute.map { RouteCoordinateNormalizationV1.mapKitToWGS84($0, near: hongKongRoute[0]) } != hongKongRoute,
+            "A Hong Kong route along the border stays in Hong Kong, which its start alone cannot settle")
         require(zip(RouteCoordinateNormalizationV1.mapKitToWGS84(shenzhenMapKit, startingNear: luohu), shenzhenRoute)
             .allSatisfy { NavigationGeometryV1.distance(from: $0.0, to: $0.1) < 0.5 },
             "A Shenzhen route along the border read from its start stays in Shenzhen")
+        // Keeping sides does not depend on how far apart the points are.
+        let westbound = (0..<4).map {
+            RouteCoordinateV1(latitude: 22.5300,
+                longitude: 114.0830 - Double($0) * 400 / (111_320 * cos(22.53 * .pi / 180)))
+        }
+        let sparseHongKong = (0..<5).map {
+            RouteCoordinateV1(latitude: 22.502 + Double($0) * 0.0008, longitude: 114.049 + Double($0) * 0.0016)
+        }
+        require(westbound.contains {
+                !RouteCoordinateNormalizationV1.isInMainlandChina(RouteCoordinateNormalizationV1.wgs84ToMapKit($0))
+            } &&
+            zip(RouteCoordinateNormalizationV1.mapKitToWGS84(
+                    westbound.map(RouteCoordinateNormalizationV1.wgs84ToMapKit), startingNear: westbound[0]), westbound)
+                .allSatisfy { NavigationGeometryV1.distance(from: $0.0, to: $0.1) < 0.5 } &&
+            RouteCoordinateNormalizationV1.mapKitToWGS84(sparseHongKong, startingNear: sparseHongKong[0]) == sparseHongKong,
+            "Routes with points 400 m apart keep their side of the border")
 
         require(MainlandChinaRegion.coverage(south: 36.0, west: 103.7, north: 36.1, east: 103.9) == .all,
             "A Lanzhou selection lies wholly in the region")
