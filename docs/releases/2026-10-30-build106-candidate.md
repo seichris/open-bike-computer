@@ -1,9 +1,11 @@
 # Build 106 candidate and remaining acceptance
 
-Status: **release authorized** on 2026-10-30 as tag `v0.3.4-release.14` on
+Status: **published** on 2026-10-30 at 13:17 UTC as tag `v0.3.4-release.14` on
 `1c70b556`.
 
 - The 1.75 gates passed on the exact candidate.
+- On the 1.75, the release installed over the air into app1, and a forced rollback
+  also passed; see "After publication".
 - The 2.06 gates were not run. The maintainer accepted that residual risk; see
   "Decisions recorded".
 
@@ -190,15 +192,58 @@ only, and the 2.06 still needs the candidate's own acceptance.
 
 ## After publication
 
-- [ ] OTA into app1 (`0x410000`) and back, with boot confirmation and forced
-  rollback, on both boards and both app families. Use an app build that contains
-  #662. The exports above came from app 1.11 (33), and bundles do not record the
-  app's commit, so confirm that build before using it for OTA.
-- [ ] A legacy dual 3 MiB device receives the release over the legacy channel.
-- [ ] `/api/firmware/identities` lists the release's four records, and the update
+Publication (2026-10-30):
+
+- Firmware Release Candidate run 41058468421 passed.
+- The publish job was approved in GitHub, and Firmware Release run 41060936843
+  finished at 13:17 UTC.
+- The GitHub release is immutable, with 24 assets, and
+  `tools/verify_github_release_assets.py --require-immutable` passed.
+- Published OTA images, which are CI's build of `1c70b556`:
+
+  | Board | Image | SHA-256 | Size (bytes) |
+  | --- | --- | --- | --- |
+  | 1.75 | `WAVESHARE_AMOLED_175.bin` | `ebc85e6f…` | 3,014,224 |
+  | 2.06 | `WAVESHARE_AMOLED_206.bin` | `48361a36…` | 3,007,728 |
+
+  These differ byte-for-byte from the local build of the same commit tested
+  above.
+- All four Pages channel manifests serve build 106 and are byte-identical to the
+  release's signed manifests: both boards, on both the legacy and the `dual4m`
+  channels. The `dual4m` channel did not exist before this release.
+
+- [x] `/api/firmware/identities` lists the release's four records, and the update
   page shows no "records rejected" notice.
-- [ ] Send the release SHA and build to the map platform so non-durable
-  direct-job maps can be approved for build 106. Durable maps are unaffected.
+- [x] The release SHA and build reached the map platform. Production selected the
+  build-106 approval `msr-20261030-firmware-build106` (#694, #695) at 13:52 UTC.
+  Durable maps are unaffected.
+- [x] OTA on the 1.75, with app 1.11 (33):
+  - Setup: the board ran a local build of main `3eea2c8e` in app0. Its firmware
+    inputs are identical to the release; only the commit differs. The app
+    offered the published build as a developer same-build install. It does not
+    reinstall an identical identity, and the build-number check is the only step
+    the developer flag bypasses. The update itself ran in build 106's updater
+    code.
+  - Install into app1 with confirmation:
+    - The trial boot 678 (`resetReason` 3, ready, `otaState` valid) passed
+      `verify_firmware_boot_acceptance.py --ota`.
+    - App1 (`0x410000`) matches the published `WAVESHARE_AMOLED_175.bin` by
+      on-device digest.
+    - Otadata shows app1 `VALID`, and app0 still held main's build.
+  - Forced rollback:
+    - After main was reflashed, a second install was interrupted by removing USB
+      power during the trial boot. The board had no battery.
+    - Otadata then showed app1 `ABORTED`, and the board booted main from app0.
+    - A third install confirmed again: app1 `VALID`, digest matched. The board is
+      left on the published release in app1.
+- [ ] OTA still open:
+  - back into app0, which needs a higher published build (release 107);
+  - the 2.06 (waived);
+  - an app that contains #662. App 1.11 (33) predates #662: it has no "OTA Slot"
+    row and fetched the legacy-channel manifest. Its `dual4m` channel choice
+    is therefore untested.
+  - the Bicino Dev app family.
+- [ ] A legacy dual 3 MiB device receives the release over the legacy channel.
 - [ ] Migration gates 1, 2 and 6 with the release's exact bytes, with read-only
   website inspections before and after; then the catalog admission PR.
 
