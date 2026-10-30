@@ -367,6 +367,20 @@ def _record_line_clip_without_length(diagnostics, result):
     by_result[code] = by_result.get(code, 0) + 1
 
 
+def merge_geometry_diagnostics(target, source):
+    """Add the counts of one diagnostics mapping into another.
+
+    Counters are integers and the ``...ByResult`` breakdowns are mappings of
+    integers, so a block clipped on a worker thread can count into a mapping
+    of its own that is folded into the shared one afterwards.
+    """
+    for key, value in source.items():
+        if isinstance(value, dict):
+            merge_geometry_diagnostics(target.setdefault(key, {}), value)
+        else:
+            target[key] = target.get(key, 0) + value
+
+
 def clip_lines( features, bbox: Polygon, label_diagnostics=None, geometry_diagnostics=None): #TODO remove feats that are fully contained, return remaining
     """ Clip lines to the box area. Each line can be splitted into one or several lines.
         Returns a list of LineStrings. A line that keeps no drawable part in

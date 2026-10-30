@@ -6,6 +6,7 @@ from funcs import (
     clip_polygons,
     lat2y,
     lon2x,
+    merge_geometry_diagnostics,
     process_features,
     render_map,
     style_features,
@@ -44,7 +45,7 @@ from itertools import product
 from shapely import box
 from shapely.geometry import shape
 import argparse, hashlib, json, yaml
-import os, sys, time
+import os, sys, threading, time
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -428,6 +429,10 @@ building_block_cache_entries = {}
 building_cache_report = None
 building_cache_lookup_seconds = 0.0
 building_cache_generation_seconds = 0.0
+# Clip diagnostics are shared by the building cache generation below and the
+# block loop; cache workers fold their counts in under the lock.
+geometry_diagnostics = {}
+geometry_diagnostics_lock = threading.Lock()
 if includes_buildings:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
@@ -665,12 +670,18 @@ if includes_buildings:
                 min_x, min_y = position
 
                 def build_section():
+                    block_diagnostics = {}
                     records, block_stats = clip_buildings(
                         buildings,
                         box(min_x, min_y, min_x + 4096, min_y + 4096),
                         min_x,
                         min_y,
+                        geometry_diagnostics=block_diagnostics,
                     )
+                    with geometry_diagnostics_lock:
+                        merge_geometry_diagnostics(
+                            geometry_diagnostics, block_diagnostics
+                        )
                     section, section_metadata = encode_building_section(records)
                     if (
                         section_metadata["buildings"] != block_stats["recordCount"]
@@ -746,7 +757,6 @@ if includes_buildings:
 # extract relevant features
 print("Extracting features")
 label_diagnostics = {}
-geometry_diagnostics = {}
 normalization_started = time.perf_counter()
 lines = process_features(
     selected_features(lines['features']),
@@ -864,7 +874,11 @@ for init_x, init_y in progress.track(block_positions):
                 building_block_stats = cached_building_block.stats
             else:
                 clipped_buildings, building_block_stats = clip_buildings(
-                    buildings, building_block_bbox, min_x, min_y
+                    buildings,
+                    building_block_bbox,
+                    min_x,
+                    min_y,
+                    geometry_diagnostics=geometry_diagnostics,
                 )
         building_record_count = building_block_stats.get("recordCount", 0)
         poi_block_records = poi_records_by_block.get((min_x, min_y), ())
