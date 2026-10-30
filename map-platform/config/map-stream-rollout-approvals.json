@@ -468,6 +468,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261030-firmware-build106",
+      "candidateGitSha": "1d5b19240fa6741aa1030eb4e2d7de0115862d11",
+      "producerBuildSha256": "97ed61023ed1a989a1399cd36fd0f265be7563ddfd254834fd7b61dddf4da027",
+      "workerImageDigest": "sha256:be7dadc2f444645dca707467d8fb269c3600f18a30f4dd7d82e43475e767c427",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "a070178e3e1bc12b3a1b806a432950542909a72505f185b16ac8eb1fdbcf44ab",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T13:27:11Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 instruction to coordinate with the 'Dual 4 MiB OTA slots implementation' session for merging and deploying; firmware identity handed off by that session after it published v0.3.4-release.14; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
