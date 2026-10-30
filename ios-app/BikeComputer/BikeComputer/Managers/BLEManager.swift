@@ -1538,6 +1538,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
+    private var isPhoneNavigationActive = false
     private var lastConnectedPeripheralIdentifier: UUID?
     
     // MARK: - Reconnection with Exponential Backoff (Optimization #14)
@@ -2930,6 +2931,16 @@ class BLEManager: NSObject, ObservableObject {
         log("Disconnecting from peripheral")
     }
 
+    /// Phone navigation needs the single Bicino link. Starting it after this
+    /// phone yielded to a Watch-direct ride asks that ride to hand the link
+    /// back; the yield stays until the Watch's exact release arrives.
+    func setPhoneNavigationActive(_ active: Bool) {
+        guard isPhoneNavigationActive != active else { return }
+        isPhoneNavigationActive = active
+        guard active else { return }
+        _ = requestWatchDirectRideReconciliation(forExplicitDiscovery: false)
+    }
+
     func handleWatchDirectRidePreparationRequest(
         _ request: WatchDirectRidePreparationRequestV1,
         phoneNavigationActive: Bool
@@ -3156,10 +3167,14 @@ class BLEManager: NSObject, ObservableObject {
               let preparationID = watchDirectRidePreparationID else {
             return false
         }
+        // Whatever prompted the request, active phone navigation needs the
+        // link back now rather than when the Watch ride ends.
         guard let request = try?
                 WatchDirectRideReconciliationRequestV1(
                     preparationID: preparationID,
-                    deviceID: deviceID
+                    deviceID: deviceID,
+                    purpose: isPhoneNavigationActive
+                        ? .phoneNavigation : .releaseWhenIdle
                 ) else {
             pairingStatusMessage = nil
             pairingError =
@@ -3195,11 +3210,20 @@ class BLEManager: NSObject, ObservableObject {
                     )
                 }
         }
-        log(
-            forExplicitDiscovery
-                ? "Requested Apple Watch direct ride reconciliation for discovery"
-                : "Requested Apple Watch direct ride reconciliation on foreground"
-        )
+        if request.purpose == .phoneNavigation {
+            log("Requested Apple Watch direct ride handback for iPhone navigation")
+            diagnosticsRecorder?.record(
+                category: .ble,
+                event: "watch_direct_handback_requested",
+                fields: ["reason": "phone_navigation"]
+            )
+        } else {
+            log(
+                forExplicitDiscovery
+                    ? "Requested Apple Watch direct ride reconciliation for discovery"
+                    : "Requested Apple Watch direct ride reconciliation on foreground"
+            )
+        }
         return true
     }
 

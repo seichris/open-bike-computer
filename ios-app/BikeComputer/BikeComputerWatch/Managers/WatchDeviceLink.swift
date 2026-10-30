@@ -166,6 +166,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         WatchDirectRideReconciliationRequestV1?
     private let pendingPhonePreparationReconciliationKey =
         "watchBLE.pendingPhonePreparationReconciliation.v1"
+    // Set after this Watch handed the link back to iPhone navigation. Demand
+    // and preparation retries continue, but the Watch does not scan or connect
+    // until the phone accepts a preparation or stops answering; otherwise it
+    // would race the phone for the advertising Bicino.
+    private var deferringToPhoneNavigation = false
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -237,6 +242,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         guard previousDeviceID != incoming.deviceID else { return }
 
         releasePhonePreparationIfNeeded()
+        deferringToPhoneNavigation = false
 
         let canRetainReadySession = transportStateMachine.isReady &&
             credential?.deviceID == incoming.deviceID
@@ -357,6 +363,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private func reconcileDemand() {
         guard !gracefulStopPending else { return }
         guard hasDemand else {
+            deferringToPhoneNavigation = false
             stop()
             return
         }
@@ -382,10 +389,24 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationAttempt = 0
             phonePreparationRetryTask?.cancel()
             phonePreparationRetryTask = nil
+            if deferringToPhoneNavigation {
+                // Phone navigation ended and the phone yielded the Bicino.
+                deferringToPhoneNavigation = false
+                if state == .busy { state = .idle }
+                beginIfNeeded()
+            }
             return
         }
         phonePreparationAccepted = false
-        guard !transportStateMachine.isReady else { return }
+        guard !transportStateMachine.isReady else {
+            // This ride won the single link while iPhone navigation was
+            // active, for example during a phone reconnect. Give it back; the
+            // phone relays the Watch workout while it navigates.
+            if response.errorCode == "phone_navigation_active" {
+                deferToPhoneNavigation()
+            }
+            return
+        }
         let message: String
         switch response.errorCode {
         case "phone_navigation_active":
@@ -420,6 +441,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         phonePreparationResponseTimeoutTask = nil
         phonePreparationSubmissionOutstanding = false
         phonePreparationAccepted = false
+        // Only an answering phone keeps the Watch deferred to its navigation.
+        deferringToPhoneNavigation = false
         schedulePhonePreparationRetry()
     }
 
@@ -623,6 +646,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             state = .bluetoothUnavailable
             return
         }
+        guard !deferringToPhoneNavigation else {
+            // The phone's answer to the retried preparation, not a scan,
+            // decides when this ride may take the Bicino back.
+            lastError = "Bicino is controlled by iPhone navigation"
+            state = .busy
+            return
+        }
         if connectRetrievedPeripheral() { return }
         startScan()
     }
@@ -703,6 +733,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .transportUnavailable, .activationPending,
                 .counterpartUnreachable, .encodingFailed:
             phonePreparationSubmissionOutstanding = false
+            deferringToPhoneNavigation = false
             schedulePhonePreparationRetry()
         }
     }
@@ -761,12 +792,28 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             return
         }
+        if request.purpose == .phoneNavigation, hasDemand {
+            deferToPhoneNavigation()
+            return
+        }
         guard !hasDemand else { return }
         if transportStateMachine.phase == .idle {
             _ = releasePhonePreparationIfNeeded()
         } else {
             reconcileDemand()
         }
+    }
+
+    /// Returns the single Bicino link to iPhone navigation without ending the
+    /// ride. Stopping releases the exact current handoff, so the phone
+    /// reconnects and relays the workout. Retained demand then asks for a
+    /// successor preparation, which the phone rejects until navigation ends.
+    private func deferToPhoneNavigation() {
+        deferringToPhoneNavigation = true
+        // A shutdown already in progress reconciles demand when it finishes.
+        guard !gracefulStopPending else { return }
+        stop()
+        if !gracefulStopPending, hasDemand { reconcileDemand() }
     }
 
     private func clearPendingPhonePreparationReconciliation(
@@ -856,6 +903,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         resetTransport(keepingPeripheral: false)
         credentials = []
         releasePhonePreparationIfNeeded()
+        deferringToPhoneNavigation = false
         state = .failed(message)
     }
 
@@ -874,6 +922,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         credential: WatchControllerCredentialV1
     ) {
         guard hasDemand, !phonePreparationReleasePending,
+              !deferringToPhoneNavigation,
               transportStateMachine.phase == .idle else { return }
         central.stopScan()
         resetTransport(keepingPeripheral: false)
@@ -993,7 +1042,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         // No subsequent navigation location callback is needed to make progress.
         // An old release remains persisted until the existing WC/outbox path
         // admits it. Only then may the successor persist a fresh preparation.
-        if hasDemand { reconcileDemand() }
+        if hasDemand {
+            reconcileDemand()
+        } else {
+            deferringToPhoneNavigation = false
+        }
     }
 
     private func releaseStoppingPhonePreparation() {

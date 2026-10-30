@@ -299,6 +299,19 @@ cancel a newer preparation. This coordination does not grant write authority:
 the authenticated firmware lease remains final. A persisted iPhone yield
 expires after 24 hours if its release never arrives.
 
+iPhone navigation that starts after the phone yielded must not stay invisible.
+iPhone queues a phone-to-Watch reconciliation request with purpose
+`phoneNavigation` for the exact yielded DeviceID and preparation ID, durably and
+interactively. Watch keeps its ride demand, drains admitted groups, releases its
+lease, disconnects and releases that preparation, so iPhone reconnects, relays
+the Watch workout and sends navigation. Watch then requests a fresh preparation,
+which iPhone rejects while it navigates, and neither scans nor connects until
+iPhone accepts a later preparation or the request cannot be delivered. A Watch
+ride that wins the link while iPhone navigation is active, for example during a
+phone reconnect, returns it the same way after its next
+`phone_navigation_active` rejection. A request without a purpose, and every
+request seen by an earlier Watch build, keeps the release-when-idle meaning.
+
 ### Application-confirmed critical ride delivery
 
 Client version `20` requests capability bit `22` (`0x00400000`). When that bit

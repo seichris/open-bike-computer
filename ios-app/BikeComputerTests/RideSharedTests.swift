@@ -1659,6 +1659,51 @@ enum RideSharedTests {
                 reconciliationRequest.deviceID == deviceID,
             "phone reconciliation binds the exact normalized Watch handoff"
         )
+        try expect(
+            reconciliationRequest.purpose == .releaseWhenIdle,
+            "reconciliation defaults to releasing an idle Watch ride"
+        )
+        let handbackRequest = try WatchDirectRideReconciliationRequestV1(
+            preparationID: preparationRequest.preparationID,
+            deviceID: deviceID,
+            purpose: .phoneNavigation
+        )
+        try expect(
+            try WatchDirectRideReconciliationRequestV1.decode(
+                handbackRequest.encoded()
+            ) == handbackRequest,
+            "phone navigation handback survives the Watch transfer"
+        )
+        // Requests queued by earlier iPhone builds carry no purpose.
+        var legacyRequest = try PropertyListSerialization.propertyList(
+            from: reconciliationRequest.encoded(),
+            format: nil
+        ) as! [String: Any]
+        legacyRequest.removeValue(forKey: "purpose")
+        let legacyPayload = try PropertyListSerialization.data(
+            fromPropertyList: legacyRequest,
+            format: .binary,
+            options: 0
+        )
+        try expect(
+            try WatchDirectRideReconciliationRequestV1.decode(
+                legacyPayload
+            ) == reconciliationRequest,
+            "a purpose-less request keeps its idle-release meaning"
+        )
+        var unknownPurposeRequest = legacyRequest
+        unknownPurposeRequest["purpose"] = "futurePurpose"
+        let unknownPurposePayload = try PropertyListSerialization.data(
+            fromPropertyList: unknownPurposeRequest,
+            format: .binary,
+            options: 0
+        )
+        try expect(
+            (try? WatchDirectRideReconciliationRequestV1.decode(
+                unknownPurposePayload
+            )) == nil,
+            "an unknown purpose is rejected instead of guessed"
+        )
         let preparationIntent = try WatchDirectRidePreparationIntentV1(
             preparationID: preparationRequest.preparationID,
             operation: .prepare,
