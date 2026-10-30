@@ -1234,6 +1234,75 @@ extension NavigationProtocolTests {
                manager.supportsRouteElevation,
                "combined capabilities enable every independent feature")
 
+        // Board display metadata is extended bit 4 plus its own TLV type 4.
+        // E-paper still reads target-3 building maps (bits 8 and 12) but has
+        // no continuous camera, so 3D and perspective controls stay hidden.
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0x11, 0, 0])
+        let epaperFeature = Data([3, 4, 0x10, 0, 0, 0])
+        let epaperMetadata = Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
+        let epaperCapabilities = epaperHeader + epaperFeature + epaperMetadata
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
+               "e-paper metadata is consumed")
+        assert(manager.hasReceivedDeviceCapabilities && manager.isEPaperDevice,
+               "valid monochrome metadata identifies e-paper")
+        assertEqual(manager.displayMetadata?.width, 480, "portrait width")
+        assertEqual(manager.displayMetadata?.height, 800, "portrait height")
+        assert(!manager.supportsDisplayBrightness && !manager.supportsTapToCycle &&
+               !manager.supportsContinuousCamera && !manager.supportsDisconnectedSleep,
+               "unsupported e-paper settings stay hidden")
+        assert(manager.supports3DBuildings && !manager.supportsBirdsEyeMapNavigation,
+               "the target-3 building reader never implies a 3D navigation view")
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities + Data([90, 2, 1, 2])),
+               "future unknown TLVs are consumed")
+        assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
+        let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0x11, 0, 4])
+        let tlvOrders: [Data] = [
+            screenMetadata + epaperFeature + epaperMetadata,
+            epaperMetadata + screenMetadata + epaperFeature,
+            epaperFeature + epaperMetadata + screenMetadata,
+        ]
+        for records in tlvOrders {
+            assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + records),
+                   "screen configuration and e-paper metadata coexist in any TLV order")
+            assert(manager.hasReceivedDeviceCapabilities && manager.supportsScreenConfiguration &&
+                   manager.isEPaperDevice && !manager.supportsContinuousCamera,
+                   "screen capabilities retain the independent display restrictions")
+        }
+        // Small typed parts keep the Swift type checker linear.
+        let displayPrefix: Data = epaperHeader + epaperFeature
+        // Retired experimental encoding: bit 31 is terrain and TLV 3 is the extended word.
+        let retiredEncoding: Data = Data("CAP2".utf8) +
+            Data([1, 0, 0, 0, 0x80, 3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let wrongVersion: Data = displayPrefix +
+            Data([4, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let zeroWidth: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0, 0, 0x20, 3, 0] as [UInt8])
+        let brightness: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1] as [UInt8])
+        let recordWithoutFeature: Data = cap2 + epaperMetadata
+        let truncated = Data(epaperCapabilities.dropLast())
+        let duplicate: Data = epaperCapabilities + epaperMetadata
+        let malformedDisplays: [Data] = [
+            retiredEncoding,
+            displayPrefix, // Feature requires its record.
+            recordWithoutFeature,
+            truncated,
+            duplicate,
+            wrongVersion,
+            zeroWidth,
+            brightness,
+        ]
+        for packet in malformedDisplays {
+            assert(manager.handleDeviceCapabilitiesNotification(packet), "bad display record is consumed")
+            assert(!manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil,
+                   "bad display record resets negotiation for retry")
+        }
+        assert(manager.handleDeviceCapabilitiesNotification(cap2), "legacy CAP2 remains supported")
+        assert(manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil &&
+               manager.supportsDisplayBrightness && manager.supportsTapToCycle,
+               "old AMOLED metadata retains its existing controls")
+
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2WithScopedWatch),

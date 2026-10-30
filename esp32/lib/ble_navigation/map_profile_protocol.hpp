@@ -95,10 +95,20 @@ constexpr uint32_t VISIBILITY_LEGACY_FEATURE_MASK = 0xFF;
 constexpr uint32_t VISIBILITY_EXTENDED_FEATURE_MASK =
     VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_SERVICE_ROADS |
     VISIBILITY_TRACKS | VISIBILITY_POI_MASK;
+#ifdef WAVESHARE_EPAPER_397
+// A one-bit threshold turns index contours into road-like strokes, drops minor
+// contours and terrain shading, and terrain height mode hides the route. The
+// board reads maps carrying these layers but never draws them.
+constexpr uint32_t BOARD_UNDRAWN_VISIBILITY =
+    VISIBILITY_CONTOURS | TERRAIN_EXPERIMENT_MASK | VISIBILITY_POI_MASK;
+#else
+constexpr uint32_t BOARD_UNDRAWN_VISIBILITY = 0;
+#endif
 constexpr uint32_t VISIBILITY_RENDER_FEATURE_MASK =
-    (VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK) |
-    VISIBILITY_CONTOURS | VISIBILITY_TERRAIN |
-    (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U);
+    ((VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK) |
+     VISIBILITY_CONTOURS | VISIBILITY_TERRAIN |
+     (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U)) &
+    ~BOARD_UNDRAWN_VISIBILITY;
 constexpr uint32_t MAP_DEFAULT_VISIBILITY_MASK =
     VISIBILITY_EXTENDED_FEATURE_MASK &
     ~(POIS_RUNTIME_ENABLED ? 0U : VISIBILITY_POI_MASK);
@@ -154,7 +164,7 @@ inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
     if ((normalized & VISIBILITY_PATHS) != 0)
       normalized |= VISIBILITY_TRACKS;
   }
-  return normalized;
+  return normalized & ~BOARD_UNDRAWN_VISIBILITY;
 }
 
 inline uint32_t visibilityMaskForMapVersion(uint32_t mask,

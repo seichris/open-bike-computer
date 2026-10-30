@@ -25,6 +25,11 @@ public:
     }
   }
 
+  void displayGenerationCompleted(uint32_t generation) {
+    if (generation != 0 && generation == pendingGeneration_)
+      renderedGeneration_ = generation;
+  }
+
   uint32_t renderedGeneration() const { return renderedGeneration_; }
 
   bool consumeRendered(uint32_t pairingGeneration) {

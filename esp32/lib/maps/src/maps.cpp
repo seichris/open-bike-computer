@@ -27,6 +27,9 @@
 #include "../../ble_navigation/ble_navigation.hpp"
 #include "../../gui/src/guiLayout.hpp"
 #include "../../gui/src/navigationContentMode.hpp"
+#ifdef WAVESHARE_EPAPER_397
+#include "../../gui/src/epaperNavigationPolicy.hpp"
+#endif
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../renderer_diagnostics/renderer_diagnostics.hpp"
@@ -796,6 +799,15 @@ static void drawCurrentPositionMarker(lv_event_t *event) {
   const int16_t size = lv_obj_get_width(marker);
   const lv_color_t color =
       lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
+#ifdef WAVESHARE_EPAPER_397
+  // A white backing keeps the black marker distinguishable over black roads.
+  lv_draw_rect_dsc_t backing;
+  lv_draw_rect_dsc_init(&backing);
+  backing.bg_color = lv_color_white();
+  backing.bg_opa = LV_OPA_COVER;
+  backing.radius = LV_RADIUS_CIRCLE;
+  lv_draw_rect(layer, &backing, &bounds);
+#endif
 
   if (routeOverlay.hasRoute() || hasCurrentNavigationData()) {
     drawNavigationMarker(layer, bounds, size, color,
@@ -960,6 +972,9 @@ Maps::Maps() {}
 #endif
 #ifndef TFT_LIGHTGREY
 #define TFT_LIGHTGREY 0xC618
+#endif
+#if defined(WAVESHARE_EPAPER_397)
+#define BACKGROUND_COLOR 0xFFFF
 #endif
 #ifndef BACKGROUND_COLOR
 #define BACKGROUND_COLOR 0x0000
@@ -1961,7 +1976,12 @@ bool Maps::fillPolygon(
           std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
+#ifdef WAVESHARE_EPAPER_397
+      for (int32_t x = startX; x < endX; ++x)
+        row[x] = ((x + pixelY) % 16 == 0) ? 0x0000 : 0xFFFF;
+#else
       std::fill(row + startX, row + endX, p.color);
+#endif
     }
   }
   return true;
@@ -3068,6 +3088,10 @@ bool Maps::readVectorMap(
       projectedPolygon.points.clear();
       projectedPolygon.points.reserve(projectedGround->size() + 1U);
       projectedPolygon.color = polygon.color;
+#ifdef WAVESHARE_EPAPER_397
+      // Sparse diagonal area hatching is distinct from roads and route weight.
+      projectedPolygon.color = 0xFFFF;
+#endif
       int16_t minX = 32767;
       int16_t minY = 32767;
       int16_t maxX = -32768;
@@ -3102,6 +3126,9 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
+#ifdef WAVESHARE_EPAPER_397
+      projectedPolygon.typeId = polygon.typeId;
+#endif
       return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
@@ -3212,8 +3239,12 @@ bool Maps::readVectorMap(
           !isLineVisible(line.typeId, line.color, line.width, blockStyle)) {
         continue;
       }
+#ifdef WAVESHARE_EPAPER_397
+      const uint16_t displayColor = 0x0000;
+#else
       const uint16_t displayColor = map_line_style::displayColor(
           line.typeId, line.color, line.width, mapNavigationActive);
+#endif
       const uint8_t baseWidth =
           shouldBoostLineWidth(line.typeId, line.width)
               ? blockStyle.streetLineWidth
@@ -4736,6 +4767,14 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
   request.context = captureRenderContextForScreen(
       nowMs, mapVisible, guidanceScreenActive);
+#ifdef WAVESHARE_EPAPER_397
+  const BLEDebugStats epaperBle = bleNavServer.getDebugStats();
+  request.capturedFixSequence = epaperBle.gpsPacketCount;
+  request.capturedFixAtMs = epaperBle.lastGpsCapturedAtMs;
+  request.capturedSpeedKmh = gps.gpsData.speed;
+  request.capturedHeadingDegrees = epaperCameraHeadingDegrees_;
+  request.capturedHeadingValid = epaperCameraHeadingValid_;
+#endif
   request.styleSignature = styleSignature(request.context.style);
   request.navigationSignature =
       navigationSignatureForScreen(guidanceScreenActive);
@@ -4804,6 +4843,12 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
 
   request.rotationRad = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
+#ifdef WAVESHARE_EPAPER_397
+    if (epaperCameraHeadingValid_) {
+      request.rotationRad =
+          -epaperCameraHeadingDegrees_ * 3.14159265358979323846 / 180.0;
+    } else
+#endif
     if (hasPresentedPose && presentedPose.headingValid) {
       request.rotationRad =
           -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
@@ -5239,6 +5284,13 @@ void Maps::renderWorkerLoop() {
       result.renderStridePixels = request.renderStridePixels;
       result.rotationRad = request.rotationRad;
       result.followPosition = request.context.followPosition;
+#ifdef WAVESHARE_EPAPER_397
+      result.capturedFixSequence = request.capturedFixSequence;
+      result.capturedFixAtMs = request.capturedFixAtMs;
+      result.capturedSpeedKmh = request.capturedSpeedKmh;
+      result.capturedHeadingDegrees = request.capturedHeadingDegrees;
+      result.capturedHeadingValid = request.capturedHeadingValid;
+#endif
       result.projection = makeRequestProjection(request);
       result.viewport.zoom = request.zoom;
       result.viewport.rasterOriginX = request.center.x;
@@ -5507,6 +5559,12 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     const auto projected = readyRenderResult.projection.projectWorld(current);
     double desiredRotation = readyRenderResult.rotationRad;
     if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
+#ifdef WAVESHARE_EPAPER_397
+      if (epaperCameraHeadingValid_) {
+        desiredRotation = -epaperCameraHeadingDegrees_ *
+                          3.14159265358979323846 / 180.0;
+      } else
+#endif
       desiredRotation =
           -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
     } else if (rotationMode == ROT_NORTH_UP) {
@@ -5516,6 +5574,28 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
         readyRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
         desiredRotation * 180.0 / 3.14159265358979323846) *
         3.14159265358979323846 / 180.0;
+#ifdef WAVESHARE_EPAPER_397
+    const bool stableCropCovered = map_camera::cropCovered(
+        readyRenderResult.renderWidth, readyRenderResult.renderHeight,
+        readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
+        readyRenderResult.overscanPixels, MAP_RENDER_SAFETY_PIXELS,
+        MAP_RENDER_ROUND_VIEWPORT);
+    const double projectedX =
+        projected.x - readyRenderResult.overscanPixels;
+    const double projectedY =
+        projected.y - readyRenderResult.overscanPixels;
+    const bool epaperRiderCovered =
+        projected.valid && projectedX >= MAP_RENDER_SAFETY_PIXELS &&
+        projectedY >= MAP_RENDER_SAFETY_PIXELS &&
+        projectedX < readyRenderResult.viewportWidth -
+                         MAP_RENDER_SAFETY_PIXELS &&
+        projectedY < readyRenderResult.viewportHeight -
+                         MAP_RENDER_SAFETY_PIXELS;
+    const bool covered = map_profile_protocol::STABLE_CAMERA_ENABLED
+                             ? stableCropCovered && epaperRiderCovered
+                             : projected.valid &&
+                                   map_presentation::frameCoversViewport(
+#else
     const bool covered = map_profile_protocol::STABLE_CAMERA_ENABLED
         ? map_camera::cropCovered(
             readyRenderResult.renderWidth, readyRenderResult.renderHeight,
@@ -5523,6 +5603,7 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
             readyRenderResult.overscanPixels, MAP_RENDER_SAFETY_PIXELS,
             MAP_RENDER_ROUND_VIEWPORT)
         : projected.valid && map_presentation::frameCoversViewport(
+#endif
             readyRenderResult.renderWidth, readyRenderResult.renderHeight,
             readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
             {projected.x, projected.y},
@@ -5617,6 +5698,18 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
   visibleRenderResult = result;
   cameraLag.reflected(result.requestedAtMs);
+#ifdef WAVESHARE_EPAPER_397
+  epaperRecoveryPending_ = false;
+  visibleFrameAcceptedAtMs_ = nowMs;
+  framePublication_ = {
+      result.version.sequence,
+      result.capturedFixSequence,
+      result.capturedFixAtMs,
+      result.capturedSpeedKmh,
+      result.capturedHeadingDegrees,
+      result.capturedHeadingValid,
+  };
+#endif
   lastCompletedRenderDurationMs = std::max<uint32_t>(250U, result.durationMs);
   visibleProjection = result.projection;
   hasVisibleProjection = true;
@@ -6001,6 +6094,77 @@ void Maps::serviceStableCamera(uint32_t nowMs) {
   if (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
       !publishedMapFrame || !hasVisibleProjection)
     return;
+#ifdef WAVESHARE_EPAPER_397
+  const EpaperCameraState camera = captureEpaperCameraState();
+  const bool updateRequired =
+      camera.baseCompatible && camera.mapCoverageAvailable &&
+      camera.riderProjected &&
+      (camera.riderOffsetPixels >=
+           epaper_navigation_policy::kMarkerDeadbandPixels ||
+       camera.headingDeltaDegrees >=
+           epaper_navigation_policy::kHeadingThresholdDegrees / 2.0);
+  const epaper_navigation_policy::Visibility state =
+      epaper_navigation_policy::visibility(
+          {camera.hasBase,
+           camera.baseCompatible,
+           camera.mapCoverageAvailable,
+           camera.riderProjected,
+           camera.riderInsideViewport,
+           camera.riderOffsetPixels,
+           camera.headingDeltaDegrees,
+           camera.baseAcceptedAtMs,
+           camera.baseFixSequence,
+           camera.baseCameraSequence,
+           camera.renderRunning,
+           camera.successorPending,
+           camera.latestRequestedFixSequence},
+          updateRequired);
+  const bool hidden =
+      state == epaper_navigation_policy::Visibility::NoBase ||
+      state == epaper_navigation_policy::Visibility::Incompatible ||
+      state == epaper_navigation_policy::Visibility::RiderOutsideCoverage;
+  // Routine camera movement is not an attention state. Keep diagnostic
+  // recentering in telemetry; epaper_ui owns the persistent fault/coverage line.
+  renderer_diagnostics::CameraSample sample;
+  sample.enabled = true;
+  sample.hidden = hidden;
+  sample.updateRequired = updateRequired;
+  sample.frameSequence = visibleRenderResult.version.sequence;
+  sample.sceneGeneration = visibleRenderResult.sceneGeneration;
+  sample.sceneReused = visibleRenderResult.sceneReused;
+  sample.requestedAtMs = visibleRenderResult.requestedAtMs;
+  sample.observedAtMs = nowMs;
+  sample.lagMs = visibleFrameAcceptedAtMs_ == 0
+                     ? 0
+                     : static_cast<uint32_t>(nowMs -
+                                             visibleFrameAcceptedAtMs_);
+  sample.displayedBearingTenths = static_cast<int16_t>(std::lround(
+      visibleRenderResult.rotationRad * 1800 / map_presentation::kPi));
+  const double targetBearing = epaperCameraHeadingValid_
+                                   ? -epaperCameraHeadingDegrees_
+                                   : 0.0;
+  sample.targetBearingTenths = static_cast<int16_t>(std::lround(
+      targetBearing * 10.0));
+  sample.markerAngleTenths = hasPresentedPose && presentedPose.headingValid
+      ? static_cast<uint16_t>(std::lround(map_camera::markerAngle(
+            visibleProjection, {presentedPose.position.x, presentedPose.position.y},
+            presentedPose.headingDegrees) * 10)) % 3600
+      : 0;
+  sample.effectiveTopScalePermille = visibleProjection.isBirdsEye()
+      ? static_cast<uint16_t>(std::lround(visibleProjection.config().topEdgeScale * 1000))
+      : 1000;
+  sample.requestedMode = isMapGuidanceScreenActive()
+      ? mapRenderSettings.mapNavigationRotationMode
+      : mapRenderSettings.mapRotationMode;
+  sample.effectiveMode = visibleRenderResult.effectiveRotationMode;
+  sample.labelDensity = visibleRenderResult.labelDensity;
+  sample.labelOrientation = visibleRenderResult.labelOrientation;
+  renderer_diagnostics::noteCameraForWindow(
+      visibleRenderResult.version.diagnosticsWindowId, sample);
+  cameraEvidence = sample;
+  // Base-render admission is owned exclusively by the 3.97-inch scheduler in
+  // mainScr.cpp. This service only maintains visibility and diagnostics.
+#else
   const bool current = renderResultStillCurrent(visibleRenderResult);
   const auto target = visibleRenderResult.followPosition && hasPresentedPose
       ? map_transform::WorldPoint{presentedPose.position.x, presentedPose.position.y}
@@ -6048,6 +6212,7 @@ void Maps::serviceStableCamera(uint32_t nowMs) {
     if (buildRenderRequest(zoom, nowMs, request) && submitRenderRequest(request))
       lastCameraRequestMs = nowMs;
   }
+#endif
 }
 
 renderer_diagnostics::CameraSample Maps::captureCameraMetadata() const {
@@ -6115,6 +6280,83 @@ bool Maps::takeFramePublication() {
   return pending;
 }
 
+#ifdef WAVESHARE_EPAPER_397
+bool Maps::takeFramePublication(EpaperFramePublication &publication) {
+  const bool pending = framePublicationPending;
+  if (pending)
+    publication = framePublication_;
+  framePublicationPending = false;
+  return pending;
+}
+
+void Maps::setEpaperCameraHeading(double degrees, bool valid) {
+  epaperCameraHeadingDegrees_ =
+      epaper_navigation_policy::normalizeDegrees(degrees);
+  epaperCameraHeadingValid_ = valid;
+}
+
+Maps::EpaperCameraState Maps::captureEpaperCameraState() const {
+  EpaperCameraState state;
+  state.hasBase = publishedMapFrame && hasVisibleProjection;
+  state.baseCompatible =
+      state.hasBase && renderResultStillCurrent(visibleRenderResult);
+  state.mapCoverageAvailable = state.hasBase && publishedMapFound;
+  state.baseAcceptedAtMs = visibleFrameAcceptedAtMs_;
+  if (state.hasBase) {
+    state.baseFixSequence = visibleRenderResult.capturedFixSequence;
+    state.baseCameraSequence = visibleRenderResult.version.sequence;
+  }
+
+  if (state.hasBase && hasPresentedPose) {
+    const map_transform::WorldPoint rider{presentedPose.position.x,
+                                          presentedPose.position.y};
+    const auto projected = visibleProjection.projectWorld(rider);
+    state.riderProjected = projected.valid;
+    if (projected.valid) {
+      const double x = projected.x - visibleRenderResult.overscanPixels;
+      const double y = projected.y - visibleRenderResult.overscanPixels;
+      const double anchorX = visibleProjection.anchorX() -
+                             visibleRenderResult.overscanPixels;
+      const double anchorY = visibleProjection.anchorY() -
+                             visibleRenderResult.overscanPixels;
+      state.riderOffsetPixels = std::hypot(x - anchorX, y - anchorY);
+      state.riderInsideViewport =
+          x >= MAP_RENDER_SAFETY_PIXELS &&
+          y >= MAP_RENDER_SAFETY_PIXELS &&
+          x < visibleRenderResult.viewportWidth - MAP_RENDER_SAFETY_PIXELS &&
+          y < visibleRenderResult.viewportHeight - MAP_RENDER_SAFETY_PIXELS;
+    }
+  }
+  if (state.hasBase && epaperCameraHeadingValid_ &&
+      rotationMode == ROT_COURSE_UP) {
+    const double renderedDegrees =
+        -visibleRenderResult.rotationRad * 180.0 /
+        map_presentation::kPi;
+    state.headingDeltaDegrees =
+        epaper_navigation_policy::headingDeltaDegrees(
+            renderedDegrees, epaperCameraHeadingDegrees_);
+  }
+
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) == pdTRUE) {
+    const map_render_job::State jobState = renderJobs.state();
+    state.renderRunning = jobState == map_render_job::State::Rendering;
+    const uint32_t activeSequence =
+        state.renderRunning ? renderJobs.active().sequence : 0;
+    state.successorPending =
+        state.renderRunning && latestRenderRequestValid &&
+        latestRenderRequest.version.sequence > activeSequence;
+    if (latestRenderRequestValid) {
+      state.latestRequestedFixSequence =
+          latestRenderRequest.capturedFixSequence;
+    }
+    xSemaphoreGive(renderStateMutex);
+  }
+  state.recoveryPending = epaperRecoveryPending_;
+  return state;
+}
+#endif
+
 bool Maps::takeRenderFailure() {
   if (renderStateMutex == nullptr)
     return false;
@@ -6122,6 +6364,10 @@ bool Maps::takeRenderFailure() {
     return false;
   const bool pending = renderFailurePending;
   renderFailurePending = false;
+#ifdef WAVESHARE_EPAPER_397
+  if (pending)
+    epaperRecoveryPending_ = true;
+#endif
   xSemaphoreGive(renderStateMutex);
   return pending;
 }
@@ -7066,6 +7312,11 @@ void Maps::deleteMapScrSprites() {
   lastCameraRequestMs = 0;
   publishedMapFound = false;
   framePublicationPending = false;
+#ifdef WAVESHARE_EPAPER_397
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  epaperRecoveryPending_ = false;
+#endif
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
@@ -7143,6 +7394,11 @@ void Maps::createMapScrSprites() {
   publishedMapFound = false;
   framePublicationPending = false;
   hasVisibleProjection = false;
+#ifdef WAVESHARE_EPAPER_397
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  epaperRecoveryPending_ = false;
+#endif
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   ++projectionEpoch;

@@ -18,7 +18,7 @@
 #include <Arduino_GFX_Library.h>
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "hal.hpp"
 #include "../ble_navigation/ble_navigation.hpp"
 #include "../speaker/speaker.hpp"

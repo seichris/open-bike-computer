@@ -6,7 +6,8 @@
 // zeroes external BSS before C++ constructors, preserving StartupConstructed
 // defaults without a late heap allocation or an internal-memory fallback.
 #if defined(ESP_PLATFORM) && \
-    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || \
+     defined(WAVESHARE_EPAPER_397))
 #include <sdkconfig.h>
 #include <esp_attr.h>
 #if !CONFIG_SPIRAM_BOOT_HW_INIT || !CONFIG_SPIRAM_BOOT_INIT || \

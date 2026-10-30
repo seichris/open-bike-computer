@@ -62,6 +62,7 @@ int main() {
   assert(previousEnabledInstanceIndex(document, 0) == 3);
   assert(previousEnabledInstanceIndex(document, 3) == 2);
   assert(previousEnabledInstanceIndex(document, 2) == 0);
+  assert(previousEnabledInstanceIndex(Document{}, 0) == kInvalidInstanceIndex);
   assert(nextEnabledInstanceOfType(document, 0, ScreenType::Map,
                                    ScreenType::MapNavigation) == 3);
 
@@ -75,6 +76,10 @@ int main() {
   navigation.mapProfile =
       screen_configuration_protocol::defaultMapProfile(ScreenType::MapNavigation);
   const uint32_t courseUpSignature = mapProfileSignature(navigation);
+  const auto retainedProfile = effectiveMapProfile(navigation.mapProfile);
+  assert(retainedProfile.rotationMode == navigation.mapProfile.rotationMode);
+  assert(retainedProfile.birdsEyeEnabled == navigation.mapProfile.birdsEyeEnabled);
+  assert(retainedProfile.buildings3DEnabled == navigation.mapProfile.buildings3DEnabled);
   navigation.mapProfile.rotationMode = 0;
   assert(mapProfileSignature(navigation) != courseUpSignature);
 

@@ -1,7 +1,7 @@
 #include "display_power.hpp"
 #include "display_power_preferences.hpp"
 
-#include "../panel/WAVESHARE_AMOLED_175.hpp"
+#include "../panel/panelSelect.hpp"
 #include "../power_management/power_management.hpp"
 #include "../power_metrics/power_metrics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
@@ -73,6 +73,9 @@ bool DisplayPowerManager::begin() {
 }
 
 bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#endif
   const uint8_t normalized =
       display_power::clampBrightnessPercent(requestedPercent);
   if (!initialized_ && !begin()) {
@@ -111,6 +114,9 @@ bool DisplayPowerManager::requestUserBrightness(int32_t requestedPercent) {
 }
 
 bool DisplayPowerManager::requestAutomaticDisplayOff(bool enabled) {
+#ifdef WAVESHARE_EPAPER_397
+  return !enabled;
+#endif
   if (!initialized_ && !begin()) {
     return false;
   }
@@ -233,6 +239,9 @@ uint8_t DisplayPowerManager::effectiveBrightnessPercent() const {
 }
 
 bool DisplayPowerManager::automaticDisplayOffEnabled() const {
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#endif
   if (!lock()) {
     return display_power::kDefaultAutomaticDisplayOffEnabled;
   }
@@ -253,6 +262,9 @@ DisplayPowerManager::displayInactivityTimeouts() const {
 }
 
 bool DisplayPowerManager::initializePanel() {
+#ifdef WAVESHARE_EPAPER_397
+  return true;
+#else
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Display);
   if (gfx == nullptr) {
@@ -283,9 +295,13 @@ bool DisplayPowerManager::initializePanel() {
   power_metrics::noteDisplayState(power_metrics::DisplayState::On, requested,
                                   effective);
   return false;
+#endif
 }
 
 bool DisplayPowerManager::applyPendingPanelChange() {
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#else
   if (gfx == nullptr || !lock()) {
     return false;
   }
@@ -321,6 +337,7 @@ bool DisplayPowerManager::applyPendingPanelChange() {
           : power_metrics::DisplayState::On,
       requested, update.brightnessCommand);
   return true;
+#endif
 }
 
 bool DisplayPowerManager::takeFullRefreshRequired() {

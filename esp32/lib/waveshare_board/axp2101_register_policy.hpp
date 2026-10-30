@@ -25,6 +25,14 @@ constexpr uint8_t POWER_BUTTON_OFF_LEVEL_COUNT = 4;
 constexpr uint8_t DISPLAY_ENABLE_REGISTER_206 = 0x90;
 constexpr uint8_t DISPLAY_ENABLE_MASK_206 = 0x80;
 
+// Waveshare's e-paper schematic connects AXP2101 ALDO3 to EPD_VCC_AXP, and
+// its reference firmware programs that rail to 3.3 V before enabling it.
+constexpr uint8_t EPAPER_ALDO3_ENABLE_REGISTER = 0x90;
+constexpr uint8_t EPAPER_ALDO3_ENABLE_MASK = 0x04;
+constexpr uint8_t EPAPER_ALDO3_VOLTAGE_REGISTER = 0x94;
+constexpr uint8_t EPAPER_ALDO3_VOLTAGE_MASK = 0x1F;
+constexpr uint8_t EPAPER_ALDO3_3300MV_VALUE = 0x1C;
+
 // These ranges remain named so tests and documentation can explicitly cover
 // the output-rail blocks that prompted the policy. They are not the boundary
 // of the protection: all non-allowlisted addresses are blocked.
@@ -50,6 +58,27 @@ constexpr bool isDisplayEnableOnlyTransition206(uint8_t current,
                                                 uint8_t updated) {
   return updated == withDisplayEnabled206(current) &&
          ((current ^ updated) & ~DISPLAY_ENABLE_MASK_206) == 0;
+}
+
+constexpr uint8_t withEpaperAldo3Enabled(uint8_t current) {
+  return current | EPAPER_ALDO3_ENABLE_MASK;
+}
+
+constexpr uint8_t withEpaperAldo3At3300mV(uint8_t current) {
+  return (current & ~EPAPER_ALDO3_VOLTAGE_MASK) |
+         EPAPER_ALDO3_3300MV_VALUE;
+}
+
+constexpr bool isEpaperAldo3EnableOnlyTransition(uint8_t current,
+                                                 uint8_t updated) {
+  return updated == withEpaperAldo3Enabled(current) &&
+         ((current ^ updated) & ~EPAPER_ALDO3_ENABLE_MASK) == 0;
+}
+
+constexpr bool isEpaperAldo3VoltageOnlyTransition(uint8_t current,
+                                                  uint8_t updated) {
+  return updated == withEpaperAldo3At3300mV(current) &&
+         ((current ^ updated) & ~EPAPER_ALDO3_VOLTAGE_MASK) == 0;
 }
 
 constexpr uint8_t powerButtonOffLevel(uint8_t registerValue) {

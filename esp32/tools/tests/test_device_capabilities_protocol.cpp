@@ -129,7 +129,10 @@ int main() {
       ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE,
       extendedPower, true, output, sizeof(output), screens, sizeof(screens),
       ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE);
-  assert(extendedSize == 36 && extendedSize == sizeof(output));
+  // The optional board display record is the only TLV after the extended word.
+  assert(extendedSize == 36 &&
+         extendedSize + device_capabilities_protocol::BOARD_DISPLAY_TLV_BYTES ==
+             sizeof(output));
   assert(output[8] == 0x80); // Terrain keeps its shipped first-word allocation.
   assert(output[9] == 1 && output[14] == 2); // Power and screen TLVs survive.
   const uint8_t extendedGolden[] = {3, 4, 1, 0, 0, 0};
@@ -141,7 +144,7 @@ int main() {
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 33);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 34);
   // The friend-marker size flag shares the extended word with group riders.
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
@@ -163,9 +166,14 @@ int main() {
       0x00003fff, power, true, output, sizeof(output));
   const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x3f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
+  static_assert(sizeof(expected) == 14); // Legacy response is byte-for-byte stable.
+  static_assert(sizeof(expected) <= device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));
   for (size_t index = 0; index < size; ++index)
     assert(output[index] == expected[index]);
+  uint8_t legacyBuffer[14]{};
+  assert(device_capabilities_protocol::encodeCap2(
+      0x00003fff, power, true, legacyBuffer, sizeof(legacyBuffer)) == 14);
   assert(device_capabilities_protocol::encodeCap2(0, nullptr, false, output,
                                                    8) == 0);
   assert(device_capabilities_protocol::encodeCap2(0, nullptr, false, output,

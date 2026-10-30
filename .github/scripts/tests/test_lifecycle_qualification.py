@@ -47,8 +47,9 @@ class LifecycleQualificationTests(unittest.TestCase):
             if not name.endswith("_LIFECYCLE_QUALIFICATION"):
                 self.assertNotIn("-DMAP_OPERATIONS_V1_ENABLED=1", config[name].get("build_flags", ""))
                 self.assertNotIn("-DFIRMWARE_OPERATIONS_V1_ENABLED=1", config[name].get("build_flags", ""))
-        base = config["waveshare_amoled_common"]
-        self.assertEqual(base["board_build.partitions"], "partitions.csv")
+        # AMOLED inherits the shared Waveshare section, which owns the layout.
+        self.assertEqual(config["waveshare_amoled_common"]["extends"], "waveshare_common")
+        self.assertEqual(config["waveshare_common"]["board_build.partitions"], "partitions.csv")
         partitions = (ROOT / "esp32/partitions.csv").read_text()
         self.assertIn("ota_0", partitions)
         self.assertIn("ota_1", partitions)
@@ -60,7 +61,8 @@ class LifecycleQualificationTests(unittest.TestCase):
         self.assertIn("fresh durable admission and operation identity required", ci)
         self.assertIn("durable OTA acceptance could not be confirmed", ci)
         self.assertIn('python3 tools/build_firmware.py', ci)
-        self.assertIn('if [[ "${BUILD_ENVIRONMENT}" == *_PRODUCTION ]]; then', ci)
+        # Lifecycle suffixes never match the AMOLED-only factory packaging gate.
+        self.assertIn('if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION ]]; then', ci)
         self.assertNotRegex(ci, r"build_firmware\.py[^\n]*(?:--upload|--device-serial)")
         for workflow in ("firmware-release.yml", "firmware-release-candidate.yml"):
             self.assertNotIn("LIFECYCLE_QUALIFICATION", (ROOT / ".github/workflows" / workflow).read_text())

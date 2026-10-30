@@ -36,13 +36,15 @@ def inherited_option(section: str, option: str) -> str:
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
 for section in config.sections():
-    if section.startswith("env:WAVESHARE_AMOLED_"):
+    if section.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_")):
         sdk = inherited_option(section, "custom_sdkconfig")
         assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
         assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
         ipc_sizes = re.findall(r"^CONFIG_ESP_IPC_TASK_STACK_SIZE=(\d+)$", sdk, re.M)
         assert ipc_sizes == ["1536"], (section, ipc_sizes)
 main_source = (project_dir / "src/main.cpp").read_text()
+main_screen_source = (project_dir / "lib/gui/src/mainScr.cpp").read_text()
+maps_source = (project_dir / "lib/maps/src/maps.cpp").read_text()
 assert '#include "ipc_stack_budget.hpp"' in main_source
 # Exercise effective SDK values, including the failing pinned-Arduino value
 # and the S3 default that leaves too little reserve on the observed crash path.
@@ -50,7 +52,8 @@ compiler = shutil.which("c++") or shutil.which("g++")
 assert compiler, "a C++ compiler is required for the effective IPC config gate"
 with tempfile.TemporaryDirectory() as temporary:
     stub_dir = Path(temporary)
-    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "LEGACY_BOARD"):
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206",
+                  "WAVESHARE_EPAPER_397", "LEGACY_BOARD"):
         for size in (None, 1024, 1280, 1536, 2048):
             (stub_dir / "sdkconfig.h").write_text(
                 "" if size is None else f"#define CONFIG_ESP_IPC_TASK_STACK_SIZE {size}\n"
@@ -73,7 +76,7 @@ external_bss_requirements = (
     "CONFIG_SPIRAM_MEMTEST", "CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY",
 )
 for environment in config.sections():
-    if environment.startswith("env:WAVESHARE_AMOLED_"):
+    if environment.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_")):
         sdkconfig = inherited_option(environment, "custom_sdkconfig")
         for requirement in external_bss_requirements:
             assert requirement + "=y" in sdkconfig, (environment, requirement)
@@ -96,7 +99,7 @@ int main() {
          reinterpret_cast<std::uintptr_t>(&state) % 64 != 0;
 }
 '''
-    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"):
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "WAVESHARE_EPAPER_397"):
         for missing in (None, *external_bss_requirements):
             (stub_dir / "sdkconfig.h").write_text("".join(
                 f"#define {name} {int(name != missing)}\n"
@@ -124,6 +127,12 @@ assert "build_timestamp_from_source_date_epoch" in prebuild_source
 assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
 assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
 assert "#define LV_FONT_MONTSERRAT_42 0" in lv_conf_source
+epaper_include_block = r"#ifdef WAVESHARE_EPAPER_397(?:(?!#endif).)*epaperNavigationPolicy\.hpp"
+assert re.search(epaper_include_block, main_screen_source, re.DOTALL)
+assert re.search(epaper_include_block, maps_source, re.DOTALL)
+# Stale #line overrides would misnumber every later AMOLED log and assertion.
+for source in (main_screen_source, maps_source):
+    assert not re.search(r"^\s*#line\b", source, re.M)
 for gui_source_path in (project_dir / "lib/gui/src").glob("*.[ch]pp"):
     assert "&lv_font_montserrat_42" not in gui_source_path.read_text(), (
         f"{gui_source_path.name} restores the unused 72 KiB Montserrat 42 asset"
@@ -140,7 +149,7 @@ assert main_source.index("std::fflush(stdout)") < main_source.index(
 )
 assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
-waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
+waveshare_sdkconfig = config.get("waveshare_common", "custom_sdkconfig")
 qualification_sdkconfig = inherited_option(
     "env:WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION", "custom_sdkconfig")
 assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n" in qualification_sdkconfig
@@ -171,9 +180,9 @@ assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
-waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
+waveshare_unflags = config.get("waveshare_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
-waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
+waveshare_flags = config.get("waveshare_common", "build_flags")
 expected_dynamic_tls_wrappers = {
     "mbedtls_ssl_write_client_hello",
     "mbedtls_ssl_handshake_client_step",
@@ -201,7 +210,7 @@ assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
 assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
-waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
+waveshare_dependencies = config.get("waveshare_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
     "https://github.com/jgauchia/NeoGPS.git#"
@@ -222,6 +231,67 @@ diagnostic_profiles = {
         "WAVESHARE_AMOLED_206",
     ),
 }
+
+# The new board shares the locked runtime, not either AMOLED electrical policy.
+assert config.get("waveshare_amoled_common", "extends") == "waveshare_common"
+epaper_base = "waveshare_epaper_397_base"
+assert config.get(epaper_base, "extends") == "waveshare_common"
+epaper_flags = config.get(epaper_base, "build_flags")
+assert "-DWAVESHARE_EPAPER_397" in epaper_flags
+assert "-DDISABLE_TOUCH=1" in epaper_flags
+assert "-DPERSISTENT_RIDE_DIAGNOSTICS=1" in epaper_flags
+for suffix in (
+    "",
+    "_DISPLAY_TEST",
+    "_POWER_METRICS",
+    "_IMU_DIAGNOSTICS",
+    "_LIGHT_SLEEP",
+    "_PRODUCTION",
+):
+    environment = "env:WAVESHARE_EPAPER_397" + suffix
+    assert inherited_option(environment, "custom_firmware_target") == "WAVESHARE_EPAPER_397"
+    expected_partition = "partitions.csv" if suffix == "_PRODUCTION" else "partitions_remote_debug.csv"
+    assert inherited_option(environment, "board_build.partitions") == expected_partition
+    assert "WAVESHARE_AMOLED" not in config.get(environment, "build_flags")
+assert "-DEPAPER_DISPLAY_TEST=1" in config.get("env:WAVESHARE_EPAPER_397_DISPLAY_TEST", "build_flags")
+assert "-DPOWER_METRICS=1" in config.get(
+    "env:WAVESHARE_EPAPER_397_POWER_METRICS", "build_flags"
+)
+epaper_sensor_flags = config.get(
+    "env:WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS", "build_flags"
+)
+assert "-DWAVESHARE_IMU_DIAGNOSTICS=1" in epaper_sensor_flags
+assert "-DWAVESHARE_SHTC3_DIAGNOSTICS=1" in epaper_sensor_flags
+epaper_light_sleep = "env:WAVESHARE_EPAPER_397_LIGHT_SLEEP"
+assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in config.get(
+    epaper_light_sleep, "build_flags"
+)
+# The light-sleep image restates the SDK list. It must differ from the shared
+# contract only by tickless idle and its callbacks, never by drifting behind.
+epaper_light_sleep_sdkconfig = config.get(epaper_light_sleep, "custom_sdkconfig")
+shared_sdk_lines = {
+    line.strip() for line in waveshare_sdkconfig.splitlines()
+    if line.strip() and not line.strip().startswith(";")
+}
+light_sleep_lines = {
+    line.strip() for line in epaper_light_sleep_sdkconfig.splitlines()
+    if line.strip() and not line.strip().startswith(";")
+}
+assert light_sleep_lines - shared_sdk_lines == {
+    "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y",
+    "CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y",
+}, light_sleep_lines - shared_sdk_lines
+assert shared_sdk_lines - light_sleep_lines == {
+    "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n",
+}, shared_sdk_lines - light_sleep_lines
+assert "-DEPAPER_DISPLAY_TEST" not in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
+assert "-DPOWER_METRICS" not in config.get(
+    "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
+)
+assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT" not in config.get(
+    "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
+)
+assert "-DARDUINO_USB_CDC_ON_BOOT=0" in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
 for environment, (base, board_define) in diagnostic_profiles.items():
     assert config.get(environment, "extends") == base
     assert inherited_option(environment, "custom_firmware_target") == board_define

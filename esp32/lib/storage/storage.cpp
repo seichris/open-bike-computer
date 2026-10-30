@@ -23,7 +23,7 @@
 #include "freertos/task.h"
 #include <SD.h>
 #include <SPI.h>
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include <SD_MMC.h>
 #endif
 #include <FFat.h>
@@ -50,7 +50,7 @@ using ride_diagnostics::transfer_policy::StoragePreparation;
 // ENOENT before reaching any volume, including FFat mounted at /sdcard.
 constexpr const char *kUnavailableMapRoot = "/map-storage-unavailable";
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 void endWaveshareMigrationBus();
 #endif
 
@@ -84,10 +84,10 @@ bool writableProbeSucceeded(const char *root) {
   return wrote && synced && closed && removed;
 }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
 uint8_t removableCardType(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   return backend == StorageBackend::LegacySpiMigration ? SD.cardType()
                                                         : SD_MMC.cardType();
 #else
@@ -97,7 +97,7 @@ uint8_t removableCardType(StorageBackend backend) {
 }
 
 File openRemovableRoot(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   return backend == StorageBackend::LegacySpiMigration ? SD.open("/")
                                                         : SD_MMC.open("/");
 #else
@@ -107,7 +107,7 @@ File openRemovableRoot(StorageBackend backend) {
 }
 
 uint64_t removableCardSize(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   return backend == StorageBackend::LegacySpiMigration ? SD.cardSize()
                                                         : SD_MMC.cardSize();
 #else
@@ -117,7 +117,7 @@ uint64_t removableCardSize(StorageBackend backend) {
 }
 
 uint64_t removableTotalBytes(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   return backend == StorageBackend::LegacySpiMigration ? SD.totalBytes()
                                                         : SD_MMC.totalBytes();
 #else
@@ -127,7 +127,7 @@ uint64_t removableTotalBytes(StorageBackend backend) {
 }
 
 uint64_t removableUsedBytes(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   return backend == StorageBackend::LegacySpiMigration ? SD.usedBytes()
                                                         : SD_MMC.usedBytes();
 #else
@@ -137,7 +137,7 @@ uint64_t removableUsedBytes(StorageBackend backend) {
 }
 
 void endRemovableStorage(StorageBackend backend) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (backend == StorageBackend::LegacySpiMigration) {
     endWaveshareMigrationBus();
   } else {
@@ -150,7 +150,9 @@ void endRemovableStorage(StorageBackend backend) {
 }
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_EPAPER_397)
+void endWaveshareMigrationBus() {}
+#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 SPIClass &waveshareMigrationBus() {
   static SPIClass bus(HSPI);
   return bus;
@@ -228,7 +230,8 @@ void Storage::shutdownTask(void *context) {
       if (backend == StorageBackend::InternalFFat) {
         FFat.end();
       } else if (backend != StorageBackend::Unavailable) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(SPI_SHARED)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || \
+    defined(WAVESHARE_EPAPER_397) || defined(SPI_SHARED)
         endRemovableStorage(backend);
 #else
         stopped = esp_vfs_fat_sdcard_unmount("/sdcard", self.card) == ESP_OK;
@@ -283,7 +286,7 @@ bool Storage::ensureSdMounted() {
   struct stat mounted = {};
   bool ready = isSdLoaded.load() && ::stat("/sdcard", &mounted) == 0 &&
                S_ISDIR(mounted.st_mode);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
   const StorageBackend activeBackend = mountedBackend.load();
   ready = ready && removableCardType(activeBackend) != CARD_NONE;
@@ -348,7 +351,7 @@ bool Storage::tryRemovableSdFreeBytes(uint64_t &bytes) const {
       power_management::LockDomain::Storage);
   if (!isSdLoaded.load())
     return false;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
   const StorageBackend activeBackend = mountedBackend.load();
   const uint64_t total = removableTotalBytes(activeBackend);
@@ -383,7 +386,7 @@ StoragePreparation Storage::prepareDiagnosticsStorage() {
     if (!mountedDirectoryAvailable(root)) {
       result = StoragePreparation::MountFailed;
     }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
     else if (!internalMounted &&
              removableCardType(mountedBackend.load()) == CARD_NONE) {
@@ -443,7 +446,7 @@ uint64_t Storage::diagnosticsSdFreeBytes() const {
       power_management::LockDomain::Storage);
   if (!getDiagnosticsSdLoaded())
     return 0;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
   if (internalFallbackMounted.load()) {
     const uint64_t total = FFat.totalBytes();
@@ -478,7 +481,7 @@ esp_err_t Storage::mountRemovableStorage() {
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const uint32_t mountStartMs = millis();
   uint8_t mountedCardType = CARD_NONE;
   uint64_t mountedCardSize = 0;
@@ -563,13 +566,20 @@ esp_err_t Storage::mountRemovableStorage() {
               SD_MMC.end();
               Serial.printf(
                   "SDIO: native-summary ok=0 attempts=%u elapsedMs=%lu "
+#ifdef WAVESHARE_EPAPER_397
+                  "next=no-migration\n",
+#else
                   "next=legacy_spi_migration\n",
+#endif
                   static_cast<unsigned>(nativeAttempts),
                   (unsigned long)(millis() - mountStartMs));
             }
             return mountResult.ok;
           },
           [&]() {
+#ifdef WAVESHARE_EPAPER_397
+            return false;
+#else
             Serial.printf(
                 "SDIO: compatibility bus=HSPI reason=native_mount_failed "
                 "freqHz=%lu pins[cs=%d mosi=%d miso=%d sck=%d]\n",
@@ -631,6 +641,7 @@ esp_err_t Storage::mountRemovableStorage() {
             if (!mountResult.ok)
               endWaveshareMigrationBus();
             return mountResult.ok;
+#endif
           });
 
   if (migrationResult.backend ==
@@ -923,7 +934,7 @@ SDCardInfo Storage::getSDCardInfo() {
       power_management::LockDomain::Storage);
   SDCardInfo info{};
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397) ||          \
     defined(SPI_SHARED)
   const StorageBackend activeBackend = mountedBackend.load();
   const uint8_t cardType = removableCardType(activeBackend);

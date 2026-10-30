@@ -6940,6 +6940,10 @@ extension NavigationProtocolTests {
 
     static func testFirmwareSourceIdentityMigration() {
         let full = String(repeating: "a", count: 40)
+        assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_EPAPER_397", version: "0.3.4", build: 94), full,
+                    "new board preserves a full immutable source identity")
+        assert(FirmwareSourceIdentity.fullSHA("8a0c9df6db26", target: "WAVESHARE_EPAPER_397", version: "0.3.4", build: 93) == nil,
+               "new board cannot reuse an AMOLED historical short-SHA exception")
         assertEqual(FirmwareSourceIdentity.fullSHA(full, target: "WAVESHARE_AMOLED_175", version: "0.3.4", build: 94), full,
                     "full immutable identity is preserved")
         for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
@@ -9848,7 +9852,10 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 33, "capability version negotiates POIs after route elevation, friend-marker size, group riders and terrain")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 34, "capability version negotiates board display metadata after POIs, route elevation, friend-marker size, group riders and terrain")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedBoardDisplayMetadataFeature, 1 << 4, "extended bit 4 advertises board display metadata without reusing terrain bit 31")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedBoardDisplayMetadataMinimumClientVersion, 34, "board metadata requires the coordinated version 34 client")
+        assertEqual(RideBLEGeneratedProtocolV1.boardDisplayTLVType, 4, "board metadata has its own TLV after the extended feature word")
         assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature, 1 << 2, "extended bit 2 advertises route elevation profiles")
         assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1MinimumClientVersion, 32, "route elevation negotiation requires protocol 32")
         assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisFeature, 1 << 3, "extended bit 3 advertises map POIs and Nearby")

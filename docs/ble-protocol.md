@@ -1396,8 +1396,9 @@ ID `39`). Version `32` requests extended bit `2`, route elevation profiles
 (`ELV1`, see [Route elevation profiles](#route-elevation-profiles-elv1-v1)).
 Version `33` requests extended bit `3`, map POIs and Nearby. Versions `31` and
 `32` retain their released friend-marker sizing and route elevation meanings
-and cannot negotiate POIs.
-The current iPhone client negotiates version `33`; older direct Watch clients
+and cannot negotiate POIs. Version `34` requests extended bit `4`, board
+display/input metadata (TLV type `4`, below).
+The current iPhone client negotiates version `34`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
@@ -1413,6 +1414,50 @@ navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in
 `esp32/lib/world_radio/world_radio_protocol.hpp` and
 `ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
+
+Version `34` requests extended bit `4`, board display/input metadata. Two
+earlier experimental e-paper allocations are retired and must not be aliased:
+bit `28`/version `26` (now display inactivity timeouts) and bit `31`/version
+`29` with TLV type `3` (now terrain experiments and the extended feature word).
+Update experimental e-paper firmware and its companion together.
+
+Extended bit `4` requires exactly one TLV type `4`, length `8`:
+
+| Value offset | Encoding | Meaning |
+| --- | --- | --- |
+| 0 | UInt8, `1` | Metadata version |
+| 1 | UInt8 | `1` color display, `2` monochrome e-paper |
+| 2 | UInt8 bitmask | bit 0 physical buttons, bit 1 touch |
+| 3–4 | UInt16LE | Logical display width |
+| 5–6 | UInt16LE | Logical display height |
+| 7 | UInt8 bitmask | bit 0 brightness, 1 display rotation, 2 tap-to-cycle, 3 continuous camera, 4 disconnected sleep |
+
+The 3.97 board sends kind `2`, buttons `1`, dimensions `480 × 800`, settings
+`0`. AMOLED boards send kind `1`, buttons/touch `3`, their existing dimensions,
+and settings `29`. Older clients receive their existing CAPS/CAP2 shape without
+this record. Firmware appends the record after every other TLV, so responses
+without it keep their previous bytes. The encoder's maximum response is 46
+bytes including the optional PWR configuration, screen configuration, extended
+feature and display records. A record without its extended bit, a bit without
+its record, unknown metadata version, invalid dimensions, duplicate or
+truncated records invalidate negotiation. Unknown unrelated TLV types remain
+skippable. Existing UUIDs and route/GPS/ride payloads are unchanged.
+
+E-paper firmware normalizes or rejects unsupported brightness, touch,
+automatic sleep, course-up, bird's-eye and 3D settings even when written by an
+older companion. It never sets bird's-eye bits `9`-`11`, orientation bit `24`,
+display-off bits `19`/`28`, terrain bit `31` or extended POI bit `3`. Bits `8`,
+`12` and `30` keep their reader meaning on this board: it installs renderer
+targets 1-4, matching its `mapReader` report, and draws street labels and flat
+building footprints, so durable production maps remain installable. It has no LoD1 walls or roofs (setting
+`35` is ignored and the bird's-eye view is never offered) and does not draw
+contour lines, because a one-bit threshold would turn index contours into
+road-like strokes. A companion toggle therefore never establishes e-paper 3D
+or contour support. Current iOS hides those controls and names the board from
+metadata or its exact canonical firmware target. The authenticated `DSTS`
+response additionally reports display queue/transmit/presented generations,
+completion time, full/partial counts, discarded frames, failures and busy/fault
+state. SPI/LVGL flush completion alone never establishes pairing visibility.
 Production builds now advertise bit `15` because the RAUT control path is
 enabled; physical ride-detection gates remain outstanding. Firmware sets bit
 `16` only in
@@ -1450,7 +1495,8 @@ first word's same-valued bit.
 Firmware includes this extension only when at least one extended feature is
 available to the negotiated client. Bit `31` of the first word remains terrain;
 it never enables social packets. Older clients skip the new TLV, and version-29
-firmware remains usable without group riders. Types are unique;
+firmware remains usable without group riders. TLV type `4` carries the
+eight-byte display/input metadata described above. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1494,6 +1540,9 @@ Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 
 Configurable screens, CAP2 schema 1, feature bit 26 and TLV type 2:
 43 41 50 32 01 00 00 00 04 02 0e 01 10 18 07 1f 00 00 00 ff ff 01 00 00 10
+
+Monochrome e-paper, 480 x 800 portrait, buttons only, extended bit 4 and TLV type 4:
+43 41 50 32 01 00 00 00 00 03 04 10 00 00 00 04 08 01 02 01 e0 01 20 03 00
 
 Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 43 41 50 32 01 00 00 80 00

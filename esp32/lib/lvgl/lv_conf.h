@@ -53,7 +53,7 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /*Size of the memory available for `lv_malloc()` in bytes (>= 2kB)*/
-    #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+    #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
         // All resident screens, eight social badges and temporary glyph/image
         // buffers share this pool. The 96 KiB pool exhausted during a map drag
         // while drawing rider initials, trapping the UI in LV_ASSERT_MALLOC.
@@ -75,9 +75,10 @@
     #if LV_MEM_ADR == 0
         // Map and firmware transfers start a Wi-Fi AP after the complete UI
         // and BLE stack are live. Keep LVGL's fixed TLSF semantics, but put
-        // its 192 KiB backing pool in the PSRAM available on both AMOLED boards
-        // so the Wi-Fi driver retains enough contiguous internal memory.
-        #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+        // its 192 KiB backing pool in the PSRAM available on the AMOLED and
+        // e-paper boards so the Wi-Fi driver retains enough contiguous internal
+        // memory. E-paper aborted before setup() with this pool in internal RAM.
+        #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
             #define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
             #define LV_MEM_POOL_ALLOC(size) heap_caps_aligned_alloc(16, (size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         #else

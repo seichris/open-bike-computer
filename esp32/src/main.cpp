@@ -24,6 +24,11 @@
 #include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
+#ifdef WAVESHARE_EPAPER_397
+#include "epaper_display.hpp"
+#include "board_input.hpp"
+#include "epaper_ui.hpp"
+#endif
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -91,7 +96,7 @@ extern xSemaphoreHandle gpsMutex;
 
 // BLE Navigation for iOS route overlay
 #include "ble_navigation.hpp"
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "boot_diagnostics.hpp"
 #include "display_inactivity_policy.hpp"
 #include "display_power.hpp"
@@ -109,12 +114,13 @@ extern xSemaphoreHandle gpsMutex;
 #include "ui_scheduler.hpp"
 #include "waitingScr.hpp"
 #include "workout_telemetry_runtime.hpp"
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "WAVESHARE_AMOLED_175.hpp"
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
+#include "panelSelect.hpp"
 #include "axp2101.hpp"
 #include "i2c_bus.hpp"
 #include "pcf85063.hpp"
 #include "qmi8658.hpp"
+#include "shtc3.hpp"
 #include "speaker.hpp"
 #include "waveshare_board.hpp"
 #endif
@@ -294,7 +300,7 @@ static void updateMapActivationProgressOverlay() {
   lv_obj_move_foreground(mapActivationProgressPanel);
 }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 volatile bool waveshareBootScreenCyclePending = false;
 static portMUX_TYPE waveshareBootButtonMux = portMUX_INITIALIZER_UNLOCKED;
 static ownership_button_policy::FreshBootButtonGate waveshareBootPairingGate;
@@ -338,6 +344,10 @@ static bool processWaveshareBootButton() {
   const bool hadInput = physicalLatchedPress || pressed ||
                         deviceDebugHttp.bootPressRequested();
 
+#ifdef WAVESHARE_EPAPER_397
+  if (bleNavServer.hasOwnershipPairingCode() && !epaper::pairingPresented())
+    waveshareBootPairingGate.arm();
+#endif
   if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {
     return hadInput;
   }
@@ -406,6 +416,9 @@ static bool processWaveshareBootButton() {
 }
 
 static bool processWavesharePowerButton() {
+#ifdef WAVESHARE_EPAPER_397
+  return false;
+#endif
   waveshare_board::axp2101::PowerButtonEvents events;
   if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(events)) {
     return false;
@@ -435,8 +448,16 @@ static bool processWavesharePowerButton() {
 }
 
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
-    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
 static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
+#ifdef WAVESHARE_EPAPER_397
+  constexpr uint64_t kButtonWakeMask =
+      (1ULL << BOARD_BOOT_PIN) | (1ULL << board_traits::up) |
+      (1ULL << board_traits::center) | (1ULL << board_traits::down);
+  if ((gpioMask & kButtonWakeMask) != 0) {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
+  }
+#else
   const uint32_t reasons =
       ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
   if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
@@ -445,6 +466,7 @@ static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
   if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
     ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
   }
+#endif
 }
 #endif
 
@@ -463,12 +485,16 @@ static void armOwnershipPairingAfterRenderedComparison() {
   waveshareBootHandledPairingConfirmation = false;
   waveshareBootReleaseStartMs = 0;
   waveshareBootPressStartMs = 0;
+#ifndef WAVESHARE_EPAPER_397
   waveshare_board::axp2101::PowerButtonEvents stalePowerButtonEvents;
   if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(
           stalePowerButtonEvents)) {
     return;
   }
 
+#else
+  board_input::requireFreshPairingInput();
+#endif
   wavesharePowerPairingGate.arm(pairingGeneration);
   wavesharePowerPairingGeneration = pairingGeneration;
   if (bleNavServer.armOwnershipPairingConfirmation(pairingGeneration)) {
@@ -647,7 +673,7 @@ static void logMapActivationTiming(const char *source,
 static bool ordinaryRendererSessionActive = false;
 static uint32_t ordinaryRendererWindowSequence = 0;
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 static display_inactivity::Policy displayInactivityPolicy;
 static display_inactivity::Mode currentDisplayMode =
     display_inactivity::Mode::Active;
@@ -900,7 +926,7 @@ static bool rendererRequestMatchesActiveMap(
 #endif
 
 void appRemoteDebugPointerActivity() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   displayInactivityPolicy.noteMeaningfulActivity(millis());
 #endif
 }
@@ -954,7 +980,7 @@ static const char *debugTileName(uint8_t tile) {
   }
 }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 static const char *displayInactivityModeName(display_inactivity::Mode mode) {
   switch (mode) {
   case display_inactivity::Mode::Active:
@@ -1246,7 +1272,7 @@ static void logSystemDebugHeartbeat() {
   const uint32_t dmaFree = heap_caps_get_free_size(MALLOC_CAP_DMA);
   const uint32_t dmaLargest =
       heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
   const waveshare_board::rtc::Status &rtcStatus =
@@ -1255,7 +1281,7 @@ static void logSystemDebugHeartbeat() {
       waveshare_board::imu::status();
   const waveshare_board::imu::Sample &imuSample =
       waveshare_board::imu::lastSample();
-#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const waveshare_board::i2c::Stats &i2cStats = waveshare_board::i2c::stats();
   const waveshare_board::rtc::Status &rtcStatus =
       waveshare_board::rtc::status();
@@ -1268,7 +1294,7 @@ static void logSystemDebugHeartbeat() {
     screenName = "main";
   }
 
-#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)) &&       \
     defined(WAVESHARE_IMU_DIAGNOSTICS)
   Serial.printf("IMU: p=%d cfg=%d valid=%d addr=0x%02X n=%lu zero=%lu fail=%lu "
                 "a=%.0f,%.0f,%.0f g=%.1f,%.1f,%.1f mag=%.0f vib=%.1f "
@@ -1286,7 +1312,21 @@ static void logSystemDebugHeartbeat() {
                 imuStatus.moving);
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_SHTC3_DIAGNOSTICS)
+  const waveshare_board::shtc3::Status &shtc3Status =
+      waveshare_board::shtc3::status();
+  Serial.printf("SHTC3: present=%d identified=%d valid=%d id=0x%04X n=%lu "
+                "fail=%lu crc=%lu tempC=%.2f humidity=%.2f lastMs=%lu\n",
+                shtc3Status.present, shtc3Status.identified,
+                shtc3Status.dataValid, shtc3Status.id,
+                (unsigned long)shtc3Status.sampleCount,
+                (unsigned long)shtc3Status.failedReads,
+                (unsigned long)shtc3Status.crcFailures,
+                shtc3Status.temperatureC, shtc3Status.humidityPercent,
+                (unsigned long)shtc3Status.lastSampleMs);
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   Serial.printf("SYS: up=%lus heap=%lu heap8=%lu/%lu dma=%lu/%lu psram=%lu "
                 "screen=%s tile=%s "
                 "displayMode=%s "
@@ -1437,12 +1477,12 @@ static void logPowerMetricsReport() {
   }
 
   bool audioActive = false;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const char *powerMode = displayInactivityModeName(currentDisplayMode);
 #else
   const char *powerMode = "unsupported";
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   audioActive = waveshare_board::speaker::isPlaying();
 #endif
 
@@ -1564,6 +1604,9 @@ static void logPowerMetricsReport() {
 }
 
 static void processDisconnectedShutdown() {
+#ifdef WAVESHARE_EPAPER_397
+  return; // Whole-board sleep/wake remains behind the physical hardware gate.
+#endif
   static disconnected_shutdown_policy::Tracker shutdownTracker;
   const bool connected = bleNavServer.isConnected();
   const bool ownershipClaimed = bleNavServer.isOwnershipClaimed();
@@ -1671,8 +1714,8 @@ void setup() {
   // opening USB CDC so the host-attach window cannot truncate their tails.
 #if POWER_METRICS ||                                                         \
     (FIRMWARE_DIAGNOSTICS &&                                                \
-     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)))
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+     (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)))
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   constexpr size_t kSerialTxBufferSize =
       boot_diagnostics::kStructuredSerialTxBufferSize;
 #else
@@ -1687,7 +1730,7 @@ void setup() {
   // underflows that counter when the USB host stops reading and stalls the UI.
   Serial.setTxTimeoutMs(1);
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   // ESP-IDF's hardware-crypto allocation-error path writes through stdout.
   // Prime its recursive lock while internal RAM is plentiful so a later
   // recoverable AES allocation failure cannot itself abort while logging.
@@ -1700,7 +1743,7 @@ void setup() {
                   static_cast<unsigned>(kSerialTxBufferSize));
   }
 #elif FIRMWARE_DIAGNOSTICS &&                                               \
-    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
   if (configuredSerialTxBufferSize != kSerialTxBufferSize) {
     Serial.printf("BOOT_DIAGNOSTICS_ERROR schema=1 operation=serial_buffer "
                   "configured=%u required=%u\n",
@@ -1713,7 +1756,7 @@ void setup() {
   // can attach without missing firmware identity or the first boot stage.
   delay(2000);
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::begin();
   const boot_diagnostics::Snapshot initialBoot =
       boot_diagnostics::snapshot();
@@ -1740,15 +1783,15 @@ void setup() {
   // Arduino setup() and loop() share the same FreeRTOS task. Bind it before
   // enabling BLE, touch, BOOT, audio, or transfer publishers.
   ui_scheduler::bindCurrentTask();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::CoreServices);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::WakeConfiguration);
 #endif
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT &&                                      \
-    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+    (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
   power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (!firmware_maintenance::active())
     displayPowerManager.begin();
 #endif
@@ -1758,16 +1801,24 @@ void setup() {
   // Configure Wire directly below; do not preemptively bit-bang the shared bus.
 #endif
 #if defined(POWER_SAVE) || defined(WAVESHARE_AMOLED_175) ||                   \
-    defined(WAVESHARE_AMOLED_206)
+    defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (!firmware_maintenance::active()) {
     attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
                     latchWaveshareBootScreenCycle, FALLING);
     uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
 #ifdef WAVESHARE_AMOLED_175
     ext1WakeMask |= 1ULL << TCH_I2C_INT;
+#endif
+#ifdef WAVESHARE_EPAPER_397
+    pinMode(board_traits::up, INPUT_PULLUP);
+    pinMode(board_traits::center, INPUT_PULLUP);
+    pinMode(board_traits::down, INPUT_PULLUP);
+    ext1WakeMask |= (1ULL << board_traits::up) |
+                    (1ULL << board_traits::center) |
+                    (1ULL << board_traits::down);
 #endif
     power_management::configureExt1Wakeup(ext1WakeMask);
     configureTouchWakeInterrupt();
@@ -1780,7 +1831,7 @@ void setup() {
   gpio_deep_sleep_hold_dis();
 #endif
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::WakeConfiguration);
 #endif
@@ -1824,7 +1875,7 @@ void setup() {
 #endif
 #endif
 
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
   waveshare_board::i2c::configureBus();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::I2cBus);
@@ -1833,7 +1884,7 @@ void setup() {
   Wire.begin();
 #endif
 
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
@@ -1844,6 +1895,8 @@ void setup() {
     setupFirmwareMaintenanceMode();
     return;
   }
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::ClockAndSensors);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
@@ -1854,7 +1907,12 @@ void setup() {
 #else
   waveshare_board::imu::disable();
 #endif
+#ifdef WAVESHARE_SHTC3_DIAGNOSTICS
+  waveshare_board::shtc3::begin();
+#endif
+#ifndef WAVESHARE_EPAPER_397
   ride_automation_runtime::beginFirmwareShadow();
+#endif
 #endif
 #endif
 
@@ -1871,7 +1929,7 @@ void setup() {
 #endif
 
   battery.initADC();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::ClockAndSensors);
 #endif
@@ -1879,11 +1937,11 @@ void setup() {
   // Preserve the established display-first board bring-up order. Waveshare
   // storage now uses the independent native SDMMC peripheral, so later QSPI
   // display traffic cannot change the card bus configuration.
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
 #endif
   initTFT();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #endif
 
@@ -1896,7 +1954,7 @@ void setup() {
 #endif
 
   // Initialize removable storage after board display bring-up.
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Storage);
 #endif
   esp_err_t sdResult = storage.initSD();
@@ -1912,7 +1970,7 @@ void setup() {
   storage.pinBackendForBoot();
   mapView.bindMapStorageRoot(storage.mapStorageRoot());
   mapTransferHttp.bindStorageRoot(storage.mapStorageRoot());
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const boot_diagnostics::Snapshot diagnosticBoot = boot_diagnostics::snapshot();
   ride_diagnostics::begin(
       storage,
@@ -1954,7 +2012,7 @@ void setup() {
       ride_diagnostics::Level::Info, "storage", "mount_checked",
       storage.getSdLoaded() ? "{\"available\":true}"
                             : "{\"available\":false}");
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);
   // Present the real waiting screen before map recovery. Recovery validates
   // map-wide assets on this task, so it takes longer as the installed map
@@ -1964,6 +2022,9 @@ void setup() {
   // BLE and boot acceptance, so map failures keep OTA rollback and safe mode.
   boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
   startUserInterface();
+#ifdef WAVESHARE_EPAPER_397
+  board_input::begin();
+#endif
   lv_screen_load(waitingScreen);
   lv_refr_now(display);
   (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
@@ -2155,7 +2216,7 @@ void setup() {
   ride_diagnostics::setStorageRecoveryAllowedProbe(
       diagnosticsStorageRecoveryAllowed);
   ride_diagnostics::startWriter();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);
   boot_diagnostics::enterStage(
       boot_diagnostics::Stage::ApplicationServices);
@@ -2187,7 +2248,7 @@ void setup() {
 
   createGpxFolders();
 
-#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && !defined(WAVESHARE_EPAPER_397)
   // Other boards keep the original order: their splash screen preloads the
   // recovered map before the waiting screen is shown.
   startUserInterface();
@@ -2270,7 +2331,7 @@ void setup() {
   }
 #endif
 
-#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
+#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && !defined(WAVESHARE_EPAPER_397)
   log_i("Loading Splash Screen...");
   splashScreen();
 #else
@@ -2280,21 +2341,23 @@ void setup() {
       boot_diagnostics::Stage::ApplicationServices);
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Speaker);
+#ifndef WAVESHARE_EPAPER_397
   waveshare_board::speaker::begin();
   if (!waveshare_board::axp2101::setPowerButtonEventMonitoring(true)) {
     Serial.println("AXP2101: PWR button-event monitoring unavailable");
   }
+#endif
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker);
 #endif
 
   // Initialize BLE early so device is discoverable while showing waiting screen
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Ble);
 #endif
   bleNavServer.init("BikeComputer");
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Ble);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Finalization);
 #endif
@@ -2310,7 +2373,7 @@ void setup() {
 
   // Show waiting screen - will transition to map when GPS is received via BLE.
   // Waveshare boards presented it before map recovery.
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   displayInactivityPolicy.begin(millis());
 #else
   log_i("Loading Waiting Screen...");
@@ -2319,7 +2382,7 @@ void setup() {
 
   mapTransferHttp.resumePendingActivations();
   power_management::completeStartup();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Finalization);
   const auto completedBoot = boot_diagnostics::snapshot();
   if (completedBoot.safeMode || completedBoot.diagnosticHold ||
@@ -2351,7 +2414,7 @@ void setup() {
  */
 void loop() {
   usb_recovery_status::process();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
 #endif
@@ -2359,11 +2422,15 @@ void loop() {
     delay(shutdownDeferredNoticeShown ? 50 : 5);
     return;
   }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
   }
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  // E-paper reports firmware maintenance as unsupported and never schedules
+  // this reboot, matching setup(), which enters maintenance only on AMOLED.
   if (firmware_maintenance::active()) {
     processFirmwareMaintenanceMode();
     return;
@@ -2381,7 +2448,7 @@ void loop() {
   const uint32_t wakeReasons =
       pendingUiWakeReasons | ui_scheduler::wait(0);
   pendingUiWakeReasons = 0;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (ui_scheduler::hasReason(wakeReasons,
                               ui_scheduler::WakeReason::RemoteDebug)) {
     displayInactivityPolicy.noteMeaningfulActivity(now);
@@ -2637,7 +2704,7 @@ void loop() {
       lv_obj_invalidate(lv_screen_active());
     }
 #endif
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     processTransferInactivityTimeout(now);
 #endif
     updateMapActivationProgressOverlay();
@@ -2759,7 +2826,7 @@ void loop() {
   // briefly block on display, sensor, BLE, or debug output.
   checkPendingMapTransition();
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
   if (!shutdownDeferredNoticeShown && processWaveshareBootButton()) {
@@ -2774,7 +2841,7 @@ void loop() {
   }
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
 #ifdef WAVESHARE_AMOLED_175
   constexpr bool kDecodedTouchPollingRequired = true;
@@ -2811,8 +2878,15 @@ void loop() {
   }
 #endif
 
+#ifdef WAVESHARE_EPAPER_397
+  epaper::poll();
+  if (!shutdownDeferredNoticeShown) {
+    board_input::process();
+    epaper_ui::process();
+  }
+#endif
   bool runLvglHandler = !waitScreenRefresh && !shutdownDeferredNoticeShown;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   constexpr uint32_t kDimmedLvglCadenceMs = 100;
   if (currentDisplayMode == display_inactivity::Mode::DisplayOff) {
     runLvglHandler = false;
@@ -2831,7 +2905,7 @@ void loop() {
     }
     lvglHandlerCount++;
     lastLvglHandlerMs = millis();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     armOwnershipPairingAfterRenderedComparison();
 #endif
   }
@@ -2856,9 +2930,12 @@ void loop() {
         MapDiagnosticMetrics::Render);
   }
 
-#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)) &&       \
+#if (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)) &&       \
     (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
+#endif
+#ifdef WAVESHARE_SHTC3_DIAGNOSTICS
+  waveshare_board::shtc3::process();
 #endif
   // IMU acquisition and UI work can advance the clock beyond loop entry.
   // Evaluate freshness only after the latest sample has been timestamped.
@@ -2897,7 +2974,7 @@ void loop() {
                                    lastShutdownHousekeepingMs,
                                    kStaticHousekeepingPeriodMs));
   nextHousekeepingMs = std::min(nextHousekeepingMs, nextBleHousekeepingMs);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   nextHousekeepingMs = std::min(
       nextHousekeepingMs,
       ui_scheduler::remainingUntil(schedulerNow,
@@ -2907,7 +2984,7 @@ void loop() {
 
   uint32_t effectiveLvglDelayMs = ui_scheduler::remainingUntil(
       schedulerNow, lastLvglHandlerMs, nextLvglDelayMs);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (currentDisplayMode == display_inactivity::Mode::Dimmed) {
     effectiveLvglDelayMs =
         std::max(effectiveLvglDelayMs,
@@ -2920,10 +2997,23 @@ void loop() {
   deadline.housekeepingDelayMs = nextHousekeepingMs;
   deadline.connectedNavigation = connectedNavigation;
   deadline.lvglBlocked = waitScreenRefresh;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   deadline.displayOff =
       currentDisplayMode == display_inactivity::Mode::DisplayOff;
 #endif
+#ifdef WAVESHARE_EPAPER_397
+  // The contacts are polled independently of LVGL and the waveform worker.
+#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
+  // All four active-low contacts are wake sources in this opt-in profile, so
+  // the regular scheduler deadline can be used without 20 ms polling wakes.
   pendingUiWakeReasons =
       ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
+#else
+  pendingUiWakeReasons = ui_scheduler::wait(
+      std::min<uint32_t>(20, ui_scheduler::nextWaitMs(deadline)));
+#endif
+#else
+  pendingUiWakeReasons =
+      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
+#endif
 }
