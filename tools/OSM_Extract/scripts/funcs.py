@@ -10,11 +10,13 @@ from shapely import (
     intersection,
     set_precision,
 )
+import shapely
 from shapely.errors import GEOSException
 from shapely.ops import triangulate, unary_union
 import PIL.ImageDraw as ImageDraw
 import PIL.Image as Image
 import math
+import numpy as np
 
 from label_pipeline import extract_join_metadata, extract_label_tags
 
@@ -341,6 +343,8 @@ def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove f
     clipped = []
     for feat in features:
         line = feat['geom']
+        # BlockFeatureIndex only omits features this test would skip; keep
+        # every per-feature effect below it.
         assert type( line) == LineString, type(line)
         if not bbox.intersects( line) or bbox.touches( line): continue
         parts = intersection( line, bbox)
@@ -526,6 +530,8 @@ def clip_polygons(
                 raise GenericGeometryError(
                     "generic polygon feature is not a Polygon"
                 )
+            # BlockFeatureIndex only omits features this test would skip;
+            # keep every other per-feature effect below it.
             if not bbox.intersects(polygon) or bbox.touches(polygon):
                 continue
             parts = intersection(polygon, bbox)
@@ -605,6 +611,57 @@ def clip_polygons(
         clipped.extend(feature_clipped)
         # if len( new_feat['geom'].coords) <= 2: continue
     return clipped
+
+
+class BlockFeatureIndex:
+    """Offer each block clip only the features that can affect it, in order.
+
+    clip_lines() and clip_polygons() skip a feature whose geometry does not
+    intersect the block before it adds a part, spends a piece budget or
+    records a diagnostic, and GEOS rejects disjoint envelopes before any
+    other work. An STRtree envelope query therefore returns a superset of the
+    features a full scan keeps. Sorting the hits back into list order keeps
+    piece budgets, label counters and output bytes identical to scanning
+    every feature. Geometries the clip functions reject by type, and empty or
+    non-finite ones, are offered to every block so the legacy assertion and
+    per-block drop diagnostics stay unchanged.
+    """
+
+    def __init__(self, features, accepts):
+        self.features = features
+        accepted = [
+            position
+            for position, feature in enumerate(features)
+            if accepts(feature['geom'])
+        ]
+        geometries = np.empty(len(accepted), dtype=object)
+        geometries[:] = [features[position]['geom'] for position in accepted]
+        finite = np.isfinite(shapely.bounds(geometries)).all(axis=1)
+        self._indexed = np.asarray(accepted, dtype=np.intp)[finite]
+        self._always = np.setdiff1d(
+            np.arange(len(features), dtype=np.intp),
+            self._indexed,
+            assume_unique=True,
+        )
+        self._tree = shapely.STRtree(geometries[finite]) if finite.any() else None
+
+    @classmethod
+    def for_lines(cls, features):
+        # clip_lines() asserts this exact type for every feature it visits.
+        return cls(features, lambda geom: type(geom) == LineString)
+
+    @classmethod
+    def for_polygons(cls, features):
+        # clip_polygons() records anything else as a dropped component.
+        return cls(features, lambda geom: isinstance(geom, Polygon))
+
+    def candidates(self, block: Polygon):
+        positions = self._always
+        if self._tree is not None:
+            positions = np.union1d(
+                self._indexed[self._tree.query(block)], positions
+            )
+        return [self.features[position] for position in positions.tolist()]
 
 
 def color_to_24bits( color565):
