@@ -1704,6 +1704,26 @@ enum RideSharedTests {
             )) == nil,
             "an unknown purpose is rejected instead of guessed"
         )
+        // An idle-release request still in flight when phone navigation
+        // queued its handback must not overwrite the handback when requeued.
+        try expect(
+            WatchDirectRideReconciliationPolicyV1.requeueing(
+                reconciliationRequest,
+                into: [handbackRequest]
+            ) == [handbackRequest],
+            "an abandoned older request cannot replace a newer handback"
+        )
+        let otherHandoff = try WatchDirectRideReconciliationRequestV1(
+            preparationID: UUID(),
+            deviceID: deviceID
+        )
+        try expect(
+            WatchDirectRideReconciliationPolicyV1.requeueing(
+                reconciliationRequest,
+                into: [otherHandoff]
+            ) == [otherHandoff, reconciliationRequest],
+            "an abandoned request without a newer copy is retried"
+        )
         let preparationIntent = try WatchDirectRidePreparationIntentV1(
             preparationID: preparationRequest.preparationID,
             operation: .prepare,

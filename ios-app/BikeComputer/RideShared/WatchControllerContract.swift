@@ -510,6 +510,20 @@ enum WatchDirectRideReconciliationPolicyV1 {
     /// Keeps the exact discovery request alive for a late durable release, but
     /// replaces the progress claim with actionable guidance after this delay.
     static let phoneWaitTimeoutSeconds: Double = 8
+
+    /// Returns the phone's queue after an in-flight request was abandoned. A
+    /// request queued for the same handoff since then is newer and carries the
+    /// phone's current purpose, so the abandoned one must not replace it.
+    static func requeueing(
+        _ abandoned: WatchDirectRideReconciliationRequestV1,
+        into pending: [WatchDirectRideReconciliationRequestV1]
+    ) -> [WatchDirectRideReconciliationRequestV1] {
+        guard !pending.contains(where: {
+            $0.deviceID == abandoned.deviceID &&
+                $0.preparationID == abandoned.preparationID
+        }) else { return pending }
+        return pending + [abandoned]
+    }
 }
 
 struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {

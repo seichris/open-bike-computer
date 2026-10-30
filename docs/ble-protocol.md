@@ -306,11 +306,13 @@ interactively. Watch keeps its ride demand, drains admitted groups, releases its
 lease, disconnects and releases that preparation, so iPhone reconnects, relays
 the Watch workout and sends navigation. Watch then requests a fresh preparation,
 which iPhone rejects while it navigates, and neither scans nor connects until
-iPhone accepts a later preparation or the request cannot be delivered. A Watch
-ride that wins the link while iPhone navigation is active, for example during a
-phone reconnect, returns it the same way after its next
-`phone_navigation_active` rejection. A request without a purpose, and every
-request seen by an earlier Watch build, keeps the release-when-idle meaning.
+iPhone accepts a later preparation or the request cannot be delivered. A
+`phone_navigation_active` rejection alone never makes an established Watch link
+stop: iPhone also uses that code while its own workout recording or recovery
+blocks a handoff. A newer queued request for the same handoff always replaces an
+older one, including an older request requeued after its transfer was lost. A
+request without a purpose, and every request seen by an earlier Watch build,
+keeps the release-when-idle meaning.
 
 ### Application-confirmed critical ride delivery
 

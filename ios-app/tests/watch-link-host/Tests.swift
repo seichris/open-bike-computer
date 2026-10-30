@@ -809,24 +809,23 @@ enum Tests {
                 String(data: $0.data, encoding: .utf8)?.contains("running") == true
             }, "the retained workout is replayed on the new link")
         }
-        await run("a ready ride rejected for phone navigation returns the link") {
+        // A phone woken at ride start reports `phone_navigation_active` while
+        // its workout recovery is incomplete. That late answer must not make
+        // an established ride drop the Bicino.
+        await run("a late preparation rejection leaves a ready ride connected") {
             let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
             f.link.setDemand(navigation: false, workout: true)
             let request = prepare(f.id)
-            f.link.directRidePreparationDidRespond(request: request,
-                response: .init(requestID: request.requestID, accepted: false,
-                                errorCode: "device_transfer_active"))
-            expect(f.link.state.isReady, "other rejections leave an established ride alone")
-            f.link.directRidePreparationDidRespond(request: request,
-                response: .init(requestID: request.requestID, accepted: false,
-                                errorCode: "phone_navigation_active"))
-            expect(f.link.transportPhase == .stopping,
-                   "phone navigation reclaims a link this ride won")
-            f.link.testAuth("LEASE_RELEASED", on: f.peer)
-            f.link.testDrop(f.peer)
-            expect(f.releases == [f.id], "the rejected handoff is retired")
-            expect(f.link.state == .busy && f.link.testCentral.connections.isEmpty,
-                   "the ride waits for the phone")
+            for code in ["phone_navigation_active", "device_transfer_active"] {
+                f.link.directRidePreparationDidRespond(request: request,
+                    response: .init(requestID: request.requestID, accepted: false,
+                                    errorCode: code))
+                expect(f.link.state.isReady && f.link.transportPhase == .ready,
+                       "\(code) leaves an established ride on its link")
+            }
+            expect(f.releases.isEmpty && f.link.testCentral.cancellations.isEmpty,
+                   "no handoff is released and the link is not cancelled")
         }
         for failure in ["reply error", "unreachable"] {
             await run("a phone that stops answering ends the deferral: \(failure)") {

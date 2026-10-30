@@ -398,15 +398,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             return
         }
         phonePreparationAccepted = false
-        guard !transportStateMachine.isReady else {
-            // This ride won the single link while iPhone navigation was
-            // active, for example during a phone reconnect. Give it back; the
-            // phone relays the Watch workout while it navigates.
-            if response.errorCode == "phone_navigation_active" {
-                deferToPhoneNavigation()
-            }
-            return
-        }
+        // The phone also reports `phone_navigation_active` while its own
+        // workout recording or recovery blocks a handoff, so a rejection is
+        // no reason to drop an established link. Only an explicit phone
+        // navigation handback does that.
+        guard !transportStateMachine.isReady else { return }
         let message: String
         switch response.errorCode {
         case "phone_navigation_active":
