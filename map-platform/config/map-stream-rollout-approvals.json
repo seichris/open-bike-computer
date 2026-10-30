@@ -442,6 +442,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261030-clip-edge-cases",
+      "candidateGitSha": "1d5b19240fa6741aa1030eb4e2d7de0115862d11",
+      "producerBuildSha256": "97ed61023ed1a989a1399cd36fd0f265be7563ddfd254834fd7b61dddf4da027",
+      "workerImageDigest": "sha256:be7dadc2f444645dca707467d8fb269c3600f18a30f4dd7d82e43475e767c427",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 104,
+      "firmwareGitSha": "483ac42937fa3d982410d82b591f2c2ec13a39f0",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "7ae3412f034719b2a8c3ead46b360a96224feb11136fa3086cbd40e893a0f310",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T09:41:28Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 'Do this task here' for the clip edge-case fixes of #681; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
