@@ -188,7 +188,9 @@ final class WatchConnectivityCoordinator: NSObject {
             return .submitted
         }
         guard session.activationState == .activated else {
-            return .activationPending
+            // A failed activation is terminal for this wake; only a pending
+            // one is worth waiting for.
+            return activationFailed ? .transportUnavailable : .activationPending
         }
         guard session.isReachable else { return .counterpartUnreachable }
         session.sendMessageData(payload) { [weak self] responseData in

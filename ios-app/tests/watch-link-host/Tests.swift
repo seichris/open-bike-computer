@@ -793,6 +793,8 @@ enum Tests {
                 response: .init(requestID: successor.requestID, accepted: false,
                                 errorCode: "phone_navigation_active"))
             expect(f.link.state == .busy, "a navigating phone keeps the ride deferred")
+            // The reconnect timer waits for the preparation backoff to ask.
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
             await settle(); f.clock.advance(by: .seconds(1)); await settle()
             expect(f.prepares == [successorID, successorID],
                    "the deferred ride keeps asking with the same identity")
@@ -848,7 +850,10 @@ enum Tests {
                 }
                 expect(f.link.testCentral.connections.isEmpty,
                        "the Watch does not connect before its retry")
-                await settle(); f.clock.advance(by: .seconds(1)); await settle()
+                // A rejected hold asks again only on its backoff.
+                for _ in 0..<2 {
+                    await settle(); f.clock.advance(by: .seconds(1)); await settle()
+                }
                 expect(f.link.testCentral.connections.count == 1,
                        "an unanswering phone cannot strand the Watch ride")
             }
@@ -931,6 +936,201 @@ enum Tests {
             f.link.testRadio(.poweredOn)
             expect(f.link.state == .busy && f.link.testCentral.connections.isEmpty,
                    "radio recovery keeps waiting for the phone")
+        }
+        await run("restoration reported during a stop completes after it") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.stop()
+            expect(f.link.transportPhase == .stopping, "withdrawn demand starts a graceful stop")
+            f.link.completeInitialDemandRestoration()
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            f.link.testDrop(f.peer)
+            f.link.setWorkoutDemand(true)
+            f.link.testFinishReconnect(f.peer)
+            guard let current = f.link.testPreparationID, f.link.state.isReady else {
+                expect(false, "the next ride reconnects")
+                return
+            }
+            f.link.requestPhonePreparationReconciliation(handback(current))
+            expect(f.link.transportPhase == .stopping,
+                   "restoration finished with the stop, so a later handback applies")
+        }
+        await run("a later idle-release copy cannot replace a pending handback") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.link.requestPhonePreparationReconciliation(handback(f.id))
+            f.link.requestPhonePreparationReconciliation(
+                try! .init(preparationID: f.id, deviceID: device))
+            expect(f.link.testPendingReconciliation?.purpose == .phoneNavigation,
+                   "the navigation handback stays pending")
+            f.link.completeInitialDemandRestoration()
+            expect(f.link.transportPhase == .stopping,
+                   "restoration applies the handback, not the idle release")
+        }
+        await run("a relaunched Watch keeps its phone navigation hold") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            f.link.testDispose()
+            f.defaults.set(
+                try! JSONEncoder().encode(WatchSelectedBikeComputerV1(revision: 1, deviceID: device)),
+                forKey: "watchDeviceLink.selectedBikeComputer.v1")
+            let restored = WatchDeviceLink(credentialStore: WatchControllerCredentialStore(), defaults: f.defaults,
+                                           sleep: { try await f.clock.sleep($0) })
+            defer { restored.testDispose() }
+            var prepared: [UUID] = []
+            restored.onDirectRidePreparationChange = { operation, _, id in
+                if operation == .prepare { prepared.append(id) }
+                return .submitted
+            }
+            restored.setWorkoutDemand(true)
+            restored.completeInitialDemandRestoration()
+            expect(prepared == [successorID],
+                   "the relaunched ride asks with its retained identity")
+            expect(restored.state == .busy && restored.testCentral.scans == 0 &&
+                   restored.testCentral.connections.isEmpty,
+                   "the restored hold keeps the relaunched ride off the Bicino")
+        }
+        await run("a relaunch without a recovered ride drops the persisted hold") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            f.link.testDispose()
+            let restored = WatchDeviceLink(credentialStore: WatchControllerCredentialStore(), defaults: f.defaults,
+                                           sleep: { try await f.clock.sleep($0) })
+            defer { restored.testDispose() }
+            restored.onDirectRidePreparationChange = { _, _, _ in .submitted }
+            restored.completeInitialDemandRestoration()
+            expect(f.defaults.string(forKey: "watchDeviceLink.phoneNavigationHandback.v1") == nil,
+                   "no recovered ride leaves no hold behind")
+            restored.setWorkoutDemand(true)
+            expect(restored.testCentral.scans + restored.testCentral.connections.count == 1,
+                   "the next ride looks for the Bicino normally")
+        }
+        await run("a deferred ride asks the phone on the backoff, not every snapshot") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            for _ in 0..<10 {
+                f.link.setWorkoutDemand(true)
+                f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+            }
+            expect(f.prepares.count == 1,
+                   "workout snapshots do not ask the navigating phone again")
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            expect(f.prepares == [successorID, successorID],
+                   "the retry backoff asks again")
+        }
+        await run("a held navigation ride asks on the retry backoff alone") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            for asks in 2...4 {
+                f.link.directRidePreparationDidRespond(request: successor,
+                    response: .init(requestID: successor.requestID, accepted: false,
+                                    errorCode: "phone_navigation_active"))
+                let delay = WatchDirectRidePreparationRetryPolicyV1.delaySeconds(afterAttempt: asks - 1)
+                await settle(); f.clock.advance(by: .seconds(delay)); await settle()
+                expect(f.prepares.count == asks,
+                       "ask \(asks) waits only for its \(delay) s backoff, not the reconnect timer too")
+            }
+        }
+        await run("a held ride notices at once that the phone became unreachable") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            f.disposition = .counterpartUnreachable
+            f.link.directRidePreparationAvailabilityDidChange()
+            expect(f.link.testCentral.connections.count == 1,
+                   "a reachability change suspends the hold without waiting for the backoff")
+        }
+        await run("a Watch session still activating keeps a held ride off the Bicino") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            f.disposition = .activationPending
+            f.link.directRidePreparationAvailabilityDidChange()
+            expect(f.link.state == .busy && f.link.testCentral.connections.isEmpty,
+                   "an activating Watch session is no sign that the phone is gone")
+        }
+        await run("a selection change that ends a stop completes deferred restoration") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.stop()
+            f.link.completeInitialDemandRestoration()
+            f.link.receiveApplicationContext([
+                WatchSelectedBikeComputerV1.applicationContextKey: try! JSONEncoder().encode(
+                    WatchSelectedBikeComputerV1(revision: 2, deviceID: "ffeeddccbbaa99887766554433221100"))
+            ])
+            expect(f.link.transportPhase == .idle, "the selection change abandoned the stop")
+            let stale = UUID()
+            f.link.requestPhonePreparationReconciliation(
+                try! .init(preparationID: stale, deviceID: device))
+            expect(f.releases.contains(stale),
+                   "restoration completed with the reset, so reconciliations apply")
+        }
+        await run("before restoration a relaunched ride keeps the link it holds") {
+            let suite = "WatchLinkRelaunch-\(UUID())"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("suspended", forKey: "watchDeviceLink.phoneNavigationHandback.v1")
+            let clock = ManualClock()
+            let link = WatchDeviceLink(credentialStore: WatchControllerCredentialStore(), defaults: defaults,
+                                       sleep: { try await clock.sleep($0) })
+            defer { link.testDispose(); clock.cancelAll() }
+            let id = UUID()
+            _ = link.testStartReady(preparationID: id)
+            link.onDirectRidePreparationChange = { _, _, _ in .submitted }
+            let request = prepare(id)
+            link.directRidePreparationDidRespond(request: request,
+                response: .init(requestID: request.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(link.state.isReady && link.transportPhase == .ready,
+                   "before restoration the phone may be answering for its own recovery")
+            link.completeInitialDemandRestoration()
+            link.directRidePreparationDidRespond(request: request,
+                response: .init(requestID: request.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(link.transportPhase == .stopping,
+                   "after restoration the remembered handback returns the link")
         }
         await run("a stale navigation handback cannot interrupt a successor ride") {
             let f = Fixture(); defer { f.close() }

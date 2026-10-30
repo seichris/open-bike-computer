@@ -162,6 +162,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             restoredOperation: nil
         )
     private var initialDemandRestorationCompleted = false
+    // Restoration reported while a graceful stop drains. The stop finalizer
+    // completes it; otherwise later phone reconciliations would never run.
+    private var initialDemandRestorationDeferred = false
     private var pendingPhonePreparationReconciliation:
         WatchDirectRideReconciliationRequestV1?
     private let pendingPhonePreparationReconciliationKey =
@@ -172,9 +175,28 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     // the Watch neither scans nor connects; otherwise it would race the phone
     // for the advertising Bicino. A phone that stops answering suspends the
     // hold so the ride is not stranded; its next `phone_navigation_active`
-    // answer restores it and returns a link won in the meantime.
-    private enum PhoneNavigationHandback { case deferring, suspended }
-    private var phoneNavigationHandback: PhoneNavigationHandback?
+    // answer restores it and returns a link won in the meantime. Persisted,
+    // so a relaunch mid-ride does not race the phone either; restoration
+    // without recovered demand clears it.
+    private enum PhoneNavigationHandback: String { case deferring, suspended }
+    private var phoneNavigationHandback: PhoneNavigationHandback? {
+        didSet {
+            guard phoneNavigationHandback != oldValue else { return }
+            if let phoneNavigationHandback {
+                defaults.set(
+                    phoneNavigationHandback.rawValue,
+                    forKey: phoneNavigationHandbackKey
+                )
+            } else {
+                defaults.removeObject(forKey: phoneNavigationHandbackKey)
+            }
+        }
+    }
+    private let phoneNavigationHandbackKey =
+        "watchDeviceLink.phoneNavigationHandback.v1"
+    // While deferring, only the retry backoff may ask the phone again. Each
+    // workout snapshot would otherwise resubmit about once a second.
+    private var deferredPreparationRetryDue = false
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -213,6 +235,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             pendingPhonePreparationReconciliation = try?
                 WatchDirectRideReconciliationRequestV1.decode(data)
         }
+        phoneNavigationHandback = defaults.string(
+            forKey: phoneNavigationHandbackKey
+        ).flatMap(PhoneNavigationHandback.init(rawValue:))
         super.init()
     }
 
@@ -244,6 +269,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         selectedBikeComputerEnvelope = incoming
         defaults.set(data, forKey: selectedBikeComputerKey)
         guard previousDeviceID != incoming.deviceID else { return }
+        defer { completeDeferredRestorationIfNeeded() }
 
         releasePhonePreparationIfNeeded()
         phoneNavigationHandback = nil
@@ -298,6 +324,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     /// credential must not remain usable merely because its BLE session was
     /// already authenticated before Keychain deletion.
     func controllerCredentialsDidChange() {
+        defer { completeDeferredRestorationIfNeeded() }
         let refreshed: [WatchControllerCredentialV1]
         do {
             refreshed = try credentialStore.allActiveCredentials()
@@ -407,11 +434,14 @@ final class WatchDeviceLink: NSObject, ObservableObject {
            response.errorCode == "phone_navigation_active" {
             // The phone still navigates after it stopped answering. Restore
             // the hold, and return a link this ride won in the meantime.
-            if transportStateMachine.isReady {
+            // Before ride restoration a relaunched Watch keeps its link: the
+            // phone may be answering for its own workout recovery.
+            if !transportStateMachine.isReady {
+                phoneNavigationHandback = .deferring
+            } else if initialDemandRestorationCompleted {
                 deferToPhoneNavigation()
                 return
             }
-            phoneNavigationHandback = .deferring
         }
         // Outside a handback the phone also reports `phone_navigation_active`
         // while its own workout recording or recovery blocks a handoff, so a
@@ -437,6 +467,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         disconnectingForBusyLease = peripheral != nil
         fail(message, reason: .leaseBusy)
         state = .busy
+        // A held ride waits for the preparation backoff, not the reconnect
+        // timer as well; both reach 30 s and would add up.
+        if phoneNavigationHandback == .deferring {
+            schedulePhonePreparationRetry()
+        }
     }
 
     func directRidePreparationSubmissionDidFail(
@@ -459,6 +494,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         guard !gracefulStopPending else { return }
         reconcilePendingPhonePreparationRequest()
         if hasDemand {
+            // Reachability changed: ask now, so a held ride learns at once
+            // that the phone is gone (or back) instead of after its backoff.
+            deferredPreparationRetryDue = true
             reconcileDemand()
         } else if phonePreparationReleasePending {
             releasePhonePreparationIfNeeded()
@@ -466,7 +504,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     func completeInitialDemandRestoration() {
-        guard !gracefulStopPending else { return }
+        guard !gracefulStopPending else {
+            // Recovery reports once. The stop finalizer completes this after
+            // the old link is gone instead of dropping it for the process.
+            initialDemandRestorationDeferred = true
+            return
+        }
+        initialDemandRestorationDeferred = false
         initialDemandRestorationCompleted = true
         switch phonePreparationRestorationGate.complete(
             hasRecoveredDemand: hasDemand
@@ -478,13 +522,35 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .none:
             break
         }
+        // A hold persisted by a ride that did not survive the relaunch.
+        if !hasDemand { phoneNavigationHandback = nil }
         reconcilePendingPhonePreparationRequest()
+    }
+
+    /// Every way a graceful stop ends, including a reset that abandons it,
+    /// finishes the restoration it deferred.
+    private func completeDeferredRestorationIfNeeded() {
+        guard initialDemandRestorationDeferred, !gracefulStopPending else {
+            return
+        }
+        completeInitialDemandRestoration()
     }
 
     func requestPhonePreparationReconciliation(
         _ request: WatchDirectRideReconciliationRequestV1
     ) {
         guard (try? request.validated()) != nil else { return }
+        // Copies arrive by two WatchConnectivity paths in either order. For
+        // the same handoff, an idle release asks for less than a pending
+        // navigation handback and must not replace it.
+        if let pending = pendingPhonePreparationReconciliation,
+           pending.deviceID == request.deviceID,
+           pending.preparationID == request.preparationID,
+           pending.purpose == .phoneNavigation,
+           request.purpose == .releaseWhenIdle {
+            reconcilePendingPhonePreparationRequest()
+            return
+        }
         pendingPhonePreparationReconciliation = request
         if let data = try? request.encoded() {
             defaults.set(
@@ -727,6 +793,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
               !phonePreparationReleasePending,
               force || !phonePreparationAccepted,
               !phonePreparationSubmissionOutstanding else { return }
+        // The phone keeps rejecting until its navigation ends, which may take
+        // hours. Ask again on the backoff (at most every 30 s) rather than
+        // after every workout snapshot. A fresh preparation asks at once.
+        if phoneNavigationHandback == .deferring, phonePreparationAttempt > 0,
+           !deferredPreparationRetryDue {
+            schedulePhonePreparationRetry()
+            return
+        }
+        deferredPreparationRetryDue = false
         phonePreparationRetryTask?.cancel()
         phonePreparationRetryTask = nil
         phonePreparationAttempt = min(phonePreparationAttempt + 1, 6)
@@ -739,8 +814,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .submitted:
             phonePreparationSubmissionOutstanding = true
             startPhonePreparationResponseTimeout()
-        case .transportUnavailable, .activationPending,
-                .counterpartUnreachable, .encodingFailed:
+        case .activationPending:
+            // This Watch's own session is still activating, typically right
+            // after a relaunch; completion asks again. The phone is not gone.
+            phonePreparationSubmissionOutstanding = false
+            schedulePhonePreparationRetry()
+        case .transportUnavailable, .counterpartUnreachable, .encodingFailed:
             phonePreparationSubmissionOutstanding = false
             suspendPhoneNavigationDeferral()
             schedulePhonePreparationRetry()
@@ -897,6 +976,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                   self.preparedPhonePreparationID == preparationID else {
                 return
             }
+            self.deferredPreparationRetryDue = true
             self.reconcileDemand()
         }
     }
@@ -922,6 +1002,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         releasePhonePreparationIfNeeded()
         phoneNavigationHandback = nil
         state = .failed(message)
+        completeDeferredRestorationIfNeeded()
     }
 
     private func startScan() {
@@ -1056,6 +1137,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         resetTransport(keepingPeripheral: false)
         state = .idle
         lastError = nil
+        completeDeferredRestorationIfNeeded()
         // No subsequent navigation location callback is needed to make progress.
         // An old release remains persisted until the existing WC/outbox path
         // admits it. Only then may the successor persist a fresh preparation.

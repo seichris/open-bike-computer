@@ -634,12 +634,14 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         data: Data,
         error: Error?
     ) {
-        var inFlight = defaults.array(
-            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
-        ) as? [Data] ?? []
-        if let index = inFlight.firstIndex(of: data) {
-            inFlight.remove(at: index)
-        }
+        let finished = WatchDirectRideReconciliationPolicyV1.finishing(
+            data,
+            failed: error != nil,
+            inFlight: defaults.array(
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            ) as? [Data] ?? []
+        )
+        let inFlight = finished.inFlight
         if inFlight.isEmpty {
             defaults.removeObject(
                 forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
@@ -651,6 +653,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             )
         }
         if error != nil {
+            guard finished.resend else { return }
             requeueDirectRideReconciliation(data)
             scheduleDirectRideReconciliationRetry()
             return
