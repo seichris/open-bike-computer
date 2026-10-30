@@ -859,15 +859,16 @@ esp_err_t Storage::initSPIFFS() {
     if (mounted)
       (void)internal_storage::recordGeometry(assessment);
   }
-  ESP_LOGI(TAG,
-           "STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
-           "mounted=%d offset=0x%lx size=0x%lx",
-           assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
-           assessment.wearLevellingValid ? 1 : 0,
-           static_cast<unsigned>(assessment.record),
-           static_cast<unsigned>(plan), mounted ? 1 : 0,
-           static_cast<unsigned long>(assessment.address),
-           static_cast<unsigned long>(assessment.size));
+  // Printed like the SDIO lines: AMOLED profiles compile out ESP_LOGI, and
+  // the partition-layout gates read this decision from serial.
+  Serial.printf("STORAGE_FFAT found=%d erased=%d wl=%d record=%u plan=%u "
+                "mounted=%d offset=0x%lx size=0x%lx\n",
+                assessment.partitionFound ? 1 : 0, assessment.erased ? 1 : 0,
+                assessment.wearLevellingValid ? 1 : 0,
+                static_cast<unsigned>(assessment.record),
+                static_cast<unsigned>(plan), mounted ? 1 : 0,
+                static_cast<unsigned long>(assessment.address),
+                static_cast<unsigned long>(assessment.size));
   if (!mounted) {
     ESP_LOGE(TAG, "FFat Mount Failed");
     internalFallbackMounted = false;

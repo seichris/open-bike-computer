@@ -44,6 +44,19 @@ template <typename... Arguments> void discardLog(const Arguments &...) {}
 #define ESP_LOGI(...) discardLog(__VA_ARGS__)
 #define ESP_LOGE(...) discardLog(__VA_ARGS__)
 static const char *TAG = "Storage";
+// Serial is the only log that reaches USB on AMOLED profiles; ESP_LOGI is
+// compiled out there, as the discarding macros above model.
+std::string serialOutput;
+struct FakeSerial {
+  void println(const char *) {}
+  void printf(const char *text) { serialOutput += text; }
+  template <typename First, typename... Rest>
+  void printf(const char *format, const First &first, const Rest &...rest) {
+    char line[256];
+    std::snprintf(line, sizeof(line), format, first, rest...);
+    serialOutput += line;
+  }
+} Serial;
 
 namespace power_management {
 enum class LockDomain { Storage };
@@ -209,11 +222,6 @@ namespace ride_diagnostics {
 enum class Level { Info, Warning };
 bool record(Level, const char *, const char *, const char *) { return true; }
 } // namespace ride_diagnostics
-struct FakeSerial {
-  void println(const char *) {}
-  template <typename... Arguments>
-  void printf(const char *, const Arguments &...) {}
-} Serial;
 namespace ble_transfer {
 enum class Action { EnableMap, EnableFirmware };
 } // namespace ble_transfer
@@ -294,6 +302,11 @@ void resetHardware() {
                     0x810000, 0x700000};
   geometryRecords = formatsWhenRecorded = 0;
   geometryRecordFails = false;
+  serialOutput.clear();
+}
+
+bool serialLogged(const char *text) {
+  return serialOutput.find(text) != std::string::npos;
 }
 
 void cardBootPinsTheCardAndNeverRemounts() {
@@ -460,6 +473,9 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 1 && FFat.formats == 1 && geometryRecords == 1);
   CHECK(formatsWhenRecorded == 0);
+  // The physical gate reads this line from a developer profile's serial.
+  CHECK(serialLogged("STORAGE_FFAT found=1 erased=1 wl=0 record=0 plan=0 "
+                     "mounted=1 offset=0x810000 size=0x700000\n"));
 
   // Without a durable ownership record an erased partition stays erased.
   resetHardware();
@@ -482,6 +498,7 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   resetHardware();
   CHECK(noCardBoot() == ESP_OK);
   CHECK(FFat.begins == 1 && FFat.formats == 0 && geometryRecords == 1);
+  CHECK(serialLogged("wl=1 record=0 plan=1 mounted=1"));
   resetHardware();
   FFat.canMount = false;
   CHECK(noCardBoot() == ESP_OK);
@@ -493,12 +510,14 @@ void ffatFormatsOnlyErasedOrOwnedVolumes() {
   ffatAssessment.wearLevellingValid = false;
   CHECK(noCardBoot() != ESP_OK);
   CHECK(FFat.begins == 0 && FFat.formats == 0 && geometryRecords == 0);
+  CHECK(serialLogged("wl=0 record=0 plan=3 mounted=0"));
 
   // FFat moved since this device owned it: untouched, even if WL looks valid.
   resetHardware();
   ffatAssessment.record = InternalGeometryRecord::Differs;
   CHECK(noCardBoot() != ESP_OK);
   CHECK(FFat.begins == 0 && FFat.formats == 0 && geometryRecords == 0);
+  CHECK(serialLogged("wl=1 record=2 plan=2 mounted=0"));
 
   // After the migration's erase the new geometry is owned, then formatted.
   resetHardware();
