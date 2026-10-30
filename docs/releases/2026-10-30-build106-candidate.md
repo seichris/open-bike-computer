@@ -4,8 +4,11 @@ Status: **published** on 2026-10-30 at 13:17 UTC as tag `v0.3.4-release.14` on
 `1c70b556`.
 
 - The 1.75 gates passed on the exact candidate.
-- On the 1.75, the release installed over the air into app1, and a forced rollback
-  also passed; see "After publication".
+- On the 1.75, these passed; see "After publication":
+  - over-the-air install into app1;
+  - a forced rollback;
+  - the dual 4 MiB channel choice, with an app that contains #662;
+  - a release 13 device updating over the legacy channel.
 - The 2.06 gates were not run. The maintainer accepted that residual risk; see
   "Decisions recorded".
 
@@ -217,7 +220,7 @@ Publication (2026-10-30):
 - [x] The release SHA and build reached the map platform. Production selected the
   build-106 approval `msr-20261030-firmware-build106` (#694, #695) at 13:52 UTC.
   Durable maps are unaffected.
-- [x] OTA on the 1.75, with app 1.11 (33):
+- [x] OTA on the 1.75, with Bicino Dev 1.11 (33), which predates #662:
   - Setup: the board ran a local build of main `3eea2c8e` in app0. Its firmware
     inputs are identical to the release; only the commit differs. The app
     offered the published build as a developer same-build install. It does not
@@ -236,14 +239,32 @@ Publication (2026-10-30):
     - Otadata then showed app1 `ABORTED`, and the board booted main from app0.
     - A third install confirmed again: app1 `VALID`, digest matched. The board is
       left on the published release in app1.
-- [ ] OTA still open:
-  - back into app0, which needs a higher published build (release 107);
-  - the 2.06 (waived);
-  - an app that contains #662. App 1.11 (33) predates #662: it has no "OTA Slot"
-    row and fetched the legacy-channel manifest. Its `dual4m` channel choice
-    is therefore untested.
-  - the Bicino Dev app family.
-- [ ] A legacy dual 3 MiB device receives the release over the legacy channel.
+- [x] Channel choice, with an app that contains #662. Bicino Dev built from main
+  `c155dac2` (signature verified) was installed over the existing Bicino Dev,
+  keeping its data and pairing.
+  - Dual 4 MiB:
+    - The board again ran main `3eea2c8e` in app0.
+    - The app showed "OTA Slot 4096 KiB". With that slot it tries the `dual4m`
+      manifest first, which is published, and it offered build 106.
+    - The developer same-build install confirmed: app1 `VALID`, digest matched
+      the published image.
+  - Legacy channel:
+    - Release 13's signed factory images went back on the dual 3 MiB table with
+      NVS and pairing kept. Legacy app1 and FFat were erased first.
+    - The app showed "OTA Slot 3072 KiB", which restricts it to the legacy
+      channel. It reported "firmware update available" for 106 with the
+      developer flag off, and no layout notice.
+    - Release 13's updater installed it. Legacy app1 (`0x310000`) is `VALID`
+      and matches the published image by digest, and app0 still holds
+      release 13.
+  - The board was then returned to release 14's signed factory images on the
+    dual 4 MiB table (app0 `ebc85e6f…`, NVS kept), at 14:49 UTC.
+- [ ] Still open:
+  - back into app0: skipped by the maintainer until the next release;
+  - the 2.06: waived;
+  - the production Bicino app family. Only Bicino Dev was installed;
+  - the app's rejection and notice for an oversized image, the second half of
+    partition-layout gate 7. No oversized release exists.
 - [ ] Migration gates 1, 2 and 6 with the release's exact bytes, with read-only
   website inspections before and after; then the catalog admission PR.
 
