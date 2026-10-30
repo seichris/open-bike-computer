@@ -337,12 +337,14 @@ def style_features( features, styles):
 
 
 def _linear_parts(value):
-    """Return the drawable lines of a line/block intersection, in GEOS order.
+    """Return the line members of a line/block intersection, in GEOS order.
 
     A line that enters the block and also touches its boundary at an isolated
     point comes back as a GeometryCollection holding that point beside the
-    line parts. A point has no length to draw, so it is dropped; any other
-    unexpected geometry still fails closed.
+    line parts, and a line crossing a block corner within a nanometre comes
+    back as that corner point alone. Points have no length to draw, so they
+    are dropped; clip_lines counts the lines left with nothing to draw. Any
+    other geometry type is unexpected and fails closed.
     """
     if type(value) == LineString:
         return [value]
@@ -355,9 +357,22 @@ def _linear_parts(value):
     return parts
 
 
-def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove feats that are fully contained, return remaining
+def _record_line_clip_without_length(diagnostics, result):
+    """Count a line that passed the block test but left nothing to draw."""
+    if diagnostics is None:
+        return
+    diagnostics["lineClipsWithoutLength"] = diagnostics.get("lineClipsWithoutLength", 0) + 1
+    by_result = diagnostics.setdefault("lineClipsWithoutLengthByResult", {})
+    code = "empty" if result.is_empty else result.geom_type
+    by_result[code] = by_result.get(code, 0) + 1
+
+
+def clip_lines( features, bbox: Polygon, label_diagnostics=None, geometry_diagnostics=None): #TODO remove feats that are fully contained, return remaining
     """ Clip lines to the box area. Each line can be splitted into one or several lines.
-        Returns a list of LineStrings
+        Returns a list of LineStrings. A line that keeps no drawable part in
+        the block (a corner contact point, or a line so short that GEOS
+        reduces it to an empty line) is skipped and counted in
+        geometry_diagnostics.
     """
     clipped = []
     for feat in features:
@@ -369,8 +384,12 @@ def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove f
         parts = intersection( line, bbox)
         line_parts = _linear_parts( parts)
         if not parts.is_valid: continue
+        emitted = 0
         for p in line_parts:
-            if p.is_valid:
+            # An empty part (a line about one ULP long) has NaN bounds that
+            # would abort the FMB writer.
+            if p.is_valid and not p.is_empty:
+                emitted += 1
                 new_feat = dict( feat)
                 new_feat['geom'] = p
                 new_feat['bbox'] = p.bounds
@@ -388,8 +407,10 @@ def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove f
                     dropped = len(feat.get('label_candidates', [])) - len(candidates)
                     label_diagnostics['candidatesRejectedByBlockOwnership'] = \
                         label_diagnostics.get('candidatesRejectedByBlockOwnership', 0) + max(0, dropped)
-                clipped.append( new_feat)            
-    return clipped 
+                clipped.append( new_feat)
+        if not emitted:
+            _record_line_clip_without_length( geometry_diagnostics, parts)
+    return clipped
 
 def _polygonal_parts(value):
     if isinstance(value, Polygon):

@@ -117,6 +117,59 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertGreater(stats["emittedWallCount"], 0)
         self.assertGreater(stats["suppressedWallCount"], 0)
 
+    def test_keeps_the_lobe_inside_a_block_when_another_lobe_touches_its_edge(self):
+        # Each building has a lobe inside block (0, 0) and another lobe that
+        # touches the block boundary from outside, so GEOS returns the clip
+        # as a GeometryCollection holding the polygon beside the contact.
+        cases = {
+            "relation outers sharing a segment with the right edge": feature(
+                300,
+                MultiPolygon([box(10, 10, 30, 30), box(100, 10, 130, 30)]),
+                '"height"=>"12"',
+                building="commercial",
+                relation=True,
+            ),
+            "relation outers meeting the top edge at a point": feature(
+                301,
+                MultiPolygon(
+                    [box(10, 10, 30, 30), Polygon([(50, 100), (40, 120), (60, 120)])]
+                ),
+                '"height"=>"12"',
+                building="commercial",
+                relation=True,
+            ),
+            "one outline folding back onto the right edge": feature(
+                302,
+                Polygon(
+                    [
+                        (10, 10), (40, 10), (40, 120), (100, 120),
+                        (100, 30), (130, 30), (130, 140), (10, 140),
+                    ]
+                ),
+                '"height"=>"12"',
+                building="commercial",
+            ),
+        }
+        block = box(0, 0, 100, 100)
+        for name, source in cases.items():
+            with self.subTest(case=name):
+                buildings, _report, _flat = prepare_buildings([source], self.rules)
+                self.assertEqual(len(buildings), 1)
+                clipped = buildings[0].geometry.intersection(block)
+                self.assertEqual(clipped.geom_type, "GeometryCollection")
+                records, stats = clip_buildings(buildings, block, 0, 0)
+                self.assertEqual(stats["recordCount"], 1)
+                roofs = unary_union(
+                    [
+                        Polygon(ring["points"])
+                        for record in records
+                        for ring in record["rings"]
+                        if ring["flags"] == 0
+                    ]
+                )
+                self.assertAlmostEqual(roofs.area, clipped.area)
+                self.assertGreater(clipped.area, 0)
+
     def test_collects_closed_building_parts_from_the_gdal_line_layer(self):
         outline = feature(
             1,

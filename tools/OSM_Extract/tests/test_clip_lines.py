@@ -29,6 +29,18 @@ TOUCHING_ROAD = [
     (4086, 4196), (4196, 4196), (4196, 4086),
     (4296, 4086), (4296, 4096), (4396, 4086),
 ]
+# Inside block (0, 0) and one ULP long: GEOS reduces its block intersection
+# to an empty line.
+ULP_SHORT_ROAD = [
+    (2815.860862137019, 3797.2024186666486),
+    (2815.8608621370204, 3797.2024186666486),
+]
+# Crosses the corner of block (4096, 4096) within a nanometre: GEOS returns
+# the corner point as the whole intersection.
+CORNER_CONTACT_ROAD = [
+    (4096.000000001, 4095.999999999),
+    (4095.999999999, 4096.000000001),
+]
 
 
 def block_box(min_x, min_y):
@@ -47,7 +59,7 @@ def expected_line_parts(line, block):
     parts = [result] if result.geom_type == "LineString" else [
         part for part in result.geoms if part.geom_type == "LineString"
     ]
-    return [part.wkb for part in parts if part.is_valid]
+    return [part.wkb for part in parts if part.is_valid and not part.is_empty]
 
 
 class ClipLinesTests(unittest.TestCase):
@@ -89,6 +101,36 @@ class ClipLinesTests(unittest.TestCase):
             },
         )
 
+    def test_a_line_one_ulp_long_is_counted_instead_of_drawn(self):
+        block = block_box(0, 0)
+        line = LineString(ULP_SHORT_ROAD)
+        self.assertTrue(block.intersects(line) and not block.touches(line))
+        self.assertTrue(intersection(line, block).is_empty)
+        diagnostics = {}
+        self.assertEqual(
+            clip_lines([{"geom": line}], block, geometry_diagnostics=diagnostics), []
+        )
+        self.assertEqual(
+            diagnostics,
+            {"lineClipsWithoutLength": 1, "lineClipsWithoutLengthByResult": {"empty": 1}},
+        )
+
+    def test_a_corner_contact_point_is_counted_instead_of_drawn(self):
+        block = block_box(4096, 4096)
+        line = LineString(CORNER_CONTACT_ROAD)
+        self.assertTrue(block.intersects(line) and not block.touches(line))
+        self.assertEqual(intersection(line, block).geom_type, "Point")
+        diagnostics = {}
+        self.assertEqual(
+            clip_lines([{"geom": line}], block, geometry_diagnostics=diagnostics), []
+        )
+        self.assertEqual(
+            diagnostics,
+            {"lineClipsWithoutLength": 1, "lineClipsWithoutLengthByResult": {"Point": 1}},
+        )
+        # Callers without a diagnostics mapping get the same output.
+        self.assertEqual(clip_lines([{"geom": line}], block), [])
+
     def test_every_line_result_keeps_its_line_parts_in_order(self):
         # Integer coordinates on a coarse grid make exact boundary contacts
         # common, so every GEOS result shape is exercised.
@@ -114,7 +156,7 @@ class ClipLinesTests(unittest.TestCase):
         for shape in ("LineString", "MultiLineString", "GeometryCollection"):
             self.assertGreater(shapes[shape], 10, shape)
 
-    def test_extract_features_keeps_a_road_that_touches_a_block_edge(self):
+    def test_extract_features_keeps_an_edge_touching_road_and_counts_a_ulp_short_one(self):
         host_font = next(
             (path for path in HOST_FONT_CANDIDATES if path.is_file()),
             None,
@@ -142,7 +184,15 @@ class ClipLinesTests(unittest.TestCase):
                                     "type": "LineString",
                                     "coordinates": [list(point) for point in TOUCHING_ROAD],
                                 },
-                            }
+                            },
+                            {
+                                "type": "Feature",
+                                "properties": {"osm_id": 2, "highway": "residential"},
+                                "geometry": {
+                                    "type": "LineString",
+                                    "coordinates": [list(point) for point in ULP_SHORT_ROAD],
+                                },
+                            },
                         ],
                     }
                 ),
@@ -187,6 +237,16 @@ class ClipLinesTests(unittest.TestCase):
             )
             # Block (1, 1) holds the clipped road beside the touch point.
             self.assertTrue((root / "map" / "+000+000" / "1_1.fmb").is_file())
+            # The one-ULP road in block (0, 0) is counted, not written.
+            diagnostics = json.loads(
+                next(
+                    line[len("GEOMETRY_DIAGNOSTICS:"):]
+                    for line in result.stdout.splitlines()
+                    if line.startswith("GEOMETRY_DIAGNOSTICS:")
+                )
+            )
+            self.assertEqual(diagnostics.get("lineClipsWithoutLength"), 1)
+            self.assertEqual(diagnostics.get("lineClipsWithoutLengthByResult"), {"empty": 1})
 
 
 def mercator_latitude(y):
