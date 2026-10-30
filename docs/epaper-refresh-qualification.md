@@ -101,10 +101,11 @@ map, ticking ride clock, live speed) reaches 160 partials in about 3.5–4 minut
 then cleans for about 2.5–3 s; a stop of a minute or more adds a wake frame. The
 limit was 20 until 2026-10-30, which flashed every 20–25 s. With the E397-11
 fix in place, the owner saw only very slight ghosting after 160 partials while
-navigating, on one panel at room temperature, and chose 160. Still open: ghost
-∆L (or photographed residual contrast) for the moving-map and workout screens
-after 20, 40, 80 and 160 partials at 5 and 40 °C and on a second panel, before
-and after each cleaning. The vendor's 1.5 s fast-full waveform needs its own
+navigating, on one panel at room temperature, and chose 160. The owner then
+judged ghosting acceptable at about 5 °C and about 40 °C on the same panel
+(visual, 2026-10-30). Still open: a second panel, and recorded ghost ∆L (or
+photographed residual contrast) for the moving-map and workout screens after
+20, 40, 80 and 160 partials, before and after each cleaning. The vendor's 1.5 s fast-full waveform needs its own
 tracked qualification profile and a reviewed policy change.
 
 ## Capability, map and navigation checks
