@@ -524,6 +524,22 @@ enum WatchDirectRideReconciliationPolicyV1 {
         }) else { return pending }
         return pending + [abandoned]
     }
+
+    /// Removes a finished transfer from the phone's in-flight record. A failed
+    /// transfer is resent only while that record still owns it: a flush may
+    /// already have requeued it as abandoned and sent a newer request since.
+    static func finishing(
+        _ payload: Data,
+        failed: Bool,
+        inFlight: [Data]
+    ) -> (inFlight: [Data], resend: Bool) {
+        guard let index = inFlight.firstIndex(of: payload) else {
+            return (inFlight, false)
+        }
+        var remaining = inFlight
+        remaining.remove(at: index)
+        return (remaining, failed)
+    }
 }
 
 struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {

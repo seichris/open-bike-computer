@@ -1724,6 +1724,37 @@ enum RideSharedTests {
             ) == [otherHandoff, reconciliationRequest],
             "an abandoned request without a newer copy is retried"
         )
+        let olderPayload = try reconciliationRequest.encoded()
+        let newerPayload = try handbackRequest.encoded()
+        let ownedFailure = WatchDirectRideReconciliationPolicyV1.finishing(
+            olderPayload,
+            failed: true,
+            inFlight: [olderPayload, newerPayload]
+        )
+        try expect(
+            ownedFailure.inFlight == [newerPayload] && ownedFailure.resend,
+            "a failed transfer still recorded in flight is resent"
+        )
+        // A flush already requeued this transfer as abandoned and sent the
+        // newer request; its late failure must not queue it after that one.
+        let lateFailure = WatchDirectRideReconciliationPolicyV1.finishing(
+            olderPayload,
+            failed: true,
+            inFlight: [newerPayload]
+        )
+        try expect(
+            lateFailure.inFlight == [newerPayload] && !lateFailure.resend,
+            "a late failure of an abandoned transfer is not resent again"
+        )
+        let delivered = WatchDirectRideReconciliationPolicyV1.finishing(
+            olderPayload,
+            failed: false,
+            inFlight: [olderPayload]
+        )
+        try expect(
+            delivered.inFlight.isEmpty && !delivered.resend,
+            "a delivered transfer leaves the in-flight record"
+        )
         let preparationIntent = try WatchDirectRidePreparationIntentV1(
             preparationID: preparationRequest.preparationID,
             operation: .prepare,
