@@ -23,7 +23,7 @@ Boards in scope:
 | Waveshare ESP32-S3-ePaper-3.97 | Experimental (#442) | 480×800 e-paper, buttons, ALDO3-only PMIC writes |
 | 1.75 with a GNSS module | Candidate | The 1.75 has unpopulated GPS pads; a fitted variant would be a new target |
 | Other ESP32-S3 boards | Candidate | Different display, power chip, sensors or radios on the same SoC |
-| IceNav-era boards (T-Deck, Elecrow, MakerFabs, N16R4, N16R8, IceNav) | Legacy | Not built by CI; images stamp `unverified-…` |
+| IceNav-era boards (T-Deck, Elecrow, MakerFabs, N16R4, N16R8, IceNav) | To be removed (M0) | Not built by CI; images stamp `unverified-…`; removal decided 2026-10-30 |
 
 This is a plan, not a contract change. Nothing here alters the BLE contract,
 partition layouts, release gates or physical acceptance rules; it says where
@@ -306,7 +306,8 @@ sequencing is where the PMIC policies live.
 | M5 | Position source | Put `gps.cpp` behind the position-source interface as the GNSS implementation; the phone path becomes the default implementation; retire `HAS_HARDWARE_GPS` and `AT6558D_GPS` | Navigation consumes one interface; AMOLED behaviour unchanged | None until a GNSS board exists |
 | M6 | First variant through the checklist | Add one new variant (the GNSS 1.75 or another board) using only the per-variant steps above | The ratchet test's allowlist gains no entry; CI builds the variant automatically | The variant's own gates |
 
-M0 and M1 can share one pull request. M2 is the largest and riskiest; split it
+M0 is decided (see Decisions) and starts once #442 has merged. M0 and M1 can
+share one pull request. M2 is the largest and riskiest; split it
 by family if the review grows past the three-pass limit. M5 has no user-visible
 effect on its own and can wait until a GNSS board is real.
 
@@ -339,10 +340,18 @@ existing esp32 host check so CI runs it:
   risk. Keep it to the few hooks the scheduler already uses, and let the two
   stacks stay different rather than forcing symmetry.
 
-## Decisions needed
+## Decisions
 
-1. Legacy boards: remove them (recommended) or freeze them in a `legacy/`
-   directory that CI never builds.
+1. **Legacy boards: remove them.** Decided by the maintainer on 2026-10-30.
+   M0 deletes the six environments, their `hal.hpp` blocks, the conditionals in
+   the ten other files, the `DISABLE_*` branches no Waveshare build compiles and
+   the `lib_deps` only they used (LovyanGFX, EasyPreferences, ESP32 Wifi CLI,
+   AsyncTCP, ESPAsyncWebServer). It runs after #442 merges, as the first
+   milestone, in one pull request with M1 where practical. Nothing is frozen or
+   kept as reference; Git history holds the removed code.
+
+Still open:
+
 2. Whether a GNSS 1.75 is a real target. The 1.75 pads are unpopulated, so it
    needs a fitted module and its own bench board before M5 and M6 are worth
    doing.
