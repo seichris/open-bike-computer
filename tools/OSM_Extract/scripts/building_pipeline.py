@@ -802,7 +802,15 @@ def clip_buildings(
     min_y: int,
     *,
     tolerance: float = 0.05,
+    geometry_diagnostics=None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Clip the buildings to a block and encode their rings.
+
+    A building that passes the block test but leaves no record, because its
+    clip is not a polygon or its rings round to fewer than three points, is
+    counted in geometry_diagnostics. The returned statistics keep the block
+    cache contract, so the count never enters a cached block.
+    """
     records: list[dict[str, Any]] = []
     suppressed_walls = 0
     emitted_walls = 0
@@ -829,7 +837,9 @@ def clip_buildings(
                 )
             )
         )
-        for fragment in _polygons(clipped):
+        fragments = _polygons(clipped)
+        records_before = len(records)
+        for fragment in fragments:
             if fragment.is_empty or not fragment.is_valid:
                 continue
             oriented = orient(fragment, sign=1.0)
@@ -902,6 +912,10 @@ def clip_buildings(
             provenance_counts[
                 PROVENANCE_NAMES[source.resolved.provenance] + "Count"
             ] += 1
+        if len(records) == records_before:
+            _record_building_clip_without_record(
+                geometry_diagnostics, clipped, len(fragments)
+            )
     records.sort(
         key=lambda item: (
             item["bbox"], item["height_dm"], item["source_key"], item["flags"]
@@ -1087,6 +1101,25 @@ def _local_median(
         for y in range(cell_y - rules.halo_cells, cell_y + rules.halo_cells + 1):
             samples.extend(calibration.get((x, y, source.building_class), ()))
     return statistics.median(sorted(samples)) if len(samples) >= rules.minimum_samples else None
+
+
+def _record_building_clip_without_record(diagnostics, clipped, fragment_count):
+    """Count a building that passed the block test but left no record."""
+    if diagnostics is None:
+        return
+    diagnostics["buildingClipsWithoutRecord"] = (
+        diagnostics.get("buildingClipsWithoutRecord", 0) + 1
+    )
+    by_result = diagnostics.setdefault("buildingClipsWithoutRecordByResult", {})
+    if clipped.is_empty:
+        code = "empty"
+    elif fragment_count:
+        # Polygon fragments that encode no ring: empty, invalid, or rounding
+        # to fewer than three points.
+        code = "degenerate"
+    else:
+        code = clipped.geom_type
+    by_result[code] = by_result.get(code, 0) + 1
 
 
 def _polygons(geometry) -> list[Polygon]:
