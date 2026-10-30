@@ -276,6 +276,9 @@ class BikeComputerCoordinator: ObservableObject {
                 guard let self = self else { return }
                 let navigationChanged = self.wasNavigating != navigating
                 self.isNavigating = navigating
+                // A Watch-direct ride may hold the single Bicino link; phone
+                // navigation asks for it back instead of navigating unseen.
+                self.bleManager.setPhoneNavigationActive(navigating)
                 if self.startServices {
                     self.locationManager.setNavigating(navigating && !self.navEngine.isSimulationMode)
                 }

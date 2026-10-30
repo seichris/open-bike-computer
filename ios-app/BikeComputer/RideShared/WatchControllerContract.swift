@@ -422,6 +422,17 @@ struct WatchDirectRidePreparationRequestV1: Codable, Equatable, Sendable {
     }
 }
 
+/// What the phone needs from a reconciled direct-ride handoff.
+enum WatchDirectRideReconciliationPurposeV1: String, Codable, Equatable,
+    Sendable {
+    /// Release the exact handoff once the Watch has no ride demand left.
+    case releaseWhenIdle
+    /// iPhone navigation needs the single Bicino link. The Watch hands it back
+    /// even during an active ride and keeps its demand until the phone accepts
+    /// a later preparation.
+    case phoneNavigation
+}
+
 /// An idempotent phone-to-Watch request to reconcile a persisted direct-ride
 /// handoff. It is keyed to the same exact preparation identity as release, so
 /// delayed requests cannot affect a successor ride.
@@ -435,11 +446,17 @@ struct WatchDirectRideReconciliationRequestV1:
     let requestID: UUID
     let preparationID: UUID
     let deviceID: String
+    let purpose: WatchDirectRideReconciliationPurposeV1
+
+    private enum CodingKeys: String, CodingKey {
+        case schema, requestID, preparationID, deviceID, purpose
+    }
 
     init(
         requestID: UUID = UUID(),
         preparationID: UUID,
-        deviceID: String
+        deviceID: String,
+        purpose: WatchDirectRideReconciliationPurposeV1 = .releaseWhenIdle
     ) throws {
         let validatedIdentity = try WatchDirectRidePreparationRequestV1(
             requestID: requestID,
@@ -451,6 +468,21 @@ struct WatchDirectRideReconciliationRequestV1:
         self.requestID = validatedIdentity.requestID
         self.preparationID = validatedIdentity.preparationID
         self.deviceID = validatedIdentity.deviceID
+        self.purpose = purpose
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try values.decode(Int.self, forKey: .schema)
+        requestID = try values.decode(UUID.self, forKey: .requestID)
+        preparationID = try values.decode(UUID.self, forKey: .preparationID)
+        deviceID = try values.decode(String.self, forKey: .deviceID)
+        // Earlier iPhone builds sent only idle-release requests. Earlier Watch
+        // builds ignore this key and keep treating every request that way.
+        purpose = try values.decodeIfPresent(
+            WatchDirectRideReconciliationPurposeV1.self,
+            forKey: .purpose
+        ) ?? .releaseWhenIdle
     }
 
     func validated() throws -> Self {
@@ -460,7 +492,8 @@ struct WatchDirectRideReconciliationRequestV1:
         return try Self(
             requestID: requestID,
             preparationID: preparationID,
-            deviceID: deviceID
+            deviceID: deviceID,
+            purpose: purpose
         )
     }
 
@@ -477,6 +510,20 @@ enum WatchDirectRideReconciliationPolicyV1 {
     /// Keeps the exact discovery request alive for a late durable release, but
     /// replaces the progress claim with actionable guidance after this delay.
     static let phoneWaitTimeoutSeconds: Double = 8
+
+    /// Returns the phone's queue after an in-flight request was abandoned. A
+    /// request queued for the same handoff since then is newer and carries the
+    /// phone's current purpose, so the abandoned one must not replace it.
+    static func requeueing(
+        _ abandoned: WatchDirectRideReconciliationRequestV1,
+        into pending: [WatchDirectRideReconciliationRequestV1]
+    ) -> [WatchDirectRideReconciliationRequestV1] {
+        guard !pending.contains(where: {
+            $0.deviceID == abandoned.deviceID &&
+                $0.preparationID == abandoned.preparationID
+        }) else { return pending }
+        return pending + [abandoned]
+    }
 }
 
 struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {
