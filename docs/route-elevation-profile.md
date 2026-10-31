@@ -1,8 +1,8 @@
 # Route elevation
 
 One canonical, versioned elevation profile per route geometry drives both the
-iPhone preview and the 1.75-inch Bicino Elevation screen. The device never
-recomputes it. Navigation never waits for, or depends on, elevation: every
+iPhone preview and the Bicino Elevation screen on both Waveshare panels. The
+device never recomputes it. Navigation never waits for, or depends on, elevation: every
 failure is an explicit state and guidance continues unchanged.
 
 Related issue: seichris/open-bike-computer#98.
@@ -185,7 +185,7 @@ configured, never the key.
   and derives every on-device value from the same profile and along-route
   progress the phone shows.
 
-## Bicino Elevation screen (1.75-inch)
+## Bicino Elevation screen (1.75-inch and 2.06-inch)
 
 A default-off screen after Ride Stats: the simplified profile with estimated
 and structure-uncertain stretches marked, the progress marker, route elevation
@@ -195,9 +195,17 @@ Total ascent is available as soon as the profile arrives. The other values
 require the phone's on-route position; a stationary rider with a valid position
 can see them, while missing progress or an off-route position leaves them blank.
 It explains each state: connect the app, update the app, no route,
-loading, and unavailable with the reason. It is compiled only into 1.75-inch
-development (`FIRMWARE_DIAGNOSTICS=1`) builds until physically qualified;
-production and 2.06-inch builds omit the screen and the capability.
+loading, and unavailable with the reason. Both Waveshare boards compile the
+screen and advertise the capability in development and production builds.
+Users enable the screen through their device screen configuration; existing
+screen selections are preserved. `ROUTE_ELEVATION_SCREEN=0` remains an explicit
+build override to exclude the screen and transport.
+
+On 31 October 2026 the maintainer requested this rollout in both profiles and
+accepted the existing 2.06-inch layout on the assumption that it works. This
+records rollout acceptance rather than new physical test evidence. Per-board
+transfer, reconnect, riding readability and power checks remain pending; neither
+board's exact production image is factory-qualified by this configuration change.
 
 ## Configuration
 
@@ -237,7 +245,8 @@ the secret.
 - Production approval of the pinned Copernicus sources before enabling the DEM
   fallback in production, and staging of its tiles.
 - Building and provisioning structure indexes for the served regions.
-- Physical 1.75-inch qualification of transfer, reconnect, readability and
-  power; the 2.06-inch layout is not implemented or qualified.
+- Physical qualification of transfer, reconnect, readability and power on
+  each board's exact production image; the existing 2.06-inch layout is enabled
+  under the maintainer's accepted assumption above.
 - A product decision before Apple Maps or Strava geometry may use the service.
 - Per-climb segmentation and statistics from issue #98 are not part of v1.
