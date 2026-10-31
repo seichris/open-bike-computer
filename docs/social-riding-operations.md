@@ -290,6 +290,13 @@ pass the existing worker/hardware promotion gates.
 
 ### Map-independent friend indicators
 
+Friend markers and their shared marker-size setting are enabled in production
+and development firmware by default, independently of `FIRMWARE_DIAGNOSTICS`.
+The iPhone still requires the device's negotiated rider capability and the
+service's hardware-relay capability before sending authenticated rider packets.
+Production releases before this rollout (including the original build 106)
+need a firmware update; using Bicino Dev alone does not change their support.
+
 Social locations are global. Offline map packs supply the background, not a
 geographic limit on friends. With a usable published map, portraits use its
 projection as before. Without a map or microSD card, fresh friend positions use
@@ -301,7 +308,7 @@ The fallback follows course-up when a resolved heading is available, otherwise
 north-up, with an explicit orientation label. It requires a valid own coordinate
 and source measurement younger than 15 seconds. BLE source revocation takes effect
 immediately. Existing friend staleness (15 seconds), expiry (60 seconds), clustering,
-portraits, privacy revocation and production capability gates remain in force.
+portraits, privacy revocation and BLE capability negotiation remain in force.
 An exactly antipodal friend has no unique bearing and is omitted.
 
 ### Staged feature activation
@@ -326,13 +333,14 @@ Use lowercase `true`/`false`; invalid values fail startup. The authenticated
 `GET /v1/social/capabilities` response drives native feature availability. Live
 snapshots carry the same capabilities so a connected phone clears portrait caches
 or its BLE rider slots when those features are disabled. Firmware must still
-advertise the diagnostic Group Riders capability; this flag cannot qualify a
-production board by itself.
+advertise the Group Riders capability, which is now enabled in production and
+development builds. Keep `HARDWARE=true` in both deployed environments for the
+standard friend-marker feature; it remains an operational rollback switch.
 
 Enable media with profiles, then routes, activities, groups and finally hardware.
 For a fully enabled **development test environment**, enable the applicable
 flags, including `FRIEND_SHARING` for direct sharing;
-retain the separate native build and firmware diagnostic gates. Provider, S3 and
+retain native sign-in and device BLE capability negotiation. Provider, S3 and
 database configuration must still be supplied; disabling media does not remove
 its cleanup configuration. Restart every API replica and worker together when
 changing flags. Do not run mixed rollout settings across replicas.

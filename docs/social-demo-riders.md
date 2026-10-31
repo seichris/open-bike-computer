@@ -51,8 +51,10 @@ The connected bike computer uses the same size on Map, Map + Navigation and
 terrain/topographic Map screens. Its map-screen settings in Bicino (each Map or
 Map + Navigation screen, or the gear beside it on older screen lists) show the
 same **Friends → Friend Marker Size** control. Changing it anywhere changes it
-everywhere, and the device keeps the size after a restart. It appears only for
-developer firmware that can draw friends.
+everywhere, and the device keeps the size after a restart. Friend markers and
+this control are standard features in both production and developer firmware.
+Older production firmware, including the original build 106 release, must be
+updated before the bike computer can receive and display friends.
 
 ## Filming with riders following you
 
