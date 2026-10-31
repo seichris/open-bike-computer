@@ -92,8 +92,13 @@ class BrokerReliabilityTests(BrokerTLSTestCase):
                 except OSError:
                     time.sleep(.02)
             self.assertIsNotNone(sock)
+            # Python 3.14 increased the default file buffer to 128 KiB. Send
+            # beyond that buffer so disk bytes exist before killing the child,
+            # while leaving half the declared request body unfinished.
+            partial_body = b'x' * (2 * max(io.DEFAULT_BUFFER_SIZE, 64 * 1024))
             sock.sendall((f'PUT /v2/uploads/{uuid.uuid4()} HTTP/1.1\r\nHost: localhost\r\n'
-                f'{broker.TOKEN_HEADER}: {self.config["token"]}\r\nContent-Length: 1048576\r\n\r\n').encode() + b'x'*131072)
+                f'{broker.TOKEN_HEADER}: {self.config["token"]}\r\n'
+                f'Content-Length: {2 * len(partial_body)}\r\n\r\n').encode() + partial_body)
             for _ in range(100):
                 staged = list((self.root/'pending').glob('.upload-*'))
                 if staged and staged[0].stat().st_size >= 65536: break

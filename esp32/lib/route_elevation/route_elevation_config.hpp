@@ -6,14 +6,13 @@
 
 namespace route_elevation_config {
 
-// The Elevation screen targets the 1.75-inch round panel. Keep it in
-// development (diagnostics) profiles until transfer, reconnect and riding
-// readability are physically qualified; production and the unqualified
-// 2.06-inch layout omit both the screen and the capability. Define
-// ROUTE_ELEVATION_SCREEN=0/1 to override after a recorded hardware gate.
+// Route Elevation is available on both Waveshare panels in development and
+// production. Screen selection remains opt-in; the capability still requires
+// a compatible authenticated peer. Define ROUTE_ELEVATION_SCREEN=0/1 to
+// explicitly override the board default.
 #if defined(ROUTE_ELEVATION_SCREEN)
 #define ROUTE_ELEVATION_SCREEN_ENABLED (ROUTE_ELEVATION_SCREEN != 0)
-#elif defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS && defined(WAVESHARE_AMOLED_175)
+#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #define ROUTE_ELEVATION_SCREEN_ENABLED 1
 #else
 #define ROUTE_ELEVATION_SCREEN_ENABLED 0

@@ -2980,9 +2980,10 @@ CAP2 extended feature word (TLV type `3`) bit `2` (`route_elevation_v1`)
 requires client version `32`, an owner-authenticated session, ATT MTU of at
 least 100 and the PSRAM session state. Firmware compiles the transport and the
 optional Elevation screen (screen type `6`, legacy mask bit `6`) only where
-`ROUTE_ELEVATION_SCREEN_ENABLED` is set: today the 1.75-inch development
-(`FIRMWARE_DIAGNOSTICS=1`) profiles. Production and 2.06-inch builds advertise
-neither bit `2` nor screen type `6`. The screen is default-off and follows Ride
+`ROUTE_ELEVATION_SCREEN_ENABLED` is set: both the 1.75-inch and 2.06-inch
+Waveshare development and production profiles enable it by default. An explicit
+`ROUTE_ELEVATION_SCREEN=0` build override disables both the capability and the
+screen. The screen is default-off in the user's screen selection and follows Ride
 Stats in the cycle. Scoped Watch sessions are rejected. See
 [Route elevation](route-elevation-profile.md) for the profile contract.
 
