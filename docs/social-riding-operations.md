@@ -297,6 +297,18 @@ service's hardware-relay capability before sending authenticated rider packets.
 Production releases before this rollout (including the original build 106)
 need a firmware update; using Bicino Dev alone does not change their support.
 
+On 31 October 2026 the maintainer explicitly requested that group/friend rider
+markers remain enabled in both development and production firmware on both
+Waveshare boards. This records acceptance of the rollout before full per-board
+physical qualification, including the remaining display, memory and power
+risks. The owner observed working markers on a spare 1.75-inch device; that
+observation does not qualify the 2.06-inch board or replace either board's
+exact-production-image transfer, reconnect, readability and long-run checks.
+Keep those hardware gates separate from CI build/image-reserve results and
+from factory/golden-image qualification. Disabling the backend `HARDWARE` flag
+stops relay only; firmware recovery requires restoring a compatible image
+under the partition-migration runbook.
+
 Social locations are global. Offline map packs supply the background, not a
 geographic limit on friends. With a usable published map, portraits use its
 projection as before. Without a map or microSD card, fresh friend positions use
