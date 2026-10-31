@@ -252,6 +252,9 @@ public:
   InstallStatus recoverPendingStreamActivation(
       const ActivationProgressCallback &onProgress = {},
       ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
+  // A legacy root whose consumed marker failed after its pointer switch is
+  // installed, not pending. Finishes that cleanup; never activates anything.
+  InstallStatus settleSelectedStreamMap() const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.
@@ -300,6 +303,11 @@ public:
   bool readPendingArchiveActivation(std::string &sessionId) const;
   bool clearPendingArchiveActivation() const;
   bool discardStagedSession(const std::string &sessionId) const;
+  // Reads every FMB block once more; progress reports validated blocks.
+  InstallStatus validateLabelContracts(const std::string &root,
+                                       const MapManifest &manifest,
+                                       bool useManifestPaths,
+                                       const ActivationProgressCallback &onProgress = {}) const;
 
   std::string stagingRoot(const std::string &sessionId) const;
   std::string stagedArchivePath(const std::string &sessionId) const;
@@ -398,9 +406,6 @@ private:
   bool writeTextFile(const std::string &path, const std::string &text) const;
   bool readTextFile(const std::string &path, std::string &text,
                     size_t maxBytes) const;
-  InstallStatus validateLabelContracts(const std::string &root,
-                                       const MapManifest &manifest,
-                                       bool useManifestPaths) const;
 };
 
 std::string sha256Hex(const uint8_t *data, size_t len);

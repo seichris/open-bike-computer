@@ -6,6 +6,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+# Start of the bounded retry constants and helpers in map_transfer_http.cpp.
+RETRY_POLICY = "namespace {\n// Accepted work gets this many activation attempts"
+# Fixtures that include the constants reference each one; clang rejects unused ones.
+USES_RETRY_POLICY = (
+    "\nstatic_assert(kCommitRecoveryAttempts == 3 && "
+    "kCommitRecoveryBackoffMs < kCommitRecoveryMaximumBackoffMs, \"retry policy\");\n")
 
 
 def method(source, name):
@@ -36,14 +42,17 @@ class MapCommitRecoveryTests(unittest.TestCase):
 
     def test_actual_activation_failure_rearms_reserved_disposition(self):
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
-        retry = source[source.index("void MapTransferHttpServer::retryAcceptedActivation("):
+        retry = source[source.index(RETRY_POLICY):
                        source.index("bool MapTransferHttpServer::recoverCommitDisposition(")]
         execute = source[source.index("void MapTransferHttpServer::executeActivation("):
                          source.index("bool MapTransferHttpServer::runStreamActivationTask(")]
         fixture = r'''
+#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <new>
 #include <string>
+uint32_t millis() { return 0; }
 namespace power_management {
 enum class LockDomain { Transfer };
 struct ScopedLock { explicit ScopedLock(LockDomain) {} };
@@ -55,8 +64,11 @@ public:
   struct Recovery {
     struct Identity { std::string session; } identity;
     bool armed=false, responseCompleted=true;
+    uint8_t failures=0; uint32_t retryAfterMs=0;
     bool pending() const { return !identity.session.empty(); }
   } commitRecovery_;
+  void scheduleCommitRecoveryRetry();
+  bool commitRecoveryDue() const;
   bool pendingRendererAcknowledgement_=false;
   bool grantOwned=true, automaticExit=false;
   int outcome=0, runs=0;
@@ -73,7 +85,7 @@ public:
   void retryAcceptedActivation(const std::string &);
   void executeActivation(const std::string &, bool);
 };
-''' + retry + execute + r'''
+''' + retry + execute + USES_RETRY_POLICY + r'''
 int main() {
   for(int outcome: {0,2}) {
     MapTransferHttpServer server;
@@ -100,6 +112,90 @@ int main() {
 }
 '''
         with tempfile.TemporaryDirectory(prefix="activation-disposition-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
+    def test_failed_attempts_back_off_before_the_storage_worker_retries(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        retry = source[source.index(RETRY_POLICY):
+                       source.index("bool MapTransferHttpServer::recoverCommitDisposition(")]
+        submit = source[source.index("void MapTransferHttpServer::submitPendingOperationTask()"):
+                        source.index("void MapTransferHttpServer::operationTask(")]
+        fixture = r'''
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <string>
+uint32_t clockMs = 1000;
+uint32_t millis() { return clockMs; }
+namespace ui_scheduler { enum class WakeReason { Transfer }; void notify(WakeReason) {} }
+class MapTransferHttpServer {
+public:
+  struct StateGuard { explicit StateGuard(MapTransferHttpServer &) {} };
+  struct Recovery {
+    struct Identity { std::string session; } identity;
+    bool armed = false, responseCompleted = false;
+    uint8_t failures = 0; uint32_t retryAfterMs = 0;
+    bool pending() const { return !identity.session.empty(); }
+  } commitRecovery_;
+  bool pendingRendererAcknowledgement_ = false, operationTaskSubmitted_ = false;
+  std::string operationQuery_, terminalOperationID_;
+  bool (*storageControlSubmit_)(void (*)(void *), void *) =
+      [](void (*)(void *), void *) { return true; };
+  static void operationTask(void *) {}
+  void lockState() {}
+  void unlockState() {}
+  void scheduleCommitRecoveryRetry();
+  bool commitRecoveryDue() const;
+  void retryAcceptedActivation(const std::string &);
+  void submitPendingOperationTask();
+};
+''' + retry + submit + USES_RETRY_POLICY + r'''
+void expectRetryAfter(MapTransferHttpServer &server, uint32_t wait) {
+  server.operationTaskSubmitted_ = false;
+  server.retryAcceptedActivation("accepted");
+  assert(server.commitRecovery_.armed);
+  // The storage worker is not resubmitted before the backoff expires.
+  server.submitPendingOperationTask();
+  assert(!server.operationTaskSubmitted_);
+  clockMs += wait - 1;
+  server.submitPendingOperationTask();
+  assert(!server.operationTaskSubmitted_);
+  clockMs += 1;
+  server.submitPendingOperationTask();
+  assert(server.operationTaskSubmitted_);
+}
+int main() {
+  MapTransferHttpServer server;
+  server.commitRecovery_.identity.session = "accepted";
+  server.submitPendingOperationTask();
+  assert(!server.operationTaskSubmitted_); // Reserved but not armed.
+  for (uint32_t wait : {5000U, 10000U, 20000U, 40000U, 60000U, 60000U})
+    expectRetryAfter(server, wait);
+  assert(server.commitRecovery_.failures == 6);
+  // The deadline stays correct across the millis() wrap.
+  clockMs = UINT32_MAX - 1000U;
+  expectRetryAfter(server, 60000U);
+  // Another session's failure, or one racing an outstanding renderer ACK,
+  // schedules nothing.
+  const uint8_t failures = server.commitRecovery_.failures;
+  server.retryAcceptedActivation("other");
+  server.pendingRendererAcknowledgement_ = true;
+  server.retryAcceptedActivation("accepted");
+  assert(server.commitRecovery_.failures == failures);
+  // Queries and terminal receipts are never held back by the backoff.
+  server.pendingRendererAcknowledgement_ = false;
+  server.retryAcceptedActivation("accepted");
+  server.operationTaskSubmitted_ = false;
+  server.operationQuery_ = "query";
+  server.submitPendingOperationTask();
+  assert(server.operationTaskSubmitted_);
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="activation-backoff-") as temporary:
             path = Path(temporary)
             (path / "test.cpp").write_text(fixture)
             subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
@@ -205,6 +301,7 @@ struct ReadyStreamMap {
 };
 struct Installer {
   bool ready = false, discardable = true, discarded = false;
+  std::string discardCode = "stream_discard_cleanup";
   ReadyStreamMap marker;
   Status readReadyStreamMap(const std::string &, ReadyStreamMap &out) {
     out = marker; return {ready};
@@ -213,16 +310,19 @@ struct Installer {
     return {ready, ready ? "ok" : "stream_ready_invalid"};
   }
   Status discardUnselectedStreamMap(const std::string &) {
-    discarded = discardable; return {discardable};
+    discarded = discardable; return {discardable, discardable ? "stream_superseded" : discardCode};
   }
 };
 enum class ActivationBeginResult { Started, Busy, AlreadyInstalled };
+struct Progress { unsigned step, totalSteps; uint64_t completed, total; };
 struct Activation {
-  ActivationBeginResult begin(const std::string &, int) { return ActivationBeginResult::Started; }
+  unsigned step = 1;
+  ActivationBeginResult begin(const std::string &, int) { step = 1; return ActivationBeginResult::Started; }
+  void updateProgress(const Progress &progress) { step = progress.step; }
 };
 class MapTransferHttpServer {
 public:
-  struct CommitRecovery { operation::Identity identity; };
+  struct CommitRecovery { operation::Identity identity; uint8_t failures = 0; };
   struct StateGuard { StateGuard(MapTransferHttpServer &) {} };
   struct OperationStoreGuard { OperationStoreGuard(MapTransferHttpServer &) {} };
   std::string storageRoot_ = "/sdcard", operationDeviceID_ = std::string(32, 'a');
@@ -236,11 +336,17 @@ public:
   void rememberOwnerRecovery(const char *code) { if(firstOwnerCode.empty()) firstOwnerCode=code; }
   bool runStreamActivationTask(const std::string &, bool, bool owner = false) {
     assert(!owner); dispatched = true; return true; }
-  void finishActivation(const char *, const std::string &, const char *, const char *) { finished = true; }
+  std::string finishedCode;
+  void finishActivation(const char *, const std::string &, const char *code, const char *) {
+    finished = true; finishedCode = code;
+  }
   void releaseCommitGrant() { released = true; }
   bool recoverCommitDisposition(const CommitRecovery &);
 };
 '''
+        policy = source.index(RETRY_POLICY)
+        fixture += source[policy:source.index("} // namespace", policy) + len("} // namespace")]
+        fixture += USES_RETRY_POLICY
         fixture += method(source, "recoverCommitDisposition")
         fixture += r'''
 int main() {
@@ -277,8 +383,55 @@ int main() {
       }
     } else if (scenario == 3) {
       assert(resolved && server.dispatched && !server.released && !server.installer_.discarded);
+      // A storage retry reports the activation step, not upload step 1.
+      assert(server.activationState_.step == 3);
     } else {
       assert(!resolved && !server.released && !server.finished);
+    }
+  }
+  // After the last allowed attempt an exact ready map is not activated again:
+  // the work fails so the phone can retry. A legacy retry of the map that is
+  // still selected keeps it; operation-backed work never fails a selected root.
+  for (int scenario = 0; scenario != 4; ++scenario) {
+    const bool operationBacked = scenario >= 2, selected = scenario % 2 == 1;
+    MapOperationStorage::slots[0].clear(); MapOperationStorage::slots[1].clear();
+    MapOperationStorage::failRead = MapOperationStorage::failWrite = false;
+    MapOperationStorage storage(""); operation::Store store(storage, id.device);
+    assert(store.restore() == operation::Result::Ok);
+    assert(store.initializeAdmission(123) == operation::Result::Ok);
+    operation::Identity identity = id;
+    if (operationBacked) {
+      assert(store.admit(id, store.admissionRevision()) == operation::Result::Ok);
+      assert(store.prepare(id) == operation::Result::Ok);
+      assert(store.accept(id) == operation::Result::Ok);
+    } else {
+      identity.operation.clear();
+    }
+    MapTransferHttpServer server;
+    server.installer_.marker = {identity.operation, id.map, id.manifest, id.signedManifest};
+    server.installer_.ready = true;
+    server.installer_.discardable = !selected;
+    server.installer_.discardCode = "stream_discard_active";
+    MapTransferHttpServer::CommitRecovery recovery{identity};
+    recovery.failures = 2;
+    MapTransferHttpServer attempt;
+    attempt.installer_ = server.installer_;
+    assert(attempt.recoverCommitDisposition(recovery) && attempt.dispatched);
+    recovery.failures = 3;
+    const bool resolved = server.recoverCommitDisposition(recovery);
+    assert(!server.dispatched);
+    if (operationBacked && selected) {
+      assert(!resolved && !server.released && !server.finished);
+      continue;
+    }
+    assert(resolved && server.released && server.finished);
+    assert(server.finishedCode == "activation_retry_limit");
+    assert(server.installer_.discarded == !selected);
+    if (operationBacked) {
+      assert(store.restore() == operation::Result::Ok);
+      operation::Record record;
+      assert(store.query(id, record) == operation::Result::Ok);
+      assert(record.phase == operation::Phase::Failed);
     }
   }
 }

@@ -36,6 +36,10 @@ int creates = 0, sends = 0, resets = 0;
 bool createFails = false, mutexFails = false, sendFails = false;
 bool receiveFails = false, mismatched = false, resultFails = false;
 bool radioStopFails = false;
+// Result waits that time out before the reply; each may advance map progress.
+int receiveTimeouts = 0, receives = 0;
+bool timeoutsAdvanceProgress = false;
+std::atomic<uint32_t> mapProgress{0};
 const void *externalPointer = nullptr;
 void *context = nullptr;
 TaskHandle_t currentTask = nullptr;
@@ -89,6 +93,7 @@ BaseType_t xQueueSend(QueueHandle_t, const void *data, TickType_t) {
   const auto &command = *static_cast<const Owner::Command *>(data);
   Owner::Result result;
   switch (command.operation) {
+  case Owner::Operation::MapActivation: result.error = ESP_OK; break;
   // PRODUCTION_QUIESCE
   default: assert(false);
   }
@@ -99,7 +104,13 @@ BaseType_t xQueueSend(QueueHandle_t, const void *data, TickType_t) {
   return pdTRUE;
 }
 BaseType_t xQueueReceive(QueueHandle_t, void *data, TickType_t) {
+  ++receives;
   if (receiveFails) return 0;
+  if (receiveTimeouts > 0) {
+    --receiveTimeouts;
+    if (timeoutsAdvanceProgress) mapProgress.fetch_add(1);
+    return 0;
+  }
   *static_cast<Owner::Result *>(data) = reply;
   return pdTRUE;
 }
@@ -178,4 +189,36 @@ int main() {
     assert(issued == replyTimeout); // Queue rejection owns no callback; a late reply does.
     sendFails = receiveFails = false;
   }
+  // Map work that keeps reporting storage progress outlives each deadline;
+  // the first deadline without progress still times out and poisons.
+  const std::string session = "map-session";
+  Owner::Command map; map.operation = Owner::Operation::MapActivation;
+  for (bool progressing : {true, false}) {
+    Owner mapOwner;
+    assert(mapOwner.start());
+    mapOwner.setMapActivationProgress(&mapProgress);
+    receiveTimeouts = 3; timeoutsAdvanceProgress = progressing; receives = 0;
+    const esp_err_t dispatched = mapOwner.execute(map, reply, nullptr, &session, nullptr, 1);
+    if (progressing) {
+      assert(dispatched == ESP_OK && receives == 4 && receiveTimeouts == 0);
+      assert(mapOwner.dispatchState_ == firmware_update::internal_owner_policy::DispatchState::Ready);
+    } else {
+      assert(dispatched == ESP_ERR_TIMEOUT && receives == 1);
+      assert(mapOwner.dispatchState_ == firmware_update::internal_owner_policy::DispatchState::Poisoned);
+      assert(!mapOwner.start());
+    }
+  }
+  // Progress never extends other commands or an owner without a source.
+  Owner noSource;
+  assert(noSource.start());
+  receiveTimeouts = 3; timeoutsAdvanceProgress = true; receives = 0;
+  assert(noSource.execute(map, reply, nullptr, &session, nullptr, 1) == ESP_ERR_TIMEOUT);
+  assert(receives == 1 && !noSource.start());
+  Owner quiesce;
+  assert(quiesce.start());
+  quiesce.setMapActivationProgress(&mapProgress);
+  receiveTimeouts = 3; timeoutsAdvanceProgress = true; receives = 0;
+  assert(quiesce.execute(command, reply, nullptr, nullptr, nullptr, 1) == ESP_ERR_TIMEOUT);
+  assert(receives == 1 && !quiesce.start());
+  receiveTimeouts = 0; timeoutsAdvanceProgress = false;
 }

@@ -483,8 +483,9 @@ std::string MapStreamInstallSnapshot::json(bool compact) const {
 }
 
 MapStreamRecoveryResult
-readRecoverableMapStreamInstall(const std::string &storageRoot,
-                                MapStreamInstallSnapshot &snapshot) {
+readRecoverableMapStreamInstall(
+    const std::string &storageRoot, MapStreamInstallSnapshot &snapshot,
+    const std::function<bool(const MapStreamInstallSnapshot &)> &skipReady) {
   snapshot = MapStreamInstallSnapshot();
   const std::string mapsRoot = joinPath(storageRoot, "/VECTMAP/.maps");
   DIR *directory = ::opendir(mapsRoot.c_str());
@@ -547,6 +548,9 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
       invalid = true;
       continue;
     }
+    if (skipReady && candidate.state == MapStreamInstallState::Ready &&
+        skipReady(candidate))
+      continue;
     const std::string checkpointPath = joinPath(root, kCheckpointFile);
     const bool checkpointExists = regularFileExists(checkpointPath) ||
                                   regularFileExists(checkpointPath + ".bak");
