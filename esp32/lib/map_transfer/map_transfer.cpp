@@ -3525,6 +3525,22 @@ InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
           "removed streamed map superseded by archive transfer"};
 }
 
+InstallStatus MapTransferInstaller::keepSelectedStreamMap(
+    const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("stream_discard_session", "stream session is invalid");
+  // The same completed-version branches as discard, minus the deletion.
+  const auto root = joinPath(storageRoot_, std::string("/VECTMAP/.maps/") + sessionId);
+  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
+                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  if (!consumed && (!fileExists(joinPath(root, kLibraryRetainedFile)) ||
+                    !restoreRetainedLibraryVersion(sessionId)))
+    return fail("stream_keep_unverified", "selected map has no completed version to keep");
+  return clearPendingStreamActivation(sessionId)
+      ? InstallStatus{true, "library_kept", ""}
+      : fail("stream_discard_cleanup", "could not clear abandoned activation metadata");
+}
+
 InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
   ActiveMapSelection selected;
   const InstallStatus active = readActiveMap(selected);

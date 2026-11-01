@@ -2443,6 +2443,10 @@ Each retry waits longer (5, 10, then 20 seconds, at most one minute) and reports
 `recovering`. After three failed attempts the device discards the unselected
 root, records a Failed receipt for operation-backed work, reports `failed` with
 `activation_retry_limit`, and releases the commit so the app can upload again.
+A root that is still selected is never deleted: a completed version that the
+attempt reused is kept, and stays in Saved Maps, while only the attempt fails.
+A new version that the pointer already names keeps retrying until its renderer
+handoff.
 A legacy upload resumed at boot gets the same bounded retries. While accepted
 work is pending, a new upload gets 409 `activation_busy`. A ready marker left on
 the selected or previous map by a failed consumed-marker write is cleaned up and

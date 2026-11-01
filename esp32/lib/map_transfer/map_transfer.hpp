@@ -295,6 +295,10 @@ public:
       const std::string &sessionId) const;
   InstallStatus discardUnselectedStreamMap(
       const std::string &sessionId) const;
+  // For a root discard refuses as selected or rollback: keeps the completed
+  // version a failed reactivation reused, without deleting anything. Fails
+  // when the root holds no completed version.
+  InstallStatus keepSelectedStreamMap(const std::string &sessionId) const;
   InstallStatus discardAllUnselectedStreamMaps() const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
   bool pruneObsoleteInstalledMaps(

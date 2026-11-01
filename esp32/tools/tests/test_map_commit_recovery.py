@@ -118,6 +118,30 @@ int main() {
                             str(path / "test.cpp"), "-o", str(path / "test")], check=True)
             subprocess.run([str(path / "test")], check=True)
 
+    def test_each_failed_attempt_is_counted_once(self):
+        # A storage-worker attempt runs the activation directly and never
+        # re-arms, so executeOperationTask schedules its one retry. Only owner
+        # and boot attempts re-arm through retryAcceptedActivation, and those
+        # never run inside the storage worker's disposition.
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        run = source[source.index("bool MapTransferHttpServer::runStreamActivationTask("):
+                     source.index("void MapTransferHttpServer::activationTaskThunk(")]
+        self.assertNotIn("retryAcceptedActivation(", run)
+        recover = method(source, "recoverCommitDisposition")
+        self.assertIn("runStreamActivationTask(identity.session, false)", recover)
+        self.assertNotIn("executeActivation(", recover)
+        self.assertNotIn("retryAcceptedActivation(", recover)
+        # Boot resume re-arms only when its dedicated task was never created.
+        # The task is not an owner dispatch, so false cannot mean a timed-out
+        # activation that is still running.
+        start = source[source.index("bool MapTransferHttpServer::startActivationTask("):
+                       source.index("bool MapTransferHttpServer::deferActivationUntilResponse(")]
+        self.assertNotIn("runMapActivation(", start)
+        created = start.index("xTaskCreate(activationTaskThunk")
+        self.assertLess(start.index("new ActivationTaskContext"), created)
+        self.assertEqual(start.count("return true;"), 1)
+        self.assertLess(start.index("if (created != pdPASS) {"), start.index("return true;"))
+
     def test_failed_attempts_back_off_before_the_storage_worker_retries(self):
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
         retry = source[source.index(RETRY_POLICY):
@@ -295,7 +319,11 @@ struct MapOperationStorage : operation::Storage {
 std::vector<uint8_t> MapOperationStorage::slots[2];
 bool MapOperationStorage::failRead = false;
 bool MapOperationStorage::failWrite = false;
-struct Status { bool ok; std::string code; Status(bool value, std::string reason="") : ok(value), code(reason) {} };
+struct Status {
+  bool ok; std::string code;
+  Status(bool value, std::string reason = "", std::string = "") : ok(value), code(reason) {}
+};
+using InstallStatus = Status;
 struct ReadyStreamMap {
   std::string operationID, mapId, manifestReceipt, signedManifestReceipt;
 };
@@ -311,6 +339,10 @@ struct Installer {
   }
   Status discardUnselectedStreamMap(const std::string &) {
     discarded = discardable; return {discardable, discardable ? "stream_superseded" : discardCode};
+  }
+  bool keepable = false, kept = false;
+  Status keepSelectedStreamMap(const std::string &) {
+    kept = keepable; return {keepable, keepable ? "library_kept" : "stream_keep_unverified"};
   }
 };
 enum class ActivationBeginResult { Started, Busy, AlreadyInstalled };
@@ -390,10 +422,13 @@ int main() {
     }
   }
   // After the last allowed attempt an exact ready map is not activated again:
-  // the work fails so the phone can retry. A legacy retry of the map that is
-  // still selected keeps it; operation-backed work never fails a selected root.
-  for (int scenario = 0; scenario != 4; ++scenario) {
-    const bool operationBacked = scenario >= 2, selected = scenario % 2 == 1;
+  // the work fails so the phone can retry. A selected root is never deleted:
+  // a completed version it reused is kept while the attempt fails, and a new
+  // version the pointer already names keeps retrying activation. Legacy work
+  // has no receipt to hold, so its attempt fails either way.
+  for (int scenario = 0; scenario != 6; ++scenario) {
+    const bool operationBacked = scenario >= 3, selected = scenario % 3 != 0;
+    const bool keepable = scenario % 3 == 1;
     MapOperationStorage::slots[0].clear(); MapOperationStorage::slots[1].clear();
     MapOperationStorage::failRead = MapOperationStorage::failWrite = false;
     MapOperationStorage storage(""); operation::Store store(storage, id.device);
@@ -412,27 +447,32 @@ int main() {
     server.installer_.ready = true;
     server.installer_.discardable = !selected;
     server.installer_.discardCode = "stream_discard_active";
+    server.installer_.keepable = keepable;
     MapTransferHttpServer::CommitRecovery recovery{identity};
     recovery.failures = 2;
     MapTransferHttpServer attempt;
     attempt.installer_ = server.installer_;
     assert(attempt.recoverCommitDisposition(recovery) && attempt.dispatched);
+    assert(!attempt.installer_.discarded && !attempt.installer_.kept);
     recovery.failures = 3;
     const bool resolved = server.recoverCommitDisposition(recovery);
-    assert(!server.dispatched);
-    if (operationBacked && selected) {
-      assert(!resolved && !server.released && !server.finished);
-      continue;
-    }
-    assert(resolved && server.released && server.finished);
-    assert(server.finishedCode == "activation_retry_limit");
     assert(server.installer_.discarded == !selected);
+    assert(server.installer_.kept == (selected && keepable));
+    operation::Record record;
     if (operationBacked) {
       assert(store.restore() == operation::Result::Ok);
-      operation::Record record;
       assert(store.query(id, record) == operation::Result::Ok);
-      assert(record.phase == operation::Phase::Failed);
     }
+    if (operationBacked && selected && !keepable) {
+      // The new selected version is activated again; its receipt stays open.
+      assert(resolved && server.dispatched && !server.released && !server.finished);
+      assert(server.activationState_.step == 3);
+      assert(record.phase == operation::Phase::Accepted);
+      continue;
+    }
+    assert(resolved && !server.dispatched && server.released && server.finished);
+    assert(server.finishedCode == "activation_retry_limit");
+    if (operationBacked) assert(record.phase == operation::Phase::Failed);
   }
 }
 '''

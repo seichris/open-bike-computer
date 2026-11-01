@@ -1830,6 +1830,74 @@ void testFailedReactivationKeepsAgedOutLibraryVersion() {
 // version is refused with an actionable 409, the damaged files are left for an
 // explicit removal, and removal followed by reinstall repairs it. A protected
 // (selected) damaged copy is refused as a session conflict and cannot be removed.
+// The same content committed again while it is the selected map: promotion
+// moves its completion evidence aside, so the active map leaves Saved Maps
+// until this operation ends. If activation keeps failing, discard refuses the
+// selected root; keep restores the completed version without deleting it. A
+// version the pointer selected but never completed has nothing to keep.
+void testFailedReactivationOfSelectedMapKeepsIt() {
+  namespace op = map_transfer::operation;
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto publicKey = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
+  map_transfer::Sha256Hasher streamHash; streamHash.update(stream.data(), stream.size());
+  const auto digest = streamHash.finalHex();
+  const std::string device(32, 'a');
+  const auto root = tempRoot();
+  MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+  map_transfer::MapOperationStorage disk(root); op::Store store(disk, device);
+  assert(store.restore() == op::Result::Ok && store.initializeAdmission(100) == op::Result::Ok);
+  const auto installAndConfirm = [&](const std::string &session, const std::string &operation) {
+    MapStreamReceiver receiver(trust, root, session, stream.size(), "9.0.0", 1024 * 1024, {}, {}, {}, {}, operation);
+    assert(receiver.feed(stream.data(), stream.size()) && receiver.finish().ok);
+    op::Identity identity{device, operation, receiver.snapshot().manifestReceipt,
+                          receiver.snapshot().signedManifestReceipt, digest, stream.size(), session,
+                          receiver.snapshot().mapId};
+    assert(store.restore() == op::Result::Ok);
+    assert(store.admit(identity, store.admissionRevision()) == op::Result::Ok);
+    assert(store.prepare(identity) == op::Result::Ok && store.accept(identity) == op::Result::Ok);
+    assert(installer.promotePreparedOperation(session, operation).ok);
+    return identity;
+  };
+  const std::string session = "selected-city";
+  const auto first = installAndConfirm(session, std::string(32, '4'));
+  assert(installer.activateReadyStreamMap(session).ok);
+  assert(store.rendererAcknowledged(first, first.manifest, first.signedManifest) == op::Result::Ok);
+  assert(installer.finalizeOperation(session, first.operation).ok);
+  map_transfer::InstalledMap before;
+  assert(installer.readInstalledMap(session, before).ok && before.available);
+
+  const auto again = installAndConfirm(session, std::string(32, '3'));
+  const std::string selectedRoot = root + before.root;
+  const std::string pending = root + "/VECTMAP/.pending-stream-activation.json";
+  assert(exists(selectedRoot + "/.library-retained") && exists(pending));
+  map_transfer::InstalledMap hidden;
+  assert(installer.readInstalledMap(session, hidden).code == "library_uncommitted");
+  assert(installer.discardUnselectedStreamMap(session).code == "stream_discard_active");
+  const auto kept = installer.keepSelectedStreamMap(session);
+  assert(kept.ok && kept.code == "library_kept");
+  assert(store.fail(again) == op::Result::Ok);
+  map_transfer::InstalledMap after;
+  assert(installer.readInstalledMap(session, after).ok && after.available);
+  assert(after.manifestReceipt == before.manifestReceipt);
+  assert(!exists(selectedRoot + "/.library-retained") && !exists(pending));
+  assert(!exists(selectedRoot + "/.operation-prepared"));
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == session);
+  assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
+
+  // A new version selected by the pointer but never completed is not kept.
+  const auto fresh = installAndConfirm("fresh-city", std::string(32, '5'));
+  assert(installer.activateReadyStreamMap("fresh-city").ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "fresh-city");
+  assert(installer.keepSelectedStreamMap("fresh-city").code == "stream_keep_unverified");
+  assert(exists(root + "/VECTMAP/.maps/fresh-city"));
+  (void)fresh;
+  std::filesystem::remove_all(root);
+}
+
 void testDamagedLibraryVersionRepairRequiresRemoval() {
   const auto fixture = readGoldenFixture();
   const auto stream = decodeHex(fixture.at("stream_hex"));
@@ -2613,6 +2681,7 @@ int main() {
   testTemporaryOnlyJournalIsUnpublishedScratch();
   testFreeSpacePreflightBeforePayload();
   testFailedReactivationKeepsAgedOutLibraryVersion();
+  testFailedReactivationOfSelectedMapKeepsIt();
   testDamagedLibraryVersionRepairRequiresRemoval();
   testDeviceBoundOperationActivationAndReceipt();
   testExplicitOperationPromotionAndTerminalCrashBoundaries();

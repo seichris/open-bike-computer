@@ -971,7 +971,24 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
       ready.signedManifestReceipt == identity.signedManifest;
   // After the last allowed attempt the accepted work fails, so the phone can
   // retry, instead of rereading the map forever.
-  const bool exhausted = recovery.failures >= kCommitRecoveryAttempts;
+  bool exhausted = recovery.failures >= kCommitRecoveryAttempts;
+  InstallStatus disposed{true, "", ""};
+  if (!accepted || !readyMatches || exhausted) {
+    // No pointer mutation was issued by the upload finalizer. Discard checks both
+    // active and rollback roots and fails closed on unreadable selection metadata.
+    // Cleanup precedes a failed receipt so reboot cannot reactivate a ready root.
+    disposed = installer_.discardUnselectedStreamMap(identity.session);
+    if (!disposed.ok && disposed.code == "stream_discard_active") {
+      // A root that is still selected is never deleted. A completed version
+      // that this attempt reused is kept and only the attempt fails. A new
+      // version that the pointer already names keeps retrying activation:
+      // its renderer handoff is the only way to finish it. Legacy work has
+      // no receipt to hold, so its attempt fails either way.
+      const auto kept = installer_.keepSelectedStreamMap(identity.session);
+      if (kept.ok || identity.operation.empty()) disposed = {true, "library_kept", ""};
+      else if (accepted && readyMatches) exhausted = false;
+    }
+  }
   if (accepted && readyMatches && !exhausted) {
     // This is the same serialized storage owner used by rollback and receipt
     // writes. Hand off to the renderer only after exact ready identity agrees.
@@ -985,15 +1002,7 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
     }
     return runStreamActivationTask(identity.session, false);
   }
-  // No pointer mutation was issued by the upload finalizer. Discard checks both
-  // active and rollback roots and fails closed on unreadable selection metadata.
-  // Cleanup precedes a failed receipt so reboot cannot reactivate a ready root.
-  // A legacy retry of the map that is still selected keeps that map; only
-  // this attempt fails.
-  const auto discarded = installer_.discardUnselectedStreamMap(identity.session);
-  if (!discarded.ok &&
-      (!identity.operation.empty() || discarded.code != "stream_discard_active"))
-    return false;
+  if (!disposed.ok) return false;
   if (hasRecord && record.phase != operation::Phase::Failed &&
       record.phase != operation::Phase::Cancelled) {
     const auto result = store.fail(identity);
@@ -2159,6 +2168,8 @@ bool MapTransferHttpServer::resumePendingStreamActivation(
     Serial.printf("MAP_TRANSFER_HTTP: resuming ready stream session=%s\n",
                   snapshot.sessionId.c_str());
     if (startActivationTask(snapshot.sessionId, true)) return true;
+    // False means the dedicated task was never created, so no activation body
+    // runs; the storage worker can retry safely.
     retryAcceptedActivation(snapshot.sessionId);
   }
   return false;
