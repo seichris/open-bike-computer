@@ -591,9 +591,11 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             ]
             session.transferUserInfo(message)
             if session.isReachable {
+                // Watch handles this request only in its reply-handler
+                // delegate method; a message sent without one never arrives.
                 session.sendMessage(
                     message,
-                    replyHandler: nil,
+                    replyHandler: { _ in },
                     errorHandler: nil
                 )
             }
@@ -632,12 +634,14 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         data: Data,
         error: Error?
     ) {
-        var inFlight = defaults.array(
-            forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
-        ) as? [Data] ?? []
-        if let index = inFlight.firstIndex(of: data) {
-            inFlight.remove(at: index)
-        }
+        let finished = WatchDirectRideReconciliationPolicyV1.finishing(
+            data,
+            failed: error != nil,
+            inFlight: defaults.array(
+                forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
+            ) as? [Data] ?? []
+        )
+        let inFlight = finished.inFlight
         if inFlight.isEmpty {
             defaults.removeObject(
                 forKey: Self.inFlightDirectRideReconciliationsDefaultsKey
@@ -649,6 +653,7 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             )
         }
         if error != nil {
+            guard finished.resend else { return }
             requeueDirectRideReconciliation(data)
             scheduleDirectRideReconciliationRetry()
             return
@@ -662,11 +667,11 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                 WatchDirectRideReconciliationRequestV1.decode(data) else {
             return
         }
-        pendingDirectRideReconciliations.removeAll {
-            $0.deviceID == request.deviceID &&
-                $0.preparationID == request.preparationID
-        }
-        pendingDirectRideReconciliations.append(request)
+        pendingDirectRideReconciliations =
+            WatchDirectRideReconciliationPolicyV1.requeueing(
+                request,
+                into: pendingDirectRideReconciliations
+            )
         persistPendingDirectRideReconciliations()
     }
 

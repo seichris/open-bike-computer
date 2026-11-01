@@ -69,6 +69,19 @@ def block_box(min_x, min_y):
     return box(min_x, min_y, min_x + MASK, min_y + MASK + 1)
 
 
+# The two lines test_clip_lines.py counts instead of drawing: one ULP long
+# inside block (0, 0), and crossing the corner of block (4096, 4096) within
+# a nanometre.
+ULP_SHORT_ROAD = [
+    (2815.860862137019, 3797.2024186666486),
+    (2815.8608621370204, 3797.2024186666486),
+]
+CORNER_CONTACT_ROAD = [
+    (4096.000000001, 4095.999999999),
+    (4095.999999999, 4096.000000001),
+]
+
+
 def line_feature(identifier, geometry, label_candidates=()):
     return {
         "id": identifier,
@@ -139,6 +152,9 @@ def synthetic_features(seed):
             line_feature("edge-graze", LineString([(4094.5, 500), (4100, 520)])),
             line_feature("top-strip", LineString([(1000, 4095.4), (1300, 4095.6)])),
             line_feature("empty", LineString()),
+            # Pass the block test but leave nothing to draw: counted, not drawn.
+            line_feature("ulp-short", LineString(ULP_SHORT_ROAD)),
+            line_feature("corner-contact", LineString(CORNER_CONTACT_ROAD)),
         ]
     )
 
@@ -248,6 +264,7 @@ class BlockFeatureIndexTests(unittest.TestCase):
                             line_candidates,
                             block,
                             label_diagnostics=indexed_label_diagnostics,
+                            geometry_diagnostics=indexed_geometry_diagnostics,
                         )
                     ),
                     canonical(
@@ -255,6 +272,7 @@ class BlockFeatureIndexTests(unittest.TestCase):
                             lines,
                             block,
                             label_diagnostics=full_label_diagnostics,
+                            geometry_diagnostics=full_geometry_diagnostics,
                         )
                     ),
                 )
@@ -276,6 +294,12 @@ class BlockFeatureIndexTests(unittest.TestCase):
                 )
         self.assertEqual(indexed_label_diagnostics, full_label_diagnostics)
         self.assertEqual(indexed_geometry_diagnostics, full_geometry_diagnostics)
+        # The index offers the two undrawable lines to the blocks that count
+        # them, and nothing else is counted.
+        self.assertEqual(
+            full_geometry_diagnostics["lineClipsWithoutLengthByResult"],
+            {"empty": 1, "Point": 1},
+        )
         # The fixture exercises label ownership, both drop reasons and pruning.
         self.assertGreater(full_label_diagnostics["clippedCandidates"], 0)
         self.assertGreater(

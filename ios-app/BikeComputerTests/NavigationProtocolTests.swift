@@ -920,6 +920,7 @@ struct NavigationProtocolTests {
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorRequiresSelectionForSingleRoute()
+        testCoordinatorNavigationReclaimsWatchDirectBicino()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
@@ -4636,6 +4637,107 @@ struct NavigationProtocolTests {
         coordinator.startSelectedRoute()
         assert(coordinator.isNavigating, "the explicitly selected route starts")
         assert(coordinator.currentRoute === route, "the selected route becomes active")
+    }
+
+    /// A Watch workout started first prepared the phone to yield the Bicino.
+    /// Phone navigation started afterwards must ask for the link back, or the
+    /// device never shows the arrow, turn distance and route.
+    @MainActor
+    static func testCoordinatorNavigationReclaimsWatchDirectBicino() {
+        let suite = "CoordinatorWatchHandback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let known = KnownBikeComputerDevice(
+            deviceID: "00112233445566778899aabbccddeeff",
+            peripheralIdentifier: UUID(
+                uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+            )!,
+            name: "Known Bicino",
+            lastConnectedAt: Date(),
+            isLegacy: false
+        )
+        let manager = coordinator.bleManager
+        manager.installScanDriverForTesting(
+            BLEScanDriverForTesting(),
+            knownDevices: [known],
+            trustedPeripheralIdentifier: known.peripheralIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        assert(manager.watchDirectRideReconciliationRequestForTesting == nil,
+               "a yielded idle phone leaves the Watch ride alone")
+
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        coordinator.planNavigation(
+            from: .mapItem(MKMapItem(
+                placemark: MKPlacemark(coordinate: sourceCoordinate)
+            )),
+            to: .mapItem(MKMapItem(
+                placemark: MKPlacemark(coordinate: destinationCoordinate)
+            )),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        factory.tasks[0].succeed(with: [TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )])
+        coordinator.selectRouteAlternative(coordinator.routeAlternatives[0].id)
+        coordinator.startSelectedRoute()
+        assert(coordinator.isNavigating, "the selected route starts")
+        guard let handback = manager
+            .watchDirectRideReconciliationRequestForTesting else {
+            assertionFailure("phone navigation asks the Watch ride for the Bicino")
+            return
+        }
+        assertEqual(handback.purpose, .phoneNavigation,
+                    "the Watch hands the link back during its active ride")
+        assertEqual(handback.deviceID, known.deviceID,
+                    "the handback names the yielded Bike Computer")
+        assertEqual(handback.preparationID,
+                    UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")!,
+                    "the handback names the exact yielded preparation")
+        assertEqual(manager.currentScanPurpose, .none,
+                    "the phone keeps its yield until the Watch releases it")
+
+        let release = try! WatchDirectRidePreparationRequestV1(
+            preparationID: handback.preparationID,
+            operation: .release,
+            deviceID: handback.deviceID
+        )
+        assert(manager.handleWatchDirectRidePreparationRequest(
+            release, phoneNavigationActive: true
+        ).accepted, "the Watch's exact release is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            manager.currentScanPurpose ==
+                .trustedReconnect(known.peripheralIdentifier)
+        }, "the released phone reconnects to carry navigation and the workout")
+
+        coordinator.stopNavigation()
+        manager.installScanDriverForTesting(
+            BLEScanDriverForTesting(),
+            knownDevices: [known],
+            trustedPeripheralIdentifier: known.peripheralIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        manager.setApplicationActive(true)
+        assertEqual(manager.watchDirectRideReconciliationRequestForTesting?
+            .purpose, .releaseWhenIdle,
+                    "without phone navigation a foreground check only releases idle rides")
     }
 
     @MainActor

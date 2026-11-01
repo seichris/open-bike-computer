@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from shapely.geometry import box, LineString, mapping, MultiPolygon, Polygon
+from shapely.geometry import box, LineString, mapping, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 from shapely.prepared import prep
 import yaml
@@ -29,6 +29,7 @@ from building_pipeline import (
     projected_selection_geometry,
     source_object_key,
 )
+from building_pipeline import _record_building_clip_without_record  # noqa: E402
 from map_format import MAX_BUILDING_RINGS, _building_section
 
 
@@ -169,6 +170,55 @@ class BuildingPipelineTests(unittest.TestCase):
                 )
                 self.assertAlmostEqual(roofs.area, clipped.area)
                 self.assertGreater(clipped.area, 0)
+
+    def test_counts_a_building_whose_clip_leaves_no_record(self):
+        # 0.3 m of the sliver lie inside the block: its clip is a real
+        # polygon, but the ring rounds to two points and nothing is encoded.
+        sliver = feature(
+            310, box(99.7, 10, 100.5, 40), '"height"=>"12"', building="commercial"
+        )
+        control = feature(
+            311, box(10, 10, 30, 30), '"height"=>"12"', building="commercial"
+        )
+        block = box(0, 0, 100, 100)
+        buildings, _report, _flat = prepare_buildings([sliver, control], self.rules)
+        self.assertEqual(len(buildings), 2)
+        diagnostics = {}
+        records, stats = clip_buildings(
+            buildings, block, 0, 0, geometry_diagnostics=diagnostics
+        )
+        self.assertEqual(stats["recordCount"], 1)
+        self.assertEqual(
+            diagnostics,
+            {
+                "buildingClipsWithoutRecord": 1,
+                "buildingClipsWithoutRecordByResult": {"degenerate": 1},
+            },
+        )
+        # The statistics keep the block cache contract, and callers without
+        # a diagnostics mapping get the same output.
+        self.assertNotIn("buildingClipsWithoutRecord", stats)
+        self.assertEqual(clip_buildings(buildings, block, 0, 0), (records, stats))
+
+    def test_building_clip_without_record_is_coded_by_its_result(self):
+        diagnostics = {}
+        for clipped, fragment_count in (
+            (LineString([(0, 0), (1, 1)]), 0),
+            (Point(0, 0), 0),
+            (Polygon(), 0),
+            (box(0, 0, 1, 1), 1),
+        ):
+            _record_building_clip_without_record(diagnostics, clipped, fragment_count)
+        self.assertEqual(
+            diagnostics,
+            {
+                "buildingClipsWithoutRecord": 4,
+                "buildingClipsWithoutRecordByResult": {
+                    "LineString": 1, "Point": 1, "empty": 1, "degenerate": 1,
+                },
+            },
+        )
+        _record_building_clip_without_record(None, Polygon(), 0)
 
     def test_collects_closed_building_parts_from_the_gdal_line_layer(self):
         outline = feature(

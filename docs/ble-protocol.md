@@ -299,6 +299,41 @@ cancel a newer preparation. This coordination does not grant write authority:
 the authenticated firmware lease remains final. A persisted iPhone yield
 expires after 24 hours if its release never arrives.
 
+iPhone navigation that starts after the phone yielded must not stay invisible.
+iPhone queues a phone-to-Watch reconciliation request with purpose
+`phoneNavigation` for the exact yielded DeviceID and preparation ID, durably and
+interactively. Watch keeps its ride demand, drains admitted groups, releases its
+lease, disconnects and releases that preparation, so iPhone reconnects, relays
+the Watch workout and sends navigation. Watch then requests a fresh preparation,
+which iPhone rejects while it navigates, and neither scans nor connects while it
+holds for iPhone. It asks again on the preparation retry backoff (1 s, doubling
+to 30 s) rather than after every workout snapshot, so taking the Bicino back
+after navigation ends can take up to about 30 s.
+
+The handback ends when iPhone accepts a later preparation, when ride demand ends
+or when the selected Bicino changes. It survives a Watch app relaunch; restoring
+no ride demand clears it. A preparation request that cannot be delivered, a
+failed reply or an unreachable iPhone suspends the hold so the ride is not
+stranded. A five-second response timeout only retries, a Watch session that is
+still activating waits for activation, and a reachability change asks at once.
+Before ride restoration a relaunched Watch keeps a link it already holds; iPhone
+may be answering for its own workout recovery. iPhone's next
+`phone_navigation_active` answer during the same handback restores the hold and
+returns a link won in the meantime. Outside a handback, a
+`phone_navigation_active` rejection never makes an established Watch link stop:
+iPhone also uses that code while its own workout recording, recovery or storage
+failure blocks a handoff.
+
+Both peers order duplicate requests for one handoff. In iPhone's outbox a newer
+request for the same handoff replaces an older one, an older request requeued
+after its transfer was lost cannot replace a newer one, and a failed transfer is
+resent only while it is still recorded in flight. Watch keeps a pending
+`phoneNavigation` request when a `releaseWhenIdle` copy for the same handoff
+arrives later. Watch applies requests only after ride restoration; restoration
+that is reported during a graceful stop completes when that stop finishes. A
+request without a purpose, and every request seen by an earlier Watch build,
+keeps the release-when-idle meaning.
+
 ### Application-confirmed critical ride delivery
 
 Client version `20` requests capability bit `22` (`0x00400000`). When that bit
@@ -2962,9 +2997,10 @@ CAP2 extended feature word (TLV type `3`) bit `2` (`route_elevation_v1`)
 requires client version `32`, an owner-authenticated session, ATT MTU of at
 least 100 and the PSRAM session state. Firmware compiles the transport and the
 optional Elevation screen (screen type `6`, legacy mask bit `6`) only where
-`ROUTE_ELEVATION_SCREEN_ENABLED` is set: today the 1.75-inch development
-(`FIRMWARE_DIAGNOSTICS=1`) profiles. Production and 2.06-inch builds advertise
-neither bit `2` nor screen type `6`. The screen is default-off and follows Ride
+`ROUTE_ELEVATION_SCREEN_ENABLED` is set: both the 1.75-inch and 2.06-inch
+Waveshare development and production profiles enable it by default. An explicit
+`ROUTE_ELEVATION_SCREEN=0` build override disables both the capability and the
+screen. The screen is default-off in the user's screen selection and follows Ride
 Stats in the cycle. Scoped Watch sessions are rejected. See
 [Route elevation](route-elevation-profile.md) for the profile contract.
 

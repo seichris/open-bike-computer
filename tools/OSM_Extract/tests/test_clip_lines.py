@@ -15,7 +15,7 @@ from shapely import LineString, box, intersection
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from funcs import clip_lines  # noqa: E402
+from funcs import clip_lines, merge_geometry_diagnostics  # noqa: E402
 
 
 EARTH_RADIUS_METERS = 6_378_137
@@ -131,6 +131,30 @@ class ClipLinesTests(unittest.TestCase):
         # Callers without a diagnostics mapping get the same output.
         self.assertEqual(clip_lines([{"geom": line}], block), [])
 
+    def test_merge_geometry_diagnostics_adds_counts_and_breakdowns(self):
+        target = {
+            "lineClipsWithoutLength": 1,
+            "lineClipsWithoutLengthByResult": {"empty": 1},
+        }
+        merge_geometry_diagnostics(
+            target,
+            {
+                "lineClipsWithoutLength": 2,
+                "lineClipsWithoutLengthByResult": {"empty": 1, "Point": 1},
+                "droppedByCode": {"invalid_block_polygon": 3},
+            },
+        )
+        self.assertEqual(
+            target,
+            {
+                "lineClipsWithoutLength": 3,
+                "lineClipsWithoutLengthByResult": {"empty": 2, "Point": 1},
+                "droppedByCode": {"invalid_block_polygon": 3},
+            },
+        )
+        merge_geometry_diagnostics(target, {})
+        self.assertEqual(target["lineClipsWithoutLength"], 3)
+
     def test_every_line_result_keeps_its_line_parts_in_order(self):
         # Integer coordinates on a coarse grid make exact boundary contacts
         # common, so every GEOS result shape is exercised.
@@ -198,8 +222,36 @@ class ClipLinesTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            # Feature coordinates are EPSG:3857 metres, like ogr2ogr's output.
+            # A building 0.5 m wide across the x = 4096 block edge: 0.3 m of
+            # it lie in block (0, 0) and 0.2 m in block (1, 0), and both clips
+            # round away, so it is counted twice and drawn nowhere.
             (root / "features_polygons.geojson").write_text(
-                json.dumps({"type": "FeatureCollection", "features": []}),
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "properties": {
+                                    "osm_way_id": 7,
+                                    "building": "yes",
+                                    "other_tags": '"height"=>"12"',
+                                },
+                                "geometry": {
+                                    "type": "Polygon",
+                                    "coordinates": [[
+                                        [4095.7, 1000],
+                                        [4096.2, 1000],
+                                        [4096.2, 1030],
+                                        [4095.7, 1030],
+                                        [4095.7, 1000],
+                                    ]],
+                                },
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             environment = os.environ.copy()
@@ -247,6 +299,20 @@ class ClipLinesTests(unittest.TestCase):
             )
             self.assertEqual(diagnostics.get("lineClipsWithoutLength"), 1)
             self.assertEqual(diagnostics.get("lineClipsWithoutLengthByResult"), {"empty": 1})
+            # The sliver building is counted in both blocks it reaches.
+            self.assertEqual(diagnostics.get("buildingClipsWithoutRecord"), 2)
+            self.assertEqual(
+                diagnostics.get("buildingClipsWithoutRecordByResult"), {"degenerate": 2}
+            )
+            building_stats = json.loads(
+                next(
+                    line[len("BUILDING_STATS:"):]
+                    for line in result.stdout.splitlines()
+                    if line.startswith("BUILDING_STATS:")
+                )
+            )
+            self.assertEqual(building_stats["recordCount"], 0)
+            self.assertEqual(building_stats["geometryDiagnostics"], diagnostics)
 
 
 def mercator_latitude(y):
