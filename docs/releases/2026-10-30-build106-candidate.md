@@ -334,9 +334,17 @@ Publication (2026-10-30):
     - OTA data equal to boot_app0;
     - app1 and FFat erased;
     - bootloader and coredump equal to the backups.
-  - The maintainer accepted power cuts during the later steps as residual risk
-    instead of testing them: they should behave like the USB disconnects on
-    `waveshare-175-c`.
+  - Power cuts during the later steps were not tested. The maintainer accepted
+    them as residual risk.
+    - Unverified: after the app0 write, a power cut reboots the board into
+      release 14 on the dual 3 MiB table, with app1 or FFat partly erased. Its
+      firmware can act before the page resumes, for example by formatting the
+      old FFat.
+    - Only the app0-write cut was exercised, and in that state nothing boots.
+    - The cable pulls on `waveshare-175-c` kept the chip powered, so they are not
+      evidence for these states.
+    - This acceptance covers only the 1.75 package. It is not evidence for the
+      2.06 package.
 - [x] Catalog admission: seichris/bicino#115, merged as `25f91bb9` on
   2026-11-01. It is the catalog's first qualified package.
   - Live on bicino.com: the artifact route serves the 1.75 migration manifest
