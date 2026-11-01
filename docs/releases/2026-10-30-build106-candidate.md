@@ -8,7 +8,9 @@ Status: **published** on 2026-10-30 at 13:17 UTC as tag `v0.3.4-release.14` on
   - over-the-air install into app1;
   - a forced rollback;
   - the dual 4 MiB channel choice, with an app that contains #662;
-  - a release 13 device updating over the legacy channel.
+  - a release 13 device updating over the legacy channel;
+  - the website's storage layout migration, partition-layout gates 1, 2 and 6,
+    except a power loss during a step.
 - The 2.06 gates were not run. The maintainer accepted that residual risk; see
   "Decisions recorded".
 
@@ -265,8 +267,61 @@ Publication (2026-10-30):
   - the production Bicino app family; only Bicino Dev was installed;
   - the app's rejection and notice for an oversized image, the second half of
     partition-layout gate 7, since no oversized release exists.
-- [ ] Migration gates 1, 2 and 6 with the release's exact bytes, with read-only
-  website inspections before and after; then the catalog admission PR.
+- [x] Migration gates 1, 2 and 6 with the release's exact bytes, on a third 1.75,
+  `waveshare-175-c` (`28:84:85:3B:67:88`), on 2026-10-31:
+  - Package: `WAVESHARE_AMOLED_175.web-migration-dual3m-dual4m.json`
+    (`78954385…`), with app `ebc85e6f…`, destination table `60ec28f8…`,
+    bootstrap `f94c5d78…` and source table `6d6e1059…`.
+  - Website: a local production build of seichris/bicino with the read fix
+    seichris/bicino#113. Gate 1 used `a73e11c` plus that PR's two files; gate 6
+    used `main` `ecc2bcf8`. Three local-only patches were never deployed: a
+    catalog entry for this manifest, a catalog type cast and a GitHub API token.
+  - Start: release 13's signed factory images (`63054f01`, build 105) on the
+    dual 3 MiB table. Legacy app1 and FFat were erased; NVS and the coredump were
+    kept. The board was paired and its settings changed on release 13 first.
+  - Gate 1: the migration completed in Chrome on macOS 26.7.1. A read-only
+    esptool check afterwards showed:
+    - table `60ec28f8…`;
+    - bootloader and coredump equal to dumps taken before;
+    - app0 equal to `ebc85e6f…`;
+    - OTA data equal to boot_app0;
+    - app1 and FFat blank.
+  - Gate 2:
+    - The app reconnected without pairing again, and the settings were kept.
+    - Boots 696 and 697 (release 14, ready) loaded the same SD map as before the
+      migration: `china-2a80548a47`, `1f6f9301…`.
+    - A device-log download over the pinned HTTPS transfer worked. Support
+      bundle `F9D75CCF…` verified, with all 45 chunks and no gaps. The first
+      attempt failed only because the iPhone was sharing Personal Hotspot over
+      Wi-Fi.
+    - After the migration, the website offered only the dual 4 MiB update.
+  - Gate 6, USB disconnects:
+    - USB was pulled during the app0 write, the app1 erase write, the app1
+      verification and the FFat verification. Each fresh-session retry
+      continued, and the final readback matched gate 1.
+    - Torn table, emulated with esptool: first an erased table sector, then the
+      new table's first 100 bytes without its MD5 entry. Each time the page
+      verified app0, OTA data, app1 and FFat (about 14 MiB), then wrote only the
+      table. The readback matched gate 1.
+  - Earlier attempts on `waveshare-175-b` failed with "Corrupt flash read" and
+    "USB operation timed out":
+    - Chrome sets PARMRK, so macOS doubles every 0xFF byte and drops input past
+      1 KiB. 4 KiB read packets of erased flash therefore lost bytes.
+    - Hidden tabs throttled the page's reader.
+    - seichris/bicino#113 fixed both. That board was left mid-migration: dual
+      3 MiB table, release 14 in app0, app1 and FFat erased. It boots release 14.
+  - Website follow-ups, not blockers:
+    - After a cable pull during an erase write, the page waits out a long
+      timeout.
+    - The resume and done screens describe a full migration.
+    - The 14 MiB resume check shows no progress.
+    - One transient "Firmware download unavailable" left the device unchanged,
+      and the retry worked.
+- [ ] Gate 6 with real power loss. `waveshare-175-c` has a battery, so pulling
+  USB never cut its power. The battery-less `waveshare-175-b` can run this while
+  it finishes its own migration.
+- [ ] The catalog admission PR in seichris/bicino. It is the catalog's first
+  qualified package.
 
 ## Recovery
 
