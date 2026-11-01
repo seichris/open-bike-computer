@@ -13,7 +13,8 @@ Status: **published** on 2026-10-30 at 13:17 UTC as tag `v0.3.4-release.14` on
     Power cuts after the app0 write were accepted untested. The 1.75 package is
     admitted on bicino.com.
 - The 2.06 gates were not run. The maintainer accepted that residual risk; see
-  "Decisions recorded".
+  "Decisions recorded". On a later acceptance, the 2.06 migration package is
+  also admitted on bicino.com, without a migration gate.
 
 Record every result against the actual commit, profile, binary hash, device and
 new boot. Acceptance does not carry over to a different binary.
@@ -175,6 +176,9 @@ only, and the 2.06 still needs the candidate's own acceptance.
       pauses both boards.
     - The signals are owner-exported support bundles from 2.06 devices
       (`boot/acceptance`, `boot/confirmation_failed`) and field reports.
+- On 2026-11-01, the maintainer skipped the 2.06 migration check: "skip the
+  2.06 check!". The 2.06 migration package was admitted without
+  partition-layout gates on a 2.06; see "After publication".
 
 ## Before tagging
 
@@ -350,7 +354,33 @@ Publication (2026-10-30):
   - Live on bicino.com: the artifact route serves the 1.75 migration manifest
     (`78954385…`), which answered 503 `qualification-pending` before.
     `/api/firmware/approval` lists it.
-  - The 2.06 migration package still answers `qualification-pending`.
+  - The 2.06 migration package still answered `qualification-pending` then; see
+    the next item.
+- [x] 2.06 catalog admission without a migration gate: seichris/bicino#116,
+  merged as `20b9d21d` on 2026-11-01, on the maintainer's acceptance
+  (see "Decisions recorded").
+  - Package: `WAVESHARE_AMOLED_206.web-migration-dual3m-dual4m.json`
+    (`0938f262…`), with app `48361a36…`.
+  - Offline checks, which are not hardware evidence:
+    - The signed recipe differs from the 1.75 package only in the target, the
+      build environment, the factory archive and descriptor digests, and the
+      application image. Both tables, the bootloader digest, the OTA selection
+      and the erase spans are identical.
+    - Release 13's 2.06 factory images carry the same bootloader (`83a06f27…`)
+      and legacy table (`6d6e1059…`).
+    - A one-off simulation ran the website's migration code with the production
+      key and the exact release bytes. A simulated release-13 2.06 board
+      migrated in full and finished after an interruption at every write. A
+      1.75 board confirmed as a 2.06 was refused without writes.
+  - Untested on a 2.06:
+    - the migration and its readback;
+    - whether pairing, settings and SD data survive it;
+    - USB disconnects and power cuts;
+    - release 14's first boot, FFat format and OTA on the new layout.
+  - Live on bicino.com: `/api/firmware/approval` lists both packages, and the
+    artifact route serves the 2.06 manifest and its app, OTA selection and table
+    images with matching SHA-256. Before the merge, the manifest answered 503
+    `qualification-pending`.
 
 ## Recovery
 
