@@ -9,8 +9,9 @@ Status: **published** on 2026-10-30 at 13:17 UTC as tag `v0.3.4-release.14` on
   - a forced rollback;
   - the dual 4 MiB channel choice, with an app that contains #662;
   - a release 13 device updating over the legacy channel;
-  - the website's storage layout migration, partition-layout gates 1, 2 and 6,
-    except a power loss during a step.
+  - the website's storage layout migration, partition-layout gates 1, 2 and 6.
+    Power cuts after the app0 write were accepted untested. The 1.75 package is
+    admitted on bicino.com.
 - The 2.06 gates were not run. The maintainer accepted that residual risk; see
   "Decisions recorded".
 
@@ -310,18 +311,38 @@ Publication (2026-10-30):
     - Hidden tabs throttled the page's reader.
     - seichris/bicino#113 fixed both. That board was left mid-migration: dual
       3 MiB table, release 14 in app0, app1 and FFat erased. It boots release 14.
-  - Website follow-ups, not blockers:
-    - After a cable pull during an erase write, the page waits out a long
+  - Website follow-ups found here:
+    - After a cable pull during an erase write, the page waited out a long
       timeout.
-    - The resume and done screens describe a full migration.
-    - The 14 MiB resume check shows no progress.
+    - The resume and done screens described a full migration.
+    - The 14 MiB resume check showed no progress.
+    - seichris/bicino#114 (`a23d51bf`) fixed all three. Reads now fail as soon
+      as the device is lost.
     - One transient "Firmware download unavailable" left the device unchanged,
       and the retry worked.
-- [ ] Gate 6 with real power loss. `waveshare-175-c` has a battery, so pulling
-  USB never cut its power. The battery-less `waveshare-175-b` can run this while
-  it finishes its own migration.
-- [ ] The catalog admission PR in seichris/bicino. It is the catalog's first
-  qualified package.
+- [x] Gate 6 with real power loss, on the battery-less `waveshare-175-b`
+  (`28:84:85:3B:75:20`), on 2026-11-01:
+  - Start: dual 3 MiB table, release 14 in app0, app1 erased, and a legacy FFat
+    holding files. Its FFat, bootloader and coredump were backed up first.
+  - A USB pull during the app0 write was a real power cut. The page stopped with
+    an error.
+  - A fresh session completed the migration on website `main` `a23d51bf`. Its
+    done screen showed #114's migration text.
+  - Readback:
+    - table `60ec28f8…`;
+    - app0 `ebc85e6f…`;
+    - OTA data equal to boot_app0;
+    - app1 and FFat erased;
+    - bootloader and coredump equal to the backups.
+  - The maintainer accepted power cuts during the later steps as residual risk
+    instead of testing them: they should behave like the USB disconnects on
+    `waveshare-175-c`.
+- [x] Catalog admission: seichris/bicino#115, merged as `25f91bb9` on
+  2026-11-01. It is the catalog's first qualified package.
+  - Live on bicino.com: the artifact route serves the 1.75 migration manifest
+    (`78954385…`), which answered 503 `qualification-pending` before.
+    `/api/firmware/approval` lists it.
+  - The 2.06 migration package still answers `qualification-pending`.
 
 ## Recovery
 
