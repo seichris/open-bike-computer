@@ -4784,6 +4784,9 @@ bool MapTransferInstaller::selectionAnchorProtectsRoot(const std::string &root) 
     selection_anchor::Record record;
     const auto decoded=selection_anchor::decode(bytes,record);
     if (decoded==selection_anchor::Decode::Unsupported) return true; // No destructive downgrade.
+    // Another board's anchor can never be restored here, so it keeps no map.
+    if (decoded==selection_anchor::Decode::Valid && !record.device.empty() &&
+        record.device!=operationDeviceID_) continue;
     ActiveMapSelection selection;
     if (decoded==selection_anchor::Decode::Valid && parseActiveMapText(record.selection,selection).ok &&
         (selection.root==root || selection.previousRoot==root)) return true;
@@ -4808,7 +4811,10 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
     const auto decoded=selection_anchor::decode(bytes,record);
     if(decoded==selection_anchor::Decode::Unsupported) return false;
     if(decoded!=selection_anchor::Decode::Valid) continue;
-    if(!record.device.empty() && record.device!=operationDeviceID_) return false;
+    // A card moved from another board keeps that board's anchors. They are
+    // not this device's evidence and must not block its selections, so the
+    // next anchor replaces them. Recovery still never restores them.
+    if(!record.device.empty() && record.device!=operationDeviceID_) continue;
     if(record.sequence==highest && record.selection!=latest) return false;
     if(record.sequence>highest) { highest=record.sequence; newest=slot; latest=record.selection; }
   }

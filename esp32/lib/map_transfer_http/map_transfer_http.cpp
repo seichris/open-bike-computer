@@ -516,7 +516,10 @@ void MapTransferHttpServer::executeLibraryTask() try {
     const auto workspace = makeActivationWorkspace<Workspace>(storageRoot_, operationDeviceID_);
     auto &store = workspace->store;
     const auto restored = store.restore();
-    if (restored != operation::Result::Ok)
+    // A card moved from another board keeps that board's ledger. None of its
+    // operations can progress on this device, so they gate nothing here.
+    const bool foreignLedger = restored == operation::Result::ForeignDevice;
+    if (restored != operation::Result::Ok && !foreignLedger)
       result = {false, "library_operation_storage", ""};
     // Removal is the remedy for a full card, so a paused or rejected upload of
     // another map cannot block it. That upload's own root and committed
@@ -527,7 +530,7 @@ void MapTransferHttpServer::executeLibraryTask() try {
            ((record.phase == operation::Phase::Receiving || record.phase == operation::Phase::Prepared) &&
             record.identity.session == session));
     };
-    if (result.ok && (action == "remove"
+    if (result.ok && !foreignLedger && (action == "remove"
             ? std::any_of(store.records().begin(), store.records().end(), blocksRemoval)
             : store.hasUnresolvedOperation()))
       result = {false, "library_operation_pending", ""};
