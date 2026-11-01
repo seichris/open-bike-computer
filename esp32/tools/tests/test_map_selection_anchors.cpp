@@ -176,11 +176,15 @@ void testAnchorsRestoreOnlyExactVerifiedPredecessors() {
   assert(installer.recoverInterruptedActivation().code=="selection_anchor_conflict");
   assert(!exists(active));
 
-  // A moved card cannot supply another device's recovery authority.
+  // A moved card cannot supply another device's recovery authority, and its
+  // anchor refuses recovery while it is at least as new as this board's own.
   second=first; second.device="different-device";
   writeFile(slot1,anchor::encode(second));
   assert(installer.recoverInterruptedActivation().code=="selection_anchor_device");
   assert(!exists(active));
+  second.sequence=first.sequence-1; writeFile(slot1,anchor::encode(second));
+  assert(installer.recoverInterruptedActivation().ok && readFile(active)==previousJson);
+  assert(::unlink(active.c_str())==0);
 
   // A checksum authenticates metadata consistency, not map bytes. Rehash the
   // exact referenced payload; never restore a corrupt root just because the
@@ -194,24 +198,26 @@ void testAnchorsRestoreOnlyExactVerifiedPredecessors() {
 
 // A card keeps its anchors when it moves to another board. That board's
 // anchors are not this board's evidence: they keep no map from removal and
-// block no selection, and the next selections replace them. Recovery still
-// never restores them, and the original board keeps working after the move.
+// block no selection. This board's anchors replace them one slot at a time and
+// are numbered above them, so its first selection is already recoverable.
+// Recovery never restores another board's anchor and refuses while one is the
+// newest, and the original board keeps working after the move.
 void testMovedCardSelectsOnAnotherBoard() {
   const auto root=tempRoot();
   const auto active=root+"/VECTMAP/active-map.json";
   const auto slot0=root+"/VECTMAP/.selection-anchor-0";
   const auto slot1=root+"/VECTMAP/.selection-anchor-1";
   const std::string deviceA(32,'a'), deviceB(32,'b');
-  const auto anchorDevice=[&](const std::string &slot) {
+  const auto anchorRecord=[&](const std::string &slot) {
     anchor::Record record;
     assert(anchor::decode(readFile(slot),record)==anchor::Decode::Valid);
-    return record.device;
+    return record;
   };
   MapTransferInstaller boardA(root); boardA.setOperationDeviceID(deviceA);
   for(const auto *session:{"a-one","a-two","a-three"}) {
     prepareReadyRoot(root,session); assert(boardA.activateReadyStreamMap(session).ok);
   }
-  assert(anchorDevice(slot0)==deviceA && anchorDevice(slot1)==deviceA);
+  assert(anchorRecord(slot0).device==deviceA && anchorRecord(slot1).device==deviceA);
   map_transfer::InstalledMap aOne;
   assert(boardA.readInstalledMap("a-one",aOne).ok);
   // Board A's own anchor still keeps its predecessor.
@@ -219,19 +225,29 @@ void testMovedCardSelectsOnAnotherBoard() {
 
   MapTransferInstaller boardB(root); boardB.setOperationDeviceID(deviceB);
   assert(boardB.removeInstalledMap("a-one",aOne.manifestReceipt).ok);
+  // Before board B selects anything, a lost pointer is not recovered from
+  // board A's anchors. Board B's next selection names no predecessor.
+  auto predecessor=readFile(active);
+  assert(::unlink(active.c_str())==0);
+  assert(boardB.recoverInterruptedActivation().code=="selection_anchor_device");
+  assert(!exists(active));
+  writeFile(active,predecessor);
+
   prepareReadyRoot(root,"b-one");
   const auto installed=boardB.activateReadyStreamMap("b-one");
   if(!installed.ok) std::cerr << installed.code << ": " << installed.message << "\n";
   assert(installed.ok);
   ActiveMapSelection selected;
   assert(boardB.readActiveMap(selected).ok && selected.sessionId=="b-one");
-  assert(anchorDevice(slot0)==deviceB && anchorDevice(slot1)==deviceA);
+  auto newer=anchorRecord(slot0), older=anchorRecord(slot1);
+  assert(newer.device==deviceB && older.device==deviceA && newer.sequence>older.sequence);
 
-  // A lost pointer is not recovered from the other board's anchor.
+  // Board B's first anchor outranks board A's other one, so a lost pointer
+  // recovers board B's exact predecessor.
   assert(::unlink(active.c_str())==0);
-  assert(boardB.recoverInterruptedActivation().code=="selection_anchor_device");
-  assert(!exists(active));
-  // The rider selects again; the next anchor replaces board A's last one.
+  assert(boardB.recoverInterruptedActivation().code=="recovered_anchor");
+  assert(readFile(active)==predecessor);
+  // Later selections replace board A's last anchor.
   map_transfer::InstalledMap bOne, aTwo;
   assert(boardB.readInstalledMap("b-one",bOne).ok);
   assert(boardB.selectInstalledMap("b-one",bOne.manifestReceipt).ok);
@@ -239,13 +255,101 @@ void testMovedCardSelectsOnAnotherBoard() {
   assert(boardB.selectInstalledMap("a-two",aTwo.manifestReceipt).ok);
   assert(boardB.readActiveMap(selected).ok && selected.sessionId=="a-two" &&
          selected.previousSessionId=="b-one");
-  assert(anchorDevice(slot0)==deviceB && anchorDevice(slot1)==deviceB);
+  assert(anchorRecord(slot0).device==deviceB && anchorRecord(slot1).device==deviceB);
 
   // Back on board A, board B's anchors are the foreign ones.
+  predecessor=readFile(active);
   prepareReadyRoot(root,"a-four");
   assert(boardA.activateReadyStreamMap("a-four").ok);
   assert(boardA.readActiveMap(selected).ok && selected.sessionId=="a-four");
-  assert(anchorDevice(slot0)==deviceA && anchorDevice(slot1)==deviceB);
+  newer=anchorRecord(slot0); older=anchorRecord(slot1);
+  assert(newer.device==deviceA && older.device==deviceB && newer.sequence>older.sequence);
+  assert(::unlink(active.c_str())==0);
+  // Board B's own anchor is older than board A's, so board B refuses it.
+  assert(boardB.recoverInterruptedActivation().code=="selection_anchor_device");
+  assert(!exists(active));
+  assert(boardA.recoverInterruptedActivation().code=="recovered_anchor");
+  assert(readFile(active)==predecessor);
+  std::filesystem::remove_all(root);
+}
+
+// Every power cut in the first Use or install on a moved card, and in its
+// recovery, leaves a pointer that the new board recovers: the old selection
+// or the new one. A Use has no activation journal and relies on the anchor.
+void testMovedCardFirstSelectionCrashCuts() {
+  const std::string deviceA(32,'a'), deviceB(32,'b');
+  const auto baseline=tempRoot(); MapTransferInstaller boardA(baseline);
+  boardA.setOperationDeviceID(deviceA);
+  for(const auto *session:{"one","two","three"}) {
+    prepareReadyRoot(baseline,session); assert(boardA.activateReadyStreamMap(session).ok);
+  }
+  prepareReadyRoot(baseline,"four");
+  map_transfer::InstalledMap one;
+  assert(boardA.readInstalledMap("one",one).ok);
+  const auto clone=[&]() {
+    const auto root=tempRoot();
+    std::filesystem::copy(baseline,root,std::filesystem::copy_options::recursive |
+                          std::filesystem::copy_options::overwrite_existing);
+    return root;
+  };
+  const auto cuts=[&](const std::string &target,
+                      const std::function<map_transfer::InstallStatus(MapTransferInstaller &)> &select) {
+    const auto probeRoot=clone(); MutationCrashInstaller probe(probeRoot);
+    probe.setOperationDeviceID(deviceB);
+    assert(select(probe).ok);
+    for(size_t cut=0;cut<probe.mutations;++cut) {
+      const auto root=clone(); MutationCrashInstaller interrupted(root,cut);
+      interrupted.setOperationDeviceID(deviceB);
+      bool reached=false;
+      try { (void)select(interrupted); }
+      catch(const SimulatedInstallerPowerCut &) { interrupted.restoreCutImage(); reached=true; }
+      assert(reached);
+      for(size_t pass=0;pass<3;++pass) {
+        MutationCrashInstaller recovery(root,pass); recovery.setOperationDeviceID(deviceB);
+        try { (void)recovery.recoverInterruptedActivation(); }
+        catch(const SimulatedInstallerPowerCut &) { recovery.restoreCutImage(); }
+      }
+      MapTransferInstaller boardB(root); boardB.setOperationDeviceID(deviceB);
+      for(unsigned pass=0;pass<3;++pass) (void)boardB.recoverInterruptedActivation();
+      ActiveMapSelection active; assert(boardB.readActiveMap(active).ok);
+      assert(active.sessionId=="three" || active.sessionId==target);
+      assert(readFile(root+active.root+"/+0000+0000/0.fmb")==kPayload0);
+      std::filesystem::remove_all(root);
+    }
+    std::filesystem::remove_all(probeRoot);
+    return probe.mutations;
+  };
+  const auto use=cuts("one",[&](MapTransferInstaller &board) {
+    return board.selectInstalledMap("one",one.manifestReceipt);
+  });
+  const auto install=cuts("four",[](MapTransferInstaller &board) {
+    return board.activateReadyStreamMap("four");
+  });
+  std::cout << "moved-card first selection cuts: use=" << use << " install=" << install << "\n";
+  std::filesystem::remove_all(baseline);
+}
+
+// This board's newest anchor may already hold the current predecessor while
+// another board's anchor is newer. A new anchor is still numbered above it,
+// or recovery could not use it for this selection.
+void testOwnAnchorBehindAnotherBoardIsRenumbered() {
+  const auto root=tempRoot();
+  const auto active=root+"/VECTMAP/active-map.json";
+  const auto slot0=root+"/VECTMAP/.selection-anchor-0";
+  const auto slot1=root+"/VECTMAP/.selection-anchor-1";
+  const std::string device(32,'a');
+  MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+  prepareReadyRoot(root,"previous"); assert(installer.activateReadyStreamMap("previous").ok);
+  const auto previousJson=readFile(active);
+  writeFile(slot0,anchor::encode({1,device,"",previousJson}));
+  writeFile(slot1,anchor::encode({5,std::string(32,'b'),"",previousJson}));
+  prepareReadyRoot(root,"candidate"); assert(installer.activateReadyStreamMap("candidate").ok);
+  anchor::Record renumbered;
+  assert(anchor::decode(readFile(slot1),renumbered)==anchor::Decode::Valid);
+  assert(renumbered.device==device && renumbered.sequence==6 && renumbered.selection==previousJson);
+  assert(::unlink(active.c_str())==0);
+  assert(installer.recoverInterruptedActivation().code=="recovered_anchor");
+  assert(readFile(active)==previousJson);
   std::filesystem::remove_all(root);
 }
 
@@ -311,6 +415,8 @@ int main() {
   testAnchorEnvelopeRejectsCorruptionAndUnknownSchemas();
   testAnchorsRestoreOnlyExactVerifiedPredecessors();
   testMovedCardSelectsOnAnotherBoard();
+  testMovedCardFirstSelectionCrashCuts();
+  testOwnAnchorBehindAnotherBoardIsRenumbered();
   testAlternationRetainsFullRollbackRoots();
   testAlternatingSlotOverwriteCrashCuts();
   std::cout << "selection anchor validation/recovery tests passed\n";

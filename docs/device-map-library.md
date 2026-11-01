@@ -119,11 +119,14 @@ Selection anchors and the operation ledger record the device that wrote them.
 A card moved from another Bike Computer keeps both, but they are not this
 board's evidence:
 - That board's anchors protect no map from removal and never block a selection.
-  The next selection writes this board's anchor over them.
+  This board's anchors replace them one slot at a time and are numbered above
+  every anchor on the card. From this board's first selection on, its own
+  anchor recovers a lost pointer.
 - Its ledger does not gate Use, Remove or automatic selection. Its operations
   cannot progress here.
-- Recovery still refuses to restore another board's anchor
-  (`selection_anchor_device`). If the pointer is lost while one remains, the
+- Recovery never restores another board's anchor. It refuses
+  (`selection_anchor_device`) while one is the newest anchor on the card, such
+  as before this board's first selection. If the pointer is lost then, the
   rider selects a map again.
 
 Before this rule, a moved card refused every install and Use on the new board
