@@ -93,7 +93,10 @@ struct Installer {
   }
   bool mapRootHasBlock(const std::string&,int32_t,int32_t){return currentCovers;}
   bool installedMapCovers(const InstalledMap&,int32_t,int32_t){return candidateCovers;}
+  int writeFailureClears=0;
+  void clearStorageWriteFailure(){++writeFailureClears;}
   InstallStatus selectInstalledMap(const std::string&s,const std::string&){
+    assert(writeFailureClears==selectAttempts+1); // Each Use records only its own writes.
     ++selectAttempts;
     if(!selectionError.empty())return {false,selectionError,""};
     ++selected;previous=active;active.root="/VECTMAP/.maps/"+s;active.sessionId=s;active.mapId="city";
@@ -175,6 +178,8 @@ public:
   void submitLibraryTask();
   void lockState(){} void unlockState(){}
   void finishActivation(std::string a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
+  std::vector<std::string> storageWriteCodes;
+  void recordStorageWriteFailure(const std::string&code){storageWriteCodes.push_back(code);}
   void releaseCommitGrant(){} void requestAutomaticExit(){}
   std::string selectionOperationID(const ActiveMapSelection&){return "";}
   bool observeOperationRevision(uint64_t){return true;}
@@ -271,6 +276,8 @@ int main(){using namespace map_transfer;
     assert(s.installer_.automatic&&s.libraryManualPending_==!pending);
     assert(s.libraryCommandID_==std::string(32,'f'));
     assert((s.libraryCommandError_=="library_operation_pending")==pending);
+    // A completed Use still reports a write step that failed on the way.
+    assert(s.storageWriteCodes==(pending?std::vector<std::string>{}:std::vector<std::string>{"library_selected"}));
     if(!pending){
       assert(s.mapLibraryJson(true).find("\"automatic\":false")!=std::string::npos);
       s.pendingMapRootTaken_=true;s.acknowledgeActivatedMapRoot(city().root,true);
@@ -344,6 +351,7 @@ int main(){using namespace map_transfer;
   reset();MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.selectionError="library_integrity";
   assert(s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'e')));s.executeLibraryTask();
   assert(s.installer_.automatic&&!s.pendingRendererAcknowledgement_&&!s.libraryManualPending_);
+  assert(s.storageWriteCodes==std::vector<std::string>{"library_integrity"});
   s.librarySubmitted_=true;assert(!s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'f')));
   assert(s.libraryCommandID_==std::string(32,'f')&&s.libraryCommandError_=="library_busy");
   for(bool issued:{false,true}) {
