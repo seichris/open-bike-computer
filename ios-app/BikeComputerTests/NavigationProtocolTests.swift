@@ -1168,6 +1168,7 @@ struct NavigationProtocolTests {
         testSettingsSheetPresentationWiring()
         testStravaRouteCatalogUIWiring()
         testLandingMapConnectionStatusPositioning()
+        testActionStatusChipLargeTextLayout()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testTopographicMapChoicesAreIndependent()

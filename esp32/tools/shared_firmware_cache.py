@@ -252,19 +252,40 @@ def restore_shared_core(project: Path, environment: str) -> bool:
         for path in core._sdkconfig_paths(project, environment):
             if os.path.lexists(path) and (path.is_symlink() or not core._is_generated_sdkconfig(path) or core._is_tracked(project, path)):
                 raise core.GeneratedSdkconfigError("shared core cannot replace user SDK configuration")
-        rebound = core._hydrate_core_cache_entry(
-            project, environment, manifest["coreInputKey"], manifest,
-            entry_dir=source, relocate_from=origin,
-        )
-        key = core.core_input_key(project, environment)
-        if key != manifest["coreInputKey"]:
-            raise core.GeneratedSdkconfigError("relocated core input identity changed")
+        key = manifest["coreInputKey"]
         local = core._core_cache_entry_dir(project, environment, key)
+        local_manifest = None
         if os.path.lexists(local):
-            core._validate_core_cache_entry(project, environment, key)
+            try:
+                local_manifest = core._validate_core_cache_entry(project, environment, key)
+            except core.GeneratedSdkconfigError as error:
+                core._quarantine_core_cache_entry(project, environment, key, str(error))
+        imported = None
+        if local_manifest is not None:
+            # This worktree already holds the imported core as an attested
+            # private entry; only its generated sdkconfig files are missing
+            # (another profile's build replaced them). Hydrate from that entry.
+            # Relocating the transport copy onto the same path rewrites the
+            # launchers in a way that is not byte-for-byte idempotent, so the
+            # relocated tree would no longer match the private attestation.
+            core._hydrate_core_cache_entry(project, environment, key, local_manifest)
         else:
-            base = {name: value for name, value in rebound.items() if name not in ARCHIVE_FIELDS}
-            core._publish_core_cache_entry(project, environment, key, base)
+            # Relocation rebases launchers and configuration onto another
+            # worktree's path; a transport published from this path needs none.
+            relocate_from = None if origin.resolve() == project.resolve() else origin
+            rebound = core._hydrate_core_cache_entry(
+                project, environment, key, manifest,
+                entry_dir=source, relocate_from=relocate_from,
+            )
+            imported = {name: value for name, value in rebound.items() if name not in ARCHIVE_FIELDS}
+        # The hydrated sidecars must reproduce the transport's identity before
+        # an import may become a private entry: later restores prefer a valid
+        # private entry over the transport, so a mismatched import must leave
+        # nothing behind.
+        if core.core_input_key(project, environment) != key:
+            raise core.GeneratedSdkconfigError("relocated core input identity changed")
+        if imported is not None:
+            core._publish_core_cache_entry(project, environment, key, imported)
         if not core._active_core_matches(project, environment, core._validate_core_cache_entry(project, environment, key)):
             raise core.GeneratedSdkconfigError("imported core differs from its private cache")
     elapsed = round((time.monotonic() - started) * 1000)

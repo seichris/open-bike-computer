@@ -3756,6 +3756,33 @@ extension NavigationProtocolTests {
         )
     }
 
+    static func testActionStatusChipLargeTextLayout() {
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/ActionStatusChip.swift"
+        )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            assert(false, "status chip source should be available to the integration test")
+            return
+        }
+
+        let compactSource = source.filter { !$0.isWhitespace }
+        assert(
+            compactSource.contains(
+                "privatestaticletshape=RoundedRectangle(cornerRadius:32)"
+            ) &&
+                compactSource.contains(".background(.regularMaterial,in:Self.shape)") &&
+                compactSource.contains(".overlay(Self.shape.stroke(") &&
+                !compactSource.contains("Capsule("),
+            "status chips stay capsules only while short, so wrapped large text stays inside their corners"
+        )
+        assert(
+            compactSource.contains(
+                ".dynamicTypeSize(...DynamicTypeSize.xxxLarge).frame(width:22,height:22)"
+            ),
+            "a status chip's symbol stops growing at XXXL in its own slot instead of spilling into the text"
+        )
+    }
+
     static func testDeviceScreenUISettingsWiring() {
         let sourceURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"

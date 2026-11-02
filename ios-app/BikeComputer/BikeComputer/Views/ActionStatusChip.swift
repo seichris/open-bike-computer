@@ -17,9 +17,14 @@ struct ActionStatusChip: View {
                         ProgressView(value: progress)
                             .frame(width: 22, height: 22)
                     } else {
+                        // At accessibility text sizes the symbol would spill
+                        // far out of its slot and into the text, so it stops
+                        // growing at XXXL. Widening the slot instead would
+                        // take width the wrapped text needs on small screens.
                         Image(systemName: systemImage)
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(tint)
+                            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                             .frame(width: 22, height: 22)
                     }
 
@@ -53,11 +58,16 @@ struct ActionStatusChip: View {
         .padding(.leading, 14)
         .padding(.trailing, onDismiss == nil ? 14 : 8)
         .padding(.vertical, 9)
-        .background(.regularMaterial, in: Capsule())
+        .background(.regularMaterial, in: Self.shape)
         .overlay(
-            Capsule()
+            Self.shape
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
     }
+
+    // The radius is clamped to half the height, so a one-line chip is still
+    // a capsule. When large text wraps it into a tall chip, these corners
+    // keep the text inside, where capsule ends would cut through it.
+    private static let shape = RoundedRectangle(cornerRadius: 32)
 }
