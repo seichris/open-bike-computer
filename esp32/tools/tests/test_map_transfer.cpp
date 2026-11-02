@@ -747,6 +747,27 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(std::strlen(recovering.snapshot().terminalCode.data()) == 63);
   assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
   assert(recovering.snapshot().ownerRecoveryCode[0] == '\0');
+
+  // An allocation failure inside begin() leaves the state as it was, not
+  // running under the previous session.
+  MapActivationState unwound;
+  assert(unwound.begin("previous", 3) == ActivationBeginResult::Started);
+  unwound.finish("installed", "map", "", "");
+  const std::string longSession(47, 's'); // One 48-byte block in libstdc++ and libc++.
+  const unsigned rejected = rejectedAllocations;
+  rejectAllocationSize = longSession.size() + 1;
+  bool threw = false;
+  try {
+    (void)unwound.begin(longSession, 3);
+  } catch (const std::bad_alloc &) {
+    threw = true;
+  }
+  rejectAllocationSize = 0;
+  assert(threw && rejectedAllocations == rejected + 1);
+  assert(unwound.acceptsUploads() && !unwound.runningFor("previous"));
+  assert(unwound.snapshot().status == "installed");
+  assert(unwound.begin(longSession, 3) == ActivationBeginResult::Started);
+  assert(unwound.runningFor(longSession) && unwound.snapshot().sequence == 2);
 }
 
 static void testRejectsUnsafeManifestPath() {

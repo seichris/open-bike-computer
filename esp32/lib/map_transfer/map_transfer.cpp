@@ -1149,6 +1149,10 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   if (state_.status == "installed" && state_.sessionId == sessionId) {
     return ActivationBeginResult::AlreadyInstalled;
   }
+  // Copy before the first change. An allocation failure must not leave the
+  // state running under the previous session: every retry of this one would
+  // then see Busy until its attempts ran out.
+  std::string session = sessionId;
   // Retry of this accepted session retains the first owner failure. A new
   // session or a completed attempt starts a separate diagnostic identity.
   if (state_.sessionId != sessionId || state_.terminalCode[0] != '\0') {
@@ -1162,7 +1166,7 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   if (state_.sequence == 0)
     state_.sequence = 1;
   state_.status = "activating";
-  state_.sessionId = sessionId;
+  state_.sessionId = std::move(session);
   state_.mapId.clear();
   state_.step = 1;
   state_.totalSteps = std::max<uint8_t>(1, totalSteps);

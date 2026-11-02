@@ -179,7 +179,7 @@ public:
   void lockState(){} void unlockState(){}
   void finishActivation(std::string a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
   std::vector<std::string> storageWriteCodes;
-  void recordStorageWriteFailure(const std::string&code){storageWriteCodes.push_back(code);}
+  void recordStorageWriteFailure(const char*code){storageWriteCodes.push_back(code);}
   void releaseCommitGrant(){} void requestAutomaticExit(){}
   std::string selectionOperationID(const ActiveMapSelection&){return "";}
   bool observeOperationRevision(uint64_t){return true;}
@@ -277,7 +277,8 @@ int main(){using namespace map_transfer;
     assert(s.libraryCommandID_==std::string(32,'f'));
     assert((s.libraryCommandError_=="library_operation_pending")==pending);
     // A completed Use still reports a write step that failed on the way.
-    assert(s.storageWriteCodes==(pending?std::vector<std::string>{}:std::vector<std::string>{"library_selected"}));
+    if(pending)assert(s.storageWriteCodes.empty());
+    else assert(s.storageWriteCodes.size()==1&&s.storageWriteCodes[0]=="library_selected");
     if(!pending){
       assert(s.mapLibraryJson(true).find("\"automatic\":false")!=std::string::npos);
       s.pendingMapRootTaken_=true;s.acknowledgeActivatedMapRoot(city().root,true);
@@ -351,7 +352,7 @@ int main(){using namespace map_transfer;
   reset();MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.selectionError="library_integrity";
   assert(s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'e')));s.executeLibraryTask();
   assert(s.installer_.automatic&&!s.pendingRendererAcknowledgement_&&!s.libraryManualPending_);
-  assert(s.storageWriteCodes==std::vector<std::string>{"library_integrity"});
+  assert(s.storageWriteCodes.size()==1&&s.storageWriteCodes[0]=="library_integrity");
   s.librarySubmitted_=true;assert(!s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'f')));
   assert(s.libraryCommandID_==std::string(32,'f')&&s.libraryCommandError_=="library_busy");
   for(bool issued:{false,true}) {

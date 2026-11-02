@@ -568,8 +568,9 @@ void MapTransferHttpServer::executeLibraryTask() try {
     installer_.clearStorageWriteFailure();
     result = installer_.selectInstalledMap(session, receipt);
     // Use reconciles a pointer that was written although the write reported
-    // failure, so record the step even when the selection completed.
-    recordStorageWriteFailure(result.ok ? "library_selected" : result.code);
+    // failure, so record the step even when the selection completed. A plain
+    // C string: building a std::string here could fail a completed Use.
+    recordStorageWriteFailure(result.ok ? "library_selected" : result.code.c_str());
   }
   // A refused or failed Use left (or recovery restored) the previous pointer,
   // so settling its journal now drops it without touching automatic mode.
@@ -2357,14 +2358,14 @@ void MapTransferHttpServer::recordActivationOutcome(const std::string &phase,
 
 // Names the failed metadata write step behind an activation failure such as
 // stream_active_write. Step names are fixed tokens from the installer.
-void MapTransferHttpServer::recordStorageWriteFailure(const std::string &code) try {
+void MapTransferHttpServer::recordStorageWriteFailure(const char *code) try {
   const auto failure = installer_.storageWriteFailure();
   if (failure.first == nullptr) return;
   struct Workspace { char fields[192]{}; };
   const auto workspace = makeActivationWorkspace<Workspace>();
   const int bytes = std::snprintf(workspace->fields, sizeof(workspace->fields),
       "{\"code\":\"%s\",\"phase\":\"%s\",\"reason\":\"%s\",\"errorCode\":%d}",
-      code.c_str(), failure.first, failure.last, failure.firstError);
+      code, failure.first, failure.last, failure.firstError);
   if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(workspace->fields))
     (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "transfer",
                                    "map_storage_write_failed", workspace->fields);
@@ -2563,7 +2564,7 @@ bool MapTransferHttpServer::runStreamActivationTask(
   InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress,
       internalOwner ? +onRecovery : nullptr, this);
   if (!activated.ok) {
-    recordStorageWriteFailure(activated.code);
+    recordStorageWriteFailure(activated.code.c_str());
     if (internalOwner) rememberOwnerRecovery(activated.code.c_str());
     finishActivation("recovering", "", activated.code, activated.message);
     return false;

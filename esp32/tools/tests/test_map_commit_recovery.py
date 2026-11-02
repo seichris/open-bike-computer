@@ -402,12 +402,13 @@ struct Progress { unsigned step, totalSteps; uint64_t completed, total; };
 struct Activation {
   unsigned step = 1, begins = 0;
   bool running = false, installed = false, otherRunning = false, startsBeforeBegin = false;
-  std::string status = "idle";
-  bool runningFor(const std::string &) const { return running; }
-  ActivationBeginResult begin(const std::string &, int) {
+  std::string status = "idle", session = "session";
+  bool runningFor(const std::string &id) const { return running && id == session; }
+  ActivationBeginResult begin(const std::string &id, int) {
     ++begins;
     if (startsBeforeBegin) running = true; // An attempt began after the first check.
-    if (running) return ActivationBeginResult::AlreadyRunning;
+    if (running) return id == session ? ActivationBeginResult::AlreadyRunning
+                                      : ActivationBeginResult::Busy;
     if (otherRunning) return ActivationBeginResult::Busy;
     if (installed) return ActivationBeginResult::AlreadyInstalled;
     running = true; step = 1; status = "activating";
