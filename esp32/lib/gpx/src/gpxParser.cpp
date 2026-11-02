@@ -7,6 +7,7 @@
  */
 
 #include "gpxParser.hpp"
+#include "iso8601_utc.hpp"
 
 /**
  * @brief Helper function to format double values to a specific number of decimal places
@@ -258,9 +259,9 @@ bool GPXParser::addWaypoint(const wayPoint& wp)
       power_management::LockDomain::Storage);
   time_t tUTCwpt = time(NULL);
   struct tm UTCwpt_tm;
-  struct tm *tmUTCwpt = gmtime_r(&tUTCwpt, &UTCwpt_tm);
+  gmtime_r(&tUTCwpt, &UTCwpt_tm);
   char textFmt[30];
-  strftime(textFmt, sizeof(textFmt), "%Y-%m-%dT%H:%M:%SZ", tmUTCwpt);
+  time_format::formatUtcIso8601(textFmt, sizeof(textFmt), UTCwpt_tm);
 
   tinyxml2::XMLDocument doc;
   tinyxml2::XMLError result = doc.LoadFile(filePath.c_str());
