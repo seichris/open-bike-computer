@@ -2428,11 +2428,32 @@ restart. A card that validates but whose map namespace cannot be written
 returns `sd_unwritable` and stays in use, so a later request probes it again.
 
 After the active pointer transaction, the final step remains nonterminal until
-the main loop locates and parses a renderer block from the new root. All blocks
-were already structurally validated during their unavoidable write/hash pass,
-so activation adds no full payload scan. Only that acknowledgement emits
-`installed` and closes
-transfer mode. A rejected renderer root restores the previous valid selection
+the main loop locates and parses a renderer block from the new root. Blocks
+were structurally validated during their write/hash pass, but activation of a
+label-aware map reads every `.fmb` block once more to check its label, building,
+POI and contour sections against the font asset and the manifest counts. That
+pass fills the first third of the final step's `progress`, so a large map
+visibly advances instead of staying at 0%. Only the renderer acknowledgement
+emits `installed` and closes
+transfer mode.
+
+Accepted work whose activation fails is retried by the device, not by the app.
+Each retry waits longer (5, 10, then 20 seconds, at most one minute) and reports
+`activating` from the final step again; between attempts status is
+`recovering`. After three failed attempts the device discards the unselected
+root, records a Failed receipt for operation-backed work, reports `failed` with
+`activation_retry_limit`, and releases the commit so the app can upload again.
+A root that is still selected is never deleted: a completed version that the
+attempt reused is kept, and stays in Saved Maps, while only the attempt fails.
+A new version that the pointer already names keeps retrying until its renderer
+handoff.
+A legacy upload resumed at boot gets the same bounded retries. While accepted
+work is pending, a new upload gets 409 `activation_busy`. A ready marker left on
+the selected or previous map by a failed consumed-marker write is cleaned up and
+never refuses another upload with `stream_ready_pending`. The internal operation
+owner waits for map work in ten-minute slices while that work reports verified
+storage progress; only a slice without progress is a timeout that poisons the
+owner for the rest of the boot. A rejected renderer root restores the previous valid selection
 and emits `renderer_reload`. Revocation before a commit grant prevents
 boot-eligible writes. Once a grant is accepted, clean response completion,
 response abort, lost close acknowledgement, and BLE revocation cannot revoke
@@ -2941,7 +2962,16 @@ map, rechecks file checksums and reader contracts, and uses the existing canonic
 pointer/readback/recovery mechanism. The renderer must acknowledge the new root
 before `selectedSessionID` identifies it as in use. Selection does not issue or
 rewrite an upload operation's Installed receipt. Removal cannot delete selected,
-rollback, transaction, selection-anchor or live-renderer roots.
+rollback, transaction, selection-anchor or live-renderer roots. Selection anchors
+and the operation ledger are bound to the device that wrote them. On a card moved
+from another Bike Computer, that board's anchors protect no root and block no
+selection. This board's anchors replace them one slot at a time and are
+numbered above every anchor on the card, so recovery uses this board's anchor
+from its first selection on. Its ledger does not gate library
+actions, which therefore do not return `library_operation_storage` or
+`library_operation_pending` for it. Recovery never restores another board's
+anchor and refuses (`selection_anchor_device`) while one is the newest, such as
+before this board's first selection.
 
 A durable `PUT /map-transfer/sessions/<session>/install-stream` refused before it writes payload, such
 as `stream_sd_full` (507) or `stream_storage_unavailable` (503) for a fresh

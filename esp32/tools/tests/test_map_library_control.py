@@ -284,6 +284,21 @@ int main(){using namespace map_transfer;
       clockMs+=30000;covered.considerAutomaticMap(0,0,false);assert(covered.libraryAction_.empty());
     }
   }
+  // A card moved from another board carries that board's ledger. Even its
+  // unresolved operation gates nothing here: Use and removal both proceed.
+  for(const std::string action:{"select","remove"}){
+    reset();MapOperationStorage disk("");operation::Store other(disk,std::string(32,'b'));
+    assert(other.restore()==operation::Result::Ok&&other.initializeAdmission(99)==operation::Result::Ok);
+    auto identity=id();identity.device=std::string(32,'b');
+    assert(other.admit(identity,other.admissionRevision())==operation::Result::Ok);
+    assert(other.prepare(identity)==operation::Result::Ok&&other.accept(identity)==operation::Result::Ok);
+    operation::Store local(disk,std::string(32,'a'));assert(local.restore()==operation::Result::ForeignDevice);
+    MapTransferHttpServer s;s.libraryMaps_={city()};
+    assert(s.requestMapLibrary(action,"city",std::string(64,'b'),std::string(32,'e')));s.executeLibraryTask();
+    assert(s.libraryCommandID_==std::string(32,'e')&&s.libraryCommandError_.empty()&&s.libraryError_.empty());
+    if(action=="select") assert(s.installer_.selected==1&&s.pendingRendererAcknowledgement_);
+    else assert(s.installer_.removed==1);
+  }
   reset();
   for(bool covers:{false,true}){
     MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.candidateCovers=false;s.installer_.currentCovers=covers;

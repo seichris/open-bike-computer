@@ -69,9 +69,7 @@ public:
   void resumePendingActivations();
   using StorageControlSubmit = bool (*)(void (*)(void *), void *);
   void setStorageControlSubmit(StorageControlSubmit submit) { storageControlSubmit_ = submit; }
-  void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
-    operationOwner_ = owner;
-  }
+  void setOperationOwner(firmware_update::DeviceOperationOwner *owner);
   std::string selectionHealthJson() const;
   // Boot recovery/storage worker only: resolves retained operation identity.
   void observeBootSelection(const ActiveMapSelection &selected, bool loaded,
@@ -170,11 +168,17 @@ private:
     device_transfer::HttpResponseCompletionToken response;
     bool armed = false;
     bool responseCompleted = false;
+    // Failed activation attempts and the earliest next retry (millis).
+    uint8_t failures = 0;
+    uint32_t retryAfterMs = 0;
     bool pending() const { return !identity.session.empty(); }
   };
   CommitRecovery commitRecovery_;
   void armCommitRecovery(const device_transfer::HttpRequest &request);
   void retryAcceptedActivation(const std::string &sessionId);
+  // Both require the state lock.
+  void scheduleCommitRecoveryRetry();
+  bool commitRecoveryDue() const;
   bool recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);
   void executeOperationTask();

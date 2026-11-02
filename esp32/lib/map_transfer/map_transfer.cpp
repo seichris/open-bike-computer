@@ -2582,8 +2582,12 @@ InstallStatus MapTransferInstaller::selectReadyStreamMap(
     return manifestStatus;
   if (readyManifest.mapId!=ready.mapId)
     return fail("stream_manifest_identity","ready metadata map ID does not match signed content");
+  // The block cross-check fills the first third of the final step.
+  const auto scanProgress = [&onProgress](const ActivationProgress &scan) {
+    if (onProgress) onProgress({3, 3, scan.completed, scan.total * 3});
+  };
   const InstallStatus labelStatus = validateLabelContracts(
-      joinPath(storageRoot_, ready.root), readyManifest, false);
+      joinPath(storageRoot_, ready.root), readyManifest, false, scanProgress);
   if (!labelStatus.ok)
     return labelStatus;
   workspace->target = targetMetadata(readyManifest);
@@ -2699,6 +2703,42 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
   const auto pending = resolvePendingStreamActivation(sessionId);
   if (!pending.ok || sessionId.empty()) return pending;
   return activateReadyStreamMap(sessionId, onProgress, onRecovery, recoveryContext);
+}
+
+InstallStatus MapTransferInstaller::settleSelectedStreamMap() const try {
+  // An interrupted switch belongs to journal recovery. Operation-backed roots
+  // keep their ready state until finalizeOperation persists the receipt.
+  if (hasInterruptedActivation()) return {true, "stream_settle_deferred", ""};
+  struct Workspace { ActiveMapSelection active; ReadyStreamMap ready; std::string pending; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &active = workspace->active;
+  auto &ready = workspace->ready;
+  if (!readActiveMap(active).ok || !safeId(active.sessionId) ||
+      active.root != std::string("/VECTMAP/.maps/") + active.sessionId ||
+      !readReadyStreamMap(active.sessionId, ready).ok || !ready.operationID.empty() ||
+      ready.root != active.root || ready.mapId != active.mapId ||
+      ready.manifestReceipt != active.manifestReceipt ||
+      ready.signedManifestReceipt != active.signedManifestReceipt ||
+      preparationBlocksActivation(ready))
+    return {true, "stream_settle_none", ""};
+  const std::string root = joinPath(storageRoot_, ready.root);
+  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
+                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  auto &pending = workspace->pending;
+  const std::string pendingPath = joinPath(storageRoot_, kPendingStreamActivationFile);
+  const bool pendingSelected =
+      (readTextFile(pendingPath, pending, 2048) || readTextFile(pendingPath + ".bak", pending, 2048)) &&
+      jsonStringValue(pending, "sessionId") == ready.sessionId;
+  if (consumed && !pendingSelected) return {true, "stream_settle_none", ""};
+  // The same cleanup as an activation of the already selected root.
+  if ((!consumed && !markStreamActivationConsumed(ready)) ||
+      (pendingSelected && !clearPendingStreamActivation(ready.sessionId)) ||
+      !removeTree(joinPath(root, kStreamCheckpointFile)) ||
+      !removeTree(joinPath(root, kStreamInstallingFile)))
+    return fail("stream_settle_cleanup", "selected map cleanup will retry");
+  return {true, "stream_installed", ""};
+} catch (const std::bad_alloc &) {
+  return {false, "out_of_memory", ""};
 }
 
 InstallStatus MapTransferInstaller::resolvePendingStreamActivation(
@@ -3483,6 +3523,22 @@ InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
   }
   return {true, "stream_superseded",
           "removed streamed map superseded by archive transfer"};
+}
+
+InstallStatus MapTransferInstaller::keepSelectedStreamMap(
+    const std::string &sessionId) const {
+  if (!safeId(sessionId))
+    return fail("stream_discard_session", "stream session is invalid");
+  // The same completed-version branches as discard, minus the deletion.
+  const auto root = joinPath(storageRoot_, std::string("/VECTMAP/.maps/") + sessionId);
+  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
+                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  if (!consumed && (!fileExists(joinPath(root, kLibraryRetainedFile)) ||
+                    !restoreRetainedLibraryVersion(sessionId)))
+    return fail("stream_keep_unverified", "selected map has no completed version to keep");
+  return clearPendingStreamActivation(sessionId)
+      ? InstallStatus{true, "library_kept", ""}
+      : fail("stream_discard_cleanup", "could not clear abandoned activation metadata");
 }
 
 InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
@@ -4479,7 +4535,7 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
-    bool useManifestPaths) const try {
+    bool useManifestPaths, const ActivationProgressCallback &onProgress) const try {
   if (manifest.formatVersion != 2 && manifest.formatVersion != 3 &&
       manifest.formatVersion != 4 && manifest.formatVersion != 5)
     return {true, "ok", ""};
@@ -4522,6 +4578,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
   std::vector<map_poi_index::Entry> expectedPoiIndex;
   const ManifestFile *poiIndexFile = nullptr;
 #endif
+  // This pass reads every block again, which takes minutes on a large map.
+  // Report it, and feed the storage heartbeat that keeps an owner waiting.
+  uint64_t blocks = 0, validated = 0, reportedPercent = 0;
+  for (const ManifestFile &file : manifest.files)
+    if (file.path.size() >= 4 && file.path.compare(file.path.size() - 4, 4, ".fmb") == 0)
+      ++blocks;
 
   for (const ManifestFile &file : manifest.files) {
 #if MAP_POIS_RUNTIME_ENABLED
@@ -4619,6 +4681,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       }
       contourRecords += contours.records.size();
       contourPoints += contours.points.size();
+    }
+    ++validated;
+    if (storageProgressCallback_) storageProgressCallback_(storageProgressContext_);
+    if (onProgress && validated * 100 / blocks != reportedPercent) {
+      reportedPercent = validated * 100 / blocks;
+      onProgress({1, 1, validated, blocks});
     }
   }
   if (manifest.formatVersion >= 3) {
@@ -4784,6 +4852,9 @@ bool MapTransferInstaller::selectionAnchorProtectsRoot(const std::string &root) 
     selection_anchor::Record record;
     const auto decoded=selection_anchor::decode(bytes,record);
     if (decoded==selection_anchor::Decode::Unsupported) return true; // No destructive downgrade.
+    // Another board's anchor can never be restored here, so it keeps no map.
+    if (decoded==selection_anchor::Decode::Valid && !record.device.empty() &&
+        record.device!=operationDeviceID_) continue;
     ActiveMapSelection selection;
     if (decoded==selection_anchor::Decode::Valid && parseActiveMapText(record.selection,selection).ok &&
         (selection.root==root || selection.previousRoot==root)) return true;
@@ -4795,7 +4866,7 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Same-root refreshes and rollback writes cannot bless a provisional map as
   // a predecessor. Only preserve the canonical predecessor explicitly named
   // by a replacement transaction; never scan ready roots to manufacture one.
-  uint64_t highest=0; unsigned newest=1;
+  uint64_t highest=0, foreign=0; unsigned newest=1;
   std::string latest;
   for(unsigned slot=0;slot<2;++slot) {
     std::string bytes;
@@ -4808,7 +4879,14 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
     const auto decoded=selection_anchor::decode(bytes,record);
     if(decoded==selection_anchor::Decode::Unsupported) return false;
     if(decoded!=selection_anchor::Decode::Valid) continue;
-    if(!record.device.empty() && record.device!=operationDeviceID_) return false;
+    // A card moved from another board keeps that board's anchors. They are
+    // not this device's evidence and must not block its selections. This
+    // board's anchors replace them one slot at a time and are numbered above
+    // them, so recovery uses this board's anchor from its first selection on.
+    if(!record.device.empty() && record.device!=operationDeviceID_) {
+      foreign=std::max(foreign,record.sequence);
+      continue;
+    }
     if(record.sequence==highest && record.selection!=latest) return false;
     if(record.sequence>highest) { highest=record.sequence; newest=slot; latest=record.selection; }
   }
@@ -4826,11 +4904,12 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Anchors keep the size older firmware reads, or a downgrade would fail
   // every activation. A larger predecessor keeps journal and backup recovery.
   if (selection.size()>selection_anchor::kMaximumSelectionBytes) return true;
-  if (highest!=0 && latest==selection) return true;
-  if (highest==std::numeric_limits<uint64_t>::max()) return false;
+  if (highest>foreign && latest==selection) return true;
+  const auto sequence=std::max(highest,foreign);
+  if (sequence==std::numeric_limits<uint64_t>::max()) return false;
   auto &ready = workspace->ready;
   if (!readReadyStreamMap(prior.sessionId,ready).ok) return false;
-  selection_anchor::Record record{highest+1,operationDeviceID_,ready.operationID,selection};
+  selection_anchor::Record record{sequence+1,operationDeviceID_,ready.operationID,selection};
   const auto bytes=selection_anchor::encode(record);
   const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(newest^1U));
   // Write only the older/inactive slot. No rename/backup deletion can destroy
@@ -4843,9 +4922,9 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
 }
 
 InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
-  uint64_t highest=0, observedSequence=0;
+  uint64_t highest=0, observedSequence=0, own=0, foreign=0;
   std::string selectedText, observedSelection;
-  bool present=false;
+  bool present=false, anotherBoard=false;
   for(unsigned slot=0;slot<2;++slot) {
     const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
     if(!fileExists(path)) continue;
@@ -4858,8 +4937,13 @@ InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
     if(decoded==selection_anchor::Decode::Unsupported)
       return fail("selection_anchor_schema","selection anchor requires newer firmware");
     if(decoded!=selection_anchor::Decode::Valid) continue;
-    if(!record.device.empty() && record.device!=operationDeviceID_)
-      return fail("selection_anchor_device","selection anchor belongs to another device");
+    // Another board's anchor is never restored here. It only shows whether
+    // this board's own anchor is still the newest evidence on the card.
+    if(!record.device.empty() && record.device!=operationDeviceID_) {
+      anotherBoard=true; foreign=std::max(foreign,record.sequence);
+      continue;
+    }
+    own=std::max(own,record.sequence);
     if(record.sequence==observedSequence && record.selection!=observedSelection)
       return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
     observedSequence=record.sequence; observedSelection=record.selection;
@@ -4871,6 +4955,8 @@ InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
       return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
     if(record.sequence>highest) { highest=record.sequence; selectedText=record.selection; }
   }
+  if(anotherBoard && foreign>=own)
+    return fail("selection_anchor_device","selection anchor belongs to another device");
   if(highest==0)
     return present ? fail("selection_anchor_invalid","no exact verified predecessor anchor remains")
                    : InstallStatus{true,"selection_anchor_none",""};

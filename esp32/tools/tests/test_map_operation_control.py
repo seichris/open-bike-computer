@@ -70,9 +70,12 @@ public:
   InstallerSeam installer_;
   TransferSeam transfer;
   TransferSeam *transferServer_=&transfer;
-  int finishes=0,releases=0,exits=0,errorReports=0;
+  int finishes=0,releases=0,exits=0,errorReports=0,recoveries=0,retries=0;
+  bool recoveryDue=true;
   void lockState() {} void unlockState() {}
-  bool recoverCommitDisposition(const CommitRecovery &) {return false;}
+  bool recoverCommitDisposition(const CommitRecovery &) {++recoveries;return false;}
+  bool commitRecoveryDue() const {return recoveryDue;}
+  void scheduleCommitRecoveryRetry() {++retries;}
   bool observeOperationRevision(uint64_t) {return true;}
   void rememberOwnerRecovery(const char *code) {if(firstRecovery.empty()) firstRecovery=code;}
   void setLastError(const std::string &code,const std::string &) {
@@ -159,6 +162,14 @@ int main(int argc,char **argv) {
   assert(!worker.terminalCleanupReported_);
   worker.executeOperationTask();
   assert(worker.finishes==1 && worker.releases==1 && worker.exits==1);
+  // An armed disposition waits out its backoff; a failed attempt schedules
+  // the next one instead of retrying on the following pass.
+  assert(worker.recoveries==0 && worker.retries==0);
+  worker.commitRecovery_.armed=true;worker.commitRecovery_.identity="accepted";
+  worker.recoveryDue=false;worker.executeOperationTask();
+  assert(worker.recoveries==0 && worker.retries==0);
+  worker.recoveryDue=true;worker.executeOperationTask();
+  assert(worker.recoveries==1 && worker.retries==1 && worker.commitRecovery_.armed);
 }
 '''
         with tempfile.TemporaryDirectory(prefix='map-terminal-cleanup-') as temporary:
