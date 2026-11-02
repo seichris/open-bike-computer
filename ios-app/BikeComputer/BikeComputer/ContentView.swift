@@ -394,6 +394,9 @@ struct ContentView: View {
                         }
                     }
                 }
+                // A child wider than the screen would otherwise widen this
+                // stack and push the map control rail past the right edge.
+                .frame(maxWidth: proxy.size.width)
                 .ignoresSafeArea(.container, edges: .bottom)
 
                 if showsSupplementaryMapChrome &&
@@ -2110,8 +2113,16 @@ struct ContentView: View {
                         _ = workoutSessionCoordinator.requestStart()
                     }
                 ) {
-                    Label("Start Workout", systemImage: "figure.outdoor.cycle")
-                        .labelStyle(.titleAndIcon)
+                    // The full label keeps its width whenever it fits beside
+                    // the search field. At large text sizes it cannot, and a
+                    // fixed-width label pushed this row and the map controls
+                    // above it past the screen edge, so only the icon shows.
+                    ViewThatFits(in: .horizontal) {
+                        Label("Start Workout", systemImage: "figure.outdoor.cycle")
+                            .labelStyle(.titleAndIcon)
+                        Label("Start Workout", systemImage: "figure.outdoor.cycle")
+                            .labelStyle(.iconOnly)
+                    }
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
@@ -2132,7 +2143,6 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
                 .accessibilityLabel("Start workout with the selected recorder")
             }
