@@ -77,6 +77,28 @@ class FirmwareCompileCacheTests(unittest.TestCase):
         self.assertEqual(first, _application_build_cache_identity(project, "WAVESHARE_AMOLED_175", "b" * 40, "1" * 64))
         self.assertNotEqual(first, _application_build_cache_identity(project, "WAVESHARE_AMOLED_175", "a" * 40, "2" * 64))
 
+    def test_gfx_library_objects_compile_without_exceptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            env = Mock()
+            env.subst.side_effect = {"$PROJECT_DIR": str(project), "$PIOENV": "WAVESHARE_AMOLED_175"}.__getitem__
+            flags = {"CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"]}
+            env.get.side_effect = lambda name, default=None: flags.get(name, default)
+            configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
+            callback = env.AddBuildMiddleware.call_args.args[0]
+            env.Object.return_value = [Mock()]
+            libdeps = project / ".pio/open-bike-build/platformio/WAVESHARE_AMOLED_175/libdeps/WAVESHARE_AMOLED_175"
+            gfx = Mock()
+            gfx.srcnode.return_value.get_abspath.return_value = str(libdeps / "GFX Library for Arduino/src/Arduino_GFX.cpp")
+            self.assertIs(callback(env, gfx), env.Object.return_value[0])
+            self.assertEqual(env.Object.call_args.kwargs, {"CXXFLAGS": ["-std=gnu++2b", "-fno-rtti", "-fno-exceptions"]})
+            # Every other object, including other libraries and C sources, keeps the framework flags.
+            for relative in ("lib/gui/src/mainScr.cpp", "NimBLE-Arduino/src/NimBLEDevice.cpp", "GFX Library for Arduino/src/font.c"):
+                node = Mock()
+                node.srcnode.return_value.get_abspath.return_value = str((libdeps if "/src/" in relative and not relative.startswith("lib/") else project) / relative)
+                callback(env, node)
+                self.assertEqual(env.Object.call_args.kwargs, {}, relative)
+
     def test_identity_header_changes_only_metadata_compilation(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()

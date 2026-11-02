@@ -11,6 +11,30 @@ from pathlib import Path
 FORCE_INCLUDE_OPTIONS = ("-include", "-imacros")
 
 
+# Libraries compiled without C++ exception support. Arduino_GFX neither throws
+# nor catches, yet the Arduino framework's CXXFLAGS carry -fexceptions into
+# every C++ translation unit, so its unwind tables (.eh_frame and
+# .gcc_except_table) only cost flash. An allocation failure inside such a
+# library terminates, as an uncaught exception did before. Matched against a
+# directory component of the source path under the dependency store.
+NO_EXCEPTION_LIBRARIES = frozenset({"GFX Library for Arduino"})
+
+
+def _flag_list(build_env, variable: str) -> list:
+    flags = build_env.get(variable)
+    if isinstance(flags, str):
+        flags = shlex.split(flags)
+    return list(flags) if isinstance(flags, Iterable) else []
+
+
+def object_overrides(build_env, source: Path) -> dict:
+    """Per-object construction variable overrides for `source`."""
+    if source.suffix != ".cpp" or NO_EXCEPTION_LIBRARIES.isdisjoint(source.parts):
+        return {}
+    cxxflags = [flag for flag in _flag_list(build_env, "CXXFLAGS") if flag != "-fexceptions"]
+    return {"CXXFLAGS": cxxflags + ["-fno-exceptions"]}
+
+
 def force_included_files(build_env, project: Path) -> list[str]:
     """Existing files named by -include/-imacros in this environment's flags.
 
@@ -121,7 +145,7 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
     def metadata_object(build_env, node):
         source = Path(node.srcnode().get_abspath())
         if source != project / "lib/firmware_metadata/firmware_metadata.cpp":
-            result = build_env.Object(node)
+            result = build_env.Object(node, **object_overrides(build_env, source))
             build_env.Depends(result, inputs_for(build_env))
             return result[0]
         identity_env = build_env.Clone()
