@@ -191,6 +191,9 @@ public:
               std::string errorCode, std::string errorMessage);
   void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
+  bool runningFor(const std::string &sessionId) const {
+    return state_.running && state_.sessionId == sessionId;
+  }
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
   const std::array<char, 64> &ownerRecoveryCode() const { return state_.ownerRecoveryCode; }

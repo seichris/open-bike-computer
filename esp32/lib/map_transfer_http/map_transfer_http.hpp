@@ -176,10 +176,14 @@ private:
   CommitRecovery commitRecovery_;
   void armCommitRecovery(const device_transfer::HttpRequest &request);
   void retryAcceptedActivation(const std::string &sessionId);
-  // Both require the state lock.
+  // These three require the state lock.
   void scheduleCommitRecoveryRetry();
+  void deferCommitRecoveryRetry();
   bool commitRecoveryDue() const;
-  bool recoverCommitDisposition(const CommitRecovery &recovery);
+  // Completed retires the disposition and Failed spends an attempt. Deferred
+  // waits for this session's attempt that is still running, without spending one.
+  enum class CommitRecoveryResult : uint8_t { Completed, Failed, Deferred };
+  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);
   void executeOperationTask();
   std::string readOperationStatus(const std::string &operationID) const;
@@ -264,6 +268,7 @@ private:
                                bool peerClosedCleanly);
   void requestAutomaticExit();
   void executeActivation(const std::string &sessionId, bool automaticExit);
+  void finishUnwoundActivation(const std::string &sessionId) noexcept;
   static void ownedActivation(void *context, const char *sessionId,
                               bool automaticExit);
   static void ownedInstalledCleanup(void *context, const char *sessionId,
