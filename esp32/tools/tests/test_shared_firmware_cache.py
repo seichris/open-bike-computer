@@ -71,6 +71,43 @@ class SharedCoreCacheTests(unittest.TestCase):
             self.assertEqual(binary.read_bytes(), b"\x00" + os.fsencode(str(origin)))
             self.assertTrue(core.prepare_generated_sdkconfigs(target, self.environment))
 
+    def test_restores_into_the_worktree_that_published_the_entry(self):
+        # Another profile's build replaced the generated sdkconfig files, so the
+        # private-cache path is unavailable although this worktree still holds
+        # the private entry the transport was published from. The import must
+        # not relocate launchers onto their own path: that rewrite is not
+        # idempotent, and the result no longer matched the private attestation.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
+
+    def test_same_path_import_keeps_launchers_byte_identical(self):
+        # Without a private entry the transport is imported; a transport from
+        # this very path needs no relocation.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            key = core.core_input_key(origin, self.environment)
+            entry = core._core_cache_entry_dir(origin, self.environment, key)
+            self.assertTrue(entry.is_dir())
+            core._quarantine_core_cache_entry(origin, self.environment, key, "unit test")
+            self.assertFalse(entry.exists())
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(entry.is_dir())
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
+
     def test_ci_artifact_restores_on_a_runner_without_the_producer_cache(self):
         def ci(*arguments):
             output = io.StringIO()
