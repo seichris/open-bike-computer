@@ -171,6 +171,8 @@ assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
+# No profile has a PPP consumer; the Arduino default would link lwIP PPP.
+assert "CONFIG_LWIP_PPP_SUPPORT=n" in waveshare_sdkconfig
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -201,6 +203,8 @@ assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
 assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
+# The variant's RGB_BUILTIN digitalWrite hook would link the RMT driver.
+assert "-DESP32_ARDUINO_NO_RGB_BUILTIN" in waveshare_flag_lines
 waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
@@ -436,6 +440,7 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in sdkconfig
     assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
+    assert "CONFIG_LWIP_PPP_SUPPORT=n" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
