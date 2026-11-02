@@ -273,6 +273,7 @@ private:
   void rememberOwnerRecovery(const char *code) noexcept;
   __attribute__((noinline)) void recordActivationOutcome(const std::string &phase,
                                                         const std::string &code);
+  __attribute__((noinline)) void recordStorageWriteFailure(const std::string &code);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,
                                 bool active);
   bool streamStoragePathAccessible() const;

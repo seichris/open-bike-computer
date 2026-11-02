@@ -565,7 +565,11 @@ void MapTransferHttpServer::executeLibraryTask() try {
     { StateGuard guard(*this);
       librarySession_ = session; libraryReceipt_ = receipt; librarySelectionStarted_ = true;
     }
+    installer_.clearStorageWriteFailure();
     result = installer_.selectInstalledMap(session, receipt);
+    // Use reconciles a pointer that was written although the write reported
+    // failure, so record the step even when the selection completed.
+    recordStorageWriteFailure(result.ok ? "library_selected" : result.code);
   }
   // A refused or failed Use left (or recovery restored) the previous pointer,
   // so settling its journal now drops it without touching automatic mode.
@@ -2313,6 +2317,23 @@ void MapTransferHttpServer::recordActivationOutcome(const std::string &phase,
   // Authenticated status retains the bounded codes even if recording is lost.
 }
 
+// Names the failed metadata write step behind an activation failure such as
+// stream_active_write. Step names are fixed tokens from the installer.
+void MapTransferHttpServer::recordStorageWriteFailure(const std::string &code) try {
+  const auto failure = installer_.storageWriteFailure();
+  if (failure.first == nullptr) return;
+  struct Workspace { char fields[192]{}; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  const int bytes = std::snprintf(workspace->fields, sizeof(workspace->fields),
+      "{\"code\":\"%s\",\"phase\":\"%s\",\"reason\":\"%s\",\"errorCode\":%d}",
+      code.c_str(), failure.first, failure.last, failure.firstError);
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(workspace->fields))
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "transfer",
+                                   "map_storage_write_failed", workspace->fields);
+} catch (const std::bad_alloc &) {
+  // The activation result still records its bounded codes.
+}
+
 void MapTransferHttpServer::updateActivationProgress(
     const ActivationProgress &progress) {
   lockState();
@@ -2489,9 +2510,11 @@ bool MapTransferHttpServer::runStreamActivationTask(
   const auto onRecovery = [](void *context, const char *code) {
     static_cast<MapTransferHttpServer *>(context)->rememberOwnerRecovery(code);
   };
+  installer_.clearStorageWriteFailure();
   InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress,
       internalOwner ? +onRecovery : nullptr, this);
   if (!activated.ok) {
+    recordStorageWriteFailure(activated.code);
     if (internalOwner) rememberOwnerRecovery(activated.code.c_str());
     finishActivation("recovering", "", activated.code, activated.message);
     return false;

@@ -220,6 +220,15 @@ public:
   void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
     storageProgressCallback_ = callback; storageProgressContext_ = context;
   }
+  // The deepest and the outermost failed step of metadata writes since the
+  // last clear, with errno at the first failure. Diagnostics only.
+  struct StorageWriteFailure {
+    const char *first = nullptr;
+    const char *last = nullptr;
+    int firstError = 0;
+  };
+  StorageWriteFailure storageWriteFailure() const { return storageWriteFailure_; }
+  void clearStorageWriteFailure() const { storageWriteFailure_ = {}; }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -352,6 +361,8 @@ private:
   std::string operationDeviceID_;
   StorageProgressCallback storageProgressCallback_ = nullptr;
   void *storageProgressContext_ = nullptr;
+  mutable StorageWriteFailure storageWriteFailure_;
+  void noteStorageWriteFailure(const char *step) const;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
