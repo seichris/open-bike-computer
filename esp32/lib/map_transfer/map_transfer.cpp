@@ -4784,6 +4784,9 @@ bool MapTransferInstaller::selectionAnchorProtectsRoot(const std::string &root) 
     selection_anchor::Record record;
     const auto decoded=selection_anchor::decode(bytes,record);
     if (decoded==selection_anchor::Decode::Unsupported) return true; // No destructive downgrade.
+    // Another board's anchor can never be restored here, so it keeps no map.
+    if (decoded==selection_anchor::Decode::Valid && !record.device.empty() &&
+        record.device!=operationDeviceID_) continue;
     ActiveMapSelection selection;
     if (decoded==selection_anchor::Decode::Valid && parseActiveMapText(record.selection,selection).ok &&
         (selection.root==root || selection.previousRoot==root)) return true;
@@ -4795,7 +4798,7 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Same-root refreshes and rollback writes cannot bless a provisional map as
   // a predecessor. Only preserve the canonical predecessor explicitly named
   // by a replacement transaction; never scan ready roots to manufacture one.
-  uint64_t highest=0; unsigned newest=1;
+  uint64_t highest=0, foreign=0; unsigned newest=1;
   std::string latest;
   for(unsigned slot=0;slot<2;++slot) {
     std::string bytes;
@@ -4808,7 +4811,14 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
     const auto decoded=selection_anchor::decode(bytes,record);
     if(decoded==selection_anchor::Decode::Unsupported) return false;
     if(decoded!=selection_anchor::Decode::Valid) continue;
-    if(!record.device.empty() && record.device!=operationDeviceID_) return false;
+    // A card moved from another board keeps that board's anchors. They are
+    // not this device's evidence and must not block its selections. This
+    // board's anchors replace them one slot at a time and are numbered above
+    // them, so recovery uses this board's anchor from its first selection on.
+    if(!record.device.empty() && record.device!=operationDeviceID_) {
+      foreign=std::max(foreign,record.sequence);
+      continue;
+    }
     if(record.sequence==highest && record.selection!=latest) return false;
     if(record.sequence>highest) { highest=record.sequence; newest=slot; latest=record.selection; }
   }
@@ -4826,11 +4836,12 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Anchors keep the size older firmware reads, or a downgrade would fail
   // every activation. A larger predecessor keeps journal and backup recovery.
   if (selection.size()>selection_anchor::kMaximumSelectionBytes) return true;
-  if (highest!=0 && latest==selection) return true;
-  if (highest==std::numeric_limits<uint64_t>::max()) return false;
+  if (highest>foreign && latest==selection) return true;
+  const auto sequence=std::max(highest,foreign);
+  if (sequence==std::numeric_limits<uint64_t>::max()) return false;
   auto &ready = workspace->ready;
   if (!readReadyStreamMap(prior.sessionId,ready).ok) return false;
-  selection_anchor::Record record{highest+1,operationDeviceID_,ready.operationID,selection};
+  selection_anchor::Record record{sequence+1,operationDeviceID_,ready.operationID,selection};
   const auto bytes=selection_anchor::encode(record);
   const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(newest^1U));
   // Write only the older/inactive slot. No rename/backup deletion can destroy
@@ -4843,9 +4854,9 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
 }
 
 InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
-  uint64_t highest=0, observedSequence=0;
+  uint64_t highest=0, observedSequence=0, own=0, foreign=0;
   std::string selectedText, observedSelection;
-  bool present=false;
+  bool present=false, anotherBoard=false;
   for(unsigned slot=0;slot<2;++slot) {
     const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
     if(!fileExists(path)) continue;
@@ -4858,8 +4869,13 @@ InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
     if(decoded==selection_anchor::Decode::Unsupported)
       return fail("selection_anchor_schema","selection anchor requires newer firmware");
     if(decoded!=selection_anchor::Decode::Valid) continue;
-    if(!record.device.empty() && record.device!=operationDeviceID_)
-      return fail("selection_anchor_device","selection anchor belongs to another device");
+    // Another board's anchor is never restored here. It only shows whether
+    // this board's own anchor is still the newest evidence on the card.
+    if(!record.device.empty() && record.device!=operationDeviceID_) {
+      anotherBoard=true; foreign=std::max(foreign,record.sequence);
+      continue;
+    }
+    own=std::max(own,record.sequence);
     if(record.sequence==observedSequence && record.selection!=observedSelection)
       return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
     observedSequence=record.sequence; observedSelection=record.selection;
@@ -4871,6 +4887,8 @@ InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
       return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
     if(record.sequence>highest) { highest=record.sequence; selectedText=record.selection; }
   }
+  if(anotherBoard && foreign>=own)
+    return fail("selection_anchor_device","selection anchor belongs to another device");
   if(highest==0)
     return present ? fail("selection_anchor_invalid","no exact verified predecessor anchor remains")
                    : InstallStatus{true,"selection_anchor_none",""};

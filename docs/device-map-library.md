@@ -115,6 +115,23 @@ transactions remain protected. Explicit removal refuses protected maps. Complete
 versions persist until explicitly removed; an update does not destroy its older
 version. Invalid/staging state still uses the existing bounded recovery rules.
 
+Selection anchors and the operation ledger record the device that wrote them.
+A card moved from another Bike Computer keeps both, but they are not this
+board's evidence:
+- That board's anchors protect no map from removal and never block a selection.
+  This board's anchors replace them one slot at a time and are numbered above
+  every anchor on the card. From this board's first selection on, its own
+  anchor recovers a lost pointer.
+- Its ledger does not gate Use, Remove or automatic selection. Its operations
+  cannot progress here.
+- Recovery never restores another board's anchor. It refuses
+  (`selection_anchor_device`) while one is the newest anchor on the card, such
+  as before this board's first selection. If the pointer is lost then, the
+  rider selects a map again.
+
+Before this rule, a moved card refused every install and Use on the new board
+with `stream_active_write`.
+
 The authenticated inventory supports **32 completed maps**, delivered in four-map
 BLE pages and assembled within one connection and snapshot revision. Installation
 refuses a 33rd map before receiving its payload and asks for an explicit removal;

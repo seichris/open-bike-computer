@@ -2941,7 +2941,16 @@ map, rechecks file checksums and reader contracts, and uses the existing canonic
 pointer/readback/recovery mechanism. The renderer must acknowledge the new root
 before `selectedSessionID` identifies it as in use. Selection does not issue or
 rewrite an upload operation's Installed receipt. Removal cannot delete selected,
-rollback, transaction, selection-anchor or live-renderer roots.
+rollback, transaction, selection-anchor or live-renderer roots. Selection anchors
+and the operation ledger are bound to the device that wrote them. On a card moved
+from another Bike Computer, that board's anchors protect no root and block no
+selection. This board's anchors replace them one slot at a time and are
+numbered above every anchor on the card, so recovery uses this board's anchor
+from its first selection on. Its ledger does not gate library
+actions, which therefore do not return `library_operation_storage` or
+`library_operation_pending` for it. Recovery never restores another board's
+anchor and refuses (`selection_anchor_device`) while one is the newest, such as
+before this board's first selection.
 
 A durable `PUT /map-transfer/sessions/<session>/install-stream` refused before it writes payload, such
 as `stream_sd_full` (507) or `stream_storage_unavailable` (503) for a fresh
