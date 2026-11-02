@@ -536,6 +536,52 @@ static void testTargetTwoLabelContractValidation() {
   assert(mismatch.code == "label_block_contract");
 }
 
+// Activation rereads every block for the label cross-check. Each block feeds
+// the storage heartbeat, and progress reports whole-percent block counts.
+static void testLabelContractScanReportsEveryBlock() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string session = "session-label-progress";
+  const std::string directory = installer.stagingRoot(session);
+  assert(::system((std::string("mkdir -p ") + directory +
+                   "/VECTMAP/map-labels/+0000+0000 " + directory +
+                   "/VECTMAP/map-labels/assets")
+                      .c_str()) == 0);
+  const std::string block = emptyLabelFmb(0x12345678);
+  const std::string font = emptyFontAsset(0x12345678);
+  std::string files;
+  for (const char *name : {"0_0", "0_1", "1_0"}) {
+    const std::string path = std::string("VECTMAP/map-labels/+0000+0000/") + name + ".fmb";
+    writeFile(directory + "/" + path, block);
+    files += "{\"path\":\"" + path + "\",\"bytes\":" + std::to_string(block.size()) +
+             ",\"sha256\":\"" + sha(block) + "\"},";
+  }
+  const std::string fontPath = "VECTMAP/map-labels/assets/street-labels.fma";
+  writeFile(directory + "/" + fontPath, font);
+  files += "{\"path\":\"" + fontPath + "\",\"bytes\":" + std::to_string(font.size()) +
+           ",\"sha256\":\"" + sha(font) + "\"}";
+  writeFile(directory + "/manifest.json",
+            "{\"schemaVersion\":1,\"mapId\":\"map-labels\",\"target\":{"
+            "\"renderer\":\"esp32-fmb\",\"formatVersion\":2,"
+            "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
+            "\"internationalFallback\":\"en\"},\"files\":[" + files + "]}\n");
+  MapManifest parsed;
+  assert(installer.validateStagedMap(session, parsed).ok);
+  size_t heartbeats = 0;
+  installer.setStorageProgressCallback(
+      [](void *count) { ++*static_cast<size_t *>(count); }, &heartbeats);
+  std::vector<map_transfer::ActivationProgress> reports;
+  assert(installer.validateLabelContracts(
+      directory, parsed, true, [&](const map_transfer::ActivationProgress &progress) {
+        reports.push_back(progress);
+      }).ok);
+  assert(heartbeats == 3 && reports.size() == 3);
+  for (size_t index = 0; index < reports.size(); ++index)
+    assert(reports[index].completed == index + 1 && reports[index].total == 3);
+  // Without a callback the scan still beats the heartbeat for its owner.
+  assert(installer.validateLabelContracts(directory, parsed, true).ok && heartbeats == 6);
+}
+
 static void testTargetThreeBuildingContractValidation() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -2144,6 +2190,7 @@ int main() {
   testPersistentMapLibrary();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
+  testLabelContractScanReportsEveryBlock();
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
