@@ -127,6 +127,35 @@ class SharedCoreCacheTests(unittest.TestCase):
             environment_root = target / ".pio/open-bike-build/core-cache" / self.environment
             self.assertEqual([path.name for path in environment_root.iterdir()] if environment_root.exists() else [], [])
 
+    def test_invalid_private_entry_is_quarantined_before_import(self):
+        # A private entry that no longer validates must not be preferred over
+        # the transport: it is quarantined and the transport imported instead.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            key = core.core_input_key(origin, self.environment)
+            entry = core._core_cache_entry_dir(origin, self.environment, key)
+            archive = entry / core.CORE_ARCHIVE_FILENAME
+            entry.chmod(0o755)
+            archive.chmod(0o644)
+            archive.write_bytes(b"corrupt")
+            archive.chmod(0o444)
+            entry.chmod(0o555)
+            with self.assertRaisesRegex(core.GeneratedSdkconfigError, "digest"):
+                core._validate_core_cache_entry(origin, self.environment, key)
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            quarantined = list((entry.parent / "quarantine").iterdir())
+            self.assertEqual(len(quarantined), 1)
+            self.assertTrue(quarantined[0].name.startswith(key))
+            self.assertEqual((quarantined[0] / core.CORE_ARCHIVE_FILENAME).read_bytes(), b"corrupt")
+            core._validate_core_cache_entry(origin, self.environment, key)
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
+
     def test_ci_artifact_restores_on_a_runner_without_the_producer_cache(self):
         def ci(*arguments):
             output = io.StringIO()
