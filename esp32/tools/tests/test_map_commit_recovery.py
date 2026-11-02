@@ -318,9 +318,13 @@ struct ActivationState {
 };
 struct Transfer {void sampleResources(const char *) {}};
 using Work=void (*)(void *,const char *,bool);
+// Production sets issued once the command is queued: always for ESP_OK,
+// never for a refusal, and for a timeout only if it timed out after queueing.
 struct Owner {
-  Work called=nullptr; int result=ESP_OK;
-  int runMapActivation(Work work,void *,const std::string &,bool) {called=work;return result;}
+  Work called=nullptr; int result=ESP_OK; bool issued=true;
+  int runMapActivation(Work work,void *,const std::string &,bool,bool *out) {
+    called=work; *out=result==ESP_OK || (result==ESP_ERR_TIMEOUT && issued); return result;
+  }
 };
 class MapTransferHttpServer {
 public:
@@ -332,9 +336,10 @@ public:
   Owner owner; Owner *operationOwner_=&owner;
   static void ownedActivation(void *,const char *,bool) {}
   static void ownedInstalledCleanup(void *,const char *,bool) {}
+  std::string finished,lastError;
   void retryAcceptedActivation(const std::string &) {++retries;}
-  void finishActivation(const char *,const char *,const char *,const char *) {}
-  void setLastError(const char *,const char *) {}
+  void finishActivation(const char *status,const char *,const char *,const char *) {finished=status;}
+  void setLastError(const char *code,const char *) {lastError=code;}
   void rememberOwnerRecovery(const char *) {}
   void beginDeferredActivation(const DeferredActivation &,bool);
 };
@@ -354,6 +359,26 @@ int main() {
   legacy.owner.result=ESP_ERR_TIMEOUT;
   legacy.beginDeferredActivation({"same-content",4},true);
   assert(legacy.retries==1); // late live owner cannot race storage retry
+  assert(legacy.lastError=="activation_cleanup_timeout");
+  // A timeout before the owner received the command runs nothing, so the
+  // storage worker retries it instead of the work waiting for a reboot.
+  legacy.owner.issued=false;
+  legacy.beginDeferredActivation({"same-content",4},true);
+  assert(legacy.retries==2 && legacy.lastError=="activation_cleanup_owner");
+  for (const bool issued : {true,false}) {
+    MapTransferHttpServer timedOut;
+    timedOut.commitRecovery_.identity.operation="new-logical-operation";
+    timedOut.owner.result=ESP_ERR_TIMEOUT;
+    timedOut.owner.issued=issued;
+    timedOut.beginDeferredActivation({"same-content",4},true);
+    assert(timedOut.owner.called==MapTransferHttpServer::ownedActivation);
+    if (issued) {
+      assert(timedOut.retries==0 && timedOut.finished.empty());
+      assert(timedOut.lastError=="activation_owner_timeout");
+    } else {
+      assert(timedOut.retries==1 && timedOut.finished=="recovering");
+    }
+  }
 }
 '''
         with tempfile.TemporaryDirectory(prefix="activation-reinstall-") as temporary:

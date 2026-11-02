@@ -75,7 +75,10 @@ public:
   void lockState() {} void unlockState() {}
   enum class CommitRecoveryResult {Completed,Failed,Deferred};
   CommitRecoveryResult recoveryResult=CommitRecoveryResult::Failed;
-  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &) {++recoveries;return recoveryResult;}
+  bool throwRecovery=false;
+  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &) {
+    ++recoveries;if(throwRecovery) throw std::bad_alloc();return recoveryResult;
+  }
   bool commitRecoveryDue() const {return recoveryDue;}
   void scheduleCommitRecoveryRetry() {++retries;}
   void deferCommitRecoveryRetry() {++deferrals;}
@@ -183,6 +186,13 @@ int main(int argc,char **argv) {
   worker.executeOperationTask();
   assert(worker.recoveries==3 && worker.retries==1 && worker.deferrals==1);
   assert(!worker.commitRecovery_.armed && worker.commitRecovery_.identity.empty());
+  // An attempt that unwinds on allocation failure spends the attempt and
+  // backs off, as an owner attempt does, instead of rerunning next pass.
+  worker.commitRecovery_.armed=true;worker.commitRecovery_.identity="accepted";
+  worker.throwRecovery=true;worker.operationTaskSubmitted_=true;
+  worker.executeOperationTask();
+  assert(worker.recoveries==4 && worker.retries==2 && worker.deferrals==1);
+  assert(worker.commitRecovery_.armed && !worker.operationTaskSubmitted_);
 }
 '''
         with tempfile.TemporaryDirectory(prefix='map-terminal-cleanup-') as temporary:
