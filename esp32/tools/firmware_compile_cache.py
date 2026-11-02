@@ -1,8 +1,11 @@
 """Track macro-included UI configuration while keeping identity metadata scoped."""
 
+import configparser
 import json
 import os
+import re
 import shlex
+import struct
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -31,8 +34,131 @@ def object_overrides(build_env, source: Path) -> dict:
     """Per-object construction variable overrides for `source`."""
     if source.suffix != ".cpp" or NO_EXCEPTION_LIBRARIES.isdisjoint(source.parts):
         return {}
+    # SCons expands $CXXFLAGS before $CCFLAGS and GCC honours the last switch,
+    # so -fexceptions is removed from both lists and the override goes last.
+    # A switch arriving through a response file cannot be rewritten here;
+    # verify_no_exception_objects inspects the built objects for that case.
     cxxflags = [flag for flag in _flag_list(build_env, "CXXFLAGS") if flag != "-fexceptions"]
-    return {"CXXFLAGS": cxxflags + ["-fno-exceptions"]}
+    ccflags = [flag for flag in _flag_list(build_env, "CCFLAGS") if flag != "-fexceptions"]
+    return {"CXXFLAGS": cxxflags, "CCFLAGS": ccflags + ["-fno-exceptions"]}
+
+
+# Section names GCC emits only for code built with exception support.
+EXCEPTION_SECTIONS = (".eh_frame", ".gcc_except_table")
+
+
+def elf_section_names(path: Path) -> list[str]:
+    """Section names of a 32-bit little-endian ELF object (the Xtensa format)."""
+    data = path.read_bytes()
+    if len(data) < 52 or data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
+        raise ValueError(f"not a 32-bit little-endian ELF object: {path}")
+    (section_offset,) = struct.unpack_from("<I", data, 32)
+    entry_size, count, names_index = struct.unpack_from("<HHH", data, 46)
+    if (
+        entry_size < 40
+        or count == 0
+        or names_index >= count
+        or section_offset + entry_size * count > len(data)
+    ):
+        raise ValueError(f"malformed ELF section table: {path}")
+
+    def header(index: int) -> tuple:
+        return struct.unpack_from("<IIIIIIIIII", data, section_offset + index * entry_size)
+
+    names_header = header(names_index)
+    strings_start, strings_size = names_header[4], names_header[5]
+    if strings_start + strings_size > len(data):
+        raise ValueError(f"malformed ELF section names: {path}")
+    strings = data[strings_start:strings_start + strings_size]
+    names = []
+    for index in range(count):
+        name_offset = header(index)[0]
+        end = strings.find(b"\0", name_offset)
+        if name_offset > len(strings) or end < 0:
+            raise ValueError(f"malformed ELF section name: {path}")
+        names.append(strings[name_offset:end].decode("ascii", "replace"))
+    return names
+
+
+def _carries_exception_tables(names: Iterable[str]) -> bool:
+    return any(
+        name == section or name.startswith(section + ".")
+        for name in names
+        for section in EXCEPTION_SECTIONS
+    )
+
+
+_OPTION_REFERENCE = re.compile(r"\$\{([^.}]+)\.([^}]+)\}")
+
+
+def _effective_option(config, section: str, option: str, seen: tuple = ()) -> str:
+    """A PlatformIO option after `extends` inheritance and ${section.option} expansion."""
+    if (section, option) in seen or not config.has_section(section):
+        return ""
+    seen = seen + ((section, option),)
+    if config.has_option(section, option):
+        value = config.get(section, option)
+    else:
+        value = ""
+        parents = config.get(section, "extends", fallback="").replace(",", " ").split()
+        for parent in parents:
+            value = _effective_option(config, parent, option, seen)
+            if value:
+                break
+    return _OPTION_REFERENCE.sub(
+        lambda match: _effective_option(config, match.group(1), match.group(2), seen), value
+    )
+
+
+def declared_no_exception_libraries(project_dir: Path, environment: str) -> frozenset[str]:
+    """No-exception libraries named by the environment's effective lib_deps.
+
+    The dependency is declared by its registry name, so a package that later
+    installs under another directory still counts as declared and the object
+    check then fails instead of silently matching nothing.
+    """
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(project_dir / "platformio.ini", encoding="utf-8")
+    declared = []
+    for line in _effective_option(config, f"env:{environment}", "lib_deps").splitlines():
+        entry = line.strip()
+        if entry and not entry.startswith((";", "#")):
+            declared.append(entry)
+    return frozenset(
+        library for library in NO_EXCEPTION_LIBRARIES
+        if any(library in entry for entry in declared)
+    )
+
+
+def verify_no_exception_objects(build_dir: Path, libraries: Iterable[str] = NO_EXCEPTION_LIBRARIES) -> int:
+    """Prove the no-exception override reached every object it targets.
+
+    Returns the number of objects inspected under `build_dir` (PlatformIO's
+    .pio/build/<environment>). Raises RuntimeError when no object of a listed
+    library exists, because the override then matched nothing (for example the
+    library resolved under another directory name), or when an object still
+    carries .eh_frame or .gcc_except_table sections, which means -fexceptions
+    reached the compiler through a path the override does not rewrite.
+    """
+    libraries = frozenset(libraries)
+    inspected = 0
+    offenders = []
+    for library in sorted(libraries):
+        for path in sorted(build_dir.glob(f"lib*/{library}/**/*.o")):
+            if _carries_exception_tables(elf_section_names(path)):
+                offenders.append(str(path.relative_to(build_dir)))
+            inspected += 1
+    if inspected == 0:
+        raise RuntimeError(
+            "no objects of the no-exception libraries ("
+            + ", ".join(sorted(libraries))
+            + f") were built under {build_dir}"
+        )
+    if offenders:
+        raise RuntimeError(
+            "objects still carry exception tables: " + ", ".join(offenders)
+        )
+    return inspected
 
 
 def force_included_files(build_env, project: Path) -> list[str]:

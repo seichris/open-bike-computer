@@ -25,6 +25,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
+from firmware_compile_cache import (
+    declared_no_exception_libraries,
+    verify_no_exception_objects,
+)
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
@@ -269,6 +273,29 @@ def _require_dynamic_tls_link(project_dir: Path, environment: str) -> None:
     raise BuildError(
         "dynamic TLS configuration did not reach the linked firmware: missing "
         + ", ".join(sorted(missing))
+    )
+
+
+def _require_no_exception_library_objects(project_dir: Path, environment: str) -> None:
+    """Prove the per-library -fno-exceptions override reached the built objects.
+
+    The override in the compile-cache middleware silently does nothing when a
+    library resolves under another directory name or the framework delivers
+    -fexceptions through a flag list it does not rewrite. Inspect the objects
+    PlatformIO built so such a miss can never produce an upload-eligible image.
+    """
+    build_dir = project_dir / ".pio" / "build" / environment
+    try:
+        libraries = declared_no_exception_libraries(project_dir, environment)
+        if not libraries:
+            return
+        inspected = verify_no_exception_objects(build_dir, libraries)
+    except (RuntimeError, ValueError, OSError, configparser.Error) as error:
+        raise BuildError(f"no-exception library verification failed: {error}") from error
+    print(
+        "FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 "
+        f"environment={environment} objects={inspected}",
+        flush=True,
     )
 
 
@@ -1866,6 +1893,7 @@ def build_firmware(
                     )
                 if environment.startswith("WAVESHARE_AMOLED_"):
                     _require_dynamic_tls_link(project_dir, environment)
+                    _require_no_exception_library_objects(project_dir, environment)
 
                 attestation_started = time.monotonic()
                 try:

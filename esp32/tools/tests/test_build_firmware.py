@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from build_firmware import (
+    _require_no_exception_library_objects,
     BuildError,
     WAVESHARE_PLATFORM_URL,
     _bootstrap_build_cache_identity,
@@ -55,6 +56,10 @@ from generated_sdkconfig import (
     recognized_generated_sdkconfigs,
 )
 from record_flash_plan import record_flash_plan
+if __package__:
+    from .elf_fixtures import write_elf_object
+else:
+    from elf_fixtures import write_elf_object
 import partition_layouts
 from pioarduino_custom_core import (
     IDF_EXACT_REQUIREMENTS,
@@ -2963,3 +2968,32 @@ build_src_filter =
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoExceptionLibraryObjectTests(unittest.TestCase):
+    def test_build_fails_when_gfx_objects_keep_exception_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            environment = "WAVESHARE_AMOLED_175_PRODUCTION"
+            (project / "platformio.ini").write_text(
+                "[waveshare_base]\nlib_deps =\n  moononournation/GFX Library for Arduino @ 1.6.7\n\n"
+                f"[env:{environment}]\nextends = waveshare_base\n\n"
+                "[env:WAVESHARE_AMOLED_175_BARE]\nplatform = test\n",
+                encoding="utf-8",
+            )
+            # An environment that does not declare the library is left alone.
+            output = StringIO()
+            with redirect_stdout(output):
+                _require_no_exception_library_objects(project, "WAVESHARE_AMOLED_175_BARE")
+            self.assertEqual(output.getvalue(), "")
+            gfx = project / ".pio/build" / environment / "lib306/GFX Library for Arduino"
+            with self.assertRaisesRegex(BuildError, "no-exception library verification failed: no objects"):
+                _require_no_exception_library_objects(project, environment)
+            write_elf_object(gfx / "Arduino_GFX.cpp.o", (".text", ".literal"))
+            output = StringIO()
+            with redirect_stdout(output):
+                _require_no_exception_library_objects(project, environment)
+            self.assertIn(f"FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 environment={environment} objects=1", output.getvalue())
+            write_elf_object(gfx / "Arduino_G.cpp.o", (".text", ".eh_frame"))
+            with self.assertRaisesRegex(BuildError, r"exception tables: lib306/GFX Library for Arduino/Arduino_G\.cpp\.o"):
+                _require_no_exception_library_objects(project, environment)
