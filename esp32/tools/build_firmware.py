@@ -25,10 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
-from firmware_compile_cache import (
-    declared_no_exception_libraries,
-    verify_no_exception_objects,
-)
+from firmware_compile_cache import verify_no_exception_objects
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
@@ -281,16 +278,15 @@ def _require_no_exception_library_objects(project_dir: Path, environment: str) -
 
     The override in the compile-cache middleware silently does nothing when a
     library resolves under another directory name or the framework delivers
-    -fexceptions through a flag list it does not rewrite. Inspect the objects
-    PlatformIO built so such a miss can never produce an upload-eligible image.
+    -fexceptions through a flag list it does not rewrite. Every Waveshare
+    environment links Arduino_GFX, so the caller runs this unconditionally for
+    them: a build without any GFX object, or with one that still carries
+    unwind tables, fails closed instead of producing an upload-eligible image.
     """
     build_dir = project_dir / ".pio" / "build" / environment
     try:
-        libraries = declared_no_exception_libraries(project_dir, environment)
-        if not libraries:
-            return
-        inspected = verify_no_exception_objects(build_dir, libraries)
-    except (RuntimeError, ValueError, OSError, configparser.Error) as error:
+        inspected = verify_no_exception_objects(build_dir)
+    except (RuntimeError, ValueError, OSError) as error:
         raise BuildError(f"no-exception library verification failed: {error}") from error
     print(
         "FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 "

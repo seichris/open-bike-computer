@@ -1,9 +1,7 @@
 """Track macro-included UI configuration while keeping identity metadata scoped."""
 
-import configparser
 import json
 import os
-import re
 import shlex
 import struct
 import tempfile
@@ -85,48 +83,6 @@ def _carries_exception_tables(names: Iterable[str]) -> bool:
         name == section or name.startswith(section + ".")
         for name in names
         for section in EXCEPTION_SECTIONS
-    )
-
-
-_OPTION_REFERENCE = re.compile(r"\$\{([^.}]+)\.([^}]+)\}")
-
-
-def _effective_option(config, section: str, option: str, seen: tuple = ()) -> str:
-    """A PlatformIO option after `extends` inheritance and ${section.option} expansion."""
-    if (section, option) in seen or not config.has_section(section):
-        return ""
-    seen = seen + ((section, option),)
-    if config.has_option(section, option):
-        value = config.get(section, option)
-    else:
-        value = ""
-        parents = config.get(section, "extends", fallback="").replace(",", " ").split()
-        for parent in parents:
-            value = _effective_option(config, parent, option, seen)
-            if value:
-                break
-    return _OPTION_REFERENCE.sub(
-        lambda match: _effective_option(config, match.group(1), match.group(2), seen), value
-    )
-
-
-def declared_no_exception_libraries(project_dir: Path, environment: str) -> frozenset[str]:
-    """No-exception libraries named by the environment's effective lib_deps.
-
-    The dependency is declared by its registry name, so a package that later
-    installs under another directory still counts as declared and the object
-    check then fails instead of silently matching nothing.
-    """
-    config = configparser.ConfigParser(interpolation=None)
-    config.read(project_dir / "platformio.ini", encoding="utf-8")
-    declared = []
-    for line in _effective_option(config, f"env:{environment}", "lib_deps").splitlines():
-        entry = line.strip()
-        if entry and not entry.startswith((";", "#")):
-            declared.append(entry)
-    return frozenset(
-        library for library in NO_EXCEPTION_LIBRARIES
-        if any(library in entry for entry in declared)
     )
 
 

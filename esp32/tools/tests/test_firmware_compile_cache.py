@@ -10,7 +10,6 @@ from unittest.mock import Mock
 from build_firmware import _application_build_cache_identity
 from firmware_compile_cache import (
     configure_metadata_identity,
-    declared_no_exception_libraries,
     elf_section_names,
     relocate_core_text,
     verify_no_exception_objects,
@@ -140,42 +139,6 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             (gfx / "databus/Arduino_ESP32QSPI.cpp.o").write_bytes(b"not an object")
             with self.assertRaisesRegex(ValueError, "not a 32-bit little-endian ELF"):
                 verify_no_exception_objects(build_dir)
-
-    def test_declared_no_exception_libraries_follow_extends_and_references(self):
-        with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory).resolve()
-            (project / "platformio.ini").write_text(
-                "[common]\n"
-                "lib_deps =\n"
-                "  bblanchon/ArduinoJson @ 7.0.0\n"
-                "  moononournation/GFX Library for Arduino @ 1.6.7\n"
-                "\n"
-                "[waveshare_base]\n"
-                "lib_deps =\n"
-                "  ${common.lib_deps}\n"
-                "  ; a comment inside the list\n"
-                "  h2zero/NimBLE-Arduino @ 1.4.3\n"
-                "\n"
-                "[env:WAVESHARE_AMOLED_175_PRODUCTION]\n"
-                "extends = waveshare_base\n"
-                "\n"
-                "[env:WAVESHARE_AMOLED_175_PERSONAL]\n"
-                "extends = env:WAVESHARE_AMOLED_175_PRODUCTION\n"
-                "\n"
-                "[env:LEGACY]\n"
-                "lib_deps =\n"
-                "  ; moononournation/GFX Library for Arduino @ 1.4.7\n"
-                "  bblanchon/ArduinoJson @ 7.0.0\n"
-                "\n"
-                "[env:BARE]\n"
-                "platform = test\n",
-                encoding="utf-8",
-            )
-            self.assertEqual(declared_no_exception_libraries(project, "WAVESHARE_AMOLED_175_PRODUCTION"), {"GFX Library for Arduino"})
-            self.assertEqual(declared_no_exception_libraries(project, "WAVESHARE_AMOLED_175_PERSONAL"), {"GFX Library for Arduino"})
-            self.assertEqual(declared_no_exception_libraries(project, "LEGACY"), frozenset())
-            self.assertEqual(declared_no_exception_libraries(project, "BARE"), frozenset())
-            self.assertEqual(declared_no_exception_libraries(project, "MISSING"), frozenset())
 
     def test_identity_header_changes_only_metadata_compilation(self):
         with tempfile.TemporaryDirectory() as directory:
