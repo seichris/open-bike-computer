@@ -794,8 +794,17 @@ void MapTransferHttpServer::executeOperationTask() try {
     failed = terminalFailed_;
     query = operationQuery_;
   }
-  const auto recoveryResult = recoveryDue ? recoverCommitDisposition(recovery)
-                                          : CommitRecoveryResult::Failed;
+  auto recoveryResult = CommitRecoveryResult::Failed;
+  if (recoveryDue) {
+    try {
+      recoveryResult = recoverCommitDisposition(recovery);
+    } catch (const std::bad_alloc &) {
+      // Spend the attempt and back off, as an owner attempt that unwinds
+      // does, rather than rereading the map next pass while memory is short.
+      // The unwound attempt has already released its activation state.
+      recoveryResult = CommitRecoveryResult::Failed;
+    }
+  }
   const bool recoveryCompleted = recoveryResult == CommitRecoveryResult::Completed;
   bool completed=terminal.empty();
   std::string body;
@@ -2477,18 +2486,21 @@ void MapTransferHttpServer::beginDeferredActivation(
     // operation owner may now run the durable activation/rollback transaction;
     // the TLS worker's stack is in PSRAM and must never be the flash caller.
     transferServer_->sampleResources("before_map_activation");
+    bool issued = false;
     const esp_err_t dispatch = operationOwner_ == nullptr
         ? ESP_ERR_INVALID_STATE
         : operationOwner_->runMapActivation(ownedActivation, this,
                                             activation.sessionId,
-                                            peerClosedCleanly);
-    if (dispatch == ESP_ERR_TIMEOUT) {
+                                            peerClosedCleanly, &issued);
+    if (dispatch == ESP_ERR_TIMEOUT && issued) {
       // The internal task may still be committing the journal. Keep its
       // activation state live and poison the owner; a late completion must
       // never be reported as a cancelled or safely retryable map switch.
       setLastError("activation_owner_timeout",
                    "map activation is still resolving on the device");
     } else if (dispatch != ESP_OK) {
+      // Refused, or timed out before the owner received the command: no
+      // activation body runs, so the storage worker retries it.
       retryAcceptedActivation(activation.sessionId);
       rememberOwnerRecovery("activation_owner");
       finishActivation("recovering", "", "activation_owner",
@@ -2498,15 +2510,17 @@ void MapTransferHttpServer::beginDeferredActivation(
     return;
   }
   if (beginResult == ActivationBeginResult::AlreadyInstalled) {
+    bool issued = false;
     const esp_err_t dispatch = operationOwner_ == nullptr
         ? ESP_ERR_INVALID_STATE
         : operationOwner_->runMapActivation(ownedInstalledCleanup, this,
                                             activation.sessionId,
-                                            peerClosedCleanly);
+                                            peerClosedCleanly, &issued);
     if (dispatch != ESP_OK) {
-      if (dispatch != ESP_ERR_TIMEOUT) retryAcceptedActivation(activation.sessionId);
-      setLastError(dispatch == ESP_ERR_TIMEOUT ? "activation_cleanup_timeout"
-                                               : "activation_cleanup_owner",
+      // Only an issued command can still be running on the owner.
+      const bool live = dispatch == ESP_ERR_TIMEOUT && issued;
+      if (!live) retryAcceptedActivation(activation.sessionId);
+      setLastError(live ? "activation_cleanup_timeout" : "activation_cleanup_owner",
                    "installed map cleanup could not complete safely");
     }
     return;
