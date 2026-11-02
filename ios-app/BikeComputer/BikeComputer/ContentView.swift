@@ -1746,6 +1746,9 @@ struct ContentView: View {
 
     private var mapControlRail: some View {
         mapControlRailContent
+            // The glass does not clip its content, and MapKit's tracking
+            // button fills its whole cell while following the user.
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             .mapOverlayGlassSurface(cornerRadius: 26)
     }
 
