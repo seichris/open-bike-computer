@@ -108,6 +108,25 @@ class SharedCoreCacheTests(unittest.TestCase):
             self.assertTrue(entry.is_dir())
             self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
 
+    def test_identity_mismatch_after_import_publishes_no_private_entry(self):
+        # The identity check runs before an import becomes a private entry:
+        # later restores prefer a valid private entry over the transport, so
+        # a mismatched import must leave nothing behind.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin):
+            self.publish(origin)
+        transport_manifest = next((self.root / "transport").rglob("manifest.json"))
+        key = json.loads(transport_manifest.read_text())["coreInputKey"]
+        target = self.project("consumer")
+        with self.fixture.fake_core(target):
+            (target / "sdkconfig.defaults").unlink()
+            with patch.object(core, "core_input_key", return_value="0" * 64):
+                with self.assertRaisesRegex(core.GeneratedSdkconfigError, "identity changed"):
+                    restore_shared_core(target, self.environment)
+            self.assertFalse(os.path.lexists(core._core_cache_entry_dir(target, self.environment, key)))
+            environment_root = target / ".pio/open-bike-build/core-cache" / self.environment
+            self.assertEqual([path.name for path in environment_root.iterdir()] if environment_root.exists() else [], [])
+
     def test_ci_artifact_restores_on_a_runner_without_the_producer_cache(self):
         def ci(*arguments):
             output = io.StringIO()
