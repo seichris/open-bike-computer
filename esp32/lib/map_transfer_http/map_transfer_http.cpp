@@ -914,12 +914,16 @@ namespace {
 constexpr uint8_t kCommitRecoveryAttempts = 3;
 constexpr uint32_t kCommitRecoveryBackoffMs = 5000U;
 constexpr uint32_t kCommitRecoveryMaximumBackoffMs = 60000U;
+// A running attempt whose storage progress has not moved for this long is
+// gone, as for the internal owner's own activation deadline.
+constexpr uint32_t kCommitRecoveryStalledMs = 600000U;
 } // namespace
 
 // Each failed attempt waits longer (5, 10, 20 s, up to a minute) before the
 // storage worker retries, instead of rereading a large map back to back.
 void MapTransferHttpServer::scheduleCommitRecoveryRetry() {
   if (commitRecovery_.failures < UINT8_MAX) ++commitRecovery_.failures;
+  commitRecovery_.waiting = false;
   const uint32_t shift = commitRecovery_.failures - 1U < 4U ? commitRecovery_.failures - 1U : 4U;
   const uint32_t delay = std::min<uint32_t>(kCommitRecoveryBackoffMs << shift,
                                             kCommitRecoveryMaximumBackoffMs);
@@ -929,9 +933,17 @@ void MapTransferHttpServer::scheduleCommitRecoveryRetry() {
 
 // Waiting for this session's running attempt is not a failed attempt: check
 // again after the first interval without spending one. If that attempt fails,
-// it re-arms with its own backoff.
+// it re-arms with its own backoff. The wait restarts whenever storage
+// progress moves; recoverCommitDisposition stops waiting once it has not.
 void MapTransferHttpServer::deferCommitRecoveryRetry() {
-  commitRecovery_.retryAfterMs = millis() + kCommitRecoveryBackoffMs;
+  const uint32_t now = millis();
+  const uint32_t progress = storageProgressSequence();
+  if (!commitRecovery_.waiting || progress != commitRecovery_.waitingProgress) {
+    commitRecovery_.waiting = true;
+    commitRecovery_.waitingProgress = progress;
+    commitRecovery_.waitingSinceMs = now;
+  }
+  commitRecovery_.retryAfterMs = now + kCommitRecoveryBackoffMs;
   if (!commitRecovery_.retryAfterMs) commitRecovery_.retryAfterMs = 1;
 }
 
@@ -958,12 +970,20 @@ void MapTransferHttpServer::retryAcceptedActivation(const std::string &sessionId
 
 MapTransferHttpServer::CommitRecoveryResult
 MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) {
+  // This session's attempt on the internal owner, or its renderer handoff,
+  // still owns the map metadata. Neither activate nor dispose beside it while
+  // its storage progress moves. A running state without progress for the
+  // owner's own deadline belongs to no attempt: the retry then takes it over,
+  // so the attempt limit still ends the work.
+  bool stalled = false;
   {
-    // This session's attempt on the internal owner, or its renderer handoff,
-    // still owns the map metadata. Neither activate nor dispose beside it.
     StateGuard guard(*this);
-    if (activationState_.runningFor(recovery.identity.session))
-      return CommitRecoveryResult::Deferred;
+    if (activationState_.runningFor(recovery.identity.session)) {
+      stalled = recovery.waiting &&
+                storageProgressSequence() == recovery.waitingProgress &&
+                millis() - recovery.waitingSinceMs >= kCommitRecoveryStalledMs;
+      if (!stalled) return CommitRecoveryResult::Deferred;
+    }
   }
   // ENOENT on an absent card must not be mistaken for verified cleanup.
   if (!refreshStreamStorageCapability(true)) return CommitRecoveryResult::Failed;
@@ -1031,7 +1051,7 @@ MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) 
         activationState_.finish("prepared", "", "", "");
         begun = activationState_.begin(identity.session, 3);
       }
-      if (begun == ActivationBeginResult::AlreadyRunning)
+      if (begun == ActivationBeginResult::AlreadyRunning && !stalled)
         return CommitRecoveryResult::Deferred;
       if (begun == ActivationBeginResult::Busy) return CommitRecoveryResult::Failed;
       // Report the activation step, as the first attempt does, not step 1.

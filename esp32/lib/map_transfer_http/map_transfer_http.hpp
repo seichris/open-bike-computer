@@ -171,6 +171,11 @@ private:
     // Failed activation attempts and the earliest next retry (millis).
     uint8_t failures = 0;
     uint32_t retryAfterMs = 0;
+    // While waiting for this session's running attempt: the storage progress
+    // count last seen, and when it last moved (millis).
+    bool waiting = false;
+    uint32_t waitingProgress = 0;
+    uint32_t waitingSinceMs = 0;
     bool pending() const { return !identity.session.empty(); }
   };
   CommitRecovery commitRecovery_;
@@ -181,7 +186,8 @@ private:
   void deferCommitRecoveryRetry();
   bool commitRecoveryDue() const;
   // Completed retires the disposition and Failed spends an attempt. Deferred
-  // waits for this session's attempt that is still running, without spending one.
+  // waits for this session's attempt that is still running and making storage
+  // progress, without spending one.
   enum class CommitRecoveryResult : uint8_t { Completed, Failed, Deferred };
   CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);

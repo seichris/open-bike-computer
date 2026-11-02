@@ -11,7 +11,8 @@ RETRY_POLICY = "namespace {\n// Accepted work gets this many activation attempts
 # Fixtures that include the constants reference each one; clang rejects unused ones.
 USES_RETRY_POLICY = (
     "\nstatic_assert(kCommitRecoveryAttempts == 3 && "
-    "kCommitRecoveryBackoffMs < kCommitRecoveryMaximumBackoffMs, \"retry policy\");\n")
+    "kCommitRecoveryBackoffMs < kCommitRecoveryMaximumBackoffMs && "
+    "kCommitRecoveryStalledMs == 600000U, \"retry policy\");\n")
 
 
 # recoverCommitDisposition returns a nested type, declared on its own line.
@@ -69,8 +70,10 @@ public:
     struct Identity { std::string session; } identity;
     bool armed=false, responseCompleted=true;
     uint8_t failures=0; uint32_t retryAfterMs=0;
+    bool waiting=false; uint32_t waitingProgress=0, waitingSinceMs=0;
     bool pending() const { return !identity.session.empty(); }
   } commitRecovery_;
+  uint32_t storageProgressSequence() const { return 0; }
   void scheduleCommitRecoveryRetry();
   void deferCommitRecoveryRetry();
   bool commitRecoveryDue() const;
@@ -198,8 +201,11 @@ public:
     struct Identity { std::string session; } identity;
     bool armed = false, responseCompleted = false;
     uint8_t failures = 0; uint32_t retryAfterMs = 0;
+    bool waiting = false; uint32_t waitingProgress = 0, waitingSinceMs = 0;
     bool pending() const { return !identity.session.empty(); }
   } commitRecovery_;
+  uint32_t progress = 0;
+  uint32_t storageProgressSequence() const { return progress; }
   bool pendingRendererAcknowledgement_ = false, operationTaskSubmitted_ = false;
   std::string operationQuery_, terminalOperationID_;
   bool (*storageControlSubmit_)(void (*)(void *), void *) =
@@ -251,6 +257,8 @@ int main() {
   server.operationTaskSubmitted_ = false;
   server.deferCommitRecoveryRetry();
   assert(server.commitRecovery_.failures == failures);
+  assert(server.commitRecovery_.waiting && server.commitRecovery_.waitingSinceMs == clockMs);
+  const uint32_t waitStarted = clockMs;
   server.submitPendingOperationTask();
   assert(!server.operationTaskSubmitted_);
   clockMs += 4999U;
@@ -259,6 +267,19 @@ int main() {
   clockMs += 1U;
   server.submitPendingOperationTask();
   assert(server.operationTaskSubmitted_);
+  // The wait is measured from the last storage progress, not the last pass.
+  server.deferCommitRecoveryRetry();
+  assert(server.commitRecovery_.waitingSinceMs == waitStarted);
+  ++server.progress;
+  clockMs += 5000U;
+  server.deferCommitRecoveryRetry();
+  assert(server.commitRecovery_.waitingSinceMs == clockMs);
+  assert(server.commitRecovery_.waitingProgress == server.progress);
+  // A real attempt that fails ends the wait.
+  server.pendingRendererAcknowledgement_ = false;
+  server.retryAcceptedActivation("accepted");
+  assert(!server.commitRecovery_.waiting && server.commitRecovery_.failures == failures + 1);
+  server.pendingRendererAcknowledgement_ = true;
   // Queries and terminal receipts are never held back by the backoff.
   server.pendingRendererAcknowledgement_ = false;
   server.retryAcceptedActivation("accepted");
@@ -397,6 +418,8 @@ struct Installer {
   }
 };
 enum class ActivationBeginResult { Started, AlreadyRunning, AlreadyInstalled, Busy };
+uint32_t clockMs = 2000000U;
+uint32_t millis() { return clockMs; }
 struct Progress { unsigned step, totalSteps; uint64_t completed, total; };
 // MapActivationState's begin/finish/progress rules for one session.
 struct Activation {
@@ -421,7 +444,12 @@ struct Activation {
 };
 class MapTransferHttpServer {
 public:
-  struct CommitRecovery { operation::Identity identity; uint8_t failures = 0; };
+  struct CommitRecovery {
+    operation::Identity identity; uint8_t failures = 0;
+    bool waiting = false; uint32_t waitingProgress = 0, waitingSinceMs = 0;
+  };
+  uint32_t progress = 7;
+  uint32_t storageProgressSequence() const { return progress; }
   enum class CommitRecoveryResult { Completed, Failed, Deferred };
   struct StateGuard { StateGuard(MapTransferHttpServer &) {} };
   struct OperationStoreGuard { OperationStoreGuard(MapTransferHttpServer &) {} };
@@ -578,6 +606,29 @@ int main() {
     assert(server.recoverCommitDisposition(recovery) == Result::Deferred);
     assert(server.refreshes == 0 && server.installer_.calls == 0 && !server.dispatched);
     assert(server.activationState_.begins == 0 && !server.released && !server.finished);
+  }
+  // The wait lasts only while storage progress moves. A running state that
+  // has not moved for the owner's own deadline belongs to no attempt: the
+  // retry takes it over, and past the limit the work fails as before.
+  for (int scenario = 0; scenario != 4; ++scenario) {
+    MapTransferHttpServer server;
+    accepted(server, id);
+    server.activationState_.running = true;
+    MapTransferHttpServer::CommitRecovery recovery{id};
+    recovery.waiting = true;
+    recovery.waitingProgress = scenario == 2 ? server.progress - 1 : server.progress;
+    recovery.waitingSinceMs = clockMs - (scenario == 1 ? 599999U : 600000U);
+    if (scenario == 3) recovery.failures = 3;
+    const auto result = server.recoverCommitDisposition(recovery);
+    if (scenario == 1 || scenario == 2) {
+      assert(result == Result::Deferred && !server.dispatched && server.installer_.calls == 0);
+    } else if (scenario == 0) {
+      assert(result == Result::Completed && server.dispatched && !server.released);
+      assert(server.activationState_.begins == 1 && server.activationState_.step == 3);
+    } else {
+      assert(result == Result::Completed && !server.dispatched && server.installer_.discarded);
+      assert(server.released && server.finishedCode == "activation_retry_limit");
+    }
   }
   {
     // An attempt that starts after the first check is caught by begin().
