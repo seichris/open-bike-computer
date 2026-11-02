@@ -447,11 +447,15 @@ void Gps::setLocalTime(NeoGPS::time_t gpsTime, const char* tz)
   struct tm *tmLocal = localtime_r(&tLocal, &local_tm);
   struct tm *tmUTC = gmtime_r(&tUTC, &UTC_tm);
 
+#if FIRMWARE_DIAGNOSTICS
+  // Only diagnostics profiles emit these logs; keeping the formatting out of
+  // the other profiles keeps strftime and its printf engine out of their image.
   char buffer[100];
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S %Z", tmLocal);
   ESP_LOGI(TAG, "Current local time: %s",buffer);
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S %Z", tmUTC);
   ESP_LOGI(TAG, "Current UTC time: %s", buffer);
+#endif
 
   
   int UTC = tmLocal->tm_hour - tmUTC->tm_hour;

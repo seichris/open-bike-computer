@@ -161,15 +161,21 @@
 	 * NOTE: some features use certain color formats internally, e.g.
 	 * - gradients use RGB888
 	 * - bitmaps with transparency may use ARGB8888
+	 *
+	 * Bicino draws RGB565 frame buffers and canvases, RGB565A8 and A8 image
+	 * sources (the navigation arrow is A8 with recolor), ARGB8888 layers for
+	 * transformed or translucent objects, and the I1 app QR code. The GUI
+	 * uses no gradients and no L8/AL88/RGB888/XRGB8888 buffers, so those
+	 * blend paths are compiled out; adding a gradient needs RGB888 again.
 	 */
 
 	#define LV_DRAW_SW_SUPPORT_RGB565		1
 	#define LV_DRAW_SW_SUPPORT_RGB565A8		1
-	#define LV_DRAW_SW_SUPPORT_RGB888		1
-	#define LV_DRAW_SW_SUPPORT_XRGB8888		1
+	#define LV_DRAW_SW_SUPPORT_RGB888		0
+	#define LV_DRAW_SW_SUPPORT_XRGB8888		0
 	#define LV_DRAW_SW_SUPPORT_ARGB8888		1
-	#define LV_DRAW_SW_SUPPORT_L8			1
-	#define LV_DRAW_SW_SUPPORT_AL88			1
+	#define LV_DRAW_SW_SUPPORT_L8			0
+	#define LV_DRAW_SW_SUPPORT_AL88			0
 	#define LV_DRAW_SW_SUPPORT_A8			1
 	#define LV_DRAW_SW_SUPPORT_I1			1
 
@@ -621,7 +627,10 @@
 
 #define LV_WIDGETS_HAS_DEFAULT_VALUE  1
 
-#define LV_USE_ANIMIMG    1
+/* Widgets the Bicino GUI never creates are compiled out (they also shrink the
+ * default theme): animimg, calendar, imagebutton, roller, scale, span, tabview
+ * and win. Re-enable one here before using it. */
+#define LV_USE_ANIMIMG    0
 
 #define LV_USE_ARC        1
 
@@ -631,7 +640,7 @@
 
 #define LV_USE_BUTTONMATRIX  1
 
-#define LV_USE_CALENDAR   1
+#define LV_USE_CALENDAR   0
 #if LV_USE_CALENDAR
     #define LV_CALENDAR_WEEK_STARTS_MONDAY 0
     #if LV_CALENDAR_WEEK_STARTS_MONDAY
@@ -656,7 +665,7 @@
 
 #define LV_USE_IMAGE      1   /*Requires: lv_label*/
 
-#define LV_USE_IMAGEBUTTON     1
+#define LV_USE_IMAGEBUTTON     0
 
 #define LV_USE_KEYBOARD   1
 
@@ -679,13 +688,13 @@
 
 #define LV_USE_MSGBOX     1
 
-#define LV_USE_ROLLER     1   /*Requires: lv_label*/
+#define LV_USE_ROLLER     0   /*Requires: lv_label*/
 
-#define LV_USE_SCALE      1
+#define LV_USE_SCALE      0
 
 #define LV_USE_SLIDER     1   /*Requires: lv_bar*/
 
-#define LV_USE_SPAN       1
+#define LV_USE_SPAN       0
 #if LV_USE_SPAN
     /*A line text can contain maximum num of span descriptor */
     #define LV_SPAN_SNIPPET_STACK_SIZE 64
@@ -704,11 +713,11 @@
 
 #define LV_USE_TABLE      1
 
-#define LV_USE_TABVIEW    1
+#define LV_USE_TABVIEW    0
 
 #define LV_USE_TILEVIEW   1
 
-#define LV_USE_WIN        1
+#define LV_USE_WIN        0
 
 /*==================
  * THEMES
@@ -729,10 +738,10 @@
 #endif /*LV_USE_THEME_DEFAULT*/
 
 /*A very simple theme that is a good starting point for a custom theme*/
-#define LV_USE_THEME_SIMPLE 1
+#define LV_USE_THEME_SIMPLE 0
 
 /*A theme designed for monochrome displays*/
-#define LV_USE_THEME_MONO 1
+#define LV_USE_THEME_MONO 0
 
 /*==================
  * LAYOUTS

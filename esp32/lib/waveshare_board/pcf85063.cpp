@@ -9,6 +9,7 @@
 
 #include "i2c_bus.hpp"
 #include "waveshare_board.hpp"
+#include "iso8601_utc.hpp"
 #include <sys/time.h>
 
 namespace waveshare_board::rtc {
@@ -116,7 +117,7 @@ void logUtcTime(const char *prefix, time_t unixTime) {
   tm utc;
   gmtime_r(&unixTime, &utc);
   char buffer[24];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);
+  time_format::formatUtcIso8601(buffer, sizeof(buffer), utc);
   Serial.printf("PCF85063: %s %s\n", prefix, buffer);
 }
 
