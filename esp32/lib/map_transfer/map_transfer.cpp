@@ -1149,6 +1149,10 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   if (state_.status == "installed" && state_.sessionId == sessionId) {
     return ActivationBeginResult::AlreadyInstalled;
   }
+  // Copy before the first change. An allocation failure must not leave the
+  // state running under the previous session: every retry of this one would
+  // then see Busy until its attempts ran out.
+  std::string session = sessionId;
   // Retry of this accepted session retains the first owner failure. A new
   // session or a completed attempt starts a separate diagnostic identity.
   if (state_.sessionId != sessionId || state_.terminalCode[0] != '\0') {
@@ -1162,7 +1166,7 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   if (state_.sequence == 0)
     state_.sequence = 1;
   state_.status = "activating";
-  state_.sessionId = sessionId;
+  state_.sessionId = std::move(session);
   state_.mapId.clear();
   state_.step = 1;
   state_.totalSteps = std::max<uint8_t>(1, totalSteps);
@@ -4871,13 +4875,22 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   for(unsigned slot=0;slot<2;++slot) {
     std::string bytes;
     const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
+    // An oversized or short file fails without a failed call; it reports 0.
+    errno=0;
     if (!readTextFile(path,bytes,selection_anchor::kMaximumBytes)) {
-      if (fileExists(path)) return false;
+      const int error=errno;
+      if (fileExists(path)) {
+        noteStorageWriteFailure("anchor_slot_read", error);
+        return false;
+      }
       continue;
     }
     selection_anchor::Record record;
     const auto decoded=selection_anchor::decode(bytes,record);
-    if(decoded==selection_anchor::Decode::Unsupported) return false;
+    if(decoded==selection_anchor::Decode::Unsupported) {
+      noteStorageWriteFailure("anchor_slot_unsupported", 0);
+      return false;
+    }
     if(decoded!=selection_anchor::Decode::Valid) continue;
     // A card moved from another board keeps that board's anchors. They are
     // not this device's evidence and must not block its selections. This
@@ -4887,7 +4900,10 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
       foreign=std::max(foreign,record.sequence);
       continue;
     }
-    if(record.sequence==highest && record.selection!=latest) return false;
+    if(record.sequence==highest && record.selection!=latest) {
+      noteStorageWriteFailure("anchor_slot_duplicate", 0);
+      return false;
+    }
     if(record.sequence>highest) { highest=record.sequence; newest=slot; latest=record.selection; }
   }
   if (incoming.previousRoot.empty() || incoming.previousRoot==incoming.root) return true;
@@ -4900,25 +4916,49 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Unsigned legacy /VECTMAP state is not invented into a verified anchor.
   if (!anchorSelectionVerified(prior)) return true;
   std::string selection;
-  if (!readTextFile(joinPath(storageRoot_,kActiveMapFile),selection,kActiveMapBytes)) return false;
+  errno=0;
+  if (!readTextFile(joinPath(storageRoot_,kActiveMapFile),selection,kActiveMapBytes)) {
+    noteStorageWriteFailure("anchor_active_read", errno);
+    return false;
+  }
   // Anchors keep the size older firmware reads, or a downgrade would fail
   // every activation. A larger predecessor keeps journal and backup recovery.
   if (selection.size()>selection_anchor::kMaximumSelectionBytes) return true;
   if (highest>foreign && latest==selection) return true;
   const auto sequence=std::max(highest,foreign);
-  if (sequence==std::numeric_limits<uint64_t>::max()) return false;
+  if (sequence==std::numeric_limits<uint64_t>::max()) {
+    noteStorageWriteFailure("anchor_sequence", 0);
+    return false;
+  }
   auto &ready = workspace->ready;
-  if (!readReadyStreamMap(prior.sessionId,ready).ok) return false;
+  if (!readReadyStreamMap(prior.sessionId,ready).ok) {
+    noteStorageWriteFailure("anchor_ready", 0);
+    return false;
+  }
   selection_anchor::Record record{sequence+1,operationDeviceID_,ready.operationID,selection};
   const auto bytes=selection_anchor::encode(record);
   const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(newest^1U));
   // Write only the older/inactive slot. No rename/backup deletion can destroy
   // the other verified record. Readback proves consistency, NOT SD persistence.
-  if(bytes.empty() || !writeTextFile(path,bytes)) return false;
+  if (bytes.empty()) {
+    noteStorageWriteFailure("anchor_encode", 0);
+    return false;
+  }
+  if (!writeTextFile(path,bytes)) {
+    noteStorageWriteFailure("anchor_write", 0);
+    return false;
+  }
   std::string readback;
   selection_anchor::Record decoded;
-  return readTextFile(path,readback,selection_anchor::kMaximumBytes) && readback==bytes &&
+  errno=0;
+  if (!readTextFile(path,readback,selection_anchor::kMaximumBytes)) {
+    noteStorageWriteFailure("anchor_readback", errno);
+    return false;
+  }
+  const bool consistent = readback==bytes &&
       selection_anchor::decode(readback,decoded)==selection_anchor::Decode::Valid;
+  if (!consistent) noteStorageWriteFailure("anchor_readback", 0);
+  return consistent;
 }
 
 InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
@@ -4998,11 +5038,15 @@ bool MapTransferInstaller::writeActiveMap(
       (!selection.manifestReceipt.empty() &&
        (!isHexSha256(selection.manifestReceipt) ||
         !isHexSha256(selection.signedManifestReceipt)))) {
+    noteStorageWriteFailure("pointer_validate", 0);
     return false;
   }
   // Predecessor validation/rehashing must finish before canonical serialization
   // and readback reserve their frames. The anchor still precedes pointer writes.
-  if (!persistPredecessorAnchor(selection)) return false;
+  if (!persistPredecessorAnchor(selection)) {
+    noteStorageWriteFailure("pointer_anchor", 0);
+    return false;
+  }
   return writeCanonicalActiveMap(selection);
 }
 
@@ -5032,12 +5076,17 @@ bool MapTransferInstaller::writeCanonicalActiveMap(
             selection.signedManifestReceipt + "\"";
   }
   json += "}\n";
-  if (json.size() > kActiveMapBytes ||
-      !writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json))
+  if (json.size() > kActiveMapBytes) {
+    noteStorageWriteFailure("pointer_size", 0);
     return false;
+  }
+  if (!writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json)) {
+    noteStorageWriteFailure("pointer_write", 0);
+    return false;
+  }
   ActiveMapSelection readback;
   const InstallStatus status = readActiveMap(readback);
-  return status.ok && readback.mapId == selection.mapId &&
+  const bool matches = status.ok && readback.mapId == selection.mapId &&
          readback.sessionId == selection.sessionId &&
          readback.root == selection.root &&
          targetMetadataMatches(readback.target, selection.target) &&
@@ -5052,6 +5101,8 @@ bool MapTransferInstaller::writeCanonicalActiveMap(
              selection.previousManifestReceipt &&
          readback.previousSignedManifestReceipt ==
              selection.previousSignedManifestReceipt;
+  if (!matches) noteStorageWriteFailure("pointer_readback", 0);
+  return matches;
 }
 
 bool MapTransferInstaller::activeRootExists(const std::string &root) const {
@@ -5146,15 +5197,31 @@ bool MapTransferInstaller::fileSha256Hex(const std::string &path,
   return true;
 }
 
+void MapTransferInstaller::noteStorageWriteFailure(const char *step,
+                                                   int error) const {
+  if (storageWriteFailure_.first == nullptr) {
+    storageWriteFailure_.first = step;
+    storageWriteFailure_.firstError = error;
+  }
+  storageWriteFailure_.last = step;
+}
+
 bool MapTransferInstaller::writeTextFile(const std::string &path,
                                          const std::string &text) const {
-  if (!mkdirs(dirnameOf(path)))
+  if (!mkdirs(dirnameOf(path))) {
+    noteStorageWriteFailure("file_mkdirs", errno);
     return false;
+  }
   storageMutationBoundary("open_truncate", path, false);
   FileHandle output(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
   storageMutationBoundary("open_truncate", path, true);
-  if (!output) return false;
+  if (!output) {
+    noteStorageWriteFailure("file_open", errno);
+    return false;
+  }
   storageMutationBoundary("write", path, false);
+  // A full FAT volume can accept zero bytes without failing the call.
+  errno = 0;
   const bool written = descriptor_file::writeAll(output.get(), text.data(), text.size());
   storageMutationBoundary("write", path, true);
   storageMutationBoundary("flush", path, false);
@@ -5162,20 +5229,37 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
   // used by recovery fault tests, then require the explicit fsync below.
   const bool flushed = true;
   storageMutationBoundary("flush", path, true);
-  if (!written || !flushed) return false;
+  if (!written || !flushed) {
+    noteStorageWriteFailure("file_write", errno);
+    return false;
+  }
   storageMutationBoundary("fsync", path, false);
   const bool synced = ::fsync(output.get()) == 0;
   storageMutationBoundary("fsync", path, true);
-  if (!synced) return false;
+  if (!synced) {
+    noteStorageWriteFailure("file_fsync", errno);
+    return false;
+  }
   storageMutationBoundary("close", path, false);
   const bool closed = output.close() == 0;
   storageMutationBoundary("close", path, true);
+  if (!closed) {
+    noteStorageWriteFailure("file_close", errno);
+    return false;
+  }
   // SDK success alone is not enough to publish boot-eligible metadata. Detect
   // silent/partial writes (including a zeroed stdio-sized prefix) while the
   // previous primary/backup is still intact. This is not SD power-loss proof.
   std::string digest;
-  return closed && fileSha256Hex(path,digest) &&
-      digest==sha256Hex(reinterpret_cast<const uint8_t *>(text.data()),text.size());
+  if (!fileSha256Hex(path,digest)) {
+    noteStorageWriteFailure("file_verify", errno);
+    return false;
+  }
+  if (digest!=sha256Hex(reinterpret_cast<const uint8_t *>(text.data()),text.size())) {
+    noteStorageWriteFailure("file_verify", 0);
+    return false;
+  }
+  return true;
 }
 
 bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
@@ -5184,6 +5268,7 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   const std::string backupPath = path + ".bak";
   removeTree(temporaryPath);
   if (!writeTextFile(temporaryPath, text)) {
+    noteStorageWriteFailure("atomic_temporary", 0);
     // Unpublished bytes never describe committed state; leave none behind.
     removeTree(temporaryPath);
     return false;
@@ -5201,6 +5286,7 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
     // newer version. Drop the stale backup; refusing here would fail every
     // later write of this file.
     if (!removeTree(backupPath)) {
+      noteStorageWriteFailure("atomic_stale_backup", errno);
       removeTree(temporaryPath);
       return false;
     }
@@ -5208,23 +5294,32 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   }
   if (hadPrevious && (preserveBackup ? !removeTree(path) :
       renameStoragePath(path.c_str(), backupPath.c_str()) != 0)) {
+    noteStorageWriteFailure(preserveBackup ? "atomic_primary_remove" : "atomic_primary_backup",
+                            errno);
     removeTree(temporaryPath);
     return false;
   }
   if (renameStoragePath(temporaryPath.c_str(), path.c_str()) != 0) {
+    noteStorageWriteFailure("atomic_publish", errno);
     if (hadPrevious && !preserveBackup)
       renameStoragePath(backupPath.c_str(), path.c_str());
     removeTree(temporaryPath);
     return false;
   }
-  if (!fileSha256Hex(path,digest) || digest!=expected) {
+  const bool hashed = fileSha256Hex(path,digest);
+  if (!hashed || digest!=expected) {
+    noteStorageWriteFailure("atomic_verify", hashed ? 0 : errno);
     // Put back the version this call replaced rather than leaving a corrupt
     // publication beside it. Without one, the file returns to absent.
     if (removeTree(path) && hadPrevious && fileExists(backupPath))
       renameStoragePath(backupPath.c_str(), path.c_str());
     return false;
   }
-  return removeTree(backupPath);
+  if (!removeTree(backupPath)) {
+    noteStorageWriteFailure("atomic_backup_remove", errno);
+    return false;
+  }
+  return true;
 }
 
 bool MapTransferInstaller::readTextFile(const std::string &path,

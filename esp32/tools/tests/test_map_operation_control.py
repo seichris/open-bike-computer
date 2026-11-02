@@ -70,12 +70,15 @@ public:
   InstallerSeam installer_;
   TransferSeam transfer;
   TransferSeam *transferServer_=&transfer;
-  int finishes=0,releases=0,exits=0,errorReports=0,recoveries=0,retries=0;
+  int finishes=0,releases=0,exits=0,errorReports=0,recoveries=0,retries=0,deferrals=0;
   bool recoveryDue=true;
   void lockState() {} void unlockState() {}
-  bool recoverCommitDisposition(const CommitRecovery &) {++recoveries;return false;}
+  enum class CommitRecoveryResult {Completed,Failed,Deferred};
+  CommitRecoveryResult recoveryResult=CommitRecoveryResult::Failed;
+  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &) {++recoveries;return recoveryResult;}
   bool commitRecoveryDue() const {return recoveryDue;}
   void scheduleCommitRecoveryRetry() {++retries;}
+  void deferCommitRecoveryRetry() {++deferrals;}
   bool observeOperationRevision(uint64_t) {return true;}
   void rememberOwnerRecovery(const char *code) {if(firstRecovery.empty()) firstRecovery=code;}
   void setLastError(const std::string &code,const std::string &) {
@@ -170,6 +173,16 @@ int main(int argc,char **argv) {
   assert(worker.recoveries==0 && worker.retries==0);
   worker.recoveryDue=true;worker.executeOperationTask();
   assert(worker.recoveries==1 && worker.retries==1 && worker.commitRecovery_.armed);
+  // Waiting behind this session's running attempt checks again later without
+  // spending an attempt; a completed disposition retires the recovery.
+  worker.recoveryResult=MapTransferHttpServer::CommitRecoveryResult::Deferred;
+  worker.executeOperationTask();
+  assert(worker.recoveries==2 && worker.retries==1 && worker.deferrals==1);
+  assert(worker.commitRecovery_.armed);
+  worker.recoveryResult=MapTransferHttpServer::CommitRecoveryResult::Completed;
+  worker.executeOperationTask();
+  assert(worker.recoveries==3 && worker.retries==1 && worker.deferrals==1);
+  assert(!worker.commitRecovery_.armed && worker.commitRecovery_.identity.empty());
 }
 '''
         with tempfile.TemporaryDirectory(prefix='map-terminal-cleanup-') as temporary:

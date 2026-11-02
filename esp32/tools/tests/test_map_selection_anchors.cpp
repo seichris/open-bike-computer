@@ -408,6 +408,61 @@ void testAlternatingSlotOverwriteCrashCuts() {
   std::filesystem::remove_all(probeRoot); std::filesystem::remove_all(baseline);
 }
 
+// Fails the first predecessor anchor write once, either in a call or in the
+// post-write check, and leaves recovery's retry of that write alone.
+class AnchorWriteFaultInstaller : public MapTransferInstaller {
+public:
+  enum class Fault { ChangedAfterClose, DirectoryAtOpen };
+  AnchorWriteFaultInstaller(const std::string &root, Fault fault)
+      : MapTransferInstaller(root), slot_(root+"/VECTMAP/.selection-anchor-0"), fault_(fault) {}
+protected:
+  void storageMutationBoundary(const char *operation, const std::string &path,
+                               bool after) const override {
+    if (done_ || path!=slot_) return;
+    const std::string step=operation;
+    if (fault_==Fault::DirectoryAtOpen && step=="open_truncate") {
+      const int error=errno;
+      if (!after) assert(::mkdir(path.c_str(),0755)==0);
+      else { assert(::rmdir(path.c_str())==0); done_=true; }
+      errno=error;
+    } else if (fault_==Fault::ChangedAfterClose && step=="close" && after) {
+      writeFile(path,"changed after a successful write");
+      // A successful mkdir of an existing directory leaves this behind.
+      errno=EEXIST;
+      done_=true;
+    }
+  }
+private:
+  std::string slot_;
+  Fault fault_;
+  mutable bool done_=false;
+};
+
+void testWriteFailureKeepsCallErrorsOnly() {
+  using Fault=AnchorWriteFaultInstaller::Fault;
+  for (const auto fault : {Fault::ChangedAfterClose, Fault::DirectoryAtOpen}) {
+    const auto root=tempRoot();
+    prepareReadyRoot(root,"previous");
+    { MapTransferInstaller initial(root); assert(initial.activateReadyStreamMap("previous").ok); }
+    prepareReadyRoot(root,"candidate");
+    AnchorWriteFaultInstaller installer(root,fault);
+    const auto result=installer.activateReadyStreamMap("candidate");
+    assert(!result.ok && result.code=="stream_active_write");
+    const auto failure=installer.storageWriteFailure();
+    assert(failure.first!=nullptr && failure.last!=nullptr);
+    assert(std::string(failure.last)=="pointer_anchor");
+    if (fault==Fault::ChangedAfterClose) {
+      // Different bytes after a write that succeeded is a check, not a call.
+      assert(std::string(failure.first)=="file_verify" && failure.firstError==0);
+    } else {
+      assert(std::string(failure.first)=="file_open" && failure.firstError==EISDIR);
+    }
+    installer.clearStorageWriteFailure();
+    assert(installer.storageWriteFailure().first==nullptr);
+    std::filesystem::remove_all(root);
+  }
+}
+
 }
 int main() {
   testInvalidJournalAndMissingSelectionRecoverWithoutRecursion();
@@ -419,5 +474,6 @@ int main() {
   testOwnAnchorBehindAnotherBoardIsRenumbered();
   testAlternationRetainsFullRollbackRoots();
   testAlternatingSlotOverwriteCrashCuts();
+  testWriteFailureKeepsCallErrorsOnly();
   std::cout << "selection anchor validation/recovery tests passed\n";
 }

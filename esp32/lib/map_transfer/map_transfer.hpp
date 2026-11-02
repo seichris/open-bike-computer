@@ -191,6 +191,9 @@ public:
               std::string errorCode, std::string errorMessage);
   void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
+  bool runningFor(const std::string &sessionId) const {
+    return state_.running && state_.sessionId == sessionId;
+  }
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
   const std::array<char, 64> &ownerRecoveryCode() const { return state_.ownerRecoveryCode; }
@@ -220,6 +223,17 @@ public:
   void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
     storageProgressCallback_ = callback; storageProgressContext_ = context;
   }
+  // The deepest and the outermost failed step of metadata writes since the
+  // last clear. firstError is errno of the first step's failed call, or 0
+  // when that step failed a check (a mismatch or invalid input) instead: a
+  // successful call can leave errno set, e.g. mkdir's EEXIST. Diagnostics only.
+  struct StorageWriteFailure {
+    const char *first = nullptr;
+    const char *last = nullptr;
+    int firstError = 0;
+  };
+  StorageWriteFailure storageWriteFailure() const { return storageWriteFailure_; }
+  void clearStorageWriteFailure() const { storageWriteFailure_ = {}; }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -352,6 +366,8 @@ private:
   std::string operationDeviceID_;
   StorageProgressCallback storageProgressCallback_ = nullptr;
   void *storageProgressContext_ = nullptr;
+  mutable StorageWriteFailure storageWriteFailure_;
+  void noteStorageWriteFailure(const char *step, int error) const;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.

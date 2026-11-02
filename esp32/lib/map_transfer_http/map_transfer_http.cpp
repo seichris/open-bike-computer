@@ -565,7 +565,12 @@ void MapTransferHttpServer::executeLibraryTask() try {
     { StateGuard guard(*this);
       librarySession_ = session; libraryReceipt_ = receipt; librarySelectionStarted_ = true;
     }
+    installer_.clearStorageWriteFailure();
     result = installer_.selectInstalledMap(session, receipt);
+    // Use reconciles a pointer that was written although the write reported
+    // failure, so record the step even when the selection completed. A plain
+    // C string: building a std::string here could fail a completed Use.
+    recordStorageWriteFailure(result.ok ? "library_selected" : result.code.c_str());
   }
   // A refused or failed Use left (or recovery restored) the previous pointer,
   // so settling its journal now drops it without touching automatic mode.
@@ -789,7 +794,9 @@ void MapTransferHttpServer::executeOperationTask() try {
     failed = terminalFailed_;
     query = operationQuery_;
   }
-  const bool recoveryCompleted = recoveryDue && recoverCommitDisposition(recovery);
+  const auto recoveryResult = recoveryDue ? recoverCommitDisposition(recovery)
+                                          : CommitRecoveryResult::Failed;
+  const bool recoveryCompleted = recoveryResult == CommitRecoveryResult::Completed;
   bool completed=terminal.empty();
   std::string body;
   if (!terminal.empty()) {
@@ -860,8 +867,10 @@ void MapTransferHttpServer::executeOperationTask() try {
   if (!query.empty() && operationQuery_==query) operationQuery_.clear();
   if (recoveryCompleted && commitRecovery_.identity == recovery.identity)
     commitRecovery_ = {};
-  else if (recoveryDue && commitRecovery_.armed && commitRecovery_.identity == recovery.identity)
-    scheduleCommitRecoveryRetry();
+  else if (recoveryDue && commitRecovery_.armed && commitRecovery_.identity == recovery.identity) {
+    if (recoveryResult == CommitRecoveryResult::Deferred) deferCommitRecoveryRetry();
+    else scheduleCommitRecoveryRetry();
+  }
   operationTaskSubmitted_=false;
   unlockState();
   if (completed && !terminal.empty()) {
@@ -905,16 +914,36 @@ namespace {
 constexpr uint8_t kCommitRecoveryAttempts = 3;
 constexpr uint32_t kCommitRecoveryBackoffMs = 5000U;
 constexpr uint32_t kCommitRecoveryMaximumBackoffMs = 60000U;
+// A running attempt whose storage progress has not moved for this long is
+// gone, as for the internal owner's own activation deadline.
+constexpr uint32_t kCommitRecoveryStalledMs = 600000U;
 } // namespace
 
 // Each failed attempt waits longer (5, 10, 20 s, up to a minute) before the
 // storage worker retries, instead of rereading a large map back to back.
 void MapTransferHttpServer::scheduleCommitRecoveryRetry() {
   if (commitRecovery_.failures < UINT8_MAX) ++commitRecovery_.failures;
+  commitRecovery_.waiting = false;
   const uint32_t shift = commitRecovery_.failures - 1U < 4U ? commitRecovery_.failures - 1U : 4U;
   const uint32_t delay = std::min<uint32_t>(kCommitRecoveryBackoffMs << shift,
                                             kCommitRecoveryMaximumBackoffMs);
   commitRecovery_.retryAfterMs = millis() + delay;
+  if (!commitRecovery_.retryAfterMs) commitRecovery_.retryAfterMs = 1;
+}
+
+// Waiting for this session's running attempt is not a failed attempt: check
+// again after the first interval without spending one. If that attempt fails,
+// it re-arms with its own backoff. The wait restarts whenever storage
+// progress moves; recoverCommitDisposition stops waiting once it has not.
+void MapTransferHttpServer::deferCommitRecoveryRetry() {
+  const uint32_t now = millis();
+  const uint32_t progress = storageProgressSequence();
+  if (!commitRecovery_.waiting || progress != commitRecovery_.waitingProgress) {
+    commitRecovery_.waiting = true;
+    commitRecovery_.waitingProgress = progress;
+    commitRecovery_.waitingSinceMs = now;
+  }
+  commitRecovery_.retryAfterMs = now + kCommitRecoveryBackoffMs;
   if (!commitRecovery_.retryAfterMs) commitRecovery_.retryAfterMs = 1;
 }
 
@@ -939,9 +968,25 @@ void MapTransferHttpServer::retryAcceptedActivation(const std::string &sessionId
   }
 }
 
-bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) {
+MapTransferHttpServer::CommitRecoveryResult
+MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) {
+  // This session's attempt on the internal owner, or its renderer handoff,
+  // still owns the map metadata. Neither activate nor dispose beside it while
+  // its storage progress moves. A running state without progress for the
+  // owner's own deadline belongs to no attempt: the retry then takes it over,
+  // so the attempt limit still ends the work.
+  bool stalled = false;
+  {
+    StateGuard guard(*this);
+    if (activationState_.runningFor(recovery.identity.session)) {
+      stalled = recovery.waiting &&
+                storageProgressSequence() == recovery.waitingProgress &&
+                millis() - recovery.waitingSinceMs >= kCommitRecoveryStalledMs;
+      if (!stalled) return CommitRecoveryResult::Deferred;
+    }
+  }
   // ENOENT on an absent card must not be mistaken for verified cleanup.
-  if (!refreshStreamStorageCapability(true)) return false;
+  if (!refreshStreamStorageCapability(true)) return CommitRecoveryResult::Failed;
   const auto &identity = recovery.identity;
   OperationStoreGuard operationStoreGuard(*this);
   MapOperationStorage storage(storageRoot_);
@@ -951,10 +996,11 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
   bool hasRecord = false;
   if (!identity.operation.empty()) {
     if (store.restore() != operation::Result::Ok ||
-        !observeOperationRevision(store.admissionRevision())) return false;
+        !observeOperationRevision(store.admissionRevision()))
+      return CommitRecoveryResult::Failed;
     const auto result = store.query(identity, record);
     if (result != operation::Result::Ok && result != operation::Result::Unavailable)
-      return false;
+      return CommitRecoveryResult::Failed;
     hasRecord = result == operation::Result::Ok;
     accepted = hasRecord && (record.phase == operation::Phase::Accepted ||
                              record.phase == operation::Phase::Installed);
@@ -965,7 +1011,7 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
     const auto promoted=installer_.promotePreparedOperation(identity.session,identity.operation);
     if (!promoted.ok && promoted.code!="stream_ready_invalid" &&
         promoted.code!="stream_manifest_receipt" && promoted.code!="stream_installed_receipt")
-      return false;
+      return CommitRecoveryResult::Failed;
   }
   ReadyStreamMap ready;
   const bool readyMatches = installer_.readReadyStreamMap(identity.session, ready).ok &&
@@ -997,21 +1043,38 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
     // writes. Hand off to the renderer only after exact ready identity agrees.
     {
       StateGuard guard(*this);
-      const auto begun = activationState_.begin(identity.session, 3);
-      if (begun == ActivationBeginResult::Busy) return false;
+      auto begun = activationState_.begin(identity.session, 3);
+      if (begun == ActivationBeginResult::AlreadyInstalled && !identity.operation.empty()) {
+        // As in beginDeferredActivation: the same content under a new
+        // operation is a new installation; earlier renderer success cannot
+        // complete its receipt. Legacy work keeps that success.
+        activationState_.finish("prepared", "", "", "");
+        begun = activationState_.begin(identity.session, 3);
+      }
+      if (begun == ActivationBeginResult::AlreadyRunning && !stalled)
+        return CommitRecoveryResult::Deferred;
+      if (begun == ActivationBeginResult::Busy) return CommitRecoveryResult::Failed;
       // Report the activation step, as the first attempt does, not step 1.
       activationState_.updateProgress({3, 3, 0, 1});
       streamStatusActive_ = false;
     }
-    return runStreamActivationTask(identity.session, false);
+    try {
+      return runStreamActivationTask(identity.session, false)
+                 ? CommitRecoveryResult::Completed
+                 : CommitRecoveryResult::Failed;
+    } catch (const std::bad_alloc &) {
+      finishUnwoundActivation(identity.session);
+      throw;
+    }
   }
-  if (!disposed.ok) return false;
+  if (!disposed.ok) return CommitRecoveryResult::Failed;
   if (hasRecord && record.phase != operation::Phase::Failed &&
       record.phase != operation::Phase::Cancelled) {
     const auto result = store.fail(identity);
     if (result != operation::Result::Ok && result != operation::Result::Replay)
-      return false;
-    if (!observeOperationRevision(store.admissionRevision())) return false;
+      return CommitRecoveryResult::Failed;
+    if (!observeOperationRevision(store.admissionRevision()))
+      return CommitRecoveryResult::Failed;
   }
   {
     StateGuard guard(*this);
@@ -1024,7 +1087,7 @@ bool MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recov
     finishActivation("failed", identity.map, "stream_finalization",
                      "map finalization failed; unselected staging was removed");
   releaseCommitGrant();
-  return true;
+  return CommitRecoveryResult::Completed;
 }
 
 bool MapTransferHttpServer::admitReceivingOperation(
@@ -2313,6 +2376,23 @@ void MapTransferHttpServer::recordActivationOutcome(const std::string &phase,
   // Authenticated status retains the bounded codes even if recording is lost.
 }
 
+// Names the failed metadata write step behind an activation failure such as
+// stream_active_write. Step names are fixed tokens from the installer.
+void MapTransferHttpServer::recordStorageWriteFailure(const char *code) try {
+  const auto failure = installer_.storageWriteFailure();
+  if (failure.first == nullptr) return;
+  struct Workspace { char fields[192]{}; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  const int bytes = std::snprintf(workspace->fields, sizeof(workspace->fields),
+      "{\"code\":\"%s\",\"phase\":\"%s\",\"reason\":\"%s\",\"errorCode\":%d}",
+      code, failure.first, failure.last, failure.firstError);
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(workspace->fields))
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "transfer",
+                                   "map_storage_write_failed", workspace->fields);
+} catch (const std::bad_alloc &) {
+  // The activation result still records its bounded codes.
+}
+
 void MapTransferHttpServer::updateActivationProgress(
     const ActivationProgress &progress) {
   lockState();
@@ -2476,9 +2556,20 @@ void MapTransferHttpServer::executeActivation(const std::string &sessionId,
 
 catch (const std::bad_alloc &) {
   rememberOwnerRecovery("out_of_memory");
+  finishUnwoundActivation(sessionId);
   retryAcceptedActivation(sessionId);
   // Do not allocate another error report while recovering from allocation
   // failure. Durable accepted state remains queryable and the worker retries.
+}
+
+// An attempt that unwound on allocation failure no longer runs. Left marked
+// running, it would make every storage-worker retry wait for it. Short fixed
+// text stays within string small-buffer storage, so this cannot allocate.
+void MapTransferHttpServer::finishUnwoundActivation(
+    const std::string &sessionId) noexcept {
+  StateGuard guard(*this);
+  if (activationState_.runningFor(sessionId) && !pendingRendererAcknowledgement_)
+    activationState_.finish("recovering", "", "out_of_memory", "");
 }
 
 bool MapTransferHttpServer::runStreamActivationTask(
@@ -2489,9 +2580,11 @@ bool MapTransferHttpServer::runStreamActivationTask(
   const auto onRecovery = [](void *context, const char *code) {
     static_cast<MapTransferHttpServer *>(context)->rememberOwnerRecovery(code);
   };
+  installer_.clearStorageWriteFailure();
   InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress,
       internalOwner ? +onRecovery : nullptr, this);
   if (!activated.ok) {
+    recordStorageWriteFailure(activated.code.c_str());
     if (internalOwner) rememberOwnerRecovery(activated.code.c_str());
     finishActivation("recovering", "", activated.code, activated.message);
     return false;
