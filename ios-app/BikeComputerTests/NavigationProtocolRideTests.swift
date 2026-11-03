@@ -769,16 +769,20 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceSoundProtocol() {
-        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 5], "the picker omits the retired rotating-bell sound ID")
-        assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1], "the picker offers only the bell ding; the horn and rotating-bell IDs are retired")
+        assertEqual(DeviceSound.defaultSelection, .bellDing, "bell ding is the default sound")
+        assertEqual(DeviceSound.selectable(.bellDing), .bellDing, "the offered sound stays selectable")
+        assertEqual(DeviceSound.selectable(.plasticBicycleHorn), .bellDing, "the retired bicycle horn falls back to the default")
+        assertEqual(DeviceSound.selectable(.squeezeHorn), .bellDing, "the retired squeeze horn falls back to the default")
+        assertEqual(DeviceSound.selectable(.rotatingBicycleBell), .bellDing, "the retired rotating bell falls back to the default")
         assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
 
-        let defaultPacket = DeviceSound.plasticBicycleHorn.playPacket(volumePercent: .nan)
+        let defaultPacket = DeviceSound.bellDing.playPacket(volumePercent: .nan)
         assertEqual(String(data: defaultPacket.prefix(4), encoding: .utf8), "SNDP", "sound packet uses SNDP prefix")
-        assertEqual(defaultPacket[4], DeviceSound.plasticBicycleHorn.rawValue, "sound packet contains sound ID")
+        assertEqual(defaultPacket[4], DeviceSound.bellDing.rawValue, "sound packet contains sound ID")
         assertEqual(defaultPacket[5], 70, "non-finite volume falls back to the default")
         assertEqual(DeviceSound.bellDing.playPacket(volumePercent: -1)[5], 0, "sound volume clamps below zero")
-        assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
+        assertEqual(DeviceSound.bellDing.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
 
         let honkPacket = DeviceSound.rotatingBicycleBell.powerButtonHonkPacket(
             enabled: true,
@@ -791,7 +795,7 @@ extension NavigationProtocolTests {
         assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[4], 0, "PWR honk packet contains disabled state")
         assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[6], 100, "PWR honk volume clamps above 100")
 
-        let trackedHonkPacket = DeviceSound.squeezeHorn.powerButtonHonkPacket(
+        let trackedHonkPacket = DeviceSound.bellDing.powerButtonHonkPacket(
             enabled: true,
             volumePercent: 80,
             requestID: 0xA1B2C3D4
@@ -800,7 +804,7 @@ extension NavigationProtocolTests {
         assertEqual(readUInt32LE(trackedHonkPacket, offset: 4), 0xA1B2C3D4,
                     "tracked PWR honk packet stores the request ID little-endian")
         assertEqual(trackedHonkPacket[8], 1, "tracked PWR honk packet contains enabled state")
-        assertEqual(trackedHonkPacket[9], DeviceSound.squeezeHorn.rawValue,
+        assertEqual(trackedHonkPacket[9], DeviceSound.bellDing.rawValue,
                     "tracked PWR honk packet contains sound ID")
         assertEqual(trackedHonkPacket[10], 80, "tracked PWR honk packet contains volume")
     }
@@ -1102,8 +1106,8 @@ extension NavigationProtocolTests {
                "versioned CAPS configuration should be consumed")
         assert(manager.isPowerButtonHonkEnabled,
                "versioned CAPS restores the device-persisted PWR state")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
-                    "versioned CAPS restores the device-persisted sound")
+        assertEqual(manager.selectedDeviceSound, .bellDing,
+                    "a device-persisted retired sound falls back to the bell ding, which the app then re-applies")
         assertEqual(manager.deviceSoundVolumePercent, 65,
                     "versioned CAPS restores the device-persisted volume")
 
@@ -1596,7 +1600,7 @@ extension NavigationProtocolTests {
         manager.isConnected = true
         manager.isNavigationReady = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 55
 
         var sentPackets: [Data] = []
@@ -1629,7 +1633,7 @@ extension NavigationProtocolTests {
                "versioned capability response should be consumed during an in-flight update")
         assert(manager.isPowerButtonHonkEnabled,
                "an in-flight local update wins over an older device snapshot")
-        assertEqual(manager.selectedDeviceSound, .squeezeHorn,
+        assertEqual(manager.selectedDeviceSound, .bellDing,
                     "an older device snapshot does not replace the pending sound")
         assertEqual(manager.deviceSoundVolumePercent, 55,
                     "an older device snapshot does not replace the pending volume")
@@ -1657,8 +1661,8 @@ extension NavigationProtocolTests {
                     "device-authoritative capability state is not written back")
         assert(manager.isPowerButtonHonkEnabled,
                "device-authoritative capability state remains enabled")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
-                    "device-authoritative capability state selects the device sound")
+        assertEqual(manager.selectedDeviceSound, .bellDing,
+                    "device-authoritative capability state with a retired sound falls back to the bell ding")
 
         let disabledDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
@@ -1666,7 +1670,7 @@ extension NavigationProtocolTests {
                "disabled device configuration should still restore the toggle")
         assert(!manager.isPowerButtonHonkEnabled,
                "disabled device configuration restores the disabled PWR state")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+        assertEqual(manager.selectedDeviceSound, .bellDing,
                     "dormant PWR configuration does not replace the map-button sound")
         assertEqual(manager.deviceSoundVolumePercent, 60,
                     "dormant PWR configuration does not replace the map-button volume")
@@ -4077,16 +4081,16 @@ extension NavigationProtocolTests {
             write: { sentPackets.append($0) }
         ))
 
-        assert(!manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+        assert(!manager.playDeviceSound(.bellDing, volumePercent: 62),
                "sound playback rejects devices without the negotiated capability")
         assertEqual(sentPackets.count, 0, "unsupported devices receive no sound packet")
 
         manager.supportsDeviceSounds = true
-        assert(manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+        assert(manager.playDeviceSound(.bellDing, volumePercent: 62),
                "sound playback queues when BLE is ready and capability is present")
         assertEqual(sentPackets.count, 1, "sound playback sends one route-equivalent fallback packet")
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDP", "fallback packet uses SNDP prefix")
-        assertEqual(sentPackets[0][4], DeviceSound.squeezeHorn.rawValue, "fallback packet includes selected sound")
+        assertEqual(sentPackets[0][4], DeviceSound.bellDing.rawValue, "fallback packet includes selected sound")
         assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
     }
 
@@ -4132,21 +4136,21 @@ extension NavigationProtocolTests {
 
         manager.supportsPowerButtonHonk = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .plasticBicycleHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(),
                "PWR honk configuration queues when BLE is ready and capability is present")
         assertEqual(sentPackets.count, 1, "PWR honk configuration sends one fallback packet")
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH", "PWR honk fallback uses SNDH prefix")
         assertEqual(sentPackets[0][4], 1, "PWR honk fallback includes enabled state")
-        assertEqual(sentPackets[0][5], DeviceSound.plasticBicycleHorn.rawValue, "PWR honk fallback includes selected sound")
+        assertEqual(sentPackets[0][5], DeviceSound.bellDing.rawValue, "PWR honk fallback includes selected sound")
         assertEqual(sentPackets[0][6], 75, "PWR honk fallback includes selected volume")
 
         var legacyFailedStatus = Data(DeviceBLEProtocol.powerButtonHonkStatusPrefix.utf8)
         legacyFailedStatus.append(contentsOf: [
             0,
             1,
-            DeviceSound.plasticBicycleHorn.rawValue,
+            DeviceSound.bellDing.rawValue,
             75
         ])
         assert(manager.handlePowerButtonHonkStatusNotification(legacyFailedStatus),
@@ -4221,11 +4225,12 @@ extension NavigationProtocolTests {
 
         sentPackets.removeAll()
         manager.selectedDeviceSound = .bellDing
+        manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(), "first A configuration should send")
         let firstA = sentPackets.last!
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.deviceSoundVolumePercent = 40
         assert(manager.sendPowerButtonHonkConfiguration(), "intervening B configuration should send")
-        manager.selectedDeviceSound = .bellDing
+        manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(), "second A configuration should send")
         let secondA = sentPackets.last!
         assert(readUInt32LE(firstA, offset: 4) != readUInt32LE(secondA, offset: 4),
@@ -4266,7 +4271,7 @@ extension NavigationProtocolTests {
         manager.supportsPowerButtonHonk = true
         manager.supportsPowerButtonHonkAcknowledgement = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 65
         manager.installPowerButtonHonkRetryTiming(
             ackTimeout: 0.02,
@@ -8342,31 +8347,33 @@ extension NavigationProtocolTests {
 
         let freshManager = BLEManager()
         assert(!freshManager.deviceSoundsEnabled, "fresh installs leave device sounds disabled")
-        assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
+        assertEqual(freshManager.selectedDeviceSound, .bellDing, "fresh installs use the bell ding")
         assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
         assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
         freshManager.deviceSoundsEnabled = true
-        freshManager.selectedDeviceSound = .squeezeHorn
+        freshManager.selectedDeviceSound = .bellDing
         freshManager.deviceSoundVolumePercent = 65
         freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
         assert(reloaded.deviceSoundsEnabled, "device sounds enabled state persists")
-        assertEqual(reloaded.selectedDeviceSound, .squeezeHorn, "selected sound persists")
+        assertEqual(reloaded.selectedDeviceSound, .bellDing, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
         assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
 
-        defaults.set(3, forKey: soundKey)
-        let retiredValue = BLEManager()
-        assertEqual(retiredValue.selectedDeviceSound, .plasticBicycleHorn,
-                    "the retired rotating-bell ID migrates to the default horn")
+        for retiredSoundID in [2, 3, 5] {
+            defaults.set(retiredSoundID, forKey: soundKey)
+            let retiredValue = BLEManager()
+            assertEqual(retiredValue.selectedDeviceSound, .bellDing,
+                        "the retired sound ID \(retiredSoundID) migrates to the bell ding")
+        }
 
         defaults.set(4, forKey: soundKey)
         defaults.set(Double.nan, forKey: volumeKey)
         let invalidValues = BLEManager()
-        assertEqual(invalidValues.selectedDeviceSound, .plasticBicycleHorn, "unknown sound IDs fall back safely")
+        assertEqual(invalidValues.selectedDeviceSound, .bellDing, "unknown sound IDs fall back safely")
         assertEqual(invalidValues.deviceSoundVolumePercent, 70, "non-finite persisted volume falls back safely")
 
         defaults.removeObject(forKey: deviceSoundsEnabledKey)
