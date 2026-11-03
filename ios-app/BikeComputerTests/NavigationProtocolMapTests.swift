@@ -5892,6 +5892,14 @@ extension NavigationProtocolTests {
             .pending,
             "matching device activation blocks a redundant archive upload"
         )
+        assertEqual(CachedPackRecoveryDecision.evaluate(
+            expectedSessionId: "session-new", activeSessionId: "session-old",
+            activationStatus: "recovering", activationSessionId: "session-new"
+        ), .pending, "a device retrying this session blocks a redundant archive upload")
+        assertEqual(ExistingMapStreamAttemptDisposition.evaluate(
+            expectedSessionID: "session-new", activeSessionID: "session-old",
+            activationStatus: "recovering", activationSessionID: "session-new"
+        ), .awaitDevice, "a device retrying this session is awaited instead of sent the map again")
         assertEqual(
             CachedPackRecoveryDecision.evaluate(
                 expectedSessionId: "session-new",
@@ -6192,6 +6200,31 @@ extension NavigationProtocolTests {
                     .installed, "activation sequence wrap is a forward transition")
         assertEqual(evaluate(acceptedSequence: 9, activationSequence: 8).decision,
                     .pending("installed"), "another acknowledged attempt cannot complete this operation")
+        assertEqual(evaluate(acceptedSequence: 8, activationStatus: "recovering", activationSequence: 8).decision,
+                    .pending("recovering"), "the device keeps an acknowledged attempt between its retries")
+        assertEqual(evaluate(acceptedSequence: 8, activationSequence: 9).decision, .installed,
+                    "a device retry of the acknowledged attempt completes it under the next sequence")
+        assertEqual(evaluate(previousSequence: nil, acceptedSequence: 8, activationStatus: "failed",
+                             activationSequence: 10, activationError: "activation_retry_limit").decision,
+                    .failed("activation_retry_limit"),
+                    "the device's last retry ends the acknowledged attempt without a pre-upload sequence")
+        assertEqual(evaluate(previousSequence: 9, acceptedSequence: 8, activationSequence: 9).decision,
+                    .pending("installed"), "a status from before the upload never completes a later attempt")
+        for status in ["receiving", "paused", "finalizing", "ready", "idle", "prepared", "failed", nil] as [String?] {
+            assertEqual(MapActivationReconciler.attemptSequence(status: status, sequence: 1), nil,
+                        "stream reception numbers its own sequence and shares some status words")
+        }
+        assertEqual(MapActivationReconciler.attemptSequence(status: "recovering", sequence: 9), 9,
+                    "an activation status binds an upload taken over mid-way to its attempt")
+        assertEqual(evaluate(previousSequence: nil, acceptedSequence: nil, activationStatus: "failed",
+                             activationSequence: 9, activationError: "activation_retry_limit").decision,
+                    .pending("failed"), "a result left from before an upload taken over mid-way cannot end it")
+        let managerURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputer/Managers/OfflineMapManager.swift")
+        let managerSource = try! String(contentsOf: managerURL, encoding: .utf8)
+        assert(managerSource.contains("previousSequence: attemptSequence,") &&
+               managerSource.contains("Int(attemptSequence),"),
+               "an upload taken over mid-way keeps only an activation sequence as its baseline")
         assertEqual(evaluate(activationSequence: 8, activationSessionId: "foreign-session").decision,
                     .pending("active map is map-1; waiting for current activation"),
                     "another content session cannot complete this operation")
@@ -6510,6 +6543,132 @@ extension NavigationProtocolTests {
             assert(false, "a rotated token during HTTP status await cannot complete activation")
         }
         assert(bleManager.mapTransferActiveMapId != "stale-map", "late old-token HTTP status cannot overwrite BLE state")
+    }
+
+    static func testMapActivationConfirmationFollowsDeviceRetries() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        let defaults = UserDefaults(suiteName: "map-retry-confirmation-\(UUID().uuidString)")!
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.setConnectedDeviceIDForTesting("map-test-device")
+        bleManager.deviceTransferSessionToken = "map-test-token"
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+        let clock = TestClock()
+        let advancePollClock: (UInt64) async throws -> Void = { nanoseconds in
+            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+        }
+        // Each device retry starts under the next sequence; the last status repeats.
+        var statusRequests = 0
+        func serve(_ activations: [String]) {
+            statusRequests = 0
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                let activation = activations[min(statusRequests, activations.count - 1)]
+                statusRequests += 1
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data("{\"activeMapId\":\"old-map\",\"activation\":\(activation)}".utf8))
+            }
+        }
+        func confirm() async -> (MapActivationConfirmationResult?, Error?) {
+            var confirmation: MapActivationConfirmationResult?
+            var failure: Error?
+            await runMainActorAsyncTest {
+                do {
+                    confirmation = try await manager.confirmActivatedMap(
+                        expectedMapId: "map-1", sessionId: "session-1",
+                        previousMapId: "old-map", previousSessionId: "old-session",
+                        previousSequence: 7, acceptedSequence: 8,
+                        client: client, bleManager: bleManager,
+                        timeout: 0.2, pollIntervalNanoseconds: 1_000_000,
+                        now: clock.now, sleep: advancePollClock)
+                } catch {
+                    failure = error
+                }
+            }
+            return (confirmation, failure)
+        }
+        let firstAttempt = """
+        {"status":"activating","sequence":8,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":40}
+        """
+        let betweenAttempts = """
+        {"status":"recovering","sequence":8,"sessionId":"session-1","step":3,"steps":3,"progress":40,"error":{"code":"stream_active_write","message":"active map pointer write failed"}}
+        """
+
+        serve([firstAttempt, betweenAttempts,
+               #"{"status":"activating","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":0}"#,
+               #"{"status":"installed","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":100}"#])
+        let retried = await confirm()
+        assertEqual(retried.0, .installed, "a device retry that installs the map completes the confirmation")
+        assert(retried.1 == nil, "the failed first attempt is not reported while the device retries")
+        assertEqual(statusRequests, 4, "confirmation waits through the retry before reporting")
+
+        serve([firstAttempt, betweenAttempts,
+               #"{"status":"activating","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":0}"#,
+               #"{"status":"failed","sequence":9,"sessionId":"session-1","mapId":"map-1","error":{"code":"activation_retry_limit","message":"map activation kept failing; upload the map again"}}"#])
+        let exhausted = await confirm()
+        assert(exhausted.0 == nil, "the device's retry limit is not reported as installed or still running")
+        assertEqual(exhausted.1?.localizedDescription,
+                    "The Bike Computer could not install this map after several tries. Upload it again.",
+                    "the retry limit reads as a request to upload again")
+
+        // Without Wi-Fi status the loop reads BLE, whose compact status carries codes without messages.
+        FirmwareRequestCaptureProtocol.handler = { _, _ in throw URLError(.timedOut) }
+        func confirmOverBLE(_ activations: [String]) async -> (MapActivationConfirmationResult?, Error?) {
+            var pending = activations.map { activation in
+                try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+                    from: Data("{\"activeMapId\":\"old-map\",\"activation\":\(activation)}".utf8))
+            }
+            bleManager.applyAuthenticatedMapTransferStatus(pending.removeFirst())
+            var confirmation: MapActivationConfirmationResult?
+            var failure: Error?
+            await runMainActorAsyncTest {
+                do {
+                    confirmation = try await manager.confirmActivatedMap(
+                        expectedMapId: "map-1", sessionId: "session-1",
+                        previousMapId: "old-map", previousSessionId: "old-session",
+                        previousSequence: 7, acceptedSequence: 8,
+                        client: client, bleManager: bleManager,
+                        timeout: 0.2, pollIntervalNanoseconds: 1_000_000,
+                        now: clock.now, sleep: { nanoseconds in
+                            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+                            guard !pending.isEmpty else { return }
+                            let next = pending.removeFirst()
+                            await MainActor.run { bleManager.applyAuthenticatedMapTransferStatus(next) }
+                        })
+                } catch {
+                    failure = error
+                }
+            }
+            return (confirmation, failure)
+        }
+        let bleBetweenAttempts = #"{"status":"recovering","sequence":8,"sessionId":"session-1","error":{"code":"stream_active_write"}}"#
+        let bleRetried = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"installed","sequence":9,"sessionId":"session-1","mapId":"map-1","terminalCode":"installed"}"#])
+        assertEqual(bleRetried.0, .installed, "BLE status confirms a device retry that installs the map")
+        let bleExhausted = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"failed","sequence":9,"sessionId":"session-1","mapId":"map-1","error":{"code":"activation_retry_limit"},"terminalCode":"activation_retry_limit"}"#])
+        assertEqual(bleExhausted.1?.localizedDescription,
+                    "The Bike Computer could not install this map after several tries. Upload it again.",
+                    "BLE status reports the retry limit by its code alone")
+
+        for failure in ["activation_retry_limit", "activation_retry_limit: map activation kept failing; upload the map again"] {
+            assertEqual(OfflineMapPlatformError.mapActivationFailed(failure).localizedDescription,
+                        "The Bike Computer could not install this map after several tries. Upload it again.",
+                        "BLE status reports the retry limit by code, with or without its message")
+        }
+        assertEqual(OfflineMapPlatformError.mapActivationFailed("file_sha256").localizedDescription,
+                    "Map activation failed: file_sha256", "other device failures keep their code")
+        assertEqual(MapActivationFailureText.statusFailure(code: "file_sha256", message: "sha mismatch"),
+                    "sha mismatch", "HTTPS status keeps the device's own message for other failures")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {

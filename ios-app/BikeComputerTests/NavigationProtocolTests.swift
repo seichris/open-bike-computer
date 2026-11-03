@@ -1202,6 +1202,7 @@ struct NavigationProtocolTests {
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
         await testMapActivationConfirmationOrchestration()
+        await testMapActivationConfirmationFollowsDeviceRetries()
         testDeviceMapLibrary()
         await testDeviceMapLibraryCommandDelivery()
         testMapTransferDeviceStatusDecodesActivationFailure()
