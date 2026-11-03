@@ -156,7 +156,71 @@ int main() {
                             str(path / "test.cpp"), "-o", str(path / "test")], check=True)
             subprocess.run([str(path / "test")], check=True)
 
-    def test_boot_resume_reserves_bounded_retries_for_selected_roots(self):
+    def test_boot_and_upload_admission_skip_a_finished_selection_marker(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        # Boot used to resume these markers: a previous map's activation can
+        # never finish, refused uploads meanwhile and could select it again.
+        for body in (method(source, "resumePendingActivations", returns="void "),
+                     method(source, "handleInstallStream")):
+            self.assertIn("readPendingStreamInstall(", body)
+            self.assertNotIn("readRecoverableMapStreamInstall(", body)
+        self.assertEqual(source.count("readRecoverableMapStreamInstall("), 1)
+        helper = method(source, "readPendingStreamInstall", returns="MapStreamRecoveryResult ")
+        fixture = r'''
+#include <cassert>
+#include <functional>
+#include <string>
+#include <vector>
+enum class MapStreamRecoveryResult { None, Found };
+struct MapStreamInstallSnapshot { std::string sessionId, signedManifestReceipt; };
+std::vector<MapStreamInstallSnapshot> readyRoots;
+MapStreamRecoveryResult readRecoverableMapStreamInstall(
+    const std::string &, MapStreamInstallSnapshot &snapshot,
+    const std::function<bool(const MapStreamInstallSnapshot &)> &skipReady) {
+  for (const auto &ready : readyRoots)
+    if (!skipReady(ready)) { snapshot = ready; return MapStreamRecoveryResult::Found; }
+  return MapStreamRecoveryResult::None;
+}
+struct Status { bool ok; };
+struct ActiveMapSelection { std::string root, previousRoot, signedManifestReceipt; };
+class MapTransferHttpServer {
+public:
+  struct Installer {
+    ActiveMapSelection selection{"/VECTMAP/.maps/selected", "/VECTMAP/.maps/previous", "installed"};
+    bool known = true;
+    Status readActiveMap(ActiveMapSelection &out) const { out = selection; return {known}; }
+  } installer_;
+  std::string storageRoot_ = "/sd";
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &snapshot) const;
+};
+''' + helper + r'''
+int main() {
+  MapTransferHttpServer server;
+  MapStreamInstallSnapshot found;
+  // A finished selection's marker, or the previous map's, is not pending work.
+  readyRoots = {{"selected", "installed"}, {"previous", "older"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::None);
+  // A version the pointer names that never finished, and any other map, are.
+  readyRoots = {{"selected", "newer"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found &&
+         found.sessionId == "selected");
+  readyRoots = {{"previous", "older"}, {"other", "other"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found &&
+         found.sessionId == "other");
+  // An unreadable selection skips nothing.
+  server.installer_.known = false;
+  readyRoots = {{"previous", "older"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found);
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="pending-stream-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
+    def test_every_legacy_resume_reserves_bounded_retries(self):
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
         resume = method(source, "resumePendingStreamActivation")
         fixture = r'''
@@ -213,6 +277,9 @@ public:
   void updateStreamInstallState(const MapStreamInstallSnapshot &, bool) {}
   bool startActivationTask(const std::string &, bool) { return taskStarts; }
   void retryAcceptedActivation(const std::string &) { ++retries; }
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &) const {
+    return MapStreamRecoveryResult::None;
+  }
   bool resumePendingStreamActivation(const MapStreamInstallSnapshot *recovered);
 };
 ''' + resume + r'''
@@ -220,10 +287,9 @@ int main() {
   MapStreamInstallSnapshot snapshot{"ready-session", MapStreamInstallState::Ready, 4};
   const ActiveMapSelection selections[] = {
       {"/VECTMAP/.maps/other", ""},
-      // A consumed-marker write that failed leaves a ready marker on the
-      // selected (or previous) root, which boot then resumes.
-      {"/VECTMAP/.maps/ready-session", ""},
-      {"/VECTMAP/.maps/other", "/VECTMAP/.maps/ready-session"}};
+      // Boot skips a finished selection's marker, so a root the pointer names
+      // arrives here only as a version that never finished.
+      {"/VECTMAP/.maps/ready-session", ""}};
   for (const auto &selection : selections) {
     MapTransferHttpServer server;
     server.installer_.selection = selection;

@@ -289,6 +289,7 @@ private:
                                 bool active);
   bool streamStoragePathAccessible() const;
   bool streamStoragePathWritable() const;
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &snapshot) const;
   bool resumePendingStreamActivation(
       const MapStreamInstallSnapshot *recovered = nullptr);
   static void activationTaskThunk(void *arg);
