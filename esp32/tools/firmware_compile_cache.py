@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import struct
 import tempfile
@@ -49,6 +50,40 @@ STACK_PROTECTED_LIBRARIES = frozenset({
 STACK_PROTECTOR_FLAGS = ("-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all")
 COMPILED_SUFFIXES = (".c", ".cc", ".cpp", ".cxx")
 
+# PlatformIO builds each library below .pio/build/<env>/lib<hash>/<name>/.
+_BUILD_LIBRARY_DIR = re.compile(r"^lib[0-9a-f]{3}$")
+
+
+def library_name(parts) -> str | None:
+    """The library a path belongs to, from its directory under a library root.
+
+    Accepts a source path relative to the project (`lib/<name>/…`, the
+    dependency store's `…/libdeps/<env>/<name>/…`, the framework's
+    `…/libraries/<name>/…`) or an object path relative to the build directory
+    (`lib<hash>/<name>/…`, or the mirrored framework `…/libraries/<name>/…`).
+    Project sources and the Arduino core belong to no library. Only the
+    component directly under the root counts, so a checkout living under a
+    directory that happens to carry a library's name can never match.
+    """
+    parts = tuple(parts)
+    for index, part in enumerate(parts[:-1]):
+        if index == 0 and part == "lib":
+            return parts[1]
+        if _BUILD_LIBRARY_DIR.match(part) or part == "libraries":
+            return parts[index + 1]
+        if part == "libdeps" and index + 2 < len(parts):
+            return parts[index + 2]
+    return None
+
+
+def source_library(source: Path, project: Path) -> str | None:
+    """`library_name` for an absolute source path below `project`."""
+    try:
+        parts = source.relative_to(project).parts
+    except ValueError:
+        parts = source.parts
+    return library_name(parts)
+
 
 def _flag_list(build_env, variable: str) -> list:
     flags = build_env.get(variable)
@@ -57,12 +92,13 @@ def _flag_list(build_env, variable: str) -> list:
     return list(flags) if isinstance(flags, Iterable) else []
 
 
-def object_overrides(build_env, source: Path) -> dict:
-    """Per-object construction variable overrides for `source`."""
+def object_overrides(build_env, source: Path, project: Path) -> dict:
+    """Per-object construction variable overrides for `source` below `project`."""
     if source.suffix.lower() not in COMPILED_SUFFIXES:
         return {}
-    no_exceptions = source.suffix == ".cpp" and not NO_EXCEPTION_LIBRARIES.isdisjoint(source.parts)
-    no_stack_protector = STACK_PROTECTED_LIBRARIES.isdisjoint(source.parts)
+    library = source_library(source, project)
+    no_exceptions = source.suffix == ".cpp" and library in NO_EXCEPTION_LIBRARIES
+    no_stack_protector = library not in STACK_PROTECTED_LIBRARIES
     if not no_exceptions and not no_stack_protector:
         return {}
     # SCons expands $CXXFLAGS before $CCFLAGS and GCC honours the last switch,
@@ -209,8 +245,8 @@ def verify_stack_protector_scope(build_dir: Path, protected: Iterable[str] = STA
     offenders = []
     unprotected = 0
     for path in sorted(build_dir.rglob("*.o")):
-        parts = path.relative_to(build_dir).parts
-        library = next((part for part in parts if part in protected), None)
+        name = library_name(path.relative_to(build_dir).parts)
+        library = name if name in protected else None
         guarded = not STACK_PROTECTOR_SYMBOLS.isdisjoint(elf_undefined_symbols(path))
         if library is None:
             unprotected += 1
@@ -353,12 +389,12 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
     def metadata_object(build_env, node):
         source = Path(node.srcnode().get_abspath())
         if source != project / "lib/firmware_metadata/firmware_metadata.cpp":
-            result = build_env.Object(node, **object_overrides(build_env, source))
+            result = build_env.Object(node, **object_overrides(build_env, source, project))
             build_env.Depends(result, inputs_for(build_env))
             return result[0]
         identity_env = build_env.Clone()
         identity_env.Append(CCFLAGS=["-include", str(header)])
-        result = identity_env.Object(node, **object_overrides(identity_env, source))
+        result = identity_env.Object(node, **object_overrides(identity_env, source, project))
         identity_env.Depends(result, inputs_for(identity_env))
         identity_env.Depends(result, str(header))
         return result[0]

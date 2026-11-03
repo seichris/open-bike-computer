@@ -13,6 +13,7 @@ from firmware_compile_cache import (
     configure_metadata_identity,
     elf_section_names,
     elf_undefined_symbols,
+    library_name,
     object_overrides,
     relocate_core_text,
     verify_no_exception_objects,
@@ -129,24 +130,43 @@ class FirmwareCompileCacheTests(unittest.TestCase):
                     "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fexceptions", "-fno-stack-protector"],
                 }, relative)
 
+    def test_library_identity_comes_from_the_library_root_only(self):
+        store = ".pio/open-bike-build/platformio/ENV"
+        self.assertEqual(library_name(("lib", "map_transfer", "map_transfer.cpp")), "map_transfer")
+        self.assertEqual(library_name((*store.split("/"), "libdeps", "ENV", "NimBLE-Arduino", "src", "NimBLEDevice.cpp")), "NimBLE-Arduino")
+        self.assertEqual(library_name((*store.split("/"), "packages", "framework-arduinoespressif32", "libraries", "WiFi", "src", "WiFi.cpp")), "WiFi")
+        self.assertEqual(library_name(("lib306", "GFX Library for Arduino", "display", "Arduino_CO5300.cpp.o")), "GFX Library for Arduino")
+        self.assertEqual(library_name((".pio", "open-bike-build", "platformio", "ENV", "packages", "framework-arduinoespressif32", "libraries", "Network", "src", "NetworkClient.cpp.o")), "Network")
+        for parts in (("src", "main.cpp"), ("src", "main.cpp.o"), ("FrameworkArduino", "HardwareSerial.cpp.o"),
+                      (*store.split("/"), "packages", "framework-arduinoespressif32", "cores", "esp32", "Esp.cpp"),
+                      ("maps", "lib"), ("lib",)):
+            self.assertIsNone(library_name(parts), parts)
+
     def test_stack_protector_stays_on_input_parsing_libraries_only(self):
         env = Mock()
         flags = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fstack-protector"]}
         env.get.side_effect = lambda name, default=None: flags.get(name, default)
-        project = Path("/project")
+        # The checkout lives under directories named after protected libraries;
+        # those ancestors must never make an object count as protected.
+        project = Path("/srv/maps/WiFi/project")
+        store = project / ".pio/open-bike-build/platformio/ENV"
         for library in STACK_PROTECTED_LIBRARIES:
-            self.assertEqual(object_overrides(env, project / "lib" / library / "src/parser.cpp"), {}, library)
-            self.assertEqual(object_overrides(env, project / "libdeps/ENV" / library / "src/host.c"), {}, library)
+            self.assertEqual(object_overrides(env, project / "lib" / library / "src/parser.cpp", project), {}, library)
+            self.assertEqual(object_overrides(env, store / "libdeps/ENV" / library / "src/host.c", project), {}, library)
+            self.assertEqual(object_overrides(env, store / "packages/framework-arduinoespressif32/libraries" / library / "src/lib.cpp", project), {}, library)
         without = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fno-stack-protector"]}
-        for source in ("src/main.cpp", "lib/gui/src/mainScr.cpp", "lib/power/power.c", "cores/esp32/HardwareSerial.cpp", "lib/images/src/navup.c"):
-            self.assertEqual(object_overrides(env, project / source), without, source)
+        for source in ("src/main.cpp", "lib/gui/src/mainScr.cpp", "lib/power/power.c", "lib/images/src/navup.c",
+                       ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/cores/esp32/HardwareSerial.cpp",
+                       ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.cpp"):
+            self.assertEqual(object_overrides(env, project / source, project), without, source)
         # Assembly sources and headers are left alone.
         for source in ("src/https_server.crt.S", "lib/gui/src/gui.h"):
-            self.assertEqual(object_overrides(env, project / source), {}, source)
+            self.assertEqual(object_overrides(env, project / source, project), {}, source)
 
     def test_stack_protector_scope_is_verified_from_symbol_tables(self):
         with tempfile.TemporaryDirectory() as directory:
-            build_dir = Path(directory).resolve()
+            # The build directory sits under a directory named like a protected library.
+            build_dir = Path(directory).resolve() / "maps" / ".pio/build/WAVESHARE_AMOLED_175_PRODUCTION"
             with self.assertRaisesRegex(RuntimeError, "without any built object"):
                 verify_stack_protector_scope(build_dir)
             for library in STACK_PROTECTED_LIBRARIES:
@@ -155,12 +175,16 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             write_elf_object(build_dir / "src/main.cpp.o", (".text",), ("memcpy",))
             write_elf_object(build_dir / "FrameworkArduino/HardwareSerial.cpp.o", (".text",))
             write_elf_object(build_dir / "lib306/GFX Library for Arduino/Arduino_GFX.cpp.o", (".text",))
+            # Framework libraries are mirrored under their package path in the build directory.
+            framework = build_dir / ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/libraries"
+            write_elf_object(framework / "Wire/src/Wire.cpp.o", (".text",))
+            write_elf_object(framework / "WiFi/src/WiFi.cpp.o", (".text",), ("__stack_chk_fail",))
             counts = verify_stack_protector_scope(build_dir)
             self.assertEqual(counts, {
                 "protectedLibraries": len(STACK_PROTECTED_LIBRARIES),
-                "protectedObjects": 2 * len(STACK_PROTECTED_LIBRARIES),
-                "guardedObjects": len(STACK_PROTECTED_LIBRARIES),
-                "unprotectedObjects": 3,
+                "protectedObjects": 2 * len(STACK_PROTECTED_LIBRARIES) + 1,
+                "guardedObjects": len(STACK_PROTECTED_LIBRARIES) + 1,
+                "unprotectedObjects": 4,
             })
             self.assertEqual(sorted(elf_undefined_symbols(build_dir / "lib0a1/gpx/gpx.cpp.o")), ["__stack_chk_fail", "__stack_chk_guard"])
             # An unprotected object that still imports the canary fails the build.
