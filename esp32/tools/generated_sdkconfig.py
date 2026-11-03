@@ -1026,12 +1026,15 @@ CORE_ARCHIVE_FREE_MARGIN = 256 * 1024 * 1024
 def _core_archive_bytes(project_dir: Path, environment: str) -> int:
     """Bytes the core archive will occupy, before it is written.
 
-    Every member costs a PAX header block pair plus its data rounded up to the
-    tar block size; the walk is the one the writer performs, so a root that is
-    missing fails here with the writer's message.
+    Mirrors the writer: every member costs a ustar header block, a name or
+    link target longer than the 100-byte ustar field adds a PAX extended header
+    and its record block (most members of a PlatformIO store do), and regular
+    files add their data rounded up to the tar block size. The walk is the
+    writer's, so a missing root fails here with the writer's message. On the
+    1.75 production store this reproduces the archive to within the trailer.
     """
     total = 0
-    for _, root, required in _core_artifact_roots(project_dir, environment):
+    for logical_root, root, required in _core_artifact_roots(project_dir, environment):
         if not os.path.lexists(root):
             if required:
                 raise GeneratedSdkconfigError(
@@ -1039,11 +1042,21 @@ def _core_archive_bytes(project_dir: Path, environment: str) -> int:
                 )
             continue
         for path in _walk_archive_tree(root):
+            relative = path.relative_to(root).as_posix()
+            name = logical_root if relative == "." else f"{logical_root}/{relative}"
             metadata = path.lstat()
-            total += 1024
+            total += 512
+            if len(name.encode("utf-8")) > 100:
+                total += 1024
             if stat.S_ISREG(metadata.st_mode):
                 total += metadata.st_size + (-metadata.st_size % 512)
-    return total
+            elif (
+                stat.S_ISLNK(metadata.st_mode)
+                and len(_archive_linkname(project_dir, path).encode("utf-8")) > 100
+            ):
+                total += 1024
+    # Two end-of-archive blocks and the final record padding.
+    return total + 64 * 1024
 
 
 def _require_core_archive_space(
