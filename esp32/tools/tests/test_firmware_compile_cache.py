@@ -9,10 +9,14 @@ from unittest.mock import Mock
 
 from build_firmware import _application_build_cache_identity
 from firmware_compile_cache import (
+    STACK_PROTECTED_LIBRARIES,
     configure_metadata_identity,
     elf_section_names,
+    elf_undefined_symbols,
+    object_overrides,
     relocate_core_text,
     verify_no_exception_objects,
+    verify_stack_protector_scope,
 )
 if __package__:
     from .elf_fixtures import write_elf_object
@@ -94,7 +98,7 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             env.subst.side_effect = lambda value: substitutions.get(value, value)
             flags = {
                 "CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"],
-                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fexceptions"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fstack-protector", "-fexceptions"],
             }
             env.get.side_effect = lambda name, default=None: flags.get(name, default)
             configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
@@ -104,17 +108,74 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             gfx = Mock()
             gfx.srcnode.return_value.get_abspath.return_value = str(libdeps / "GFX Library for Arduino/src/Arduino_GFX.cpp")
             self.assertIs(callback(env, gfx), env.Object.return_value[0])
-            # Both flag lists lose -fexceptions; the override goes last, after $CCFLAGS.
+            # Both flag lists lose -fexceptions; the overrides go last, after $CCFLAGS.
+            # GFX is outside the protected set, so it also loses the stack protector.
             self.assertEqual(env.Object.call_args.kwargs, {
                 "CXXFLAGS": ["-std=gnu++2b", "-fno-rtti"],
-                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fno-exceptions"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fno-exceptions", "-fno-stack-protector"],
             })
-            # Every other object, including other libraries and C sources, keeps the framework flags.
-            for relative in ("lib/gui/src/mainScr.cpp", "NimBLE-Arduino/src/NimBLEDevice.cpp", "GFX Library for Arduino/src/font.c"):
+            # A protected library keeps the framework flags untouched.
+            node = Mock()
+            node.srcnode.return_value.get_abspath.return_value = str(libdeps / "NimBLE-Arduino/src/NimBLEDevice.cpp")
+            callback(env, node)
+            self.assertEqual(env.Object.call_args.kwargs, {})
+            # Other objects keep exceptions but lose the stack protector, C sources included.
+            for relative in ("lib/gui/src/mainScr.cpp", "GFX Library for Arduino/src/font.c"):
                 node = Mock()
-                node.srcnode.return_value.get_abspath.return_value = str((libdeps if "/src/" in relative and not relative.startswith("lib/") else project) / relative)
+                node.srcnode.return_value.get_abspath.return_value = str((libdeps if not relative.startswith("lib/") else project) / relative)
                 callback(env, node)
-                self.assertEqual(env.Object.call_args.kwargs, {}, relative)
+                self.assertEqual(env.Object.call_args.kwargs, {
+                    "CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"],
+                    "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fexceptions", "-fno-stack-protector"],
+                }, relative)
+
+    def test_stack_protector_stays_on_input_parsing_libraries_only(self):
+        env = Mock()
+        flags = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fstack-protector"]}
+        env.get.side_effect = lambda name, default=None: flags.get(name, default)
+        project = Path("/project")
+        for library in STACK_PROTECTED_LIBRARIES:
+            self.assertEqual(object_overrides(env, project / "lib" / library / "src/parser.cpp"), {}, library)
+            self.assertEqual(object_overrides(env, project / "libdeps/ENV" / library / "src/host.c"), {}, library)
+        without = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fno-stack-protector"]}
+        for source in ("src/main.cpp", "lib/gui/src/mainScr.cpp", "lib/power/power.c", "cores/esp32/HardwareSerial.cpp", "lib/images/src/navup.c"):
+            self.assertEqual(object_overrides(env, project / source), without, source)
+        # Assembly sources and headers are left alone.
+        for source in ("src/https_server.crt.S", "lib/gui/src/gui.h"):
+            self.assertEqual(object_overrides(env, project / source), {}, source)
+
+    def test_stack_protector_scope_is_verified_from_symbol_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build_dir = Path(directory).resolve()
+            with self.assertRaisesRegex(RuntimeError, "without any built object"):
+                verify_stack_protector_scope(build_dir)
+            for library in STACK_PROTECTED_LIBRARIES:
+                write_elf_object(build_dir / f"lib0a1/{library}/{library}.cpp.o", (".text",), ("__stack_chk_fail", "__stack_chk_guard"))
+                write_elf_object(build_dir / f"lib0a1/{library}/helper.cpp.o", (".text",))
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",), ("memcpy",))
+            write_elf_object(build_dir / "FrameworkArduino/HardwareSerial.cpp.o", (".text",))
+            write_elf_object(build_dir / "lib306/GFX Library for Arduino/Arduino_GFX.cpp.o", (".text",))
+            counts = verify_stack_protector_scope(build_dir)
+            self.assertEqual(counts, {
+                "protectedLibraries": len(STACK_PROTECTED_LIBRARIES),
+                "protectedObjects": 2 * len(STACK_PROTECTED_LIBRARIES),
+                "guardedObjects": len(STACK_PROTECTED_LIBRARIES),
+                "unprotectedObjects": 3,
+            })
+            self.assertEqual(sorted(elf_undefined_symbols(build_dir / "lib0a1/gpx/gpx.cpp.o")), ["__stack_chk_fail", "__stack_chk_guard"])
+            # An unprotected object that still imports the canary fails the build.
+            write_elf_object(build_dir / "lib1c8/gui/mainScr.cpp.o", (".text",), ("__stack_chk_fail",))
+            with self.assertRaisesRegex(RuntimeError, r"outside the protected libraries still use the stack protector: lib1c8/gui/mainScr\.cpp\.o"):
+                verify_stack_protector_scope(build_dir)
+            (build_dir / "lib1c8/gui/mainScr.cpp.o").unlink()
+            # A protected library whose objects lost the canary fails the build.
+            write_elf_object(build_dir / "lib0a1/gpx/gpx.cpp.o", (".text",))
+            with self.assertRaisesRegex(RuntimeError, "no longer import the stack canary: gpx"):
+                verify_stack_protector_scope(build_dir)
+            # A protected library with no object at all fails the build.
+            shutil.rmtree(build_dir / "lib0a1/gpx")
+            with self.assertRaisesRegex(RuntimeError, "without any built object: gpx"):
+                verify_stack_protector_scope(build_dir)
 
     def test_no_exception_objects_are_verified_from_their_section_tables(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -161,6 +222,9 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             env.Clone.return_value.Object.return_value = [Mock()]
             self.assertIs(callback(env, metadata), env.Clone.return_value.Object.return_value[0])
             clone = env.Clone.return_value
+            # The metadata object is outside the protected set, so the identity
+            # environment also drops the stack protector.
+            self.assertEqual(clone.Object.call_args.kwargs, {"CXXFLAGS": [], "CCFLAGS": ["-fno-stack-protector"]})
             self.assertEqual(clone.Depends.call_count, 2)
             header = Path(clone.Depends.call_args.args[1])
             before = header.read_text()

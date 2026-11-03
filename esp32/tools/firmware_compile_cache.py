@@ -20,6 +20,35 @@ FORCE_INCLUDE_OPTIONS = ("-include", "-imacros")
 # directory component of the source path under the dependency store.
 NO_EXCEPTION_LIBRARIES = frozenset({"GFX Library for Arduino"})
 
+# Libraries that keep GCC's stack-smashing protector (-fstack-protector, the
+# Arduino default): everything that parses input from outside the device. The
+# map, firmware and device transfers and the HTTPS handlers, the BLE service
+# and the NimBLE host, the GPX/XML, NMEA and map-block parsers, and the Arduino
+# network glue. Every other application object, the Arduino core and the
+# remaining libraries are compiled with -fno-stack-protector: their functions
+# only ever see data the firmware produced itself, and the canary cost them
+# flash without guarding an input path. The IDF components are not built here;
+# they keep the protector through CONFIG_COMPILER_STACK_CHECK_MODE. Matched
+# against a directory component of the source path, like the set above.
+STACK_PROTECTED_LIBRARIES = frozenset({
+    "map_transfer",
+    "map_transfer_http",
+    "device_transfer",
+    "firmware_update",
+    "ride_diagnostics",
+    "ble_navigation",
+    "NimBLE-Arduino",
+    "gpx",
+    "tinyxml2",
+    "gps",
+    "maps",
+    "Network",
+    "WiFi",
+})
+
+STACK_PROTECTOR_FLAGS = ("-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all")
+COMPILED_SUFFIXES = (".c", ".cc", ".cpp", ".cxx")
+
 
 def _flag_list(build_env, variable: str) -> list:
     flags = build_env.get(variable)
@@ -30,24 +59,35 @@ def _flag_list(build_env, variable: str) -> list:
 
 def object_overrides(build_env, source: Path) -> dict:
     """Per-object construction variable overrides for `source`."""
-    if source.suffix != ".cpp" or NO_EXCEPTION_LIBRARIES.isdisjoint(source.parts):
+    if source.suffix.lower() not in COMPILED_SUFFIXES:
+        return {}
+    no_exceptions = source.suffix == ".cpp" and not NO_EXCEPTION_LIBRARIES.isdisjoint(source.parts)
+    no_stack_protector = STACK_PROTECTED_LIBRARIES.isdisjoint(source.parts)
+    if not no_exceptions and not no_stack_protector:
         return {}
     # SCons expands $CXXFLAGS before $CCFLAGS and GCC honours the last switch,
-    # so -fexceptions is removed from both lists and the override goes last.
-    # A switch arriving through a response file cannot be rewritten here;
-    # verify_no_exception_objects inspects the built objects for that case.
-    cxxflags = [flag for flag in _flag_list(build_env, "CXXFLAGS") if flag != "-fexceptions"]
-    ccflags = [flag for flag in _flag_list(build_env, "CCFLAGS") if flag != "-fexceptions"]
-    return {"CXXFLAGS": cxxflags, "CCFLAGS": ccflags + ["-fno-exceptions"]}
+    # so the framework's switches are removed from both lists and the
+    # overrides go last. A switch arriving through a response file cannot be
+    # rewritten here; the post-build checks inspect the built objects instead.
+    dropped = set()
+    appended = []
+    if no_exceptions:
+        dropped.add("-fexceptions")
+        appended.append("-fno-exceptions")
+    if no_stack_protector:
+        dropped.update(STACK_PROTECTOR_FLAGS)
+        appended.append("-fno-stack-protector")
+    cxxflags = [flag for flag in _flag_list(build_env, "CXXFLAGS") if flag not in dropped]
+    ccflags = [flag for flag in _flag_list(build_env, "CCFLAGS") if flag not in dropped]
+    return {"CXXFLAGS": cxxflags, "CCFLAGS": ccflags + appended}
 
 
 # Section names GCC emits only for code built with exception support.
 EXCEPTION_SECTIONS = (".eh_frame", ".gcc_except_table")
 
 
-def elf_section_names(path: Path) -> list[str]:
-    """Section names of a 32-bit little-endian ELF object (the Xtensa format)."""
-    data = path.read_bytes()
+def _elf_section_headers(data: bytes, path: Path) -> list[tuple]:
+    """Section headers of a 32-bit little-endian ELF object (the Xtensa format)."""
     if len(data) < 52 or data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
         raise ValueError(f"not a 32-bit little-endian ELF object: {path}")
     (section_offset,) = struct.unpack_from("<I", data, 32)
@@ -59,23 +99,53 @@ def elf_section_names(path: Path) -> list[str]:
         or section_offset + entry_size * count > len(data)
     ):
         raise ValueError(f"malformed ELF section table: {path}")
+    return [
+        struct.unpack_from("<IIIIIIIIII", data, section_offset + index * entry_size)
+        for index in range(count)
+    ]
 
-    def header(index: int) -> tuple:
-        return struct.unpack_from("<IIIIIIIIII", data, section_offset + index * entry_size)
 
-    names_header = header(names_index)
-    strings_start, strings_size = names_header[4], names_header[5]
-    if strings_start + strings_size > len(data):
-        raise ValueError(f"malformed ELF section names: {path}")
-    strings = data[strings_start:strings_start + strings_size]
-    names = []
-    for index in range(count):
-        name_offset = header(index)[0]
-        end = strings.find(b"\0", name_offset)
-        if name_offset > len(strings) or end < 0:
-            raise ValueError(f"malformed ELF section name: {path}")
-        names.append(strings[name_offset:end].decode("ascii", "replace"))
-    return names
+def _elf_string(table: bytes, offset: int, path: Path) -> str:
+    end = table.find(b"\0", offset)
+    if offset > len(table) or end < 0:
+        raise ValueError(f"malformed ELF string table: {path}")
+    return table[offset:end].decode("ascii", "replace")
+
+
+def _elf_section_bytes(data: bytes, header: tuple, path: Path) -> bytes:
+    start, size = header[4], header[5]
+    if start + size > len(data):
+        raise ValueError(f"malformed ELF section bounds: {path}")
+    return data[start:start + size]
+
+
+def elf_section_names(path: Path) -> list[str]:
+    """Section names of a 32-bit little-endian ELF object (the Xtensa format)."""
+    data = path.read_bytes()
+    headers = _elf_section_headers(data, path)
+    (_, _, names_index) = struct.unpack_from("<HHH", data, 46)
+    strings = _elf_section_bytes(data, headers[names_index], path)
+    return [_elf_string(strings, header[0], path) for header in headers]
+
+
+def elf_undefined_symbols(path: Path) -> frozenset[str]:
+    """Names of the undefined symbols an ELF32 object imports."""
+    data = path.read_bytes()
+    headers = _elf_section_headers(data, path)
+    names = set()
+    for header in headers:
+        if header[1] != 2:  # SHT_SYMTAB
+            continue
+        link, entry_size = header[6], header[9]
+        if entry_size != 16 or link >= len(headers):
+            raise ValueError(f"malformed ELF symbol table: {path}")
+        symbols = _elf_section_bytes(data, header, path)
+        strings = _elf_section_bytes(data, headers[link], path)
+        for offset in range(0, len(symbols) - len(symbols) % 16, 16):
+            name_offset, _, _, _, _, section_index = struct.unpack_from("<IIIBBH", symbols, offset)
+            if section_index == 0 and name_offset:  # SHN_UNDEF
+                names.add(_elf_string(strings, name_offset, path))
+    return frozenset(names)
 
 
 def _carries_exception_tables(names: Iterable[str]) -> bool:
@@ -115,6 +185,62 @@ def verify_no_exception_objects(build_dir: Path, libraries: Iterable[str] = NO_E
             "objects still carry exception tables: " + ", ".join(offenders)
         )
     return inspected
+
+
+# Symbols a translation unit imports only when the protector instrumented it.
+STACK_PROTECTOR_SYMBOLS = frozenset({"__stack_chk_fail", "__stack_chk_guard"})
+
+
+def verify_stack_protector_scope(build_dir: Path, protected: Iterable[str] = STACK_PROTECTED_LIBRARIES) -> dict:
+    """Prove the stack protector stayed exactly on the protected libraries.
+
+    Walks every object PlatformIO built under `build_dir` (project sources,
+    the Arduino core and all libraries). An object outside the protected set
+    must not import the canary symbols, which proves -fno-stack-protector
+    reached it. Each protected library must be present and at least one of its
+    objects must import them, which proves the protector is still on where
+    input from outside the device is parsed; a protected library whose last
+    stack buffer disappears therefore fails the build until the list is
+    revisited. Returns the counts for the build log.
+    """
+    protected = frozenset(protected)
+    guarded_by_library = {library: 0 for library in protected}
+    objects_by_library = {library: 0 for library in protected}
+    offenders = []
+    unprotected = 0
+    for path in sorted(build_dir.rglob("*.o")):
+        parts = path.relative_to(build_dir).parts
+        library = next((part for part in parts if part in protected), None)
+        guarded = not STACK_PROTECTOR_SYMBOLS.isdisjoint(elf_undefined_symbols(path))
+        if library is None:
+            unprotected += 1
+            if guarded:
+                offenders.append(str(path.relative_to(build_dir)))
+        else:
+            objects_by_library[library] += 1
+            guarded_by_library[library] += int(guarded)
+    missing = sorted(library for library, count in objects_by_library.items() if count == 0)
+    if missing:
+        raise RuntimeError(
+            "protected libraries without any built object: " + ", ".join(missing)
+        )
+    unguarded = sorted(library for library, count in guarded_by_library.items() if count == 0)
+    if unguarded:
+        raise RuntimeError(
+            "protected libraries whose objects no longer import the stack canary: "
+            + ", ".join(unguarded)
+        )
+    if offenders:
+        raise RuntimeError(
+            "objects outside the protected libraries still use the stack protector: "
+            + ", ".join(offenders)
+        )
+    return {
+        "protectedLibraries": len(protected),
+        "protectedObjects": sum(objects_by_library.values()),
+        "guardedObjects": sum(guarded_by_library.values()),
+        "unprotectedObjects": unprotected,
+    }
 
 
 def force_included_files(build_env, project: Path) -> list[str]:
@@ -232,7 +358,7 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
             return result[0]
         identity_env = build_env.Clone()
         identity_env.Append(CCFLAGS=["-include", str(header)])
-        result = identity_env.Object(node)
+        result = identity_env.Object(node, **object_overrides(identity_env, source))
         identity_env.Depends(result, inputs_for(identity_env))
         identity_env.Depends(result, str(header))
         return result[0]
