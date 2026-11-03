@@ -2211,16 +2211,15 @@ bool MapTransferHttpServer::resumePendingStreamActivation(
     return false;
 
   // A legacy upload has no grant after a reboot. Reserve the same bounded
-  // disposition, so a failed resume retries and finally discards this
-  // unselected root instead of refusing every other upload until next boot.
+  // disposition, so a failed resume retries and finally resolves instead of
+  // refusing every other upload until next boot: an unselected root is
+  // discarded, and a selected or previous root is kept while only the attempt
+  // fails. Without it, a failed resume would report recovering with no retry
+  // coming.
   CommitRecovery recovery;
   {
-    const std::string root = "/VECTMAP/.maps/" + snapshot.sessionId;
-    ActiveMapSelection selected;
     ReadyStreamMap ready;
-    const bool selectedRoot = installer_.readActiveMap(selected).ok &&
-        (selected.root == root || selected.previousRoot == root);
-    if (!selectedRoot && installer_.readReadyStreamMap(snapshot.sessionId, ready).ok &&
+    if (installer_.readReadyStreamMap(snapshot.sessionId, ready).ok &&
         ready.operationID.empty()) {
       recovery.identity = {operationDeviceID_, "", ready.manifestReceipt,
           ready.signedManifestReceipt, "", 0, ready.sessionId, ready.mapId};

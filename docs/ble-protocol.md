@@ -2451,8 +2451,11 @@ A root that is still selected is never deleted: a completed version that the
 attempt reused is kept, and stays in Saved Maps, while only the attempt fails.
 A new version that the pointer already names keeps retrying until its renderer
 handoff.
-A legacy upload resumed at boot gets the same bounded retries. While accepted
-work is pending, a new upload gets 409 `activation_busy`. A ready marker left on
+A legacy upload resumed at boot gets the same bounded retries, also when its root
+is already selected or is the previous root (for example after a failed
+consumed-marker write); such a root is kept and only the attempt fails, so
+`recovering` always has a retry coming. While accepted work is pending, a new
+upload gets 409 `activation_busy`. A ready marker left on
 the selected or previous map by a failed consumed-marker write is cleaned up and
 never refuses another upload with `stream_ready_pending`. The internal operation
 owner waits for map work in ten-minute slices while that work reports verified
