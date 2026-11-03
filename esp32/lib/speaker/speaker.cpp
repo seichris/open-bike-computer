@@ -61,15 +61,6 @@ constexpr gpio_num_t I2S_DIN = GPIO_NUM_42;
 #endif
 constexpr gpio_num_t PA_ENABLE = GPIO_NUM_46;
 
-extern const uint8_t realBikeHornStart[]
-    asm("_binary_lib_speaker_assets_real_bike_horn_pcm_start");
-extern const uint8_t realBikeHornEnd[]
-    asm("_binary_lib_speaker_assets_real_bike_horn_pcm_end");
-extern const uint8_t squeezeHornStart[]
-    asm("_binary_lib_speaker_assets_squeeze_horn_a_pcm_start");
-extern const uint8_t squeezeHornEnd[]
-    asm("_binary_lib_speaker_assets_squeeze_horn_a_pcm_end");
-
 struct WireControlInterface {
   audio_codec_ctrl_if_t base{};
 };
@@ -93,7 +84,7 @@ float currentDacGainDb = 0.0f;
 speaker_limiter_t playbackLimiter{};
 SpeakerResourceState resourceState{};
 PowerButtonHonkConfig powerButtonHonkConfig{
-    false, Sound::PlasticBicycleHorn, DEFAULT_VOLUME_PERCENT};
+    false, Sound::BellDing, DEFAULT_VOLUME_PERCENT};
 uint32_t lastPowerButtonConfigureAttemptMs = 0;
 
 constexpr uint32_t POWER_BUTTON_CONFIGURE_RETRY_MS = 5000;
@@ -540,30 +531,6 @@ bool writeSilence(uint32_t milliseconds) {
   return true;
 }
 
-bool playMonoPcm(const uint8_t *start, const uint8_t *end) {
-  if (start == nullptr || end <= start ||
-      static_cast<size_t>(end - start) % sizeof(int16_t) != 0) {
-    return false;
-  }
-
-  const uint8_t *cursor = start;
-  size_t remaining = static_cast<size_t>(end - start);
-  alignas(int16_t) uint8_t stereoFrames[256 * CHANNELS * sizeof(int16_t)];
-  while (remaining > 0) {
-    const size_t frames = expandMonoPcm16ToStereo(
-        cursor, remaining, stereoFrames, 256);
-    if (frames == 0 ||
-        !writeAudio(stereoFrames,
-                    frames * CHANNELS * sizeof(int16_t))) {
-      return false;
-    }
-    const size_t consumed = frames * sizeof(int16_t);
-    cursor += consumed;
-    remaining -= consumed;
-  }
-  return writeSilence(180);
-}
-
 bool playBellDing() {
   int16_t frame[128 * CHANNELS];
   constexpr uint32_t totalFrames = SAMPLE_RATE * 700 / 1000;
@@ -603,10 +570,6 @@ bool playNow(Sound sound) {
   switch (sound) {
   case Sound::BellDing:
     return playBellDing();
-  case Sound::PlasticBicycleHorn:
-    return playMonoPcm(realBikeHornStart, realBikeHornEnd);
-  case Sound::SqueezeHorn:
-    return playMonoPcm(squeezeHornStart, squeezeHornEnd);
   }
   return false;
 }
