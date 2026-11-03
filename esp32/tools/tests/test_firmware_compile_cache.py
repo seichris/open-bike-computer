@@ -8,7 +8,16 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from build_firmware import _application_build_cache_identity
-from firmware_compile_cache import configure_metadata_identity, relocate_core_text
+from firmware_compile_cache import (
+    configure_metadata_identity,
+    elf_section_names,
+    relocate_core_text,
+    verify_no_exception_objects,
+)
+if __package__:
+    from .elf_fixtures import write_elf_object
+else:
+    from elf_fixtures import write_elf_object
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
@@ -81,8 +90,12 @@ class FirmwareCompileCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
             env = Mock()
-            env.subst.side_effect = {"$PROJECT_DIR": str(project), "$PIOENV": "WAVESHARE_AMOLED_175"}.__getitem__
-            flags = {"CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"]}
+            substitutions = {"$PROJECT_DIR": str(project), "$PIOENV": "WAVESHARE_AMOLED_175"}
+            env.subst.side_effect = lambda value: substitutions.get(value, value)
+            flags = {
+                "CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fexceptions"],
+            }
             env.get.side_effect = lambda name, default=None: flags.get(name, default)
             configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
             callback = env.AddBuildMiddleware.call_args.args[0]
@@ -91,13 +104,41 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             gfx = Mock()
             gfx.srcnode.return_value.get_abspath.return_value = str(libdeps / "GFX Library for Arduino/src/Arduino_GFX.cpp")
             self.assertIs(callback(env, gfx), env.Object.return_value[0])
-            self.assertEqual(env.Object.call_args.kwargs, {"CXXFLAGS": ["-std=gnu++2b", "-fno-rtti", "-fno-exceptions"]})
+            # Both flag lists lose -fexceptions; the override goes last, after $CCFLAGS.
+            self.assertEqual(env.Object.call_args.kwargs, {
+                "CXXFLAGS": ["-std=gnu++2b", "-fno-rtti"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fno-exceptions"],
+            })
             # Every other object, including other libraries and C sources, keeps the framework flags.
             for relative in ("lib/gui/src/mainScr.cpp", "NimBLE-Arduino/src/NimBLEDevice.cpp", "GFX Library for Arduino/src/font.c"):
                 node = Mock()
                 node.srcnode.return_value.get_abspath.return_value = str((libdeps if "/src/" in relative and not relative.startswith("lib/") else project) / relative)
                 callback(env, node)
                 self.assertEqual(env.Object.call_args.kwargs, {}, relative)
+
+    def test_no_exception_objects_are_verified_from_their_section_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build_dir = Path(directory).resolve()
+            gfx = build_dir / "lib306/GFX Library for Arduino"
+            with self.assertRaisesRegex(RuntimeError, "no objects"):
+                verify_no_exception_objects(build_dir)
+            write_elf_object(gfx / "Arduino_GFX.cpp.o", (".text", ".literal", ".rela.text", ".symtab", ".strtab"))
+            write_elf_object(gfx / "display/Arduino_CO5300.cpp.o", (".text.draw", ".rodata", ".debug_info"))
+            self.assertEqual(verify_no_exception_objects(build_dir), 2)
+            self.assertEqual(elf_section_names(gfx / "Arduino_GFX.cpp.o"),
+                             ["", ".text", ".literal", ".rela.text", ".symtab", ".strtab", ".shstrtab"])
+            # An unrelated library keeps its tables without failing the check.
+            write_elf_object(build_dir / "lib123/NimBLE-Arduino/NimBLEDevice.cpp.o", (".text", ".eh_frame"))
+            self.assertEqual(verify_no_exception_objects(build_dir), 2)
+            write_elf_object(gfx / "databus/Arduino_ESP32QSPI.cpp.o", (".text", ".eh_frame", ".rela.eh_frame"))
+            with self.assertRaisesRegex(RuntimeError, r"exception tables: lib306/GFX Library for Arduino/databus/Arduino_ESP32QSPI\.cpp\.o"):
+                verify_no_exception_objects(build_dir)
+            write_elf_object(gfx / "databus/Arduino_ESP32QSPI.cpp.o", (".text", ".gcc_except_table.fn", ".literal"))
+            with self.assertRaisesRegex(RuntimeError, "exception tables"):
+                verify_no_exception_objects(build_dir)
+            (gfx / "databus/Arduino_ESP32QSPI.cpp.o").write_bytes(b"not an object")
+            with self.assertRaisesRegex(ValueError, "not a 32-bit little-endian ELF"):
+                verify_no_exception_objects(build_dir)
 
     def test_identity_header_changes_only_metadata_compilation(self):
         with tempfile.TemporaryDirectory() as directory:
