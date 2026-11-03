@@ -1061,17 +1061,17 @@ void testSelectedReadyMarkerIsSettledNotPending() {
   // An interrupted pointer switch belongs to journal recovery.
   const std::string transaction = root + "/VECTMAP/.activation-transaction.json";
   writeFile(transaction, "{}");
-  assert(installer.settleSelectedStreamMap().code == "stream_settle_deferred");
+  assert(installer.settleSelectionStreamMaps().code == "stream_settle_deferred");
   assert(!exists(consumed));
   assert(::unlink(transaction.c_str()) == 0);
 
-  auto settled = installer.settleSelectedStreamMap();
+  auto settled = installer.settleSelectionStreamMaps();
   assert(settled.ok && settled.code == "stream_installed");
   assert(exists(consumed) && !exists(pendingPath));
   assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
          MapStreamRecoveryResult::None);
   assert(installer.readInstalledMap("selected", installed).ok);
-  assert(installer.settleSelectedStreamMap().code == "stream_settle_none");
+  assert(installer.settleSelectionStreamMaps().code == "stream_settle_none");
 
   // Beside a real pending upload: only the selected root is settled; the
   // other upload and its pending marker are left for activation.
@@ -1081,7 +1081,7 @@ void testSelectedReadyMarkerIsSettledNotPending() {
          MapStreamRecoveryResult::Ambiguous);
   assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable, skipSelected) ==
          MapStreamRecoveryResult::Found && recoverable.sessionId == "other");
-  settled = installer.settleSelectedStreamMap();
+  settled = installer.settleSelectionStreamMaps();
   assert(settled.ok && settled.code == "stream_installed" && exists(consumed));
   assert(readFile(pendingPath).find("\"sessionId\":\"other\"") != std::string::npos);
   assert(!exists(root + "/VECTMAP/.maps/other/.activation-consumed"));
@@ -1089,6 +1089,65 @@ void testSelectedReadyMarkerIsSettledNotPending() {
          MapStreamRecoveryResult::Found && recoverable.sessionId == "other");
   ActiveMapSelection selected;
   assert(installer.readActiveMap(selected).ok && selected.sessionId == "selected");
+  std::filesystem::remove_all(root);
+}
+
+// A selected map with a bare ready marker becomes the previous map once the
+// rider chooses another one, and it is just as installed there. Settling it
+// returns it to Saved Maps and drops a pending file that still names it, which
+// would refuse every other map's cleanup. Once it leaves the pointer it is
+// neither pending work nor selected again by activation recovery.
+void testPreviousReadyMarkerIsSettledNotPending() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string pendingPath = root + "/VECTMAP/.pending-stream-activation.json";
+  prepareReadyRoot(root, "earlier");
+  assert(installer.activateReadyStreamMap("earlier").ok);
+  prepareReadyRoot(root, "previous");
+  const std::string pending = readFile(pendingPath);
+  assert(installer.activateReadyStreamMap("previous").ok);
+  // Its consumed marker write failed, which also left the pending file; then
+  // the rider chose another map in Saved Maps.
+  const std::string consumed = root + "/VECTMAP/.maps/previous/.activation-consumed";
+  assert(::unlink(consumed.c_str()) == 0);
+  writeFile(pendingPath, pending);
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 1 && maps[0].sessionId == "earlier");
+  assert(installer.selectInstalledMap("earlier", maps[0].manifestReceipt).ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "earlier" &&
+         selected.previousSessionId == "previous");
+  map_transfer::InstalledMap installed;
+  assert(!installer.readInstalledMap("previous", installed).ok);
+  MapStreamInstallSnapshot recoverable;
+  assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
+             MapStreamRecoveryResult::Found &&
+         recoverable.sessionId == "previous");
+  assert(installer.discardUnselectedStreamMap("other").code == "stream_discard_pending_conflict");
+
+  auto settled = installer.settleSelectionStreamMaps();
+  assert(settled.ok && settled.code == "stream_installed");
+  assert(exists(consumed) && !exists(pendingPath));
+  assert(installer.readInstalledMap("previous", installed).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 2);
+  assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
+         MapStreamRecoveryResult::None);
+  assert(installer.discardUnselectedStreamMap("other").ok);
+  assert(installer.settleSelectionStreamMaps().code == "stream_settle_none");
+  // A pending file left behind after the marker itself was written.
+  writeFile(pendingPath, pending);
+  settled = installer.settleSelectionStreamMaps();
+  assert(settled.ok && settled.code == "stream_installed" && !exists(pendingPath));
+
+  prepareReadyRoot(root, "current");
+  assert(installer.activateReadyStreamMap("current").ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "current" &&
+         selected.previousSessionId == "earlier");
+  assert(map_transfer::readRecoverableMapStreamInstall(root, recoverable) ==
+         MapStreamRecoveryResult::None);
+  assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "current");
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 3);
   std::filesystem::remove_all(root);
 }
 
@@ -2711,6 +2770,7 @@ int main() {
   testRollbackRejectsMismatchedPreviousIdentity();
   testConsumedReadyRootsAreNotReactivatedAndRemainInLibrary();
   testSelectedReadyMarkerIsSettledNotPending();
+  testPreviousReadyMarkerIsSettledNotPending();
   testFrozenMapIdEdgesInstallAndActivate();
   testCrashBoundariesRemainRetryableWithMonotonicFinalization();
   testEveryInstallerMutationAndInterruptedRecovery();

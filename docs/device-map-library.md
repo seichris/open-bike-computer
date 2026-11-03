@@ -81,7 +81,10 @@ cache so another covering version can be tried after a failed switch.
 
 Inventory admits only completed signed streams with matching consumed markers,
 manifest receipts, and file sizes, or existing verified archive installations.
-Prepared and uncommitted roots are excluded. Completed versions with missing or
+Prepared and uncommitted roots are excluded. A selected or previous map whose
+consumed-marker write failed is completed all the same: boot, uploads, and each
+library selection or refresh retry the missing marker, which returns it to the
+inventory. Completed versions with missing or
 truncated payloads remain visible as **Files need repair**; they can be removed
 but cannot authorize reuse or automatic selection. Cancelled
 retransmissions preserve a previously completed version even after it has aged

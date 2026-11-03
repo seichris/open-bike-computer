@@ -2449,16 +2449,18 @@ operation-backed work, reports `failed` with `activation_retry_limit`, and
 releases the commit so the app can upload again.
 A root that is still selected is never deleted: a completed version that the
 attempt reused is kept, and stays in Saved Maps, while only the attempt fails.
-A new version that the pointer already names keeps retrying until its renderer
-handoff.
+A new operation-backed version that the pointer already names keeps retrying
+until its renderer handoff. Legacy work has no receipt to hold, so its last
+attempt fails and the root is kept either way.
 A legacy upload resumed at boot gets the same bounded retries, so `recovering`
-always has a retry coming; a root the pointer already names is kept while only
-the attempt fails. While accepted work is pending, a new upload gets 409
+always has a retry coming. While accepted work is pending, a new upload gets 409
 `activation_busy`. A ready marker that a failed consumed-marker write leaves on
 the installed selected map, or on the previous map once another map is chosen,
 is not pending work: boot does not resume it and it never refuses another upload
-with `stream_ready_pending`. Boot and each upload retry the selected map's
-cleanup; a previous map's marker is left as it is. The internal operation
+with `stream_ready_pending`. Boot, each upload, and each library selection or
+refresh retry that cleanup for both maps, including a pending-activation file
+that still names one of them. A settled map stays in Saved Maps and does not
+become pending work when it leaves the pointer. The internal operation
 owner waits for map work in ten-minute slices while that work reports verified
 storage progress; only a slice without progress is a timeout that poisons the
 owner for the rest of the boot. A rejected renderer root restores the previous valid selection

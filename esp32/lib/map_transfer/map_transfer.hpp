@@ -267,8 +267,9 @@ public:
       const ActivationProgressCallback &onProgress = {},
       ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   // A legacy root whose consumed marker failed after its pointer switch is
-  // installed, not pending. Finishes that cleanup; never activates anything.
-  InstallStatus settleSelectedStreamMap() const;
+  // installed, not pending, as selected map and later as previous map.
+  // Finishes that cleanup for both; never activates anything.
+  InstallStatus settleSelectionStreamMaps() const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.

@@ -95,9 +95,13 @@ struct Installer {
   bool installedMapCovers(const InstalledMap&,int32_t,int32_t){return candidateCovers;}
   int writeFailureClears=0;
   void clearStorageWriteFailure(){++writeFailureClears;}
+  // Storage order: S settles the selected and previous maps, U moves the
+  // pointer, L reads the inventory.
+  std::string calls;
+  InstallStatus settleSelectionStreamMaps(){calls+='S';return {true,"stream_settle_none",""};}
   InstallStatus selectInstalledMap(const std::string&s,const std::string&){
     assert(writeFailureClears==selectAttempts+1); // Each Use records only its own writes.
-    ++selectAttempts;
+    calls+='U';++selectAttempts;
     if(!selectionError.empty())return {false,selectionError,""};
     ++selected;previous=active;active.root="/VECTMAP/.maps/"+s;active.sessionId=s;active.mapId="city";
     return {true,"selected",""};
@@ -112,7 +116,7 @@ struct Installer {
     ++removed;return {true,"ok",""};
   }
   bool pruneObsoleteInstalledMaps(){return true;}
-  InstallStatus readMapLibrary(std::vector<InstalledMap>&){++scans;if(throwRefresh){throwRefresh=false;throw std::bad_alloc();}return {true,"ok",""};}
+  InstallStatus readMapLibrary(std::vector<InstalledMap>&){calls+='L';++scans;if(throwRefresh){throwRefresh=false;throw std::bad_alloc();}return {true,"ok",""};}
 };
 struct Activation {
   bool running=false,throwBegin=false;
@@ -244,6 +248,8 @@ int main(){using namespace map_transfer;
     assert(suggestion.libraryCoverageKnown_&&suggestion.libraryCurrentCovered_==currentCovers);
     assert((suggestion.libraryCoveringSession_=="city")==(!currentCovers&&candidateCovers));
     assert(suggestion.installer_.selected==0&&!suggestion.pendingRendererAcknowledgement_);
+    // A suggestion moves nothing, so this GPS-driven task settles nothing either.
+    assert(suggestion.installer_.calls.empty());
     assert(!suggestion.installer_.manualSelectionIntentPending());
     assert(!suggestion.installer_.automatic);
     auto json=suggestion.mapLibraryJson(false);assert(json.find("\"coverage\":{\"known\":true")!=std::string::npos);
@@ -271,6 +277,10 @@ int main(){using namespace map_transfer;
     assert(s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'f')));s.executeLibraryTask();
     const bool pending=phase>0&&phase<4;
     assert((s.installer_.selected==0)==pending);
+    // Use settles the selected and previous maps before the pointer moves: a
+    // finished map whose consumed marker failed cannot leave the pointer as
+    // pending work. A refused Use touches no map.
+    assert(s.installer_.calls==(pending?"":"SU"));
     assert(s.pendingRendererAcknowledgement_==!pending);
     // Use is journaled; the manual policy waits for the renderer ACK.
     assert(s.installer_.automatic&&s.libraryManualPending_==!pending);
@@ -284,6 +294,8 @@ int main(){using namespace map_transfer;
       s.pendingMapRootTaken_=true;s.acknowledgeActivatedMapRoot(city().root,true);
       assert(s.libraryAction_=="refresh");s.executeLibraryTask();
       assert(!s.installer_.automatic&&!s.libraryManualPending_&&s.libraryCommandError_.empty());
+      // Refresh settles before it lists, so such a map is listed again.
+      assert(s.installer_.calls=="SUSL");
     }
     if(pending){
       MapTransferHttpServer covered;covered.libraryMaps_={city()};covered.installer_.currentCovers=true;
