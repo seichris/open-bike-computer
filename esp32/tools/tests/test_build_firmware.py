@@ -995,6 +995,41 @@ build_src_filter =
         self.assertTrue(firmware.is_file())
         self.assertIn("uploadEligible=0", output.getvalue())
 
+    def test_dirty_build_never_consults_the_transport_publisher(self):
+        # record_generated_sdkconfig_defaults returns None for a source
+        # identity that is not a full Git SHA, so neither the publisher nor
+        # the manifest status recorder runs; the build stays upload-ineligible.
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write("; intentional local diagnostic change\n")
+
+        def runner(command, cwd):
+            self.write_firmware()
+            return subprocess.CompletedProcess(command, 0)
+
+        output = StringIO()
+        with (
+            patch(
+                "build_firmware.record_generated_sdkconfig_defaults",
+                return_value=None,
+            ),
+            patch(
+                "build_firmware.publish_shared_core",
+                side_effect=AssertionError("a dirty build must not publish"),
+            ),
+            redirect_stdout(output),
+        ):
+            firmware = build_firmware(
+                self.project_dir,
+                self.environment,
+                runner=runner,
+            )
+
+        self.assertTrue(firmware.is_file())
+        self.assertIn("uploadEligible=0", output.getvalue())
+        self.assertNotIn("sharedCoreTransport", output.getvalue())
+
     def test_build_subprocesses_preserve_hydrated_bytecode(self):
         # Hydration gives source files new mtimes but retains attested .pyc
         # contents. Real recursive Python imports must not rewrite that tree.
@@ -3037,13 +3072,24 @@ class SharedCoreTransportRecordTests(unittest.TestCase):
             stored = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(stored["sharedCoreTransport"], "skipped")
 
+    def test_every_publisher_outcome_is_recordable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            for status in ("ineligible", "present", "published", "skipped"):
+                manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+                recorded = _record_build_phase_timings(manifest_path, {"total": 1}, status)
+
+                self.assertEqual(recorded["sharedCoreTransport"], status)
+
     def test_unknown_shared_core_transport_status_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             manifest_path = Path(directory) / "current.json"
             manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
 
-            with self.assertRaisesRegex(BuildError, "shared core transport status is invalid"):
-                _record_build_phase_timings(manifest_path, {"total": 1}, "ineligible")
+            for status in ("unknown", None, ""):
+                with self.assertRaisesRegex(BuildError, "shared core transport status is invalid"):
+                    _record_build_phase_timings(manifest_path, {"total": 1}, status)
 
             self.assertEqual(
                 json.loads(manifest_path.read_text(encoding="utf-8")), {"schema": 1}

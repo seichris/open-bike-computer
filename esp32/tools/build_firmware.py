@@ -1564,9 +1564,12 @@ def _pioarduino_toolchain_bootstrap_ready(
     )
 
 
-# What publish_shared_core reports for an upload-eligible build; the build
-# manifest keeps it so a skipped transport copy stays visible in the evidence.
-SHARED_CORE_TRANSPORT_STATUSES = frozenset({"published", "present", "skipped"})
+# Every value publish_shared_core can report; the build manifest keeps it so a
+# skipped transport copy stays visible in the evidence. Anything else is a
+# programming error, not a publication outcome, and fails the build.
+SHARED_CORE_TRANSPORT_STATUSES = frozenset(
+    {"ineligible", "present", "published", "skipped"}
+)
 
 
 def _record_build_phase_timings(
