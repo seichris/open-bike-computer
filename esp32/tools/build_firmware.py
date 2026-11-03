@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
+from firmware_compile_cache import verify_no_exception_objects
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
@@ -269,6 +270,28 @@ def _require_dynamic_tls_link(project_dir: Path, environment: str) -> None:
     raise BuildError(
         "dynamic TLS configuration did not reach the linked firmware: missing "
         + ", ".join(sorted(missing))
+    )
+
+
+def _require_no_exception_library_objects(project_dir: Path, environment: str) -> None:
+    """Prove the per-library -fno-exceptions override reached the built objects.
+
+    The override in the compile-cache middleware silently does nothing when a
+    library resolves under another directory name or the framework delivers
+    -fexceptions through a flag list it does not rewrite. Every Waveshare
+    environment links Arduino_GFX, so the caller runs this unconditionally for
+    them: a build without any GFX object, or with one that still carries
+    unwind tables, fails closed instead of producing an upload-eligible image.
+    """
+    build_dir = project_dir / ".pio" / "build" / environment
+    try:
+        inspected = verify_no_exception_objects(build_dir)
+    except (RuntimeError, ValueError, OSError) as error:
+        raise BuildError(f"no-exception library verification failed: {error}") from error
+    print(
+        "FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 "
+        f"environment={environment} objects={inspected}",
+        flush=True,
     )
 
 
@@ -1866,6 +1889,7 @@ def build_firmware(
                     )
                 if environment.startswith("WAVESHARE_AMOLED_"):
                     _require_dynamic_tls_link(project_dir, environment)
+                    _require_no_exception_library_objects(project_dir, environment)
 
                 attestation_started = time.monotonic()
                 try:
