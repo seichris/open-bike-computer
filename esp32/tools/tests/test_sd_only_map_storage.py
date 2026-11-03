@@ -161,7 +161,12 @@ def storage_harness(mutate=None, mutate_entry=None):
     harness = harness.replace("// PRODUCTION_HEADER", header)
     harness = harness.replace("// PRODUCTION_UNAVAILABLE_ROOT", unavailable_root)
     harness = harness.replace("// PRODUCTION_METHODS", methods)
-    harness = harness.replace("// PRODUCTION_ACTIVE_MAP_STATUS", status)
+    # The status reader keeps its snapshot and cache in .bss through the
+    # firmware's StartupConstructed template; the sliced source needs it too.
+    startup_constructed = "\n".join(
+        line for line in source("lib/utils/src/startup_constructed.hpp").splitlines()
+        if not line.startswith("#pragma"))
+    harness = harness.replace("// PRODUCTION_ACTIVE_MAP_STATUS", startup_constructed + "\n" + status)
     return harness.replace("// PRODUCTION_ENABLE_MAP", entry)
 
 

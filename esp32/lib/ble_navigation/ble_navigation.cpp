@@ -2698,10 +2698,16 @@ struct ActiveMapStatusSnapshot {
 // Keep filesystem/manifest work out of the JSON composition frame. The VFS
 // stat path is deep enough that combining both phases can consume most of the
 // Arduino loop task stack during an iPhone status request.
+// Both objects carry non-zero defaults; as plain statics their whole
+// initializer images would sit in .data. StartupConstructed keeps them in
+// .bss, value-initialized during static initialization.
+static StartupConstructed<ActivePresentationCache> activePresentationCacheStorage;
+static StartupConstructed<ActiveMapStatusSnapshot> activeMapStatusSnapshotStorage;
+
 __attribute__((noinline)) static const ActiveMapStatusSnapshot &
 readActiveMapStatusSnapshot() {
-  static ActivePresentationCache activePresentationCache;
-  static ActiveMapStatusSnapshot snapshot;
+  ActivePresentationCache &activePresentationCache = activePresentationCacheStorage.value;
+  ActiveMapStatusSnapshot &snapshot = activeMapStatusSnapshotStorage.value;
 
   if (!storage.mapStorageAvailable()) {
     // Without a card there is no active map, and FFat is never searched for
