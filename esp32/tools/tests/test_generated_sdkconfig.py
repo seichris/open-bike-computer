@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -634,6 +637,47 @@ class GeneratedSdkconfigTests(unittest.TestCase):
                 )
             self.assertFalse(defaults.exists())
             self.assertTrue(legacy.is_file())
+
+    def test_publication_checks_free_disk_before_writing_the_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            (project / "platformio.ini").write_text(
+                "[env:WAVESHARE_AMOLED_175]\nplatform = test\n", encoding="utf-8"
+            )
+            (project / "sdkconfig.defaults").write_text(GENERATED_CONFIG, encoding="utf-8")
+            usage = shutil.disk_usage(project)
+            cache_root = project / ".pio/open-bike-build/core-cache/WAVESHARE_AMOLED_175"
+            with self.fake_core(project):
+                # Too little free space fails before any archive byte is written
+                # and leaves nothing behind in the entry root.
+                with patch(
+                    "generated_sdkconfig.shutil.disk_usage",
+                    return_value=usage._replace(free=0),
+                ):
+                    with self.assertRaisesRegex(
+                        GeneratedSdkconfigError,
+                        r"needs about [0-9.]+ GiB free below .*, 0\.0 GiB available",
+                    ):
+                        record_generated_sdkconfig_defaults(project, "WAVESHARE_AMOLED_175")
+                self.assertEqual(
+                    sorted(path.name for path in cache_root.iterdir()) if cache_root.exists() else [],
+                    [],
+                )
+                # A normal publication prints the estimate, which bounds the
+                # archive it then writes.
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    manifest_path = record_generated_sdkconfig_defaults(
+                        project, "WAVESHARE_AMOLED_175"
+                    )
+                line = next(
+                    candidate for candidate in output.getvalue().splitlines()
+                    if candidate.startswith("FIRMWARE_CORE_CACHE schema=1 status=publishing")
+                )
+                estimate = int(re.search(r"archiveBytes=(\d+)", line).group(1))
+                archive_size = json.loads(manifest_path.read_text(encoding="utf-8"))["coreArchiveSize"]
+                self.assertGreaterEqual(estimate, archive_size)
+                self.assertLess(estimate, 2 * archive_size + 1024 * 1024)
 
     def test_publishes_and_hydrates_an_immutable_core_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

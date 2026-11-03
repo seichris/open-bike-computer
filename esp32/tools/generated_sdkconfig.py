@@ -1018,6 +1018,58 @@ def _archive_linkname(project_dir: Path, path: Path) -> str:
     return link
 
 
+# Headroom kept beyond the archive's own bytes: the manifest, sidecars and the
+# filesystem's own bookkeeping while the entry is written and renamed.
+CORE_ARCHIVE_FREE_MARGIN = 256 * 1024 * 1024
+
+
+def _core_archive_bytes(project_dir: Path, environment: str) -> int:
+    """Bytes the core archive will occupy, before it is written.
+
+    Every member costs a PAX header block pair plus its data rounded up to the
+    tar block size; the walk is the one the writer performs, so a root that is
+    missing fails here with the writer's message.
+    """
+    total = 0
+    for _, root, required in _core_artifact_roots(project_dir, environment):
+        if not os.path.lexists(root):
+            if required:
+                raise GeneratedSdkconfigError(
+                    f"required custom-core output is missing: {root}"
+                )
+            continue
+        for path in _walk_archive_tree(root):
+            metadata = path.lstat()
+            total += 1024
+            if stat.S_ISREG(metadata.st_mode):
+                total += metadata.st_size + (-metadata.st_size % 512)
+    return total
+
+
+def _require_core_archive_space(
+    environment_root: Path, environment: str, archive_bytes: int
+) -> None:
+    """Fail before writing when the entry cannot fit next to the build.
+
+    A runner or workstation that compiled the whole image and then dies with
+    ENOSPC half-way through a multi-gigabyte archive wastes the build and
+    leaves the cause unclear; the numbers are printed on every publication so
+    the headroom stays visible.
+    """
+    free = shutil.disk_usage(environment_root).free
+    print(
+        "FIRMWARE_CORE_CACHE schema=1 status=publishing "
+        f"environment={environment} archiveBytes={archive_bytes} freeBytes={free}",
+        flush=True,
+    )
+    if free < archive_bytes + CORE_ARCHIVE_FREE_MARGIN:
+        raise GeneratedSdkconfigError(
+            "core cache entry needs about "
+            f"{(archive_bytes + CORE_ARCHIVE_FREE_MARGIN) / 2**30:.1f} GiB free below "
+            f"{environment_root}, {free / 2**30:.1f} GiB available"
+        )
+
+
 def _write_core_archive(
     archive_path: Path,
     project_dir: Path,
@@ -1514,6 +1566,9 @@ def _publish_core_cache_entry(
                 environment_config, temporary / f"sdkconfig.{environment}"
             )
         archive_path = temporary / CORE_ARCHIVE_FILENAME
+        _require_core_archive_space(
+            environment_root, environment, _core_archive_bytes(project_dir, environment)
+        )
         inventory_sha256, entry_count = _write_core_archive(
             archive_path, project_dir, environment
         )
