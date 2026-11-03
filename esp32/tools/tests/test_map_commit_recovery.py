@@ -156,6 +156,178 @@ int main() {
                             str(path / "test.cpp"), "-o", str(path / "test")], check=True)
             subprocess.run([str(path / "test")], check=True)
 
+    def test_boot_and_upload_admission_skip_a_finished_selection_marker(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        # Boot used to resume these markers: a previous map's activation can
+        # never finish, refused uploads meanwhile and could select it again.
+        for body in (method(source, "resumePendingActivations", returns="void "),
+                     method(source, "handleInstallStream")):
+            self.assertIn("readPendingStreamInstall(", body)
+            self.assertNotIn("readRecoverableMapStreamInstall(", body)
+        self.assertEqual(source.count("readRecoverableMapStreamInstall("), 1)
+        helper = method(source, "readPendingStreamInstall", returns="MapStreamRecoveryResult ")
+        fixture = r'''
+#include <cassert>
+#include <functional>
+#include <string>
+#include <vector>
+enum class MapStreamRecoveryResult { None, Found };
+struct MapStreamInstallSnapshot { std::string sessionId, signedManifestReceipt; };
+std::vector<MapStreamInstallSnapshot> readyRoots;
+MapStreamRecoveryResult readRecoverableMapStreamInstall(
+    const std::string &, MapStreamInstallSnapshot &snapshot,
+    const std::function<bool(const MapStreamInstallSnapshot &)> &skipReady) {
+  for (const auto &ready : readyRoots)
+    if (!skipReady(ready)) { snapshot = ready; return MapStreamRecoveryResult::Found; }
+  return MapStreamRecoveryResult::None;
+}
+struct Status { bool ok; };
+struct ActiveMapSelection { std::string root, previousRoot, signedManifestReceipt; };
+class MapTransferHttpServer {
+public:
+  struct Installer {
+    ActiveMapSelection selection{"/VECTMAP/.maps/selected", "/VECTMAP/.maps/previous", "installed"};
+    bool known = true;
+    Status readActiveMap(ActiveMapSelection &out) const { out = selection; return {known}; }
+  } installer_;
+  std::string storageRoot_ = "/sd";
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &snapshot) const;
+};
+''' + helper + r'''
+int main() {
+  MapTransferHttpServer server;
+  MapStreamInstallSnapshot found;
+  // A finished selection's marker, or the previous map's, is not pending work.
+  readyRoots = {{"selected", "installed"}, {"previous", "older"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::None);
+  // A version the pointer names that never finished, and any other map, are.
+  readyRoots = {{"selected", "newer"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found &&
+         found.sessionId == "selected");
+  readyRoots = {{"previous", "older"}, {"other", "other"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found &&
+         found.sessionId == "other");
+  // An unreadable selection skips nothing.
+  server.installer_.known = false;
+  readyRoots = {{"previous", "older"}};
+  assert(server.readPendingStreamInstall(found) == MapStreamRecoveryResult::Found);
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="pending-stream-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
+    def test_every_legacy_resume_reserves_bounded_retries(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        resume = method(source, "resumePendingStreamActivation")
+        fixture = r'''
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <utility>
+struct SerialStub { template<class... Args> void printf(const char *, Args...) {} } Serial;
+enum class MapStreamInstallState { Receiving, Ready };
+enum class MapStreamRecoveryResult { None, Found };
+struct MapStreamInstallSnapshot {
+  std::string sessionId; MapStreamInstallState state; uint32_t sequence;
+};
+MapStreamRecoveryResult readRecoverableMapStreamInstall(const std::string &, MapStreamInstallSnapshot &) {
+  return MapStreamRecoveryResult::None;
+}
+struct Status { bool ok; };
+struct ActiveMapSelection { std::string root, previousRoot; };
+struct ReadyStreamMap {
+  std::string operationID, manifestReceipt, signedManifestReceipt, sessionId, mapId;
+};
+struct ActivationProgress { uint8_t step = 1, totalSteps = 5; uint64_t completed = 0, total = 0; };
+enum class ActivationBeginResult { Started, AlreadyRunning };
+class MapTransferHttpServer {
+public:
+  struct CommitRecovery {
+    struct Identity {
+      std::string device, operation, manifest, signedManifest, sha256;
+      uint64_t bytes = 0; std::string session, map;
+    } identity;
+    bool responseCompleted = false;
+    bool pending() const { return !identity.session.empty(); }
+  } commitRecovery_;
+  struct Installer {
+    ActiveMapSelection selection;
+    ReadyStreamMap ready{"", "manifest", "signed", "ready-session", "map-1"};
+    Status readActiveMap(ActiveMapSelection &out) const { out = selection; return {true}; }
+    Status readReadyStreamMap(const std::string &id, ReadyStreamMap &out) const {
+      out = ready; return {id == ready.sessionId};
+    }
+  } installer_;
+  struct Activation {
+    int begins = 0;
+    ActivationBeginResult begin(const std::string &, uint8_t, uint32_t) {
+      ++begins; return ActivationBeginResult::Started;
+    }
+    void updateProgress(const ActivationProgress &) {}
+  } activationState_;
+  std::string storageRoot_ = "/sd", operationDeviceID_ = "device";
+  bool streamStatusActive_ = true, taskStarts = true;
+  int retries = 0;
+  void lockState() {}
+  void unlockState() {}
+  void updateStreamInstallState(const MapStreamInstallSnapshot &, bool) {}
+  bool startActivationTask(const std::string &, bool) { return taskStarts; }
+  void retryAcceptedActivation(const std::string &) { ++retries; }
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &) const {
+    return MapStreamRecoveryResult::None;
+  }
+  bool resumePendingStreamActivation(const MapStreamInstallSnapshot *recovered);
+};
+''' + resume + r'''
+int main() {
+  MapStreamInstallSnapshot snapshot{"ready-session", MapStreamInstallState::Ready, 4};
+  const ActiveMapSelection selections[] = {
+      {"/VECTMAP/.maps/other", ""},
+      // Boot skips a finished selection's marker, so a root the pointer names
+      // arrives here only as a version that never finished.
+      {"/VECTMAP/.maps/ready-session", ""}};
+  for (const auto &selection : selections) {
+    MapTransferHttpServer server;
+    server.installer_.selection = selection;
+    assert(server.resumePendingStreamActivation(&snapshot));
+    // Every legacy resume gets the bounded disposition. A failed attempt then
+    // retries, and the last one keeps a selected root and fails the attempt,
+    // never leaving it recovering without a retry coming.
+    assert(server.commitRecovery_.pending() && server.commitRecovery_.responseCompleted);
+    assert(server.commitRecovery_.identity.session == "ready-session" &&
+           server.commitRecovery_.identity.operation.empty() &&
+           server.commitRecovery_.identity.map == "map-1");
+    assert(server.activationState_.begins == 1 && !server.streamStatusActive_);
+    assert(server.retries == 0);
+  }
+  {
+    // Operation-backed work is armed from its Accepted receipt instead.
+    MapTransferHttpServer server;
+    server.installer_.ready.operationID = "0123456789abcdef0123456789abcdef";
+    assert(server.resumePendingStreamActivation(&snapshot));
+    assert(!server.commitRecovery_.pending());
+  }
+  {
+    // A task that was never created hands the reserved work to the storage worker.
+    MapTransferHttpServer server;
+    server.installer_.selection = selections[1];
+    server.taskStarts = false;
+    assert(!server.resumePendingStreamActivation(&snapshot));
+    assert(server.retries == 1 && server.commitRecovery_.pending());
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="boot-resume-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
     def test_each_failed_attempt_is_counted_once(self):
         # A storage-worker attempt runs the activation directly and never
         # re-arms, so executeOperationTask schedules its one retry. Only owner

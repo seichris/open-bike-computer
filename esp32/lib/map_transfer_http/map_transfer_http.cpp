@@ -1552,20 +1552,7 @@ bool MapTransferHttpServer::handleInstallStream(
   // as boot recovery does, if this cleanup fails again.
   (void)installer_.settleSelectedStreamMap();
   MapStreamInstallSnapshot recoverableStream;
-  MapStreamRecoveryResult streamRecovery = MapStreamRecoveryResult::None;
-  {
-    // Scoped: the receive loop below should not carry this selection.
-    ActiveMapSelection selection;
-    const bool selectionKnown = installer_.readActiveMap(selection).ok;
-    streamRecovery = readRecoverableMapStreamInstall(
-        storageRoot_, recoverableStream, [&](const MapStreamInstallSnapshot &ready) {
-          const std::string root = "/VECTMAP/.maps/" + ready.sessionId;
-          return selectionKnown &&
-                 ((selection.root == root &&
-                   selection.signedManifestReceipt == ready.signedManifestReceipt) ||
-                  selection.previousRoot == root);
-        });
-  }
+  MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(recoverableStream);
   if (streamRecovery == MapStreamRecoveryResult::Invalid) {
     const InstallStatus discarded =
         installer_.discardAllUnselectedStreamMaps();
@@ -2195,14 +2182,33 @@ bool MapTransferHttpServer::takeAutomaticExitRequest() {
   return requested;
 }
 
+// A ready marker left by a failed consumed-marker write on the installed
+// selection, or on its previous root after another map was chosen, belongs
+// to a finished install. It is neither pending upload work nor something boot
+// resumes: activating a previous root cannot succeed, would refuse uploads
+// meanwhile and could select it again. Settle retries the selected map's
+// cleanup at boot and on each upload.
+MapStreamRecoveryResult MapTransferHttpServer::readPendingStreamInstall(
+    MapStreamInstallSnapshot &snapshot) const {
+  ActiveMapSelection selection;
+  const bool selectionKnown = installer_.readActiveMap(selection).ok;
+  return readRecoverableMapStreamInstall(
+      storageRoot_, snapshot, [&](const MapStreamInstallSnapshot &ready) {
+        const std::string root = "/VECTMAP/.maps/" + ready.sessionId;
+        return selectionKnown &&
+               ((selection.root == root &&
+                 selection.signedManifestReceipt == ready.signedManifestReceipt) ||
+                selection.previousRoot == root);
+      });
+}
+
 bool MapTransferHttpServer::resumePendingStreamActivation(
     const MapStreamInstallSnapshot *recovered) {
   MapStreamInstallSnapshot snapshot;
   if (recovered != nullptr) {
     snapshot = *recovered;
   } else {
-    const MapStreamRecoveryResult recovery =
-        readRecoverableMapStreamInstall(storageRoot_, snapshot);
+    const MapStreamRecoveryResult recovery = readPendingStreamInstall(snapshot);
     if (recovery != MapStreamRecoveryResult::Found)
       return false;
   }
@@ -2211,16 +2217,15 @@ bool MapTransferHttpServer::resumePendingStreamActivation(
     return false;
 
   // A legacy upload has no grant after a reboot. Reserve the same bounded
-  // disposition, so a failed resume retries and finally discards this
-  // unselected root instead of refusing every other upload until next boot.
+  // disposition for every legacy resume, so a failed one retries and finally
+  // resolves instead of refusing every other upload until next boot or
+  // reporting recovering with no retry coming. Boot never resumes a finished
+  // selection's marker; a root the pointer names anyway is kept while only
+  // the attempt fails.
   CommitRecovery recovery;
   {
-    const std::string root = "/VECTMAP/.maps/" + snapshot.sessionId;
-    ActiveMapSelection selected;
     ReadyStreamMap ready;
-    const bool selectedRoot = installer_.readActiveMap(selected).ok &&
-        (selected.root == root || selected.previousRoot == root);
-    if (!selectedRoot && installer_.readReadyStreamMap(snapshot.sessionId, ready).ok &&
+    if (installer_.readReadyStreamMap(snapshot.sessionId, ready).ok &&
         ready.operationID.empty()) {
       recovery.identity = {operationDeviceID_, "", ready.manifestReceipt,
           ready.signedManifestReceipt, "", 0, ready.sessionId, ready.mapId};
@@ -2292,11 +2297,11 @@ void MapTransferHttpServer::resumePendingActivations() {
     }
   }
   // A selected map whose consumed marker failed needs cleanup, not another
-  // activation with a full block scan.
+  // activation with a full block scan. If this cleanup fails again, the scan
+  // skips it, and a previous map's marker, as upload admission does.
   (void)installer_.settleSelectedStreamMap();
   MapStreamInstallSnapshot streamSnapshot;
-  const MapStreamRecoveryResult streamRecovery =
-      readRecoverableMapStreamInstall(storageRoot_, streamSnapshot);
+  const MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(streamSnapshot);
   if (streamRecovery == MapStreamRecoveryResult::Found) {
     updateStreamInstallState(streamSnapshot, true);
   } else if (streamRecovery != MapStreamRecoveryResult::None) {
