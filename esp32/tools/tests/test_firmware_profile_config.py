@@ -173,6 +173,9 @@ assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
 # No profile has a PPP consumer; the Arduino default would link lwIP PPP.
 assert "CONFIG_LWIP_PPP_SUPPORT=n" in waveshare_sdkconfig
+# Nothing routes between the access point and another network either.
+assert "CONFIG_LWIP_IP_FORWARD=n" in waveshare_sdkconfig
+assert "CONFIG_LWIP_IPV4_NAPT=n" in waveshare_sdkconfig
 
 
 # Production-slot profiles (both *_PRODUCTION environments and everything that
@@ -215,6 +218,8 @@ for section in config.sections():
         assert "CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y" in sdk, section
         # The production list extends the shared Waveshare settings.
         assert "CONFIG_LWIP_PPP_SUPPORT=n" in sdk, section
+        assert "CONFIG_LWIP_IP_FORWARD=n" in sdk, section
+        assert "CONFIG_LWIP_IPV4_NAPT=n" in sdk, section
         assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
     else:
         assert "CONFIG_LOG_DEFAULT_LEVEL" not in sdk, section
@@ -486,6 +491,8 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
     assert "CONFIG_LWIP_PPP_SUPPORT=n" in sdkconfig
+    assert "CONFIG_LWIP_IP_FORWARD=n" in sdkconfig
+    assert "CONFIG_LWIP_IPV4_NAPT=n" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags
