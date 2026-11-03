@@ -47,6 +47,7 @@ FIRMWARE_RENDER_TEST_PATHS = {
 }
 FIRMWARE_HOST_PATH_PREFIXES = (
     ".github/actions/firmware-build-cache/",
+    ".github/actions/free-runner-disk/",
     ".github/actions/require-immutable-releases/",
     ".github/actions/require-firmware-release-controls/",
 )
@@ -248,9 +249,10 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         elif path.startswith("tools/development/") and not path.startswith("tools/development/tests/"):
             return {component: True for component in COMPONENTS}
 
-        if (path.startswith(".github/actions/firmware-build-cache/")
+        if (path.startswith((".github/actions/firmware-build-cache/", ".github/actions/free-runner-disk/"))
                 or path == ".github/scripts/firmware_core_artifact.py"):
-            # Every firmware build restores through these; host tests cover their unit tests.
+            # Every firmware build frees the runner disk and restores through
+            # these; host tests cover their unit and workflow-policy tests.
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 

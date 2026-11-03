@@ -113,6 +113,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
+      - name: Free runner disk for the core cache archive
+        uses: ./.github/actions/free-runner-disk
       - name: Require a clean exact validation checkout
         run: test -z "$(git status --porcelain=v1 --untracked-files=all)"
         working-directory: ${{ github.workspace }}
