@@ -129,6 +129,7 @@ class ChangedComponentsTests(unittest.TestCase):
             "esp32/tools/build_firmware.py", "esp32/tools/firmware_runtime.py",
             "esp32/platformio.ini", "esp32/tools/firmware-runtime/lock-v1.json",
             ".github/actions/firmware-build-cache/action.yml",
+            ".github/actions/free-runner-disk/action.yml",
         ):
             with self.subTest(path=path):
                 selected = changed_components.classify_paths([path])
