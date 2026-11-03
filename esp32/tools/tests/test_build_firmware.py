@@ -28,6 +28,7 @@ from build_firmware import (
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
+    _record_build_phase_timings,
     _deterministic_build_environment,
     _require_dynamic_tls_link,
     _verified_platformio_project_config,
@@ -2540,7 +2541,7 @@ build_src_filter =
                 "build_firmware.record_generated_sdkconfig_defaults",
                 return_value=fake_manifest,
             ),
-            patch("build_firmware.publish_shared_core"),
+            patch("build_firmware.publish_shared_core", return_value="present"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 
@@ -3020,6 +3021,33 @@ class NoExceptionLibraryObjectTests(unittest.TestCase):
             with self.assertRaisesRegex(BuildError, r"still use the stack protector: src/main\.cpp\.o"):
                 _require_stack_protector_scope(project, environment)
 
+
+class SharedCoreTransportRecordTests(unittest.TestCase):
+    def test_build_manifest_records_the_shared_core_transport_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+            recorded = _record_build_phase_timings(
+                manifest_path, {"total": 1}, "skipped"
+            )
+
+            self.assertEqual(recorded["sharedCoreTransport"], "skipped")
+            self.assertEqual(recorded["phaseTimingsMs"], {"total": 1})
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["sharedCoreTransport"], "skipped")
+
+    def test_unknown_shared_core_transport_status_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+            with self.assertRaisesRegex(BuildError, "shared core transport status is invalid"):
+                _record_build_phase_timings(manifest_path, {"total": 1}, "ineligible")
+
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8")), {"schema": 1}
+            )
 
 if __name__ == "__main__":
     unittest.main()

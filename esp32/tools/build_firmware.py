@@ -1564,9 +1564,18 @@ def _pioarduino_toolchain_bootstrap_ready(
     )
 
 
+# What publish_shared_core reports for an upload-eligible build; the build
+# manifest keeps it so a skipped transport copy stays visible in the evidence.
+SHARED_CORE_TRANSPORT_STATUSES = frozenset({"published", "present", "skipped"})
+
+
 def _record_build_phase_timings(
-    manifest_path: Path, timings: dict[str, int]
+    manifest_path: Path, timings: dict[str, int], shared_core_transport: str
 ) -> dict[str, object]:
+    if shared_core_transport not in SHARED_CORE_TRANSPORT_STATUSES:
+        raise BuildError(
+            f"shared core transport status is invalid: {shared_core_transport!r}"
+        )
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise BuildError("recorded build manifest is missing or unsafe")
     try:
@@ -1579,6 +1588,7 @@ def _record_build_phase_timings(
     ):
         raise BuildError("recorded build provenance or phase timings are invalid")
     manifest["phaseTimingsMs"] = timings
+    manifest["sharedCoreTransport"] = shared_core_transport
     temporary_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1936,7 +1946,9 @@ def build_firmware(
                 )
                 manifest = None
                 if manifest_path is not None:
-                    publish_shared_core(project_dir, environment)
+                    shared_core_transport = publish_shared_core(
+                        project_dir, environment
+                    )
                     manifest = _record_build_phase_timings(
                         manifest_path,
                         {
@@ -1951,6 +1963,7 @@ def build_firmware(
                             "attestation": attestation_ms,
                             "total": round((time.monotonic() - build_started) * 1000),
                         },
+                        shared_core_transport,
                     )
                 if (
                     environment.startswith("WAVESHARE_AMOLED_")

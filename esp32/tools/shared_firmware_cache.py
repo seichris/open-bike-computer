@@ -7,6 +7,7 @@ then publishes and verifies a new project-private core entry before use.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import gzip
 import json
@@ -174,22 +175,38 @@ def publish_shared_download(source: Path, sha256: str, size: int) -> None:
                 shutil.rmtree(temporary)
 
 
-def publish_shared_core(project: Path, environment: str) -> None:
+# Transport publication is best-effort with respect to disk space. The private
+# entry is written only after its size was checked against the free space, but
+# the gzip copy that follows is not reserved: the attested entry and the
+# firmware already exist by then, so a full disk costs other worktrees a cold
+# build until the next clean build of the same core input key, not this build.
+TRANSPORT_SKIP_ERRNOS = {errno.ENOSPC: "enospc", errno.EDQUOT: "edquot"}
+
+
+def publish_shared_core(project: Path, environment: str) -> str:
+    """Publish this worktree's private core entry as a shared transport.
+
+    Returns ``"ineligible"`` for a build that may not publish, ``"present"``
+    when the transport already exists, ``"published"`` after writing it, and
+    ``"skipped"`` when the transport root ran out of space; the skip prints the
+    archive and free bytes and leaves nothing behind.
+    """
     if core.FULL_GIT_SHA.fullmatch(core.current_source_identity(project, environment)) is None:
-        return
+        return "ineligible"
     request_key = core.core_request_key(project, environment)
     key = core.core_input_key(project, environment)
     if request_key is None or key is None:
-        return
+        return "ineligible"
     source = core._core_cache_entry_dir(project, environment, key)
     with _store(environment, request_key) as entry:
         if os.path.lexists(entry):
             # A producer never consumes this entry. Consumers always verify it
             # before restoring; avoid rehashing an unused archive on warm builds.
-            return
+            return "present"
         manifest = core._validate_core_cache_entry(project, environment, key)
-        temporary = Path(tempfile.mkdtemp(prefix=f".{request_key}.", dir=entry.parent))
+        temporary = None
         try:
+            temporary = Path(tempfile.mkdtemp(prefix=f".{request_key}.", dir=entry.parent))
             destination = temporary / "core"
             destination.mkdir()
             files = {}
@@ -230,13 +247,26 @@ def publish_shared_core(project: Path, environment: str) -> None:
             temporary.chmod(0o700)
             os.rename(temporary, entry)
             entry.chmod(0o555)
+        except OSError as error:
+            reason = TRANSPORT_SKIP_ERRNOS.get(error.errno)
+            if reason is None:
+                raise
+            free = shutil.disk_usage(entry.parent).free
+            print(
+                f"FIRMWARE_SHARED_CORE_CACHE schema=1 status=skipped reason={reason} "
+                f"environment={environment} archiveBytes={manifest['coreArchiveSize']} "
+                f"freeBytes={free}",
+                flush=True,
+            )
+            return "skipped"
         finally:
-            if temporary.exists():
+            if temporary is not None and temporary.exists():
                 temporary.chmod(0o700)
                 if (temporary / "core").exists():
                     (temporary / "core").chmod(0o700)
                 shutil.rmtree(temporary)
     print(f"FIRMWARE_SHARED_CORE_CACHE schema=1 status=published environment={environment}", flush=True)
+    return "published"
 
 
 def restore_shared_core(project: Path, environment: str) -> bool:

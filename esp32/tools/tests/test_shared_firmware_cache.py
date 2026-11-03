@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -238,6 +239,50 @@ class SharedCoreCacheTests(unittest.TestCase):
             with patch("generated_sdkconfig.current_source_identity", return_value="dirty-" + "a" * 40):
                 publish_shared_core(origin, self.environment)
         self.assertFalse((self.root / "transport").exists())
+
+    def test_full_disk_skips_the_transport_and_the_next_clean_build_publishes_it(self):
+        origin = self.project("producer")
+        transport_root = self.root / "transport" / "cores-v1" / self.environment
+        with self.fixture.fake_core(origin):
+            core.record_generated_sdkconfig_defaults(origin, self.environment)
+            output = io.StringIO()
+            with (
+                patch(
+                    "shared_firmware_cache.shutil.copyfileobj",
+                    side_effect=OSError(errno.ENOSPC, "No space left on device"),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(publish_shared_core(origin, self.environment), "skipped")
+            # The skip leaves no temporary entry behind and names its numbers.
+            self.assertEqual(sorted(path.name for path in transport_root.iterdir()), [".lock"])
+            status = [
+                line for line in output.getvalue().splitlines()
+                if line.startswith("FIRMWARE_SHARED_CORE_CACHE ")
+            ]
+            self.assertEqual(len(status), 1)
+            self.assertRegex(
+                status[0],
+                r"^FIRMWARE_SHARED_CORE_CACHE schema=1 status=skipped reason=enospc "
+                rf"environment={self.environment} archiveBytes=[1-9][0-9]* freeBytes=[0-9]+$",
+            )
+            # The private entry is intact, so the next clean build publishes.
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(publish_shared_core(origin, self.environment), "published")
+                self.assertEqual(publish_shared_core(origin, self.environment), "present")
+            self.assertEqual(len(list(transport_root.rglob("transport.json"))), 1)
+
+    def test_other_transport_write_errors_still_fail_publication(self):
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin):
+            core.record_generated_sdkconfig_defaults(origin, self.environment)
+            with patch(
+                "shared_firmware_cache.shutil.copyfileobj",
+                side_effect=OSError(errno.EACCES, "Permission denied"),
+            ):
+                with self.assertRaises(OSError):
+                    publish_shared_core(origin, self.environment)
+        self.assertEqual(list((self.root / "transport").rglob("transport.json")), [])
 
     def test_symlinked_shared_root_is_rejected(self):
         target = self.project("consumer")
