@@ -825,6 +825,25 @@ struct MapActivationProgressPresentation: Equatable {
     }
 }
 
+nonisolated enum MapActivationFailureText {
+    // BLE status carries a failure as its code, or as "code: message".
+    static func readable(for failure: String) -> String? {
+        let code = failure.split(separator: ":", maxSplits: 1).first.map(String.init) ?? failure
+        switch code {
+        case "activation_retry_limit":
+            return "The Bike Computer could not install this map after several tries. Upload it again."
+        default:
+            return nil
+        }
+    }
+
+    // HTTPS status keeps the device's own message unless the app explains the code.
+    static func statusFailure(code: String?, message: String?) -> String? {
+        if let code, readable(for: code) != nil { return code }
+        return message ?? code
+    }
+}
+
 nonisolated enum MapUploadProgressReconciler {
     static func percentage(
         retryTransportPercentage: Int?,
@@ -1378,7 +1397,8 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
-            return "Map activation failed: \(message)"
+            return MapActivationFailureText.readable(for: message) ??
+                "Map activation failed: \(message)"
         case .deviceMapLibraryCommandFailed(let message):
             return message
         case .transferWiFiJoinFailed(let ssid, let message):
