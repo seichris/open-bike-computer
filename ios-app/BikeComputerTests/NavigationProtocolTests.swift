@@ -1185,6 +1185,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
+        testOfflineMapManagerAdoptsLiveAttemptOfTakenOverUpload()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testOfflineMapPackPreviewReader()
