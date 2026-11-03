@@ -18,8 +18,8 @@ The TTF/WOFF sources are read from the LVGL 9.2.2 package PlatformIO already
 downloaded (``.pio/open-bike-build/platformio/*/libdeps/*/lvgl``) unless
 ``--lvgl-dir`` names another copy. lv_font_conv 1.5.3 reproduces LVGL's
 shipped fonts byte for byte from those sources; other versions may differ.
-``--compressed`` writes LVGL-compressed variants to ``--out-dir`` for
-measurement; the shipped fonts stay uncompressed (``LV_USE_FONT_COMPRESSED 0``).
+The shipped fonts are LVGL-compressed (``LV_USE_FONT_COMPRESSED 1``);
+``--uncompressed`` writes uncompressed variants to ``--out-dir`` for measurement.
 """
 
 from __future__ import annotations
@@ -254,8 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lv-font-conv",
                         help="lv_font_conv executable (default: PATH, then npx)")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-    parser.add_argument("--compressed", action="store_true",
-                        help="write LVGL-compressed fonts (measurement only)")
+    parser.add_argument("--uncompressed", action="store_true",
+                        help="write uncompressed fonts (measurement only; the "
+                             "shipped fonts are LVGL-compressed)")
     parser.add_argument("--size", type=int, action="append", choices=SIZES,
                         help="generate only these sizes (default: all)")
     args = parser.parse_args(argv)
@@ -274,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         destination = generate(size, converter=converter,
                                converter_version=converter_version,
                                font_sources=font_sources, out_dir=args.out_dir,
-                               compressed=args.compressed)
+                               compressed=not args.uncompressed)
         print(f"{destination}: {len(symbols_for(size))} symbols")
     return 0
 
