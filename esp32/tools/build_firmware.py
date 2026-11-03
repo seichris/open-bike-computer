@@ -25,7 +25,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
-from firmware_compile_cache import verify_no_exception_objects
+from firmware_compile_cache import (
+    verify_no_exception_objects,
+    verify_stack_protector_scope,
+)
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
@@ -291,6 +294,28 @@ def _require_no_exception_library_objects(project_dir: Path, environment: str) -
     print(
         "FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 "
         f"environment={environment} objects={inspected}",
+        flush=True,
+    )
+
+
+def _require_stack_protector_scope(project_dir: Path, environment: str) -> None:
+    """Prove the stack protector is on the input-parsing libraries and nowhere else.
+
+    The compile-cache middleware drops -fstack-protector from every application
+    object outside STACK_PROTECTED_LIBRARIES. Inspect the built objects in both
+    directions, so neither a silent loss of the canary on a transfer, HTTPS or
+    BLE library nor a silent return of it elsewhere can produce an
+    upload-eligible image.
+    """
+    build_dir = project_dir / ".pio" / "build" / environment
+    try:
+        counts = verify_stack_protector_scope(build_dir)
+    except (RuntimeError, ValueError, OSError) as error:
+        raise BuildError(f"stack protector scope verification failed: {error}") from error
+    print(
+        "FIRMWARE_STACK_PROTECTOR_SCOPE schema=1 "
+        f"environment={environment} "
+        + " ".join(f"{name}={value}" for name, value in counts.items()),
         flush=True,
     )
 
@@ -1890,6 +1915,7 @@ def build_firmware(
                 if environment.startswith("WAVESHARE_AMOLED_"):
                     _require_dynamic_tls_link(project_dir, environment)
                     _require_no_exception_library_objects(project_dir, environment)
+                    _require_stack_protector_scope(project_dir, environment)
 
                 attestation_started = time.monotonic()
                 try:
