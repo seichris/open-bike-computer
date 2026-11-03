@@ -6620,6 +6620,46 @@ extension NavigationProtocolTests {
                     "The Bike Computer could not install this map after several tries. Upload it again.",
                     "the retry limit reads as a request to upload again")
 
+        // Without Wi-Fi status the loop reads BLE, whose compact status carries codes without messages.
+        FirmwareRequestCaptureProtocol.handler = { _, _ in throw URLError(.timedOut) }
+        func confirmOverBLE(_ activations: [String]) async -> (MapActivationConfirmationResult?, Error?) {
+            var pending = activations.map { activation in
+                try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+                    from: Data("{\"activeMapId\":\"old-map\",\"activation\":\(activation)}".utf8))
+            }
+            bleManager.applyAuthenticatedMapTransferStatus(pending.removeFirst())
+            var confirmation: MapActivationConfirmationResult?
+            var failure: Error?
+            await runMainActorAsyncTest {
+                do {
+                    confirmation = try await manager.confirmActivatedMap(
+                        expectedMapId: "map-1", sessionId: "session-1",
+                        previousMapId: "old-map", previousSessionId: "old-session",
+                        previousSequence: 7, acceptedSequence: 8,
+                        client: client, bleManager: bleManager,
+                        timeout: 0.2, pollIntervalNanoseconds: 1_000_000,
+                        now: clock.now, sleep: { nanoseconds in
+                            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+                            guard !pending.isEmpty else { return }
+                            let next = pending.removeFirst()
+                            await MainActor.run { bleManager.applyAuthenticatedMapTransferStatus(next) }
+                        })
+                } catch {
+                    failure = error
+                }
+            }
+            return (confirmation, failure)
+        }
+        let bleBetweenAttempts = #"{"status":"recovering","sequence":8,"sessionId":"session-1","error":{"code":"stream_active_write"}}"#
+        let bleRetried = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"installed","sequence":9,"sessionId":"session-1","mapId":"map-1","terminalCode":"installed"}"#])
+        assertEqual(bleRetried.0, .installed, "BLE status confirms a device retry that installs the map")
+        let bleExhausted = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"failed","sequence":9,"sessionId":"session-1","mapId":"map-1","error":{"code":"activation_retry_limit"},"terminalCode":"activation_retry_limit"}"#])
+        assertEqual(bleExhausted.1?.localizedDescription,
+                    "The Bike Computer could not install this map after several tries. Upload it again.",
+                    "BLE status reports the retry limit by its code alone")
+
         for failure in ["activation_retry_limit", "activation_retry_limit: map activation kept failing; upload the map again"] {
             assertEqual(OfflineMapPlatformError.mapActivationFailed(failure).localizedDescription,
                         "The Bike Computer could not install this map after several tries. Upload it again.",
