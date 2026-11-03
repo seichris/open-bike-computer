@@ -4978,6 +4978,102 @@ extension NavigationProtocolTests {
                     "the original observing connection reconciles its activation acknowledgement")
     }
 
+    @MainActor
+    static func testOfflineMapManagerAdoptsLiveAttemptOfTakenOverUpload() {
+        func status(_ state: String, _ sequence: Int, session: String = "map-1-manifest",
+                    error: String? = nil) -> MapTransferDeviceStatus {
+            let errorField = error.map { ",\"error\":{\"code\":\"\($0)\",\"message\":\"attempts exhausted\"}" } ?? ""
+            return try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
+            {"activeMapId":"map-0","activeSessionId":"map-0-manifest","activation":{"status":"\(state)","sequence":\(sequence),"sessionId":"\(session)","mapId":"map-1"\(errorField)}}
+            """.utf8))
+        }
+        let acceptedKey = "offlineMap.lastTransfer.acceptedSequence"
+        for ending in ["installed", "failed"] {
+            let suite = "offline-map-taken-over-\(ending)-\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                assert(false, "test defaults should create")
+                return
+            }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            // An upload taken over during reception stores no baseline: stream
+            // statuses number their own sequence.
+            defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+            let manager = OfflineMapManager(defaults: defaults)
+            let bleManager = BLEManager()
+            manager.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+
+            // Between the upload and its activation the device still reports
+            // this session's result from an earlier attempt, under a sequence
+            // above the stream's.
+            for (state, sequence) in [("receiving", 40), ("ready", 41), ("failed", 120), ("installed", 120)] {
+                bleManager.applyAuthenticatedMapTransferStatus(status(state, sequence))
+                manager.reconcileLastTransfer(bleManager: bleManager)
+                assertEqual(manager.lastTransferOutcome, "unconfirmed",
+                            "\(state) cannot end an upload taken over without a baseline")
+                assert(defaults.object(forKey: acceptedKey) == nil,
+                       "\(state) is not adopted as the upload's live attempt")
+            }
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 121, session: "map-2-manifest"))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assert(defaults.object(forKey: acceptedKey) == nil,
+                   "another session's live attempt is not adopted")
+
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 121))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(defaults.integer(forKey: acceptedKey), 121,
+                        "the session's first live attempt becomes the baseline")
+            assertEqual(manager.lastTransferOutcome, "unconfirmed", "a live attempt keeps the upload pending")
+            bleManager.applyAuthenticatedMapTransferStatus(status("recovering", 121, error: "stream_active_write"))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 122))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(manager.lastTransferOutcome, "unconfirmed", "the device's retry keeps the upload pending")
+            assertEqual(defaults.integer(forKey: acceptedKey), 121, "a retry continues the adopted attempt")
+
+            bleManager.applyAuthenticatedMapTransferStatus(
+                status(ending, 122, error: ending == "failed" ? "activation_retry_limit" : nil))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(manager.lastTransferOutcome, ending,
+                        "the retry's \(ending) result ends the upload taken over mid-way")
+            assertEqual(manager.errorMessage, ending == "failed"
+                ? "The Bike Computer could not install this map after several tries. Upload it again." : nil,
+                        "the final retry failure reads as the device's give-up")
+        }
+
+        // An activation already live when the upload was taken over binds the
+        // first attempt too.
+        let suite = "offline-map-taken-over-activating-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        manager.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+        bleManager.applyAuthenticatedMapTransferStatus(status("activating", 8))
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        bleManager.applyAuthenticatedMapTransferStatus(status("installed", 8))
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(manager.lastTransferOutcome, "installed",
+                    "an activation live at take-over completes its upload")
+
+        // Another connection's transfer stays unbound: it adopts nothing.
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.removeObject(forKey: acceptedKey)
+        let unbound = OfflineMapManager(defaults: defaults)
+        unbound.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch &+ 1)
+        bleManager.applyAuthenticatedMapTransferStatus(status("activating", 9))
+        unbound.reconcileLastTransfer(bleManager: bleManager)
+        assert(defaults.object(forKey: acceptedKey) == nil,
+               "a transfer observed in another connection adopts no attempt")
+    }
+
     static func testOfflineMapPolygonClosesRing() {
         let request = OfflineMapJobRequest.customPolygon(ring: [
             CLLocationCoordinate2D(latitude: 1, longitude: 2),
@@ -6216,6 +6312,15 @@ extension NavigationProtocolTests {
         }
         assertEqual(MapActivationReconciler.attemptSequence(status: "recovering", sequence: 9), 9,
                     "an activation status binds an upload taken over mid-way to its attempt")
+        for status in ["receiving", "paused", "finalizing", "ready", "idle", "prepared", "failed", "installed",
+                       nil] as [String?] {
+            assertEqual(MapActivationReconciler.liveAttemptSequence(status: status, sequence: 1), nil,
+                        "a stream or terminal status is never adopted as a live attempt")
+        }
+        for status in ["activating", "recovering"] {
+            assertEqual(MapActivationReconciler.liveAttemptSequence(status: status, sequence: 9), 9,
+                        "\(status) is a live attempt an upload without a baseline can adopt")
+        }
         assertEqual(evaluate(previousSequence: nil, acceptedSequence: nil, activationStatus: "failed",
                              activationSequence: 9, activationError: "activation_retry_limit").decision,
                     .pending("failed"), "a result left from before an upload taken over mid-way cannot end it")
