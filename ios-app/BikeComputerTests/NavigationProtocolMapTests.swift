@@ -6210,6 +6210,21 @@ extension NavigationProtocolTests {
                     "the device's last retry ends the acknowledged attempt without a pre-upload sequence")
         assertEqual(evaluate(previousSequence: 9, acceptedSequence: 8, activationSequence: 9).decision,
                     .pending("installed"), "a status from before the upload never completes a later attempt")
+        for status in ["receiving", "paused", "finalizing", "ready", "idle", "prepared", "failed", nil] as [String?] {
+            assertEqual(MapActivationReconciler.attemptSequence(status: status, sequence: 1), nil,
+                        "stream reception numbers its own sequence and shares some status words")
+        }
+        assertEqual(MapActivationReconciler.attemptSequence(status: "recovering", sequence: 9), 9,
+                    "an activation status binds an upload taken over mid-way to its attempt")
+        assertEqual(evaluate(previousSequence: nil, acceptedSequence: nil, activationStatus: "failed",
+                             activationSequence: 9, activationError: "activation_retry_limit").decision,
+                    .pending("failed"), "a result left from before an upload taken over mid-way cannot end it")
+        let managerURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputer/Managers/OfflineMapManager.swift")
+        let managerSource = try! String(contentsOf: managerURL, encoding: .utf8)
+        assert(managerSource.contains("previousSequence: attemptSequence,") &&
+               managerSource.contains("Int(attemptSequence),"),
+               "an upload taken over mid-way keeps only an activation sequence as its baseline")
         assertEqual(evaluate(activationSequence: 8, activationSessionId: "foreign-session").decision,
                     .pending("active map is map-1; waiting for current activation"),
                     "another content session cannot complete this operation")

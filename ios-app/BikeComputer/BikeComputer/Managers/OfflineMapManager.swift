@@ -761,6 +761,14 @@ nonisolated struct MapActivationEvaluation: Equatable {
 }
 
 nonisolated enum MapActivationReconciler {
+    // Stream reception numbers its own sequence from 1 for each upload, apart
+    // from the activation sequence that the device's attempts advance, and
+    // shares the idle, prepared and failed words. Only these activation
+    // statuses give an upload taken over mid-way a sequence to bind its result to.
+    static func attemptSequence(status: String?, sequence: UInt32?) -> UInt32? {
+        ["activating", "recovering", "installed"].contains(status ?? "") ? sequence : nil
+    }
+
     static func evaluate(expectedMapId: String,
                          sessionId: String,
                          previousMapId: String?,
@@ -6979,12 +6987,14 @@ final class OfflineMapManager: ObservableObject {
             activationSessionID: activationSessionID,
             bindsOriginalObservation: bindsOriginalObservation
         )
+        let attemptSequence = MapActivationReconciler.attemptSequence(
+            status: activationStatus, sequence: activationSequence)
         recordTransfer(
             mapId: mapID,
             sessionId: sessionID,
             previousMapId: activeMapID,
             previousSessionId: activeSessionID,
-            previousSequence: activationSequence,
+            previousSequence: attemptSequence,
             outcome: disposition == .installed ? "installed" : "unconfirmed",
             connectionEpoch: bindsOriginalObservation ? bleManager.transferConnectionEpoch : nil,
             protocolVersion: 2,
@@ -7005,9 +7015,9 @@ final class OfflineMapManager: ObservableObject {
             stepCount: activationStepCount,
             percentage: activationProgress
         )
-        if let activationSequence {
+        if let attemptSequence {
             defaults.set(
-                Int(activationSequence),
+                Int(attemptSequence),
                 forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey
             )
         }

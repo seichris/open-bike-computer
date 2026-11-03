@@ -2438,12 +2438,13 @@ emits `installed` and closes
 transfer mode.
 
 Accepted work whose activation fails is retried by the device, not by the app.
-Each retry waits longer (5, 10, then 20 seconds, at most one minute) and reports
-`activating` from the final step again; between attempts status is
-`recovering`. Each retry also takes the next activation `sequence`, so the app
-treats a later sequence of the same session as the same accepted work and keeps
-waiting through `recovering` instead of uploading again. After three failed
-attempts the device discards the unselected root, records a Failed receipt for
+Each retry waits longer (5, then 10 seconds; work that keeps retrying doubles
+the wait up to one minute) and reports `activating` from the final step again;
+between attempts status is `recovering`. Each retry also takes the next
+activation `sequence`, so the app treats a later sequence of the same session as
+the same accepted work and keeps waiting through `recovering` instead of
+uploading again. After three failed attempts and one more wait (20 seconds) the
+device discards the unselected root, records a Failed receipt for
 operation-backed work, reports `failed` with `activation_retry_limit`, and
 releases the commit so the app can upload again.
 A root that is still selected is never deleted: a completed version that the
