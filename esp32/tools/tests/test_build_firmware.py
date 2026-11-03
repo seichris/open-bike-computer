@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from build_firmware import (
     _require_no_exception_library_objects,
+    _require_stack_protector_scope,
     BuildError,
     WAVESHARE_PLATFORM_URL,
     _bootstrap_build_cache_identity,
@@ -56,6 +57,7 @@ from generated_sdkconfig import (
     recognized_generated_sdkconfigs,
 )
 from record_flash_plan import record_flash_plan
+from firmware_compile_cache import STACK_PROTECTED_LIBRARIES
 if __package__:
     from .elf_fixtures import write_elf_object
 else:
@@ -355,11 +357,18 @@ class FirmwareBuildTests(unittest.TestCase):
         firmware.write_bytes(b"real firmware")
         firmware.with_suffix(".bin").write_bytes(b"real flash image")
         (firmware.parent / "bootloader.bin").write_bytes(b"real bootloader")
-        # Every Waveshare build must leave Arduino_GFX objects without unwind tables.
+        # Every Waveshare build must leave Arduino_GFX objects without unwind
+        # tables and keep the stack canary on each input-parsing library only.
         write_elf_object(
             firmware.parent / "lib306/GFX Library for Arduino/Arduino_GFX.cpp.o",
             (".text", ".literal"),
         )
+        for library in sorted(STACK_PROTECTED_LIBRARIES):
+            write_elf_object(
+                firmware.parent / f"lib0a1/{library}/{library}.cpp.o",
+                (".text", ".literal"),
+                ("__stack_chk_fail", "__stack_chk_guard"),
+            )
         (self.project_dir / f"sdkconfig.{environment}").write_text(
             GENERATED_CONFIG, encoding="utf-8"
         )
@@ -2987,6 +2996,29 @@ class NoExceptionLibraryObjectTests(unittest.TestCase):
             write_elf_object(gfx / "Arduino_G.cpp.o", (".text", ".eh_frame"))
             with self.assertRaisesRegex(BuildError, r"exception tables: lib306/GFX Library for Arduino/Arduino_G\.cpp\.o"):
                 _require_no_exception_library_objects(project, environment)
+
+    def test_build_fails_when_the_stack_protector_leaves_its_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            environment = "WAVESHARE_AMOLED_175_PRODUCTION"
+            build_dir = project / ".pio/build" / environment
+            with self.assertRaisesRegex(BuildError, "stack protector scope verification failed: protected libraries without any built object"):
+                _require_stack_protector_scope(project, environment)
+            for library in STACK_PROTECTED_LIBRARIES:
+                write_elf_object(build_dir / f"lib0a1/{library}/{library}.cpp.o", (".text",), ("__stack_chk_fail",))
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",))
+            output = StringIO()
+            with redirect_stdout(output):
+                _require_stack_protector_scope(project, environment)
+            self.assertIn(
+                f"FIRMWARE_STACK_PROTECTOR_SCOPE schema=1 environment={environment} "
+                f"protectedLibraries={len(STACK_PROTECTED_LIBRARIES)} protectedObjects={len(STACK_PROTECTED_LIBRARIES)} "
+                f"guardedObjects={len(STACK_PROTECTED_LIBRARIES)} unprotectedObjects=1",
+                output.getvalue(),
+            )
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",), ("__stack_chk_guard",))
+            with self.assertRaisesRegex(BuildError, r"still use the stack protector: src/main\.cpp\.o"):
+                _require_stack_protector_scope(project, environment)
 
 
 if __name__ == "__main__":
