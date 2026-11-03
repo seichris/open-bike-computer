@@ -769,6 +769,13 @@ nonisolated enum MapActivationReconciler {
         ["activating", "recovering", "installed"].contains(status ?? "") ? sequence : nil
     }
 
+    // A live attempt that an observed transfer without a baseline can adopt.
+    // A terminal status may be a result left from an earlier attempt of the
+    // same session, so it is never adopted.
+    static func liveAttemptSequence(status: String?, sequence: UInt32?) -> UInt32? {
+        ["activating", "recovering"].contains(status ?? "") ? sequence : nil
+    }
+
     static func evaluate(expectedMapId: String,
                          sessionId: String,
                          previousMapId: String?,
@@ -4854,10 +4861,25 @@ final class OfflineMapManager: ObservableObject {
             defaults.object(forKey: OfflineMapDefaults.lastTransferPreviousSequenceKey)
                 as? NSNumber
         )?.uint32Value
-        let acceptedSequence = (
+        var acceptedSequence = (
             defaults.object(forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey)
                 as? NSNumber
         )?.uint32Value
+        // An upload taken over mid-way can lack an activation sequence to bind
+        // its result to, and this poll keeps nothing between statuses. Until
+        // that upload's activation ends, the device refuses other uploads and
+        // library tasks, and a reboot ends the binding, so the first live
+        // attempt of this session is that activation. It becomes the baseline,
+        // and the device's retries continue it.
+        if acceptedSequence == nil,
+           bleManager.mapTransferActivationSessionId == sessionId,
+           let liveSequence = MapActivationReconciler.liveAttemptSequence(
+               status: bleManager.mapTransferActivationStatus,
+               sequence: bleManager.mapTransferActivationSequence
+           ) {
+            defaults.set(Int(liveSequence), forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey)
+            acceptedSequence = liveSequence
+        }
         let evaluation = MapActivationReconciler.evaluate(
             expectedMapId: lastTransferMapId,
             sessionId: sessionId,

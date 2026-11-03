@@ -2452,8 +2452,12 @@ the wait up to one minute) and reports `activating` from the final step again;
 between attempts status is `recovering`. Each retry also takes the next
 activation `sequence`, so the app treats a later sequence of the same session as
 the same accepted work and keeps waiting through `recovering` instead of
-uploading again. After three failed attempts and one more wait (20 seconds) the
-device discards the unselected root, records a Failed receipt for
+uploading again. When the app has no accepted `sequence` for an upload it
+observed in the current connection, for example one it joined mid-way, it
+adopts the first `activating` or `recovering` that the device reports for that
+session. It never adopts a terminal status, which can be an earlier attempt's
+result. After three failed attempts and one more wait (20 seconds) the device
+discards the unselected root, records a Failed receipt for
 operation-backed work, reports `failed` with `activation_retry_limit`, and
 releases the commit so the app can upload again.
 A root that is still selected is never deleted: a completed version that the
