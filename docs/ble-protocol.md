@@ -2313,11 +2313,20 @@ Status responses should include:
 - `capabilities`: `secureTransferV1`, `signedMapStreamV1`, and
   `legacyArchivePolicy`. Current map installation requires both booleans and
   the exact policy value `disabled`.
-- `activation`: the latest activation `status`, monotonic boot-local
-  `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
-  integer `progress` percentage, and structured `error`, when present. Status
-  is `idle`, `receiving`, `paused`, `finalizing`, `ready`, `activating`, `recovering`,
-  `failed`, or `installed`. BLE uses a compact form
+- `activation`: the latest activation `status`, `sequence`, `sessionId`,
+  optional `mapId`, numbered `step`, total `steps`, integer `progress`
+  percentage, and structured `error`, when present. Status is `idle`,
+  `receiving`, `paused`, `finalizing`, `prepared`, `ready`, `activating`,
+  `recovering`, `failed`, or `installed`. `sequence` is not one counter:
+  `receiving`, `paused`, `finalizing`, and `ready` carry the upload's own
+  counter, which starts again for each new upload, continues from its
+  checkpoint when resumed, and advances through finalization; `activating`,
+  `recovering`, and `installed` carry the boot-local activation counter, which
+  advances with every attempt, including each device retry; `idle`,
+  `prepared`, and `failed` can carry either. A legacy upload's first attempt
+  starts above the upload's last stream sequence, so the value rises within
+  one upload, but a new upload can report a lower value than an earlier
+  activation. BLE uses a compact form
   that omits error messages and duplicate `lastError`; HTTPS retains the full
   diagnostic text. Optional `ownerRecoveryCode` retains the first internal-owner
   activation failure across same-session recovery retries; `terminalCode` retains
@@ -2459,8 +2468,9 @@ the installed selected map, or on the previous map once another map is chosen,
 is not pending work: boot does not resume it and it never refuses another upload
 with `stream_ready_pending`. Boot, each upload, and each library selection or
 refresh retry that cleanup for both maps, including a pending-activation file
-that still names one of them. A settled map stays in Saved Maps and does not
-become pending work when it leaves the pointer. The internal operation
+that still names one of them. Settling returns the map to Saved Maps before a
+selection can push it out of the pointer, where an unsettled marker would
+count as pending work again. The internal operation
 owner waits for map work in ten-minute slices while that work reports verified
 storage progress; only a slice without progress is a timeout that poisons the
 owner for the rest of the boot. A rejected renderer root restores the previous valid selection

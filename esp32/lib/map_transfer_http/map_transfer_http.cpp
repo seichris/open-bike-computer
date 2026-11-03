@@ -2192,8 +2192,8 @@ bool MapTransferHttpServer::takeAutomaticExitRequest() {
 // selection, or on its previous root after another map was chosen, belongs
 // to a finished install. It is neither pending upload work nor something boot
 // resumes: activating a previous root cannot succeed, would refuse uploads
-// meanwhile and could select it again. Settle retries the selected map's
-// cleanup at boot and on each upload.
+// meanwhile and could select it again. Settle retries the cleanup of both at
+// boot, on each upload, and on each library selection or refresh.
 MapStreamRecoveryResult MapTransferHttpServer::readPendingStreamInstall(
     MapStreamInstallSnapshot &snapshot) const {
   ActiveMapSelection selection;
