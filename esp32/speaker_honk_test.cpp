@@ -18,8 +18,6 @@ constexpr uint32_t PLAYBACK_START_TIMEOUT_MS = 5000;
 constexpr uint32_t PLAYBACK_FINISH_TIMEOUT_MS = 15000;
 constexpr Sound TEST_SOUNDS[] = {
     Sound::BellDing,
-    Sound::PlasticBicycleHorn,
-    Sound::SqueezeHorn,
 };
 
 size_t nextSoundIndex = 0;

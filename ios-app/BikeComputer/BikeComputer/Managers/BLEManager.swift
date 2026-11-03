@@ -647,22 +647,29 @@ enum DeviceTransferPacketRoutingPolicy {
 
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
+    // The horn and rotating-bell recordings were removed from the firmware.
+    // Their raw values stay decodable so legacy device state and persisted
+    // settings parse, but they are never offered or sent: firmware keeps raw
+    // values 2, 3 and 5 reserved and rejects them.
     case plasticBicycleHorn = 2
-    // Decode legacy device state without offering the removed recording in
-    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
 
+    /// The sounds the current firmware plays; the picker offers exactly these.
     static let allCases: [DeviceSound] = [
         .bellDing,
-        .plasticBicycleHorn,
-        .squeezeHorn,
     ]
 
-    static let defaultSelection: DeviceSound = .plasticBicycleHorn
+    static let defaultSelection: DeviceSound = .bellDing
     static let defaultVolumePercent: Double = 70
+
+    /// A legacy or persisted value that the current firmware no longer plays
+    /// falls back to the default instead of selecting a rejected ID.
+    static func selectable(_ sound: DeviceSound) -> DeviceSound {
+        allCases.contains(sound) ? sound : defaultSelection
+    }
 
     static func normalizedVolumePercent(_ volumePercent: Double) -> Double {
         guard volumePercent.isFinite else { return defaultVolumePercent }
@@ -701,11 +708,11 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .bellDing:
             return "Bell Ding"
         case .plasticBicycleHorn:
-            return "Bicycle Horn"
+            return "Bicycle Horn (Legacy)"
         case .rotatingBicycleBell:
             return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
-            return "Squeeze Horn"
+            return "Squeeze Horn (Legacy)"
         }
     }
 
@@ -2016,9 +2023,7 @@ class BLEManager: NSObject, ObservableObject {
         let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
-        selectedDeviceSound = restoredSound == .rotatingBicycleBell
-            ? .defaultSelection
-            : restoredSound
+        selectedDeviceSound = DeviceSound.selectable(restoredSound)
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
@@ -11366,7 +11371,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 let deviceHonkEnabled = powerButtonConfig[0] == 1
                 isPowerButtonHonkEnabled = deviceHonkEnabled
                 if deviceHonkEnabled {
-                    selectedDeviceSound = deviceSound
+                    selectedDeviceSound = DeviceSound.selectable(deviceSound)
                     deviceSoundVolumePercent = Double(powerButtonConfig[2])
                 }
                 saveSettings()

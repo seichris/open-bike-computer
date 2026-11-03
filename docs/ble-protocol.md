@@ -1208,13 +1208,13 @@ Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 | ID | Sound |
 | ---: | --- |
 | `1` | Bell ding |
-| `2` | Plastic bicycle horn |
-| `5` | Squeeze horn |
 
-Sound ID `3` was the retired rotating-bell recording and remains reserved. New
-firmware rejects it rather than reassigning it to a different sound. Bicino
-continues to decode legacy device state containing ID `3`, but does not offer
-it in the current sound picker.
+Sound IDs `2` (plastic bicycle horn) and `5` (squeeze horn) were the removed
+horn recordings, and `3` the retired rotating-bell recording. All three remain
+reserved: new firmware rejects them rather than reassigning them to a different
+sound. Bicino continues to decode legacy device state containing them, does not
+offer them in the current sound picker, and migrates a persisted selection to
+the bell ding.
 
 `VolumePercent` must be in the inclusive range `0...100`. For compatibility,
 the firmware also accepts the older frame containing only `SoundID` and uses
