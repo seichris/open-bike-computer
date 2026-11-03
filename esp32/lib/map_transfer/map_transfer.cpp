@@ -2709,7 +2709,7 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
   return activateReadyStreamMap(sessionId, onProgress, onRecovery, recoveryContext);
 }
 
-InstallStatus MapTransferInstaller::settleSelectedStreamMap() const try {
+InstallStatus MapTransferInstaller::settleSelectionStreamMaps() const try {
   // An interrupted switch belongs to journal recovery. Operation-backed roots
   // keep their ready state until finalizeOperation persists the receipt.
   if (hasInterruptedActivation()) return {true, "stream_settle_deferred", ""};
@@ -2717,30 +2717,48 @@ InstallStatus MapTransferInstaller::settleSelectedStreamMap() const try {
   const auto workspace = makeActivationWorkspace<Workspace>();
   auto &active = workspace->active;
   auto &ready = workspace->ready;
-  if (!readActiveMap(active).ok || !safeId(active.sessionId) ||
-      active.root != std::string("/VECTMAP/.maps/") + active.sessionId ||
-      !readReadyStreamMap(active.sessionId, ready).ok || !ready.operationID.empty() ||
-      ready.root != active.root || ready.mapId != active.mapId ||
-      ready.manifestReceipt != active.manifestReceipt ||
-      ready.signedManifestReceipt != active.signedManifestReceipt ||
-      preparationBlocksActivation(ready))
-    return {true, "stream_settle_none", ""};
-  const std::string root = joinPath(storageRoot_, ready.root);
-  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
-                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
   auto &pending = workspace->pending;
+  if (!readActiveMap(active).ok) return {true, "stream_settle_none", ""};
   const std::string pendingPath = joinPath(storageRoot_, kPendingStreamActivationFile);
-  const bool pendingSelected =
-      (readTextFile(pendingPath, pending, 2048) || readTextFile(pendingPath + ".bak", pending, 2048)) &&
-      jsonStringValue(pending, "sessionId") == ready.sessionId;
-  if (consumed && !pendingSelected) return {true, "stream_settle_none", ""};
-  // The same cleanup as an activation of the already selected root.
-  if ((!consumed && !markStreamActivationConsumed(ready)) ||
-      (pendingSelected && !clearPendingStreamActivation(ready.sessionId)) ||
-      !removeTree(joinPath(root, kStreamCheckpointFile)) ||
-      !removeTree(joinPath(root, kStreamInstallingFile)))
-    return fail("stream_settle_cleanup", "selected map cleanup will retry");
-  return {true, "stream_installed", ""};
+  if (!readTextFile(pendingPath, pending, 2048) && !readTextFile(pendingPath + ".bak", pending, 2048))
+    pending.clear();
+  InstallStatus result{true, "stream_settle_none", ""};
+  // The previous map was selected before, so it is just as installed. Once
+  // another map is chosen it leaves the pointer, and an unsettled marker would
+  // then turn back into pending work that boot activates again.
+  for (const bool previous : {false, true}) {
+    const auto &sessionId = previous ? active.previousSessionId : active.sessionId;
+    const auto &selectedRoot = previous ? active.previousRoot : active.root;
+    if (!safeId(sessionId) || selectedRoot != std::string("/VECTMAP/.maps/") + sessionId)
+      continue;
+    const std::string root = joinPath(storageRoot_, selectedRoot);
+    const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
+                          fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+    const bool pendingNamesRoot = !pending.empty() && jsonStringValue(pending, "sessionId") == sessionId;
+    // Checked before the ready marker, whose read hashes the whole manifest:
+    // Saved Maps settles too, and a settled root needs no reads beyond these.
+    if ((consumed && !pendingNamesRoot) ||
+        (!fileExists(joinPath(root, kStreamReadyFile)) &&
+         !fileExists(joinPath(root, kStreamReadyFile) + ".bak")))
+      continue;
+    if (!readReadyStreamMap(sessionId, ready).ok || !ready.operationID.empty() ||
+        ready.root != selectedRoot ||
+        ready.mapId != (previous ? active.previousMapId : active.mapId) ||
+        ready.manifestReceipt != (previous ? active.previousManifestReceipt : active.manifestReceipt) ||
+        ready.signedManifestReceipt !=
+            (previous ? active.previousSignedManifestReceipt : active.signedManifestReceipt) ||
+        preparationBlocksActivation(ready))
+      continue;
+    // The same cleanup as an activation of the already selected root.
+    if ((!consumed && !markStreamActivationConsumed(ready)) ||
+        (pendingNamesRoot && !clearPendingStreamActivation(sessionId)) ||
+        !removeTree(joinPath(root, kStreamCheckpointFile)) ||
+        !removeTree(joinPath(root, kStreamInstallingFile)))
+      result = fail("stream_settle_cleanup", "installed map cleanup will retry");
+    else if (result.ok)
+      result = {true, "stream_installed", ""};
+  }
+  return result;
 } catch (const std::bad_alloc &) {
   return {false, "out_of_memory", ""};
 }

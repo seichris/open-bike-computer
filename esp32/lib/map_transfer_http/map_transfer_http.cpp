@@ -558,6 +558,12 @@ void MapTransferHttpServer::executeLibraryTask() try {
   if (result.ok && action == "select" &&
       !installer_.writeManualSelectionIntent(session, "/VECTMAP/.maps/" + session, receipt))
     result = {false, "library_policy_write", ""};
+  // Settle before Use moves the pointer and before Refresh lists the library,
+  // so a finished map whose consumed marker failed is listed again and is
+  // settled before a Use can push it out of the pointer. Outside the pointer
+  // its marker is pending work that refuses uploads and that boot selects.
+  if (result.ok && (selecting || action == "refresh"))
+    (void)installer_.settleSelectionStreamMaps();
   if (result.ok && selecting) {
     // Persist the chosen identity in RAM before any pointer write. A retry
     // after allocation failure must hand this exact map to the renderer,
@@ -1547,10 +1553,10 @@ bool MapTransferHttpServer::handleInstallStream(
     sendError(client, 503, recovered.code, recovered.message);
     return true;
   }
-  // The selected map is installed even when its consumed marker failed, so it
-  // must not count as another pending upload. The scan skips it either way,
-  // as boot recovery does, if this cleanup fails again.
-  (void)installer_.settleSelectedStreamMap();
+  // The selected and previous maps are installed even when their consumed
+  // marker failed, so they must not count as another pending upload. The scan
+  // skips them either way, as boot recovery does, if this cleanup fails again.
+  (void)installer_.settleSelectionStreamMaps();
   MapStreamInstallSnapshot recoverableStream;
   MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(recoverableStream);
   if (streamRecovery == MapStreamRecoveryResult::Invalid) {
@@ -2186,8 +2192,8 @@ bool MapTransferHttpServer::takeAutomaticExitRequest() {
 // selection, or on its previous root after another map was chosen, belongs
 // to a finished install. It is neither pending upload work nor something boot
 // resumes: activating a previous root cannot succeed, would refuse uploads
-// meanwhile and could select it again. Settle retries the selected map's
-// cleanup at boot and on each upload.
+// meanwhile and could select it again. Settle retries the cleanup of both at
+// boot, on each upload, and on each library selection or refresh.
 MapStreamRecoveryResult MapTransferHttpServer::readPendingStreamInstall(
     MapStreamInstallSnapshot &snapshot) const {
   ActiveMapSelection selection;
@@ -2296,10 +2302,10 @@ void MapTransferHttpServer::resumePendingActivations() {
       }
     }
   }
-  // A selected map whose consumed marker failed needs cleanup, not another
-  // activation with a full block scan. If this cleanup fails again, the scan
-  // skips it, and a previous map's marker, as upload admission does.
-  (void)installer_.settleSelectedStreamMap();
+  // A selected or previous map whose consumed marker failed needs cleanup,
+  // not another activation with a full block scan. If this cleanup fails
+  // again, the scan skips both, as upload admission does.
+  (void)installer_.settleSelectionStreamMaps();
   MapStreamInstallSnapshot streamSnapshot;
   const MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(streamSnapshot);
   if (streamRecovery == MapStreamRecoveryResult::Found) {
