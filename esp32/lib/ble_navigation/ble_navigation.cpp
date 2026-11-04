@@ -250,6 +250,10 @@ static void recordTransferLinkGrace(const char *phase, uint32_t durationMs) {
 
 #if !BLE_RADIO_CHARACTERIZATION
 static uint16_t transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+// NimBLE reuses connection handles, so the handle alone cannot tell a new
+// link from the one that last carried a profile request; the link's connect
+// time distinguishes them.
+static uint32_t transferProfileLinkStartMs = 0;
 static bool transferProfileApplied = false;
 #endif
 // Start of the unauthenticated client's window (ble_connection_policy): set
@@ -1555,14 +1559,81 @@ static bool decodeOwnershipHandshake(const std::string &frame,
                               frame, payload, "ownership command", true);
 }
 
+static bool isNimbleCallbackContext();
+
+// Waits for the ownership mutex. From a NimBLE callback the wait is bounded:
+// the host task must keep answering ATT writes, because a write left without
+// its response makes the phone drop the link after 15 s and leaves the next
+// link's AUTH exchange unserved behind it (seen under transfer load, where the
+// mutex was held for longer than that). A wait past the report threshold, and
+// every timeout, records the task that held the mutex so the holder can be
+// identified from the device log.
+static constexpr uint32_t kOwnershipCallbackWaitMs = 1000;
+static constexpr uint32_t kOwnershipWaitReportMs = 100;
+
+static void recordOwnershipLockWait(const char *site, uint32_t waitedMs,
+                                    bool taken, TaskHandle_t holder) {
+  const char *holderName =
+      holder == nullptr ? "none" : pcTaskGetName(holder);
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
+      "\"reason\":\"%s\"}",
+      site, static_cast<unsigned long>(waitedMs),
+      holderName == nullptr ? "unknown" : holderName,
+      taken ? "waited" : "timeout");
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(taken ? ride_diagnostics::Level::Info
+                                         : ride_diagnostics::Level::Warning,
+                                   "ble", "ownership_lock", fields);
+  }
+}
+
+// The requested wait, capped to the callback limit when called from a NimBLE
+// callback.
+static TickType_t ownershipWaitTicks(TickType_t requested) {
+  const TickType_t callbackLimit = pdMS_TO_TICKS(kOwnershipCallbackWaitMs);
+  return isNimbleCallbackContext() ? std::min(requested, callbackLimit)
+                                   : requested;
+}
+
+static void noteOwnershipLockWaited(const char *site, uint32_t waitedMs) {
+  if (waitedMs >= kOwnershipWaitReportMs)
+    recordOwnershipLockWait(site, waitedMs, true, nullptr);
+}
+
+static bool takeOwnershipMutex(TickType_t waitTicks, const char *site) {
+  if (deviceOwnershipMutex == nullptr) return false;
+  const uint32_t startedMs = millis();
+  const bool taken =
+      xSemaphoreTake(deviceOwnershipMutex, ownershipWaitTicks(waitTicks)) ==
+      pdTRUE;
+  const uint32_t waitedMs = millis() - startedMs;
+  if (!taken) {
+    recordOwnershipLockWait(site, waitedMs, false,
+                            xSemaphoreGetMutexHolder(deviceOwnershipMutex));
+    return false;
+  }
+  noteOwnershipLockWaited(site, waitedMs);
+  return true;
+}
+
 // Execution and revocation are serialized by the ownership mutex. Admission to
 // the queue is provisional; configuration persists only after an authorized
 // apply, and the caller performs that flash write after this lock is released.
 bool BLENavigationServer::applyAuthorizedRideCommand(
     ride_command_admission::Authorization admitted,
     bool (*apply)(void *), void *context) {
-  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
-      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr) return false;
+  const uint32_t waitStartedMs = millis();
+  if (xSemaphoreTake(deviceOwnershipMutex, ownershipWaitTicks(portMAX_DELAY)) !=
+      pdTRUE) {
+    recordOwnershipLockWait("ride_command", millis() - waitStartedMs, false,
+                            xSemaphoreGetMutexHolder(deviceOwnershipMutex));
+    return false;
+  }
+  noteOwnershipLockWaited("ride_command", millis() - waitStartedMs);
   const ride_command_admission::Authorization current{
       ridePayloadGeneration.load(std::memory_order_acquire),
       deviceOwnership.authenticatedRideLeaseGeneration(millis())};
@@ -6134,8 +6205,7 @@ static bool resetOwnershipConnectionState() {
   if (!deviceOwnershipReady) {
     return true;
   }
-  if (deviceOwnershipMutex == nullptr ||
-      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) {
+  if (!takeOwnershipMutex(portMAX_DELAY, "connection_reset")) {
     return false;
   }
   deviceOwnership.resetConnection();
@@ -7819,12 +7889,17 @@ void BLENavigationServer::syncTransferConnectionProfile() {
   const uint16_t handle = activeConnHandle;
   if (pServer == nullptr || !connected || handle == BLE_HS_CONN_HANDLE_NONE) {
     transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+    transferProfileLinkStartMs = 0;
     transferProfileApplied = false;
     return;
   }
-  if (handle != transferProfileHandle) {
+  const uint32_t linkStartMs =
+      activeConnectionStartMs.load(std::memory_order_acquire);
+  if (handle != transferProfileHandle ||
+      linkStartMs != transferProfileLinkStartMs) {
     // A new link starts from the phone's defaults; request again if needed.
     transferProfileHandle = handle;
+    transferProfileLinkStartMs = linkStartMs;
     transferProfileApplied = false;
   }
   // Only the authenticated owner link gets the transfer profile: a link that

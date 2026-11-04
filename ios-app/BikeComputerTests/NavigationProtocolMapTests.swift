@@ -9621,6 +9621,106 @@ extension NavigationProtocolTests {
         )
     }
 
+    static func testDeviceTransferLinkRebindPolicy() {
+        typealias Policy = DeviceTransferLinkRebindPolicy
+        func link(
+            ready: Bool = true, device: String? = "bike-a", epoch: UInt64 = 9,
+            revision: UInt64 = 1, mode: String = "diagnostics",
+            token: String? = "tok", generation: UInt32 = 7
+        ) -> Policy.Link {
+            Policy.Link(navigationReady: ready, deviceID: device, connectionEpoch: epoch,
+                        statusRevision: revision, mode: mode, sessionToken: token,
+                        transferGeneration: generation)
+        }
+        func decide(
+            _ value: Policy.Link, token: String? = "tok", generation: UInt32? = 7
+        ) -> Policy.Decision {
+            Policy.decision(leaseDeviceID: "bike-a", leaseMode: "diagnostics", leaseEpoch: 3,
+                            authorizedToken: token, authorizedGeneration: generation, link: value)
+        }
+        assertEqual(decide(link(epoch: 3)), Policy.Decision.keep, "the link that authorized the session needs no rebind")
+        assertEqual(decide(link()), Policy.Decision.rebind, "the same device showing the same session on a new link is rebound")
+        assertEqual(
+            decide(link(ready: false, device: nil, revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "no link yet keeps waiting for the owner to come back"
+        )
+        assertEqual(
+            decide(link(revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "a new link without a transfer status yet keeps waiting"
+        )
+        assertEqual(
+            decide(link(ready: false, revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "a link that has yet to authenticate keeps waiting"
+        )
+        assertEqual(decide(link(device: "bike-b")), Policy.Decision.stale, "another device is a stale owner")
+        assertEqual(
+            decide(link(mode: "", token: nil, generation: 0)),
+            Policy.Decision.stale, "a fresh empty status means the device tore the session down"
+        )
+        assertEqual(decide(link(token: "other")), Policy.Decision.stale, "a different token is another session")
+        assertEqual(decide(link(generation: 8)), Policy.Decision.stale, "a rotated generation is another session")
+        assertEqual(decide(link(mode: "map")), Policy.Decision.stale, "a different mode is another session")
+        assertEqual(
+            decide(link(), token: nil, generation: nil),
+            Policy.Decision.stale, "a session that never authorized a token has nothing to carry over"
+        )
+        assert(
+            Policy.linkWindow == 15 && Policy.windowCap == 45,
+            "the wait mirrors the firmware's window and cap"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: nil), 115,
+            "with no link back the firmware gives up 15 s after the loss"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 90), 115,
+            "a connect before the loss is the lost link itself"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 110), 125,
+            "a link that came back moves the deadline to 15 s from that link"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 140), 145,
+            "the deadline never passes 45 s after the loss"
+        )
+        assert(
+            !Policy.expired(now: 114.9, lossUptime: 100, lastConnectUptime: nil) &&
+                Policy.expired(now: 115, lossUptime: 100, lastConnectUptime: nil) &&
+                !Policy.expired(now: 120, lossUptime: 100, lastConnectUptime: 110),
+            "the wait is anchored at the loss, not at the cleanup call"
+        )
+        assert(
+            Policy.shouldRequestStatus(now: 10, lastRequest: nil) &&
+                !Policy.shouldRequestStatus(now: 11, lastRequest: 10) &&
+                Policy.shouldRequestStatus(now: 12, lastRequest: 10),
+            "a status is requested at most every two seconds while waiting"
+        )
+
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let source = try? String(contentsOf: transferManagerURL, encoding: .utf8),
+              let cleanupStart = source.range(
+                of: "private func cleanupOperation(bleManager: BLEManager) async -> Bool {"
+              )?.lowerBound,
+              let cleanupEnd = source.range(
+                of: "func releaseFirmwareAfterReboot(",
+                range: cleanupStart..<source.endIndex
+              )?.lowerBound else {
+            assert(false, "device transfer cleanup source should be available")
+            return
+        }
+        let cleanupSource = String(source[cleanupStart..<cleanupEnd])
+        assert(
+            cleanupSource.contains("await self.rebindAfterLinkLoss(bleManager: bleManager)") &&
+                cleanupSource.contains("let lease = self.operationLease ?? lease") &&
+                cleanupSource.range(of: "rebindAfterLinkLoss")!.lowerBound <
+                    cleanupSource.range(of: "let alreadyClear")!.lowerBound,
+            "the session exit rebinds the lease to a replacing link before deciding ownership"
+        )
+    }
+
     static func testRendererCrossRunRetainedMemoryPolicy() {
         assert(
             RendererBenchmarkEvaluator.progressiveCrossRunDecline(
