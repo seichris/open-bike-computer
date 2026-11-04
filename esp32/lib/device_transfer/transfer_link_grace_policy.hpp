@@ -6,15 +6,28 @@
 // What an enabled transfer session does when the owner's BLE link is lost.
 //
 // A map or diagnostics transfer keeps its token, authorization generation,
-// listener and in-flight client for a short grace window instead of the
-// immediate fail-closed teardown. The owner's link returns within seconds
-// after a connection supervision timeout and only the owner credential can
-// authenticate, so the rebind inside the window is the same owner by
-// construction. The window expiring without a rebind, a mode replacement, an
-// explicit exit and every other mode keep the existing teardown.
+// listener and in-flight client for a bounded grace window instead of the
+// immediate fail-closed teardown. The owner's link usually returns within
+// seconds after a connection supervision timeout; under transfer load it has
+// been seen to need 24 s (a first reconnect that never authenticated before
+// the 12-s unauthenticated deadline, then four links shorter than 3 s). The
+// window is therefore 15 s from the loss, moved to 15 s from each BLE link
+// that appears while it is open, and never later than 45 s after the loss.
+// Only the owner credential can authenticate, so the rebind inside the window
+// is the same owner by construction, and a stray central can at most hold the
+// session to that cap. The window expiring without a rebind, a mode
+// replacement, an explicit exit and every other mode keep the existing
+// teardown.
 namespace transfer_link_grace_policy {
 
 constexpr uint32_t graceMs = 15000;
+constexpr uint32_t graceMaxMs = 45000;
+
+// Wrap-safe "a is later than b" for millis() values that are never more than
+// half the counter range apart.
+inline bool isAfter(uint32_t a, uint32_t b) {
+  return a != b && static_cast<uint32_t>(a - b) < UINT32_MAX / 2;
+}
 
 inline bool modeKeepsSessionAcrossLinkLoss(const std::string &mode) {
   return mode == "map" || mode == "diagnostics";
@@ -53,6 +66,22 @@ inline LinkLoss linkLoss(bool graceActive, bool starts) {
 // window is far shorter than half the counter range.
 inline bool graceExpired(uint32_t nowMs, uint32_t deadlineMs) {
   return static_cast<uint32_t>(nowMs - deadlineMs) < UINT32_MAX / 2;
+}
+
+// A BLE link appearing while the window is open is the owner coming back (or
+// a stray central, which the cap bounds): the deadline moves to a full window
+// from that link, no later than the cap from the first loss, and never
+// earlier than it already is. A link arriving once the deadline has passed,
+// before the loop's expiry check ran, does not revive the window.
+inline uint32_t extendedDeadlineMs(uint32_t nowMs, uint32_t lossMs,
+                                   uint32_t deadlineMs) {
+  if (graceExpired(nowMs, deadlineMs))
+    return deadlineMs;
+  const uint32_t cap = lossMs + graceMaxMs;
+  uint32_t candidate = nowMs + graceMs;
+  if (isAfter(candidate, cap))
+    candidate = cap;
+  return isAfter(candidate, deadlineMs) ? candidate : deadlineMs;
 }
 
 enum class Rebind : uint8_t {

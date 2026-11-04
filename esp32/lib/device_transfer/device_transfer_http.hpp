@@ -136,6 +136,12 @@ public:
   transfer_link_grace_policy::LinkLoss suspendOwnerBleSessionForLinkLoss(
       uint32_t nowMs, bool linkWasAuthenticated, bool firmwareRequested);
   bool bleLinkGraceActive() const;
+  // A BLE link appeared while the window is open: the deadline moves per the
+  // policy (a full window from now, within the cap from the loss). Returns
+  // the time left until the deadline afterwards, 0 when no window is open.
+  uint32_t extendBleLinkGraceForLink(uint32_t nowMs);
+  // Milliseconds since the loss that opened the window, 0 when none is open.
+  uint32_t bleLinkGraceElapsedMs(uint32_t nowMs) const;
   // Tears the session down (clearAuthenticatedBleSession) once the window has
   // passed without the owner rebinding; returns whether it did.
   bool expireBleLinkGraceIfDue(uint32_t nowMs);
@@ -189,6 +195,7 @@ private:
   uint64_t authenticatedBleSessionId_ = 0;
   bool bleLinkGraceActive_ = false;
   uint32_t bleLinkGraceDeadlineMs_ = 0;
+  uint32_t bleLinkGraceLossMs_ = 0;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;
