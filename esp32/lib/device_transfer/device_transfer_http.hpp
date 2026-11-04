@@ -127,6 +127,15 @@ public:
   bool bindAuthenticatedBleSession(uint64_t sessionId);
   void clearAuthenticatedBleSession();
   bool suspendFirmwareAuthenticatedBleSession();
+  // Owner BLE link lost during a map or diagnostics transfer: keep the token,
+  // generation, listener and in-flight client for the policy's grace window.
+  // Returns false when the session must be torn down immediately instead.
+  bool suspendOwnerBleSessionForLinkLoss(uint32_t nowMs);
+  bool bleLinkGraceActive() const;
+  // Tears the session down (clearAuthenticatedBleSession) once the window has
+  // passed without the owner rebinding; returns whether it did.
+  bool expireBleLinkGraceIfDue(uint32_t nowMs);
+  bool isSessionEnabled() const;
   bool prepareTlsIdentityRotation();
   bool commitTlsIdentityRotation(
       const std::string &expectedCertificateSha256);
@@ -174,6 +183,8 @@ private:
   std::string sessionToken_;
   TransferTlsIdentityStore tlsIdentityStore_;
   uint64_t authenticatedBleSessionId_ = 0;
+  bool bleLinkGraceActive_ = false;
+  uint32_t bleLinkGraceDeadlineMs_ = 0;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;

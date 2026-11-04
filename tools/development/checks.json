@@ -739,6 +739,17 @@
       ]
     },
     {
+      "id": "esp32-host-transfer-link-grace-policy-host-tests",
+      "name": "Transfer link grace policy host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_transfer_link_grace_policy.cpp \\\n  -o ${TMPDIR}/test_transfer_link_grace_policy\n${TMPDIR}/test_transfer_link_grace_policy",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
       "id": "esp32-host-codec-recovery-host-tests",
       "name": "Codec recovery host tests",
       "component": "firmware_host",

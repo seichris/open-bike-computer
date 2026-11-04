@@ -2303,9 +2303,15 @@ Status responses should include:
   choice is offered as an update. Each saved copy records the entries it was
   chosen for, and the app uses them while no bike reports its own.
 - `baseUrl`: temporary HTTPS base URL when transfer mode is enabled.
-- `transferGeneration`: nonzero boot-local authorization generation. BLE
-  disconnect, exit, or mode replacement increments it so in-flight requests
-  from the old session fail authorization.
+- `transferGeneration`: nonzero boot-local authorization generation. Exit,
+  mode replacement, and a BLE disconnect outside the grace window below
+  increment it so in-flight requests from the old session fail authorization.
+  A map or diagnostics transfer survives a loss of the owner's BLE link for
+  up to 15 seconds: the token, the generation, the listener and any in-flight
+  request stay valid while the same owner re-authenticates (only the owner
+  credential can); the generation increments and the session tears down when
+  that window expires without a rebind. Firmware maintenance and debug
+  sessions keep their immediate revocation.
 - `tls`: active `identityVersion` and exact lowercase DER leaf-certificate
   `certificateSha256` used by iOS for pinning.
 - `pendingTls`: optional staged identity version/fingerprint during two-phase
@@ -2497,7 +2503,13 @@ Boot-local activation sequence alone is not a durable operation receipt.
 The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
-stops the listener, and schedules mode-specific cleanup.
+stops the listener, and schedules mode-specific cleanup, except that a map or
+diagnostics transfer first keeps everything for a 15-second grace window (see
+`transferGeneration`): the same owner re-authenticating inside it continues the
+session on the new link, and the window expiring runs that teardown. While a
+transfer session is enabled, firmware also requests the relaxed BLE connection
+profile (60-100 ms interval, latency 4, six-second supervision timeout) and
+restores the navigation profile on the same link when the session ends.
 
 ### World Radio reuse invariants
 
