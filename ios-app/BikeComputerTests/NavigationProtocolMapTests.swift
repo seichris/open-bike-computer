@@ -9664,10 +9664,31 @@ extension NavigationProtocolTests {
             decide(link(), token: nil, generation: nil),
             Policy.Decision.stale, "a session that never authorized a token has nothing to carry over"
         )
-        assert(Policy.waitTimeout == 45, "the wait matches the firmware's cap after the loss")
         assert(
-            !Policy.expired(elapsed: 44.9) && Policy.expired(elapsed: 45),
-            "the wait ends at the cap"
+            Policy.linkWindow == 15 && Policy.windowCap == 45,
+            "the wait mirrors the firmware's window and cap"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: nil), 115,
+            "with no link back the firmware gives up 15 s after the loss"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 90), 115,
+            "a connect before the loss is the lost link itself"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 110), 125,
+            "a link that came back moves the deadline to 15 s from that link"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 140), 145,
+            "the deadline never passes 45 s after the loss"
+        )
+        assert(
+            !Policy.expired(now: 114.9, lossUptime: 100, lastConnectUptime: nil) &&
+                Policy.expired(now: 115, lossUptime: 100, lastConnectUptime: nil) &&
+                !Policy.expired(now: 120, lossUptime: 100, lastConnectUptime: 110),
+            "the wait is anchored at the loss, not at the cleanup call"
         )
         assert(
             Policy.shouldRequestStatus(now: 10, lastRequest: nil) &&

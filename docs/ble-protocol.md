@@ -2522,8 +2522,10 @@ restores the navigation profile on the same link when the session ends. The
 app keeps its side of a kept session as well: an in-flight device-log download
 is not tied to the BLE link, and when the link that authorized the session is
 replaced, the app rebinds its operation lease to the replacing link once a
-fresh `DSTS` on it shows the same mode, session token and `transferGeneration`
-(waiting at most the firmware's 45-second cap), so the session exit is sent
+fresh `DSTS` on it shows the same mode, session token and `transferGeneration`,
+waiting only as long as the firmware keeps the session (15 seconds from the
+loss, moved to 15 seconds from each link that came back, at most 45 seconds
+after the loss, all counted from the loss itself), so the session exit is sent
 over the new link instead of failing as a stale owner.
 
 ### World Radio reuse invariants

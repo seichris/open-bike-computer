@@ -675,9 +675,12 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 /// so the session exit and any later request go to the device over the new
 /// link instead of stranding the cleanup as a stale owner.
 enum DeviceTransferLinkRebindPolicy {
-    /// The firmware's cap after the loss: a link that has not shown the
-    /// session by then will not, because the device has torn it down.
-    static let waitTimeout: TimeInterval = 45
+    /// The firmware's window: 15 s from the loss, moved to 15 s from each BLE
+    /// link that appears while it is open, never later than 45 s after the
+    /// loss. A link that has not shown the session by then will not, because
+    /// the device has torn it down.
+    static let linkWindow: TimeInterval = 15
+    static let windowCap: TimeInterval = 45
     static let statusRequestInterval: TimeInterval = 2
     static let observationIntervalNanoseconds: UInt64 = 250_000_000
 
@@ -719,8 +722,26 @@ enum DeviceTransferLinkRebindPolicy {
         return sameSession ? .rebind : .stale
     }
 
-    static func expired(elapsed: TimeInterval) -> Bool {
-        elapsed >= waitTimeout
+    /// The moment the firmware gives the kept session up, mirrored from the
+    /// loss and the last link that came back since; a connect before the loss
+    /// is the lost link itself and does not extend anything.
+    static func deadline(
+        lossUptime: TimeInterval,
+        lastConnectUptime: TimeInterval?
+    ) -> TimeInterval {
+        var deadline = lossUptime + linkWindow
+        if let lastConnectUptime, lastConnectUptime > lossUptime {
+            deadline = max(deadline, lastConnectUptime + linkWindow)
+        }
+        return min(deadline, lossUptime + windowCap)
+    }
+
+    static func expired(
+        now: TimeInterval,
+        lossUptime: TimeInterval,
+        lastConnectUptime: TimeInterval?
+    ) -> Bool {
+        now >= deadline(lossUptime: lossUptime, lastConnectUptime: lastConnectUptime)
     }
 
     static func shouldRequestStatus(
@@ -1215,9 +1236,10 @@ final class DeviceTransferManager {
 
     /// Rebinds the operation lease to the link that replaced a lost one, once
     /// that link shows the same device and the same authorized session. Waits
-    /// at most the firmware's window for the owner to come back; a different
-    /// device, a different session or the window passing leaves the lease as
-    /// it is, so the caller's stale-owner handling runs unchanged.
+    /// only as long as the firmware keeps the session, counted from the link
+    /// loss itself (not from this call, which may come long after it); a
+    /// different device, a different session or the window passing leaves
+    /// the lease as it is, so the caller's stale-owner handling runs unchanged.
     private func rebindAfterLinkLoss(bleManager: BLEManager) async -> Bool {
         guard let lease = operationLease, coordinator.owns(lease),
               lease.connectionEpoch != bleManager.transferConnectionEpoch else {
@@ -1225,6 +1247,9 @@ final class DeviceTransferManager {
         }
         let mode = DeviceTransferSession.Mode(rawValue: lease.mode) ?? .diagnostics
         let started = ProcessInfo.processInfo.systemUptime
+        // The loss is the manager's only anchor; without one observed, this
+        // call is the earliest it can have happened.
+        let lossUptime = bleManager.transportLinkLostUptime ?? started
         var lastStatusRequest: TimeInterval?
         while true {
             let link = DeviceTransferLinkRebindPolicy.Link(
@@ -1237,7 +1262,7 @@ final class DeviceTransferManager {
                 transferGeneration: bleManager.deviceTransferGeneration
             )
             let now = ProcessInfo.processInfo.systemUptime
-            let elapsedMs = String(Int((now - started) * 1_000))
+            let elapsedMs = String(Int((now - lossUptime) * 1_000))
             switch DeviceTransferLinkRebindPolicy.decision(
                 leaseDeviceID: lease.deviceID,
                 leaseMode: lease.mode,
@@ -1267,7 +1292,11 @@ final class DeviceTransferManager {
                        fields: ["phase": "stale", "durationMs": elapsedMs])
                 return false
             case .wait:
-                if DeviceTransferLinkRebindPolicy.expired(elapsed: now - started) {
+                if DeviceTransferLinkRebindPolicy.expired(
+                    now: now,
+                    lossUptime: lossUptime,
+                    lastConnectUptime: bleManager.transportLinkConnectedUptime
+                ) {
                     record(mode: mode, event: "ble_link_grace",
                            fields: ["phase": "expired", "durationMs": elapsedMs])
                     return false
