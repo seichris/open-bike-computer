@@ -652,6 +652,11 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    // iOS can accept a persistent configuration for a network it will not
+    // auto-join (a no-internet accessory AP it has seen often). A retry after
+    // such an accepted-but-unassociated attempt joins once explicitly, after a
+    // longer settle so the removal of the previous configuration is complete.
+    static let unassociatedRetrySettleDelayNanoseconds: UInt64 = 2_000_000_000
     // iOS can leave its accessory Wi-Fi confirmation visible while an XCTest
     // screen capture is stalled. Give the foreground user time to answer while
     // retaining a bounded window below firmware's 90-second inactivity limit.
@@ -659,6 +664,7 @@ enum DeviceNetworkJoinPolicy {
     static let currentNetworkFetchTimeout: TimeInterval = 2
     static let associationObservationTimeout: TimeInterval = 12
     static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
+    static let applyObservationIntervalNanoseconds: UInt64 = 2_000_000_000
     static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
     static let joinErrorDomain = "Bicino.DeviceNetworkJoin"
     static let configurationApplyTimeoutCode = 1
@@ -709,6 +715,70 @@ enum DeviceNetworkJoinPolicy {
         )
     }
 
+    static func acceptedWithoutAssociation(
+        applyAccepted: Bool,
+        observation: DeviceTransferNetworkObservation
+    ) -> Bool {
+        applyAccepted && observation != .target
+    }
+
+    static func retryJoinsOnce(afterAcceptedWithoutAssociation previous: Bool) -> Bool {
+        previous
+    }
+
+    static func retrySettleDelayNanoseconds(
+        afterAcceptedWithoutAssociation previous: Bool
+    ) -> UInt64 {
+        previous ? unassociatedRetrySettleDelayNanoseconds
+                 : configurationSettleDelayNanoseconds
+    }
+
+    enum ApplyResolution: String, Equatable, CaseIterable {
+        case callback
+        case associated
+        case timeout
+        /// No system apply was issued: the operation lease was gone or an
+        /// earlier apply is still outstanding under the no-overlap rule.
+        case refused
+    }
+
+    enum ApplyWaitDecision: String, Equatable {
+        case continueWaiting
+        case associated
+        case timedOut
+    }
+
+    /// iOS can leave an accepted configuration unconfirmed for longer than the
+    /// association itself takes. Observing the active network while the system
+    /// completes the apply lets a confirmed association proceed to the pinned
+    /// probe without waiting for that late callback.
+    static func applyWaitDecision(
+        elapsed: TimeInterval,
+        observation: DeviceTransferNetworkObservation
+    ) -> ApplyWaitDecision {
+        if observation == .target { return .associated }
+        if elapsed >= configurationApplyTimeout { return .timedOut }
+        return .continueWaiting
+    }
+
+    /// Fields of the `wifi_apply` record written when the system callback
+    /// arrives after the wait already ended by timeout or by observation.
+    static func lateCallbackFields(
+        error: NSError?,
+        elapsed: TimeInterval
+    ) -> [String: String] {
+        var fields = [
+            "phase": "late_callback",
+            "applyResult": error == nil ? "accepted" : "error",
+            "durationMs": String(Int(elapsed * 1_000)),
+        ]
+        if let error {
+            fields["applyErrorDomain"] = error.domain
+            fields["applyErrorCode"] = String(error.code)
+        }
+        return fields
+    }
+
     static func makeHotspotConfiguration<Configuration>(
         ssid: String,
         passphrase: String?,
@@ -740,18 +810,35 @@ enum DeviceNetworkJoinPolicy {
 
 #if os(iOS)
 private final class DeviceNetworkApplyGate: @unchecked Sendable {
+    enum Resolution: Equatable {
+        case pending
+        case callback
+        case timeout
+        case observation
+    }
+
     private let lock = NSLock()
     private var continuation: CheckedContinuation<NSError?, Never>?
-    private var isResolved = false
-    private var didTimeOut = false
+    private var state = Resolution.pending
     private var callbackReceived = false
     private var callbackSucceeded = false
     private var isAbandoned = false
     private var cleanupIssued = false
     private let cleanup: @Sendable () -> Void
+    private let lateCallback: @Sendable (NSError?) -> Void
 
-    init(cleanup: @escaping @Sendable () -> Void) {
+    init(
+        cleanup: @escaping @Sendable () -> Void,
+        lateCallback: @escaping @Sendable (NSError?) -> Void = { _ in }
+    ) {
         self.cleanup = cleanup
+        self.lateCallback = lateCallback
+    }
+
+    var resolution: Resolution {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
     }
 
     func install(_ continuation: CheckedContinuation<NSError?, Never>) {
@@ -763,44 +850,62 @@ private final class DeviceNetworkApplyGate: @unchecked Sendable {
     func receiveCallback(_ error: NSError?) {
         var continuationToResume: CheckedContinuation<NSError?, Never>?
         var shouldCleanUp = false
+        var isLate = false
         lock.lock()
         callbackReceived = true
         callbackSucceeded = error == nil
-        if !isResolved {
-            isResolved = true
+        if state == .pending {
+            state = .callback
             continuationToResume = continuation
             continuation = nil
-        } else if didTimeOut && isAbandoned && error == nil && !cleanupIssued {
-            cleanupIssued = true
-            shouldCleanUp = true
+        } else {
+            isLate = true
+            if state == .timeout && isAbandoned && error == nil && !cleanupIssued {
+                cleanupIssued = true
+                shouldCleanUp = true
+            }
         }
         lock.unlock()
         continuationToResume?.resume(returning: error)
+        if isLate {
+            lateCallback(error)
+        }
         if shouldCleanUp {
             cleanup()
         }
     }
 
     func timeOut() {
+        resolve(
+            .timeout,
+            returning: DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        )
+    }
+
+    /// The active network already is the accessory AP: proceed without the
+    /// system's late confirmation; that callback is still recorded.
+    func resolveAssociated() {
+        resolve(.observation, returning: nil)
+    }
+
+    private func resolve(_ resolution: Resolution, returning error: NSError?) {
         var continuationToResume: CheckedContinuation<NSError?, Never>?
         lock.lock()
-        if !isResolved {
-            isResolved = true
-            didTimeOut = true
+        if state == .pending {
+            state = resolution
             continuationToResume = continuation
             continuation = nil
         }
         lock.unlock()
-        continuationToResume?.resume(
-            returning: DeviceNetworkJoinPolicy.configurationApplyTimeoutError
-        )
+        continuationToResume?.resume(returning: error)
     }
 
     func abandon() {
         var shouldCleanUp = false
         lock.lock()
         isAbandoned = true
-        if didTimeOut && callbackReceived && callbackSucceeded && !cleanupIssued {
+        if state == .timeout && callbackReceived && callbackSucceeded &&
+            !cleanupIssued {
             cleanupIssued = true
             shouldCleanUp = true
         }
@@ -2353,6 +2458,7 @@ final class DeviceTransferManager {
                 DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
         )
 
+        var previousAcceptedWithoutAssociation = false
         for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
             lastFailureWasServerProbe = false
             let configuration = DeviceNetworkJoinPolicy.hotspotConfiguration(
@@ -2362,18 +2468,28 @@ final class DeviceTransferManager {
             // A join-once network is disconnected by iOS when the screen sleeps
             // or the app remains backgrounded for 15 seconds. Keep this
             // accessory AP configured for the background URLSession upload and
-            // remove it explicitly when transfer mode exits.
-            configuration.joinOnce = false
-            configuration.lifeTimeInDays = 1
+            // remove it explicitly when transfer mode exits. After iOS accepted
+            // that persistent configuration without joining it, the retry
+            // joins once explicitly instead.
+            let joinOnce = DeviceNetworkJoinPolicy.retryJoinsOnce(
+                afterAcceptedWithoutAssociation: previousAcceptedWithoutAssociation
+            )
+            configuration.joinOnce = joinOnce
+            if !joinOnce {
+                configuration.lifeTimeInDays = 1
+            }
 
             let applyStarted = ProcessInfo.processInfo.systemUptime
             record(mode: session.mode, event: "wifi_apply", fields: [
                 "attempt": String(attempt + 1), "phase": "requested",
                 "generation": String(session.transferGeneration),
+                "kind": joinOnce ? "join_once" : "persistent",
             ])
             let applyResult = await apply(
                 configuration: configuration,
-                ssid: ssid
+                ssid: ssid,
+                session: session,
+                attempt: attempt
             )
             let applyError = applyResult.error
             var applyFields = [
@@ -2381,6 +2497,7 @@ final class DeviceTransferManager {
                 "generation": String(session.transferGeneration),
                 "durationMs": String(Int((ProcessInfo.processInfo.systemUptime - applyStarted) * 1_000)),
                 "applyResult": applyError == nil ? "accepted" : "error",
+                "result": applyResult.resolution.rawValue,
             ]
             if let applyError {
                 applyFields["applyErrorDomain"] = applyError.domain
@@ -2449,6 +2566,11 @@ final class DeviceTransferManager {
                 fields: observationFields
             )
 
+            previousAcceptedWithoutAssociation =
+                DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                    applyAccepted: applyError == nil,
+                    observation: networkObservation
+                )
             if networkObservation == .other {
                 if let applyError,
                    !DeviceNetworkJoinPolicy.shouldRetry(
@@ -2500,7 +2622,10 @@ final class DeviceTransferManager {
                 joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
-                        DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+                        DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                            afterAcceptedWithoutAssociation:
+                                previousAcceptedWithoutAssociation
+                        )
                 )
             }
         }
@@ -2529,14 +2654,41 @@ final class DeviceTransferManager {
 #if os(iOS)
     private func apply(
         configuration: NEHotspotConfiguration,
-        ssid: String
-    ) async -> (error: NSError?, gate: DeviceNetworkApplyGate) {
+        ssid: String,
+        session: DeviceTransferSession,
+        attempt: Int
+    ) async -> (
+        error: NSError?,
+        gate: DeviceNetworkApplyGate,
+        resolution: DeviceNetworkJoinPolicy.ApplyResolution
+    ) {
         guard let lease = operationLease,
               let applyID = try? coordinator.beginApply(lease) else {
             let gate = DeviceNetworkApplyGate(cleanup: {})
-            return (DeviceNetworkJoinPolicy.configurationApplyTimeoutError, gate)
+            return (
+                DeviceNetworkJoinPolicy.configurationApplyTimeoutError,
+                gate,
+                .refused
+            )
         }
-        let gate = DeviceNetworkApplyGate(cleanup: {})
+        let applyStarted = ProcessInfo.processInfo.systemUptime
+        let mode = session.mode
+        let generation = session.transferGeneration
+        let gate = DeviceNetworkApplyGate(
+            cleanup: {},
+            lateCallback: { [weak self] error in
+                Task { @MainActor in
+                    var fields = DeviceNetworkJoinPolicy.lateCallbackFields(
+                        error: error,
+                        elapsed: ProcessInfo.processInfo.systemUptime - applyStarted
+                    )
+                    fields["attempt"] = String(attempt + 1)
+                    fields["generation"] = String(generation)
+                    self?.record(mode: mode, event: "wifi_apply", fields: fields)
+                }
+            }
+        )
+        var observer: Task<Void, Never>?
         let error = await withCheckedContinuation { continuation in
             gate.install(continuation)
             NEHotspotConfigurationManager.shared.apply(configuration) { error in
@@ -2551,8 +2703,40 @@ final class DeviceTransferManager {
             ) {
                 gate.timeOut()
             }
+            // iOS can hold an accepted configuration unconfirmed long after the
+            // phone associated. Watch the active network meanwhile and proceed
+            // on the accessory AP instead of waiting for that late callback.
+            observer = Task { @MainActor [weak self] in
+                while gate.resolution == .pending {
+                    try? await Task.sleep(
+                        nanoseconds:
+                            DeviceNetworkJoinPolicy
+                                .applyObservationIntervalNanoseconds
+                    )
+                    guard let self, gate.resolution == .pending else { return }
+                    let observation = await self.currentNetworkObservation(
+                        expectedSSID: ssid
+                    )
+                    if DeviceNetworkJoinPolicy.applyWaitDecision(
+                        elapsed: ProcessInfo.processInfo.systemUptime - applyStarted,
+                        observation: observation
+                    ) == .associated {
+                        gate.resolveAssociated()
+                    }
+                }
+            }
         }
-        return (error, gate)
+        observer?.cancel()
+        let resolution: DeviceNetworkJoinPolicy.ApplyResolution
+        switch gate.resolution {
+        case .observation:
+            resolution = .associated
+        case .timeout:
+            resolution = .timeout
+        case .callback, .pending:
+            resolution = .callback
+        }
+        return (error, gate, resolution)
     }
 
     private func currentNetworkObservation(
