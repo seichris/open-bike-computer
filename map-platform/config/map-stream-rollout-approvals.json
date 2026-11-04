@@ -520,6 +520,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261104-brotli-security",
+      "candidateGitSha": "ef49abbb47b527a16b440eeb7238b2ce5a184f93",
+      "producerBuildSha256": "cf355d747acc33734d6e1853985add6b2b88fdf400beb978a4056549adaef9b2",
+      "workerImageDigest": "sha256:6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "4ca86afa7165616f6a392412f6177c78653d04edd3a7b5090fc9a38b7c7f33f7",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-04T11:22:52Z",
+      "approvedBy": "Codex (software security release review under Chris's explicit 2026-11-04 request to fix Brotli and certificate trust; optional hardware matrix, zero physical runs)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
