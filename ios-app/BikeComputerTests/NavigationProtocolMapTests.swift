@@ -9366,6 +9366,11 @@ extension NavigationProtocolTests {
             ),
             "a rejected configuration keeps the typed error path"
         )
+        assertEqual(
+            DeviceNetworkJoinPolicy.ApplyResolution.allCases.map(\.rawValue),
+            ["callback", "associated", "timeout", "refused"],
+            "a refused apply (no lease or an outstanding apply) is labelled apart from a timed-out one"
+        )
         assert(
             DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: true) &&
                 !DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: false),

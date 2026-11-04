@@ -733,10 +733,13 @@ enum DeviceNetworkJoinPolicy {
                  : configurationSettleDelayNanoseconds
     }
 
-    enum ApplyResolution: String, Equatable {
+    enum ApplyResolution: String, Equatable, CaseIterable {
         case callback
         case associated
         case timeout
+        /// No system apply was issued: the operation lease was gone or an
+        /// earlier apply is still outstanding under the no-overlap rule.
+        case refused
     }
 
     enum ApplyWaitDecision: String, Equatable {
@@ -2665,7 +2668,7 @@ final class DeviceTransferManager {
             return (
                 DeviceNetworkJoinPolicy.configurationApplyTimeoutError,
                 gate,
-                .timeout
+                .refused
             )
         }
         let applyStarted = ProcessInfo.processInfo.systemUptime
