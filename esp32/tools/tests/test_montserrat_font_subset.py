@@ -132,8 +132,8 @@ class LvConfTests(unittest.TestCase):
             self.assertIn(f"LV_FONT_DECLARE({fonts.font_name(size)})", LV_CONF)
         self.assertIn("#define LV_FONT_DEFAULT &lv_font_montserrat_14", LV_CONF)
 
-    def test_shipped_fonts_are_uncompressed(self):
-        self.assertRegex(LV_CONF, r"(?m)^#define LV_USE_FONT_COMPRESSED 0\s*$")
+    def test_shipped_fonts_are_compressed(self):
+        self.assertRegex(LV_CONF, r"(?m)^#define LV_USE_FONT_COMPRESSED 1\s*$")
 
     def test_waveshare_builds_use_the_small_screen_aliases(self):
         self.assertNotRegex(PLATFORMIO_INI, r"-D\s*LARGE_SCREEN\b")
@@ -155,7 +155,7 @@ class GeneratedFontTests(unittest.TestCase):
             self.assertIn(f" * Bpp: {fonts.BPP}\n", source)
             options = re.search(r"^ \* Opts: (.*)$", source, re.M)
             self.assertIsNotNone(options, f"{size}: Opts line missing")
-            expected = " ".join(fonts.conversion_arguments(size, compressed=False))
+            expected = " ".join(fonts.conversion_arguments(size, compressed=True))
             self.assertEqual(options.group(1), expected,
                              f"{size}: regenerate with the generator")
             self.assertIn(f"tools/generate_montserrat_fonts.py with lv_font_conv "
