@@ -9221,6 +9221,26 @@ extension NavigationProtocolTests {
         )
         assertEqual(
             MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isSimulationMode: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "test navigation leaves the camera to the simulated position and course"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isSimulationMode: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "a simulation never falls back to MapKit tracking"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
                 isNavigating: false,
                 isOfflineMapSelectionActive: true,
                 isDestinationSelectionActive: false

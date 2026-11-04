@@ -954,6 +954,7 @@ struct NavigationProtocolTests {
         testRouteGeometryTransmissionPolicy()
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
+        testTestNavigationHeadingFollowsRouteTurns()
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -7245,6 +7246,77 @@ struct NavigationProtocolTests {
         assertEqual(testEngine.routeCoordinateExtractionCount, 1,
                     "test navigation uses the same cached MKRoute polyline")
         testEngine.stopNavigation()
+    }
+
+    @MainActor
+    static func testTestNavigationHeadingFollowsRouteTurns() {
+        // An eastbound leg, then a northbound leg, in MapKit's GCJ-02 space like
+        // a real MKRoute in Shanghai.
+        let wgsStart = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let gcjStart = CoordinateConverter.wgs84ToGCJ02(coordinate: wgsStart)
+        let gcjCorner = CLLocationCoordinate2D(
+            latitude: gcjStart.latitude,
+            longitude: gcjStart.longitude + 0.003
+        )
+        let gcjEnd = CLLocationCoordinate2D(
+            latitude: gcjCorner.latitude + 0.003,
+            longitude: gcjCorner.longitude
+        )
+        let route = TestRoute(
+            instructions: "Continue east, then north",
+            coordinates: [gcjStart, gcjCorner, gcjEnd]
+        )
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, isTestMode: true)
+        var headings: [UInt16] = []
+        var resolutions: [String] = []
+        for _ in 0..<70 {
+            engine.updateSimulationForTesting(timeInterval: 1)
+            guard engine.isNavigating, let gps = manager.sentGPSPositions.last else { break }
+            headings.append(readUInt16LE(gps, offset: 8))
+            if let r = engine.lastDeviceCourseForTesting {
+                resolutions.append("seg=\(r.segmentIndex.map(String.init) ?? "nil") f=\(r.fraction.map { String(format: "%.2f", $0) } ?? "nil") rb=\(r.routeBearing.map { String(format: "%.0f", $0) } ?? "nil") mc=\(r.measuredCourse) h=\(r.heading.map { String(format: "%.0f", $0) } ?? "nil") n=\(r.cacheCount)")
+            }
+        }
+        engine.stopNavigation()
+        // 10 m/s: the eastbound leg (about 285 m) covers the first 28 steps and
+        // the northbound leg the rest.
+        assert(headings.count >= 50, "test navigation advances along both legs: \(headings.count) steps")
+        let eastbound = headings[2..<15]
+        let northbound = headings[35..<50]
+        assert(
+            eastbound.allSatisfy { $0 >= 88 && $0 <= 92 },
+            "the eastbound leg sends an eastbound course: \(Array(eastbound))"
+        )
+        assert(
+            northbound.allSatisfy { $0 >= 358 || $0 <= 2 },
+            "after the corner the simulated course turns north: \(Array(northbound)) \(resolutions.suffix(3))"
+        )
+
+        // The route bearing itself covers the whole compass: a westward leg
+        // used to come back as nil (atan2's negative half) and the last
+        // valid course stuck.
+        let origin = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        func bearing(dLat: Double, dLon: Double) -> Int {
+            guard let value = NavigationHeading.bearing(
+                from: origin,
+                to: CLLocationCoordinate2D(latitude: origin.latitude + dLat, longitude: origin.longitude + dLon)
+            ) else { return -1 }
+            return Int(value.rounded()) % 360
+        }
+        assertEqual(bearing(dLat: 0, dLon: 0.001), 90, "east")
+        assertEqual(bearing(dLat: -0.001, dLon: 0), 180, "south")
+        assertEqual(bearing(dLat: 0, dLon: -0.001), 270, "west is a bearing, not an invalid course")
+        assertEqual(bearing(dLat: 0.001, dLon: -0.001 / 0.855), 315, "north-west")
+        assertEqual(bearing(dLat: 0.001, dLon: -0.00000001), 0, "due north with a westward skew is north, not an invalid course")
+        assert(
+            NavigationHeading.bearing(from: origin, to: origin) == nil,
+            "a zero-length segment has no bearing"
+        )
     }
 
     @MainActor
