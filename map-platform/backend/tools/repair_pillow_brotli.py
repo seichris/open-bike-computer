@@ -18,6 +18,16 @@ import subprocess
 import sys
 
 
+def decoder_version(path: Path) -> int:
+    # Probe in a child: overwriting an ELF mapped into this process is unsafe.
+    return int(subprocess.check_output(
+        [sys.executable, "-c",
+         "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); "
+         "lib.BrotliDecoderVersion.restype=ctypes.c_uint32; "
+         "print(lib.BrotliDecoderVersion())", str(path)], text=True,
+    ).strip())
+
+
 def repair(native_root: Path) -> None:
     distribution = importlib.metadata.distribution("Pillow")
     directory = Path(distribution.locate_file("pillow.libs"))
@@ -26,6 +36,8 @@ def repair(native_root: Path) -> None:
     if len(decoders) != 1 or len(commons) != 1:
         raise RuntimeError("Expected one independent Pillow Brotli decoder/common pair")
     decoder, common = decoders[0], commons[0]
+    if decoder_version(decoder) != 0x1002000:
+        raise RuntimeError("Repair requires the verified Brotli 1.2.0 ABI; refusing to replace another version")
     modified = {decoder.resolve(), common.resolve()}
     for destination, component in ((common, "common"), (decoder, "dec")):
         shutil.copy2(native_root / f"libbrotli{component}.so.1.2.1", destination)
@@ -44,6 +56,15 @@ def repair(native_root: Path) -> None:
     library.BrotliDecoderVersion.restype = ctypes.c_uint32
     if library.BrotliDecoderVersion() != 0x1002001:
         raise RuntimeError("Pillow did not load Brotli 1.2.1")
+    library.BrotliDecoderDecompress.argtypes = [
+        ctypes.c_size_t, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p,
+    ]
+    compressed = bytes.fromhex("8b098042726f746c69206465636f64657220736d6f6b6503")
+    output = ctypes.create_string_buffer(128)
+    size = ctypes.c_size_t(len(output))
+    if (library.BrotliDecoderDecompress(len(compressed), compressed, ctypes.byref(size), output) != 1
+            or output.raw[:size.value] != b"Brotli decoder smoke"):
+        raise RuntimeError("Repaired Pillow Brotli decoder failed its decode check")
 
     records = [path for path in distribution.files or () if str(path).endswith(".dist-info/RECORD")]
     if len(records) != 1:
