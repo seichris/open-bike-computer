@@ -552,6 +552,25 @@ or deferred pruning exposes more closed chunks, the index fails explicitly with
 `diagnostics_index_unreadable`; it never advertises a truncated subset as a
 complete inventory. Retry after the lease ends and retention runs.
 
+### BLE link loss evidence
+
+Every `ble disconnected` event of the active link carries why it ended:
+
+| Field | Meaning |
+| --- | --- |
+| `disconnectReason` | NimBLE's host status for the GAP disconnect event, `0x200` plus the HCI reason: `520` connection supervision timeout (the radio link was lost), `531` the peer ended it, `534` the firmware ended it, `546` LL response timeout, `571` unacceptable connection parameters, `574` the connection never established. `0` when the GAP event was not observed for the active link. |
+| `durationMs` | Milliseconds since the matching `ble connected` event. |
+| `state` | `authenticated` when the owner session was authenticated at the moment of the loss, otherwise `unauthenticated`. |
+| `reason` | The firmware's own cause when it requested the disconnect: `unauthenticated_deadline` (the 12-second window for an unauthenticated client, 120 seconds while pairing), `ownership_lost`, `ownership_invalidated`; `remote` when the peer, the link or the controller ended it. |
+
+Read `disconnectReason` and `reason` together: `534` with a named `reason` is a
+deliberate firmware disconnect, `520` with `remote` is a link that timed out
+under the phone's or the device's radio, and `531` with `remote` is the app
+or iOS closing the link. A transfer that ends with "connection ended after N
+of M bytes (network error -1005)" on the phone pairs with the `ble
+disconnected` event of the same second: the device revokes every transfer when
+the owner link drops.
+
 ## I2C retry attribution on remote-debug firmware
 
 The Waveshare remote-debug profiles emit `I2C_RETRY schema=1` on USB serial
