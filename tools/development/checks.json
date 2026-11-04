@@ -728,6 +728,17 @@
       ]
     },
     {
+      "id": "esp32-host-ble-disconnect-diagnostics-host-tests",
+      "name": "BLE disconnect diagnostics host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_disconnect_diagnostics.cpp \\\n  -o ${TMPDIR}/test_ble_disconnect_diagnostics\n${TMPDIR}/test_ble_disconnect_diagnostics",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
       "id": "esp32-host-codec-recovery-host-tests",
       "name": "Codec recovery host tests",
       "component": "firmware_host",

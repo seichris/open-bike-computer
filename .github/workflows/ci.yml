@@ -655,6 +655,9 @@ jobs:
       - name: Sound protocol host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-sound-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-sound-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-sound-protocol-host-tests/results.json"
+      - name: BLE disconnect diagnostics host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-ble-disconnect-diagnostics-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-ble-disconnect-diagnostics-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-ble-disconnect-diagnostics-host-tests/results.json"
       - name: Codec recovery host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-codec-recovery-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-codec-recovery-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-codec-recovery-host-tests/results.json"

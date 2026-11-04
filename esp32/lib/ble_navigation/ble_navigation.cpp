@@ -19,6 +19,7 @@ extern Power power;
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
 #include "ble_connection_policy.hpp"
+#include "ble_disconnect_diagnostics.hpp"
 #include "ride_command_admission.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
@@ -204,6 +205,32 @@ static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+// NimBLE delivers the GAP disconnect reason only through its event listener,
+// which the host calls before the server callback (`ble_gap_conn_broken`).
+// The listener keeps the last reason and handle; `onDisconnect` pairs them
+// with the active link and `disconnectActive()` records them.
+static std::atomic<int32_t> lastGapDisconnectReason{0};
+static std::atomic<uint16_t> lastGapDisconnectHandle{BLE_HS_CONN_HANDLE_NONE};
+static std::atomic<int32_t> pendingDisconnectGapReason{0};
+static std::atomic<uint32_t> activeConnectionStartMs{0};
+static std::atomic<uint8_t> localDisconnectCause{0};
+static std::atomic<uint8_t> pendingOwnershipDisconnectCause{0};
+
+static int bleGapEventListener(ble_gap_event *event, void *) {
+  if (event != nullptr && event->type == BLE_GAP_EVENT_DISCONNECT) {
+    lastGapDisconnectReason.store(event->disconnect.reason,
+                                  std::memory_order_release);
+    lastGapDisconnectHandle.store(event->disconnect.conn.conn_handle,
+                                  std::memory_order_release);
+  }
+  return 0;
+}
+
+static void noteLocalDisconnectCause(
+    ble_disconnect_diagnostics::LocalCause cause) {
+  localDisconnectCause.store(static_cast<uint8_t>(cause),
+                             std::memory_order_release);
+}
 // Start of the unauthenticated client's window (ble_connection_policy): set
 // when a link is accepted, and under the ownership lock when CONFIRM registers
 // ownership on it, in the same critical section that clears the pairing.
@@ -1291,6 +1318,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
 #ifdef BLE_DEV_RANDOM_IDENTITY
   NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, true);
   NimBLEDevice::init(deviceName);
+  NimBLEDevice::setCustomGapHandler(bleGapEventListener);
   ble_addr_t randomAddress;
   if (ble_hs_id_gen_rnd(1, &randomAddress) == 0 &&
       ble_hs_id_set_rnd(randomAddress.val) == 0) {
@@ -1310,6 +1338,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
     NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, false);
   }
   NimBLEDevice::init(deviceName);
+  NimBLEDevice::setCustomGapHandler(bleGapEventListener);
   if (hasStableIdentity && ble_hs_id_set_rnd(identity.address) == 0) {
     formatBleAddress(identity.address, advertisedAddress,
                      sizeof(advertisedAddress));
@@ -1473,6 +1502,10 @@ static bool decodeSessionPayload(
     bleDebugStats.updateWith([](BLEDebugStats &stats) {
       stats.authenticated = false;
     });
+    pendingOwnershipDisconnectCause.store(
+        static_cast<uint8_t>(
+            ble_disconnect_diagnostics::LocalCause::OwnershipLost),
+        std::memory_order_release);
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
   }
@@ -2322,6 +2355,10 @@ static void handleAuthPayload(const std::string &frame) {
       bleDebugStats.updateWith([](BLEDebugStats &stats) {
         stats.authenticated = false;
       });
+      pendingOwnershipDisconnectCause.store(
+          static_cast<uint8_t>(
+              ble_disconnect_diagnostics::LocalCause::OwnershipInvalidated),
+          std::memory_order_release);
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
     }
@@ -6187,6 +6224,10 @@ public:
       xSemaphoreGive(destinationCatalogReassemblerMutex);
     }
     Serial.println("BLE: iOS client connected!");
+    activeConnectionStartMs.store(millis(), std::memory_order_release);
+    localDisconnectCause.store(0, std::memory_order_release);
+    pendingOwnershipDisconnectCause.store(0, std::memory_order_release);
+    pendingDisconnectGapReason.store(0, std::memory_order_release);
     ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                              "connected", "{}");
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
@@ -6211,6 +6252,12 @@ public:
     portENTER_CRITICAL(&radioDebugMux);
     radioDebugSnapshot.connectionParametersValid = false;
     portEXIT_CRITICAL(&radioDebugMux);
+    pendingDisconnectGapReason.store(
+        lastGapDisconnectHandle.load(std::memory_order_acquire) ==
+                desc->conn_handle
+            ? lastGapDisconnectReason.load(std::memory_order_acquire)
+            : 0,
+        std::memory_order_release);
     disconnectActive();
   }
 
@@ -6223,6 +6270,7 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
+    const bool disconnectedWhileAuthenticated = bleSessionAuthenticated;
     // A firmware maintenance hotspot can briefly interrupt BLE while the Wi-Fi
     // radio starts. Revoke its HTTP token and active client immediately, but
     // keep the listener alive so the same owner can reauthenticate and receive
@@ -6298,8 +6346,26 @@ public:
       stats.connected = false;
       stats.authenticated = false;
     });
-    ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
-                             "disconnected", "{}");
+    {
+      char disconnectFields[ble_disconnect_diagnostics::FIELDS_CAPACITY] = {};
+      const uint32_t startMs =
+          activeConnectionStartMs.load(std::memory_order_acquire);
+      const int written = ble_disconnect_diagnostics::formatFields(
+          disconnectFields, sizeof(disconnectFields),
+          pendingDisconnectGapReason.load(std::memory_order_acquire),
+          startMs == 0 ? 0 : millis() - startMs,
+          disconnectedWhileAuthenticated,
+          ble_disconnect_diagnostics::localCauseFromValue(
+              localDisconnectCause.load(std::memory_order_acquire)));
+      ride_diagnostics::record(
+          ride_diagnostics::Level::Info, "ble", "disconnected",
+          written > 0 &&
+                  static_cast<size_t>(written) < sizeof(disconnectFields)
+              ? disconnectFields
+              : "{}");
+      pendingDisconnectGapReason.store(0, std::memory_order_release);
+      localDisconnectCause.store(0, std::memory_order_release);
+    }
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.updateWith([](BLEDebugStats &stats) {
       ++stats.disconnectCount;
@@ -7459,6 +7525,8 @@ void BLENavigationServer::process() {
     if (connected && ownershipDisconnectPending) {
       ownershipDisconnectPending = false;
       unauthTimeoutDisconnectRequested = true;
+      noteLocalDisconnectCause(ble_disconnect_diagnostics::localCauseFromValue(
+          pendingOwnershipDisconnectCause.load(std::memory_order_acquire)));
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
         pServer->disconnect(activeConnHandle);
@@ -7471,6 +7539,8 @@ void BLENavigationServer::process() {
         ble_connection_policy::unauthenticatedDeadlinePassed(
             millis(), windowStartMs, deadlinePairingActive)) {
       unauthTimeoutDisconnectRequested = true;
+      noteLocalDisconnectCause(
+          ble_disconnect_diagnostics::LocalCause::UnauthenticatedDeadline);
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
         pServer->disconnect(activeConnHandle);
@@ -7563,6 +7633,8 @@ void BLENavigationServer::process() {
   if (connected && ownershipDisconnectPending) {
     ownershipDisconnectPending = false;
     unauthTimeoutDisconnectRequested = true;
+    noteLocalDisconnectCause(ble_disconnect_diagnostics::localCauseFromValue(
+        pendingOwnershipDisconnectCause.load(std::memory_order_acquire)));
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
       pServer->disconnect(activeConnHandle);
     }
@@ -7575,6 +7647,8 @@ void BLENavigationServer::process() {
           millis(), windowStartMs, deadlinePairingActive)) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
+    noteLocalDisconnectCause(
+        ble_disconnect_diagnostics::LocalCause::UnauthenticatedDeadline);
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
       pServer->disconnect(activeConnHandle);
     }
