@@ -1612,6 +1612,10 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
     var transferConnectionEpoch: UInt64 { rideDeliveryConnectionGeneration }
+    /// System uptime of the last transport disconnect and connect, for the
+    /// transfer manager's link-loss window (which mirrors the firmware's).
+    private(set) var transportLinkLostUptime: TimeInterval?
+    private(set) var transportLinkConnectedUptime: TimeInterval?
 
     private var rideDeliveryConnectionGeneration: UInt64 = 0
     private var rideTransportStateMachine = RideBLETransportStateMachineV1(
@@ -10513,6 +10517,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 )
         )
         log("Connected to: \(peripheral.name ?? "Unknown")")
+        transportLinkConnectedUptime = ProcessInfo.processInfo.systemUptime
         diagnosticsRecorder?.record(
             category: .ble,
             event: "transport_connected",
@@ -10549,6 +10554,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         locallyForgottenPeripheralIdentifiers.remove(peripheral.identifier)
         log("Disconnected from: \(peripheral.name ?? "Unknown")")
+        transportLinkLostUptime = ProcessInfo.processInfo.systemUptime
         
         if let error = error {
             log("Disconnect error: \(error.localizedDescription)")

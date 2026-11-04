@@ -1801,8 +1801,12 @@ struct ContentView: View {
 
             mapControlDivider
 
-            MapUserTrackingControl(controlState: mapViewControlState)
-                .frame(width: 52, height: 50)
+            // Test navigation drives the camera itself; the MapKit tracking
+            // button would re-enable tracking against the phone's real location.
+            if !coordinator.isSimulationMode {
+                MapUserTrackingControl(controlState: mapViewControlState)
+                    .frame(width: 52, height: 50)
+            }
         }
         .frame(width: 52)
         .accessibilityElement(children: .contain)
