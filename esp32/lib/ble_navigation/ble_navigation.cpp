@@ -20,6 +20,7 @@ extern Power power;
 #endif
 #include "ble_connection_policy.hpp"
 #include "ble_disconnect_diagnostics.hpp"
+#include "../device_transfer/transfer_link_grace_policy.hpp"
 #include "ride_command_admission.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
@@ -82,6 +83,7 @@ extern Power power;
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cctype>
 #include <cstring>
 #include <esp_heap_caps.h>
@@ -231,6 +233,25 @@ static void noteLocalDisconnectCause(
   localDisconnectCause.store(static_cast<uint8_t>(cause),
                              std::memory_order_release);
 }
+
+static void rebindTransferAfterLinkGrace();
+
+static void recordTransferLinkGrace(const char *phase, uint32_t durationMs) {
+  char fields[64] = {};
+  const int written =
+      std::snprintf(fields, sizeof(fields),
+                    "{\"phase\":\"%s\",\"durationMs\":%lu}", phase,
+                    static_cast<unsigned long>(durationMs));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "transfer",
+                                   "ble_link_grace", fields);
+  }
+}
+
+#if !BLE_RADIO_CHARACTERIZATION
+static uint16_t transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+static bool transferProfileApplied = false;
+#endif
 // Start of the unauthenticated client's window (ble_connection_policy): set
 // when a link is accepted, and under the ownership lock when CONFIRM registers
 // ownership on it, in the same critical section that clears the pairing.
@@ -1863,6 +1884,7 @@ static void completeBleSessionAuthentication() {
   });
   ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                            "authenticated", "{}");
+  rebindTransferAfterLinkGrace();
   queueOwnershipUiUpdate();
 }
 
@@ -3923,6 +3945,20 @@ static uint64_t currentAuthenticatedTransferSessionId() {
   const uint64_t sessionId = deviceOwnership.authenticatedOwnerSessionId();
   xSemaphoreGive(deviceOwnershipMutex);
   return sessionId;
+}
+
+// The owner rebinding the transfer session inside the grace window; the
+// same owner is the only one who can authenticate, so no token rotates.
+static void rebindTransferAfterLinkGrace() {
+  if (!deviceTransferHttp.bleLinkGraceActive())
+    return;
+  const uint32_t startMs =
+      activeConnectionStartMs.load(std::memory_order_acquire);
+  if (deviceTransferHttp.bindAuthenticatedBleSession(
+          currentAuthenticatedTransferSessionId())) {
+    recordTransferLinkGrace("rebound",
+                            startMs == 0 ? 0 : millis() - startMs);
+  }
 }
 
 static void processPendingTransferControl() {
@@ -6065,6 +6101,8 @@ static bool handleFirmwareMaintenancePayload(
       // A hotspot start may have suspended this owner's HTTP token when BLE
       // briefly disconnected. Rebinding issues a fresh token before DSTS is
       // reported; bindAuthenticatedBleSession records any ownership conflict.
+      // Inside a transfer's link-loss grace window the rebind keeps the token.
+      rebindTransferAfterLinkGrace();
       deviceTransferHttp.bindAuthenticatedBleSession(
           currentAuthenticatedTransferSessionId());
       queueTransferControl(ble_transfer::Action::None,
@@ -6279,10 +6317,33 @@ public:
     const bool suspendedFirmwareTransfer =
         firmware_maintenance::active() &&
         deviceTransferHttp.suspendFirmwareAuthenticatedBleSession();
-    if (!suspendedFirmwareTransfer)
+    // A map or diagnostics transfer keeps its token, generation, listener and
+    // in-flight client for a short grace window: the owner's link comes back
+    // within seconds after a supervision timeout and only the owner can
+    // authenticate. process() runs the fail-closed teardown unchanged when
+    // the window expires without a rebind.
+    // Only the owner's own link, lost without the firmware asking (no local
+    // cause: not the unauthenticated deadline, not an ownership revocation),
+    // opens a window; a later disconnect inside an open window keeps that
+    // window's deadline instead of restarting it.
+    const bool firmwareRequestedDisconnect =
+        localDisconnectCause.load(std::memory_order_acquire) != 0;
+    const transfer_link_grace_policy::LinkLoss linkLoss =
+        (suspendedFirmwareTransfer || firmware_maintenance::active())
+            ? transfer_link_grace_policy::LinkLoss::TearDown
+            : deviceTransferHttp.suspendOwnerBleSessionForLinkLoss(
+                  millis(), disconnectedWhileAuthenticated,
+                  firmwareRequestedDisconnect);
+    const bool transferLinkGrace =
+        linkLoss != transfer_link_grace_policy::LinkLoss::TearDown;
+    if (linkLoss == transfer_link_grace_policy::LinkLoss::Started) {
+      recordTransferLinkGrace("started",
+                              transfer_link_grace_policy::graceMs);
+    }
+    if (!suspendedFirmwareTransfer && !transferLinkGrace)
       deviceTransferHttp.clearAuthenticatedBleSession();
     resetScreenConfigurationTransport();
-    if (!suspendedFirmwareTransfer) {
+    if (!suspendedFirmwareTransfer && !transferLinkGrace) {
       queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
                            ble_transfer::NotifyNone);
     }
@@ -7639,6 +7700,12 @@ void BLENavigationServer::process() {
       pServer->disconnect(activeConnHandle);
     }
   }
+  if (deviceTransferHttp.expireBleLinkGraceIfDue(millis())) {
+    recordTransferLinkGrace("expired", transfer_link_grace_policy::graceMs);
+    queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
+                         ble_transfer::NotifyNone);
+  }
+  syncTransferConnectionProfile();
   const uint32_t windowStartMs =
       unauthenticatedWindowStartMs.load(std::memory_order_acquire);
   if (deadlineStateRead && connected && !bleSessionAuthenticated &&
@@ -7732,6 +7799,42 @@ void BLENavigationServer::setNavigationActivity(bool active) {
   radioNavigationActive.store(active, std::memory_order_release);
 #else
   (void)active;
+#endif
+}
+
+void BLENavigationServer::syncTransferConnectionProfile() {
+#if !BLE_RADIO_CHARACTERIZATION
+  const uint16_t handle = activeConnHandle;
+  if (pServer == nullptr || !connected || handle == BLE_HS_CONN_HANDLE_NONE) {
+    transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+    transferProfileApplied = false;
+    return;
+  }
+  if (handle != transferProfileHandle) {
+    // A new link starts from the phone's defaults; request again if needed.
+    transferProfileHandle = handle;
+    transferProfileApplied = false;
+  }
+  const bool transferActive = deviceTransferHttp.isSessionEnabled();
+  if (transferActive == transferProfileApplied)
+    return;
+  // During a transfer the Wi-Fi radio, TLS and SD hashing compete with BLE;
+  // the relaxed profile (longer interval, latency, six-second supervision
+  // timeout) keeps the owner link alive through that. The navigation profile
+  // returns when the session ends on the same link.
+  const ble_radio_policy::ConnectionParameters &parameters =
+      ble_radio_policy::connectionParameters(
+          transferActive ? ble_radio_policy::ConnectionProfile::Idle
+                         : ble_radio_policy::ConnectionProfile::Navigation);
+  pServer->updateConnParams(handle, parameters.minimumIntervalUnits,
+                            parameters.maximumIntervalUnits,
+                            parameters.latency,
+                            parameters.supervisionTimeoutUnits);
+  transferProfileApplied = transferActive;
+  (void)ride_diagnostics::record(
+      ride_diagnostics::Level::Info, "ble", "connection_profile",
+      transferActive ? "{\"state\":\"transfer\"}"
+                     : "{\"state\":\"navigation\"}");
 #endif
 }
 

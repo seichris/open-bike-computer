@@ -566,10 +566,16 @@ Every `ble disconnected` event of the active link carries why it ended:
 Read `disconnectReason` and `reason` together: `534` with a named `reason` is a
 deliberate firmware disconnect, `520` with `remote` is a link that timed out
 under the phone's or the device's radio, and `531` with `remote` is the app
-or iOS closing the link. A transfer that ends with "connection ended after N
-of M bytes (network error -1005)" on the phone pairs with the `ble
-disconnected` event of the same second: the device revokes every transfer when
-the owner link drops.
+or iOS closing the link. A map or diagnostics transfer no longer dies with the
+link: `transfer ble_link_grace` records `phase` `started` (`durationMs` = the
+15-second window) when the owner link is lost during such a session,
+`rebound` (`durationMs` since the new link connected) when the same owner
+re-authenticated in time, or `expired` when the window ran out and the
+fail-closed teardown ran. `ble connection_profile` with `state` `transfer` or
+`navigation` records the connection-parameter request firmware makes while a
+transfer session is enabled and when it ends. A transfer that still ends with
+"connection ended after N of M bytes (network error -1005)" on the phone
+therefore pairs with an `expired` grace or with a non-transfer mode.
 
 ## I2C retry attribution on remote-debug firmware
 

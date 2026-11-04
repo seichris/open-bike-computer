@@ -1,4 +1,5 @@
 #include "device_transfer_http.hpp"
+#include "transfer_link_grace_policy.hpp"
 #include "commit_boundary_policy.hpp"
 #include "lifecycle_resource_event.hpp"
 #include "renderer_stack_metrics.hpp"
@@ -301,20 +302,80 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
   if (sessionId == 0)
     return false;
   lockState();
-  if (enabled_ && authenticatedBleSessionId_ != 0 &&
-      authenticatedBleSessionId_ != sessionId) {
+  switch (transfer_link_grace_policy::rebind(enabled_, bleLinkGraceActive_,
+                                             authenticatedBleSessionId_,
+                                             sessionId)) {
+  case transfer_link_grace_policy::Rebind::Reject:
     rememberError("ble_session_changed", "BLE owner changed");
     unlockState();
     return false;
-  }
-  if (authenticatedBleSessionId_ != sessionId) {
+  case transfer_link_grace_policy::Rebind::Keep:
+    break;
+  case transfer_link_grace_policy::Rebind::Adopt:
+    // The owner is back inside the grace window: the token, the generation
+    // and any in-flight request stay valid on the new BLE session.
+    authenticatedBleSessionId_ = sessionId;
+    bleLinkGraceActive_ = false;
+    bleLinkGraceDeadlineMs_ = 0;
+    break;
+  case transfer_link_grace_policy::Rebind::Rotate:
     authenticatedBleSessionId_ = sessionId;
     if (enabled_ && sessionToken_.empty())
       sessionToken_ = generateSessionToken();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    break;
   }
   unlockState();
   return true;
+}
+
+transfer_link_grace_policy::LinkLoss
+HttpTransferServer::suspendOwnerBleSessionForLinkLoss(uint32_t nowMs,
+                                                      bool linkWasAuthenticated,
+                                                      bool firmwareRequested) {
+  lockState();
+  const bool starts =
+      !bleLinkGraceActive_ &&
+      transfer_link_grace_policy::startsGrace(
+          enabled_, authenticatedBleSessionId_, commitBoundary_.active(),
+          false, mode_, linkWasAuthenticated, firmwareRequested);
+  const transfer_link_grace_policy::LinkLoss result =
+      transfer_link_grace_policy::linkLoss(bleLinkGraceActive_, starts);
+  if (result == transfer_link_grace_policy::LinkLoss::Started) {
+    bleLinkGraceActive_ = true;
+    bleLinkGraceDeadlineMs_ = nowMs + transfer_link_grace_policy::graceMs;
+  }
+  unlockState();
+  return result;
+}
+
+bool HttpTransferServer::bleLinkGraceActive() const {
+  lockState();
+  const bool active = bleLinkGraceActive_;
+  unlockState();
+  return active;
+}
+
+bool HttpTransferServer::expireBleLinkGraceIfDue(uint32_t nowMs) {
+  lockState();
+  const bool due =
+      bleLinkGraceActive_ &&
+      transfer_link_grace_policy::graceExpired(nowMs, bleLinkGraceDeadlineMs_);
+  if (due) {
+    bleLinkGraceActive_ = false;
+    bleLinkGraceDeadlineMs_ = 0;
+  }
+  unlockState();
+  if (due)
+    clearAuthenticatedBleSession();
+  return due;
+}
+
+bool HttpTransferServer::isSessionEnabled() const {
+  lockState();
+  const bool enabled = enabled_;
+  unlockState();
+  return enabled;
 }
 
 bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
@@ -324,6 +385,8 @@ bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
     return false;
   }
   authenticatedBleSessionId_ = 0;
+  bleLinkGraceActive_ = false;
+  bleLinkGraceDeadlineMs_ = 0;
   sessionToken_.clear();
   currentRequestAuthorized_ = false;
   transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
@@ -338,6 +401,8 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   const bool wasEnabled = enabled_;
   const bool commitInProgress = commitBoundary_.active();
   authenticatedBleSessionId_ = 0;
+  bleLinkGraceActive_ = false;
+  bleLinkGraceDeadlineMs_ = 0;
   if (commitInProgress) {
     // The authenticated request already crossed the serialized activation
     // boundary. A coincident BLE disconnect must not interrupt boot selection

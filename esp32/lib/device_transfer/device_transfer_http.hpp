@@ -14,6 +14,7 @@
 #include "device_transfer_network_protocol.hpp"
 #include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
+#include "transfer_link_grace_policy.hpp"
 
 namespace device_transfer {
 
@@ -127,6 +128,18 @@ public:
   bool bindAuthenticatedBleSession(uint64_t sessionId);
   void clearAuthenticatedBleSession();
   bool suspendFirmwareAuthenticatedBleSession();
+  // A BLE link ended during a map or diagnostics transfer: the authenticated
+  // owner's own link lost without the firmware asking opens the policy's
+  // grace window (token, generation, listener and in-flight client stay); a
+  // later disconnect inside an open window keeps that window's deadline;
+  // anything else means the immediate teardown.
+  transfer_link_grace_policy::LinkLoss suspendOwnerBleSessionForLinkLoss(
+      uint32_t nowMs, bool linkWasAuthenticated, bool firmwareRequested);
+  bool bleLinkGraceActive() const;
+  // Tears the session down (clearAuthenticatedBleSession) once the window has
+  // passed without the owner rebinding; returns whether it did.
+  bool expireBleLinkGraceIfDue(uint32_t nowMs);
+  bool isSessionEnabled() const;
   bool prepareTlsIdentityRotation();
   bool commitTlsIdentityRotation(
       const std::string &expectedCertificateSha256);
@@ -174,6 +187,8 @@ private:
   std::string sessionToken_;
   TransferTlsIdentityStore tlsIdentityStore_;
   uint64_t authenticatedBleSessionId_ = 0;
+  bool bleLinkGraceActive_ = false;
+  uint32_t bleLinkGraceDeadlineMs_ = 0;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;
