@@ -361,7 +361,11 @@ bool HttpTransferServer::bleLinkGraceActive() const {
 uint32_t HttpTransferServer::extendBleLinkGraceForLink(uint32_t nowMs) {
   lockState();
   uint32_t remainingMs = 0;
-  if (bleLinkGraceActive_) {
+  // An expired window waits for process() to tear the session down; a link
+  // arriving in that gap must not revive it.
+  if (bleLinkGraceActive_ &&
+      !transfer_link_grace_policy::graceExpired(nowMs,
+                                                bleLinkGraceDeadlineMs_)) {
     bleLinkGraceDeadlineMs_ = transfer_link_grace_policy::extendedDeadlineMs(
         nowMs, bleLinkGraceLossMs_, bleLinkGraceDeadlineMs_);
     remainingMs = transfer_link_grace_policy::isAfter(bleLinkGraceDeadlineMs_,

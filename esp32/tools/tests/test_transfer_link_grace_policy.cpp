@@ -73,6 +73,11 @@ int main() {
   assert(extendedDeadlineMs(35000, 1000, 45000) == 46000); // capped
   assert(extendedDeadlineMs(46000, 1000, 46000) == 46000); // at the cap
   assert(extendedDeadlineMs(1000, 1000, 40000) == 40000);  // never earlier
+  // A link after the deadline (before the loop's expiry check) and one at
+  // the deadline do not revive the window, even inside the cap.
+  assert(extendedDeadlineMs(17000, 1000, 16000) == 16000);
+  assert(extendedDeadlineMs(16000, 1000, 16000) == 16000);
+  assert(graceExpired(17000, 16000));
   const uint32_t lossNearWrap = UINT32_MAX - 10000;
   assert(extendedDeadlineMs(lossNearWrap + 5000, lossNearWrap,
                             lossNearWrap + graceMs) ==

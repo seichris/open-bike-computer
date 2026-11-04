@@ -71,9 +71,12 @@ inline bool graceExpired(uint32_t nowMs, uint32_t deadlineMs) {
 // A BLE link appearing while the window is open is the owner coming back (or
 // a stray central, which the cap bounds): the deadline moves to a full window
 // from that link, no later than the cap from the first loss, and never
-// earlier than it already is.
+// earlier than it already is. A link arriving once the deadline has passed,
+// before the loop's expiry check ran, does not revive the window.
 inline uint32_t extendedDeadlineMs(uint32_t nowMs, uint32_t lossMs,
                                    uint32_t deadlineMs) {
+  if (graceExpired(nowMs, deadlineMs))
+    return deadlineMs;
   const uint32_t cap = lossMs + graceMaxMs;
   uint32_t candidate = nowMs + graceMs;
   if (isAfter(candidate, cap))
