@@ -9389,6 +9389,238 @@ extension NavigationProtocolTests {
         )
     }
 
+    static func testDeviceNetworkStaleAssociationPolicy() async {
+        let noRoute = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorNotConnectedToInternet
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(metricsAvailable: true)
+        )
+        assert(
+            noRoute.indicatesNoRoute,
+            "a -1009 failure before any connection attempt means no route to the accessory"
+        )
+        var connected = DeviceTransferPinnedSessionSnapshot(metricsAvailable: true)
+        connected.transactionCount = 1
+        connected.connectStarted = true
+        assert(
+            !DeviceTransferServerProbeResult(
+                outcome: .transportError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorNotConnectedToInternet
+                ),
+                diagnostics: connected
+            ).indicatesNoRoute,
+            "a failure after the connection started is not a missing route"
+        )
+        assert(
+            !DeviceTransferServerProbeResult(
+                outcome: .transportError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorTimedOut
+                ),
+                diagnostics: DeviceTransferPinnedSessionSnapshot()
+            ).indicatesNoRoute,
+            "a timeout is not a missing route"
+        )
+        let ready = DeviceTransferServerProbeResult(
+            outcome: .ready,
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        assert(!ready.indicatesNoRoute, "a ready probe is not a missing route")
+        assertEqual(
+            DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(after: 2, probe: noRoute),
+            3,
+            "consecutive no-route probes count up"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(after: 2, probe: ready),
+            0,
+            "a probe that reached the device resets the count"
+        )
+
+        let count = DeviceNetworkJoinPolicy.staleAssociationProbeCount
+        let minimum = DeviceNetworkJoinPolicy.staleAssociationMinimumElapsed
+        assert(
+            count >= 3 && minimum >= 5 &&
+                minimum < DeviceTransferServerProbePolicy.absoluteTimeout / 2,
+            "stale detection waits past a healthy association's third-probe answer and keeps most of the probe window"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count,
+                elapsed: minimum
+            ),
+            "a confirmed association with no route past the threshold is stale"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count - 1,
+                elapsed: minimum + 10
+            ),
+            "fewer consecutive no-route probes keep probing"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count + 2,
+                elapsed: minimum - 0.1
+            ),
+            "an early run of no-route probes keeps probing"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .other,
+                consecutiveNoRouteProbes: count + 4,
+                elapsed: minimum + 10
+            ) && !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .unavailable,
+                consecutiveNoRouteProbes: count + 4,
+                elapsed: minimum + 10
+            ),
+            "only a confirmed accessory association can be stale"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(rejoinsUsed: 0) &&
+                !DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(rejoinsUsed: 1),
+            "a stale association is re-joined once per join"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retryJoinsOnce(
+                afterAcceptedWithoutAssociation: false,
+                afterStaleAssociation: true
+            ),
+            "the re-join after a stale association joins once"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: false,
+                afterStaleAssociation: true
+            ),
+            DeviceNetworkJoinPolicy.unassociatedRetrySettleDelayNanoseconds,
+            "the re-join waits the longer settle for the configuration removal"
+        )
+        let fields = DeviceNetworkJoinPolicy.staleRejoinFields(
+            consecutiveNoRouteProbes: 5,
+            elapsed: 6.8
+        )
+        assertEqual(fields["phase"] ?? "", "stale_rejoin", "the abandoned window is recorded as a stale re-join")
+        assertEqual(fields["result"] ?? "", "stale_association", "the record names the stale association")
+        assertEqual(fields["kind"] ?? "", "join_once", "the re-join is a join-once application")
+        assertEqual(fields["consecutiveEarlyFailures"] ?? "", "5", "the record keeps the no-route probe count")
+        assertEqual(fields["durationMs"] ?? "", "6800", "the record keeps the time spent probing")
+
+        // The probe window ends early only when the caller abandons it as
+        // stale; a healthy association still answers by its third probe, and
+        // without the hook the window runs to its timeout.
+        var now: TimeInterval = 0
+        var consecutive = 0
+        var abandonedAt = 0
+        let abandoned = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in noRoute },
+            observe: { _, _, _, _ in },
+            abandon: { attempt, elapsed, probe in
+                consecutive = DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                    after: consecutive,
+                    probe: probe
+                )
+                guard DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                    observation: .target,
+                    consecutiveNoRouteProbes: consecutive,
+                    elapsed: elapsed
+                ) else { return false }
+                abandonedAt = attempt
+                return true
+            }
+        )
+        assert(
+            abandoned?.indicatesNoRoute == true && abandonedAt >= count &&
+                now >= minimum &&
+                now < DeviceTransferServerProbePolicy.absoluteTimeout / 2,
+            "a stale association ends the window within a few probes, well before the probe timeout"
+        )
+        now = 0
+        var healthyProbes = 0
+        var healthyNoRoute = 0
+        let healthy = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in
+                healthyProbes += 1
+                return healthyProbes < 3 ? noRoute : ready
+            },
+            observe: { _, _, _, _ in },
+            abandon: { _, elapsed, probe in
+                healthyNoRoute = DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                    after: healthyNoRoute,
+                    probe: probe
+                )
+                return DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                    observation: .target,
+                    consecutiveNoRouteProbes: healthyNoRoute,
+                    elapsed: elapsed
+                )
+            }
+        )
+        assert(
+            healthy?.isReady == true && healthyProbes == 3,
+            "an association that answers by the third probe is never abandoned"
+        )
+        now = 0
+        var defaultProbes = 0
+        let exhausted = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in
+                defaultProbes += 1
+                return noRoute
+            },
+            observe: { _, _, _, _ in }
+        )
+        assert(
+            exhausted?.indicatesNoRoute == true &&
+                now >= DeviceTransferServerProbePolicy.absoluteTimeout &&
+                defaultProbes > count,
+            "without the stale hook the probe window still runs to its timeout"
+        )
+
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let source = try? String(
+            contentsOf: transferManagerURL,
+            encoding: .utf8
+        ), let joinStart = source.range(
+            of: "private func joinDeviceNetworkIfNeeded("
+        )?.lowerBound,
+        let applyStart = source.range(
+            of: "private func apply(",
+            range: joinStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "device network join source should be available")
+            return
+        }
+        let joinSource = String(source[joinStart..<applyStart])
+        assert(
+            joinSource.components(
+                separatedBy: "waitForTransferServerOrStaleAssociation("
+            ).count == 3 &&
+                joinSource.contains(
+                    "afterStaleAssociation: rejoinAfterStaleAssociation"
+                ) &&
+                joinSource.contains("staleRejoinsUsed += 1"),
+            "both probe paths of the join abandon a stale association and re-join once"
+        )
+    }
+
     static func testRendererCrossRunRetainedMemoryPolicy() {
         assert(
             RendererBenchmarkEvaluator.progressiveCrossRunDecline(
