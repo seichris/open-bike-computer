@@ -20,13 +20,33 @@ inline bool modeKeepsSessionAcrossLinkLoss(const std::string &mode) {
   return mode == "map" || mode == "diagnostics";
 }
 
-// Whether a lost owner link opens the grace window. Firmware maintenance has
-// its own suspend path and a commit boundary must never be interrupted.
+// Whether a lost link opens the grace window: only the authenticated owner's
+// own link, lost without the firmware asking for it (an unauthenticated
+// deadline, an ownership revocation or a maintenance teardown are not link
+// losses). Firmware maintenance has its own suspend path and a commit
+// boundary must never be interrupted.
 inline bool startsGrace(bool enabled, uint64_t boundSessionId,
                         bool commitActive, bool maintenanceActive,
-                        const std::string &mode) {
+                        const std::string &mode, bool linkWasAuthenticated,
+                        bool firmwareRequested) {
   return enabled && boundSessionId != 0 && !commitActive &&
-         !maintenanceActive && modeKeepsSessionAcrossLinkLoss(mode);
+         !maintenanceActive && linkWasAuthenticated && !firmwareRequested &&
+         modeKeepsSessionAcrossLinkLoss(mode);
+}
+
+enum class LinkLoss : uint8_t {
+  TearDown = 0,   // the existing fail-closed teardown runs now
+  Started = 1,    // a new window opened with the full grace
+  Continuing = 2, // a window is already open: it keeps its deadline
+};
+
+// A later disconnect during an open window (a stray central, or the owner
+// dropping again before authenticating) must neither restart the window nor
+// tear the session down; the original deadline decides.
+inline LinkLoss linkLoss(bool graceActive, bool starts) {
+  if (graceActive)
+    return LinkLoss::Continuing;
+  return starts ? LinkLoss::Started : LinkLoss::TearDown;
 }
 
 // Unsigned subtraction keeps the comparison correct across millis() wrap: the

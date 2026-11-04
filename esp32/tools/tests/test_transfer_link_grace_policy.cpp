@@ -17,14 +17,26 @@ int main() {
   assert(!modeKeepsSessionAcrossLinkLoss(""));
 
   // The window opens only for an enabled, bound session outside a commit
-  // boundary and outside firmware maintenance.
-  assert(startsGrace(true, 7, false, false, "diagnostics"));
-  assert(startsGrace(true, 7, false, false, "map"));
-  assert(!startsGrace(false, 7, false, false, "map"));
-  assert(!startsGrace(true, 0, false, false, "map"));
-  assert(!startsGrace(true, 7, true, false, "map"));
-  assert(!startsGrace(true, 7, false, true, "map"));
-  assert(!startsGrace(true, 7, false, false, "firmware"));
+  // boundary and outside firmware maintenance, when the authenticated owner's
+  // own link was lost without the firmware asking for the disconnect.
+  assert(startsGrace(true, 7, false, false, "diagnostics", true, false));
+  assert(startsGrace(true, 7, false, false, "map", true, false));
+  assert(!startsGrace(false, 7, false, false, "map", true, false));
+  assert(!startsGrace(true, 0, false, false, "map", true, false));
+  assert(!startsGrace(true, 7, true, false, "map", true, false));
+  assert(!startsGrace(true, 7, false, true, "map", true, false));
+  assert(!startsGrace(true, 7, false, false, "firmware", true, false));
+  // A stray unauthenticated link, or one the firmware disconnected itself
+  // (deadline, ownership revocation), never opens a window.
+  assert(!startsGrace(true, 7, false, false, "map", false, false));
+  assert(!startsGrace(true, 7, false, false, "map", true, true));
+
+  // An open window is never re-armed by a later disconnect and never torn
+  // down by it either: the original deadline decides.
+  assert(linkLoss(false, true) == LinkLoss::Started);
+  assert(linkLoss(false, false) == LinkLoss::TearDown);
+  assert(linkLoss(true, true) == LinkLoss::Continuing);
+  assert(linkLoss(true, false) == LinkLoss::Continuing);
 
   // Expiry is wrap-safe.
   assert(!graceExpired(1000, 1000 + graceMs));

@@ -6322,10 +6322,21 @@ public:
     // within seconds after a supervision timeout and only the owner can
     // authenticate. process() runs the fail-closed teardown unchanged when
     // the window expires without a rebind.
+    // Only the owner's own link, lost without the firmware asking (no local
+    // cause: not the unauthenticated deadline, not an ownership revocation),
+    // opens a window; a later disconnect inside an open window keeps that
+    // window's deadline instead of restarting it.
+    const bool firmwareRequestedDisconnect =
+        localDisconnectCause.load(std::memory_order_acquire) != 0;
+    const transfer_link_grace_policy::LinkLoss linkLoss =
+        (suspendedFirmwareTransfer || firmware_maintenance::active())
+            ? transfer_link_grace_policy::LinkLoss::TearDown
+            : deviceTransferHttp.suspendOwnerBleSessionForLinkLoss(
+                  millis(), disconnectedWhileAuthenticated,
+                  firmwareRequestedDisconnect);
     const bool transferLinkGrace =
-        !suspendedFirmwareTransfer && !firmware_maintenance::active() &&
-        deviceTransferHttp.suspendOwnerBleSessionForLinkLoss(millis());
-    if (transferLinkGrace) {
+        linkLoss != transfer_link_grace_policy::LinkLoss::TearDown;
+    if (linkLoss == transfer_link_grace_policy::LinkLoss::Started) {
       recordTransferLinkGrace("started",
                               transfer_link_grace_policy::graceMs);
     }

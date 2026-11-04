@@ -2310,8 +2310,13 @@ Status responses should include:
   up to 15 seconds: the token, the generation, the listener and any in-flight
   request stay valid while the same owner re-authenticates (only the owner
   credential can); the generation increments and the session tears down when
-  that window expires without a rebind. Firmware maintenance and debug
-  sessions keep their immediate revocation.
+  that window expires without a rebind. The window opens only when the lost
+  link was the authenticated owner's and the firmware did not request the
+  disconnect (the unauthenticated deadline, an ownership revocation and a
+  maintenance teardown are not link losses); a later disconnect inside an
+  open window neither extends nor restarts it. Physical owner recovery and
+  deregistration revoke the session immediately as before. Firmware
+  maintenance and debug sessions keep their immediate revocation.
 - `tls`: active `identityVersion` and exact lowercase DER leaf-certificate
   `certificateSha256` used by iOS for pinning.
 - `pendingTls`: optional staged identity version/fingerprint during two-phase

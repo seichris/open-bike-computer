@@ -329,17 +329,24 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
   return true;
 }
 
-bool HttpTransferServer::suspendOwnerBleSessionForLinkLoss(uint32_t nowMs) {
+transfer_link_grace_policy::LinkLoss
+HttpTransferServer::suspendOwnerBleSessionForLinkLoss(uint32_t nowMs,
+                                                      bool linkWasAuthenticated,
+                                                      bool firmwareRequested) {
   lockState();
-  const bool starts = transfer_link_grace_policy::startsGrace(
-      enabled_, authenticatedBleSessionId_, commitBoundary_.active(), false,
-      mode_);
-  if (starts) {
+  const bool starts =
+      !bleLinkGraceActive_ &&
+      transfer_link_grace_policy::startsGrace(
+          enabled_, authenticatedBleSessionId_, commitBoundary_.active(),
+          false, mode_, linkWasAuthenticated, firmwareRequested);
+  const transfer_link_grace_policy::LinkLoss result =
+      transfer_link_grace_policy::linkLoss(bleLinkGraceActive_, starts);
+  if (result == transfer_link_grace_policy::LinkLoss::Started) {
     bleLinkGraceActive_ = true;
     bleLinkGraceDeadlineMs_ = nowMs + transfer_link_grace_policy::graceMs;
   }
   unlockState();
-  return starts;
+  return result;
 }
 
 bool HttpTransferServer::bleLinkGraceActive() const {
