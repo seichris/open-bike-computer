@@ -471,7 +471,8 @@ enum DeviceTransferServerProbePolicy {
         clock: () -> TimeInterval,
         sleep: (UInt64) async throws -> Void,
         probe: (TimeInterval) async throws -> DeviceTransferServerProbeResult,
-        observe: (Int, TimeInterval, TimeInterval, DeviceTransferServerProbeResult) -> Void
+        observe: (Int, TimeInterval, TimeInterval, DeviceTransferServerProbeResult) -> Void,
+        abandon: (Int, TimeInterval, DeviceTransferServerProbeResult) -> Bool = { _, _, _ in false }
     ) async throws -> DeviceTransferServerProbeResult {
         let started = clock()
         let deadline = started + timeout
@@ -495,6 +496,9 @@ enum DeviceTransferServerProbePolicy {
             last = try await probe(min(requestTimeout, remaining))
             observe(attempt, max(0, clock() - started), max(0, deadline - clock()), last)
             if last.isReady || !last.shouldRetry { return last }
+            // The caller can end the window early when the probes show that
+            // the association itself is stale and a fresh join comes next.
+            if abandon(attempt, max(0, clock() - started), last) { return last }
         }
         return last
     }
@@ -552,6 +556,19 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 
     var isReady: Bool {
         outcome == .ready
+    }
+
+    /// The request failed before any connection was attempted: the phone has
+    /// no route to the accessory address, as when it holds a stale
+    /// association with an AP the device has since restarted.
+    var indicatesNoRoute: Bool {
+        guard case .transportError(let domain, let code) = outcome else {
+            return false
+        }
+        return domain == NSURLErrorDomain &&
+            code == NSURLErrorNotConnectedToInternet &&
+            !diagnostics.connectStarted &&
+            !diagnostics.tlsStarted
     }
 
     var shouldRetry: Bool {
@@ -722,15 +739,67 @@ enum DeviceNetworkJoinPolicy {
         applyAccepted && observation != .target
     }
 
-    static func retryJoinsOnce(afterAcceptedWithoutAssociation previous: Bool) -> Bool {
-        previous
+    static func retryJoinsOnce(
+        afterAcceptedWithoutAssociation previous: Bool,
+        afterStaleAssociation stale: Bool = false
+    ) -> Bool {
+        previous || stale
     }
 
     static func retrySettleDelayNanoseconds(
-        afterAcceptedWithoutAssociation previous: Bool
+        afterAcceptedWithoutAssociation previous: Bool,
+        afterStaleAssociation stale: Bool = false
     ) -> UInt64 {
-        previous ? unassociatedRetrySettleDelayNanoseconds
-                 : configurationSettleDelayNanoseconds
+        (previous || stale) ? unassociatedRetrySettleDelayNanoseconds
+                            : configurationSettleDelayNanoseconds
+    }
+
+    // iOS can keep reporting the accessory SSID as the current network after
+    // the device restarted its AP for a new session: the phone holds the old
+    // association, the new AP never sees it join, and every pinned probe fails
+    // before a connection starts. A healthy association answers by the third
+    // probe, about four seconds in. A confirmed association still without a
+    // route after this many consecutive no-route probes and this much time is
+    // stale: it gets one explicit re-join per join (configuration removed,
+    // then one join-once application) instead of the rest of the probe window.
+    static let staleAssociationProbeCount = 4
+    static let staleAssociationMinimumElapsed: TimeInterval = 6
+    static let staleAssociationRejoinLimit = 1
+
+    static func consecutiveNoRouteProbes(
+        after previous: Int,
+        probe: DeviceTransferServerProbeResult
+    ) -> Int {
+        probe.indicatesNoRoute ? previous + 1 : 0
+    }
+
+    static func staleAssociationSuspected(
+        observation: DeviceTransferNetworkObservation,
+        consecutiveNoRouteProbes: Int,
+        elapsed: TimeInterval
+    ) -> Bool {
+        observation == .target &&
+            consecutiveNoRouteProbes >= staleAssociationProbeCount &&
+            elapsed >= staleAssociationMinimumElapsed
+    }
+
+    static func rejoinsAfterStaleAssociation(rejoinsUsed: Int) -> Bool {
+        rejoinsUsed < staleAssociationRejoinLimit
+    }
+
+    /// Fields of the `wifi_apply` record written when a confirmed association
+    /// is abandoned as stale before the explicit re-join.
+    static func staleRejoinFields(
+        consecutiveNoRouteProbes: Int,
+        elapsed: TimeInterval
+    ) -> [String: String] {
+        [
+            "phase": "stale_rejoin",
+            "result": "stale_association",
+            "kind": "join_once",
+            "consecutiveEarlyFailures": String(consecutiveNoRouteProbes),
+            "durationMs": String(Int(elapsed * 1_000)),
+        ]
     }
 
     enum ApplyResolution: String, Equatable, CaseIterable {
@@ -2424,26 +2493,42 @@ final class DeviceTransferManager {
         let initialNetworkObservation = await currentNetworkObservation(
             expectedSSID: ssid
         )
+        // A stale association (the phone still reports the accessory SSID
+        // after the device restarted its AP) is re-joined once per join: the
+        // configuration is removed, then applied once as a join-once network.
+        var staleRejoinsUsed = 0
+        var rejoinAfterStaleAssociation = false
         if initialNetworkObservation == .target {
             joinedAccessPointSSID = ssid
             status("checking device transfer server")
-            let result = try await waitForTransferServer(
+            let probe = try await waitForTransferServerOrStaleAssociation(
                 session: session,
                 statusPath: statusPath,
-                networkObservation: initialNetworkObservation
+                networkObservation: initialNetworkObservation,
+                attempt: 0,
+                rejoinAvailable:
+                    DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(
+                        rejoinsUsed: staleRejoinsUsed
+                    )
             )
-            if result.isReady {
+            if probe.result.isReady {
                 return
             }
-            throw OfflineMapPlatformError.transferServerProbeFailed(
-                ssid,
-                result.diagnosticMessage(
-                    networkObservation: initialNetworkObservation
+            guard probe.staleAssociation else {
+                throw OfflineMapPlatformError.transferServerProbeFailed(
+                    ssid,
+                    probe.result.diagnosticMessage(
+                        networkObservation: initialNetworkObservation
+                    )
                 )
-            )
+            }
+            staleRejoinsUsed += 1
+            rejoinAfterStaleAssociation = true
+            joinedAccessPointSSID = nil
+            status("rejoining device Wi-Fi")
+        } else {
+            status("joining device Wi-Fi")
         }
-
-        status("joining device Wi-Fi")
         var lastApplyError: NSError?
         var lastDiagnostic: String?
         var lastFailureWasServerProbe = false
@@ -2451,11 +2536,16 @@ final class DeviceTransferManager {
         // Clear a saved configuration before the first bounded association
         // attempt. An accepted configuration gets a complete association and
         // pinned-probe window before one fresh application is allowed. Never
-        // re-prompt after user, policy, or validation denial.
+        // re-prompt after user, policy, or validation denial. After a stale
+        // association the removal also drops the phone's old link, so the
+        // longer settle applies before the explicit join.
         coordinator.removeForRetry(lease)
         try await Task.sleep(
             nanoseconds:
-                DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+                DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                    afterAcceptedWithoutAssociation: false,
+                    afterStaleAssociation: rejoinAfterStaleAssociation
+                )
         )
 
         var previousAcceptedWithoutAssociation = false
@@ -2472,7 +2562,8 @@ final class DeviceTransferManager {
             // that persistent configuration without joining it, the retry
             // joins once explicitly instead.
             let joinOnce = DeviceNetworkJoinPolicy.retryJoinsOnce(
-                afterAcceptedWithoutAssociation: previousAcceptedWithoutAssociation
+                afterAcceptedWithoutAssociation: previousAcceptedWithoutAssociation,
+                afterStaleAssociation: rejoinAfterStaleAssociation
             )
             configuration.joinOnce = joinOnce
             if !joinOnce {
@@ -2588,11 +2679,20 @@ final class DeviceTransferManager {
             } else if associationAccepted || networkObservation == .target {
                 joinedAccessPointSSID = ssid
                 status("waiting for device transfer server")
-                let result = try await waitForTransferServer(
+                let probe = try await waitForTransferServerOrStaleAssociation(
                     session: session,
                     statusPath: statusPath,
-                    networkObservation: networkObservation
+                    networkObservation: networkObservation,
+                    attempt: attempt,
+                    rejoinAvailable:
+                        DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(
+                            rejoinsUsed: staleRejoinsUsed
+                        ) &&
+                        DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
+                            after: attempt
+                        )
                 )
+                let result = probe.result
                 if result.isReady {
                     keepAppliedConfiguration = true
                     print("Device Wi-Fi ready: pinned endpoint verified")
@@ -2603,7 +2703,10 @@ final class DeviceTransferManager {
                     networkObservation: networkObservation
                 )
                 lastFailureWasServerProbe = true
-                if !result.shouldRetry || networkObservation == .target {
+                if probe.staleAssociation {
+                    staleRejoinsUsed += 1
+                    rejoinAfterStaleAssociation = true
+                } else if !result.shouldRetry || networkObservation == .target {
                     break
                 }
             } else if let applyError,
@@ -2617,14 +2720,19 @@ final class DeviceTransferManager {
             if DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
                 after: attempt
             ) {
-                status("retrying device Wi-Fi")
+                status(
+                    rejoinAfterStaleAssociation
+                        ? "rejoining device Wi-Fi"
+                        : "retrying device Wi-Fi"
+                )
                 coordinator.removeForRetry(lease)
                 joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
                         DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
                             afterAcceptedWithoutAssociation:
-                                previousAcceptedWithoutAssociation
+                                previousAcceptedWithoutAssociation,
+                            afterStaleAssociation: rejoinAfterStaleAssociation
                         )
                 )
             }
@@ -2783,11 +2891,65 @@ final class DeviceTransferManager {
     }
 #endif
 
+    /// Probes the pinned endpoint on a confirmed association and ends the
+    /// window early when that association proves stale (every probe fails
+    /// before a connection starts), so the caller can re-join once.
+    private func waitForTransferServerOrStaleAssociation(
+        session: DeviceTransferSession,
+        statusPath: String,
+        networkObservation: DeviceTransferNetworkObservation,
+        attempt: Int,
+        rejoinAvailable: Bool
+    ) async throws -> (
+        result: DeviceTransferServerProbeResult,
+        staleAssociation: Bool
+    ) {
+        var consecutiveNoRouteProbes = 0
+        var staleAssociation = false
+        var staleElapsed: TimeInterval = 0
+        let result = try await waitForTransferServer(
+            session: session,
+            statusPath: statusPath,
+            networkObservation: networkObservation,
+            abandon: { _, elapsed, probe in
+                consecutiveNoRouteProbes =
+                    DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                        after: consecutiveNoRouteProbes,
+                        probe: probe
+                    )
+                guard rejoinAvailable,
+                      DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                        observation: networkObservation,
+                        consecutiveNoRouteProbes: consecutiveNoRouteProbes,
+                        elapsed: elapsed
+                      ) else { return false }
+                staleAssociation = true
+                staleElapsed = elapsed
+                return true
+            }
+        )
+        if staleAssociation {
+            var fields = DeviceNetworkJoinPolicy.staleRejoinFields(
+                consecutiveNoRouteProbes: consecutiveNoRouteProbes,
+                elapsed: staleElapsed
+            )
+            fields["attempt"] = String(attempt + 1)
+            fields["generation"] = String(session.transferGeneration)
+            record(mode: session.mode, event: "wifi_apply", fields: fields)
+            print(
+                "Device Wi-Fi association stale after " +
+                "\(consecutiveNoRouteProbes) no-route probes; rejoining once"
+            )
+        }
+        return (result, staleAssociation)
+    }
+
     private func waitForTransferServer(
         session: DeviceTransferSession,
         statusPath: String,
         timeout: TimeInterval? = nil,
-        networkObservation: DeviceTransferNetworkObservation = .unavailable
+        networkObservation: DeviceTransferNetworkObservation = .unavailable,
+        abandon: (Int, TimeInterval, DeviceTransferServerProbeResult) -> Bool = { _, _, _ in false }
     ) async throws -> DeviceTransferServerProbeResult {
         let absoluteTimeout = max(
             1,
@@ -2840,7 +3002,8 @@ final class DeviceTransferManager {
                     networkObservation: networkObservation, result: result,
                     elapsed: elapsed, remaining: remaining
                 )
-            }
+            },
+            abandon: abandon
         )
     }
 
