@@ -2307,9 +2307,11 @@ Status responses should include:
   mode replacement, and a BLE disconnect outside the grace window below
   increment it so in-flight requests from the old session fail authorization.
   A map or diagnostics transfer survives a loss of the owner's BLE link for
-  up to 15 seconds: the token, the generation, the listener and any in-flight
-  request stay valid while the same owner re-authenticates (only the owner
-  credential can); the generation increments and the session tears down when
+  a bounded grace window (15 seconds from the loss, moved to 15 seconds from
+  each BLE link that appears while the window is open, never later than 45
+  seconds after the loss): the token, the generation, the listener and any
+  in-flight request stay valid while the same owner re-authenticates (only the
+  owner credential can); the generation increments and the session tears down when
   that window expires without a rebind. The window opens only when the lost
   link was the authenticated owner's and the firmware did not request the
   disconnect (the unauthenticated deadline, an ownership revocation and a
@@ -2509,11 +2511,13 @@ The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
 stops the listener, and schedules mode-specific cleanup, except that a map or
-diagnostics transfer first keeps everything for a 15-second grace window (see
+diagnostics transfer first keeps everything for the bounded grace window (15
+seconds, moved by each new BLE link, at most 45 seconds after the loss; see
 `transferGeneration`): the same owner re-authenticating inside it continues the
 session on the new link, and the window expiring runs that teardown. While a
 transfer session is enabled, firmware also requests the relaxed BLE connection
-profile (60-100 ms interval, latency 4, six-second supervision timeout) and
+profile (60-100 ms interval, latency 4, six-second supervision timeout) on the
+authenticated owner link, never on a link that has yet to authenticate, and
 restores the navigation profile on the same link when the session ends.
 
 ### World Radio reuse invariants
