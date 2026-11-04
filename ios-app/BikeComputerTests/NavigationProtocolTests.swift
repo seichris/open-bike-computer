@@ -962,6 +962,7 @@ struct NavigationProtocolTests {
         testSecureRendererBenchmarkProtocol()
         testRendererCrossRunRetainedMemoryPolicy()
         testDeviceNetworkJoinTimeoutPolicy()
+        await testDeviceNetworkStaleAssociationPolicy()
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
         testATTWriteSubmissionEvidence()
