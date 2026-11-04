@@ -569,11 +569,15 @@ under the phone's or the device's radio, and `531` with `remote` is the app
 or iOS closing the link. A map or diagnostics transfer no longer dies with the
 link: `transfer ble_link_grace` records `phase` `started` (`durationMs` = the
 15-second window) when the owner link is lost during such a session,
-`rebound` (`durationMs` since the new link connected) when the same owner
-re-authenticated in time, or `expired` when the window ran out and the
+`extended` (`durationMs` = the time left until the moved deadline) when a BLE
+link appears while the window is open (the deadline moves to 15 seconds from
+that link, never later than 45 seconds after the loss), `rebound`
+(`durationMs` since the loss) when the same owner re-authenticated in time, or
+`expired` (`durationMs` since the loss) when the window ran out and the
 fail-closed teardown ran. `ble connection_profile` with `state` `transfer` or
-`navigation` records the connection-parameter request firmware makes while a
-transfer session is enabled and when it ends. A transfer that still ends with
+`navigation` records the connection-parameter request firmware makes on the
+authenticated owner link while a transfer session is enabled and when it ends;
+a link that has yet to authenticate keeps the phone's own parameters. A transfer that still ends with
 "connection ended after N of M bytes (network error -1005)" on the phone
 therefore pairs with an `expired` grace or with a non-transfer mode.
 
