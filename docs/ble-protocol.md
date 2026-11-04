@@ -2518,7 +2518,13 @@ session on the new link, and the window expiring runs that teardown. While a
 transfer session is enabled, firmware also requests the relaxed BLE connection
 profile (60-100 ms interval, latency 4, six-second supervision timeout) on the
 authenticated owner link, never on a link that has yet to authenticate, and
-restores the navigation profile on the same link when the session ends.
+restores the navigation profile on the same link when the session ends. The
+app keeps its side of a kept session as well: an in-flight device-log download
+is not tied to the BLE link, and when the link that authorized the session is
+replaced, the app rebinds its operation lease to the replacing link once a
+fresh `DSTS` on it shows the same mode, session token and `transferGeneration`
+(waiting at most the firmware's 45-second cap), so the session exit is sent
+over the new link instead of failing as a stale owner.
 
 ### World Radio reuse invariants
 
