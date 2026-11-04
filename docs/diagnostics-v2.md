@@ -554,6 +554,14 @@ complete inventory. Retry after the lease ends and retention runs.
 
 ### BLE link loss evidence
 
+`ble ownership_lock` records a wait for the firmware's ownership mutex that
+took at least 100 ms (`reason` `waited`) or timed out (`reason` `timeout`,
+level warning): `phase` names the waiting site (`ride_command` for a ride or
+ride-automation write, `connection_reset` for a link connect or disconnect), `durationMs` the wait, and `state` the task that
+held the mutex when the wait timed out. A NimBLE callback never waits longer
+than one second, so an ATT write is answered even while another task holds the
+mutex; the rejected frame is retried by the phone.
+
 Every `ble disconnected` event of the active link carries why it ended:
 
 | Field | Meaning |
@@ -577,7 +585,7 @@ that link, never later than 45 seconds after the loss), `rebound`
 fail-closed teardown ran. `ble connection_profile` with `state` `transfer` or
 `navigation` records the connection-parameter request firmware makes on the
 authenticated owner link while a transfer session is enabled and when it ends;
-a link that has yet to authenticate keeps the phone's own parameters. A transfer that still ends with
+a link that has yet to authenticate keeps the phone's own parameters, and a new link is recognised by its connect time, not only its NimBLE handle (handles are reused). A transfer that still ends with
 "connection ended after N of M bytes (network error -1005)" on the phone
 therefore pairs with an `expired` grace or with a non-transfer mode.
 
