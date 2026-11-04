@@ -652,6 +652,11 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    // iOS can accept a persistent configuration for a network it will not
+    // auto-join (a no-internet accessory AP it has seen often). A retry after
+    // such an accepted-but-unassociated attempt joins once explicitly, after a
+    // longer settle so the removal of the previous configuration is complete.
+    static let unassociatedRetrySettleDelayNanoseconds: UInt64 = 2_000_000_000
     // iOS can leave its accessory Wi-Fi confirmation visible while an XCTest
     // screen capture is stalled. Give the foreground user time to answer while
     // retaining a bounded window below firmware's 90-second inactivity limit.
@@ -708,6 +713,24 @@ enum DeviceNetworkJoinPolicy {
                     "\(Int(configurationApplyTimeout)) seconds."
             ]
         )
+    }
+
+    static func acceptedWithoutAssociation(
+        applyAccepted: Bool,
+        observation: DeviceTransferNetworkObservation
+    ) -> Bool {
+        applyAccepted && observation != .target
+    }
+
+    static func retryJoinsOnce(afterAcceptedWithoutAssociation previous: Bool) -> Bool {
+        previous
+    }
+
+    static func retrySettleDelayNanoseconds(
+        afterAcceptedWithoutAssociation previous: Bool
+    ) -> UInt64 {
+        previous ? unassociatedRetrySettleDelayNanoseconds
+                 : configurationSettleDelayNanoseconds
     }
 
     enum ApplyResolution: String, Equatable {
@@ -2432,6 +2455,7 @@ final class DeviceTransferManager {
                 DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
         )
 
+        var previousAcceptedWithoutAssociation = false
         for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
             lastFailureWasServerProbe = false
             let configuration = DeviceNetworkJoinPolicy.hotspotConfiguration(
@@ -2441,14 +2465,22 @@ final class DeviceTransferManager {
             // A join-once network is disconnected by iOS when the screen sleeps
             // or the app remains backgrounded for 15 seconds. Keep this
             // accessory AP configured for the background URLSession upload and
-            // remove it explicitly when transfer mode exits.
-            configuration.joinOnce = false
-            configuration.lifeTimeInDays = 1
+            // remove it explicitly when transfer mode exits. After iOS accepted
+            // that persistent configuration without joining it, the retry
+            // joins once explicitly instead.
+            let joinOnce = DeviceNetworkJoinPolicy.retryJoinsOnce(
+                afterAcceptedWithoutAssociation: previousAcceptedWithoutAssociation
+            )
+            configuration.joinOnce = joinOnce
+            if !joinOnce {
+                configuration.lifeTimeInDays = 1
+            }
 
             let applyStarted = ProcessInfo.processInfo.systemUptime
             record(mode: session.mode, event: "wifi_apply", fields: [
                 "attempt": String(attempt + 1), "phase": "requested",
                 "generation": String(session.transferGeneration),
+                "kind": joinOnce ? "join_once" : "persistent",
             ])
             let applyResult = await apply(
                 configuration: configuration,
@@ -2531,6 +2563,11 @@ final class DeviceTransferManager {
                 fields: observationFields
             )
 
+            previousAcceptedWithoutAssociation =
+                DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                    applyAccepted: applyError == nil,
+                    observation: networkObservation
+                )
             if networkObservation == .other {
                 if let applyError,
                    !DeviceNetworkJoinPolicy.shouldRetry(
@@ -2582,7 +2619,10 @@ final class DeviceTransferManager {
                 joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
-                        DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+                        DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                            afterAcceptedWithoutAssociation:
+                                previousAcceptedWithoutAssociation
+                        )
                 )
             }
         }

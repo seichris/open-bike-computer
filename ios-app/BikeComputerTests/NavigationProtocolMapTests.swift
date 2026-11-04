@@ -9338,6 +9338,50 @@ extension NavigationProtocolTests {
             lateAccepted["applyErrorDomain"] == nil,
             "a late success carries no error fields"
         )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .other
+            ),
+            "an accepted configuration that never joined is recognised"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .unavailable
+            ),
+            "an accepted configuration with no active network is recognised"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .target
+            ),
+            "a joined configuration is not a retry case"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: false,
+                observation: .other
+            ),
+            "a rejected configuration keeps the typed error path"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: true) &&
+                !DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: false),
+            "only the retry after an unjoined persistent configuration joins once"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: true
+            ) > DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: false
+            ) &&
+                DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                    afterAcceptedWithoutAssociation: true
+                ) <= 5_000_000_000,
+            "the join-once retry waits longer for the removal, still bounded"
+        )
     }
 
     static func testRendererCrossRunRetainedMemoryPolicy() {
