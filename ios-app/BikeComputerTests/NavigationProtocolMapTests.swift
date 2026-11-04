@@ -9261,6 +9261,132 @@ extension NavigationProtocolTests {
             DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
             "the bounded apply failure retains its typed diagnostic code"
         )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .target
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.associated,
+            "an observed accessory association proceeds before the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .other
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.continueWaiting,
+            "another active network keeps waiting for the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .unavailable
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.continueWaiting,
+            "no active network keeps waiting for the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: DeviceNetworkJoinPolicy.configurationApplyTimeout,
+                observation: .unavailable
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.timedOut,
+            "the bounded apply window still ends the wait"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.applyObservationIntervalNanoseconds >=
+                1_000_000_000 &&
+                DeviceNetworkJoinPolicy.applyObservationIntervalNanoseconds <=
+                5_000_000_000,
+            "association is observed a few times within the apply window"
+        )
+        let lateError = DeviceNetworkJoinPolicy.lateCallbackFields(
+            error: NSError(
+                domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+                code: 7,
+                userInfo: nil
+            ),
+            elapsed: 72.4
+        )
+        assertEqual(
+            lateError["phase"] ?? "",
+            "late_callback",
+            "a system callback after the wait is attributed as late"
+        )
+        assertEqual(
+            lateError["applyResult"] ?? "",
+            "error",
+            "a late error keeps its result"
+        )
+        assertEqual(
+            lateError["applyErrorDomain"] ?? "",
+            DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            "a late error keeps its domain"
+        )
+        assertEqual(lateError["applyErrorCode"] ?? "", "7", "a late error keeps its code")
+        assertEqual(lateError["durationMs"] ?? "", "72400", "a late callback records its delay")
+        let lateAccepted = DeviceNetworkJoinPolicy.lateCallbackFields(
+            error: nil,
+            elapsed: 61
+        )
+        assertEqual(
+            lateAccepted["applyResult"] ?? "",
+            "accepted",
+            "a late success is recorded as accepted"
+        )
+        assert(
+            lateAccepted["applyErrorDomain"] == nil,
+            "a late success carries no error fields"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .other
+            ),
+            "an accepted configuration that never joined is recognised"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .unavailable
+            ),
+            "an accepted configuration with no active network is recognised"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .target
+            ),
+            "a joined configuration is not a retry case"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: false,
+                observation: .other
+            ),
+            "a rejected configuration keeps the typed error path"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.ApplyResolution.allCases.map(\.rawValue),
+            ["callback", "associated", "timeout", "refused"],
+            "a refused apply (no lease or an outstanding apply) is labelled apart from a timed-out one"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: true) &&
+                !DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: false),
+            "only the retry after an unjoined persistent configuration joins once"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: true
+            ) > DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: false
+            ) &&
+                DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                    afterAcceptedWithoutAssociation: true
+                ) <= 5_000_000_000,
+            "the join-once retry waits longer for the removal, still bounded"
+        )
     }
 
     static func testRendererCrossRunRetainedMemoryPolicy() {
