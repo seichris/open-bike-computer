@@ -61,5 +61,26 @@ int main() {
   assert(rebind(true, false, 0, 9) == Rebind::Rotate);
   assert(rebind(false, false, 0, 9) == Rebind::Rotate);
   assert(graceMs == 15000);
+
+  // A BLE link appearing while the window is open moves the deadline to a
+  // full window from that link, never later than the cap from the loss and
+  // never earlier than the deadline already is.
+  assert(graceMaxMs == 45000 && graceMaxMs >= 2 * graceMs);
+  assert(isAfter(5, 4) && !isAfter(4, 5) && !isAfter(4, 4) &&
+         isAfter(1, UINT32_MAX));
+  assert(extendedDeadlineMs(11000, 1000, 16000) == 26000);
+  assert(extendedDeadlineMs(2000, 1000, 16000) == 17000);
+  assert(extendedDeadlineMs(35000, 1000, 45000) == 46000); // capped
+  assert(extendedDeadlineMs(46000, 1000, 46000) == 46000); // at the cap
+  assert(extendedDeadlineMs(1000, 1000, 40000) == 40000);  // never earlier
+  const uint32_t lossNearWrap = UINT32_MAX - 10000;
+  assert(extendedDeadlineMs(lossNearWrap + 5000, lossNearWrap,
+                            lossNearWrap + graceMs) ==
+         static_cast<uint32_t>(lossNearWrap + 5000 + graceMs));
+  assert(extendedDeadlineMs(lossNearWrap + 40000, lossNearWrap,
+                            lossNearWrap + 44000) ==
+         static_cast<uint32_t>(lossNearWrap + graceMaxMs));
+  assert(graceExpired(static_cast<uint32_t>(lossNearWrap + graceMaxMs),
+                      static_cast<uint32_t>(lossNearWrap + graceMaxMs)));
   return 0;
 }

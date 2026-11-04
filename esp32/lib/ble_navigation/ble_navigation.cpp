@@ -3952,12 +3952,11 @@ static uint64_t currentAuthenticatedTransferSessionId() {
 static void rebindTransferAfterLinkGrace() {
   if (!deviceTransferHttp.bleLinkGraceActive())
     return;
-  const uint32_t startMs =
-      activeConnectionStartMs.load(std::memory_order_acquire);
+  const uint32_t elapsedMs =
+      deviceTransferHttp.bleLinkGraceElapsedMs(millis());
   if (deviceTransferHttp.bindAuthenticatedBleSession(
           currentAuthenticatedTransferSessionId())) {
-    recordTransferLinkGrace("rebound",
-                            startMs == 0 ? 0 : millis() - startMs);
+    recordTransferLinkGrace("rebound", elapsedMs);
   }
 }
 
@@ -6268,6 +6267,15 @@ public:
     pendingDisconnectGapReason.store(0, std::memory_order_release);
     ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                              "connected", "{}");
+    {
+      // A link appearing while a transfer's link-loss grace window is open
+      // moves its deadline (policy-bounded); the owner's reconnect under
+      // transfer load has been seen to need several links.
+      const uint32_t graceRemainingMs =
+          deviceTransferHttp.extendBleLinkGraceForLink(millis());
+      if (graceRemainingMs != 0)
+        recordTransferLinkGrace("extended", graceRemainingMs);
+    }
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
@@ -7700,10 +7708,14 @@ void BLENavigationServer::process() {
       pServer->disconnect(activeConnHandle);
     }
   }
-  if (deviceTransferHttp.expireBleLinkGraceIfDue(millis())) {
-    recordTransferLinkGrace("expired", transfer_link_grace_policy::graceMs);
-    queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
-                         ble_transfer::NotifyNone);
+  {
+    const uint32_t graceElapsedMs =
+        deviceTransferHttp.bleLinkGraceElapsedMs(millis());
+    if (deviceTransferHttp.expireBleLinkGraceIfDue(millis())) {
+      recordTransferLinkGrace("expired", graceElapsedMs);
+      queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
+                           ble_transfer::NotifyNone);
+    }
   }
   syncTransferConnectionProfile();
   const uint32_t windowStartMs =
@@ -7815,7 +7827,12 @@ void BLENavigationServer::syncTransferConnectionProfile() {
     transferProfileHandle = handle;
     transferProfileApplied = false;
   }
-  const bool transferActive = deviceTransferHttp.isSessionEnabled();
+  // Only the authenticated owner link gets the transfer profile: a link that
+  // has yet to authenticate keeps the phone's own parameters, so the AUTH
+  // exchange of the owner's reconnect during a transfer is not slowed by the
+  // relaxed interval and latency.
+  const bool transferActive =
+      deviceTransferHttp.isSessionEnabled() && bleSessionAuthenticated;
   if (transferActive == transferProfileApplied)
     return;
   // During a transfer the Wi-Fi radio, TLS and SD hashing compete with BLE;

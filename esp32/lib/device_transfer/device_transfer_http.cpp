@@ -317,6 +317,7 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
     authenticatedBleSessionId_ = sessionId;
     bleLinkGraceActive_ = false;
     bleLinkGraceDeadlineMs_ = 0;
+    bleLinkGraceLossMs_ = 0;
     break;
   case transfer_link_grace_policy::Rebind::Rotate:
     authenticatedBleSessionId_ = sessionId;
@@ -344,6 +345,7 @@ HttpTransferServer::suspendOwnerBleSessionForLinkLoss(uint32_t nowMs,
   if (result == transfer_link_grace_policy::LinkLoss::Started) {
     bleLinkGraceActive_ = true;
     bleLinkGraceDeadlineMs_ = nowMs + transfer_link_grace_policy::graceMs;
+    bleLinkGraceLossMs_ = nowMs;
   }
   unlockState();
   return result;
@@ -356,6 +358,29 @@ bool HttpTransferServer::bleLinkGraceActive() const {
   return active;
 }
 
+uint32_t HttpTransferServer::extendBleLinkGraceForLink(uint32_t nowMs) {
+  lockState();
+  uint32_t remainingMs = 0;
+  if (bleLinkGraceActive_) {
+    bleLinkGraceDeadlineMs_ = transfer_link_grace_policy::extendedDeadlineMs(
+        nowMs, bleLinkGraceLossMs_, bleLinkGraceDeadlineMs_);
+    remainingMs = transfer_link_grace_policy::isAfter(bleLinkGraceDeadlineMs_,
+                                                      nowMs)
+                      ? bleLinkGraceDeadlineMs_ - nowMs
+                      : 0;
+  }
+  unlockState();
+  return remainingMs;
+}
+
+uint32_t HttpTransferServer::bleLinkGraceElapsedMs(uint32_t nowMs) const {
+  lockState();
+  const uint32_t elapsedMs =
+      bleLinkGraceActive_ ? nowMs - bleLinkGraceLossMs_ : 0;
+  unlockState();
+  return elapsedMs;
+}
+
 bool HttpTransferServer::expireBleLinkGraceIfDue(uint32_t nowMs) {
   lockState();
   const bool due =
@@ -364,6 +389,7 @@ bool HttpTransferServer::expireBleLinkGraceIfDue(uint32_t nowMs) {
   if (due) {
     bleLinkGraceActive_ = false;
     bleLinkGraceDeadlineMs_ = 0;
+    bleLinkGraceLossMs_ = 0;
   }
   unlockState();
   if (due)
@@ -387,6 +413,7 @@ bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
   authenticatedBleSessionId_ = 0;
   bleLinkGraceActive_ = false;
   bleLinkGraceDeadlineMs_ = 0;
+  bleLinkGraceLossMs_ = 0;
   sessionToken_.clear();
   currentRequestAuthorized_ = false;
   transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
@@ -403,6 +430,7 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   authenticatedBleSessionId_ = 0;
   bleLinkGraceActive_ = false;
   bleLinkGraceDeadlineMs_ = 0;
+  bleLinkGraceLossMs_ = 0;
   if (commitInProgress) {
     // The authenticated request already crossed the serialized activation
     // boundary. A coincident BLE disconnect must not interrupt boot selection
