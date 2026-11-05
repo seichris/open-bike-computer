@@ -860,6 +860,8 @@ static const char *connectionProfileName(
     return "navigation";
   case ble_radio_policy::ConnectionProfile::Idle:
     return "idle";
+  case ble_radio_policy::ConnectionProfile::Transfer:
+    return "transfer";
   case ble_radio_policy::ConnectionProfile::Unset:
   default:
     return "unset";
@@ -8318,12 +8320,13 @@ void BLENavigationServer::syncTransferConnectionProfile() {
   if (transferActive == transferProfileApplied)
     return;
   // During a transfer the Wi-Fi radio, TLS and SD hashing compete with BLE;
-  // the relaxed profile (longer interval, latency, six-second supervision
-  // timeout) keeps the owner link alive through that. The navigation profile
-  // returns when the session ends on the same link.
+  // the transfer profile's six-second supervision timeout keeps the owner
+  // link alive through that, and its zero latency keeps every connection
+  // event a chance to answer the phone. The navigation profile returns when
+  // the session ends on the same link.
   const ble_radio_policy::ConnectionParameters &parameters =
       ble_radio_policy::connectionParameters(
-          transferActive ? ble_radio_policy::ConnectionProfile::Idle
+          transferActive ? ble_radio_policy::ConnectionProfile::Transfer
                          : ble_radio_policy::ConnectionProfile::Navigation);
   pServer->updateConnParams(handle, parameters.minimumIntervalUnits,
                             parameters.maximumIntervalUnits,
