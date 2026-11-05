@@ -9691,6 +9691,36 @@ extension NavigationProtocolTests {
             "the wait is anchored at the loss, not at the cleanup call"
         )
         assert(
+            Policy.remoteCleared(
+                leaseDeviceID: "bike-a",
+                link: link(revision: 1, mode: "", token: nil, generation: 0)
+            ),
+            "a fresh empty status on the same device means the session already ended"
+        )
+        assert(
+            Policy.remoteCleared(
+                leaseDeviceID: "bike-a",
+                link: link(revision: 1, mode: "", token: "", generation: 0)
+            ),
+            "an empty token reads as no session too"
+        )
+        assert(
+            !Policy.remoteCleared(leaseDeviceID: "bike-a", link: link()) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(revision: 0, mode: "", token: nil, generation: 0)
+                ) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(device: "bike-b", revision: 1, mode: "", token: nil, generation: 0)
+                ) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(ready: false, revision: 1, mode: "", token: nil, generation: 0)
+                ),
+            "a live session, no status yet, another device or an unauthenticated link are not a cleared remote"
+        )
+        assert(
             Policy.shouldRequestStatus(now: 10, lastRequest: nil) &&
                 !Policy.shouldRequestStatus(now: 11, lastRequest: 10) &&
                 Policy.shouldRequestStatus(now: 12, lastRequest: 10),
@@ -9718,6 +9748,24 @@ extension NavigationProtocolTests {
                 cleanupSource.range(of: "rebindAfterLinkLoss")!.lowerBound <
                     cleanupSource.range(of: "let alreadyClear")!.lowerBound,
             "the session exit rebinds the lease to a replacing link before deciding ownership"
+        )
+        assert(
+            cleanupSource.contains("case .stale(remoteCleared: true) =") &&
+                cleanupSource.range(of: "rebindAfterLinkLoss")!.lowerBound <
+                    cleanupSource.range(of: "coordinator.finish(lease, remoteClear: clear)")!.lowerBound,
+            "a status the rebind itself requested on the replacing link, showing no session, completes the cleanup as remotely clear"
+        )
+        guard let rebindStart = source.range(
+            of: "private func rebindAfterLinkLoss(bleManager: BLEManager) async -> LinkRebindOutcome {"
+        )?.lowerBound else {
+            assert(false, "the link rebind source should be available")
+            return
+        }
+        let rebindSource = String(source[rebindStart..<cleanupStart])
+        assert(
+            rebindSource.contains("let remoteCleared = answeredOwnRequest &&") &&
+                rebindSource.contains("statusRequest = (link.connectionEpoch, link.statusRevision)"),
+            "only a status answered on the same link to the rebind's own request can clear the remote"
         )
     }
 
