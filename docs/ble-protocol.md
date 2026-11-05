@@ -2515,8 +2515,8 @@ diagnostics transfer first keeps everything for the bounded grace window (15
 seconds, moved by each new BLE link, at most 45 seconds after the loss; see
 `transferGeneration`): the same owner re-authenticating inside it continues the
 session on the new link, and the window expiring runs that teardown. While a
-transfer session is enabled, firmware also requests the relaxed BLE connection
-profile (60-100 ms interval, latency 4, six-second supervision timeout) on the
+transfer session is enabled, firmware also requests the transfer BLE connection
+profile (30-50 ms interval, latency 0, six-second supervision timeout) on the
 authenticated owner link, never on a link that has yet to authenticate, and
 restores the navigation profile on the same link when the session ends. The
 app keeps its side of a kept session as well: an in-flight device-log download

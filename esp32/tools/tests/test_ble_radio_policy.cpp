@@ -36,6 +36,26 @@ int main() {
   assert(connectionProfile(false) == ConnectionProfile::Idle);
   assert(connectionParameters(ConnectionProfile::Navigation).latency == 0);
   assert(connectionParameters(ConnectionProfile::Idle).latency == 4);
+  // Transfers: zero latency with the idle profile's six-second timeout.
+  assert(connectionParameters(ConnectionProfile::Transfer).latency == 0);
+  assert(connectionParameters(ConnectionProfile::Transfer)
+             .supervisionTimeoutUnits == 600);
+  assert(connectionParameters(ConnectionProfile::Transfer)
+             .maximumIntervalUnits ==
+         connectionParameters(ConnectionProfile::Navigation)
+             .maximumIntervalUnits);
+  assert(acceptableToPhone(kConfiguration.transfer));
+  // A request the phone would refuse or clamp fails the check.
+  assert(!acceptableToPhone(ConnectionParameters{8, 16, 0, 600}));  // 10 ms
+  assert(!acceptableToPhone(ConnectionParameters{24, 28, 0, 600})); // 30-35 ms
+  assert(!acceptableToPhone(ConnectionParameters{24, 40, 0, 700})); // 7 s
+  assert(!acceptableToPhone(ConnectionParameters{48, 80, 31, 600}));
+  // 83.75 ms x 24 = 2010 ms effective: over the 2 s limit, and 3 x 2010 ms is
+  // not below the 6 s timeout. Whole-millisecond rounding would accept it.
+  assert(!acceptableToPhone(ConnectionParameters{48, 67, 23, 600}));
+  // Exactly at the limits: 15 ms minimum, 30 ms maximum (15 ms apart), 2 s
+  // timeout above three effective intervals.
+  assert(acceptableToPhone(ConnectionParameters{12, 24, 0, 200}));
 
   assert(isValid(IntervalRange{160, 320}));
   assert(!isValid(IntervalRange{31, 320}));
