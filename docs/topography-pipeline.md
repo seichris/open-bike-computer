@@ -342,6 +342,23 @@ image, GitHub CI, and hardware gates remain separate.
 
 ## Remaining release gates
 
+**Production decision, 2026-11-05.** The maintainer approved the pinned 2021
+Copernicus GLO-30 Public and GLO-90 sources for production and accepted the
+quality of topographic maps from development use. That decision waives the
+evidence gates listed below that were not completed: regional-boundary,
+water/no-data and high-latitude samples, and device resource measurements.
+Device qualification covers the 1.75-inch board only; the 2.06-inch residual
+risk is accepted. `map-platform/config/topography-source-policy-v2.json` records
+the approval. The same day `tools/check_topography_terms.py --upstream` found
+both retained licences unchanged upstream. `generation-profile-policy-v5.json`
+is the newest generation policy, with topographic contours available in
+production; map POIs stay disabled there. Production and development select it
+with the next signed-worker promotion, which moves the worker because the source
+policy is a worker identity input. The catalog's `TOPOGRAPHY_PROMOTION_ENABLED`
+switch is flipped separately once production serves the new policy. The list
+below remains as the record of what was not done before release.
+
+
 On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
 Copernicus DEM sources is acceptable. This resolves the source-use decision for
 those exact releases. The [2021 source review](topography-source-review-2021.md)

@@ -77,6 +77,12 @@ artifact. The public height-only inputs did not include those quality masks.
 - Record app/device resource and rendering measurements, signed production
   artifact transfer, rollback and the final reviewer decision.
 
-`productionApproved` remains false until these checks are recorded. A map made
-under the current unapproved policy cannot be promoted under an approved
-policy because the source-policy digest must match.
+Decision, 2026-11-05: the maintainer approved both pinned sources for
+production and accepted topographic map quality without the outstanding checks
+above, and accepted the 2.06-inch residual risk.
+`topography-source-policy-v2.json` sets `productionApproved` for exactly these
+two sources and records the same day's terms recheck in `accessReviewedAt`
+(`tools/check_topography_terms.py --upstream`: both retained hashes match
+upstream). `topography-source-policy-v1.json` stays as the unapproved policy.
+A map made under v1 cannot be promoted under v2 because the source-policy digest
+must match; regenerate it instead.
