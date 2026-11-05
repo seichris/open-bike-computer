@@ -135,14 +135,22 @@ connectionParameters(ConnectionProfile profile) {
 // guidelines): an interval of at least 15 ms with 15 ms between minimum and
 // maximum, latency at most 30, a 2 to 6 s supervision timeout longer than
 // three effective intervals, and an effective interval of at most 2 s.
+// Computed exactly in quarter milliseconds: an interval unit is 1.25 ms (5
+// quarters) and a timeout unit 10 ms (40 quarters), so no rounding can let a
+// request just over a limit pass.
 constexpr bool acceptableToPhone(const ConnectionParameters &parameters) {
-  const uint32_t minimumMs = parameters.minimumIntervalUnits * 5 / 4;
-  const uint32_t maximumMs = parameters.maximumIntervalUnits * 5 / 4;
-  const uint32_t effectiveMs = maximumMs * (parameters.latency + 1);
-  const uint32_t timeoutMs = parameters.supervisionTimeoutUnits * 10;
-  return minimumMs >= 15 && minimumMs + 15 <= maximumMs &&
-         parameters.latency <= 30 && timeoutMs >= 2000 && timeoutMs <= 6000 &&
-         effectiveMs * 3 < timeoutMs && effectiveMs <= 2000;
+  const uint32_t minimumQuarters =
+      static_cast<uint32_t>(parameters.minimumIntervalUnits) * 5;
+  const uint32_t maximumQuarters =
+      static_cast<uint32_t>(parameters.maximumIntervalUnits) * 5;
+  const uint32_t effectiveQuarters =
+      maximumQuarters * (static_cast<uint32_t>(parameters.latency) + 1);
+  const uint32_t timeoutQuarters =
+      static_cast<uint32_t>(parameters.supervisionTimeoutUnits) * 40;
+  return minimumQuarters >= 60 && minimumQuarters + 60 <= maximumQuarters &&
+         parameters.latency <= 30 && timeoutQuarters >= 8000 &&
+         timeoutQuarters <= 24000 && effectiveQuarters * 3 < timeoutQuarters &&
+         effectiveQuarters <= 8000;
 }
 
 static_assert(isValid(kConfiguration));
