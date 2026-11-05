@@ -146,6 +146,83 @@ class BLENotificationDispatchTests(unittest.TestCase):
             callback.index("activePeerMtu.store(peerMtu"),
         )
 
+    def test_host_liveness_probes_cover_callbacks_and_transport(self):
+        # Every characteristic write callback and the connect/disconnect
+        # callbacks mark the host task's activity before any other work, so a
+        # heartbeat stall names the site that held the host task and a slow
+        # callback is recorded with its site.
+        for signature in (
+            "  void onWrite(NimBLECharacteristic *pChar) override {",
+            "  void onWrite(NimBLECharacteristic *) override {",
+            "  void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {",
+            "                    ble_gap_conn_desc *desc) override {",
+        ):
+            start = 0
+            found = 0
+            while True:
+                index = BLE_SOURCE.find(signature, start)
+                if index == -1:
+                    break
+                found += 1
+                body = BLE_SOURCE[index + len(signature):index + len(signature) + 120]
+                self.assertTrue(
+                    body.lstrip().startswith("HostActivityScope activity("),
+                    signature,
+                )
+                start = index + 1
+            self.assertGreater(found, 0, signature)
+        self.assertEqual(BLE_SOURCE.count("  void onWrite(NimBLECharacteristic"), 9)
+        send = function_body(
+            BLE_SOURCE, "sendWireNotification(NimBLECharacteristic *characteristic"
+        )
+        self.assertLess(
+            send.index('HostActivityScope activity("notify")'),
+            send.index("ble_gatts_notify_custom"),
+        )
+        # The heartbeat is posted by the esp_timer task and handled only by
+        # the host task; its post time is published before the event.
+        timer = function_body(BLE_SOURCE, "static void hostHeartbeatTimerHandler(")
+        self.assertIn(
+            "ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &hostHeartbeatEvent)",
+            timer,
+        )
+        self.assertLess(
+            timer.index("hostHeartbeatPostedMs.store("),
+            timer.index("ble_npl_eventq_put"),
+        )
+        handler = function_body(BLE_SOURCE, "static void hostHeartbeatEventHandler(")
+        self.assertIn("nimbleHostTask.store(xTaskGetCurrentTaskHandle()", handler)
+        self.assertIn("hostHeartbeatPostedMs.store(0", handler)
+        init = function_body(
+            BLE_SOURCE, "void BLENavigationServer::init(const char *deviceName)"
+        )
+        self.assertLess(
+            init.index("ble_npl_event_init(&deferredNotificationEvent"),
+            init.index("startHostHeartbeat()"),
+        )
+        # The transfer-status write callback takes the transfer server's state
+        # lock on the host task: the wait, the holder and the holder's call
+        # site are recorded, and the record never runs under the lock.
+        http = (
+            Path(__file__).resolve().parents[2]
+            / "lib"
+            / "device_transfer"
+            / "device_transfer_http.cpp"
+        ).read_text(encoding="utf-8")
+        lock = function_body(
+            http, "__attribute__((noinline)) void HttpTransferServer::lockState() const"
+        )
+        self.assertIn("xSemaphoreGetMutexHolder(stateMutex_)", lock)
+        self.assertIn("__builtin_return_address(0)", lock)
+        unlock = function_body(
+            http,
+            "__attribute__((noinline)) void HttpTransferServer::unlockState() const",
+        )
+        self.assertLess(
+            unlock.index("xSemaphoreGive(stateMutex_)"),
+            unlock.index("recordStateLock(true"),
+        )
+
     def test_chunked_map_status_resumes_after_each_host_drain(self):
         notify = function_body(
             BLE_SOURCE, "static void notifyMapTransferStatus"

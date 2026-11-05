@@ -199,6 +199,10 @@ private:
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;
+  // State-lock probe: the code address that took the lock and when. Written
+  // under the lock; a waiter reads them before taking it.
+  mutable uint32_t stateLockedMs_ = 0;
+  mutable const void *stateLockSite_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
   uint32_t errorSequence_ = 0;

@@ -88,6 +88,7 @@ extern Power power;
 #include <cstring>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -245,6 +246,225 @@ static void recordTransferLinkGrace(const char *phase, uint32_t durationMs) {
   if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "transfer",
                                    "ble_link_grace", fields);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NimBLE host-task liveness probes.
+//
+// A phone write is answered only after the host task has run the
+// characteristic callback. A write the phone gives up on after 15 s while the
+// link stays up is therefore a callback or the controller hand-off blocking
+// the host task, a host task starved of CPU, or a radio that never carried
+// the write. The probes below tell those apart from existing field keys only:
+// `ble host_activity` (a callback or the notification hand-off held the host
+// task for 100 ms or more), `ble lock_wait` (a mutex wait on a BLE or
+// transfer path) and `ble host_heartbeat` (the host task's own scheduling
+// latency, measured through NimBLE's event queue).
+// ---------------------------------------------------------------------------
+static constexpr uint32_t kHostProbeReportMs = 100;
+static constexpr uint32_t kHostProbeWarningMs = 1000;
+// What the host task is doing right now (a callback site, "notify" while a
+// notification is handed to the controller, or "idle"), and the last thing it
+// finished; both are string literals, read by the heartbeat timer task.
+static std::atomic<const char *> nimbleHostActivity{"idle"};
+static std::atomic<const char *> nimbleHostActivityLast{"idle"};
+
+static ride_diagnostics::Level hostProbeLevel(uint32_t durationMs) {
+  return durationMs >= kHostProbeWarningMs ? ride_diagnostics::Level::Warning
+                                           : ride_diagnostics::Level::Info;
+}
+
+static const char *taskNameOf(TaskHandle_t task) {
+  if (task == nullptr) return "none";
+  const char *name = pcTaskGetName(task);
+  return name == nullptr ? "unknown" : name;
+}
+
+static void recordHostActivity(const char *site, uint32_t durationMs) {
+  char fields[96] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields), "{\"phase\":\"%s\",\"durationMs\":%lu}", site,
+      static_cast<unsigned long>(durationMs));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(hostProbeLevel(durationMs), "ble",
+                                   "host_activity", fields);
+  }
+}
+
+// Marks what the host task is doing for the heartbeat and records the span
+// when it took 100 ms or more. Scopes nest: the innermost site is the one the
+// heartbeat reports.
+class HostActivityScope {
+public:
+  explicit HostActivityScope(const char *site)
+      : site_(site), startedMs_(millis()),
+        previous_(nimbleHostActivity.exchange(site,
+                                              std::memory_order_acq_rel)) {}
+  ~HostActivityScope() {
+    nimbleHostActivity.store(previous_, std::memory_order_release);
+    nimbleHostActivityLast.store(site_, std::memory_order_release);
+    const uint32_t durationMs = millis() - startedMs_;
+    if (durationMs >= kHostProbeReportMs) recordHostActivity(site_, durationMs);
+  }
+  HostActivityScope(const HostActivityScope &) = delete;
+  HostActivityScope &operator=(const HostActivityScope &) = delete;
+
+private:
+  const char *site_;
+  uint32_t startedMs_;
+  const char *previous_;
+};
+
+static void recordLockWait(const char *site, uint32_t waitedMs,
+                           TaskHandle_t holder, bool taken) {
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
+      "\"reason\":\"%s\"}",
+      site, static_cast<unsigned long>(waitedMs), taskNameOf(holder),
+      taken ? "waited" : "timeout");
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(taken ? hostProbeLevel(waitedMs)
+                                         : ride_diagnostics::Level::Warning,
+                                   "ble", "lock_wait", fields);
+  }
+}
+
+// Takes a mutex like xSemaphoreTake and records a wait of 100 ms or more with
+// the task that held the mutex when the wait began.
+static bool takeTrackedMutex(SemaphoreHandle_t mutex, TickType_t waitTicks,
+                             const char *site) {
+  if (mutex == nullptr) return false;
+  if (xSemaphoreTake(mutex, 0) == pdTRUE) return true;
+  const TaskHandle_t holder = xSemaphoreGetMutexHolder(mutex);
+  const uint32_t startedMs = millis();
+  const bool taken = xSemaphoreTake(mutex, waitTicks) == pdTRUE;
+  const uint32_t waitedMs = millis() - startedMs;
+  if (waitedMs >= kHostProbeReportMs)
+    recordLockWait(site, waitedMs, holder, taken);
+  return taken;
+}
+
+// Host-task heartbeat: once a second the esp_timer task posts an event to
+// NimBLE's default event queue, which only the host task drains. The
+// handler's delay is the host task's scheduling latency, whatever the cause.
+// `ble host_heartbeat` records `late` (handled 500 ms or more after the
+// post), `stalled` (still unhandled a second after the post; recorded once,
+// with what the host task was doing) and `resumed` (the stalled beat finally
+// handled): `latencyMs` is the post-to-handler delay, `durationMs` the CPU
+// time the host task consumed meanwhile (near zero while blocked or starved)
+// and `state` the activity observed when the stall was recorded, or the last
+// activity the host task finished before a late beat.
+static struct ble_npl_event hostHeartbeatEvent;
+static esp_timer_handle_t hostHeartbeatTimer = nullptr;
+static std::atomic<TaskHandle_t> nimbleHostTask{nullptr};
+static std::atomic<uint32_t> hostHeartbeatPostedMs{0}; // 0: none in flight
+static std::atomic<uint32_t> hostHeartbeatRunTimeAtPostUs{0};
+static std::atomic<bool> hostHeartbeatRunTimeKnown{false};
+static std::atomic<bool> hostHeartbeatStalled{false};
+static std::atomic<const char *> hostHeartbeatStallActivity{"idle"};
+static constexpr uint64_t kHostHeartbeatPeriodUs = 1000000;
+static constexpr uint32_t kHostHeartbeatLateMs = 500;
+static constexpr uint32_t kHostHeartbeatStallMs = 1000;
+
+static uint32_t nimbleHostRunTimeUs() {
+  const TaskHandle_t task = nimbleHostTask.load(std::memory_order_acquire);
+  if (task == nullptr) return 0;
+  TaskStatus_t status = {};
+  vTaskGetInfo(task, &status, pdFALSE, eInvalid);
+  return static_cast<uint32_t>(status.ulRunTimeCounter);
+}
+
+static uint32_t hostHeartbeatRanUs() {
+  if (!hostHeartbeatRunTimeKnown.load(std::memory_order_acquire)) return 0;
+  return nimbleHostRunTimeUs() -
+         hostHeartbeatRunTimeAtPostUs.load(std::memory_order_acquire);
+}
+
+static void recordHostHeartbeat(const char *phase, uint32_t latencyMs,
+                                uint32_t ranUs, const char *activity) {
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"latencyMs\":%lu,\"durationMs\":%lu,"
+      "\"state\":\"%s\"}",
+      phase, static_cast<unsigned long>(latencyMs),
+      static_cast<unsigned long>(ranUs / 1000),
+      activity == nullptr ? "idle" : activity);
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(hostProbeLevel(latencyMs), "ble",
+                                   "host_heartbeat", fields);
+  }
+}
+
+// Runs on the NimBLE host task.
+static void hostHeartbeatEventHandler(struct ble_npl_event *event) {
+  (void)event;
+  nimbleHostTask.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+  const uint32_t postedMs =
+      hostHeartbeatPostedMs.load(std::memory_order_acquire);
+  if (postedMs == 0) return;
+  const uint32_t latencyMs = millis() - postedMs;
+  const uint32_t ranUs = hostHeartbeatRanUs();
+  const bool stalled =
+      hostHeartbeatStalled.exchange(false, std::memory_order_acq_rel);
+  hostHeartbeatPostedMs.store(0, std::memory_order_release);
+  if (stalled) {
+    recordHostHeartbeat(
+        "resumed", latencyMs, ranUs,
+        hostHeartbeatStallActivity.load(std::memory_order_acquire));
+  } else if (latencyMs >= kHostHeartbeatLateMs) {
+    recordHostHeartbeat("late", latencyMs, ranUs,
+                        nimbleHostActivityLast.load(std::memory_order_acquire));
+  }
+}
+
+// Runs on the esp_timer task; never more than one beat is in flight.
+static void hostHeartbeatTimerHandler(void *) {
+  const uint32_t nowMs = millis();
+  const uint32_t postedMs =
+      hostHeartbeatPostedMs.load(std::memory_order_acquire);
+  if (postedMs != 0) {
+    const uint32_t ageMs = nowMs - postedMs;
+    if (ageMs >= kHostHeartbeatStallMs &&
+        !hostHeartbeatStalled.exchange(true, std::memory_order_acq_rel)) {
+      const char *activity =
+          nimbleHostActivity.load(std::memory_order_acquire);
+      hostHeartbeatStallActivity.store(activity, std::memory_order_release);
+      recordHostHeartbeat("stalled", ageMs, hostHeartbeatRanUs(), activity);
+    }
+    return;
+  }
+  hostHeartbeatRunTimeKnown.store(
+      nimbleHostTask.load(std::memory_order_acquire) != nullptr,
+      std::memory_order_release);
+  hostHeartbeatRunTimeAtPostUs.store(nimbleHostRunTimeUs(),
+                                     std::memory_order_release);
+  hostHeartbeatStalled.store(false, std::memory_order_release);
+  hostHeartbeatPostedMs.store(nowMs == 0 ? 1 : nowMs,
+                              std::memory_order_release);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &hostHeartbeatEvent);
+}
+
+static void startHostHeartbeat() {
+  if (hostHeartbeatTimer != nullptr) return;
+  ble_npl_event_init(&hostHeartbeatEvent, hostHeartbeatEventHandler, nullptr);
+  esp_timer_create_args_t args = {};
+  args.callback = hostHeartbeatTimerHandler;
+  args.arg = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name = "ble_host_beat";
+  args.skip_unhandled_events = true;
+  if (esp_timer_create(&args, &hostHeartbeatTimer) != ESP_OK) {
+    hostHeartbeatTimer = nullptr;
+    return;
+  }
+  if (esp_timer_start_periodic(hostHeartbeatTimer, kHostHeartbeatPeriodUs) !=
+      ESP_OK) {
+    esp_timer_delete(hostHeartbeatTimer);
+    hostHeartbeatTimer = nullptr;
   }
 }
 
@@ -1225,7 +1445,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   }
 
   if (timing != nullptr) timing->allocated();
-  if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+  if (!takeTrackedMutex(pendingMapInputMutex, portMAX_DELAY, "map_input")) {
     free(input.data);
     return false;
   }
@@ -1837,8 +2057,13 @@ sendWireNotification(NimBLECharacteristic *characteristic,
   // NimBLE-Arduino 1.4's characteristic notify() API returns void and drops
   // the host result. Use the underlying free-form server notification so a
   // finite ATT/L2CAP buffer condition can preserve and retry this exact frame.
-  const int result = ble_gatts_notify_custom(
-      connectionHandle, characteristic->getHandle(), payload);
+  int result;
+  {
+    // The controller can hold the host task here while its buffers drain.
+    HostActivityScope activity("notify");
+    result = ble_gatts_notify_custom(connectionHandle,
+                                     characteristic->getHandle(), payload);
+  }
   xSemaphoreGive(notificationTransportMutex);
   if (result == 0) {
     return TransportResult::Sent;
@@ -1901,6 +2126,7 @@ static void processDeferredNotifications() {
 
 static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   (void)event;
+  HostActivityScope activity("deferred_drain");
   // Clear the pending hint before draining, but keep the scheduling gate held
   // until the handler is done. A producer that races the drain therefore
   // leaves a pending hint for the owner task without queueing a second copy
@@ -6194,6 +6420,7 @@ class MyMaintenanceRejectedCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *) override {
+    HostActivityScope activity("maintenance_rejected");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     Serial.println(
@@ -6227,6 +6454,7 @@ public:
   }
 
   void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
+    HostActivityScope activity("connect");
     if (desc == nullptr) {
       Serial.println("BLE: Rejected connection without a handle");
       return;
@@ -6353,6 +6581,7 @@ public:
 
   void onDisconnect(NimBLEServer *pServer,
                     ble_gap_conn_desc *desc) override {
+    HostActivityScope activity("disconnect");
     if (desc == nullptr || !ble_connection_policy::endSession(
                                activeConnHandle, desc->conn_handle,
                                [] { return resetOwnershipConnectionState(); })) {
@@ -6556,6 +6785,7 @@ public:
   }
 
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("nav");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -6826,6 +7056,7 @@ public:
 class MyRouteCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("route");
     DeliveryCallbackScope timing(1);
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
@@ -6890,6 +7121,7 @@ public:
 class MyGPSCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("gps");
     DeliveryCallbackScope timing(2);
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
@@ -6981,6 +7213,7 @@ class MyWorkoutTelemetryCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("workout");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7083,6 +7316,7 @@ public:
   }
 
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("ride_automation");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7102,6 +7336,7 @@ class MyScreenConfigurationCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("screen");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7194,6 +7429,7 @@ public:
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("settings");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7313,6 +7549,7 @@ public:
 class MyAuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("auth");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     std::string value = pChar->getValue();
@@ -7500,6 +7737,7 @@ void BLENavigationServer::init(const char *deviceName) {
                                              std::memory_order_release);
     deferredNotificationEventReady.store(true, std::memory_order_release);
   }
+  startHostHeartbeat();
   NimBLEDevice::setPower(configuredTxPowerLevel());
   NimBLEDevice::setMTU(512); // Increase MTU for route geometry
 
