@@ -1,7 +1,7 @@
 # Precise GCJ-02 region: review record
 
-Local branch `fix/precise-gcj02-region`, not pushed. Recorded under
-REVIEW.md before a pull request exists.
+Branch `fix/precise-gcj02-region`. Recorded under REVIEW.md before its pull
+request was opened.
 
 - Base: `54657fd0590abc497e4d62756916a4d7843f0beb` (GitHub `main`).
 - Reviewed head: `6ee047893ad1854c72fd1ab07a48e5c4736aa402`. Commits:
@@ -16,6 +16,16 @@ REVIEW.md before a pull request exists.
   - Pass 3 reviewed `3e8a8f28..6ee04789`, plus REF-FAR and TEST-CHAIN. A
     session restart interrupted it once, and it was rerun in full.
 - State: **clean**. 0 active P0–P2 findings.
+- Base update, 2026-11-05: merged GitHub `main` at `bbcadc90` (273 commits)
+  as `7e5c2863`.
+  - **Conflict:** one, in `NavigationProtocolTests.swift`, where both sides
+    added a test after the Shanghai test; both are kept.
+  - **New call sites:** main adds no new coordinate conversion calls, and
+    every host source group that converts still resolves the region files.
+  - **Rerun on the merge:** RideShared, navigation protocol, topography warp,
+    offline route and Watch online routing tests all passed.
+  - **Review:** no new pass was needed; checks on the merge candidate are in
+    the pull request.
 
 ## Change
 
