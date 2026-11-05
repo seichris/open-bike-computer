@@ -271,6 +271,14 @@ static std::atomic<const char *> nimbleHostActivity{"idle"};
 static std::atomic<const char *> nimbleHostActivityLast{"idle"};
 // The NimBLE host task, learned from the first heartbeat it handles.
 static std::atomic<TaskHandle_t> nimbleHostTask{nullptr};
+// Largest heartbeat latency, beats handled and longest host-task activity
+// while a transfer session is enabled: written by the host task, reset and
+// reported by the loop task (`ble host_heartbeat` phase `transfer_summary`).
+// A summary is a measurement even when no threshold record fired.
+static std::atomic<uint32_t> transferWindowMaxBeatMs{0};
+static std::atomic<uint32_t> transferWindowBeats{0};
+static std::atomic<uint32_t> transferWindowMaxActivityMs{0};
+static std::atomic<const char *> transferWindowMaxActivitySite{"none"};
 
 // Until the host task is known every caller counts as it; afterwards only the
 // host task marks activity, so a scope entered on another task can neither
@@ -392,6 +400,11 @@ public:
     nimbleHostActivity.store(previous_, std::memory_order_release);
     nimbleHostActivityLast.store(site_, std::memory_order_release);
     const uint32_t durationMs = millis() - startedMs_;
+    if (durationMs >
+        transferWindowMaxActivityMs.load(std::memory_order_relaxed)) {
+      transferWindowMaxActivityMs.store(durationMs, std::memory_order_relaxed);
+      transferWindowMaxActivitySite.store(site_, std::memory_order_relaxed);
+    }
     if (durationMs >= kHostProbeReportMs) recordHostActivity(site_, durationMs);
   }
   HostActivityScope(const HostActivityScope &) = delete;
@@ -460,6 +473,7 @@ static std::atomic<uint32_t> hostHeartbeatPostedMs{0}; // 0: none in flight
 static std::atomic<uint32_t> hostHeartbeatRunTimeAtPostUs{0};
 static std::atomic<bool> hostHeartbeatRunTimeKnown{false};
 static std::atomic<bool> hostHeartbeatStalled{false};
+static std::atomic<bool> hostHeartbeatStartedRecorded{false};
 static std::atomic<const char *> hostHeartbeatStallActivity{"idle"};
 static constexpr uint64_t kHostHeartbeatPeriodUs = 1000000;
 static constexpr uint32_t kHostHeartbeatLateMs = 500;
@@ -523,6 +537,13 @@ static void hostHeartbeatEventHandler(struct ble_npl_event *event) {
   const bool stalled =
       hostHeartbeatStalled.exchange(false, std::memory_order_acq_rel);
   hostHeartbeatPostedMs.store(0, std::memory_order_release);
+  transferWindowBeats.fetch_add(1, std::memory_order_relaxed);
+  if (latencyMs > transferWindowMaxBeatMs.load(std::memory_order_relaxed))
+    transferWindowMaxBeatMs.store(latencyMs, std::memory_order_relaxed);
+  // Once per boot: the timer runs, the host task drains NimBLE's queue and the
+  // probe ring reaches the recorder, so silence afterwards is a measurement.
+  if (!hostHeartbeatStartedRecorded.exchange(true, std::memory_order_acq_rel))
+    recordHostHeartbeat("started", latencyMs, ranUs, "idle");
   if (stalled) {
     recordHostHeartbeat(
         "resumed", latencyMs, ranUs,
@@ -558,6 +579,40 @@ static void hostHeartbeatTimerHandler(void *) {
   hostHeartbeatPostedMs.store(nowMs == 0 ? 1 : nowMs,
                               std::memory_order_release);
   ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &hostHeartbeatEvent);
+}
+
+// Loop task only: opens a measurement window when a transfer session is
+// enabled and reports it when the session ends.
+static bool transferWindowOpen = false;
+
+static void observeTransferWindow(bool sessionEnabled) {
+  if (sessionEnabled == transferWindowOpen) return;
+  transferWindowOpen = sessionEnabled;
+  if (sessionEnabled) {
+    transferWindowMaxBeatMs.store(0, std::memory_order_relaxed);
+    transferWindowBeats.store(0, std::memory_order_relaxed);
+    transferWindowMaxActivityMs.store(0, std::memory_order_relaxed);
+    transferWindowMaxActivitySite.store("none", std::memory_order_relaxed);
+    return;
+  }
+  const char *site =
+      transferWindowMaxActivitySite.load(std::memory_order_relaxed);
+  char fields[176] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"transfer_summary\",\"latencyMs\":%lu,"
+      "\"durationMs\":%lu,\"state\":\"%s\",\"sampleCount\":%lu}",
+      static_cast<unsigned long>(
+          transferWindowMaxBeatMs.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(
+          transferWindowMaxActivityMs.load(std::memory_order_relaxed)),
+      site == nullptr ? "none" : site,
+      static_cast<unsigned long>(
+          transferWindowBeats.load(std::memory_order_relaxed)));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
+                                   "host_heartbeat", fields);
+  }
 }
 
 static void startHostHeartbeat() {
@@ -8236,6 +8291,8 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 }
 
 void BLENavigationServer::syncTransferConnectionProfile() {
+  const bool sessionEnabled = deviceTransferHttp.isSessionEnabled();
+  observeTransferWindow(sessionEnabled);
 #if !BLE_RADIO_CHARACTERIZATION
   const uint16_t handle = activeConnHandle;
   if (pServer == nullptr || !connected || handle == BLE_HS_CONN_HANDLE_NONE) {
@@ -8257,8 +8314,7 @@ void BLENavigationServer::syncTransferConnectionProfile() {
   // has yet to authenticate keeps the phone's own parameters, so the AUTH
   // exchange of the owner's reconnect during a transfer is not slowed by the
   // relaxed interval and latency.
-  const bool transferActive =
-      deviceTransferHttp.isSessionEnabled() && bleSessionAuthenticated;
+  const bool transferActive = sessionEnabled && bleSessionAuthenticated;
   if (transferActive == transferProfileApplied)
     return;
   // During a transfer the Wi-Fi radio, TLS and SD hashing compete with BLE;

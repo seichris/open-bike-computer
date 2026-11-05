@@ -597,6 +597,13 @@ stays up (the app's 15-second write timeout during a LAN transfer):
   microsecond esp_timer clock, which both Waveshare profiles keep; a build
   without that clock omits the field rather than reporting zero.
 
+`ble host_heartbeat` also records `started` once per boot (the first beat:
+the timer runs, the host task drains NimBLE's queue and the probe records reach
+the recorder, so silence afterwards is a measurement) and `transfer_summary`
+when a transfer session ends: `latencyMs` is the largest heartbeat latency,
+`durationMs` the longest host-task activity and `state` its site, and
+`sampleCount` the beats handled while the session was enabled.
+
 The `ble` probes are captured where they happen and written by the loop task
 on its next pass, so their record time is the write time and `eventUptimeMs`
 the capture time; `ble probe_dropped` (`droppedCount`) means more than eight

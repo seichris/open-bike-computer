@@ -193,6 +193,16 @@ class BLENotificationDispatchTests(unittest.TestCase):
         handler = function_body(BLE_SOURCE, "static void hostHeartbeatEventHandler(")
         self.assertIn("nimbleHostTask.store(xTaskGetCurrentTaskHandle()", handler)
         self.assertIn("hostHeartbeatPostedMs.store(0", handler)
+        # A once-per-boot proof of life makes later silence a measurement, and
+        # every transfer session ends with a summary of its worst host latency.
+        self.assertIn("hostHeartbeatStartedRecorded.exchange(true", handler)
+        self.assertIn('recordHostHeartbeat("started"', handler)
+        self.assertIn("transferWindowMaxBeatMs.store(latencyMs", handler)
+        sync = function_body(BLE_SOURCE, "void BLENavigationServer::syncTransferConnectionProfile() {")
+        self.assertLess(sync.index("observeTransferWindow(sessionEnabled)"),
+                        sync.index("#if !BLE_RADIO_CHARACTERIZATION"))
+        window = function_body(BLE_SOURCE, "static void observeTransferWindow(bool sessionEnabled) {")
+        self.assertIn('\\"phase\\":\\"transfer_summary\\"', window)
         init = function_body(
             BLE_SOURCE, "void BLENavigationServer::init(const char *deviceName)"
         )
