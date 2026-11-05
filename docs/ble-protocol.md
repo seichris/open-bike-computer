@@ -535,8 +535,10 @@ DeltaLon: Int16 microdegrees
 ...
 ```
 
-Coordinates are WGS-84. The iOS app converts Apple Maps route coordinates from
-GCJ-02 to WGS-84 before writing route geometry so it aligns with OSM map blocks.
+Coordinates are WGS-84. The iOS app converts Apple Maps route coordinates in
+mainland China from GCJ-02 to WGS-84 before writing route geometry so it aligns
+with OSM map blocks; see [Apple Maps coordinates in mainland
+China](mapkit-china-coordinates.md).
 The first point is the rider's exact projection onto the route, followed only
 by forward route vertices. The retained packet never contains a rider-to-route
 connector: firmware prepends its current `PresentedPose` while drawing, so the
@@ -579,8 +581,8 @@ SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 All GPS packet versions reject latitude outside -90...90 degrees or longitude
 outside -180...180 degrees before updating map state or arrival freshness.
 
-Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
-coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
+Live CoreLocation coordinates are sent as WGS-84. Simulated positions follow
+the route's WGS-84 geometry and are sent unchanged. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
 14-byte payload with Unix time, and the extended 30-byte telemetry payload. A
 client that negotiated CAP2 bit `17` appends the six-byte quality-v1 tail for a

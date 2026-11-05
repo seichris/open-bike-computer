@@ -3,7 +3,7 @@ import Foundation
 import MapKit
 
 enum MapKitRouteAdapter {
-    static let normalizationVersion: UInt16 = 1
+    static let normalizationVersion = RouteCoordinateNormalizationV1.mapKitVersion
 
     static func route(
         from mapKitRoute: MKRoute,
@@ -14,7 +14,12 @@ enum MapKitRouteAdapter {
         destinationLabel: String = "Destination",
         localeIdentifier: String = Locale.current.identifier
     ) throws -> NavigationRouteV1 {
-        var routePoints = coordinates(from: mapKitRoute.polyline).map(normalize)
+        // Read in order from where the route was requested, so a route near a
+        // mainland-China border keeps to its own side.
+        var routePoints = RouteCoordinateNormalizationV1.mapKitToWGS84(
+            routeCoordinates(from: mapKitRoute.polyline),
+            startingNear: fallbackSource
+        )
         if routePoints.count == 1,
            let fallbackSource,
            fallbackSource.isValid,
@@ -39,7 +44,11 @@ enum MapKitRouteAdapter {
         var previousEndIndex = 0
         var routeSteps: [NavigationRouteStepV1] = []
         for (sourceStepIndex, step) in mapKitRoute.steps.enumerated() {
-            let stepPoints = coordinates(from: step.polyline).map(normalize)
+            // A step starts where the previous one ended.
+            let stepPoints = RouteCoordinateNormalizationV1.mapKitToWGS84(
+                routeCoordinates(from: step.polyline),
+                startingNear: routePoints[min(previousEndIndex, routePoints.count - 1)]
+            )
             guard let stepStart = stepPoints.first, let stepEnd = stepPoints.last else {
                 if sourceStepIndex == mapKitRoute.steps.count - 1,
                    !routePoints.isEmpty {
@@ -116,8 +125,19 @@ enum MapKitRouteAdapter {
         return route
     }
 
-    static func normalizedLocation(_ mapKitRouteLocation: CLLocation) -> CLLocation {
-        let coordinate = normalize(mapKitRouteLocation.coordinate)
+    /// `reference`, such as the rider's latest GPS fix, settles a location
+    /// that a mainland-China border makes ambiguous, so a fix converted into
+    /// MapKit route space comes back exactly.
+    static func normalizedLocation(
+        _ mapKitRouteLocation: CLLocation,
+        near reference: CLLocation? = nil
+    ) -> CLLocation {
+        let coordinate = normalize(
+            mapKitRouteLocation.coordinate,
+            near: reference.map {
+                RouteCoordinateV1(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude)
+            }
+        )
         return CLLocation(
             coordinate: CLLocationCoordinate2D(
                 latitude: coordinate.latitude,
@@ -130,6 +150,12 @@ enum MapKitRouteAdapter {
             speed: mapKitRouteLocation.speed,
             timestamp: mapKitRouteLocation.timestamp
         )
+    }
+
+    private static func routeCoordinates(from polyline: MKPolyline) -> [RouteCoordinateV1] {
+        coordinates(from: polyline).map {
+            RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude)
+        }
     }
 
     private static func coordinates(from polyline: MKPolyline) -> [CLLocationCoordinate2D] {
@@ -145,11 +171,14 @@ enum MapKitRouteAdapter {
         return result
     }
 
-    private static func normalize(_ coordinate: CLLocationCoordinate2D) -> RouteCoordinateV1 {
+    private static func normalize(
+        _ coordinate: CLLocationCoordinate2D,
+        near reference: RouteCoordinateV1?
+    ) -> RouteCoordinateV1 {
         RouteCoordinateNormalizationV1.mapKitToWGS84(RouteCoordinateV1(
             latitude: coordinate.latitude,
             longitude: coordinate.longitude
-        ))
+        ), near: reference)
     }
 
     private static func nearestIndex(

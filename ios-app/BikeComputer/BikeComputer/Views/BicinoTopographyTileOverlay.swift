@@ -33,13 +33,9 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let northwestCoordinate = CLLocationCoordinate2D(latitude: bounds[3], longitude: bounds[0])
     let southeastCoordinate = CLLocationCoordinate2D(latitude: bounds[1], longitude: bounds[2])
     let northwest = MKMapPoint(
-      alignsChina
-        ? CoordinateConverter.wgs84ToGCJ02(coordinate: northwestCoordinate)
-        : northwestCoordinate)
+      alignsChina ? BicinoTopographyTileOverlay.gcj02(northwestCoordinate) : northwestCoordinate)
     let southeast = MKMapPoint(
-      alignsChina
-        ? CoordinateConverter.wgs84ToGCJ02(coordinate: southeastCoordinate)
-        : southeastCoordinate)
+      alignsChina ? BicinoTopographyTileOverlay.gcj02(southeastCoordinate) : southeastCoordinate)
     mapBounds = MKMapRect(
       x: northwest.x, y: northwest.y, width: southeast.x - northwest.x,
       height: southeast.y - northwest.y)
@@ -71,36 +67,52 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let store = TopographyCompanionStore(url: url, receipt: receipt)
     let metadata = try await store.validate()
     try Task.checkCancellation()
-    let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
-    let corners = [
-      (bounds[1], bounds[0]), (bounds[1], bounds[2]),
-      (bounds[3], bounds[0]), (bounds[3], bounds[2]),
-    ]
-    let chinaCorners = corners.filter {
-      CoordinateConverter.isInChina(lat: $0.0, lon: $0.1)
-    }.count
-    guard chinaCorners == 0 || chinaCorners == corners.count else {
-      throw TopographyMapKitTileWarp.WarpError.extent
-    }
     return BicinoTopographyTileOverlay(
-      store: store, metadata: metadata, alignsChina: chinaCorners == corners.count
+      store: store, metadata: metadata,
+      alignsChina: try alignsChina(boundsE7: metadata.boundsE7)
     )
+  }
+
+  /// Apple Maps switches between WGS-84 and GCJ-02 at mainland China's
+  /// border, and contours are not yet aligned across it.
+  enum AlignmentError: Error, Equatable {
+    case crossesMainlandChinaBorder
+  }
+
+  /// Whether a selection's contours need GCJ-02, which holds only when the
+  /// whole selection lies in mainland China.
+  static func alignsChina(boundsE7: [Int]) throws -> Bool {
+    let bounds = boundsE7.map { Double($0) / 10_000_000 }
+    switch MainlandChinaRegion.coverage(
+      south: bounds[1], west: bounds[0], north: bounds[3], east: bounds[2])
+    {
+    case .none: return false
+    case .all: return true
+    case .partial: throw AlignmentError.crossesMainlandChinaBorder
+    }
   }
 
   func coordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D {
     let coordinate = CLLocationCoordinate2D(
       latitude: atan(sinh(worldY / 6_378_137)) * 180 / .pi,
       longitude: worldX / 6_378_137 * 180 / .pi)
-    return alignsChina ? CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate) : coordinate
+    return alignsChina ? Self.gcj02(coordinate) : coordinate
   }
 
   func world(_ coordinate: CLLocationCoordinate2D) -> (Double, Double) {
     let point =
       alignsChina
-      ? CoordinateConverter.gcj02ToWGS84(lat: coordinate.latitude, lon: coordinate.longitude)
-      : (lat: coordinate.latitude, lon: coordinate.longitude)
-    let latitude = max(-85.05112878, min(85.05112878, point.lat)) * .pi / 180
-    return (point.lon * .pi / 180 * 6_378_137, log(tan(.pi / 4 + latitude / 2)) * 6_378_137)
+      ? GCJ02.toWGS84(latitude: coordinate.latitude, longitude: coordinate.longitude)
+      : (latitude: coordinate.latitude, longitude: coordinate.longitude)
+    let latitude = max(-85.05112878, min(85.05112878, point.latitude)) * .pi / 180
+    return (point.longitude * .pi / 180 * 6_378_137, log(tan(.pi / 4 + latitude / 2)) * 6_378_137)
+  }
+
+  /// An aligned overlay lies wholly in mainland China, so all of it, including
+  /// points just beyond its bounds, uses GCJ-02 like its warped tiles.
+  private static func gcj02(_ coordinate: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+    let converted = GCJ02.fromWGS84(latitude: coordinate.latitude, longitude: coordinate.longitude)
+    return CLLocationCoordinate2D(latitude: converted.latitude, longitude: converted.longitude)
   }
 
   func labelAnchors(in rect: MKMapRect) async throws -> [ContourLabelAnchor] {

@@ -14,6 +14,7 @@ enum RideSharedTests {
         try testGPSDispatchAndGoldenPacket()
         testMotionDispatchAge()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
+        try testMainlandChinaRegion()
         try testGPXImport()
         try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()

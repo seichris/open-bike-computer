@@ -954,6 +954,7 @@ struct NavigationProtocolTests {
         testRouteGeometryTransmissionPolicy()
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
+        testHongKongBorderStartKeepsGPSFix()
         testTestNavigationHeadingFollowsRouteTurns()
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
@@ -6137,16 +6138,30 @@ struct NavigationProtocolTests {
     }
 
     static func testNonChinaCoordinatesPassThroughUnchanged() {
-        let coordinate = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-
-        assertCoordinate(CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate),
-                         latitude: coordinate.latitude,
-                         longitude: coordinate.longitude,
-                         "non-China WGS->GCJ should pass through")
-        assertCoordinate(CoordinateConverter.gcj02ToWGS84(coordinate: coordinate),
-                         latitude: coordinate.latitude,
-                         longitude: coordinate.longitude,
-                         "non-China GCJ->WGS should pass through")
+        // Apple Maps uses WGS-84 everywhere outside mainland China, including
+        // its neighbours inside the coarse rectangle the app once used.
+        for coordinate in [
+            CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+            CLLocationCoordinate2D(latitude: 22.2810, longitude: 114.1600),
+            CLLocationCoordinate2D(latitude: 1.3050, longitude: 103.8550),
+            CLLocationCoordinate2D(latitude: 25.0330, longitude: 121.5654),
+        ] {
+            assert(!CoordinateConverter.isInChina(lat: coordinate.latitude, lon: coordinate.longitude),
+                   "non-China coordinate is outside the GCJ-02 region")
+            assertCoordinate(CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate),
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China WGS->GCJ should pass through")
+            assertCoordinate(CoordinateConverter.gcj02ToWGS84(coordinate: coordinate),
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China GCJ->WGS should pass through")
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            assertCoordinate(CoordinateConverter.mapKitRouteLocation(fromGPSLocation: location).coordinate,
+                             latitude: coordinate.latitude,
+                             longitude: coordinate.longitude,
+                             "non-China GPS is already in MapKit route space")
+        }
     }
 
     static func testSourceEndpointSelection() {
@@ -7246,6 +7261,33 @@ struct NavigationProtocolTests {
         assertEqual(testEngine.routeCoordinateExtractionCount, 1,
                     "test navigation uses the same cached MKRoute polyline")
         testEngine.stopNavigation()
+    }
+
+    @MainActor
+    static func testHongKongBorderStartKeepsGPSFix() {
+        // Lok Ma Chau is in Hong Kong, where Apple Maps uses WGS-84, but GCJ-02
+        // also moves a Shenzhen position about 600 m away onto its coordinate.
+        let fix = CLLocation(latitude: 22.5143, longitude: 114.0657)
+        let routeLocation = CoordinateConverter.mapKitRouteLocation(fromGPSLocation: fix)
+        let unhinted = CoordinateConverter.gcj02ToWGS84(coordinate: routeLocation.coordinate)
+        assert(routeLocation.distance(from: fix) < 0.01 &&
+               CLLocation(latitude: unhinted.latitude, longitude: unhinted.longitude).distance(from: fix) > 500,
+               "the start's Apple Maps coordinate is shared across the border")
+        let route = TestRoute(
+            instructions: "Continue",
+            coordinates: [
+                fix.coordinate,
+                CLLocationCoordinate2D(latitude: 22.5083, longitude: 114.0717)
+            ]
+        )
+        let engine = NavigationEngine()
+        engine.processExternalLocation(fix)
+        engine.startNavigation(with: route, initialLocation: routeLocation)
+        assert(engine.processExternalLocation(fix),
+               "the rider's own fix passes the start gate")
+        assert((engine.distanceToCurrentStep(from: routeLocation) ?? .infinity) < 1,
+               "the route and the rider stay in Hong Kong")
+        engine.stopNavigation()
     }
 
     @MainActor
