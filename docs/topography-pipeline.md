@@ -355,7 +355,9 @@ is the newest generation policy, with topographic contours available in
 production; map POIs stay disabled there. Production and development select it
 with the next signed-worker promotion, which moves the worker because the source
 policy is a worker identity input. The catalog's `TOPOGRAPHY_PROMOTION_ENABLED`
-switch is flipped separately once production serves the new policy. The list
+switch is on in staging and production from the catalog deployment that
+follows the production lock. Setting it back to `0` and redeploying the catalog
+is the topographic incident control: Standard promotion and delivery continue. The list
 below remains as the record of what was not done before release.
 
 
