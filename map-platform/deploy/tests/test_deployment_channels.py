@@ -19,9 +19,17 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         )
         self.assertIn(
             "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
-            "/app/config/generation-profile-policy-v1.json",
+            "/app/config/generation-profile-policy-v5.json",
             api_environment,
         )
+        # The newest policy offers topographic maps in production (maintainer
+        # decision 2026-11-05) and keeps map POIs disabled there.
+        production_policy = json.loads(
+            (DEPLOY_DIR.parent / "config" / "generation-profile-policy-v5.json")
+            .read_text(encoding="utf-8")
+        )["channels"]["production"]
+        self.assertIn("topographic-contours-v1", production_policy["globalProfiles"])
+        self.assertIn("map-pois-v1", production_policy["disabledProfiles"])
         self.assertIn("MAP_PLATFORM_LABEL_TARGET2_ENABLED", api_environment)
         self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ENABLED", api_environment)
         self.assertIn("MAP_PLATFORM_BUILDING_TARGET3_ALLOWLIST", api_environment)
@@ -68,12 +76,12 @@ class DeploymentChannelComposeTests(unittest.TestCase):
             encoding="utf-8"
         )
         development_policy = json.loads(
-            (DEPLOY_DIR.parent / "config" / "generation-profile-policy-v2.json")
+            (DEPLOY_DIR.parent / "config" / "generation-profile-policy-v5.json")
             .read_text(encoding="utf-8")
         )
         self.assertIn(
             "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
-            "/app/config/generation-profile-policy-v2.json",
+            "/app/config/generation-profile-policy-v5.json",
             development,
         )
         self.assertNotIn("generation-profile-policy-v1.json", development)
@@ -81,8 +89,9 @@ class DeploymentChannelComposeTests(unittest.TestCase):
             "topographic-contours-v1",
             development_policy["channels"]["development"]["globalProfiles"],
         )
-        self.assertEqual(
-            [], development_policy["channels"]["development"]["canaryProfiles"]
+        self.assertNotIn(
+            "topographic-contours-v1",
+            development_policy["channels"]["development"]["canaryProfiles"],
         )
         self.assertNotIn("generation-profile-policy-v2.json", production)
         self.assertNotIn("MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST", production)
