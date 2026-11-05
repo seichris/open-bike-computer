@@ -1,6 +1,6 @@
-# control-plane-source-commit: d5e7814b9558f193914e236822cce48e9211ca43
-# worker-source-commit: ef49abbb47b527a16b440eeb7238b2ce5a184f93
-# promotion-source-commit: d5e7814b9558f193914e236822cce48e9211ca43
+# control-plane-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
+# worker-source-commit: 8baaf9804ebba273cfce3a7397ec6db341f49260
+# promotion-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
 # These digest-pinned images are the production deployment manifest. The API
 # and maintenance control plane may advance to carry a rollout approval while
@@ -11,12 +11,12 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:4bccd934f0942e09655a27dbe6c770ddbeb3687cf306e6877076c90c3018bfd4
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:3cd641df582e31e3650fac9b398fa98e1c27f6de463437930c6225b895598348
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00
 
 services:
   map-platform-promotion:
-    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:4614af8a141715ad37da11383d45991611159d72aabddca73289209419be45de
+    image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:259f065e57770b3fcea1311c646cbd53fba0df9d4743e928017147ad5c873bda
     mem_limit: 2g
     cpus: 1
     environment:
@@ -36,7 +36,7 @@ services:
       MAP_PLATFORM_MAP_SIGNING_KEY_ID: ${MAP_PLATFORM_MAP_SIGNING_KEY_ID:-}
       MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64: ${MAP_PLATFORM_MAP_SIGNING_PRIVATE_KEY_BASE64:-}
       # This converter stays fixed even if the generation worker later advances.
-      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: ghcr.io/seichris/open-bike-computer-map-platform@sha256:6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14
+      MAP_PLATFORM_WORKER_IMAGE_REFERENCE: ghcr.io/seichris/open-bike-computer-map-platform@sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00
       MAP_PLATFORM_ARTIFACT_STORE: s3
       MAP_PLATFORM_S3_BUCKET: ${MAP_PLATFORM_S3_BUCKET:-}
       MAP_PLATFORM_S3_PREFIX: ${MAP_PLATFORM_S3_PREFIX:-map-artifacts}
@@ -63,7 +63,7 @@ services:
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
       MAP_PLATFORM_DEPLOYMENT_CHANNEL: ${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-production}
-      MAP_PLATFORM_GENERATION_PROFILE_POLICY: /app/config/generation-profile-policy-v1.json
+      MAP_PLATFORM_GENERATION_PROFILE_POLICY: /app/config/generation-profile-policy-v5.json
       MAP_PLATFORM_ADMIN_TOKEN: ${MAP_PLATFORM_ADMIN_TOKEN:-}
       MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}
       MAP_PLATFORM_INSTALLATION_SECRET: ${MAP_PLATFORM_INSTALLATION_SECRET:?set MAP_PLATFORM_INSTALLATION_SECRET in Coolify secrets}
@@ -143,7 +143,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       # Keep the approval identity atomic with the image pins in this lock.
-      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261104-brotli-security
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261105-topo-production
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
