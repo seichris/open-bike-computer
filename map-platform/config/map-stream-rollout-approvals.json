@@ -546,6 +546,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261105-topo-production",
+      "candidateGitSha": "8baaf9804ebba273cfce3a7397ec6db341f49260",
+      "producerBuildSha256": "eb2f92fad79327cea3adcf406dc83bd9b0f8fe7cf9335c49448d8c4318c3a7a2",
+      "workerImageDigest": "sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "508d6f0e636dcb83323ea825878cffec97d180868c5ae23d9b367874fbcaadd7",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-05T14:11:49Z",
+      "approvedBy": "Claude (software review under Chris's explicit 2026-11-05 decision to enable topographic maps in production: 'sources are approved. topo is fine. prod server policy should be the newest policy too', and '1.75 only, accept risk'; optional hardware matrix, zero physical runs)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }

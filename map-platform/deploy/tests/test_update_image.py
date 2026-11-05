@@ -43,6 +43,9 @@ class UpdateImageTests(unittest.TestCase):
         security = update_image.IMAGE_REPOSITORY + "@sha256:6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14"
         self.assertEqual(update_image.validate_manifest_text(
             candidate.replace(converter, security)).promotion_converter_reference, security)
+        topography = update_image.IMAGE_REPOSITORY + "@sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00"
+        self.assertEqual(update_image.validate_manifest_text(
+            candidate.replace(converter, topography)).promotion_converter_reference, topography)
         for invalid in (
             candidate.replace(reference, "image:latest"),
             candidate.replace("MAP_PLATFORM_CATALOG_CHANNEL: production", "MAP_PLATFORM_CATALOG_CHANNEL: development"),
