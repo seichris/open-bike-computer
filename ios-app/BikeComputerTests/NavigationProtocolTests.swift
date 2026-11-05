@@ -920,6 +920,7 @@ struct NavigationProtocolTests {
         testReplacementStepSelectionUsesUnambiguousGeometry()
         testCoordinatorPreviewsAndSelectsAlternateRoutes()
         testCoordinatorRequiresSelectionForSingleRoute()
+        testCoordinatorNavigationReclaimsWatchDirectBicino()
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
@@ -954,6 +955,7 @@ struct NavigationProtocolTests {
         testNavigationEngineUsesRouteBearingForInvalidCourse()
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
         testHongKongBorderStartKeepsGPSFix()
+        testTestNavigationHeadingFollowsRouteTurns()
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -962,6 +964,8 @@ struct NavigationProtocolTests {
         testSecureRendererBenchmarkProtocol()
         testRendererCrossRunRetainedMemoryPolicy()
         testDeviceNetworkJoinTimeoutPolicy()
+        await testDeviceNetworkStaleAssociationPolicy()
+        testDeviceTransferLinkRebindPolicy()
         testSecureRendererBenchmarkReadiness()
         testRendererBenchmarkAtomicDelivery()
         testATTWriteSubmissionEvidence()
@@ -1168,6 +1172,7 @@ struct NavigationProtocolTests {
         testSettingsSheetPresentationWiring()
         testStravaRouteCatalogUIWiring()
         testLandingMapConnectionStatusPositioning()
+        testActionStatusChipLargeTextLayout()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
         testTopographicMapChoicesAreIndependent()
@@ -1184,6 +1189,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
+        testOfflineMapManagerAdoptsLiveAttemptOfTakenOverUpload()
         testOfflineMapPolygonClosesRing()
         testOfflineMapStoredZipReader()
         testOfflineMapPackPreviewReader()
@@ -1201,6 +1207,7 @@ struct NavigationProtocolTests {
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
         await testMapActivationConfirmationOrchestration()
+        await testMapActivationConfirmationFollowsDeviceRetries()
         testDeviceMapLibrary()
         await testDeviceMapLibraryCommandDelivery()
         testMapTransferDeviceStatusDecodesActivationFailure()
@@ -4639,6 +4646,107 @@ struct NavigationProtocolTests {
         assert(coordinator.currentRoute === route, "the selected route becomes active")
     }
 
+    /// A Watch workout started first prepared the phone to yield the Bicino.
+    /// Phone navigation started afterwards must ask for the link back, or the
+    /// device never shows the arrow, turn distance and route.
+    @MainActor
+    static func testCoordinatorNavigationReclaimsWatchDirectBicino() {
+        let suite = "CoordinatorWatchHandback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        let known = KnownBikeComputerDevice(
+            deviceID: "00112233445566778899aabbccddeeff",
+            peripheralIdentifier: UUID(
+                uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+            )!,
+            name: "Known Bicino",
+            lastConnectedAt: Date(),
+            isLegacy: false
+        )
+        let manager = coordinator.bleManager
+        manager.installScanDriverForTesting(
+            BLEScanDriverForTesting(),
+            knownDevices: [known],
+            trustedPeripheralIdentifier: known.peripheralIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        assert(manager.watchDirectRideReconciliationRequestForTesting == nil,
+               "a yielded idle phone leaves the Watch ride alone")
+
+        let sourceCoordinate = CLLocationCoordinate2D(
+            latitude: 37.0,
+            longitude: -122.0
+        )
+        let destinationCoordinate = CLLocationCoordinate2D(
+            latitude: 37.004,
+            longitude: -122.0
+        )
+        coordinator.planNavigation(
+            from: .mapItem(MKMapItem(
+                placemark: MKPlacemark(coordinate: sourceCoordinate)
+            )),
+            to: .mapItem(MKMapItem(
+                placemark: MKPlacemark(coordinate: destinationCoordinate)
+            )),
+            transportType: RouteTransportTypes.cycling,
+            isTestMode: true
+        )
+        factory.tasks[0].succeed(with: [TestRoute(
+            instructions: "Continue",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )])
+        coordinator.selectRouteAlternative(coordinator.routeAlternatives[0].id)
+        coordinator.startSelectedRoute()
+        assert(coordinator.isNavigating, "the selected route starts")
+        guard let handback = manager
+            .watchDirectRideReconciliationRequestForTesting else {
+            assertionFailure("phone navigation asks the Watch ride for the Bicino")
+            return
+        }
+        assertEqual(handback.purpose, .phoneNavigation,
+                    "the Watch hands the link back during its active ride")
+        assertEqual(handback.deviceID, known.deviceID,
+                    "the handback names the yielded Bike Computer")
+        assertEqual(handback.preparationID,
+                    UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")!,
+                    "the handback names the exact yielded preparation")
+        assertEqual(manager.currentScanPurpose, .none,
+                    "the phone keeps its yield until the Watch releases it")
+
+        let release = try! WatchDirectRidePreparationRequestV1(
+            preparationID: handback.preparationID,
+            operation: .release,
+            deviceID: handback.deviceID
+        )
+        assert(manager.handleWatchDirectRidePreparationRequest(
+            release, phoneNavigationActive: true
+        ).accepted, "the Watch's exact release is accepted")
+        assert(waitForMainLoop(timeout: 1) {
+            manager.currentScanPurpose ==
+                .trustedReconnect(known.peripheralIdentifier)
+        }, "the released phone reconnects to carry navigation and the workout")
+
+        coordinator.stopNavigation()
+        manager.installScanDriverForTesting(
+            BLEScanDriverForTesting(),
+            knownDevices: [known],
+            trustedPeripheralIdentifier: known.peripheralIdentifier,
+            shouldAutoReconnect: true,
+            isExclusiveOperationActive: true
+        )
+        manager.setApplicationActive(true)
+        assertEqual(manager.watchDirectRideReconciliationRequestForTesting?
+            .purpose, .releaseWhenIdle,
+                    "without phone navigation a foreground check only releases idle rides")
+    }
+
     @MainActor
     static func testCoordinatorReroutesAndAppliesLatestRoute() {
         let suite = "CoordinatorRerouteTests.Apply.\(UUID().uuidString)"
@@ -7180,6 +7288,77 @@ struct NavigationProtocolTests {
         assert((engine.distanceToCurrentStep(from: routeLocation) ?? .infinity) < 1,
                "the route and the rider stay in Hong Kong")
         engine.stopNavigation()
+    }
+
+    @MainActor
+    static func testTestNavigationHeadingFollowsRouteTurns() {
+        // An eastbound leg, then a northbound leg, in MapKit's GCJ-02 space like
+        // a real MKRoute in Shanghai.
+        let wgsStart = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        let gcjStart = CoordinateConverter.wgs84ToGCJ02(coordinate: wgsStart)
+        let gcjCorner = CLLocationCoordinate2D(
+            latitude: gcjStart.latitude,
+            longitude: gcjStart.longitude + 0.003
+        )
+        let gcjEnd = CLLocationCoordinate2D(
+            latitude: gcjCorner.latitude + 0.003,
+            longitude: gcjCorner.longitude
+        )
+        let route = TestRoute(
+            instructions: "Continue east, then north",
+            coordinates: [gcjStart, gcjCorner, gcjEnd]
+        )
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, isTestMode: true)
+        var headings: [UInt16] = []
+        var resolutions: [String] = []
+        for _ in 0..<70 {
+            engine.updateSimulationForTesting(timeInterval: 1)
+            guard engine.isNavigating, let gps = manager.sentGPSPositions.last else { break }
+            headings.append(readUInt16LE(gps, offset: 8))
+            if let r = engine.lastDeviceCourseForTesting {
+                resolutions.append("seg=\(r.segmentIndex.map(String.init) ?? "nil") f=\(r.fraction.map { String(format: "%.2f", $0) } ?? "nil") rb=\(r.routeBearing.map { String(format: "%.0f", $0) } ?? "nil") mc=\(r.measuredCourse) h=\(r.heading.map { String(format: "%.0f", $0) } ?? "nil") n=\(r.cacheCount)")
+            }
+        }
+        engine.stopNavigation()
+        // 10 m/s: the eastbound leg (about 285 m) covers the first 28 steps and
+        // the northbound leg the rest.
+        assert(headings.count >= 50, "test navigation advances along both legs: \(headings.count) steps")
+        let eastbound = headings[2..<15]
+        let northbound = headings[35..<50]
+        assert(
+            eastbound.allSatisfy { $0 >= 88 && $0 <= 92 },
+            "the eastbound leg sends an eastbound course: \(Array(eastbound))"
+        )
+        assert(
+            northbound.allSatisfy { $0 >= 358 || $0 <= 2 },
+            "after the corner the simulated course turns north: \(Array(northbound)) \(resolutions.suffix(3))"
+        )
+
+        // The route bearing itself covers the whole compass: a westward leg
+        // used to come back as nil (atan2's negative half) and the last
+        // valid course stuck.
+        let origin = CLLocationCoordinate2D(latitude: 31.2304, longitude: 121.4737)
+        func bearing(dLat: Double, dLon: Double) -> Int {
+            guard let value = NavigationHeading.bearing(
+                from: origin,
+                to: CLLocationCoordinate2D(latitude: origin.latitude + dLat, longitude: origin.longitude + dLon)
+            ) else { return -1 }
+            return Int(value.rounded()) % 360
+        }
+        assertEqual(bearing(dLat: 0, dLon: 0.001), 90, "east")
+        assertEqual(bearing(dLat: -0.001, dLon: 0), 180, "south")
+        assertEqual(bearing(dLat: 0, dLon: -0.001), 270, "west is a bearing, not an invalid course")
+        assertEqual(bearing(dLat: 0.001, dLon: -0.001 / 0.855), 315, "north-west")
+        assertEqual(bearing(dLat: 0.001, dLon: -0.00000001), 0, "due north with a westward skew is north, not an invalid course")
+        assert(
+            NavigationHeading.bearing(from: origin, to: origin) == nil,
+            "a zero-length segment has no bearing"
+        )
     }
 
     @MainActor

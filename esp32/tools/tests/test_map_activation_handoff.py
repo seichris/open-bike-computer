@@ -84,7 +84,7 @@ int main() {
         activation = MAPS_SOURCE.split("bool Maps::processPendingVectorMapActivation()", 1)[1].split(
             "bool Maps::takeVectorMapFolderActivationResult", 1)[0]
         for body, mutation in ((control, "work(context)"),
-                               (activation, "probeVectorMapFolderOnStorageOwner(request.folder)")):
+                               (activation, "activateVectorMapFolderOnStorageOwner(request.folder)")):
             self.assertLess(body.index("LockDomain::Storage"),
                             body.index("pauseNearbySearchOnStorageOwner()"))
             self.assertLess(body.index("pauseNearbySearchOnStorageOwner()"), body.index(mutation))

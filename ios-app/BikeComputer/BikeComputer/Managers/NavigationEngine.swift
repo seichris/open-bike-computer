@@ -498,6 +498,18 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     #if HOST_TESTING
+#if HOST_TESTING
+    struct DeviceCourseResolutionForTesting {
+        let segmentIndex: Int?
+        let fraction: Double?
+        let routeBearing: Double?
+        let measuredCourse: Double
+        let heading: Double?
+        let cacheCount: Int
+    }
+    private(set) var lastDeviceCourseForTesting: DeviceCourseResolutionForTesting?
+#endif
+
     func updateSimulationForTesting(timeInterval: TimeInterval) {
         guard isSimulationMode else { return }
         lastSimulationUpdate = Date().addingTimeInterval(-timeInterval)
@@ -922,6 +934,16 @@ class NavigationEngine: NSObject, ObservableObject {
             routeBearing: routeBearing,
             navigationActive: isNavigating
         )
+#if HOST_TESTING
+        lastDeviceCourseForTesting = DeviceCourseResolutionForTesting(
+            segmentIndex: routeProjection?.segmentIndex,
+            fraction: routeProjection?.fraction,
+            routeBearing: routeBearing,
+            measuredCourse: location.course,
+            heading: heading,
+            cacheCount: routeCoordinatesCache.count
+        )
+#endif
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,

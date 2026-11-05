@@ -286,7 +286,11 @@ void createWaitingScr() {
 
   hasDisplayedPhase = false;
   displayedPairingCode = UINT32_MAX;
-  applyPhase(Phase::Welcome, 0);
+  // The first frame can be drawn before BLE loads ownership; never let it be
+  // the add-device Welcome on an owned device.
+  applyPhase(pre_connection_presentation::resolve(
+                 pre_connection_presentation::ownershipUnknownSnapshot()),
+             0);
   log_i("waitingScreen created at 0x%p", waitingScreen);
 }
 

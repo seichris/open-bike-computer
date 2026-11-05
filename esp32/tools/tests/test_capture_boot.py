@@ -57,7 +57,42 @@ DISPLAY_RECOVERY_CAPTURE = HEALTHY_CAPTURE.replace(
 ).replace(READ_ONLY_PMIC_LINE, DISPLAY_RECOVERY_PMIC_LINE)
 
 
+# Waveshare setup() renders the waiting screen (user_interface) before
+# map_recovery and completes application_services after it.
+WAVESHARE_STAGE_ORDER = (
+    (1, "startup"), (2, "core_services"), (3, "wake_configuration"),
+    (4, "i2c_bus"), (5, "pmic_inspection"), (6, "clock_and_sensors"),
+    (7, "display"), (8, "storage"), (11, "user_interface"),
+    (9, "map_recovery"), (10, "application_services"), (12, "speaker"),
+    (13, "ble"), (14, "finalization"),
+)
+
+
 class CaptureBootTests(unittest.TestCase):
+    def test_waiting_screen_first_stage_order_validates_ready(self) -> None:
+        stages = "".join(
+            f"BOOT_STAGE schema=1 sequence=2 event={event} id={stage_id} "
+            f"name={name} uptimeMs={index * 10 + offset}\n"
+            for index, (stage_id, name) in enumerate(WAVESHARE_STAGE_ORDER)
+            for offset, event in ((0, "enter"), (5, "complete"))
+        )
+        ready = "BOOT_STAGE schema=1 sequence=2 event=ready"
+        capture = HEALTHY_CAPTURE.replace(ready, stages + ready, 1)
+        summary = summarize(capture)
+        self.assertTrue(summary.ready)
+        self.assertEqual(summary.stage_schema_mismatches, 0)
+        self.assertEqual(summary.sequence_mismatches, 0)
+        self.assertEqual(summary.boot_discontinuities, 0)
+        self.assertEqual(
+            validation_errors(
+                summary,
+                expected_target="WAVESHARE_AMOLED_175",
+                require_ready=True,
+                require_pmic_read_only=True,
+            ),
+            [],
+        )
+
     def test_hardware_serial_resolution_uses_current_port(self) -> None:
         calls: list[tuple[str, float]] = []
 

@@ -10,11 +10,13 @@ from shapely import (
     intersection,
     set_precision,
 )
+import shapely
 from shapely.errors import GEOSException
 from shapely.ops import triangulate, unary_union
 import PIL.ImageDraw as ImageDraw
 import PIL.Image as Image
 import math
+import numpy as np
 
 from label_pipeline import extract_join_metadata, extract_label_tags
 
@@ -334,21 +336,74 @@ def style_features( features, styles):
     return styled_features
 
 
-def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove feats that are fully contained, return remaining
+def _linear_parts(value):
+    """Return the line members of a line/block intersection, in GEOS order.
+
+    A line that enters the block and also touches its boundary at an isolated
+    point comes back as a GeometryCollection holding that point beside the
+    line parts, and a line crossing a block corner within a nanometre comes
+    back as that corner point alone. Points have no length to draw, so they
+    are dropped; clip_lines counts the lines left with nothing to draw. Any
+    other geometry type is unexpected and fails closed.
+    """
+    if type(value) == LineString:
+        return [value]
+    if type(value) in (Point, shapely.MultiPoint):
+        return []
+    assert type(value) in (MultiLineString, GeometryCollection), type(value)
+    parts = []
+    for child in value.geoms:
+        parts.extend(_linear_parts(child))
+    return parts
+
+
+def _record_line_clip_without_length(diagnostics, result):
+    """Count a line that passed the block test but left nothing to draw."""
+    if diagnostics is None:
+        return
+    diagnostics["lineClipsWithoutLength"] = diagnostics.get("lineClipsWithoutLength", 0) + 1
+    by_result = diagnostics.setdefault("lineClipsWithoutLengthByResult", {})
+    code = "empty" if result.is_empty else result.geom_type
+    by_result[code] = by_result.get(code, 0) + 1
+
+
+def merge_geometry_diagnostics(target, source):
+    """Add the counts of one diagnostics mapping into another.
+
+    Counters are integers and the ``...ByResult`` breakdowns are mappings of
+    integers, so a block clipped on a worker thread can count into a mapping
+    of its own that is folded into the shared one afterwards.
+    """
+    for key, value in source.items():
+        if isinstance(value, dict):
+            merge_geometry_diagnostics(target.setdefault(key, {}), value)
+        else:
+            target[key] = target.get(key, 0) + value
+
+
+def clip_lines( features, bbox: Polygon, label_diagnostics=None, geometry_diagnostics=None): #TODO remove feats that are fully contained, return remaining
     """ Clip lines to the box area. Each line can be splitted into one or several lines.
-        Returns a list of LineStrings
+        Returns a list of LineStrings. A line that keeps no drawable part in
+        the block (a corner contact point, or a line so short that GEOS
+        reduces it to an empty line) is skipped and counted in
+        geometry_diagnostics.
     """
     clipped = []
     for feat in features:
         line = feat['geom']
+        # BlockFeatureIndex only omits features this test would skip; keep
+        # every per-feature effect below it.
         assert type( line) == LineString, type(line)
         if not bbox.intersects( line) or bbox.touches( line): continue
         parts = intersection( line, bbox)
-        assert type( parts) in (LineString, MultiLineString), type( parts)
+        line_parts = _linear_parts( parts)
         if not parts.is_valid: continue
-        for p in parts.geoms if type(parts) == MultiLineString else [parts,]:
-            assert type( p) == LineString, type( p)
-            if p.is_valid:
+        emitted = 0
+        for p in line_parts:
+            # An empty part (a line about one ULP long) has NaN bounds that
+            # would abort the FMB writer.
+            if p.is_valid and not p.is_empty:
+                emitted += 1
                 new_feat = dict( feat)
                 new_feat['geom'] = p
                 new_feat['bbox'] = p.bounds
@@ -366,8 +421,10 @@ def clip_lines( features, bbox: Polygon, label_diagnostics=None): #TODO remove f
                     dropped = len(feat.get('label_candidates', [])) - len(candidates)
                     label_diagnostics['candidatesRejectedByBlockOwnership'] = \
                         label_diagnostics.get('candidatesRejectedByBlockOwnership', 0) + max(0, dropped)
-                clipped.append( new_feat)            
-    return clipped 
+                clipped.append( new_feat)
+        if not emitted:
+            _record_line_clip_without_length( geometry_diagnostics, parts)
+    return clipped
 
 def _polygonal_parts(value):
     if isinstance(value, Polygon):
@@ -526,6 +583,8 @@ def clip_polygons(
                 raise GenericGeometryError(
                     "generic polygon feature is not a Polygon"
                 )
+            # BlockFeatureIndex only omits features this test would skip;
+            # keep every other per-feature effect below it.
             if not bbox.intersects(polygon) or bbox.touches(polygon):
                 continue
             parts = intersection(polygon, bbox)
@@ -605,6 +664,57 @@ def clip_polygons(
         clipped.extend(feature_clipped)
         # if len( new_feat['geom'].coords) <= 2: continue
     return clipped
+
+
+class BlockFeatureIndex:
+    """Offer each block clip only the features that can affect it, in order.
+
+    clip_lines() and clip_polygons() skip a feature whose geometry does not
+    intersect the block before it adds a part, spends a piece budget or
+    records a diagnostic, and GEOS rejects disjoint envelopes before any
+    other work. An STRtree envelope query therefore returns a superset of the
+    features a full scan keeps. Sorting the hits back into list order keeps
+    piece budgets, label counters and output bytes identical to scanning
+    every feature. Geometries the clip functions reject by type, and empty or
+    non-finite ones, are offered to every block so the legacy assertion and
+    per-block drop diagnostics stay unchanged.
+    """
+
+    def __init__(self, features, accepts):
+        self.features = features
+        accepted = [
+            position
+            for position, feature in enumerate(features)
+            if accepts(feature['geom'])
+        ]
+        geometries = np.empty(len(accepted), dtype=object)
+        geometries[:] = [features[position]['geom'] for position in accepted]
+        finite = np.isfinite(shapely.bounds(geometries)).all(axis=1)
+        self._indexed = np.asarray(accepted, dtype=np.intp)[finite]
+        self._always = np.setdiff1d(
+            np.arange(len(features), dtype=np.intp),
+            self._indexed,
+            assume_unique=True,
+        )
+        self._tree = shapely.STRtree(geometries[finite]) if finite.any() else None
+
+    @classmethod
+    def for_lines(cls, features):
+        # clip_lines() asserts this exact type for every feature it visits.
+        return cls(features, lambda geom: type(geom) == LineString)
+
+    @classmethod
+    def for_polygons(cls, features):
+        # clip_polygons() records anything else as a dropped component.
+        return cls(features, lambda geom: isinstance(geom, Polygon))
+
+    def candidates(self, block: Polygon):
+        positions = self._always
+        if self._tree is not None:
+            positions = np.union1d(
+                self._indexed[self._tree.query(block)], positions
+            )
+        return [self.features[position] for position in positions.tolist()]
 
 
 def color_to_24bits( color565):

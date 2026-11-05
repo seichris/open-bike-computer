@@ -191,6 +191,9 @@ public:
               std::string errorCode, std::string errorMessage);
   void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
+  bool runningFor(const std::string &sessionId) const {
+    return state_.running && state_.sessionId == sessionId;
+  }
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
   const std::array<char, 64> &ownerRecoveryCode() const { return state_.ownerRecoveryCode; }
@@ -220,6 +223,17 @@ public:
   void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
     storageProgressCallback_ = callback; storageProgressContext_ = context;
   }
+  // The deepest and the outermost failed step of metadata writes since the
+  // last clear. firstError is errno of the first step's failed call, or 0
+  // when that step failed a check (a mismatch or invalid input) instead: a
+  // successful call can leave errno set, e.g. mkdir's EEXIST. Diagnostics only.
+  struct StorageWriteFailure {
+    const char *first = nullptr;
+    const char *last = nullptr;
+    int firstError = 0;
+  };
+  StorageWriteFailure storageWriteFailure() const { return storageWriteFailure_; }
+  void clearStorageWriteFailure() const { storageWriteFailure_ = {}; }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -252,6 +266,10 @@ public:
   InstallStatus recoverPendingStreamActivation(
       const ActivationProgressCallback &onProgress = {},
       ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
+  // A legacy root whose consumed marker failed after its pointer switch is
+  // installed, not pending, as selected map and later as previous map.
+  // Finishes that cleanup for both; never activates anything.
+  InstallStatus settleSelectionStreamMaps() const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.
@@ -292,6 +310,10 @@ public:
       const std::string &sessionId) const;
   InstallStatus discardUnselectedStreamMap(
       const std::string &sessionId) const;
+  // For a root discard refuses as selected or rollback: keeps the completed
+  // version a failed reactivation reused, without deleting anything. Fails
+  // when the root holds no completed version.
+  InstallStatus keepSelectedStreamMap(const std::string &sessionId) const;
   InstallStatus discardAllUnselectedStreamMaps() const;
   bool pruneStagingSessions(const std::string &keepSessionId) const;
   bool pruneObsoleteInstalledMaps(
@@ -300,6 +322,11 @@ public:
   bool readPendingArchiveActivation(std::string &sessionId) const;
   bool clearPendingArchiveActivation() const;
   bool discardStagedSession(const std::string &sessionId) const;
+  // Reads every FMB block once more; progress reports validated blocks.
+  InstallStatus validateLabelContracts(const std::string &root,
+                                       const MapManifest &manifest,
+                                       bool useManifestPaths,
+                                       const ActivationProgressCallback &onProgress = {}) const;
 
   std::string stagingRoot(const std::string &sessionId) const;
   std::string stagedArchivePath(const std::string &sessionId) const;
@@ -340,6 +367,8 @@ private:
   std::string operationDeviceID_;
   StorageProgressCallback storageProgressCallback_ = nullptr;
   void *storageProgressContext_ = nullptr;
+  mutable StorageWriteFailure storageWriteFailure_;
+  void noteStorageWriteFailure(const char *step, int error) const;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
@@ -398,9 +427,6 @@ private:
   bool writeTextFile(const std::string &path, const std::string &text) const;
   bool readTextFile(const std::string &path, std::string &text,
                     size_t maxBytes) const;
-  InstallStatus validateLabelContracts(const std::string &root,
-                                       const MapManifest &manifest,
-                                       bool useManifestPaths) const;
 };
 
 std::string sha256Hex(const uint8_t *data, size_t len);

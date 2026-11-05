@@ -761,6 +761,21 @@ nonisolated struct MapActivationEvaluation: Equatable {
 }
 
 nonisolated enum MapActivationReconciler {
+    // Stream reception numbers its own sequence from 1 for each upload, apart
+    // from the activation sequence that the device's attempts advance, and
+    // shares the idle, prepared and failed words. Only these activation
+    // statuses give an upload taken over mid-way a sequence to bind its result to.
+    static func attemptSequence(status: String?, sequence: UInt32?) -> UInt32? {
+        ["activating", "recovering", "installed"].contains(status ?? "") ? sequence : nil
+    }
+
+    // A live attempt that an observed transfer without a baseline can adopt.
+    // A terminal status may be a result left from an earlier attempt of the
+    // same session, so it is never adopted.
+    static func liveAttemptSequence(status: String?, sequence: UInt32?) -> UInt32? {
+        ["activating", "recovering"].contains(status ?? "") ? sequence : nil
+    }
+
     static func evaluate(expectedMapId: String,
                          sessionId: String,
                          previousMapId: String?,
@@ -788,13 +803,22 @@ nonisolated enum MapActivationReconciler {
 
         let acknowledgedSequenceMatches = acceptedSequence != nil &&
             activationSequence == acceptedSequence
-        let sequenceMatchesAttempt = acceptedSequence == nil || acknowledgedSequenceMatches
+        // The device retries failed accepted work itself, and each retry takes
+        // the next sequence. A later sequence of this session continues the
+        // acknowledged attempt; an earlier one belongs to another attempt.
+        let continuesAcknowledgedAttempt: Bool
+        if let acceptedSequence, let activationSequence {
+            continuesAcknowledgedAttempt = activationSequence &- acceptedSequence < 0x8000_0000
+        } else {
+            continuesAcknowledgedAttempt = false
+        }
+        let sequenceMatchesAttempt = acceptedSequence == nil || continuesAcknowledgedAttempt
         let statusIsNotOlder = previousSequence == nil || activationSequence == nil ||
             sequenceAdvanced || acknowledgedSequenceMatches
         var observedCurrentAttempt = observedCurrentAttempt
         if sessionMatches, sequenceMatchesAttempt, statusIsNotOlder {
             observedCurrentAttempt = observedCurrentAttempt || sequenceAdvanced ||
-                acknowledgedSequenceMatches || activationStatus == "activating"
+                continuesAcknowledgedAttempt || activationStatus == "activating"
         }
 
         if sessionMatches, sequenceMatchesAttempt, statusIsNotOlder, observedCurrentAttempt {
@@ -984,11 +1008,12 @@ nonisolated enum CachedPackRecoveryDecision: Equatable {
         if activationSessionId == expectedSessionId, activationStatus == "installed" {
             return bindsOriginalObservation ? .installed : .absent
         }
-        // Only a live activation for this session waits. An exact active pointer
-        // alone (for example after a reboot lost the terminal result) is not
-        // evidence: re-send the same signed stream for a fresh terminal result.
+        // Only a live activation for this session waits, including one the
+        // device is retrying. An exact active pointer alone (for example after
+        // a reboot lost the terminal result) is not evidence: re-send the same
+        // signed stream for a fresh terminal result.
         if activationSessionId == expectedSessionId,
-           ["receiving", "paused", "finalizing", "ready", "activating", "installed"]
+           ["receiving", "paused", "finalizing", "ready", "activating", "recovering", "installed"]
             .contains(activationStatus) {
             return .pending
         }
@@ -1016,7 +1041,8 @@ nonisolated enum ExistingMapStreamAttemptDisposition: Equatable {
         switch activationStatus {
         case "installed":
             return bindsOriginalObservation ? .installed : .upload
-        case "receiving", "finalizing", "ready", "activating":
+        case "receiving", "finalizing", "ready", "activating", "recovering":
+            // Between its own retries the device refuses a new upload.
             return .awaitDevice
         default:
             // Paused and failed streams need a matching retry from byte zero.
@@ -4597,7 +4623,7 @@ final class OfflineMapManager: ObservableObject {
             return
         }
         if bleManager.mapTransferActivationSessionId == sessionID,
-           ["receiving", "paused", "finalizing", "ready", "activating"]
+           ["receiving", "paused", "finalizing", "ready", "activating", "recovering"]
             .contains(bleManager.mapTransferActivationStatus) {
             statusMessage = bleManager.mapTransferActivationStatus == "paused"
                 ? "Map upload paused. Tap Upload to resume."
@@ -4835,10 +4861,25 @@ final class OfflineMapManager: ObservableObject {
             defaults.object(forKey: OfflineMapDefaults.lastTransferPreviousSequenceKey)
                 as? NSNumber
         )?.uint32Value
-        let acceptedSequence = (
+        var acceptedSequence = (
             defaults.object(forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey)
                 as? NSNumber
         )?.uint32Value
+        // An upload taken over mid-way can lack an activation sequence to bind
+        // its result to, and this poll keeps nothing between statuses. Until
+        // that upload's activation ends, the device refuses other uploads and
+        // library tasks, and a reboot ends the binding, so the first live
+        // attempt of this session is that activation. It becomes the baseline,
+        // and the device's retries continue it.
+        if acceptedSequence == nil,
+           bleManager.mapTransferActivationSessionId == sessionId,
+           let liveSequence = MapActivationReconciler.liveAttemptSequence(
+               status: bleManager.mapTransferActivationStatus,
+               sequence: bleManager.mapTransferActivationSequence
+           ) {
+            defaults.set(Int(liveSequence), forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey)
+            acceptedSequence = liveSequence
+        }
         let evaluation = MapActivationReconciler.evaluate(
             expectedMapId: lastTransferMapId,
             sessionId: sessionId,
@@ -4898,7 +4939,7 @@ final class OfflineMapManager: ObservableObject {
                 statusMessage = "Map upload continues on device"
             case "paused":
                 statusMessage = "Map upload paused. Tap Upload to resume."
-            case "finalizing", "ready", "activating":
+            case "finalizing", "ready", "activating", "recovering":
                 statusMessage = "Activation continues on device"
             default:
                 statusMessage = deviceIsIdleOnAnotherMap
@@ -6968,12 +7009,14 @@ final class OfflineMapManager: ObservableObject {
             activationSessionID: activationSessionID,
             bindsOriginalObservation: bindsOriginalObservation
         )
+        let attemptSequence = MapActivationReconciler.attemptSequence(
+            status: activationStatus, sequence: activationSequence)
         recordTransfer(
             mapId: mapID,
             sessionId: sessionID,
             previousMapId: activeMapID,
             previousSessionId: activeSessionID,
-            previousSequence: activationSequence,
+            previousSequence: attemptSequence,
             outcome: disposition == .installed ? "installed" : "unconfirmed",
             connectionEpoch: bindsOriginalObservation ? bleManager.transferConnectionEpoch : nil,
             protocolVersion: 2,
@@ -6994,9 +7037,9 @@ final class OfflineMapManager: ObservableObject {
             stepCount: activationStepCount,
             percentage: activationProgress
         )
-        if let activationSequence {
+        if let attemptSequence {
             defaults.set(
-                Int(activationSequence),
+                Int(attemptSequence),
                 forKey: OfflineMapDefaults.lastTransferAcceptedSequenceKey
             )
         }
@@ -7396,7 +7439,8 @@ final class OfflineMapManager: ObservableObject {
                     activationSequence: activation?.sequence,
                     activationSessionId: activation?.sessionId,
                     activationMapId: activation?.mapId,
-                    activationError: activation?.error?.message ?? activation?.error?.code
+                    activationError: MapActivationFailureText.statusFailure(
+                        code: activation?.error?.code, message: activation?.error?.message)
                 )
                 observedCurrentAttempt = evaluation.observedCurrentAttempt
                 switch evaluation.decision {
@@ -7568,7 +7612,7 @@ final class OfflineMapManager: ObservableObject {
             statusMessage = "Map upload continues on device"
         case "paused":
             statusMessage = "Map upload paused. Tap Upload to resume."
-        case "finalizing", "ready", "activating":
+        case "finalizing", "ready", "activating", "recovering":
             statusMessage = "Activation continues on device"
         case "failed":
             statusMessage = "Map installation needs attention"

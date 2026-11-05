@@ -22,6 +22,7 @@ enum class ConnectionProfile : uint8_t {
   Unset = 0,
   Navigation = 1,
   Idle = 2,
+  Transfer = 3,
 };
 
 struct IntervalRange {
@@ -44,6 +45,7 @@ struct Configuration {
   IntervalRange slowAdvertising;
   ConnectionParameters navigation;
   ConnectionParameters idle;
+  ConnectionParameters transfer;
 };
 
 constexpr Configuration kConfiguration{
@@ -54,6 +56,15 @@ constexpr Configuration kConfiguration{
     {1440, 1760}, // 900-1100 ms in 0.625 ms units.
     {24, 40, 0, 400}, // 30-50 ms, zero latency, four-second timeout.
     {48, 80, 4, 600}, // 60-100 ms, latency four, six-second timeout.
+    // Transfers: the navigation interval with zero latency, so a phone write
+    // never waits for the peripheral's next listening event, and the idle
+    // profile's six-second supervision timeout, which keeps the owner link
+    // alive while Wi-Fi, TLS and SD hashing compete with BLE. With latency
+    // four the peripheral listened only every fifth event: each write waited
+    // up to half a second, and every event lost to Wi-Fi cost another half
+    // second (phone write replies of 1 to 10 s during transfers on
+    // 2026-11-05, with the device's host task never late).
+    {24, 40, 0, 600}, // 30-50 ms, zero latency, six-second timeout.
 };
 
 constexpr bool isSupportedTxPowerDbm(int txPowerDbm) {
@@ -83,7 +94,8 @@ constexpr bool isValid(const Configuration &configuration) {
          configuration.fastAdvertisingWindowMs > 0 &&
          isValid(configuration.fastAdvertising) &&
          isValid(configuration.slowAdvertising) &&
-         isValid(configuration.navigation) && isValid(configuration.idle);
+         isValid(configuration.navigation) && isValid(configuration.idle) &&
+         isValid(configuration.transfer);
 }
 
 constexpr AdvertisingMode advertisingModeForElapsed(uint32_t elapsedMs) {
@@ -115,10 +127,40 @@ constexpr ConnectionProfile connectionProfile(bool navigationActive) {
 constexpr const ConnectionParameters &
 connectionParameters(ConnectionProfile profile) {
   return profile == ConnectionProfile::Navigation ? kConfiguration.navigation
-                                                   : kConfiguration.idle;
+         : profile == ConnectionProfile::Transfer ? kConfiguration.transfer
+                                                  : kConfiguration.idle;
+}
+
+// The central's own limits for a peripheral request (Apple accessory design
+// guidelines): an interval of at least 15 ms with 15 ms between minimum and
+// maximum, latency at most 30, a 2 to 6 s supervision timeout longer than
+// three effective intervals, and an effective interval of at most 2 s.
+// Computed exactly in quarter milliseconds: an interval unit is 1.25 ms (5
+// quarters) and a timeout unit 10 ms (40 quarters), so no rounding can let a
+// request just over a limit pass.
+constexpr bool acceptableToPhone(const ConnectionParameters &parameters) {
+  const uint32_t minimumQuarters =
+      static_cast<uint32_t>(parameters.minimumIntervalUnits) * 5;
+  const uint32_t maximumQuarters =
+      static_cast<uint32_t>(parameters.maximumIntervalUnits) * 5;
+  const uint32_t effectiveQuarters =
+      maximumQuarters * (static_cast<uint32_t>(parameters.latency) + 1);
+  const uint32_t timeoutQuarters =
+      static_cast<uint32_t>(parameters.supervisionTimeoutUnits) * 40;
+  return minimumQuarters >= 60 && minimumQuarters + 60 <= maximumQuarters &&
+         parameters.latency <= 30 && timeoutQuarters >= 8000 &&
+         timeoutQuarters <= 24000 && effectiveQuarters * 3 < timeoutQuarters &&
+         effectiveQuarters <= 8000;
 }
 
 static_assert(isValid(kConfiguration));
+static_assert(acceptableToPhone(kConfiguration.navigation));
+static_assert(acceptableToPhone(kConfiguration.idle));
+static_assert(acceptableToPhone(kConfiguration.transfer));
+static_assert(kConfiguration.transfer.latency == 0 &&
+                  kConfiguration.transfer.supervisionTimeoutUnits ==
+                      kConfiguration.idle.supervisionTimeoutUnits,
+              "transfers keep the long timeout without peripheral latency");
 static_assert(kConfiguration.characterizationEnabled ||
                   kConfiguration.txPowerDbm == 9,
               "non-default BLE TX power is characterization-only");

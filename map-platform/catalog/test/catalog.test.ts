@@ -3500,6 +3500,8 @@ describe("catalog lifecycle boundaries", () => {
         recreatedLibrary.libraryId,
         undefined,
         "production",
+        verifyTestArtifact,
+        new Date("2026-11-01T00:01:15.000Z"),
       ),
     ).rejects.toMatchObject({ status: 409 });
     await env.DB.prepare(

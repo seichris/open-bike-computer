@@ -81,6 +81,11 @@ public:
   using MapOperation = void (*)(void *, const char *, bool);
   esp_err_t runMapActivation(MapOperation operation, void *context,
                              const std::string &sessionId, bool automaticExit, bool *issued = nullptr);
+  // Counter that map work advances on verified storage progress. While it
+  // moves, a map command outlives kMapActivationTimeoutTicks; set once at boot.
+  void setMapActivationProgress(const std::atomic<uint32_t> *progress) {
+    mapActivationProgress_ = progress;
+  }
   bool runOnInternalStack(void (*call)(void *), void *context) override;
 
 private:
@@ -163,6 +168,7 @@ private:
   char mapSessionId_[81]{};
   DeviceWiFiRuntime wifi_;
   uint32_t nextCommandId_ = 1;
+  const std::atomic<uint32_t> *mapActivationProgress_ = nullptr;
   std::atomic<internal_owner_policy::DispatchState> dispatchState_{
       internal_owner_policy::DispatchState::Ready};
 

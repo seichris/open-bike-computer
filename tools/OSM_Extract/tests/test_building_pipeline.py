@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from shapely.geometry import box, LineString, mapping, MultiPolygon, Polygon
+from shapely.geometry import box, LineString, mapping, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 from shapely.prepared import prep
 import yaml
@@ -29,6 +29,7 @@ from building_pipeline import (
     projected_selection_geometry,
     source_object_key,
 )
+from building_pipeline import _record_building_clip_without_record  # noqa: E402
 from map_format import MAX_BUILDING_RINGS, _building_section
 
 
@@ -116,6 +117,108 @@ class BuildingPipelineTests(unittest.TestCase):
         self.assertEqual(seam_edges, [False])
         self.assertGreater(stats["emittedWallCount"], 0)
         self.assertGreater(stats["suppressedWallCount"], 0)
+
+    def test_keeps_the_lobe_inside_a_block_when_another_lobe_touches_its_edge(self):
+        # Each building has a lobe inside block (0, 0) and another lobe that
+        # touches the block boundary from outside, so GEOS returns the clip
+        # as a GeometryCollection holding the polygon beside the contact.
+        cases = {
+            "relation outers sharing a segment with the right edge": feature(
+                300,
+                MultiPolygon([box(10, 10, 30, 30), box(100, 10, 130, 30)]),
+                '"height"=>"12"',
+                building="commercial",
+                relation=True,
+            ),
+            "relation outers meeting the top edge at a point": feature(
+                301,
+                MultiPolygon(
+                    [box(10, 10, 30, 30), Polygon([(50, 100), (40, 120), (60, 120)])]
+                ),
+                '"height"=>"12"',
+                building="commercial",
+                relation=True,
+            ),
+            "one outline folding back onto the right edge": feature(
+                302,
+                Polygon(
+                    [
+                        (10, 10), (40, 10), (40, 120), (100, 120),
+                        (100, 30), (130, 30), (130, 140), (10, 140),
+                    ]
+                ),
+                '"height"=>"12"',
+                building="commercial",
+            ),
+        }
+        block = box(0, 0, 100, 100)
+        for name, source in cases.items():
+            with self.subTest(case=name):
+                buildings, _report, _flat = prepare_buildings([source], self.rules)
+                self.assertEqual(len(buildings), 1)
+                clipped = buildings[0].geometry.intersection(block)
+                self.assertEqual(clipped.geom_type, "GeometryCollection")
+                records, stats = clip_buildings(buildings, block, 0, 0)
+                self.assertEqual(stats["recordCount"], 1)
+                roofs = unary_union(
+                    [
+                        Polygon(ring["points"])
+                        for record in records
+                        for ring in record["rings"]
+                        if ring["flags"] == 0
+                    ]
+                )
+                self.assertAlmostEqual(roofs.area, clipped.area)
+                self.assertGreater(clipped.area, 0)
+
+    def test_counts_a_building_whose_clip_leaves_no_record(self):
+        # 0.3 m of the sliver lie inside the block: its clip is a real
+        # polygon, but the ring rounds to two points and nothing is encoded.
+        sliver = feature(
+            310, box(99.7, 10, 100.5, 40), '"height"=>"12"', building="commercial"
+        )
+        control = feature(
+            311, box(10, 10, 30, 30), '"height"=>"12"', building="commercial"
+        )
+        block = box(0, 0, 100, 100)
+        buildings, _report, _flat = prepare_buildings([sliver, control], self.rules)
+        self.assertEqual(len(buildings), 2)
+        diagnostics = {}
+        records, stats = clip_buildings(
+            buildings, block, 0, 0, geometry_diagnostics=diagnostics
+        )
+        self.assertEqual(stats["recordCount"], 1)
+        self.assertEqual(
+            diagnostics,
+            {
+                "buildingClipsWithoutRecord": 1,
+                "buildingClipsWithoutRecordByResult": {"degenerate": 1},
+            },
+        )
+        # The statistics keep the block cache contract, and callers without
+        # a diagnostics mapping get the same output.
+        self.assertNotIn("buildingClipsWithoutRecord", stats)
+        self.assertEqual(clip_buildings(buildings, block, 0, 0), (records, stats))
+
+    def test_building_clip_without_record_is_coded_by_its_result(self):
+        diagnostics = {}
+        for clipped, fragment_count in (
+            (LineString([(0, 0), (1, 1)]), 0),
+            (Point(0, 0), 0),
+            (Polygon(), 0),
+            (box(0, 0, 1, 1), 1),
+        ):
+            _record_building_clip_without_record(diagnostics, clipped, fragment_count)
+        self.assertEqual(
+            diagnostics,
+            {
+                "buildingClipsWithoutRecord": 4,
+                "buildingClipsWithoutRecordByResult": {
+                    "LineString": 1, "Point": 1, "empty": 1, "degenerate": 1,
+                },
+            },
+        )
+        _record_building_clip_without_record(None, Polygon(), 0)
 
     def test_collects_closed_building_parts_from_the_gdal_line_layer(self):
         outline = feature(

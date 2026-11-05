@@ -180,6 +180,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Free runner disk for the core cache archive
+        uses: ./.github/actions/free-runner-disk
       - name: Restore pinned PlatformIO downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -653,6 +655,12 @@ jobs:
       - name: Sound protocol host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-sound-protocol-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-sound-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-sound-protocol-host-tests/results.json"
+      - name: BLE disconnect diagnostics host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-ble-disconnect-diagnostics-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-ble-disconnect-diagnostics-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-ble-disconnect-diagnostics-host-tests/results.json"
+      - name: Transfer link grace policy host tests
+        if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-transfer-link-grace-policy-host-tests')
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-transfer-link-grace-policy-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-transfer-link-grace-policy-host-tests/results.json"
       - name: Codec recovery host tests
         if: contains(fromJSON(needs.changes.outputs.firmware_host_checks), 'esp32-host-codec-recovery-host-tests')
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-codec-recovery-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-codec-recovery-host-tests/results.json"
