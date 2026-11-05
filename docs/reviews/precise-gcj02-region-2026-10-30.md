@@ -26,6 +26,10 @@ request was opened.
     offline route and Watch online routing tests all passed.
   - **Review:** no new pass was needed; checks on the merge candidate are in
     the pull request.
+  - **Second merge:** `main` at `8baaf980` (#752), merged as `41add624`. It
+    changes no app code and offers topographic maps in production, so the
+    TOPO-EXTENT behaviour, no contours for selections across the border,
+    now reaches production users.
 
 ## Change
 

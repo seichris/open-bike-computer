@@ -95,7 +95,9 @@ region. A selection that crosses the region's edge shows no overlay rather
 than a partly misaligned one. Saved Maps then says "Offline contours aren't
 shown for maps that cross mainland China's border." instead of asking for
 another download. This includes most selections of Shenzhen and Zhuhai,
-Xiamen with Kinmen's waters, Fuzhou with Matsu, Dandong and Ruili.
+Xiamen with Kinmen's waters, Fuzhou with Matsu, Dandong and Ruili. With the
+old rectangle these showed contours, misaligned by one offset across the
+border.
 
 ## Where the app converts
 
