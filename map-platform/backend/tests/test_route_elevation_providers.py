@@ -302,8 +302,15 @@ class CopernicusProviderTests(unittest.TestCase):
 
     def test_gates_are_explicit(self):
         self.assertEqual(self.provider(enabled=False).unavailable_reason(), "dem-disabled")
-        self.assertEqual(self.provider(channel="production").unavailable_reason(), "dem-not-production-approved")
+        # The shipped policy approves both pinned sources for production.
+        self.assertIsNone(self.provider(channel="production").unavailable_reason())
         self.assertIsNone(self.provider().unavailable_reason())
+        unapproved = TopographySourcePolicy(
+            tuple(replace(source, production_approved=False) for source in self.policy.sources),
+            self.policy.sha256, self.policy.version)
+        provider = CopernicusRouteElevationProvider(
+            unapproved, self.root, enabled=True, deployment_channel="production")
+        self.assertEqual(provider.unavailable_reason(), "dem-not-production-approved")
 
     def test_bilinear_sampling_of_staged_tiles_and_honest_gaps(self):
         size = 120
@@ -321,7 +328,7 @@ class CopernicusProviderTests(unittest.TestCase):
         self.assertEqual(samples.source.vertical_datum, "EGM2008 (EPSG:3855)")
         self.assertEqual(samples.source.native_resolution_m, 30.0)
         self.assertEqual(samples.source.surface_model, "dsm")
-        self.assertEqual(samples.source.qualification, "development-unqualified")
+        self.assertEqual(samples.source.qualification, "production-approved")
         self.assertTrue(any("Copernicus WorldDEM-30" in line for line in samples.source.attribution))
 
     def test_missing_index_or_tiles_fail_without_downloading(self):

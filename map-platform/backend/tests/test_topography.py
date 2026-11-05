@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from map_platform.topography_cache import ElevationCache, _SourceRedirects
 from map_platform.topography_sources import (
-    TopographySourcePolicy, geocells, load_topography_source_policy,
+    TopographySourcePolicy, geocells, load_topography_source_policy, topography_generation_enabled,
     parse_tile_index, plan_elevation, require_production_topography_approval,
 )
 from map_platform.generation_profiles import GenerationProfilePolicy
@@ -85,9 +85,12 @@ class TopographyPolicyTests(unittest.TestCase):
         profile = GenerationProfilePolicy.load(
             ROOT / "map-platform/config/generation-profile-policy-v3.json"
         )
+        unapproved = TopographySourcePolicy.load(POLICY)
         with self.assertRaisesRegex(ValueError, "have not been approved"):
-            require_production_topography_approval(profile, self.policy, "production")
-        require_production_topography_approval(profile, self.policy, "development")
+            require_production_topography_approval(profile, unapproved, "production")
+        require_production_topography_approval(profile, unapproved, "development")
+        # The shipped policy carries the maintainer's 2026-11-05 approval.
+        require_production_topography_approval(profile, self.policy, "production")
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "sources.json"
             value = json.loads(POLICY.read_bytes())
@@ -96,6 +99,46 @@ class TopographyPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(value))
             approved = TopographySourcePolicy.load(path)
             require_production_topography_approval(profile, approved, "production")
+
+    def test_shipped_policy_approves_exactly_the_reviewed_pinned_sources(self):
+        before = json.loads(POLICY.read_bytes())
+        after = json.loads((ROOT / "map-platform/config/topography-source-policy-v2.json").read_bytes())
+        self.assertEqual(self.policy.version, 2)
+        self.assertEqual((before["policyVersion"], after["policyVersion"]), (1, 2))
+        changed = {"productionApproved", "accessReviewedAt"}
+        self.assertEqual(len(before["sources"]), len(after["sources"]))
+        for old, new in zip(before["sources"], after["sources"]):
+            self.assertEqual({k: v for k, v in old.items() if k not in changed},
+                             {k: v for k, v in new.items() if k not in changed})
+            self.assertFalse(old["productionApproved"])
+            self.assertTrue(new["productionApproved"])
+            # Retained terms rechecked against upstream on this date.
+            self.assertEqual(new["accessReviewedAt"], "2026-11-05")
+        self.assertEqual({s.id for s in self.policy.sources},
+                         {"copernicus-glo30-public-2021", "copernicus-glo90-2021"})
+
+    def test_policy_v5_offers_topography_in_production(self):
+        config = ROOT / "map-platform/config"
+        v4 = GenerationProfilePolicy.load(config / "generation-profile-policy-v4.json")
+        v5 = GenerationProfilePolicy.load(config / "generation-profile-policy-v5.json")
+        unapproved = TopographySourcePolicy.load(POLICY)
+        self.assertFalse(topography_generation_enabled(v4, self.policy, "production"))
+        self.assertTrue(topography_generation_enabled(v5, self.policy, "production"))
+        self.assertTrue(topography_generation_enabled(v5, self.policy, "development"))
+        self.assertFalse(topography_generation_enabled(v5, unapproved, "production"))
+        require_production_topography_approval(v5, self.policy, "production")
+        with self.assertRaisesRegex(ValueError, "have not been approved"):
+            require_production_topography_approval(v5, unapproved, "production")
+        # Only production's topographic profile changes; map POIs stay off there.
+        old = json.loads((config / "generation-profile-policy-v4.json").read_bytes())
+        new = json.loads((config / "generation-profile-policy-v5.json").read_bytes())
+        self.assertEqual(old["profiles"], new["profiles"])
+        self.assertEqual(old["channels"]["development"], new["channels"]["development"])
+        self.assertEqual(new["channels"]["production"]["globalProfiles"],
+                         old["channels"]["production"]["globalProfiles"] + ["topographic-contours-v1"])
+        self.assertEqual(new["channels"]["production"]["disabledProfiles"], ["map-pois-v1"])
+        self.assertEqual(new["channels"]["production"]["disabledOptionalFeatures"], ["contours"])
+        self.assertNotIn(5, {p.renderer_format_version for p in v5.available_profiles("production")})
 
     def test_half_open_cells_negative_coordinates_dateline_and_poles(self):
         self.assertEqual(geocells([-1, -1, 0, 0]), ((-1, -1),))
