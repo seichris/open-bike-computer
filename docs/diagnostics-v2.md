@@ -593,7 +593,15 @@ stays up (the app's 15-second write timeout during a LAN transfer):
   CPU time the host task consumed during the delay: near zero while it was
   blocked (a `lock_wait`, `state_lock` or `notify` record names the wait) or
   starved by the Wi-Fi and controller tasks that outrank it on core 0, and
-  large while it was busy.
+  large while it was busy. It comes from FreeRTOS run-time statistics on the
+  microsecond esp_timer clock, which both Waveshare profiles keep; a build
+  without that clock omits the field rather than reporting zero.
+
+The `ble` probes are captured where they happen and written by the loop task
+on its next pass, so their record time is the write time and `eventUptimeMs`
+the capture time; `ble probe_dropped` (`droppedCount`) means more than eight
+probe records waited for one pass. The `transfer state_lock` records are
+written by the task that releases the lock, after the release.
 
 Read them together: a stalled heartbeat with `state` `notify` and
 `host_activity` `notify` records is the controller refusing packets (the

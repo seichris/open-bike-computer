@@ -214,14 +214,44 @@ class BLENotificationDispatchTests(unittest.TestCase):
         )
         self.assertIn("xSemaphoreGetMutexHolder(stateMutex_)", lock)
         self.assertIn("__builtin_return_address(0)", lock)
+        self.assertNotIn("recordStateLock(", lock)
+        self.assertNotIn("ride_diagnostics::record(", lock)
         unlock = function_body(
             http,
             "__attribute__((noinline)) void HttpTransferServer::unlockState() const",
         )
         self.assertLess(
             unlock.index("xSemaphoreGive(stateMutex_)"),
+            unlock.index("recordStateLock(false"),
+        )
+        self.assertLess(
+            unlock.index("xSemaphoreGive(stateMutex_)"),
             unlock.index("recordStateLock(true"),
         )
+        # Probe records are queued where they happen and written only by the
+        # loop task: nothing enters the recorder on the host task, on the
+        # esp_timer task or under a mutex.
+        for signature in (
+            "static void recordHostActivity(",
+            "static void recordLockWait(",
+            "static void recordHostHeartbeat(",
+            "static void hostHeartbeatTimerHandler(",
+            "static void hostHeartbeatEventHandler(",
+        ):
+            body = function_body(BLE_SOURCE, signature)
+            self.assertNotIn("ride_diagnostics::record(", body, signature)
+        for signature in (
+            "static void recordHostActivity(",
+            "static void recordLockWait(",
+            "static void recordHostHeartbeat(",
+        ):
+            self.assertIn("queueProbeRecord(", function_body(BLE_SOURCE, signature))
+        drain = function_body(BLE_SOURCE, "static void drainProbeRecords() {")
+        self.assertIn("ride_diagnostics::record(", drain)
+        process = function_body(BLE_SOURCE, "void BLENavigationServer::process()")
+        self.assertIn("drainProbeRecords()", process)
+        scope = BLE_SOURCE.split("class HostActivityScope {", 1)[1].split("\nclass ", 1)[0]
+        self.assertIn("onNimbleHostTask()", scope)
 
     def test_chunked_map_status_resumes_after_each_host_drain(self):
         notify = function_body(

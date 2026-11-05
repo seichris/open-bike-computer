@@ -269,10 +269,93 @@ static constexpr uint32_t kHostProbeWarningMs = 1000;
 // finished; both are string literals, read by the heartbeat timer task.
 static std::atomic<const char *> nimbleHostActivity{"idle"};
 static std::atomic<const char *> nimbleHostActivityLast{"idle"};
+// The NimBLE host task, learned from the first heartbeat it handles.
+static std::atomic<TaskHandle_t> nimbleHostTask{nullptr};
+
+// Until the host task is known every caller counts as it; afterwards only the
+// host task marks activity, so a scope entered on another task can neither
+// corrupt the activity nor be reported as host-task time.
+static bool onNimbleHostTask() {
+  const TaskHandle_t host = nimbleHostTask.load(std::memory_order_acquire);
+  return host == nullptr || host == xTaskGetCurrentTaskHandle();
+}
 
 static ride_diagnostics::Level hostProbeLevel(uint32_t durationMs) {
   return durationMs >= kHostProbeWarningMs ? ride_diagnostics::Level::Warning
                                            : ride_diagnostics::Level::Info;
+}
+
+// Probe records are captured where they happen (on the host task, on the
+// esp_timer task, under a mutex) into this ring and written by the loop task
+// from process(). No probe therefore enters the recorder under a lock, on
+// the host task or on the esp_timer task; `eventUptimeMs` carries the
+// capture time. A full ring counts drops and reports them once drained.
+struct ProbeRecord {
+  ride_diagnostics::Level level;
+  const char *category;
+  const char *event;
+  char fields[176];
+};
+static constexpr uint8_t kProbeMailboxCapacity = 8;
+static ProbeRecord probeMailbox[kProbeMailboxCapacity];
+static uint8_t probeMailboxHead = 0;
+static uint8_t probeMailboxCount = 0;
+static uint32_t probeMailboxDrops = 0;
+static portMUX_TYPE probeMailboxMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void queueProbeRecord(ride_diagnostics::Level level,
+                             const char *category, const char *event,
+                             const char *fields) {
+  portENTER_CRITICAL(&probeMailboxMux);
+  if (probeMailboxCount < kProbeMailboxCapacity) {
+    ProbeRecord &slot = probeMailbox[static_cast<uint8_t>(
+        (probeMailboxHead + probeMailboxCount) % kProbeMailboxCapacity)];
+    slot.level = level;
+    slot.category = category;
+    slot.event = event;
+    std::strncpy(slot.fields, fields, sizeof(slot.fields) - 1);
+    slot.fields[sizeof(slot.fields) - 1] = '\0';
+    ++probeMailboxCount;
+  } else {
+    ++probeMailboxDrops;
+  }
+  portEXIT_CRITICAL(&probeMailboxMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+}
+
+// Loop task only.
+static void drainProbeRecords() {
+  for (;;) {
+    ProbeRecord record;
+    uint32_t drops = 0;
+    portENTER_CRITICAL(&probeMailboxMux);
+    const bool have = probeMailboxCount > 0;
+    if (have) {
+      record = probeMailbox[probeMailboxHead];
+      probeMailboxHead =
+          static_cast<uint8_t>((probeMailboxHead + 1) % kProbeMailboxCapacity);
+      --probeMailboxCount;
+    } else {
+      drops = probeMailboxDrops;
+      probeMailboxDrops = 0;
+    }
+    portEXIT_CRITICAL(&probeMailboxMux);
+    if (!have) {
+      if (drops != 0) {
+        char fields[48] = {};
+        const int written =
+            std::snprintf(fields, sizeof(fields), "{\"droppedCount\":%lu}",
+                          static_cast<unsigned long>(drops));
+        if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+          (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                         "ble", "probe_dropped", fields);
+        }
+      }
+      return;
+    }
+    (void)ride_diagnostics::record(record.level, record.category,
+                                   record.event, record.fields);
+  }
 }
 
 static const char *taskNameOf(TaskHandle_t task) {
@@ -282,13 +365,15 @@ static const char *taskNameOf(TaskHandle_t task) {
 }
 
 static void recordHostActivity(const char *site, uint32_t durationMs) {
-  char fields[96] = {};
+  char fields[112] = {};
   const int written = std::snprintf(
-      fields, sizeof(fields), "{\"phase\":\"%s\",\"durationMs\":%lu}", site,
-      static_cast<unsigned long>(durationMs));
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"eventUptimeMs\":%lu}", site,
+      static_cast<unsigned long>(durationMs),
+      static_cast<unsigned long>(millis()));
   if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
-    (void)ride_diagnostics::record(hostProbeLevel(durationMs), "ble",
-                                   "host_activity", fields);
+    queueProbeRecord(hostProbeLevel(durationMs), "ble", "host_activity",
+                     fields);
   }
 }
 
@@ -298,10 +383,12 @@ static void recordHostActivity(const char *site, uint32_t durationMs) {
 class HostActivityScope {
 public:
   explicit HostActivityScope(const char *site)
-      : site_(site), startedMs_(millis()),
-        previous_(nimbleHostActivity.exchange(site,
-                                              std::memory_order_acq_rel)) {}
+      : site_(site), startedMs_(millis()), active_(onNimbleHostTask()),
+        previous_(active_ ? nimbleHostActivity.exchange(
+                                site, std::memory_order_acq_rel)
+                          : nullptr) {}
   ~HostActivityScope() {
+    if (!active_) return;
     nimbleHostActivity.store(previous_, std::memory_order_release);
     nimbleHostActivityLast.store(site_, std::memory_order_release);
     const uint32_t durationMs = millis() - startedMs_;
@@ -313,6 +400,7 @@ public:
 private:
   const char *site_;
   uint32_t startedMs_;
+  bool active_;
   const char *previous_;
 };
 
@@ -322,13 +410,13 @@ static void recordLockWait(const char *site, uint32_t waitedMs,
   const int written = std::snprintf(
       fields, sizeof(fields),
       "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
-      "\"reason\":\"%s\"}",
+      "\"reason\":\"%s\",\"eventUptimeMs\":%lu}",
       site, static_cast<unsigned long>(waitedMs), taskNameOf(holder),
-      taken ? "waited" : "timeout");
+      taken ? "waited" : "timeout", static_cast<unsigned long>(millis()));
   if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
-    (void)ride_diagnostics::record(taken ? hostProbeLevel(waitedMs)
-                                         : ride_diagnostics::Level::Warning,
-                                   "ble", "lock_wait", fields);
+    queueProbeRecord(taken ? hostProbeLevel(waitedMs)
+                           : ride_diagnostics::Level::Warning,
+                     "ble", "lock_wait", fields);
   }
 }
 
@@ -357,9 +445,17 @@ static bool takeTrackedMutex(SemaphoreHandle_t mutex, TickType_t waitTicks,
 // time the host task consumed meanwhile (near zero while blocked or starved)
 // and `state` the activity observed when the stall was recorded, or the last
 // activity the host task finished before a late beat.
+// The host task's CPU time is read from FreeRTOS run-time statistics; both
+// Waveshare profiles keep them on the microsecond esp_timer clock. A build
+// without that clock omits `durationMs` instead of reporting zero.
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && \
+    defined(CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER)
+#define BLE_HOST_RUN_TIME_AVAILABLE 1
+#else
+#define BLE_HOST_RUN_TIME_AVAILABLE 0
+#endif
 static struct ble_npl_event hostHeartbeatEvent;
 static esp_timer_handle_t hostHeartbeatTimer = nullptr;
-static std::atomic<TaskHandle_t> nimbleHostTask{nullptr};
 static std::atomic<uint32_t> hostHeartbeatPostedMs{0}; // 0: none in flight
 static std::atomic<uint32_t> hostHeartbeatRunTimeAtPostUs{0};
 static std::atomic<bool> hostHeartbeatRunTimeKnown{false};
@@ -370,11 +466,15 @@ static constexpr uint32_t kHostHeartbeatLateMs = 500;
 static constexpr uint32_t kHostHeartbeatStallMs = 1000;
 
 static uint32_t nimbleHostRunTimeUs() {
+#if BLE_HOST_RUN_TIME_AVAILABLE
   const TaskHandle_t task = nimbleHostTask.load(std::memory_order_acquire);
   if (task == nullptr) return 0;
   TaskStatus_t status = {};
   vTaskGetInfo(task, &status, pdFALSE, eInvalid);
   return static_cast<uint32_t>(status.ulRunTimeCounter);
+#else
+  return 0;
+#endif
 }
 
 static uint32_t hostHeartbeatRanUs() {
@@ -386,16 +486,28 @@ static uint32_t hostHeartbeatRanUs() {
 static void recordHostHeartbeat(const char *phase, uint32_t latencyMs,
                                 uint32_t ranUs, const char *activity) {
   char fields[160] = {};
+#if BLE_HOST_RUN_TIME_AVAILABLE
   const int written = std::snprintf(
       fields, sizeof(fields),
       "{\"phase\":\"%s\",\"latencyMs\":%lu,\"durationMs\":%lu,"
-      "\"state\":\"%s\"}",
+      "\"state\":\"%s\",\"eventUptimeMs\":%lu}",
       phase, static_cast<unsigned long>(latencyMs),
       static_cast<unsigned long>(ranUs / 1000),
-      activity == nullptr ? "idle" : activity);
+      activity == nullptr ? "idle" : activity,
+      static_cast<unsigned long>(millis()));
+#else
+  (void)ranUs;
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"latencyMs\":%lu,\"state\":\"%s\","
+      "\"eventUptimeMs\":%lu}",
+      phase, static_cast<unsigned long>(latencyMs),
+      activity == nullptr ? "idle" : activity,
+      static_cast<unsigned long>(millis()));
+#endif
   if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
-    (void)ride_diagnostics::record(hostProbeLevel(latencyMs), "ble",
-                                   "host_heartbeat", fields);
+    queueProbeRecord(hostProbeLevel(latencyMs), "ble", "host_heartbeat",
+                     fields);
   }
 }
 
@@ -7866,6 +7978,7 @@ bool BLENavigationServer::pollShutdownQuiescence() {
 
 void BLENavigationServer::process() {
   processCompletedDiagnosticsSessionStart();
+  drainProbeRecords();
   scheduleDeferredNotificationEvent();
   // The unauthenticated deadline uses the pairing state read under the
   // ownership lock, never the snapshot another task may have just cleared: a

@@ -1849,7 +1849,9 @@ void HttpTransferServer::signalStatusChanged() {
 // of the call that took the lock, for addr2line against the build's ELF. The
 // NimBLE host task takes this lock from the transfer-status write callback,
 // so a long hold by the HTTP worker or the loop task delays the phone's write
-// response. Below the one-second warning level at most one record per phase
+// response. Both records are written by unlockState() after the give, so the
+// recorder (a zero-wait producer take, never blocking) is never entered under
+// this lock. Below the one-second warning level at most one record per phase
 // and second is kept.
 static constexpr uint32_t kStateLockReportMs = 100;
 static constexpr uint32_t kStateLockWarningMs = 1000;
@@ -1899,17 +1901,22 @@ static void recordStateLock(bool held, uint32_t durationMs,
 __attribute__((noinline)) void HttpTransferServer::lockState() const {
   if (stateMutex_ == nullptr)
     return;
+  uint32_t waitedMs = 0;
+  TaskHandle_t holder = nullptr;
+  const void *holderSite = nullptr;
   if (xSemaphoreTake(stateMutex_, 0) != pdTRUE) {
-    const TaskHandle_t holder = xSemaphoreGetMutexHolder(stateMutex_);
-    const void *holderSite = stateLockSite_;
+    holder = xSemaphoreGetMutexHolder(stateMutex_);
+    holderSite = stateLockSite_;
     const uint32_t startedMs = millis();
     xSemaphoreTake(stateMutex_, portMAX_DELAY);
-    const uint32_t waitedMs = millis() - startedMs;
-    if (waitedMs >= kStateLockReportMs)
-      recordStateLock(false, waitedMs, holder, holderSite);
+    waitedMs = millis() - startedMs;
   }
+  // The wait is kept for unlockState(): nothing is recorded under the lock.
   stateLockedMs_ = millis();
   stateLockSite_ = __builtin_return_address(0);
+  stateLockWaitMs_ = waitedMs;
+  stateLockWaitHolder_ = holder;
+  stateLockWaitSite_ = holderSite;
 }
 
 __attribute__((noinline)) void HttpTransferServer::unlockState() const {
@@ -1917,8 +1924,16 @@ __attribute__((noinline)) void HttpTransferServer::unlockState() const {
     return;
   const uint32_t heldMs = millis() - stateLockedMs_;
   const void *site = stateLockSite_;
+  const uint32_t waitedMs = stateLockWaitMs_;
+  const TaskHandle_t waitHolder = stateLockWaitHolder_;
+  const void *waitSite = stateLockWaitSite_;
   stateLockSite_ = nullptr;
+  stateLockWaitMs_ = 0;
+  stateLockWaitHolder_ = nullptr;
+  stateLockWaitSite_ = nullptr;
   xSemaphoreGive(stateMutex_);
+  if (waitedMs >= kStateLockReportMs)
+    recordStateLock(false, waitedMs, waitHolder, waitSite);
   if (heldMs >= kStateLockReportMs)
     recordStateLock(true, heldMs, xTaskGetCurrentTaskHandle(), site);
 }

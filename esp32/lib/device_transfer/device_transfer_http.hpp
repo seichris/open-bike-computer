@@ -203,6 +203,11 @@ private:
   // under the lock; a waiter reads them before taking it.
   mutable uint32_t stateLockedMs_ = 0;
   mutable const void *stateLockSite_ = nullptr;
+  // A wait the current holder went through before taking the lock; reported
+  // by unlockState() after the give, never under the lock.
+  mutable uint32_t stateLockWaitMs_ = 0;
+  mutable TaskHandle_t stateLockWaitHolder_ = nullptr;
+  mutable const void *stateLockWaitSite_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
   uint32_t errorSequence_ = 0;
