@@ -6,6 +6,7 @@ enum RideSharedTests {
         try testArchiveIntegrityAndRetention()
         try testRouteValidationBoundaries()
         try testRuntimeProgressDeviationAndReplacement()
+        try testRuntimeRepeatedPasses()
         try testRouteFileStoreAndSyncContract()
         try testWatchControllerContract()
         try testRideBLETransportStateMachine()
@@ -2486,6 +2487,185 @@ enum RideSharedTests {
         }
         expect(failedStart.route == nil && failedStart.generation == 0,
                "failed start leaves a stopped runtime")
+    }
+
+    /// Loops and out-and-back routes pass the same place more than once.
+    private static func testRuntimeRepeatedPasses() throws {
+        func point(_ latitude: Double, _ longitude: Double) -> RouteCoordinateV1 {
+            RouteCoordinateV1(latitude: latitude, longitude: longitude)
+        }
+        func route(
+            _ points: [RouteCoordinateV1],
+            _ steps: [(start: Int, end: Int, instruction: String, maneuver: ManeuverV1)]
+        ) throws -> NavigationRouteV1 {
+            let distances = NavigationGeometryV1.cumulativeDistances(for: points)
+            let route = NavigationRouteV1(
+                id: UUID(),
+                revision: 1,
+                provider: RouteProviderPolicyV1.importedGPX,
+                localeIdentifier: "en_US",
+                transportType: .cycling,
+                source: RouteEndpointV1(coordinate: points[0], label: "Home"),
+                destination: RouteEndpointV1(coordinate: points[points.count - 1], label: "Home"),
+                bounds: RouteBoundsV1.enclosing(points)!,
+                distanceMeters: distances[distances.count - 1],
+                expectedTravelTimeSeconds: 600,
+                name: "Repeated passes",
+                points: points,
+                steps: steps.enumerated().map { index, step in
+                    NavigationRouteStepV1(
+                        id: UInt32(index + 1),
+                        geometryStartIndex: step.start,
+                        geometryEndIndex: step.end,
+                        instruction: step.instruction,
+                        maneuver: step.maneuver,
+                        distanceMeters: distances[step.end] - distances[step.start]
+                    )
+                },
+                normalizationVersion: 1
+            )
+            try route.validate()
+            return route
+        }
+        var timestamp: TimeInterval = 1_700_000_000
+        func fix(_ latitude: Double, _ longitude: Double) -> NavigationLocationSampleV1 {
+            timestamp += 5
+            return sample(latitude: latitude, longitude: longitude, timestamp: timestamp)
+        }
+
+        // Home is both start and finish; the fix is nearer the closing street.
+        let loop = try route(
+            [point(51.5, -0.1), point(51.501, -0.1), point(51.501, -0.098),
+             point(51.5, -0.098), point(51.5, -0.1)],
+            [(0, 1, "Head north", .straight), (1, 2, "Turn right", .right),
+             (2, 3, "Turn right", .right), (3, 4, "Arrive at the destination", .arrive)]
+        )
+        var loopRuntime = NavigationRuntimeV1()
+        _ = try loopRuntime.start(
+            route: loop,
+            mode: .offline,
+            initialLocation: fix(51.500009, -0.099957)
+        )
+        expect(
+            loopRuntime.snapshot?.currentStepIndex == 0 &&
+                (loopRuntime.snapshot?.routeRemainingDistanceMeters ?? 0) > 400,
+            "a loop started at its shared start and finish begins the loop instead of finishing it"
+        )
+
+        // Out to the bakery and back along the same street.
+        let outAndBack = try route(
+            [point(51.5, -0.1), point(51.501, -0.1), point(51.502, -0.1),
+             point(51.501, -0.1), point(51.5, -0.1)],
+            [(0, 2, "Arrive at Bakery", .straight), (2, 2, "Continue", .straight),
+             (2, 4, "Arrive at the destination", .arrive)]
+        )
+        // The rider turns 15 m short of the bakery, inside its arrival band.
+        let turnaround = 51.502 - 15 / 111_320
+        for shortTurn in [false, true] {
+            var returnRuntime = NavigationRuntimeV1()
+            _ = try returnRuntime.start(
+                route: outAndBack,
+                mode: .offline,
+                initialLocation: fix(51.5, -0.1)
+            )
+            let turn = shortTurn ? turnaround : 51.502
+            var remaining: [Double] = []
+            for latitude in [51.5005, 51.501, 51.5015, turn, turn, 51.5015, 51.501, 51.5005, 51.5] {
+                remaining.append(
+                    try returnRuntime.process(fix(latitude, -0.1)).routeRemainingDistanceMeters
+                )
+            }
+            expect(
+                remaining[5] < remaining[4] - 40 && remaining[remaining.count - 1] < 1,
+                "progress continues along the return pass after an out-and-back turnaround (short turn: \(shortTurn))"
+            )
+            expect(
+                returnRuntime.snapshot?.currentStepIndex == 2 &&
+                    returnRuntime.snapshot?.maneuver == .arrive &&
+                    (returnRuntime.snapshot?.distanceToManeuverMeters ?? .infinity) < 20,
+                "the return pass reaches the final arrival (short turn: \(shortTurn))"
+            )
+        }
+
+        // A fresh start partway back, on a return lane 8 m from the outbound one.
+        let laneOffset = 8 / 69_300.0
+        let dualLane = try route(
+            [point(51.5, -0.1), point(51.501, -0.1), point(51.502, -0.1),
+             point(51.501, -0.1 + laneOffset), point(51.5, -0.1 + laneOffset)],
+            [(0, 2, "Arrive at Bakery", .straight), (2, 2, "Continue", .straight),
+             (2, 4, "Arrive at the destination", .arrive)]
+        )
+        var midReturnRuntime = NavigationRuntimeV1()
+        _ = try midReturnRuntime.start(
+            route: dualLane,
+            mode: .offline,
+            initialLocation: fix(51.5015, -0.1 + laneOffset)
+        )
+        expect(
+            midReturnRuntime.snapshot?.currentStepIndex == 2 &&
+                (midReturnRuntime.snapshot?.routeRemainingDistanceMeters ?? .infinity) < 200,
+            "a fresh start away from the route start keeps the nearest pass"
+        )
+
+        var backtrackRuntime = NavigationRuntimeV1()
+        _ = try backtrackRuntime.start(
+            route: outAndBack,
+            mode: .offline,
+            initialLocation: fix(51.5, -0.1)
+        )
+        for latitude in [51.5005, 51.501, 51.5015] {
+            _ = try backtrackRuntime.process(fix(latitude, -0.1))
+        }
+        let beforeTurnaround = backtrackRuntime.snapshot?.routeRemainingDistanceMeters
+        let backtracked = try backtrackRuntime.process(fix(51.5009, -0.1))
+        expect(
+            backtracked.routeRemainingDistanceMeters == beforeTurnaround &&
+                backtracked.currentStepIndex == 0,
+            "riding back before the turnaround never skips to the return pass"
+        )
+
+        let corner = try route(
+            [point(51.5, -0.1), point(51.501, -0.1), point(51.501, -0.098)],
+            [(0, 1, "Turn right", .right), (1, 2, "Arrive at the destination", .arrive)]
+        )
+        var cornerRuntime = NavigationRuntimeV1()
+        _ = try cornerRuntime.start(
+            route: corner,
+            mode: .offline,
+            initialLocation: fix(51.50099, -0.09995)
+        )
+        expect(
+            cornerRuntime.snapshot?.currentStepIndex == 1,
+            "a single-pass start still uses the nearest segment at a corner"
+        )
+
+        // A hairpin whose two sides are 15 m apart.
+        let hairpin = try route(
+            [point(51.5, -0.1), point(51.502, -0.1), point(51.502, -0.09978), point(51.5, -0.09978)],
+            [(0, 1, "Sharp right", .sharpRight), (1, 2, "Sharp right", .sharpRight),
+             (2, 3, "Arrive at the destination", .arrive)]
+        )
+        var hairpinRuntime = NavigationRuntimeV1()
+        _ = try hairpinRuntime.start(route: hairpin, mode: .offline, initialLocation: fix(51.5, -0.1))
+        for coordinate in [(51.501, -0.1), (51.502, -0.1), (51.502, -0.09978), (51.501, -0.09978)] {
+            _ = try hairpinRuntime.process(fix(coordinate.0, coordinate.1))
+        }
+        let pastHairpin = try hairpinRuntime.process(fix(51.5, -0.09978))
+        expect(
+            pastHairpin.currentStepIndex == 2 && pastHairpin.routeRemainingDistanceMeters < 1,
+            "progress continues down the far side of a tight hairpin"
+        )
+        var hairpinBacktrack = NavigationRuntimeV1()
+        _ = try hairpinBacktrack.start(route: hairpin, mode: .offline, initialLocation: fix(51.5, -0.1))
+        for latitude in [51.5005, 51.501, 51.5015] {
+            _ = try hairpinBacktrack.process(fix(latitude, -0.1))
+        }
+        let beforeApex = hairpinBacktrack.snapshot?.routeRemainingDistanceMeters
+        let rodeBack = try hairpinBacktrack.process(fix(51.5008, -0.1))
+        expect(
+            rodeBack.routeRemainingDistanceMeters == beforeApex && rodeBack.currentStepIndex == 0,
+            "riding back before a hairpin never jumps to its far side"
+        )
     }
 
     private static func testRouteFileStoreAndSyncContract() throws {

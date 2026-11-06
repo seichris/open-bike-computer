@@ -254,6 +254,7 @@ struct OfflineRouteSaveTests {
         try offlineNavigationAndLateDirections()
         try mapKitPlanningRegression()
         try selectedMapKitSaving()
+        try multiStopRouteTests()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
     }
