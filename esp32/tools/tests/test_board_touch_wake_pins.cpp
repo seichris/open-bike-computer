@@ -1,16 +1,8 @@
 #include <cassert>
 #include <cstdint>
 
-// Host stand-in for ESP-IDF's numeric GPIO enum. Compile the real HAL for each
-// board so the wake-policy test cannot hide a wrong pin behind a test fixture.
-enum {
-  GPIO_NUM_0 = 0, GPIO_NUM_1 = 1, GPIO_NUM_2 = 2, GPIO_NUM_3 = 3,
-  GPIO_NUM_4 = 4, GPIO_NUM_5 = 5, GPIO_NUM_6 = 6, GPIO_NUM_7 = 7,
-  GPIO_NUM_8 = 8, GPIO_NUM_9 = 9, GPIO_NUM_11 = 11, GPIO_NUM_12 = 12,
-  GPIO_NUM_14 = 14, GPIO_NUM_15 = 15, GPIO_NUM_17 = 17, GPIO_NUM_21 = 21,
-  GPIO_NUM_38 = 38, GPIO_NUM_39 = 39, GPIO_NUM_41 = 41,
-};
-
+// Compile the real board definition and hal.hpp names for each board so the
+// wake-policy test cannot hide a wrong pin behind a test fixture.
 #include "../../include/hal.hpp"
 #include "../../lib/ui_scheduler/ui_scheduler_policy.hpp"
 
@@ -32,6 +24,9 @@ int main() {
 #endif
   static_assert(BOARD_BOOT_PIN == 0);
   static_assert(TCH_I2C_INT != TFT_QSPI_CLK);
+  static_assert(TCH_I2C_INT == board::touch::interrupt);
+  static_assert(BOARD_BOOT_PIN == board::buttons::boot);
+  static_assert(board::touch::resetOnGpio == (TCH_I2C_RST != board::noPin));
   assert(ui_scheduler::gpioWakeReasons(0, TCH_I2C_INT, BOARD_BOOT_PIN) == 0);
   const auto touch = ui_scheduler::gpioWakeReasons(
       1ULL << schematicTouchPin, TCH_I2C_INT, BOARD_BOOT_PIN);

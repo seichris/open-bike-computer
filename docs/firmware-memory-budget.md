@@ -89,8 +89,8 @@ failed event admission retries the snapshot. These mechanisms still need
 physical verification of recording integrity under real concurrent load.
 
 Pre-existing local GPX import/edit stdio paths are outside this correction;
-they are not claimed safe under universal out-of-memory conditions. Legacy
-LovyanGFX PNG/calibration paths are excluded from the Waveshare configuration.
+they are not claimed safe under universal out-of-memory conditions. The legacy
+LovyanGFX PNG/calibration paths were removed with the IceNav-era boards.
 
 Keep existing internal/DMA Wi-Fi admission floors and crypto guards. Static
 placement is one part of the budget; SDMMC bounce buffers, TLS, BLE authorization,

@@ -50,11 +50,7 @@ bool canScrollMap = true;     // SIMPLIFIED: Always allow map scrolling
 uint8_t activeTile = 0;       // Current active tile
 uint8_t gpxAction = WPT_NONE; // Current Waypoint Action
 int heading = 0;              // Heading value (Compass or GPS)
-extern uint32_t DOUBLE_TOUCH_EVENT;
 
-#ifndef DISABLE_COMPASS
-extern Compass compass;
-#endif
 extern Gps gps;
 extern Battery battery;
 extern wayPoint loadWpt;
@@ -1303,9 +1299,6 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     return false;
   }
 
-#ifdef ENABLE_COMPASS
-  heading = compass.getHeading();
-#endif
   applyMapRotationForTile(static_cast<tileName>(activeTile));
 
   // Publication, pose interpolation, front-frame translation, live route, and
@@ -1405,13 +1398,6 @@ void updateMainScreen(lv_timer_t *t) {
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
     case COMPASS:
-#ifdef ENABLE_COMPASS
-      if (!waitScreenRefresh)
-        heading = compass.getHeading();
-      if (compass.isUpdated())
-        lv_obj_send_event(compassHeading, LV_EVENT_VALUE_CHANGED, NULL);
-#endif
-#ifndef ENABLE_COMPASS
       if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
         heading = gps.gpsData.heading;
         lv_obj_send_event(compassHeading, LV_EVENT_VALUE_CHANGED, NULL);
@@ -1420,17 +1406,6 @@ void updateMainScreen(lv_timer_t *t) {
         lv_obj_send_event(altitude, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_send_event(speedLabel, LV_EVENT_VALUE_CHANGED, NULL);
       }
-#endif
-#ifdef ENABLE_COMPASS
-      if (gps.hasLocationChange()) {
-        lv_obj_send_event(latitude, LV_EVENT_VALUE_CHANGED, NULL);
-        lv_obj_send_event(longitude, LV_EVENT_VALUE_CHANGED, NULL);
-      }
-      if (gps.isAltitudeChanged())
-        lv_obj_send_event(altitude, LV_EVENT_VALUE_CHANGED, NULL);
-      if (gps.isSpeedChanged())
-        lv_obj_send_event(speedLabel, LV_EVENT_VALUE_CHANGED, NULL);
-#endif
       break;
 
     case MAP:

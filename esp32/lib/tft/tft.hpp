@@ -12,14 +12,8 @@
 #include "../storage/storage.hpp"
 #include "../panel/panelSelect.hpp"
 
-#ifdef USE_ARDUINO_GFX
 // Use Arduino_GFX for CO5300 AMOLED
 #include "../panel/WAVESHARE_AMOLED_175.hpp"
-#else
-// Use LovyanGFX for other displays
-#include <LGFX_TFT_eSPI.hpp>
-extern TFT_eSPI tft;
-#endif
 
 static const char* calibrationFile PROGMEM = "/spiffs/TouchCal";
 extern bool repeatCalib;
@@ -30,7 +24,4 @@ extern bool waitScreenRefresh;                  // Wait for refresh screen (scre
 
 void tftOn(uint8_t brightness);
 void tftOff();
-#ifndef USE_ARDUINO_GFX
-void touchCalibrate();
-#endif
 void initTFT();

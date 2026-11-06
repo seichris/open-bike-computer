@@ -7,16 +7,24 @@
  */
 
 #include "power.hpp"
+#include <SPI.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <driver/rtc_io.h>
+#include <esp_bt.h>
+#ifndef CONFIG_BT_NIMBLE_ENABLED
+#include <esp_bt_main.h>
+#endif
+#include <esp_wifi.h>
+#include "../gui/src/globalGuiDef.h"
+#include "lvgl.h"
+#include "../tft/tft.hpp"
 #include "sleep_audit.hpp"
 #include "sleep_audit_policy.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
-#endif
 #include "power_metrics.hpp"
-#ifdef USE_ARDUINO_GFX
 #include <Arduino_GFX_Library.h>
-#endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "hal.hpp"
@@ -30,15 +38,11 @@ void Power::begin() {
   sleep_audit::begin();
   // Radio shutdown touches Arduino/IDF subsystems and must not run from the
   // global Power object's constructor before framework initialization.
-#ifdef DISABLE_RADIO
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-#ifndef DISABLE_BLUETOOTH
   btStop();
   esp_bt_controller_disable();
-#endif
   esp_wifi_stop();
-#endif
 }
 
 /**
@@ -49,25 +53,16 @@ void Power::powerDeepSleep() {
   if (!shutdownBarrier_.permit()) return;
   int32_t bluedroidStopResult = sleep_audit::policy::kNotAttempted;
   int32_t bluetoothStopResult = sleep_audit::policy::kNotAttempted;
-#ifndef DISABLE_BLUETOOTH
 #ifndef CONFIG_BT_NIMBLE_ENABLED
   bluedroidStopResult = esp_bluedroid_disable();
 #endif
   bluetoothStopResult = esp_bt_controller_disable();
-#endif
   // The internal network owner has already stopped Wi-Fi and drained before
   // the permit was issued. Never touch its driver from this UI stack.
   const int32_t wifiStopResult = sleep_audit::policy::kNotAttempted;
   esp_deep_sleep_disable_rom_logging();
   delay(10);
 
-#ifdef ICENAV_BOARD
-  // If you need other peripherals to maintain power, please set the IO port to
-  // hold
-  gpio_hold_en(GPIO_NUM_46);
-  gpio_hold_en((gpio_num_t)BOARD_BOOT_PIN);
-  gpio_deep_sleep_hold_en();
-#endif
 
   const int32_t wakeConfigResult = esp_sleep_enable_ext1_wakeup(
       1ull << BOARD_BOOT_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
@@ -102,14 +97,9 @@ void Power::powerLightSleep() {
  * @brief Power off peripherals devices
  */
 void Power::powerOffPeripherals() {
-#ifndef USE_ARDUINO_GFX
-  tftOff();
-  tft.fillScreen(TFT_BLACK);
-#else
   displayPowerManager.requestState(display_power::State::Off);
   const bool panelChangeApplied = displayPowerManager.applyPendingPanelChange();
   sleep_audit::panelRequested(panelChangeApplied);
-#endif
   SPI.end();
   Wire.end();
   sleep_audit::peripheralsReturned();

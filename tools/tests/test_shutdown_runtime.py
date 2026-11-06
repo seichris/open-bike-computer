@@ -340,8 +340,14 @@ int main() {
             self.assertNotIn("-DPOWER_SAVE", config.get(profile, "build_flags", fallback=""))
         source = (ROOT / "esp32/lib/lvgl/src/lvglSetup.cpp").read_text()
         setup = source[source.index("void initLVGL()") :]
-        self.assertLess(setup.index("#ifdef USE_ARDUINO_GFX"), setup.index("#else"))
-        self.assertLess(setup.index("#else"), setup.index("gpioClickEvent, LV_EVENT_SHORT_CLICKED"))
+        setup = setup[: setup.index("\n}\n") + 3]
+        # The IceNav-era boards registered gpioClickEvent here, whose short
+        # click called Power::deviceSuspend. Waveshare builds set input up in
+        # the Arduino_GFX panel and register no manual suspend at all.
+        self.assertIn("setupLVGLforArduinoGFX();", setup)
+        for legacy in ("gpioClickEvent", "deviceSuspend", "POWER_SAVE", "USE_ARDUINO_GFX"):
+            self.assertNotIn(legacy, setup)
+        self.assertNotIn("gpioClickEvent", source)
 
     def test_inactive_recorder_needs_no_sd_but_active_failure_denies_sleep(self):
         source = (ROOT / "esp32/lib/ride_diagnostics/ride_diagnostics.cpp").read_text()
