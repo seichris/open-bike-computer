@@ -359,7 +359,13 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   next failed transaction, as the 2.06 always did, and records the result),
   and the 1.75 `probe()` goes through
   `withRetries` like the 2.06 (same steps, plus the recovered-transaction
-  count). Both boards' boot smoke covers them. For #442: the e-paper board
+  count). Both boards' boot smoke covers them. Review pass 3 found that the
+  pinned TwoWire keeps its mutex taken when a transaction runs on a bus whose
+  driver install failed (`endTransmission()` returns before releasing it once
+  `begin()` has freed the buffers), so the next `begin()` or `end()` waited
+  forever; `ensureBusConfigured()` now reinstalls the driver before any
+  transaction and skips it when that fails, on both boards, with a
+  fault-injection host test. For #442: the e-paper board
   file needs `board::i2c::stopBetweenWriteAndRead = false` and
   `recoverOnFailure = false` (its reads used a repeated start and never
   recovered), `board::power::displayEnableRecovery = false` with

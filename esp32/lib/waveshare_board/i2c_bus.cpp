@@ -91,20 +91,43 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
   lastFailureLogMs = now;
 }
 
-// Used where board::i2c::recoverOnFailure is set (the 2.06). Always re-begins
-// the bus, so a Wire.begin that failed in configureBus is retried on the next
-// failed transaction instead of leaving the bus down until restart.
+// Installs the driver and applies the clock and timeout, recording whether
+// the bus is usable. No transaction may run while it is not: the pinned
+// TwoWire frees its buffers when begin() fails, endTransmission() then
+// returns before releasing the bus mutex, and the next begin() or end()
+// would wait on that mutex forever.
+void beginBus() {
+  busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  if (busConfigured) {
+    Wire.setClock(activeClockHz);
+    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
+  }
+}
+
+// Used where board::i2c::recoverOnFailure is set (the 2.06): ends a live bus,
+// clocks stuck slaves off SDA and installs the driver again.
 [[maybe_unused]] void recoverAfterFailure() {
   i2cStats.recoveryAttempts++;
   if (busConfigured) {
     Wire.end();
   }
   waveshare_board::recoverI2CBus();
-  busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  beginBus();
+}
+
+// Called with the bus lock held before any transaction. A bus whose driver
+// install failed is initialized again first: through the full recovery where
+// the board recovers on failure, otherwise by a plain begin.
+bool ensureBusConfigured() {
   if (busConfigured) {
-    Wire.setClock(activeClockHz);
-    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
+    return true;
   }
+  if constexpr (board::i2c::recoverOnFailure) {
+    recoverAfterFailure();
+  } else {
+    beginBus();
+  }
+  return busConfigured;
 }
 
 uint32_t retryStartTime() {
@@ -170,6 +193,16 @@ bool withRetries(uint8_t address, uint16_t reg, const char *label,
   const uint32_t startedMs = retryStartTime();
   for (uint8_t attempt = 0; attempt < attempts; attempt++) {
     if (trace) trace->attempts = attempt + 1;
+    if (!ensureBusConfigured()) {
+      // The driver is still not installed: count the attempt without touching
+      // TwoWire, whose mutex a bufferless transaction would leave taken.
+      if (trace) trace->failure(TransactionPhase::Transmit, 4);
+      i2cStats.failedTransactions++;
+      if (attempt + 1 < attempts) {
+        delay(2);
+      }
+      continue;
+    }
     if (fn()) {
       if (trace) trace->elapsedMs = millis() - traceStartedMs;
       if (attempt > 0) {
@@ -201,11 +234,7 @@ void configureBus(uint32_t clockHz) {
       power_management::LockDomain::I2c);
   ensureMutex();
   activeClockHz = clockHz;
-  busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  if (busConfigured) {
-    Wire.setClock(activeClockHz);
-    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
-  }
+  beginBus();
   Serial.printf("Waveshare I2C: %s SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
                 busConfigured ? "configured" : "configuration failed",
                 I2C_SDA_PIN, I2C_SCL_PIN,
@@ -220,6 +249,10 @@ void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
   BusLock lock;
   if (!lock.ok()) {
     out.println("Waveshare I2C scan: bus busy");
+    return;
+  }
+  if (!ensureBusConfigured()) {
+    out.println("Waveshare I2C scan: bus not configured");
     return;
   }
 

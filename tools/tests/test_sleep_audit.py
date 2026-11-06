@@ -105,15 +105,31 @@ int main() {
                 with self.subTest(board=board):
                     self.compile_run(path, defines=(board,))
 
-    def test_bus_recovery_rebegins_after_failed_configure(self):
+    def test_transactions_reinitialize_an_unconfigured_bus_without_deadlock(self):
+        # The pinned TwoWire frees its buffers when begin() fails and
+        # endTransmission() then returns before releasing the bus mutex, so a
+        # transaction on a bus whose driver install failed leaves the mutex
+        # taken and the next begin()/end() waits forever. The helpers must
+        # reinstall the driver before any transaction and keep retries bounded.
         source = (ROOT / "esp32/lib/waveshare_board/i2c_bus.cpp").read_text()
         def function(signature):
             start = source.index(signature)
             return source[start:source.index("\n}\n", start) + 3]
-        harness = r'''
+        production = "".join(function(signature) for signature in (
+            "void beginBus() {",
+            "[[maybe_unused]] void recoverAfterFailure() {",
+            "bool ensureBusConfigured() {",
+            "template <typename Fn>\nbool withRetries(",
+            "void configureBus(uint32_t clockHz) {",
+            "bool probe(uint8_t address, const char *label, uint8_t attempts) {",
+        ))
+        harness = (f'#include "{ROOT}/esp32/lib/board/board.hpp"\n'
+                   f'#include "{ROOT}/esp32/lib/waveshare_board/i2c_transaction_trace.hpp"\n') + r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+using waveshare_board::i2c::TransactionPhase;
+using waveshare_board::i2c::TransactionTrace;
 namespace power_management {
 enum class LockDomain { I2c };
 struct ScopedLock { explicit ScopedLock(LockDomain) {} };
@@ -122,46 +138,109 @@ namespace waveshare_board { int recoveries = 0; void recoverI2CBus() { ++recover
 #define I2C_SDA_PIN 15
 #define I2C_SCL_PIN 14
 constexpr uint16_t DEFAULT_TIMEOUT_MS = 50;
-struct { uint32_t recoveryAttempts = 0; } i2cStats;
+struct { uint32_t recoveryAttempts = 0, failedTransactions = 0, recoveredTransactions = 0, missingDevices = 0; } i2cStats;
 bool busConfigured = false;
 uint32_t activeClockHz = 0;
 void ensureMutex() {}
+struct BusLock { bool ok() { return true; } };
+uint32_t millis() { return 0; }
+uint32_t retryStartTime() { return 0; }
+void delay(int) {}
+void logRetryResult(uint8_t, uint16_t, const char *, uint8_t, bool, uint32_t) {}
+void logFailure(const char *, const char *, uint8_t) {}
+struct SerialMock { template <typename... A> int printf(const char *, A...) { return 0; } } Serial;
+// Models the pinned TwoWire: begin() creates and takes a non-recursive mutex and
+// frees the buffers on failure; beginTransmission() takes the mutex;
+// endTransmission() returns 4 on a missing buffer without releasing it. A take
+// while the mutex is held is the deadlock the production code must avoid.
 struct WireMock {
-  bool beginResult = true;
-  int begins = 0, ends = 0, clocks = 0, timeouts = 0;
-  bool begin(int, int) { ++begins; return beginResult; }
-  void end() { ++ends; }
+  bool lockCreated = false, taken = false, hasBuffer = false, ack = true;
+  int failNextBegins = 0, begins = 0, ends = 0, transactions = 0, deadlocks = 0, clocks = 0, timeouts = 0;
+  bool begin(int, int) {
+    lockCreated = true;
+    if (taken) { ++deadlocks; return false; }
+    taken = true;
+    ++begins;
+    const bool ok = failNextBegins == 0;
+    if (!ok) --failNextBegins;
+    hasBuffer = ok;
+    taken = false;
+    return ok;
+  }
+  bool end() {
+    if (lockCreated) {
+      if (taken) { ++deadlocks; return false; }
+      taken = true; hasBuffer = false; taken = false;
+    }
+    ++ends;
+    return true;
+  }
+  void beginTransmission(uint8_t) {
+    ++transactions;
+    if (!lockCreated) return;
+    if (taken) { ++deadlocks; return; }
+    taken = true;
+  }
+  int endTransmission(bool stop = true) {
+    if (!hasBuffer) return 4;  // the mutex stays taken
+    if (stop) { taken = false; return ack ? 0 : 2; }
+    return 0;
+  }
   void setClock(uint32_t) { ++clocks; }
   void setTimeOut(uint16_t) { ++timeouts; }
 } Wire;
-struct SerialMock { template <typename... A> int printf(const char *, A...) { return 0; } } Serial;
-''' + function("[[maybe_unused]] void recoverAfterFailure() {") + function("void configureBus(uint32_t clockHz) {") + r'''
+''' + production + r'''
+void reset() { Wire = {}; i2cStats = {}; busConfigured = false; waveshare_board::recoveries = 0; }
 int main() {
-  // The driver install fails at boot: the bus is reported unconfigured and
-  // no clock or timeout is applied to a bus that does not exist.
-  Wire.beginResult = false;
+  constexpr bool recovers = board::i2c::recoverOnFailure;
+  // The mock reproduces the hazard: a bufferless transaction leaves the
+  // mutex taken and the next begin() deadlocks.
+  Wire.lockCreated = true;
+  Wire.beginTransmission(0x34);
+  assert(Wire.endTransmission() == 4 && Wire.taken);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  assert(Wire.deadlocks == 1);
+  // First driver install fails, the retry during the probe succeeds: the probe
+  // reinstalls the driver before its first transaction and succeeds.
+  reset();
+  Wire.failNextBegins = 1;
   configureBus(100000);
-  assert(!busConfigured && Wire.begins == 1 && Wire.clocks == 0 && Wire.timeouts == 0);
-  // The next failed transaction recovers: no end() on a bus never begun, one
-  // bus recovery, a fresh begin whose success configures clock and timeout.
-  Wire.beginResult = true;
-  recoverAfterFailure();
-  assert(i2cStats.recoveryAttempts == 1 && waveshare_board::recoveries == 1);
-  assert(busConfigured && Wire.ends == 0 && Wire.begins == 2 && Wire.clocks == 1 && Wire.timeouts == 1);
-  // A later recovery on a live bus ends it first and begins it again.
-  recoverAfterFailure();
-  assert(busConfigured && Wire.ends == 1 && Wire.begins == 3 && Wire.clocks == 2);
-  // A failed re-begin leaves the flag honest for the passive reads.
-  Wire.beginResult = false;
-  recoverAfterFailure();
-  assert(!busConfigured && Wire.ends == 2 && Wire.begins == 4 && Wire.clocks == 2);
+  assert(!busConfigured && Wire.begins == 1 && Wire.transactions == 0 && Wire.clocks == 0);
+  assert(probe(0x34, "AXP2101", 3));
+  assert(Wire.deadlocks == 0 && busConfigured && Wire.transactions == 1);
+  assert(Wire.begins == 2 && Wire.ends == 0 && Wire.clocks == 1 && Wire.timeouts == 1);
+  assert(i2cStats.failedTransactions == 0 && i2cStats.missingDevices == 0);
+  assert(waveshare_board::recoveries == (recovers ? 1 : 0));
+  assert(i2cStats.recoveryAttempts == (recovers ? 1u : 0u));
+  // The driver install keeps failing: no transaction is ever issued, the
+  // retries stay bounded and the device counts as missing.
+  reset();
+  Wire.failNextBegins = 100;
+  configureBus(100000);
+  assert(!probe(0x34, "AXP2101", 3));
+  assert(Wire.deadlocks == 0 && Wire.transactions == 0 && !busConfigured);
+  assert(Wire.begins == 4 && Wire.ends == 0);
+  assert(i2cStats.failedTransactions == 3 && i2cStats.missingDevices == 1);
+  assert(i2cStats.recoveryAttempts == (recovers ? 3u : 0u));
+  // A live bus with a silent device: every attempt is a real transaction and
+  // only a recovering board ends and reinstalls the driver in between.
+  reset();
+  configureBus(100000);
+  Wire.ack = false;
+  assert(!probe(0x34, "AXP2101", 2));
+  assert(Wire.deadlocks == 0 && Wire.transactions == 2 && busConfigured);
+  assert(i2cStats.failedTransactions == 2 && i2cStats.missingDevices == 1);
+  assert(Wire.ends == (recovers ? 2 : 0) && Wire.begins == (recovers ? 3 : 1));
+  assert(waveshare_board::recoveries == (recovers ? 2 : 0));
   puts("passed");
 }
 '''
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "recovery.cpp"
+            path = Path(directory) / "bus_init.cpp"
             path.write_text(harness)
-            self.assertIn("passed", self.compile_run(path))
+            for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"):
+                with self.subTest(board=board):
+                    self.assertIn("passed", self.compile_run(path, defines=(board,)))
 
     def test_runtime_and_export(self):
         stubs = {
