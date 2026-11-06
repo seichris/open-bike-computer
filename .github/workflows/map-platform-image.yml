@@ -7,7 +7,6 @@ on:
     paths:
       - ".dockerignore"
       - ".github/workflows/map-platform-image.yml"
-      - ".github/workflows/map-platform-ci.yml"
       - "map-platform/backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
