@@ -1,7 +1,8 @@
 # Saved-route favorite coordinates: review record
 
-Local branch `fix/saved-route-favorite-coordinates`, not pushed. Recorded
-under REVIEW.md before a pull request exists.
+Branch `fix/saved-route-favorite-coordinates`. Recorded under REVIEW.md
+before the pull request existed; the pull request description carries the
+later record. See "Base sync" for the 2026-11-06 merge of `main`.
 
 - Base: `902a06663e890691672c0704e49175a9cb0e6fe4` (GitHub `main`).
 - Reviewed head: `57f781f5c800ec09eceb0758f6157c69b15733fb`. Commits:
@@ -44,7 +45,7 @@ resent once. Recovery needs an app update.
 | ID | Severity | Status | Summary |
 | --- | --- | --- | --- |
 | FAV-1 | P2 | fixed, verified | The first repair moved favorites but not their recent copies, which share the favorite's ID and link. A copy resurfaced under Recent Searches still routing off, and saving it again could duplicate a favorite ID, which silently stops the Watch favorite sync. A pass-2 residual, where the favorite had been re-linked to another route before the upgrade, is also fixed. |
-| PRE-1 | — | pre-existing, deferred to an app-wide follow-up | The app's GCJ-02 region test is a coarse rectangle that also covers Singapore, Hong Kong, Taiwan, Korea and Thailand, where MapKit uses WGS-84. See below. |
+| PRE-1 | — | pre-existing; resolved on `main` by PR 755 | The app's GCJ-02 region test was a coarse rectangle that also covered Singapore, Hong Kong, Taiwan, Korea and Thailand, where MapKit uses WGS-84. See below and "Base sync". |
 
 **PRE-1.** The test is `RouteCoordinateNormalizationV1.isInMainlandChina`,
 with the same bounds as `CoordinateConverter.isInChina`. This change follows
@@ -68,6 +69,24 @@ Known, documented misses: favorites whose linked route was deleted, legacy
 favorites re-linked to a different route before the upgrade (they keep the
 old point together with their copies), and Strava reloads that moved the
 destination.
+
+## Base sync
+
+On 2026-11-06 `main` at `1fa19116` was merged into the branch without
+conflicts. It brings PR 755's precise mainland-China region and the
+contour alignment of PRs 758 and 759.
+
+- **PRE-1 resolved:** `wgs84ToMapKit` now converts only inside
+  `MainlandChinaRegion`. New stars and repairs therefore move points only
+  in mainland China. Entries in Hong Kong, Taiwan, Singapore and the other
+  places the old rectangle covered are already correct and stay as they
+  are.
+- **Known limit:** near the border, a favorite synced to the Watch takes
+  the mainland reading. That limit is documented in
+  `docs/mapkit-china-coordinates.md` and is unchanged by this branch.
+- **No new review pass:** all 3 passes were already used. The sync was
+  checked by reading the conversion APIs this change calls on the new base
+  and by running the checks again; the pull request records the results.
 
 ## Checks
 
