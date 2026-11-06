@@ -99,9 +99,12 @@ way, with no reference:
   it in place as well would show it twice. The empty band is at most one
   offset deep.
 - Every other pixel keeps its position.
-- Terrain lookups use the same reading. A contour label is drawn where its
-  own contours are drawn, and is skipped where the tile at that point shows
-  other terrain.
+- Terrain lookups take the mainland reading where there is one.
+- A contour label is drawn where its own contours are drawn, and is skipped
+  where the tile at that point shows other terrain.
+- Each 128 m cell of the Terrain Experiments relief moves whole with its
+  centre, so a cell across the border keeps its shape. A cell is skipped
+  where the tile at its centre shows other terrain.
 
 A selection across the border, such as Shenzhen with Hong Kong, Zhuhai with
 Macau or Xiamen with Kinmen, therefore lines up on both sides:
@@ -112,8 +115,8 @@ Macau or Xiamen with Kinmen, therefore lines up on both sides:
 - **The strip near the border:** in the strip up to about 1.2 km deep beside
   the border, pixels take the mainland reading. There the overlay shows the
   shifted mainland terrain, and the other side's terrain begins where the
-  shifted mainland ends. The other side's contour labels in the strip are
-  skipped.
+  shifted mainland ends. The other side's contour labels and relief cells in
+  the strip are skipped.
 
 ## Where the app converts
 
