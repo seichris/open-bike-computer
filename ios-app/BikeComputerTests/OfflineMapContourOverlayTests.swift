@@ -229,7 +229,7 @@ struct OfflineMapContourOverlayTests {
         // Hong Kong label there would sit on shifted Shenzhen contours.
         func label(_ hill: (latitude: Double, longitude: Double), alignsChina: Bool = true) -> CLLocationCoordinate2D? {
             let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
-            return BicinoTopographyTileOverlay.labelCoordinate(worldX: point.0, worldY: point.1, alignsChina: alignsChina)
+            return BicinoTopographyTileOverlay.drawnCoordinate(worldX: point.0, worldY: point.1, alignsChina: alignsChina)
         }
         func near(_ coordinate: CLLocationCoordinate2D?, _ latitude: Double, _ longitude: Double) -> Bool {
             guard let coordinate else { return false }
@@ -241,6 +241,52 @@ struct OfflineMapContourOverlayTests {
         check(near(label(hongKongHill), hongKongHill.latitude, hongKongHill.longitude) &&
               near(label(shenzhenHill), shenzhenDrawn.latitude, shenzhenDrawn.longitude),
               "labels elsewhere sit where their own contours are drawn")
+        // A terrain-relief cell moves whole with its centre, so a Shenzhen
+        // cell across the border keeps its shape, and a Hong Kong cell in the
+        // strip is not drawn over the shifted Shenzhen terrain there.
+        func world(_ place: (latitude: Double, longitude: Double)) -> (Double, Double) {
+            BicinoTopographyTileOverlay.worldPoint(latitude: place.latitude, longitude: place.longitude)
+        }
+        func relief(_ center: (Double, Double), alignsChina: Bool = true) -> [CLLocationCoordinate2D]? {
+            BicinoTopographyTileOverlay.reliefCorners(
+                worldX: center.0 - 64, worldY: center.1 - 64, size: 128, alignsChina: alignsChina)
+        }
+        func same(_ a: [CLLocationCoordinate2D]?, _ b: [CLLocationCoordinate2D]?) -> Bool {
+            guard let a, let b else { return false }
+            return zip(a, b).allSatisfy { $0.latitude == $1.latitude && $0.longitude == $1.longitude }
+        }
+        let shenzhen = (latitude: 22.5431, longitude: 114.0579)
+        var inMainland = shenzhen
+        var inHongKong = hongKongHill
+        for _ in 0..<50 {
+            let middle = (latitude: (inMainland.latitude + inHongKong.latitude) / 2,
+                          longitude: (inMainland.longitude + inHongKong.longitude) / 2)
+            if MainlandChinaRegion.contains(latitude: middle.latitude, longitude: middle.longitude) {
+                inMainland = middle
+            } else {
+                inHongKong = middle
+            }
+        }
+        let border = world(inMainland), inland = world(shenzhen)
+        let length = hypot(inland.0 - border.0, inland.1 - border.1)
+        let straddling = (border.0 + (inland.0 - border.0) / length * 20,
+                          border.1 + (inland.1 - border.1) / length * 20)
+        let inPlace = relief(straddling, alignsChina: false)!
+        check(inPlace.contains { !MainlandChinaRegion.contains(latitude: $0.latitude, longitude: $0.longitude) },
+              "the Shenzhen test cell reaches across the border")
+        guard let drawn = relief(straddling) else { fail("a Shenzhen cell at the border is drawn") }
+        let metersPerPoint = MKMetersPerMapPointAtLatitude(inMainland.latitude)
+        let moves = zip(inPlace, drawn).map { from, to in
+            ((MKMapPoint(to).x - MKMapPoint(from).x) * metersPerPoint,
+             (MKMapPoint(to).y - MKMapPoint(from).y) * metersPerPoint)
+        }
+        check(hypot(moves[0].0, moves[0].1) > 100 &&
+              moves.allSatisfy { hypot($0.0 - moves[0].0, $0.1 - moves[0].1) < 1 },
+              "a Shenzhen cell across the border moves whole and keeps its shape")
+        check(relief(world(besideBorder)) == nil && relief(world(besideBorder), alignsChina: false) != nil,
+              "a Hong Kong relief cell in the strip is not drawn over shifted Shenzhen terrain")
+        check(same(relief(world(hongKongHill)), relief(world(hongKongHill), alignsChina: false)),
+              "Hong Kong relief cells beyond the strip stay in place")
         print("Offline map contour overlay tests passed")
     }
 }

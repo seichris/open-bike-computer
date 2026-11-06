@@ -94,12 +94,20 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     Self.world(coordinate, alignsChina: alignsChina)
   }
 
-  /// Where a contour label at these WGS-84 world metres is drawn, or nil when
-  /// the tile there shows other terrain. Beside mainland China's border a
-  /// MapKit pixel takes the mainland reading, so a label from across the
-  /// border would sit on shifted mainland contours.
-  func labelCoordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D? {
-    Self.labelCoordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+  /// Where terrain at these WGS-84 world metres is drawn, or nil when the
+  /// tile there shows other terrain. Beside mainland China's border a MapKit
+  /// pixel takes the mainland reading, so a label or relief cell from across
+  /// the border would sit on shifted mainland contours.
+  func drawnCoordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D? {
+    Self.drawnCoordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+  }
+
+  /// The corners of a square terrain-relief cell with this south-west corner,
+  /// as drawn, or nil when the tile at its centre shows other terrain. The
+  /// cell moves whole with its centre, so one across the border keeps its
+  /// shape.
+  func reliefCorners(worldX: Double, worldY: Double, size: Double) -> [CLLocationCoordinate2D]? {
+    Self.reliefCorners(worldX: worldX, worldY: worldY, size: size, alignsChina: alignsChina)
   }
 
   static func coordinate(worldX: Double, worldY: Double, alignsChina: Bool) -> CLLocationCoordinate2D {
@@ -120,13 +128,30 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     return worldPoint(latitude: point.latitude, longitude: point.longitude)
   }
 
-  static func labelCoordinate(worldX: Double, worldY: Double, alignsChina: Bool)
+  static func drawnCoordinate(worldX: Double, worldY: Double, alignsChina: Bool)
     -> CLLocationCoordinate2D?
   {
     let drawn = coordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
     guard alignsChina else { return drawn }
     let shown = world(drawn, alignsChina: true)
     return abs(shown.0 - worldX) < 1 && abs(shown.1 - worldY) < 1 ? drawn : nil
+  }
+
+  static func reliefCorners(worldX: Double, worldY: Double, size: Double, alignsChina: Bool)
+    -> [CLLocationCoordinate2D]?
+  {
+    let corners = [(0.0, 0.0), (size, 0), (size, size), (0, size)].map {
+      coordinate(worldX: worldX + $0.0, worldY: worldY + $0.1, alignsChina: false)
+    }
+    guard alignsChina else { return corners }
+    let centerX = worldX + size / 2
+    let centerY = worldY + size / 2
+    guard drawnCoordinate(worldX: centerX, worldY: centerY, alignsChina: true) != nil else {
+      return nil
+    }
+    let center = coordinate(worldX: centerX, worldY: centerY, alignsChina: false)
+    return MainlandChinaRegion.contains(latitude: center.latitude, longitude: center.longitude)
+      ? corners.map(gcj02) : corners
   }
 
   static func worldPoint(latitude: Double, longitude: Double) -> (Double, Double) {
@@ -400,7 +425,7 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
         }
         var annotations: [BicinoContourLabelAnnotation] = []
         for anchor in anchors {
-          guard let coordinate = overlay.labelCoordinate(
+          guard let coordinate = overlay.drawnCoordinate(
             worldX: Double(anchor.x), worldY: Double(anchor.y))
           else { continue }
           let p = mapView.convert(coordinate, toPointTo: mapView)
@@ -501,18 +526,16 @@ final class TerrainReliefOverlay: NSObject, MKOverlay {
       for y in 0..<32 {
         for x in 0..<32 {
           let indices = [y * 33 + x, y * 33 + x + 1, (y + 1) * 33 + x + 1, (y + 1) * 33 + x]
-          guard indices.allSatisfy({ grid.nodes[$0].height != -32768 }) else { continue }
-          let points = indices.map { i in
-            MKMapPoint(
-              source.coordinate(
-                worldX: Double(grid.x * 4096 + (i % 33) * 128),
-                worldY: Double(grid.y * 4096 + (i / 33) * 128)))
-          }
+          guard indices.allSatisfy({ grid.nodes[$0].height != -32768 }),
+            let corners = source.reliefCorners(
+              worldX: Double(grid.x * 4096 + x * 128), worldY: Double(grid.y * 4096 + y * 128),
+              size: 128)
+          else { continue }
           let node = grid.nodes[indices[0]]
           result.append(
             Cell(
-              points: points, shade: CGFloat(node.shade) / 255, elevation: node.height,
-              slope: node.slope))
+              points: corners.map(MKMapPoint.init), shade: CGFloat(node.shade) / 255,
+              elevation: node.height, slope: node.slope))
         }
       }
     }
