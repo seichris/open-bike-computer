@@ -1333,17 +1333,12 @@ void setupLVGLforArduinoGFX() {
 
   Serial.println("✓ LVGL 9 Display registered");
 
-#ifndef DISABLE_TOUCH
   // Initialize touch driver using LVGL 9 API
   lv_indev_t *indev_drv = lv_indev_create();
   lv_indev_set_type(indev_drv, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev_drv, my_touchpad_read);
 
   Serial.println("✓ LVGL 9 Touch driver registered");
-#else
-  Serial.println(
-      "! TOUCH DISABLED via DISABLE_TOUCH flag (Required for SD Card usage)");
-#endif
   Serial.println("LVGL 9 initialized with Arduino_GFX");
 }
 
