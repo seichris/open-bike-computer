@@ -117,19 +117,42 @@ int main() {
             waveshare_init.index("SD.begin"),
         )
 
-        waveshare_pins = HAL.split(
+        # The storage code keeps the hal.hpp names; the values come from the
+        # board definitions. Both boards route the same native SDMMC pins and
+        # differ only in the former HSPI chip select.
+        hal_pins = HAL.split(
             "// microSD in vendor-native one-bit SDMMC mode.", 1
-        )[1].split(
-            "#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206", 1
-        )[0]
-        self.assertIn("WAVESHARE_SDMMC_CLK = GPIO_NUM_2", waveshare_pins)
-        self.assertIn("WAVESHARE_SDMMC_CMD = GPIO_NUM_1", waveshare_pins)
-        self.assertIn("WAVESHARE_SDMMC_D0 = GPIO_NUM_3", waveshare_pins)
-        self.assertIn("WAVESHARE_LEGACY_SD_CS = GPIO_NUM_17", waveshare_pins)
-        self.assertIn("WAVESHARE_LEGACY_SD_CS = GPIO_NUM_41", waveshare_pins)
-        self.assertIn("WAVESHARE_LEGACY_SD_MOSI = GPIO_NUM_1", waveshare_pins)
-        self.assertIn("WAVESHARE_LEGACY_SD_MISO = GPIO_NUM_3", waveshare_pins)
-        self.assertIn("WAVESHARE_LEGACY_SD_CLK = GPIO_NUM_2", waveshare_pins)
+        )[1]
+        self.assertIn("WAVESHARE_SDMMC_CLK = board::sd::clk", hal_pins)
+        self.assertIn("WAVESHARE_SDMMC_CMD = board::sd::cmd", hal_pins)
+        self.assertIn("WAVESHARE_SDMMC_D0 = board::sd::d0", hal_pins)
+        self.assertIn("WAVESHARE_LEGACY_SD_CS = board::sd::legacySpiCs", hal_pins)
+        self.assertIn(
+            "WAVESHARE_LEGACY_SD_MOSI = board::sd::legacySpiMosi", hal_pins
+        )
+        self.assertIn(
+            "WAVESHARE_LEGACY_SD_MISO = board::sd::legacySpiMiso", hal_pins
+        )
+        self.assertIn("WAVESHARE_LEGACY_SD_CLK = board::sd::legacySpiClk", hal_pins)
+        for board_file, legacy_cs in (
+            ("waveshare_amoled_175.hpp", 41),
+            ("waveshare_amoled_206.hpp", 17),
+        ):
+            sd = (
+                (ROOT / "lib/board/boards" / board_file)
+                .read_text(encoding="utf-8")
+                .split("namespace sd {", 1)[1]
+                .split("}  // namespace sd", 1)[0]
+            )
+            self.assertIn("constexpr uint8_t clk = 2;", sd, board_file)
+            self.assertIn("constexpr uint8_t cmd = 1;", sd, board_file)
+            self.assertIn("constexpr uint8_t d0 = 3;", sd, board_file)
+            self.assertIn(
+                f"constexpr uint8_t legacySpiCs = {legacy_cs};", sd, board_file
+            )
+            self.assertIn("constexpr uint8_t legacySpiMosi = 1;", sd, board_file)
+            self.assertIn("constexpr uint8_t legacySpiMiso = 3;", sd, board_file)
+            self.assertIn("constexpr uint8_t legacySpiClk = 2;", sd, board_file)
 
         open_body = STORAGE.split("FILE *Storage::open", 1)[1].split(
             "int Storage::close", 1

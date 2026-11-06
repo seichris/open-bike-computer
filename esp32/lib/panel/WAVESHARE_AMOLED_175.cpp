@@ -44,9 +44,10 @@
 extern void appDisplayFlushCompleted();
 extern void appRemoteDebugPointerActivity();
 
-// Define Global Variables declared extern in hal.hpp
-uint8_t GPS_TX = GPIO_NUM_43;
-uint8_t GPS_RX = GPIO_NUM_44;
+// Runtime copies of the board's GNSS UART pads, declared extern in hal.hpp;
+// settings.cpp may override them from the preferences store.
+uint8_t GPS_TX = board::gnss::tx;
+uint8_t GPS_RX = board::gnss::rx;
 
 // ============================================================================
 // DISPLAY CONFIGURATION (Arduino_GFX)

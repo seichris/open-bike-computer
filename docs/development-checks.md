@@ -173,3 +173,22 @@ The host job validates its nonempty check-ID selection before executing named re
 Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. Tighten routing if a
 full/manual/release lane finds an omitted relevant failure. Revert the selector and
 workflow changes to restore the broad policy; do not raise runner resource limits.
+
+## Board-macro confinement
+
+`esp32/tools/tests/test_board_macro_confinement.py` keeps firmware-target
+macros (`WAVESHARE_AMOLED_175`, `WAVESHARE_AMOLED_206` and any later
+`custom_firmware_target` in `platformio.ini`) out of shared firmware sources.
+It scans `esp32/src`, `esp32/lib` and `esp32/include` for preprocessor
+conditionals that name a target and compares the per-file counts with
+`esp32/tools/tests/board_macro_baseline.json`. `esp32/lib/board/` and
+`esp32/lib/panel/panelSelect.hpp` may test targets freely, and so may a file
+whose single target conditional wraps all of its code, because that is how a
+translation unit stays out of the other boards' images. Every other file must
+match its baseline exactly: a higher count fails, and so does a lower one until
+`--update-baseline` records it, so a count cannot grow back. Board differences
+belong in `esp32/lib/board/boards/<target>.hpp` as data, or in a file gated as
+a whole. The test runs inside the display power and redraw policy host check,
+which every `esp32/` change selects; `--list` prints the current counts and
+exemptions. See `docs/plans/board-support-architecture-plan.md` for the layout
+it protects.

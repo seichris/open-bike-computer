@@ -169,30 +169,39 @@ esp32/lib/board/
     epaper.cpp                      bring-up sequence for the e-paper family
 ```
 
-A definition is data only: `constexpr` structs with no logic. Using the
-e-paper values already verified in `board_traits.hpp` as the example:
+A definition is data only: nested namespaces of plain `constexpr` values and
+no logic. M1 chose values over structs so that host tests and every C++17
+translation unit can read a board file without shared type definitions. The
+1.75 file, abbreviated:
 
 ```cpp
 namespace board {
-constexpr Identity identity{"WAVESHARE_EPAPER_397", Family::Epaper};
-constexpr Display display{DisplayController::Ssd1677, 480, 800, /*round=*/false,
-                          /*touch=*/false, /*brightness=*/false};
-constexpr I2c i2c{/*sda=*/41, /*scl=*/42};
-constexpr Sd sd{SdBus::Sdmmc1Bit, /*clk=*/16, /*cmd=*/17, /*d0=*/15};
-constexpr Buttons buttons{/*up=*/4, /*center=*/5, /*down=*/6, /*boot=*/0};
-constexpr Power power{Pmic::Axp2101};
-constexpr Gnss gnss{/*fitted=*/false};
-constexpr Memory memory{16 * MiB, 8 * MiB, PartitionLayout::current};
+namespace identity { constexpr const char *target = "WAVESHARE_AMOLED_175"; }
+namespace display {
+constexpr uint16_t width = 466, height = 466;
+constexpr bool round = true, touch = true, brightness = true;
+constexpr uint8_t cs = 12, clk = 38, reset = 39, d0 = 4, d1 = 5, d2 = 6, d3 = 7;
+}
+namespace i2c { constexpr uint8_t sda = 15, scl = 14; }
+namespace touch { constexpr uint8_t address = 0x5A, interrupt = 11; constexpr bool resetOnGpio = false; }
+namespace sd { constexpr uint8_t clk = 2, cmd = 1, d0 = 3; }
+namespace power { constexpr bool axp2101 = true, qualifiedPowerControl = true; }
+namespace gnss { constexpr bool fitted = false; constexpr uint8_t tx = 43, rx = 44; }
 }  // namespace board
 ```
+
+An optional pin a board does not route is `board::noPin`. `include/hal.hpp`
+keeps the old pin names (`TFT_QSPI_CLK`, `TCH_I2C_INT`, `WAVESHARE_SDMMC_CLK`
+and the rest) as aliases of this data until their users read `board::`
+directly.
 
 The AMOLED definitions take their values from `hardware/README.md`, which stays
 the authoritative pinout. `board.hpp` replaces `board_traits.hpp` and absorbs
 `panelSelect.hpp`'s role; the target macros keep their names, because
 `custom_firmware_target`, `BOOT_META`, OTA compatibility and the release
 tooling already depend on them. A target macro may appear only in
-`platformio.ini`, `lib/board/board.hpp`, the board's own files, CI routing and
-tests.
+`platformio.ini`, `lib/board/`, a file whose single conditional gates all of
+it, `panelSelect.hpp` until it is absorbed, CI routing and tests.
 
 A variant file includes its base and overrides the parts that differ. The
 variant is still its own target (`WAVESHARE_AMOLED_175_GNSS`), with its own
@@ -289,8 +298,11 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 
 ## Migration
 
-Run these after #442 merges. The e-paper PR changes `main.cpp`, `mainScr.cpp`
-and `maps.cpp` heavily, and migrating them first would only create conflicts.
+M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
+2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
+`lib/board/` when it merges `main`. M2 to M4 still wait for #442: the e-paper
+PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and migrating them
+first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
 host tests and, where it touches boot or power, a boot capture per affected
 board. A milestone that preserves behaviour still needs that capture: boot
@@ -306,26 +318,49 @@ sequencing is where the PMIC policies live.
 | M5 | Position source | Put `gps.cpp` behind the position-source interface as the GNSS implementation; the phone path becomes the default implementation; retire `HAS_HARDWARE_GPS` and `AT6558D_GPS` | Navigation consumes one interface; AMOLED behaviour unchanged | None until a GNSS board exists |
 | M6 | First variant through the checklist | Add one new variant (the GNSS 1.75 or another board) using only the per-variant steps above | The ratchet test's allowlist gains no entry; CI builds the variant automatically | The variant's own gates |
 
-M0 is decided (see Decisions) and starts once #442 has merged. M0 and M1 can
-share one pull request. M2 is the largest and riskiest; split it
-by family if the review grows past the three-pass limit. M5 has no user-visible
-effect on its own and can wait until a GNSS board is real.
+M0 and M1 shipped in one pull request (see Progress). M2 is the largest and
+riskiest; split it by family if the review grows past the three-pass limit. M5
+has no user-visible effect on its own and can wait until a GNSS board is real.
+
+### Progress
+
+- **M0, done 2026-11-06** from `main` at `0f2d209d`. The six legacy
+  environments, `[esp32_common]`, the legacy `hal.hpp` blocks and their
+  conditionals are gone, together with the `DISABLE_*` and `USE_ARDUINO_GFX`
+  flags and the feature branches no Waveshare build compiled: compass, BME and
+  IMU sensors, the serial CLI, the web server, touch gestures, the IceNav SD
+  firmware-upgrade screen and the EasyPreferences store. The device-settings
+  screen lost its inert "Firmware Upgrade" button; everything else builds the
+  same.
+- **M1, done 2026-11-06** in the same pull request. `esp32/lib/board/board.hpp`
+  selects `boards/waveshare_amoled_175.hpp` or `boards/waveshare_amoled_206.hpp`
+  and rejects any other target set; `include/hal.hpp` keeps the old pin names
+  as aliases of that data. The confinement test froze 188 conditionals in 28
+  shared files and exempts 14 files gated as a whole. `panelSelect.hpp` keeps
+  its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
+  not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
+  it merges.
 
 ### The confinement test
 
-`esp32/tools/tests/test_board_macro_confinement.py`, registered under an
-existing esp32 host check so CI runs it:
+`esp32/tools/tests/test_board_macro_confinement.py`, registered inside the
+display power and redraw policy host check, which every `esp32/` change
+selects:
 
-- Scans `esp32/src`, `esp32/lib` and `esp32/include` for preprocessor lines
-  naming a target macro.
-- Allows them without limit in `platformio.ini`, `lib/board/**`,
-  `lib/panel/panelSelect.hpp` (until M1 absorbs it) and test files.
-- Holds a baseline file mapping every other file to its current count. A file
-  above its baseline, or a new file with any count, fails the test. Lowering a
-  baseline is the only permitted edit, and reaching zero removes the entry.
-- Keeps #442's e-paper guard: e-paper-named translation units and includes stay
-  behind their board macro, which is what lets e-paper-only changes skip AMOLED
-  builds.
+- Scans `esp32/src`, `esp32/lib` and `esp32/include` for preprocessor
+  conditionals naming a target macro; the targets are the
+  `custom_firmware_target` values in `platformio.ini`, so a new board is
+  covered as soon as it has an environment.
+- Allows them without limit in `lib/board/**`, `lib/panel/panelSelect.hpp`
+  (until M3 and M4 absorb it) and in any file whose single target conditional
+  wraps all of its code. That whole-file gate is how a translation unit stays
+  out of the other boards' images, and it is what keeps #442's e-paper-named
+  sources out of AMOLED builds.
+- Holds `board_macro_baseline.json` mapping every other file to its exact
+  count. A count above or below the baseline fails; `--update-baseline`
+  records a lower count so it cannot grow back, and reaching zero removes the
+  entry. The e-paper branches inside shared files that #442 adds raise the
+  baseline once, visibly, when it merges; M2 to M4 then lower it.
 
 ## Costs and limits
 
@@ -348,7 +383,8 @@ existing esp32 host check so CI runs it:
    the `lib_deps` only they used (LovyanGFX, EasyPreferences, ESP32 Wifi CLI,
    AsyncTCP, ESPAsyncWebServer). It runs after #442 merges, as the first
    milestone, in one pull request with M1 where practical. Nothing is frozen or
-   kept as reference; Git history holds the removed code.
+   kept as reference; Git history holds the removed code. Done 2026-11-06 from
+   `main` at `0f2d209d`, before #442 merged, on the maintainer's instruction.
 
 Still open:
 
@@ -357,8 +393,8 @@ Still open:
    doing.
 3. Confirm the rule that a variant is always its own image, including for an
    optional GNSS module.
-4. Target naming for variants (`WAVESHARE_AMOLED_175_GNSS`) and the location of
-   board files (`esp32/lib/board/`).
+4. Target naming for variants (`WAVESHARE_AMOLED_175_GNSS`). Board files live
+   in `esp32/lib/board/boards/` since M1.
 
 ## Related documents
 
