@@ -294,9 +294,7 @@ final class MultiStopRoutePlanner: ObservableObject {
         for candidate in ordered {
             if let leg = try? MapKitRouteAdapter.route(
                 from: candidate.element,
-                fallbackSource: RouteCoordinateNormalizationV1.mapKitToWGS84(
-                    source.mapCoordinate
-                ),
+                fallbackSource: source.wgs84Coordinate,
                 sourceLabel: source.label,
                 destinationLabel: destination.label,
                 localeIdentifier: localeIdentifier

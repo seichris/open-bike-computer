@@ -135,6 +135,35 @@ extension OfflineRouteSaveTests {
         try multiStopRoundTripNavigation()
         try multiStopPlaceResolution()
         try multiStopDirectNavigationIsolation()
+        try multiStopCurrentLocationBesideBorder()
+    }
+
+    /// Beside Shenzhen, Hong Kong's Apple Maps coordinates also read as
+    /// shifted Shenzhen. A route from the rider's own position there keeps to
+    /// the rider's side, as direct planning does.
+    static func multiStopCurrentLocationBesideBorder() throws {
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let rider = RouteCoordinateV1(latitude: 22.52727, longitude: 114.08211)
+        guard let start = MultiStopRoutePlace.currentLocation(Stops.fix(rider, at: f.now)) else {
+            preconditionFailure("A good fix makes a current-location stop")
+        }
+        check(RouteCoordinateNormalizationV1.mapKitToWGS84(start.mapCoordinate) != rider,
+            "Without the fix, the rider's Apple Maps coordinate reads as Shenzhen")
+        let mapStart = CLLocationCoordinate2D(
+            latitude: start.mapCoordinate.latitude, longitude: start.mapCoordinate.longitude)
+        let viaPoint = CLLocationCoordinate2D(latitude: 22.5150, longitude: 114.1000)
+        let stopPoint = CLLocationCoordinate2D(latitude: 22.5011, longitude: 114.1281)
+        let planner = f.makePlanner()
+        planner.plan(Stops.request([start, Stops.place("Sheung Shui", stopPoint)]))
+        f.factory.tasks[0].succeed(with: [Stops.leg(
+            mapStart, via: viaPoint, to: stopPoint, turn: "Turn left onto Fanling Highway", travelTime: 600)])
+        guard let plan = planner.readyPlan else { preconditionFailure("Expected a ready plan") }
+        // MKPolyline's map points round the coordinate in the last digits;
+        // the Shenzhen reading lies about 600 m away.
+        let first = plan.route.points.first ?? RouteCoordinateV1(latitude: 0, longitude: 0)
+        check(start.wgs84Coordinate == rider &&
+            abs(first.latitude - rider.latitude) < 1e-7 && abs(first.longitude - rider.longitude) < 1e-7,
+            "A route from the rider's position beside the border starts at the rider's own fix")
     }
 
     static func multiStopOrderingAndStitching() throws {

@@ -1,7 +1,8 @@
 # Multi-stop Create a Route: review record
 
-Local branch `feature/create-route-waypoints-20261029`, not pushed. Recorded
-under REVIEW.md before a pull request exists.
+Branch `feature/create-route-waypoints-20261029`. Recorded under REVIEW.md
+before the pull request existed; the pull request description carries the
+later record. See "Base sync" for the 2026-11-06 merge of `main`.
 
 - Base: `f37a084facc8a286ad506bd51bfc2e6adbd19957` (GitHub `main`).
 - Reviewed head: `92ae2cf30daeb13de5737a3eb93e99dc55a1f3b9`. Commits:
@@ -49,7 +50,26 @@ Pass-1 P3 notes left unchanged as non-blocking, with reasons:
 **Separate pre-existing defect.** Favorites starred from Saved Routes rows store
 WGS-84 archive destinations, but every planner treats favorites as MapKit
 (GCJ-02) coordinates, so in mainland China those stops are offset by a few
-hundred metres. This needs its own change.
+hundred metres. This needs its own change: branch
+`fix/saved-route-favorite-coordinates`.
+
+## Base sync
+
+On 2026-11-06 `main` at `1fa19116` was merged into the branch without
+conflicts. It brings PR 755's precise mainland-China region and its
+two-reading rule beside the border. In the strip up to about 1.2 km deep
+beside the border, an Apple Maps coordinate also reads as a shifted mainland
+position. The mainland reading wins unless a reference, such as the rider's
+GPS fix, lies at the other one.
+
+| ID | Severity | Status | Summary |
+| --- | --- | --- | --- |
+| SYNC-1 | P2 | fixed after the review passes; verified by test | Exposed by the sync. A "Current Location" stop kept only its Apple Maps coordinate, and each leg's start was converted back without a reference. A multi-stop route started by a rider in Hong Kong's or Macau's strip beside the border was therefore read as shifted mainland until it left the strip, about 600 m off near Shenzhen. Direct planning on `main` already passes the rider's fix. The stop now keeps its GPS fix, and legs start from `wgs84Coordinate`, read near that fix. `multiStopCurrentLocationBesideBorder` passes and fails on the old reference. |
+
+All 3 review passes had been used, so SYNC-1's fix had no further review pass.
+It is limited to a current-location stop. Searched and saved stops in the
+strip still take the mainland reading, as a searched start does in direct
+planning.
 
 ## Checks
 

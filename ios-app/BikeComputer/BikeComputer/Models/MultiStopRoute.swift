@@ -22,12 +22,18 @@ struct MultiStopRoutePlace: Equatable {
     let subtitle: String?
     let mapCoordinate: RouteCoordinateV1
     let origin: Origin
+    /// The GPS fix a current-location stop was taken at. Beside a mainland
+    /// China border its Apple Maps coordinate can also read as a position
+    /// across the border, so it is read near this fix, as direct planning
+    /// reads the rider's own start.
+    let gpsCoordinate: RouteCoordinateV1?
 
     init?(
         label: String,
         subtitle: String? = nil,
         mapCoordinate: CLLocationCoordinate2D,
-        origin: Origin
+        origin: Origin,
+        gpsCoordinate: RouteCoordinateV1? = nil
     ) {
         let label = MultiStopRouteNaming.clamped(
             label.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -44,6 +50,12 @@ struct MultiStopRoutePlace: Equatable {
         self.subtitle = subtitle?.isEmpty == false ? subtitle : nil
         self.mapCoordinate = coordinate
         self.origin = origin
+        self.gpsCoordinate = gpsCoordinate
+    }
+
+    /// The stop in WGS-84, read near its GPS fix where it has one.
+    var wgs84Coordinate: RouteCoordinateV1 {
+        RouteCoordinateNormalizationV1.mapKitToWGS84(mapCoordinate, near: gpsCoordinate)
     }
 
     /// Snapshots a GPS fix once, converted like the existing planner's
@@ -55,7 +67,11 @@ struct MultiStopRoutePlace: Equatable {
         return MultiStopRoutePlace(
             label: currentLocationLabel,
             mapCoordinate: routeLocation.coordinate,
-            origin: .currentLocation
+            origin: .currentLocation,
+            gpsCoordinate: RouteCoordinateV1(
+                latitude: location.coordinate.latitude,
+                longitude: location.coordinate.longitude
+            )
         )
     }
 
