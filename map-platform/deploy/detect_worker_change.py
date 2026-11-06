@@ -41,8 +41,13 @@ IMAGE_INPUT_ROOTS = (
     "map-platform/config/generation-profile-policy-v5.json",
     "map-platform/config/topography-source-policy-v2.json",
 )
+# The Map Platform Image push paths must list exactly these roots (tested): a
+# run that finds a newer main commit touching one of them leaves the proposal
+# to that commit's own run. The map CI workflow is deliberately absent. It is
+# not copied into the image, and a promotion pull request runs the CI
+# definition from its own up-to-date head, so a CI-only edit such as a
+# Dependabot action bump needs neither a rebuild nor a new proposal.
 PROMOTION_INPUT_ROOTS = IMAGE_INPUT_ROOTS + (
-    ".github/workflows/map-platform-ci.yml",
     "map-platform/deploy/detect_worker_change.py",
     "map-platform/deploy/export_pending_compose.py",
     "map-platform/deploy/select_worker_promotion.py",
