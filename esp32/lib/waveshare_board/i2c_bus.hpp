@@ -23,7 +23,8 @@ struct Stats {
 };
 
 void configureBus(uint32_t clockHz = DEFAULT_CLOCK_HZ);
-const Stats &stats();
+// A snapshot of the counters, safe to read from any task.
+Stats stats();
 void debugScan(Stream &out = Serial, uint8_t firstAddress = 0x08,
                uint8_t lastAddress = 0x77);
 

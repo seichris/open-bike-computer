@@ -14,6 +14,7 @@
 #include "waveshare_board.hpp"
 #include "../power_management/power_management.hpp"
 #include <Wire.h>
+#include <atomic>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -28,7 +29,17 @@ namespace axp_policy = waveshare_board::axp2101::register_policy;
 static_assert(axp_policy::DEVICE_ADDRESS == AXP2101_ADDR,
               "AXP2101 address must match the write policy");
 
-Stats i2cStats;
+// Counters are bumped from every task that uses the bus, inside and outside
+// the bus lock (a failed probe counts its device missing after the lock is
+// released), so they are atomic and read as a snapshot.
+struct Counters {
+  std::atomic<uint32_t> recoveryAttempts{0};
+  std::atomic<uint32_t> failedTransactions{0};
+  std::atomic<uint32_t> recoveredTransactions{0};
+  std::atomic<uint32_t> missingDevices{0};
+} i2cStats;
+// Written and read only with the bus lock held: another task's recovery may
+// be reinstalling the driver while this task decides whether to transact.
 bool busConfigured = false;
 uint32_t activeClockHz = DEFAULT_CLOCK_HZ;
 uint32_t lastFailureLogMs = 0;
@@ -86,8 +97,8 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
   Serial.printf("Waveshare I2C: %s failed addr=0x%02X label=%s failures=%u "
                 "recoveries=%u recovered=%u missing=%u\n",
                 operation, address, label ? label : "-",
-                i2cStats.failedTransactions, i2cStats.recoveryAttempts,
-                i2cStats.recoveredTransactions, i2cStats.missingDevices);
+                i2cStats.failedTransactions.load(), i2cStats.recoveryAttempts.load(),
+                i2cStats.recoveredTransactions.load(), i2cStats.missingDevices.load());
   lastFailureLogMs = now;
 }
 
@@ -233,6 +244,11 @@ void configureBus(uint32_t clockHz) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::I2c);
   ensureMutex();
+  BusLock lock;
+  if (!lock.ok()) {
+    Serial.println("Waveshare I2C: bus busy, configuration skipped");
+    return;
+  }
   activeClockHz = clockHz;
   beginBus();
   Serial.printf("Waveshare I2C: %s SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
@@ -241,7 +257,14 @@ void configureBus(uint32_t clockHz) {
                 static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
 }
 
-const Stats &stats() { return i2cStats; }
+Stats stats() {
+  Stats snapshot;
+  snapshot.recoveryAttempts = i2cStats.recoveryAttempts.load();
+  snapshot.failedTransactions = i2cStats.failedTransactions.load();
+  snapshot.recoveredTransactions = i2cStats.recoveredTransactions.load();
+  snapshot.missingDevices = i2cStats.missingDevices.load();
+  return snapshot;
+}
 
 void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
   power_management::ScopedLock powerLock(
@@ -535,13 +558,17 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
 
 bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
                             uint8_t len) {
-  if (!busConfigured || data == nullptr || len == 0 || len > 16 ||
+  if (data == nullptr || len == 0 || len > 16 ||
       static_cast<unsigned>(reg) + len > 256)
     return false;
 
   power_management::ScopedLock powerLock(power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) return false;
+  // Read under the bus lock: another task's recovery may be reinstalling the
+  // driver, and a transaction on a bufferless bus would keep TwoWire's mutex.
+  // Observation never reinstalls the driver itself.
+  if (!busConfigured) return false;
   // Intentionally not withRetries(): where the board recovers the bus on
   // failure (the 2.06), even its final failed attempt resets/reconfigures
   // the bus. Observation must not do that.

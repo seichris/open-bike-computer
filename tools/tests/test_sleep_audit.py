@@ -122,12 +122,16 @@ int main() {
             "template <typename Fn>\nbool withRetries(",
             "void configureBus(uint32_t clockHz) {",
             "bool probe(uint8_t address, const char *label, uint8_t attempts) {",
+            "Stats stats() {",
+            "bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,",
         ))
         harness = (f'#include "{ROOT}/esp32/lib/board/board.hpp"\n'
                    f'#include "{ROOT}/esp32/lib/waveshare_board/i2c_transaction_trace.hpp"\n') + r'''
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 using waveshare_board::i2c::TransactionPhase;
 using waveshare_board::i2c::TransactionTrace;
 namespace power_management {
@@ -138,7 +142,10 @@ namespace waveshare_board { int recoveries = 0; void recoverI2CBus() { ++recover
 #define I2C_SDA_PIN 15
 #define I2C_SCL_PIN 14
 constexpr uint16_t DEFAULT_TIMEOUT_MS = 50;
-struct { uint32_t recoveryAttempts = 0, failedTransactions = 0, recoveredTransactions = 0, missingDevices = 0; } i2cStats;
+struct Stats { uint32_t recoveryAttempts = 0, failedTransactions = 0, recoveredTransactions = 0, missingDevices = 0; };
+struct Counters {
+  std::atomic<uint32_t> recoveryAttempts{0}, failedTransactions{0}, recoveredTransactions{0}, missingDevices{0};
+} i2cStats;
 bool busConfigured = false;
 uint32_t activeClockHz = 0;
 void ensureMutex() {}
@@ -148,7 +155,10 @@ uint32_t retryStartTime() { return 0; }
 void delay(int) {}
 void logRetryResult(uint8_t, uint16_t, const char *, uint8_t, bool, uint32_t) {}
 void logFailure(const char *, const char *, uint8_t) {}
-struct SerialMock { template <typename... A> int printf(const char *, A...) { return 0; } } Serial;
+struct SerialMock {
+  template <typename... A> int printf(const char *, A...) { return 0; }
+  int println(const char *) { return 0; }
+} Serial;
 // Models the pinned TwoWire: begin() creates and takes a non-recursive mutex and
 // frees the buffers on failure; beginTransmission() takes the mutex;
 // endTransmission() returns 4 on a missing buffer without releasing it. A take
@@ -188,9 +198,17 @@ struct WireMock {
   }
   void setClock(uint32_t) { ++clocks; }
   void setTimeOut(uint16_t) { ++timeouts; }
+  void write(uint8_t) {}
+  int requestFrom(uint8_t, uint8_t, uint8_t) { return 0; }
+  int read() { return -1; }
 } Wire;
 ''' + production + r'''
-void reset() { Wire = {}; i2cStats = {}; busConfigured = false; waveshare_board::recoveries = 0; }
+void reset() {
+  Wire = {};
+  i2cStats.recoveryAttempts = 0; i2cStats.failedTransactions = 0;
+  i2cStats.recoveredTransactions = 0; i2cStats.missingDevices = 0;
+  busConfigured = false; waveshare_board::recoveries = 0;
+}
 int main() {
   constexpr bool recovers = board::i2c::recoverOnFailure;
   // The mock reproduces the hazard: a bufferless transaction leaves the
@@ -222,6 +240,12 @@ int main() {
   assert(Wire.begins == 4 && Wire.ends == 0);
   assert(i2cStats.failedTransactions == 3 && i2cStats.missingDevices == 1);
   assert(i2cStats.recoveryAttempts == (recovers ? 3u : 0u));
+  // The snapshot reads the same counters.
+  assert(stats().failedTransactions == 3 && stats().missingDevices == 1);
+  // A passive read on the unconfigured bus refuses under the lock and never
+  // touches TwoWire either.
+  uint8_t observed[3] = {};
+  assert(!readRegisterBlock8Once(0x34, 0, observed, 3) && Wire.transactions == 0);
   // A live bus with a silent device: every attempt is a real transaction and
   // only a recovering board ends and reinstalls the driver in between.
   reset();
