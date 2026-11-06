@@ -89,15 +89,31 @@ behave as follows:
   start. A route crossing the border is misread until it leaves the strip. The RideShared and navigation tests pin these cases near
   Luohu, Lok Ma Chau and Shenzhen Railway Station.
 
-Inside a mainland-China topography overlay, every pixel uses GCJ-02, because
-`MainlandChinaRegion.coverage` admits only selections wholly inside the
-region. A selection that crosses the region's edge shows no overlay rather
-than a partly misaligned one. Saved Maps then says "Offline contours aren't
-shown for maps that cross mainland China's border." instead of asking for
-another download. This includes most selections of Shenzhen and Zhuhai,
-Xiamen with Kinmen's waters, Fuzhou with Matsu, Dandong and Ruili. With the
-old rectangle these showed contours, misaligned by one offset across the
-border.
+A topography overlay that reaches mainland China reads every pixel the same
+way, with no reference:
+- A pixel whose Apple Maps coordinate has a mainland reading samples its
+  WGS-84 source pixel.
+- A pixel inside the region with no mainland reading stays transparent. Where
+  the offset points away from the border, as at Khorgos on the Kazakh border,
+  GCJ-02 has moved the terrain just inside the border further in, and drawing
+  it in place as well would show it twice. The empty band is at most one
+  offset deep.
+- Every other pixel keeps its position.
+- Terrain lookups use the same reading. A contour label is drawn where its
+  own contours are drawn, and is skipped where the tile at that point shows
+  other terrain.
+
+A selection across the border, such as Shenzhen with Hong Kong, Zhuhai with
+Macau or Xiamen with Kinmen, therefore lines up on both sides:
+- **Border cells:** grid cells that straddle the border are mapped pixel by
+  pixel rather than interpolated, so nothing smears across it.
+- **Two source areas:** each side of the border has its own source area. A
+  tile at high zoom can therefore use two sources thousands of pixels apart.
+- **The strip near the border:** in the strip up to about 1.2 km deep beside
+  the border, pixels take the mainland reading. There the overlay shows the
+  shifted mainland terrain, and the other side's terrain begins where the
+  shifted mainland ends. The other side's contour labels in the strip are
+  skipped.
 
 ## Where the app converts
 
@@ -109,7 +125,7 @@ border.
 | Favorites synced to the Watch (`BikeComputerApp`) | Apple Maps to WGS-84 |
 | Watch online routing endpoints | WGS-84 to Apple Maps |
 | Simulated positions shown on Apple Maps (`NavigationEngine`) | WGS-84 to Apple Maps |
-| Topography overlay (`BicinoTopographyTileOverlay`, `TopographyMapKitTileWarp`) | whole overlay, or none |
+| Topography overlay (`BicinoTopographyTileOverlay`, `TopographyMapKitTileWarp`) | per pixel, Apple Maps to WGS-84 |
 
 The firmware and the map backend never convert.
 

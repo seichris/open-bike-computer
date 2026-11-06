@@ -188,32 +188,59 @@ struct OfflineMapContourOverlayTests {
         check(settled, "a tampered companion is rejected: \(rejected.topographyOverlayStatus)")
         check(rejected.topographyOverlay == nil, "a tampered companion shows no overlay")
 
-        // Apple Maps changes coordinate systems at mainland China's border, so
-        // a selection across it shows no contours and says why.
-        func alignsChina(_ west: Double, _ south: Double, _ east: Double, _ north: Double) throws -> Bool {
-            try BicinoTopographyTileOverlay.alignsChina(
+        // Apple Maps draws mainland China in GCJ-02 and its neighbours in
+        // WGS-84. Any selection reaching the mainland is warped point by point,
+        // so one across the border lines up on both sides.
+        func alignsChina(_ west: Double, _ south: Double, _ east: Double, _ north: Double) -> Bool {
+            BicinoTopographyTileOverlay.alignsChina(
                 boundsE7: [west, south, east, north].map { Int(($0 * 10_000_000).rounded()) }
             )
         }
-        check((try? alignsChina(113.2, 23.0, 113.5, 23.2)) == true,
-              "a Guangzhou selection is drawn in GCJ-02")
-        check((try? alignsChina(114.13, 22.24, 114.22, 22.29)) == false,
-              "a Hong Kong Island selection stays in WGS-84")
-        do {
-            _ = try alignsChina(113.9, 22.45, 114.2, 22.6)
-            check(false, "a Shenzhen selection reaching Hong Kong is not aligned")
-        } catch {
-            check(
-                OfflineMapManager.topographyOverlayFailureStatus(error) ==
-                    "Offline contours aren't shown for maps that cross mainland China's border.",
-                "a border-crossing selection explains itself instead of asking for a download: \(error)"
-            )
+        check(alignsChina(113.2, 23.0, 113.5, 23.2), "a Guangzhou selection is drawn in GCJ-02")
+        check(!alignsChina(114.13, 22.24, 114.22, 22.29), "a Hong Kong Island selection stays in WGS-84")
+        check(alignsChina(113.9, 22.45, 114.2, 22.6),
+              "a Shenzhen selection reaching Hong Kong is shown, aligned point by point")
+        // Labels in a view across the border come from both sides' WGS-84
+        // areas: a Shenzhen hill drawn shifted and a Hong Kong hill drawn in
+        // place.
+        let shenzhenHill = (latitude: 22.5300, longitude: 114.0830)
+        let shenzhenDrawn = GCJ02.mapKit(fromWGS84: shenzhenHill.latitude, longitude: shenzhenHill.longitude)
+        let hongKongHill = (latitude: 22.5011, longitude: 114.1281)
+        let shownAt = [
+            MKMapPoint(CLLocationCoordinate2D(latitude: shenzhenDrawn.latitude, longitude: shenzhenDrawn.longitude)),
+            MKMapPoint(CLLocationCoordinate2D(latitude: hongKongHill.latitude, longitude: hongKongHill.longitude)),
+        ]
+        let view = MKMapRect(
+            x: shownAt.map(\.x).min()!, y: shownAt.map(\.y).min()!,
+            width: abs(shownAt[0].x - shownAt[1].x), height: abs(shownAt[0].y - shownAt[1].y)
+        ).insetBy(dx: -10, dy: -10)
+        let area = BicinoTopographyTileOverlay.labelArea(for: view, alignsChina: true)
+        let unshiftedArea = BicinoTopographyTileOverlay.labelArea(for: view, alignsChina: false)
+        func covers(_ area: (west: Int, south: Int, east: Int, north: Int), _ hill: (latitude: Double, longitude: Double)) -> Bool {
+            let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
+            return Double(area.west) <= point.0 && point.0 <= Double(area.east) &&
+                Double(area.south) <= point.1 && point.1 <= Double(area.north)
         }
-        check(
-            OfflineMapManager.topographyOverlayFailureStatus(CocoaError(.fileReadCorruptFile))
-                .contains("could not be verified"),
-            "other failures still ask for a fresh download"
-        )
+        check(covers(area, shenzhenHill) && covers(area, hongKongHill),
+              "labels across the border are queried from both sides' WGS-84 areas")
+        check(!covers(unshiftedArea, shenzhenHill),
+              "the view's own area alone would miss the Shenzhen hill's labels")
+        // Beside the border a MapKit pixel takes the mainland reading, so a
+        // Hong Kong label there would sit on shifted Shenzhen contours.
+        func label(_ hill: (latitude: Double, longitude: Double), alignsChina: Bool = true) -> CLLocationCoordinate2D? {
+            let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
+            return BicinoTopographyTileOverlay.labelCoordinate(worldX: point.0, worldY: point.1, alignsChina: alignsChina)
+        }
+        func near(_ coordinate: CLLocationCoordinate2D?, _ latitude: Double, _ longitude: Double) -> Bool {
+            guard let coordinate else { return false }
+            return abs(coordinate.latitude - latitude) < 1e-7 && abs(coordinate.longitude - longitude) < 1e-7
+        }
+        let besideBorder = (latitude: 22.52727, longitude: 114.08211)
+        check(label(besideBorder) == nil && near(label(besideBorder, alignsChina: false), 22.52727, 114.08211),
+              "a Hong Kong label beside the border is skipped where the tile shows Shenzhen")
+        check(near(label(hongKongHill), hongKongHill.latitude, hongKongHill.longitude) &&
+              near(label(shenzhenHill), shenzhenDrawn.latitude, shenzhenDrawn.longitude),
+              "labels elsewhere sit where their own contours are drawn")
         print("Offline map contour overlay tests passed")
     }
 }
