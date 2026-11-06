@@ -56,8 +56,9 @@ hundred metres. This needs its own change: branch
 ## Base sync
 
 On 2026-11-06 `main` at `1fa19116` was merged into the branch without
-conflicts. It brings PR 755's precise mainland-China region and its
-two-reading rule beside the border. In the strip up to about 1.2 km deep
+conflicts, and then `268409ea`, which adds the saved-route favorite fix.
+`main` brings PR 755's precise mainland-China region and its two-reading
+rule beside the border. In the strip up to about 1.2 km deep
 beside the border, an Apple Maps coordinate also reads as a shifted mainland
 position. The mainland reading wins unless a reference, such as the rider's
 GPS fix, lies at the other one.
