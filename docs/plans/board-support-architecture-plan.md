@@ -354,9 +354,10 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   `board::layout`, and the 2.06 display-enable recovery follows
   `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`. Baseline: 109 conditionals in 17
   files. Two deliberate unifications in `i2c_bus.cpp`: the 2.06
-  `configureBus` keeps the result of `Wire.begin` (so a failed driver install
-  no longer pretends the bus is up, and `recoverAfterFailure` then does not
-  re-begin it, as on the 1.75), and the 1.75 `probe()` goes through
+  `configureBus` keeps the result of `Wire.begin` (a failed driver install
+  no longer pretends the bus is up; `recoverAfterFailure` re-begins it on the
+  next failed transaction, as the 2.06 always did, and records the result),
+  and the 1.75 `probe()` goes through
   `withRetries` like the 2.06 (same steps, plus the recovered-transaction
   count). Both boards' boot smoke covers them. For #442: the e-paper board
   file needs `board::i2c::stopBetweenWriteAndRead = false` and

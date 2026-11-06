@@ -105,6 +105,64 @@ int main() {
                 with self.subTest(board=board):
                     self.compile_run(path, defines=(board,))
 
+    def test_bus_recovery_rebegins_after_failed_configure(self):
+        source = (ROOT / "esp32/lib/waveshare_board/i2c_bus.cpp").read_text()
+        def function(signature):
+            start = source.index(signature)
+            return source[start:source.index("\n}\n", start) + 3]
+        harness = r'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+namespace power_management {
+enum class LockDomain { I2c };
+struct ScopedLock { explicit ScopedLock(LockDomain) {} };
+}
+namespace waveshare_board { int recoveries = 0; void recoverI2CBus() { ++recoveries; } }
+#define I2C_SDA_PIN 15
+#define I2C_SCL_PIN 14
+constexpr uint16_t DEFAULT_TIMEOUT_MS = 50;
+struct { uint32_t recoveryAttempts = 0; } i2cStats;
+bool busConfigured = false;
+uint32_t activeClockHz = 0;
+void ensureMutex() {}
+struct WireMock {
+  bool beginResult = true;
+  int begins = 0, ends = 0, clocks = 0, timeouts = 0;
+  bool begin(int, int) { ++begins; return beginResult; }
+  void end() { ++ends; }
+  void setClock(uint32_t) { ++clocks; }
+  void setTimeOut(uint16_t) { ++timeouts; }
+} Wire;
+struct SerialMock { template <typename... A> int printf(const char *, A...) { return 0; } } Serial;
+''' + function("[[maybe_unused]] void recoverAfterFailure() {") + function("void configureBus(uint32_t clockHz) {") + r'''
+int main() {
+  // The driver install fails at boot: the bus is reported unconfigured and
+  // no clock or timeout is applied to a bus that does not exist.
+  Wire.beginResult = false;
+  configureBus(100000);
+  assert(!busConfigured && Wire.begins == 1 && Wire.clocks == 0 && Wire.timeouts == 0);
+  // The next failed transaction recovers: no end() on a bus never begun, one
+  // bus recovery, a fresh begin whose success configures clock and timeout.
+  Wire.beginResult = true;
+  recoverAfterFailure();
+  assert(i2cStats.recoveryAttempts == 1 && waveshare_board::recoveries == 1);
+  assert(busConfigured && Wire.ends == 0 && Wire.begins == 2 && Wire.clocks == 1 && Wire.timeouts == 1);
+  // A later recovery on a live bus ends it first and begins it again.
+  recoverAfterFailure();
+  assert(busConfigured && Wire.ends == 1 && Wire.begins == 3 && Wire.clocks == 2);
+  // A failed re-begin leaves the flag honest for the passive reads.
+  Wire.beginResult = false;
+  recoverAfterFailure();
+  assert(!busConfigured && Wire.ends == 2 && Wire.begins == 4 && Wire.clocks == 2);
+  puts("passed");
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "recovery.cpp"
+            path.write_text(harness)
+            self.assertIn("passed", self.compile_run(path))
+
     def test_runtime_and_export(self):
         stubs = {
             "Arduino.h": "#pragma once\n#include <cstdint>\n#include <cstdio>\ninline uint32_t millis() { return 2000; }\n",

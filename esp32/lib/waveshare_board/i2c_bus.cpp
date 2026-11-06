@@ -91,16 +91,17 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
   lastFailureLogMs = now;
 }
 
-// Used where board::i2c::recoverOnFailure is set (the 2.06).
+// Used where board::i2c::recoverOnFailure is set (the 2.06). Always re-begins
+// the bus, so a Wire.begin that failed in configureBus is retried on the next
+// failed transaction instead of leaving the bus down until restart.
 [[maybe_unused]] void recoverAfterFailure() {
   i2cStats.recoveryAttempts++;
   if (busConfigured) {
     Wire.end();
   }
   waveshare_board::recoverI2CBus();
+  busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   if (busConfigured) {
-    Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
-    Wire.begin();
     Wire.setClock(activeClockHz);
     Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
   }
