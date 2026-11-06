@@ -100,7 +100,7 @@ int main() {
         )
         self.assertIn("&writerTaskHandle, 1);", RECORDER)
         waveshare_init = STORAGE.split("esp_err_t Storage::initSD()", 1)[1].split(
-            "#elif defined(SPI_SHARED)", 1
+            "esp_err_t Storage::initSPIFFS()", 1
         )[0]
         self.assertIn("SD_MMC.setPins(", waveshare_init)
         self.assertIn('SD_MMC.begin("/sdcard", true, false,', waveshare_init)

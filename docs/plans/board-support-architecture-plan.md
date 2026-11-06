@@ -304,9 +304,9 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 
 M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
 2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
-`lib/board/` when it merges `main`. M2 to M4 still wait for #442: the e-paper
-PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and migrating them
-first would only create conflicts.
+`lib/board/` when it merges `main`. M3 followed on 2026-11-06. M2 and M4 still wait for #442:
+the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and
+migrating them first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
 host tests and, where it touches boot or power, a boot capture per affected
 board. A milestone that preserves behaviour still needs that capture: boot
@@ -353,9 +353,18 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   per-board constants read `board::display`, `board::i2c`, `board::power` and
   `board::layout`, and the 2.06 display-enable recovery follows
   `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`. Baseline: 109 conditionals in 17
-  files. Two deliberate unifications on the 2.06 I2C path (a checked
-  `Wire.begin`, `probe()` through `withRetries`) are covered by its boot
-  smoke. The AMOLED-only guards that #442 keeps (`touch.hpp`'s whole-file
+  files. Two deliberate unifications in `i2c_bus.cpp`: the 2.06
+  `configureBus` keeps the result of `Wire.begin` (so a failed driver install
+  no longer pretends the bus is up, and `recoverAfterFailure` then does not
+  re-begin it, as on the 1.75), and the 1.75 `probe()` goes through
+  `withRetries` like the 2.06 (same steps, plus the recovered-transaction
+  count). Both boards' boot smoke covers them. For #442: the e-paper board
+  file needs `board::i2c::stopBetweenWriteAndRead = false` and
+  `recoverOnFailure = false` (its reads used a repeated start and never
+  recovered), `board::power::displayEnableRecovery = false` with
+  `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 0`, `board::display::defaultRotation =
+  0` and `rotation90Enabled = false`, and the 1.75 `board::layout` values;
+  `display.hpp` conflicts outright. The AMOLED-only guards that #442 keeps (`touch.hpp`'s whole-file
   gate, `speaker.cpp`, `sleep_audit`, `route_elevation_config.hpp`,
   `firmware_update_http.cpp`, `device_debug`, three `ble_navigation.cpp`
   sites) wait for the part interfaces of M4.

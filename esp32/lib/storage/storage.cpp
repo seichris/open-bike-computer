@@ -30,8 +30,6 @@
 #include "../board/board.hpp"
 #include <cstdio>
 
-#define SD_OCR_SDHC_CAP (1 << 30)
-
 static const char *TAG = "Storage";
 
 namespace {
@@ -148,7 +146,7 @@ std::string formatSize(uint64_t size) {
 /**
  * @brief Storage Class constructor
  */
-Storage::Storage() : isSdLoaded(false), card(nullptr) {
+Storage::Storage() : isSdLoaded(false) {
   // Construct once before any producer can publish this Storage instance.
   mountMutex = xSemaphoreCreateMutexStatic(&mountMutexStorage_);
   configASSERT(mountMutex != nullptr);
