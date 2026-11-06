@@ -1,10 +1,11 @@
-#include "../../lib/social_riders/social_riders_protocol.hpp"
+#include "../../lib/social_riders/social_riders.hpp"
 #include "../../lib/social_riders/social_riders_projection.hpp"
 #include <cassert>
 #include <iostream>
 #include <limits>
 #include <vector>
 using namespace social_riders;
+static_assert(ENABLED, "Friend markers must be available in production and development firmware");
 static void hash(const uint8_t *p,size_t n,uint8_t *out) { memset(out,0,32);for(size_t i=0;i<n;++i)out[i%32]^=p[i]; }
 static std::vector<uint8_t> packet(uint8_t op,size_t n=11,uint32_t epoch=7) {
   std::vector<uint8_t> p(n);memcpy(p.data(),"GRUP",4);p[4]=1;p[5]=op;for(int i=0;i<4;++i)p[6+i]=epoch>>(8*i);return p;

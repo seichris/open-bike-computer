@@ -47,6 +47,18 @@ runtime trust contract.
 Shared core transport is gzip compressed to bound storage and CI transfer cost;
 its compressed digest and original member inventory are both verified. Private
 core archives retain the existing format.
+Publishing the transport copy is best-effort with respect to disk space. The
+private entry is written only after its size was checked against the free
+space below the cache root (`FIRMWARE_CORE_CACHE schema=1 status=publishing
+… archiveBytes=… freeBytes=…`), but the gzip copy that follows is not
+reserved: when its write fails with `ENOSPC` or `EDQUOT`, the build keeps its
+attested private entry and firmware, prints `FIRMWARE_SHARED_CORE_CACHE
+schema=1 status=skipped reason=enospc environment=… archiveBytes=…
+freeBytes=…`, records `"sharedCoreTransport": "skipped"` in the build manifest
+(`"published"` or `"present"` otherwise), and the next clean build of the same
+core input key publishes the copy from the private entry. Until then other
+worktrees and CI runners miss and build cold; `pack` on `main` still fails when
+the transport is missing, so a skipped copy never looks published.
 
 Compiler objects stay private to the worktree and profile. Their namespace
 uses the exact core input key rather than the entire application Git identity.

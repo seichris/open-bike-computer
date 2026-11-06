@@ -99,6 +99,11 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
+    def test_social_demo_operator_is_covered_without_product_builds(self):
+        paths = ['tools/social-demo', 'tools/development/tests/test_social_demo.py', 'docs/social-demo-riders.md']
+        self.assertFalse(any(changed_components.classify_paths(paths).values()))
+        self.assertFalse(changed_components.native_ios_required(paths))
+
     def test_unclassified_shared_inputs_stop_before_product_jobs(self):
         for path in ('protocol/new-contract.json', 'tools/new-validator.py',
                      '.github/workflows/new-validation.yml'):
@@ -124,6 +129,7 @@ class ChangedComponentsTests(unittest.TestCase):
             "esp32/tools/build_firmware.py", "esp32/tools/firmware_runtime.py",
             "esp32/platformio.ini", "esp32/tools/firmware-runtime/lock-v1.json",
             ".github/actions/firmware-build-cache/action.yml",
+            ".github/actions/free-runner-disk/action.yml",
         ):
             with self.subTest(path=path):
                 selected = changed_components.classify_paths([path])
@@ -398,6 +404,7 @@ class ChangedComponentsTests(unittest.TestCase):
             "tools/firmware-signing-requirements.txt",
             "tools/verify_github_release_assets.py",
             "tools/web_flasher_manifest.py",
+            "tools/web-flasher/identity-test-vector.json",
             "tools/web-flasher/migration-test-vector.json",
             "tools/web-flasher/rescue-test-vector.json",
         ):

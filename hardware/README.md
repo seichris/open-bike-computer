@@ -242,17 +242,17 @@ The implementation is in `esp32/lib/speaker/`, with codec sources in
 `esp32/lib/esp_codec_dev/`. It uses the shared mutex-protected I2C bus,
 initializes the codec on first playback, and processes requests through a
 four-entry FreeRTOS queue outside the BLE callback. It powers the codec and PA
-down when the queue drains. PCM recordings are embedded
-with PlatformIO `board_build.embed_files`.
+down when the queue drains. The bell ding is generated at playback; the
+embedded horn recordings were removed in November 2026.
 
 #### Sounds And BLE
 
 | Sound ID | App label | Implementation |
 |---:|---|---|
 | `1` | Bell Ding | Generated PCM |
-| `2` | Plastic Bicycle Horn | Embedded PCM recording |
-| `3` | Rotating Bicycle Bell | Embedded PCM recording |
-| `5` | Squeeze Horn | Embedded PCM recording |
+| `2` | Plastic Bicycle Horn (legacy) | Reserved; recording removed, firmware rejects it |
+| `3` | Rotating Bicycle Bell (legacy) | Reserved; recording removed, firmware rejects it |
+| `5` | Squeeze Horn (legacy) | Reserved; recording removed, firmware rejects it |
 
 Authenticated playback uses:
 
@@ -498,9 +498,10 @@ confirmed.
 | PA_CTRL | GPIO 46 | Active-high NS4150B amplifier enable |
 
 The production path uses the ES8311 codec and NS4150B amplifier with signed
-16-bit stereo PCM at 16 kHz. Embedded horn and bell assets are available in
-both the production `WAVESHARE_AMOLED_175` image and the standalone
-`WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image.
+16-bit stereo PCM at 16 kHz. The generated bell ding is available in both the
+production `WAVESHARE_AMOLED_175` image and the standalone
+`WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image; the embedded horn
+recordings were removed in November 2026 and their sound IDs stay reserved.
 
 This verified status supersedes older bring-up notes that described the 1.75"
 audio path as TBD/untested or reported that the ES8311 was not detected. The

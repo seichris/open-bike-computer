@@ -19,14 +19,14 @@ constexpr size_t POWER_BUTTON_HONK_STATUS_SIZE =
 
 enum class Sound : uint8_t {
   BellDing = 1,
-  PlasticBicycleHorn = 2,
-  SqueezeHorn = 5,
 };
 
-// Sound ID 3 was the removed rotating-bell recording. Keep it unassigned so
-// persisted settings and older clients fail closed instead of selecting a
-// different sound.
+// Sound IDs 2 and 5 were the removed horn recordings and 3 the removed
+// rotating-bell recording. They stay unassigned so persisted settings and
+// older clients fail closed instead of selecting a different sound.
+constexpr uint8_t RESERVED_PLASTIC_BICYCLE_HORN_SOUND_ID = 2;
 constexpr uint8_t RESERVED_ROTATING_BELL_SOUND_ID = 3;
+constexpr uint8_t RESERVED_SQUEEZE_HORN_SOUND_ID = 5;
 
 struct PlaybackRequest {
   Sound sound;
@@ -61,8 +61,6 @@ enum class PlayCommandResult {
 inline bool isKnownSound(Sound sound) {
   switch (sound) {
   case Sound::BellDing:
-  case Sound::PlasticBicycleHorn:
-  case Sound::SqueezeHorn:
     return true;
   }
   return false;

@@ -38,6 +38,8 @@ IMAGE_INPUT_ROOTS = (
     "map-platform/config/generation-profile-policy-v2.json",
     "map-platform/config/generation-profile-policy-v3.json",
     "map-platform/config/generation-profile-policy-v4.json",
+    "map-platform/config/generation-profile-policy-v5.json",
+    "map-platform/config/topography-source-policy-v2.json",
 )
 PROMOTION_INPUT_ROOTS = IMAGE_INPUT_ROOTS + (
     ".github/workflows/map-platform-ci.yml",

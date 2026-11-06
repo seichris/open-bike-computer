@@ -187,6 +187,106 @@ struct OfflineMapContourOverlayTests {
         }
         check(settled, "a tampered companion is rejected: \(rejected.topographyOverlayStatus)")
         check(rejected.topographyOverlay == nil, "a tampered companion shows no overlay")
+
+        // Apple Maps draws mainland China in GCJ-02 and its neighbours in
+        // WGS-84. Any selection reaching the mainland is warped point by point,
+        // so one across the border lines up on both sides.
+        func alignsChina(_ west: Double, _ south: Double, _ east: Double, _ north: Double) -> Bool {
+            BicinoTopographyTileOverlay.alignsChina(
+                boundsE7: [west, south, east, north].map { Int(($0 * 10_000_000).rounded()) }
+            )
+        }
+        check(alignsChina(113.2, 23.0, 113.5, 23.2), "a Guangzhou selection is drawn in GCJ-02")
+        check(!alignsChina(114.13, 22.24, 114.22, 22.29), "a Hong Kong Island selection stays in WGS-84")
+        check(alignsChina(113.9, 22.45, 114.2, 22.6),
+              "a Shenzhen selection reaching Hong Kong is shown, aligned point by point")
+        // Labels in a view across the border come from both sides' WGS-84
+        // areas: a Shenzhen hill drawn shifted and a Hong Kong hill drawn in
+        // place.
+        let shenzhenHill = (latitude: 22.5300, longitude: 114.0830)
+        let shenzhenDrawn = GCJ02.mapKit(fromWGS84: shenzhenHill.latitude, longitude: shenzhenHill.longitude)
+        let hongKongHill = (latitude: 22.5011, longitude: 114.1281)
+        let shownAt = [
+            MKMapPoint(CLLocationCoordinate2D(latitude: shenzhenDrawn.latitude, longitude: shenzhenDrawn.longitude)),
+            MKMapPoint(CLLocationCoordinate2D(latitude: hongKongHill.latitude, longitude: hongKongHill.longitude)),
+        ]
+        let view = MKMapRect(
+            x: shownAt.map(\.x).min()!, y: shownAt.map(\.y).min()!,
+            width: abs(shownAt[0].x - shownAt[1].x), height: abs(shownAt[0].y - shownAt[1].y)
+        ).insetBy(dx: -10, dy: -10)
+        let area = BicinoTopographyTileOverlay.labelArea(for: view, alignsChina: true)
+        let unshiftedArea = BicinoTopographyTileOverlay.labelArea(for: view, alignsChina: false)
+        func covers(_ area: (west: Int, south: Int, east: Int, north: Int), _ hill: (latitude: Double, longitude: Double)) -> Bool {
+            let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
+            return Double(area.west) <= point.0 && point.0 <= Double(area.east) &&
+                Double(area.south) <= point.1 && point.1 <= Double(area.north)
+        }
+        check(covers(area, shenzhenHill) && covers(area, hongKongHill),
+              "labels across the border are queried from both sides' WGS-84 areas")
+        check(!covers(unshiftedArea, shenzhenHill),
+              "the view's own area alone would miss the Shenzhen hill's labels")
+        // Beside the border a MapKit pixel takes the mainland reading, so a
+        // Hong Kong label there would sit on shifted Shenzhen contours.
+        func label(_ hill: (latitude: Double, longitude: Double), alignsChina: Bool = true) -> CLLocationCoordinate2D? {
+            let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
+            return BicinoTopographyTileOverlay.drawnCoordinate(worldX: point.0, worldY: point.1, alignsChina: alignsChina)
+        }
+        func near(_ coordinate: CLLocationCoordinate2D?, _ latitude: Double, _ longitude: Double) -> Bool {
+            guard let coordinate else { return false }
+            return abs(coordinate.latitude - latitude) < 1e-7 && abs(coordinate.longitude - longitude) < 1e-7
+        }
+        let besideBorder = (latitude: 22.52727, longitude: 114.08211)
+        check(label(besideBorder) == nil && near(label(besideBorder, alignsChina: false), 22.52727, 114.08211),
+              "a Hong Kong label beside the border is skipped where the tile shows Shenzhen")
+        check(near(label(hongKongHill), hongKongHill.latitude, hongKongHill.longitude) &&
+              near(label(shenzhenHill), shenzhenDrawn.latitude, shenzhenDrawn.longitude),
+              "labels elsewhere sit where their own contours are drawn")
+        // A terrain-relief cell moves whole with its centre, so a Shenzhen
+        // cell across the border keeps its shape, and a Hong Kong cell in the
+        // strip is not drawn over the shifted Shenzhen terrain there.
+        func world(_ place: (latitude: Double, longitude: Double)) -> (Double, Double) {
+            BicinoTopographyTileOverlay.worldPoint(latitude: place.latitude, longitude: place.longitude)
+        }
+        func relief(_ center: (Double, Double), alignsChina: Bool = true) -> [CLLocationCoordinate2D]? {
+            BicinoTopographyTileOverlay.reliefCorners(
+                worldX: center.0 - 64, worldY: center.1 - 64, size: 128, alignsChina: alignsChina)
+        }
+        func same(_ a: [CLLocationCoordinate2D]?, _ b: [CLLocationCoordinate2D]?) -> Bool {
+            guard let a, let b else { return false }
+            return zip(a, b).allSatisfy { $0.latitude == $1.latitude && $0.longitude == $1.longitude }
+        }
+        let shenzhen = (latitude: 22.5431, longitude: 114.0579)
+        var inMainland = shenzhen
+        var inHongKong = hongKongHill
+        for _ in 0..<50 {
+            let middle = (latitude: (inMainland.latitude + inHongKong.latitude) / 2,
+                          longitude: (inMainland.longitude + inHongKong.longitude) / 2)
+            if MainlandChinaRegion.contains(latitude: middle.latitude, longitude: middle.longitude) {
+                inMainland = middle
+            } else {
+                inHongKong = middle
+            }
+        }
+        let border = world(inMainland), inland = world(shenzhen)
+        let length = hypot(inland.0 - border.0, inland.1 - border.1)
+        let straddling = (border.0 + (inland.0 - border.0) / length * 20,
+                          border.1 + (inland.1 - border.1) / length * 20)
+        let inPlace = relief(straddling, alignsChina: false)!
+        check(inPlace.contains { !MainlandChinaRegion.contains(latitude: $0.latitude, longitude: $0.longitude) },
+              "the Shenzhen test cell reaches across the border")
+        guard let drawn = relief(straddling) else { fail("a Shenzhen cell at the border is drawn") }
+        let metersPerPoint = MKMetersPerMapPointAtLatitude(inMainland.latitude)
+        let moves = zip(inPlace, drawn).map { from, to in
+            ((MKMapPoint(to).x - MKMapPoint(from).x) * metersPerPoint,
+             (MKMapPoint(to).y - MKMapPoint(from).y) * metersPerPoint)
+        }
+        check(hypot(moves[0].0, moves[0].1) > 100 &&
+              moves.allSatisfy { hypot($0.0 - moves[0].0, $0.1 - moves[0].1) < 1 },
+              "a Shenzhen cell across the border moves whole and keeps its shape")
+        check(relief(world(besideBorder)) == nil && relief(world(besideBorder), alignsChina: false) != nil,
+              "a Hong Kong relief cell in the strip is not drawn over shifted Shenzhen terrain")
+        check(same(relief(world(hongKongHill)), relief(world(hongKongHill), alignsChina: false)),
+              "Hong Kong relief cells beyond the strip stay in place")
         print("Offline map contour overlay tests passed")
     }
 }

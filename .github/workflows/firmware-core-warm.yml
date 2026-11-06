@@ -11,6 +11,7 @@ on:
     paths:
       - "esp32/**"
       - ".github/actions/firmware-build-cache/**"
+      - ".github/actions/free-runner-disk/**"
       - ".github/scripts/firmware_core_artifact.py"
       - ".github/workflows/ci.yml"
       - ".github/workflows/firmware-core-warm.yml"

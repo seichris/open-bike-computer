@@ -69,9 +69,7 @@ public:
   void resumePendingActivations();
   using StorageControlSubmit = bool (*)(void (*)(void *), void *);
   void setStorageControlSubmit(StorageControlSubmit submit) { storageControlSubmit_ = submit; }
-  void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
-    operationOwner_ = owner;
-  }
+  void setOperationOwner(firmware_update::DeviceOperationOwner *owner);
   std::string selectionHealthJson() const;
   // Boot recovery/storage worker only: resolves retained operation identity.
   void observeBootSelection(const ActiveMapSelection &selected, bool loaded,
@@ -170,12 +168,28 @@ private:
     device_transfer::HttpResponseCompletionToken response;
     bool armed = false;
     bool responseCompleted = false;
+    // Failed activation attempts and the earliest next retry (millis).
+    uint8_t failures = 0;
+    uint32_t retryAfterMs = 0;
+    // While waiting for this session's running attempt: the storage progress
+    // count last seen, and when it last moved (millis).
+    bool waiting = false;
+    uint32_t waitingProgress = 0;
+    uint32_t waitingSinceMs = 0;
     bool pending() const { return !identity.session.empty(); }
   };
   CommitRecovery commitRecovery_;
   void armCommitRecovery(const device_transfer::HttpRequest &request);
   void retryAcceptedActivation(const std::string &sessionId);
-  bool recoverCommitDisposition(const CommitRecovery &recovery);
+  // These three require the state lock.
+  void scheduleCommitRecoveryRetry();
+  void deferCommitRecoveryRetry();
+  bool commitRecoveryDue() const;
+  // Completed retires the disposition and Failed spends an attempt. Deferred
+  // waits for this session's attempt that is still running and making storage
+  // progress, without spending one.
+  enum class CommitRecoveryResult : uint8_t { Completed, Failed, Deferred };
+  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);
   void executeOperationTask();
   std::string readOperationStatus(const std::string &operationID) const;
@@ -260,6 +274,7 @@ private:
                                bool peerClosedCleanly);
   void requestAutomaticExit();
   void executeActivation(const std::string &sessionId, bool automaticExit);
+  void finishUnwoundActivation(const std::string &sessionId) noexcept;
   static void ownedActivation(void *context, const char *sessionId,
                               bool automaticExit);
   static void ownedInstalledCleanup(void *context, const char *sessionId,
@@ -269,10 +284,12 @@ private:
   void rememberOwnerRecovery(const char *code) noexcept;
   __attribute__((noinline)) void recordActivationOutcome(const std::string &phase,
                                                         const std::string &code);
+  __attribute__((noinline)) void recordStorageWriteFailure(const char *code);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,
                                 bool active);
   bool streamStoragePathAccessible() const;
   bool streamStoragePathWritable() const;
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &snapshot) const;
   bool resumePendingStreamActivation(
       const MapStreamInstallSnapshot *recovered = nullptr);
   static void activationTaskThunk(void *arg);

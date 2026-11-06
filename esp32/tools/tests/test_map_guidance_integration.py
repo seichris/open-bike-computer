@@ -542,9 +542,27 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             MAP_RENDERER_SOURCE,
             "bool Maps::processPendingVectorMapActivation",
         )
-        self.assertIn("probeVectorMapFolderOnStorageOwner", control)
-        self.assertIn("switchVectorMapFolderOnStorageOwner", control)
+        self.assertIn("activateVectorMapFolderOnStorageOwner(request.folder)",
+                      control)
         self.assertIn("map_probe_diagnostics::Code::RootSwitchFailed", control)
+        # Boot and runtime share one probe-then-switch path that validates the
+        # label font once and keeps the old root when the switch fails.
+        activate = function_body(
+            MAP_RENDERER_SOURCE,
+            "Maps::activateVectorMapFolderOnStorageOwner",
+        )
+        probe = activate.index(
+            "probeVectorMapFolderOnStorageOwner(folder, &validatedFont)")
+        switch = activate.index(
+            "switchVectorMapFolderOnStorageOwner(folder, &validatedFont)")
+        self.assertLess(probe, switch)
+        self.assertLess(activate.index("if (result.loaded())"), switch)
+        self.assertIn("map_probe_diagnostics::Code::RootSwitchFailed", activate)
+        boot = function_body(
+            MAP_RENDERER_SOURCE, "Maps::activateVectorMapFolderDetailed"
+        )
+        self.assertIn("activateVectorMapFolderOnStorageOwner(folder)", boot)
+        self.assertIn("finalizeVectorMapFolderSwitchOnUi()", boot)
         self.assertIn("gMapRenderControlOperation.store(true", control)
         self.assertIn("gMapRenderControlOperation.store(false", control)
         self.assertIn("WakeReason::Transfer", control)
@@ -584,7 +602,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             '"boot_selection_final"',
         ):
             self.assertIn(event, setup)
-        self.assertIn("probeVectorMapFolderDetailed", setup)
+        self.assertIn("activateVectorMapFolderDetailed", setup)
         self.assertIn('recordHealth("ready")', setup)
         self.assertIn("takeMapAvailabilityTransition", loop)
         self.assertIn("bleNavServer.noteMapAvailabilityChanged()", loop)

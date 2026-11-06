@@ -157,11 +157,10 @@ The selected sounds are:
 | BLE ID | App label | Implementation |
 | ---: | --- | --- |
 | `1` | Bell Ding | Generated 16 kHz PCM |
-| `2` | Bicycle Horn | Embedded CC0 recording |
-| `5` | Squeeze Horn | Embedded CC0 recording |
 
-BLE sound ID `3` is reserved after removal of the unused rotating-bell
-recording. It is not reassigned, so legacy settings fail closed.
+BLE sound IDs `2` and `5` are reserved after removal of the horn recordings in
+November 2026, and `3` after removal of the unused rotating-bell recording.
+None is reassigned, so legacy settings fail closed.
 
 Recorded assets are signed 16-bit little-endian PCM at 16 kHz with two
 channels. Their source and license information is recorded in

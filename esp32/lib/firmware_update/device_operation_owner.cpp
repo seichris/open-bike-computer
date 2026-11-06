@@ -423,8 +423,21 @@ esp_err_t DeviceOperationOwner::execute(
     dispatchState_.store(internal_owner_policy::commandIssued(
                              dispatchState_.load(std::memory_order_relaxed)),
                          std::memory_order_release);
-    if (xQueueReceive(resultQueue_, &result,
-                      timeoutTicks) != pdTRUE) {
+    // A large map's activation can outlast one deadline while still reading
+    // the card. Keep waiting only while it reports verified storage progress;
+    // a command that stops progressing still times out and poisons below.
+    const std::atomic<uint32_t> *progress =
+        command.operation == Operation::MapActivation ? mapActivationProgress_ : nullptr;
+    uint32_t progressSeen = progress ? progress->load(std::memory_order_relaxed) : 0;
+    bool received = false;
+    for (;;) {
+      received = xQueueReceive(resultQueue_, &result, timeoutTicks) == pdTRUE;
+      if (received || progress == nullptr) break;
+      const uint32_t progressNow = progress->load(std::memory_order_relaxed);
+      if (progressNow == progressSeen) break;
+      progressSeen = progressNow;
+    }
+    if (!received) {
       // The issued operation may still be using the staging buffers or may
       // complete later. Permanently reject subsequent commands in this boot
       // so a late result cannot be paired with a new caller and the shared

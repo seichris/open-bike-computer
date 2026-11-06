@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 from argparse import Namespace
@@ -80,7 +81,7 @@ def verify_envelope(envelope: dict, public_key_base64: str) -> dict:
 
 
 class WebManifestTests(unittest.TestCase):
-    def test_publisher_verifies_complete_factory_chain_and_is_create_only(self):
+    def publish_case(self, firmware=None):
         import test_factory_release_manifest as factory_tests
         helper = factory_tests.FactoryReleaseManifestTests()
         with tempfile.TemporaryDirectory() as temporary:
@@ -88,7 +89,7 @@ class WebManifestTests(unittest.TestCase):
             bundle, descriptor_path, _, key = helper.create_inputs(root)
             descriptor = json.loads(descriptor_path.read_text())
             factory = root / f"{factory_tests.TARGET}.factory"
-            sample, images = inputs()
+            sample, images = inputs(firmware=firmware)
             for old in (factory / "images").iterdir():
                 old.unlink()
             for name, data in images.items():
@@ -124,15 +125,29 @@ class WebManifestTests(unittest.TestCase):
                 web.publish(args)
                 names = sorted(path.name for path in args.output_dir.iterdir())
                 manifests = web.asset_names(factory_tests.TARGET)
-                # Three signed recipes plus three content-addressed images
-                # (application, OTA bootstrap and destination table).
-                self.assertEqual(len(names), 6)
-                self.assertTrue(set(manifests.values()) <= set(names))
-                for name in manifests.values():
+                firmware = images["images/00010000-firmware.bin"]
+                fits = len(firmware) <= web.LEGACY.max_application_bytes
+                published = [name for kind, name in manifests.items() if fits or kind != "legacy-recovery"]
+                # The signed recipes, the signed image identity and three
+                # content-addressed images (application, OTA bootstrap and
+                # destination table).
+                self.assertEqual(len(names), len(published) + 4)
+                self.assertTrue(set(published) <= set(names))
+                self.assertEqual(manifests["legacy-recovery"] in names, fits)
+                for name in published:
                     envelope = json.loads((args.output_dir / name).read_text())
                     payload = json.loads(base64.b64decode(envelope["payload"]))
                     self.assertEqual(payload["factoryDescriptorSha256"], web.digest(descriptor_path.read_bytes()))
                     self.assertEqual(payload["releaseTag"], "v2.3.4")
+                # Bound to the dual-4-MiB rescue, which every release carries.
+                recovery = json.loads(base64.b64decode(json.loads(
+                    (args.output_dir / manifests["recovery"]).read_text())["payload"]))
+                identity_envelope = json.loads(
+                    (args.output_dir / f"{factory_tests.TARGET}.image-identity.json").read_text())
+                identity = json.loads(base64.b64decode(identity_envelope["payload"]))
+                self.assertEqual(identity, web.identity_payload(recovery, firmware))
+                self.assertEqual((identity["releaseTag"], identity["build"], identity["image"]["sha256"]),
+                                 ("v2.3.4", 57, recovery["writes"][0]["sha256"]))
                 with self.assertRaisesRegex(ValueError, "create-only"):
                     web.publish(args)
                 descriptor["sourceIdentity"] = "0" * 40
@@ -141,6 +156,12 @@ class WebManifestTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     web.publish(args)
                 self.assertFalse(args.output_dir.exists())
+
+    def test_publisher_verifies_complete_factory_chain_and_is_create_only(self):
+        self.publish_case()
+
+    def test_identity_is_published_when_the_legacy_rescue_is_omitted(self):
+        self.publish_case(firmware=b"\xe9" + bytes(web.LEGACY.max_application_bytes))
 
     def test_both_layout_recoveries_preserve_all_non_recovery_regions(self):
         for target in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"):
@@ -277,6 +298,59 @@ class WebManifestTests(unittest.TestCase):
             self.assertEqual(base64.b64decode(envelope["payload"]),
                              base64.b64decode(expected["packages"][name]["payload"]), name)
             self.assertEqual(payload["target"], "WAVESHARE_AMOLED_175")
+
+    def signed_identity(self):
+        payload, assets = web.recovery_payload(*inputs(), web.CURRENT)
+        payload.update(factoryArchiveSha256="b" * 64, releaseTag="v0.3.5")
+        return payload, assets[payload["writes"][0]["asset"]]
+
+    def test_identity_binds_the_exact_signed_application(self):
+        payload, firmware = self.signed_identity()
+        identity = web.identity_payload(payload, firmware)
+        self.assertEqual(identity["image"], {
+            "size": len(firmware), "sha256": web.digest(firmware), "headLength": 4096,
+            "headSha256": web.digest(firmware[:4096]), "tail": firmware[-32:].hex()})
+        for field in ("target", "environment", "version", "build", "gitSha", "releaseTag"):
+            self.assertEqual(identity[field], payload[field])
+        self.assertIsNone(identity["descriptor"])
+        with self.assertRaisesRegex(ValueError, "identity image"):
+            web.identity_payload(payload, firmware + b"\0")
+
+    def test_app_descriptor_is_informational_printable_ascii(self):
+        image = bytearray(b"\xe9" + bytes(0x1FF))
+        struct.pack_into("<I", image, 0x20, 0xABCD5432)
+        image[0x30:0x38] = b"v1.2.3\x01\x80"
+        image[0x50:0x55] = b"esp32"
+        image[0xB0:0xD0] = bytes(range(32))
+        self.assertEqual(web.app_descriptor(bytes(image)),
+                         {"version": "v1.2.3??", "projectName": "esp32", "elfSha256": bytes(range(32)).hex()})
+        image[0x20] ^= 1
+        self.assertIsNone(web.app_descriptor(bytes(image)))
+        self.assertIsNone(web.app_descriptor(b"\xe9" * 0x100))
+
+    def test_identity_signature_is_domain_separated(self):
+        payload, firmware = self.signed_identity()
+        identity = web.identity_payload(payload, firmware)
+        key = ec.derive_private_key(1, ec.SECP256R1())  # public test key only
+        envelope = web.sign(identity, base64.b64encode((1).to_bytes(32, "big")).decode(), web.IDENTITY_DOMAIN)
+        raw = base64.b64decode(envelope["signature"])
+        der = utils.encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        key.public_key().verify(der, web.IDENTITY_DOMAIN + web.canonical(identity), ec.ECDSA(hashes.SHA256()))
+        with self.assertRaises(Exception):
+            key.public_key().verify(der, web.DOMAIN + web.canonical(identity), ec.ECDSA(hashes.SHA256()))
+
+    def test_identity_golden_vector(self):
+        path = Path(__file__).parents[1] / "web-flasher" / "identity-test-vector.json"
+        if not path.exists():
+            self.fail("cross-language identity vector missing")
+        vector = json.loads(path.read_text())
+        payload, firmware = self.signed_identity()
+        data = base64.b64decode(vector["envelope"]["payload"])
+        self.assertEqual(data, web.canonical(web.identity_payload(payload, firmware)))
+        raw = base64.b64decode(vector["envelope"]["signature"])
+        der = utils.encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        public = ec.derive_private_key(1, ec.SECP256R1()).public_key()
+        public.verify(der, web.IDENTITY_DOMAIN + data, ec.ECDSA(hashes.SHA256()))
 
 
 class _nothing:

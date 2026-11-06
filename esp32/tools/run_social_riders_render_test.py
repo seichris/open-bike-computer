@@ -54,6 +54,12 @@ def main():
     # Use the production configuration unmodified. Its assertion handler must
     # terminate, so an allocation failure fails the test instead of hanging it.
     config = (ROOT / 'esp32/lib/lvgl/lv_conf.h').read_text(encoding='utf-8-sig')
+    # lv_conf.h turns LVGL's built-in Montserrat fonts off; the firmware's own
+    # copies under lib/gui/src/fonts/ define the same lv_font_montserrat_* names.
+    fonts = sorted((ROOT / 'esp32/lib/gui/src/fonts').glob('lv_font_montserrat_*.c'))
+    if not fonts:
+        parser.error('no project Montserrat fonts found under esp32/lib/gui/src/fonts')
+    font_sources = ' '.join(f'"{path}"' for path in fonts)
     if '#define LV_ASSERT_HANDLER abort();' not in config:
         parser.error('production LVGL assertions must abort for this host test')
     with tempfile.TemporaryDirectory(prefix='bicino-social-render-') as temporary:
@@ -72,7 +78,7 @@ set(LV_CONF_BUILD_DISABLE_DEMOS ON CACHE BOOL "" FORCE)
 set(LV_CONF_BUILD_DISABLE_THORVG_INTERNAL ON CACHE BOOL "" FORCE)
 add_subdirectory("{lvgl}" lvgl)
 add_executable(social_render "{ROOT}/esp32/tools/tests/test_social_riders_render.cpp"
- "{ROOT}/esp32/lib/social_riders/social_riders_view.cpp")
+ "{ROOT}/esp32/lib/social_riders/social_riders_view.cpp" {font_sources})
 target_include_directories(social_render PRIVATE "{build}" "{ROOT}/esp32/lib/social_riders")
 target_link_libraries(social_render PRIVATE lvgl m)
 ''')
