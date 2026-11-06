@@ -27,6 +27,9 @@ struct TopographyMapKitTileWarpTests {
             try await overviewPlacement(scale: scale)
             try overzoomPlacement(scale: scale)
             try await chinaControlPoint(scale: scale, zoom: 22)
+            for zoom in [16, 20] {
+                try await borderControlPoints(scale: scale, zoom: zoom)
+            }
         }
         try await overviewLimits()
         let unchanged = Data([1, 2, 3])
@@ -199,6 +202,80 @@ struct TopographyMapKitTileWarpTests {
                      "contour did not move to its GCJ-aligned MapKit location")
     }
 
+    /// A Shenzhen position just inside the border and a Hong Kong position
+    /// whose Apple Maps pixel lies just across the shifted border line. The
+    /// warp must place each mark where Apple Maps draws it: interpolating a
+    /// cell across that line would smear both, and at zoom 20 the two sides'
+    /// sources are too far apart for a single source window.
+    private static func borderControlPoints(scale: Int, zoom: Int) async throws {
+        let side = 256 * scale
+        // Walk from Shenzhen towards Sheung Shui to the border.
+        var inside = (lat: 22.5431, lon: 114.0579)
+        var outside = (lat: 22.5011, lon: 114.1281)
+        for _ in 0..<60 {
+            let middle = (lat: (inside.lat + outside.lat) / 2, lon: (inside.lon + outside.lon) / 2)
+            if MainlandChinaRegion.contains(latitude: middle.lat, longitude: middle.lon) {
+                inside = middle
+            } else {
+                outside = middle
+            }
+        }
+        let gap = zoom >= 20 ? 3.0 : 20.0
+        let heading = (lat: outside.lat - 22.5431, lon: outside.lon - 114.0579)
+        let length = (heading.lat * heading.lat + heading.lon * heading.lon).squareRoot()
+        func along(_ meters: Double) -> (lat: Double, lon: Double) {
+            let degrees = meters / 111_320
+            return (inside.lat + heading.lat / length * degrees, inside.lon + heading.lon / length * degrees)
+        }
+        let shenzhen = along(-gap)
+        let acrossBorder = along(gap)
+        let hongKong = GCJ02.fromWGS84(latitude: acrossBorder.lat, longitude: acrossBorder.lon)
+        precondition(MainlandChinaRegion.contains(latitude: shenzhen.lat, longitude: shenzhen.lon) &&
+                     !MainlandChinaRegion.contains(latitude: hongKong.latitude, longitude: hongKong.longitude),
+                     "the control points lie on either side of the border")
+        let shenzhenMapKit = GCJ02.mapKit(fromWGS84: shenzhen.lat, longitude: shenzhen.lon)
+        let readBack = GCJ02.wgs84(fromMapKit: hongKong.latitude, longitude: hongKong.longitude)
+        precondition(readBack.latitude == hongKong.latitude && readBack.longitude == hongKong.longitude,
+                     "Apple Maps draws the Hong Kong position unshifted")
+        let marks = [
+            (source: pixel(lat: shenzhen.lat, lon: shenzhen.lon, zoom: zoom, side: side),
+             target: pixel(lat: shenzhenMapKit.latitude, lon: shenzhenMapKit.longitude, zoom: zoom, side: side)),
+            (source: pixel(lat: hongKong.latitude, lon: hongKong.longitude, zoom: zoom, side: side),
+             target: pixel(lat: hongKong.latitude, lon: hongKong.longitude, zoom: zoom, side: side)),
+        ]
+        let distance = ((marks[0].target.x - marks[1].target.x) * (marks[0].target.x - marks[1].target.x) +
+            (marks[0].target.y - marks[1].target.y) * (marks[0].target.y - marks[1].target.y)).squareRoot()
+        precondition(distance < Double(64 * scale), "the two marks share a border cell or its neighbour")
+
+        let nativeZoom = min(zoom, 16)
+        let nativeMarks = [(lat: shenzhen.lat, lon: shenzhen.lon), (lat: hongKong.latitude, lon: hongKong.longitude)]
+            .map { pixel(lat: $0.lat, lon: $0.lon, zoom: nativeZoom, side: side) }
+        for mark in marks {
+            let tileX = Int(floor(mark.target.x / Double(side)))
+            let tileY = Int(floor(mark.target.y / Double(side)))
+            let started = ProcessInfo.processInfo.systemUptime
+            let output = try await TopographyMapKitTileWarp.tile(
+                z: zoom, x: tileX, y: tileY, scale: scale
+            ) { _, x, y, _ in
+                try TopographyContourOverview.tile(z: zoom, x: x, y: y, scale: scale) { z, x, y, _ in
+                    precondition(z == nativeZoom)
+                    let inTile = nativeMarks.filter {
+                        Int($0.x) / side == x && Int($0.y) / side == y
+                    }
+                    guard !inTile.isEmpty else { return nil }
+                    return try markedTile(side: side, points: inTile.map { (Int($0.x) % side, Int($0.y) % side) })
+                }
+            }
+            precondition(ProcessInfo.processInfo.systemUptime - started < 5,
+                         "a border tile is warped in reasonable time")
+            guard let output else { preconditionFailure("border tile is missing") }
+            let targetAlpha = try alpha(output, side: side,
+                x: Int(mark.target.x) - tileX * side, y: Int(mark.target.y) - tileY * side)
+            precondition(targetAlpha > 128,
+                         "each side's contour lands where Apple Maps draws it (zoom \(zoom), scale \(scale))")
+        }
+    }
+
     private static func pixel(
         lat: Double, lon: Double, zoom: Int, side: Int
     ) -> (x: Double, y: Double) {
@@ -208,6 +285,10 @@ struct TopographyMapKitTileWarpTests {
     }
 
     private static func markedTile(side: Int, x: Int, y: Int, radius: Int = 4) throws -> Data {
+        try markedTile(side: side, points: [(x, y)], radius: radius)
+    }
+
+    private static func markedTile(side: Int, points: [(Int, Int)], radius: Int = 4) throws -> Data {
         guard let context = CGContext(
             data: nil, width: side, height: side, bitsPerComponent: 8,
             bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -216,11 +297,13 @@ struct TopographyMapKitTileWarpTests {
         ), let bytes = context.data?.assumingMemoryBound(to: UInt8.self) else {
             throw TestError.image
         }
-        for row in max(0, y - radius)...min(side - 1, y + radius) {
-            for column in max(0, x - radius)...min(side - 1, x + radius) {
-                let index = (row * side + column) * 4
-                bytes[index] = 255
-                bytes[index + 3] = 255
+        for (x, y) in points {
+            for row in max(0, y - radius)...min(side - 1, y + radius) {
+                for column in max(0, x - radius)...min(side - 1, x + radius) {
+                    let index = (row * side + column) * 4
+                    bytes[index] = 255
+                    bytes[index + 3] = 255
+                }
             }
         }
         guard let image = context.makeImage() else { throw TestError.image }

@@ -8168,18 +8168,10 @@ final class OfflineMapManager: ObservableObject {
                     return
                 }
                 self.topographyOverlay = nil
-                self.topographyOverlayStatus = Self.topographyOverlayFailureStatus(error)
+                self.topographyOverlayStatus =
+                    "The saved contour file could not be verified. Download the map again to show offline contours."
             }
         }
-    }
-
-    /// Downloading again cannot help a selection that crosses mainland China's
-    /// border, so only a damaged file asks for it.
-    static func topographyOverlayFailureStatus(_ error: Error) -> String {
-        if error as? BicinoTopographyTileOverlay.AlignmentError == .crossesMainlandChinaBorder {
-            return "Offline contours aren't shown for maps that cross mainland China's border."
-        }
-        return "The saved contour file could not be verified. Download the map again to show offline contours."
     }
 #endif
 

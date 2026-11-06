@@ -2,16 +2,27 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
-/// The signed contour companion uses WGS-84 XYZ pixels. Mainland-China Apple
-/// Maps uses GCJ-02 coordinates for overlays, so each requested MapKit pixel
-/// must look up its contour colour at the corresponding WGS-84 pixel. Only
-/// overlays wholly inside `MainlandChinaRegion` are warped, so every pixel uses
-/// GCJ-02. This changes only the iPhone presentation; the saved and device
-/// artifacts stay in WGS-84.
+/// The signed contour companion uses WGS-84 XYZ pixels. Apple Maps draws
+/// mainland China in GCJ-02, so each requested MapKit pixel that Apple Maps
+/// shifts looks up its contour colour at the corresponding WGS-84 pixel, and
+/// every other pixel keeps its own. A tile across mainland China's border
+/// samples one source area for each side. This changes only the iPhone
+/// presentation; the saved and device artifacts stay in WGS-84.
 nonisolated enum TopographyMapKitTileWarp {
     typealias TileLoader = @Sendable (_ z: Int, _ x: Int, _ y: Int, _ scale: Int) async throws -> Data?
 
-    private struct Point { let x: Double; let y: Double }
+    /// A source position in WGS-84 pixels, and whether Apple Maps shifts the
+    /// MapKit pixel it belongs to.
+    private struct Point { let x: Double; let y: Double; let shifted: Bool }
+
+    /// The stitched source rectangle that one side of the border samples.
+    private struct SourceWindow {
+        let minX: Int
+        let minY: Int
+        let width: Int
+        var pixels: [UInt8]
+    }
+
     private static let tileSide = 256
 
     enum WarpError: Error { case sourceTile, outputTile, extent }
@@ -22,14 +33,25 @@ nonisolated enum TopographyMapKitTileWarp {
         zoom: Int,
         scale: Int
     ) -> (x: Double, y: Double) {
-        let world = Double(tileSide * scale) * Double(1 << zoom)
+        let point = source(
+            forMapKitPixelX: x, y: y,
+            world: Double(tileSide * scale) * Double(1 << zoom)
+        )
+        return (point.x, point.y)
+    }
+
+    private static func source(forMapKitPixelX x: Double, y: Double, world: Double) -> Point {
         let longitude = x / world * 360 - 180
         let latitude = atan(sinh(.pi * (1 - 2 * y / world))) * 180 / .pi
-        let wgs = GCJ02.toWGS84(latitude: latitude, longitude: longitude)
+        let wgs = GCJ02.wgs84(fromMapKit: latitude, longitude: longitude)
+        guard wgs.latitude != latitude || wgs.longitude != longitude else {
+            return Point(x: x, y: y, shifted: false)
+        }
         let radians = wgs.latitude * .pi / 180
-        return (
-            (wgs.longitude + 180) / 360 * world,
-            (1 - asinh(tan(radians)) / .pi) / 2 * world
+        return Point(
+            x: (wgs.longitude + 180) / 360 * world,
+            y: (1 - asinh(tan(radians)) / .pi) / 2 * world,
+            shifted: true
         )
     }
 
@@ -64,65 +86,104 @@ nonisolated enum TopographyMapKitTileWarp {
             return try await loader(z, x, y, scale)
         }
 
+        func sample(_ pixelX: Double, _ pixelY: Double) -> Point {
+            source(forMapKitPixelX: originX + pixelX, y: originY + pixelY, world: world)
+        }
         var grid = [Point]()
         grid.reserveCapacity((count + 1) * (count + 1))
         for row in 0...count {
             for column in 0...count {
-                let point = sourcePixel(
-                    forMapKitPixelX: originX + Double(column * step),
-                    y: originY + Double(row * step),
-                    zoom: z,
-                    scale: scale
-                )
-                grid.append(Point(x: point.x, y: point.y))
+                grid.append(sample(Double(column * step), Double(row * step)))
             }
         }
-        let minX = Int(floor(grid.map(\.x).min()! - 0.5))
-        let maxX = Int(floor(grid.map(\.x).max()! - 0.5)) + 1
-        let minY = Int(floor(grid.map(\.y).min()! - 0.5))
-        let maxY = Int(floor(grid.map(\.y).max()! - 0.5)) + 1
-        let firstTileX = Int(floor(Double(minX) / Double(side)))
-        let lastTileX = Int(floor(Double(maxX) / Double(side)))
-        let firstTileY = Int(floor(Double(minY) / Double(side)))
-        let lastTileY = Int(floor(Double(maxY) / Double(side)))
-        guard firstTileX >= 0, firstTileY >= 0,
-              lastTileX < (1 << z), lastTileY < (1 << z),
-              lastTileX - firstTileX <= 2, lastTileY - firstTileY <= 2 else {
-            throw WarpError.extent
+        // Interpolating a cell that straddles the border would smear between
+        // the two sides' source areas, so map each of its pixels exactly. Its
+        // centre and edge midpoints also catch a border wiggle between corners.
+        var exact: [Int: [Point]] = [:]
+        for cellY in 0..<count {
+            for cellX in 0..<count {
+                let left = Double(cellX * step), top = Double(cellY * step)
+                let half = Double(step) / 2, full = Double(step)
+                let sides = [
+                    grid[cellY * (count + 1) + cellX], grid[cellY * (count + 1) + cellX + 1],
+                    grid[(cellY + 1) * (count + 1) + cellX], grid[(cellY + 1) * (count + 1) + cellX + 1],
+                    sample(left + half, top + half), sample(left + half, top),
+                    sample(left + half, top + full), sample(left, top + half), sample(left + full, top + half),
+                ].map(\.shifted)
+                guard sides.contains(!sides[0]) else { continue }
+                var points = [Point]()
+                points.reserveCapacity(step * step)
+                for row in 0..<step {
+                    for column in 0..<step {
+                        points.append(sample(left + Double(column) + 0.5, top + Double(row) + 0.5))
+                    }
+                }
+                exact[cellY * count + cellX] = points
+            }
         }
 
-        // Stitch only the sampled source rectangle, with transparent pixels
-        // for missing tiles. Sampling a dictionary of entire RGBA arrays for
-        // every channel caused millions of hashes and retain/release pairs per
-        // tile, delaying MapKit's replies during a zoom gesture.
-        let sourceWidth = maxX - minX + 1
-        let sourceHeight = maxY - minY + 1
-        var sourcePixels = [UInt8](repeating: 0, count: sourceWidth * sourceHeight * 4)
+        // Stitch only the sampled source rectangle of each side, with
+        // transparent pixels for missing tiles. Sampling a dictionary of entire
+        // RGBA arrays for every channel caused millions of hashes and
+        // retain/release pairs per tile, delaying MapKit's replies during a zoom
+        // gesture.
+        var windows: [Bool: SourceWindow] = [:]
         var hasSource = false
-        for tileY in firstTileY...lastTileY {
-            for tileX in firstTileX...lastTileX {
-                try Task.checkCancellation()
-                if let data = try await loader(z, tileX, tileY, scale) {
-                    let pixels = try decode(data, side: side)
-                    hasSource = true
-                    let left = max(minX, tileX * side)
-                    let right = min(maxX + 1, (tileX + 1) * side)
-                    let top = max(minY, tileY * side)
-                    let bottom = min(maxY + 1, (tileY + 1) * side)
-                    pixels.withUnsafeBufferPointer { input in
-                        sourcePixels.withUnsafeMutableBufferPointer { output in
-                            for row in top..<bottom {
-                                let src = ((row - tileY * side) * side + left - tileX * side) * 4
-                                let dst = ((row - minY) * sourceWidth + left - minX) * 4
-                                output.baseAddress!.advanced(by: dst).update(
-                                    from: input.baseAddress!.advanced(by: src),
-                                    count: (right - left) * 4
-                                )
+        for shifted in [false, true] {
+            let points = grid.filter { $0.shifted == shifted } +
+                exact.values.joined().filter { $0.shifted == shifted }
+            guard let firstPoint = points.first else { continue }
+            var lowX = firstPoint.x, highX = firstPoint.x
+            var lowY = firstPoint.y, highY = firstPoint.y
+            for point in points {
+                lowX = min(lowX, point.x); highX = max(highX, point.x)
+                lowY = min(lowY, point.y); highY = max(highY, point.y)
+            }
+            let minX = Int(floor(lowX - 0.5))
+            let maxX = Int(floor(highX - 0.5)) + 1
+            let minY = Int(floor(lowY - 0.5))
+            let maxY = Int(floor(highY - 0.5)) + 1
+            let firstTileX = Int(floor(Double(minX) / Double(side)))
+            let lastTileX = Int(floor(Double(maxX) / Double(side)))
+            let firstTileY = Int(floor(Double(minY) / Double(side)))
+            let lastTileY = Int(floor(Double(maxY) / Double(side)))
+            guard firstTileX >= 0, firstTileY >= 0,
+                  lastTileX < (1 << z), lastTileY < (1 << z),
+                  lastTileX - firstTileX <= 2, lastTileY - firstTileY <= 2 else {
+                throw WarpError.extent
+            }
+            let sourceWidth = maxX - minX + 1
+            let sourceHeight = maxY - minY + 1
+            var window = SourceWindow(
+                minX: minX, minY: minY, width: sourceWidth,
+                pixels: [UInt8](repeating: 0, count: sourceWidth * sourceHeight * 4)
+            )
+            for tileY in firstTileY...lastTileY {
+                for tileX in firstTileX...lastTileX {
+                    try Task.checkCancellation()
+                    if let data = try await loader(z, tileX, tileY, scale) {
+                        let pixels = try decode(data, side: side)
+                        hasSource = true
+                        let left = max(minX, tileX * side)
+                        let right = min(maxX + 1, (tileX + 1) * side)
+                        let top = max(minY, tileY * side)
+                        let bottom = min(maxY + 1, (tileY + 1) * side)
+                        pixels.withUnsafeBufferPointer { input in
+                            window.pixels.withUnsafeMutableBufferPointer { output in
+                                for row in top..<bottom {
+                                    let src = ((row - tileY * side) * side + left - tileX * side) * 4
+                                    let dst = ((row - minY) * sourceWidth + left - minX) * 4
+                                    output.baseAddress!.advanced(by: dst).update(
+                                        from: input.baseAddress!.advanced(by: src),
+                                        count: (right - left) * 4
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
+            windows[shifted] = window
         }
         guard hasSource else { return nil }
 
@@ -135,46 +196,67 @@ nonisolated enum TopographyMapKitTileWarp {
         ), let output = context.data?.assumingMemoryBound(to: UInt8.self) else {
             throw WarpError.outputTile
         }
-        try sourcePixels.withUnsafeBufferPointer { pixels in
-            for pixelY in 0..<side {
-                try Task.checkCancellation()
-                let cellY = pixelY / step
-                let fractionalY = (Double(pixelY) + 0.5 - Double(cellY * step)) / Double(step)
-                for pixelX in 0..<side {
-                    let cellX = pixelX / step
-                    let fractionalX = (Double(pixelX) + 0.5 - Double(cellX * step)) / Double(step)
-                    let upperLeft = grid[cellY * (count + 1) + cellX]
-                    let upperRight = grid[cellY * (count + 1) + cellX + 1]
-                    let lowerLeft = grid[(cellY + 1) * (count + 1) + cellX]
-                    let lowerRight = grid[(cellY + 1) * (count + 1) + cellX + 1]
-                    let sourceX = interpolate(
-                        upperLeft.x, upperRight.x, lowerLeft.x, lowerRight.x,
-                        fractionalX, fractionalY
-                    ) - 0.5
-                    let sourceY = interpolate(
-                        upperLeft.y, upperRight.y, lowerLeft.y, lowerRight.y,
-                        fractionalX, fractionalY
-                    ) - 0.5
-                    let left = Int(floor(sourceX))
-                    let top = Int(floor(sourceY))
-                    let fractionX = sourceX - Double(left)
-                    let fractionY = sourceY - Double(top)
-                    let outputIndex = (pixelY * side + pixelX) * 4
-                    // The inverse grid's extrema include a one-pixel bilinear
-                    // border, so all four neighbours are inside this rectangle.
-                    let aIndex = ((top - minY) * sourceWidth + left - minX) * 4
-                    let bIndex = aIndex + 4
-                    let cIndex = aIndex + sourceWidth * 4
-                    let dIndex = cIndex + 4
-                    for channel in 0..<4 {
-                        let a = Double(pixels[aIndex + channel])
-                        let b = Double(pixels[bIndex + channel])
-                        let c = Double(pixels[cIndex + channel])
-                        let d = Double(pixels[dIndex + channel])
-                        output[outputIndex + channel] = UInt8(
-                            (interpolate(a, b, c, d, fractionX, fractionY))
-                                .rounded().clamped(to: 0...255)
-                        )
+        let empty = SourceWindow(minX: 0, minY: 0, width: 0, pixels: [])
+        let unshifted = windows[false] ?? empty
+        let shifted = windows[true] ?? empty
+        try unshifted.pixels.withUnsafeBufferPointer { unshiftedPixels in
+            try shifted.pixels.withUnsafeBufferPointer { shiftedPixels in
+                for pixelY in 0..<side {
+                    try Task.checkCancellation()
+                    let cellY = pixelY / step
+                    let fractionalY = (Double(pixelY) + 0.5 - Double(cellY * step)) / Double(step)
+                    for pixelX in 0..<side {
+                        let cellX = pixelX / step
+                        let sourceX: Double
+                        let sourceY: Double
+                        let isShifted: Bool
+                        if let points = exact[cellY * count + cellX] {
+                            let point = points[(pixelY - cellY * step) * step + pixelX - cellX * step]
+                            sourceX = point.x - 0.5
+                            sourceY = point.y - 0.5
+                            isShifted = point.shifted
+                        } else {
+                            let fractionalX = (Double(pixelX) + 0.5 - Double(cellX * step)) / Double(step)
+                            let upperLeft = grid[cellY * (count + 1) + cellX]
+                            let upperRight = grid[cellY * (count + 1) + cellX + 1]
+                            let lowerLeft = grid[(cellY + 1) * (count + 1) + cellX]
+                            let lowerRight = grid[(cellY + 1) * (count + 1) + cellX + 1]
+                            sourceX = interpolate(
+                                upperLeft.x, upperRight.x, lowerLeft.x, lowerRight.x,
+                                fractionalX, fractionalY
+                            ) - 0.5
+                            sourceY = interpolate(
+                                upperLeft.y, upperRight.y, lowerLeft.y, lowerRight.y,
+                                fractionalX, fractionalY
+                            ) - 0.5
+                            isShifted = upperLeft.shifted
+                        }
+                        let pixels = isShifted ? shiftedPixels : unshiftedPixels
+                        let minX = isShifted ? shifted.minX : unshifted.minX
+                        let minY = isShifted ? shifted.minY : unshifted.minY
+                        let sourceWidth = isShifted ? shifted.width : unshifted.width
+                        let left = Int(floor(sourceX))
+                        let top = Int(floor(sourceY))
+                        let fractionX = sourceX - Double(left)
+                        let fractionY = sourceY - Double(top)
+                        let outputIndex = (pixelY * side + pixelX) * 4
+                        // Each side's window spans its points' extrema plus a
+                        // one-pixel bilinear border, so all four neighbours are
+                        // inside it.
+                        let aIndex = ((top - minY) * sourceWidth + left - minX) * 4
+                        let bIndex = aIndex + 4
+                        let cIndex = aIndex + sourceWidth * 4
+                        let dIndex = cIndex + 4
+                        for channel in 0..<4 {
+                            let a = Double(pixels[aIndex + channel])
+                            let b = Double(pixels[bIndex + channel])
+                            let c = Double(pixels[cIndex + channel])
+                            let d = Double(pixels[dIndex + channel])
+                            output[outputIndex + channel] = UInt8(
+                                (interpolate(a, b, c, d, fractionX, fractionY))
+                                    .rounded().clamped(to: 0...255)
+                            )
+                        }
                     }
                 }
             }
