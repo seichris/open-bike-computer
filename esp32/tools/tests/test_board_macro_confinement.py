@@ -32,6 +32,8 @@ EXEMPT_FILES = {"lib/panel/panelSelect.hpp"}
 
 CONDITIONAL = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b")
 OPENING = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
+POSITIVE_GATE = re.compile(r"^\s*#\s*(?:if|ifdef)\b")
+ELSE = re.compile(r"^\s*#\s*(?:else|elif)\b")
 ENDIF = re.compile(r"^\s*#\s*endif\b")
 
 
@@ -66,29 +68,39 @@ def target_directive_lines(lines: list[str], macro: re.Pattern) -> list[int]:
     return [i for i, line in enumerate(lines) if CONDITIONAL.match(line) and macro.search(line)]
 
 
-def gates_whole_file(lines: list[str], hits: list[int]) -> bool:
-    """True when the file's only target conditional wraps all of its code."""
+def gates_whole_file(lines: list[str], hits: list[int], negated: re.Pattern) -> bool:
+    """True when the file's only target conditional is a positive gate around
+    all of its code with no else branch: the file exists for those boards only.
+    A file holding two implementations under one conditional is shared code."""
     if len(hits) != 1:
         return False
     first = hits[0]
+    gate = lines[first]
+    if not POSITIVE_GATE.match(gate) or negated.search(gate):
+        return False
     for line in lines[:first]:
         stripped = line.strip()
         if stripped and not stripped.startswith(("#pragma once", "#include")):
             return False
     depth = 0
     for index in range(first, len(lines)):
-        if OPENING.match(lines[index]):
+        line = lines[index]
+        if OPENING.match(line):
             depth += 1
-        elif ENDIF.match(lines[index]):
+        elif depth == 1 and ELSE.match(line):
+            return False
+        elif ENDIF.match(line):
             depth -= 1
             if depth == 0:
-                return all(not line.strip() for line in lines[index + 1:])
+                return all(not rest.strip() for rest in lines[index + 1:])
     return False
 
 
 def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str]]:
     """Return baseline-relevant counts and the exemption reason per file."""
-    macro = re.compile(r"\b(?:" + "|".join(map(re.escape, targets)) + r")\b")
+    alternation = "|".join(map(re.escape, targets))
+    macro = re.compile(r"\b(?:" + alternation + r")\b")
+    negated = re.compile(r"!\s*defined\s*\(?\s*(?:" + alternation + r")\b")
     counts: dict[str, int] = {}
     exempt: dict[str, str] = {}
     for scan_dir in SCAN_DIRS:
@@ -102,7 +114,7 @@ def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str]]:
                 continue
             if relative.startswith(EXEMPT_PREFIXES) or relative in EXEMPT_FILES:
                 exempt[relative] = "board definition or panel selector"
-            elif gates_whole_file(lines, hits):
+            elif gates_whole_file(lines, hits, negated):
                 exempt[relative] = "gated as a whole file"
             else:
                 counts[relative] = len(hits)

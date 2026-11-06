@@ -27,6 +27,7 @@
     "lib/settings/settings.cpp": 8,
     "lib/speaker/speaker.cpp": 2,
     "lib/storage/storage.cpp": 17,
+    "lib/utils/src/task_data_placement.hpp": 1,
     "lib/waveshare_board/axp2101.cpp": 8,
     "lib/waveshare_board/display.hpp": 3,
     "lib/waveshare_board/i2c_bus.cpp": 9,

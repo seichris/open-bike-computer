@@ -272,11 +272,10 @@ Maintenance/early-startup paths without an initialized display do not attempt
 unsafe display initialization; RTC and serial retain the failure evidence.
 
 No caller requests a manual MCU suspend. The only one was the legacy LVGL
-`gpioClickEvent` of the removed IceNav-era boards, and this change deliberately
-refuses that action rather than retain a storage barrier bypass; implementing a
-reversible suspend/resume barrier is an explicit remaining compatibility gate.
-The button's existing sleep message is replaced with an unavailable notice so it
-does not promise entry into sleep.
+`gpioClickEvent` of the removed IceNav-era boards, which is gone with them.
+`Power::deviceSuspend()` still deliberately refuses the action rather than
+retain a storage barrier bypass; implementing a reversible suspend/resume
+barrier is an explicit remaining compatibility gate.
 
 ## Selection metadata power-loss recovery
 

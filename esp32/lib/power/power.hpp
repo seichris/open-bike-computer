@@ -8,20 +8,12 @@
 
 #pragma once
 
+// Declarations only. The radio, bus and display headers the implementation
+// needs stay in power.cpp so that including this header does not make a
+// library depend on WiFi, SPI, Wire or LVGL.
 #include <atomic>
+#include <cstdint>
 #include "shutdown_barrier_policy.hpp"
-#include <SPI.h>
-#include <WiFi.h>
-#include <Wire.h>
-#include <driver/rtc_io.h>
-#include <esp_bt.h>
-#ifndef CONFIG_BT_NIMBLE_ENABLED
-#include <esp_bt_main.h>
-#endif
-#include "../gui/src/globalGuiDef.h"
-#include "lvgl.h"
-#include "../tft/tft.hpp"
-#include <esp_wifi.h>
 
 class Power {
 private:

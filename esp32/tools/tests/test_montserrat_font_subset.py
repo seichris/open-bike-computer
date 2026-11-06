@@ -68,13 +68,13 @@ def glyph_symbols(source: str) -> set[str]:
 
 
 def font_aliases() -> dict[str, int]:
-    """globalGuiDef.h font aliases for the Waveshare (not LARGE_SCREEN) build."""
-    branch = GLOBAL_GUI_DEF.split("#else", 1)[1].split("#endif", 1)[0]
+    """globalGuiDef.h font aliases; the Waveshare build has one set of them."""
+    assert "LARGE_SCREEN" not in GLOBAL_GUI_DEF, "font aliases gained a second branch"
     aliases = {
         match.group(1): int(match.group(2))
         for match in re.finditer(
             r"static const lv_font_t \*(\w+) = &lv_font_montserrat_(\d+);",
-            branch)
+            GLOBAL_GUI_DEF)
     }
     assert aliases, "no font aliases found in globalGuiDef.h"
     return aliases

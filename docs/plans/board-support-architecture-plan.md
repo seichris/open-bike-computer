@@ -335,8 +335,8 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
 - **M1, done 2026-11-06** in the same pull request. `esp32/lib/board/board.hpp`
   selects `boards/waveshare_amoled_175.hpp` or `boards/waveshare_amoled_206.hpp`
   and rejects any other target set; `include/hal.hpp` keeps the old pin names
-  as aliases of that data. The confinement test froze 188 conditionals in 28
-  shared files and exempts 14 files gated as a whole. `panelSelect.hpp` keeps
+  as aliases of that data. The confinement test froze 189 conditionals in 29
+  shared files; 11 more files are exempt as whole-file gates. `panelSelect.hpp` keeps
   its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
   not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
   it merges.
@@ -353,7 +353,8 @@ selects:
   covered as soon as it has an environment.
 - Allows them without limit in `lib/board/**`, `lib/panel/panelSelect.hpp`
   (until M3 and M4 absorb it) and in any file whose single target conditional
-  wraps all of its code. That whole-file gate is how a translation unit stays
+  is a positive gate around all of its code with no else branch. That
+  whole-file gate is how a translation unit stays
   out of the other boards' images, and it is what keeps #442's e-paper-named
   sources out of AMOLED builds.
 - Holds `board_macro_baseline.json` mapping every other file to its exact

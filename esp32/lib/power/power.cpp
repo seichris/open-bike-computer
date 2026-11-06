@@ -7,6 +7,18 @@
  */
 
 #include "power.hpp"
+#include <SPI.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <driver/rtc_io.h>
+#include <esp_bt.h>
+#ifndef CONFIG_BT_NIMBLE_ENABLED
+#include <esp_bt_main.h>
+#endif
+#include <esp_wifi.h>
+#include "../gui/src/globalGuiDef.h"
+#include "lvgl.h"
+#include "../tft/tft.hpp"
 #include "sleep_audit.hpp"
 #include "sleep_audit_policy.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"

@@ -183,8 +183,10 @@ It scans `esp32/src`, `esp32/lib` and `esp32/include` for preprocessor
 conditionals that name a target and compares the per-file counts with
 `esp32/tools/tests/board_macro_baseline.json`. `esp32/lib/board/` and
 `esp32/lib/panel/panelSelect.hpp` may test targets freely, and so may a file
-whose single target conditional wraps all of its code, because that is how a
-translation unit stays out of the other boards' images. Every other file must
+whose single target conditional is a positive gate around all of its code with
+no else branch, because that is how a translation unit stays out of the other
+boards' images; a file holding two implementations under one conditional is
+shared code and is counted. Every other file must
 match its baseline exactly: a higher count fails, and so does a lower one until
 `--update-baseline` records it, so a count cannot grow back. Board differences
 belong in `esp32/lib/board/boards/<target>.hpp` as data, or in a file gated as
