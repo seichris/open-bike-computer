@@ -170,10 +170,44 @@ final class SavedDestinationStore: ObservableObject {
         guard let cleaned = cleaned(destination, savedRouteID: savedRouteID) else {
             return nil
         }
-        favoriteDestinations.removeAll { $0.matches(cleaned) }
+        // An ID names one favorite; the Watch favorite sync rejects duplicates.
+        favoriteDestinations.removeAll { $0.id == cleaned.id || $0.matches(cleaned) }
         favoriteDestinations.insert(cleaned, at: 0)
         persist()
         return cleaned
+    }
+
+    /// Rewrites stored coordinates by destination ID, keeping each entry's
+    /// name, order and saved-route link; both lists are persisted together.
+    func replaceCoordinates(
+        favorites: [UUID: CLLocationCoordinate2D],
+        recents: [UUID: CLLocationCoordinate2D]
+    ) {
+        func replacing(
+            _ destinations: [SavedDestination],
+            _ coordinates: [UUID: CLLocationCoordinate2D]
+        ) -> [SavedDestination] {
+            destinations.map { destination in
+                guard let coordinate = coordinates[destination.id] else { return destination }
+                return SavedDestination(
+                    id: destination.id,
+                    name: destination.name,
+                    coordinate: coordinate,
+                    savedRouteID: destination.savedRouteID
+                )
+            }
+        }
+        let replacedFavorites = replacing(favoriteDestinations, favorites)
+        let replacedRecents = replacing(recentDestinations, recents)
+        guard replacedFavorites != favoriteDestinations ||
+                replacedRecents != recentDestinations else { return }
+        if replacedFavorites != favoriteDestinations {
+            favoriteDestinations = replacedFavorites
+        }
+        if replacedRecents != recentDestinations {
+            recentDestinations = replacedRecents
+        }
+        persist()
     }
 
     @discardableResult

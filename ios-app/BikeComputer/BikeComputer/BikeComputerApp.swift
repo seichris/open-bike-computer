@@ -181,6 +181,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             social?.live.updateLocation(location)
             social?.friendLive.updateLocation(location)
         }.store(in: &cancellables)
+        // Favorites once starred from saved routes stored their WGS-84
+        // destinations. Repair them before the Watch first syncs favorites.
+        SavedRouteFavoritePolicy.repairLegacyCoordinates(
+            in: destinationStore,
+            whenever: routeLibrary.$routes
+        )
+        .store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
