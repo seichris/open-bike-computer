@@ -25,16 +25,12 @@ lv_obj_t *gpsFix = nullptr;
 lv_obj_t *gpsFixMode = nullptr;
 lv_obj_t *battIcon = nullptr;
 lv_obj_t *sdCard = nullptr;
-lv_obj_t *temp = nullptr;
 lv_obj_t *wifi = nullptr;
 lv_timer_t *clockTimer = nullptr;
 lv_timer_t *statusTimer = nullptr;
 ui_update_policy::StatusSnapshot displayedStatus{};
 bool statusInitialized = false;
 
-#ifdef ENABLE_TEMP
-uint8_t displayedTemperature = UINT8_MAX;
-#endif
 
 void setLabelTextIfChanged(lv_obj_t *label, const char *text) {
   if (label != nullptr && text != nullptr &&
@@ -172,16 +168,6 @@ void refreshStatus(lv_timer_t *) {
     setLabelTextIfChanged(battIcon, batterySymbol(current));
   }
 
-#ifdef ENABLE_TEMP
-  const uint8_t temperature =
-      static_cast<uint8_t>(bme.readTemperature() + tempOffset);
-  if (temperature != displayedTemperature) {
-    char text[12];
-    snprintf(text, sizeof(text), "%02u\xC2\xB0", temperature);
-    setLabelTextIfChanged(temp, text);
-    displayedTemperature = temperature;
-  }
-#endif
 
   displayedStatus = current;
   statusInitialized = true;
@@ -238,10 +224,6 @@ void createNotifyBar() {
   wifi = lv_label_create(notifyBarIcons);
   lv_label_set_text_static(wifi, " ");
 
-#ifdef ENABLE_TEMP
-  temp = lv_label_create(notifyBarIcons);
-  lv_label_set_text_static(temp, "--\xC2\xB0");
-#endif
 
   sdCard = lv_label_create(notifyBarIcons);
   lv_label_set_text_static(sdCard, " ");

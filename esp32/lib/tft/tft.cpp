@@ -9,13 +9,8 @@
 #include "tft.hpp"
 #include "power_metrics.hpp"
 
-#ifdef USE_ARDUINO_GFX
 #include "display_power.hpp"
-#endif
 
-#ifndef USE_ARDUINO_GFX
-TFT_eSPI tft = TFT_eSPI();
-#endif
 
 bool repeatCalib = false;
 uint16_t TFT_WIDTH = 0;
@@ -29,7 +24,6 @@ extern Storage storage;
  */
 void tftOn(uint8_t brightness)
 {
-#ifdef USE_ARDUINO_GFX
   // Compatibility adapter for legacy callers. DisplayPowerManager remains the
   // only owner that issues CO5300 brightness and display-state commands.
   const int32_t percent =
@@ -37,14 +31,6 @@ void tftOn(uint8_t brightness)
   displayPowerManager.requestUserBrightness(percent);
   displayPowerManager.requestState(display_power::State::Active);
   displayPowerManager.applyPendingPanelChange();
-#else
-  // For other displays (ILI9488, etc.) - use LovyanGFX
-  tft.writecommand(0x11);  // Sleep Out
-  delay(120);
-  tft.setBrightness(brightness);
-  power_metrics::noteDisplayState(power_metrics::DisplayState::On, brightness,
-                                  brightness);
-#endif
 }
 
 /**
@@ -53,78 +39,14 @@ void tftOn(uint8_t brightness)
  */
 void tftOff()
 {
-#ifdef USE_ARDUINO_GFX
   displayPowerManager.requestState(display_power::State::Off);
   displayPowerManager.applyPendingPanelChange();
-#else
-  // For other displays (ILI9488, etc.) - use LovyanGFX
-  tft.setBrightness(0);
-  tft.writecommand(0x10);  // Sleep In
-  power_metrics::noteDisplayState(power_metrics::DisplayState::Off, 0, 0);
-#endif
 }
 
 /**
  * @brief Touch calibrate (LovyanGFX only)
  *
  */
-#ifndef USE_ARDUINO_GFX
-void touchCalibrate()
-{
-  uint16_t calData[8];
-  uint8_t calDataOK = 0;
-
-  FILE* f = storage.open(calibrationFile, "r");
-
-  if (f != NULL)
-  {
-    if (!repeatCalib && fread((char *)calData, sizeof(char), 16, f) == 16)
-      calDataOK = 1;
-    // The read stream must close even for a repeated/empty calibration; its
-    // lifetime now correctly prevents shutdown from unmounting underneath it.
-    storage.close(f);
-    if (repeatCalib)
-      storage.remove(calibrationFile);
-  }
-  else
-    log_e("Touch calibration doesn't exists");
-
-  if (calDataOK && !repeatCalib)
-    tft.setTouchCalibrate(calData);
-  else
-  {
-    static const lgfx::v1::GFXfont* fontSmall;
-    static const lgfx::v1::GFXfont* fontLarge;
-
-    #ifdef LARGE_SCREEN
-      fontSmall = &fonts::DejaVu18;
-      fontLarge = &fonts::DejaVu40;
-    #else
-      fontSmall = &fonts::DejaVu12;
-      fontLarge = &fonts::DejaVu24;
-    #endif
-
-    tft.drawCenterString("TOUCH THE ARROW MARKER.", tft.width() >> 1, tft.height() >> 1, fontSmall);
-    tft.calibrateTouch(calData, TFT_WHITE, TFT_BLACK, std::max(tft.width(), tft.height()) >> 3);
-    tft.drawCenterString("DONE!", tft.width() >> 1, (tft.height() >> 1) + (tft.fontHeight(fontSmall) * 2), fontLarge);
-    delay(500);
-    tft.drawCenterString("TOUCH TO CONTINUE.", tft.width() >> 1, (tft.height() >> 1) + (tft.fontHeight(fontLarge) * 2), fontSmall);
-
-    FILE* f = storage.open(calibrationFile, "w");
-    if (f)
-    {
-      log_v("Calibration saved");
-      fwrite((const unsigned char *)calData, sizeof(unsigned char), 16 ,f);
-      storage.close(f);
-    }
-    else
-      log_e("Calibration not saved!");
-
-    uint16_t touchX, touchY;
-    while (!tft.getTouch(&touchX, &touchY));
-  }
-}
-#endif // USE_ARDUINO_GFX
 
 /**
  * @brief Init TFT display
@@ -132,7 +54,6 @@ void touchCalibrate()
  */
 void initTFT()
 {
-#ifdef USE_ARDUINO_GFX
   // Arduino_GFX initialization for CO5300
   setupDisplay();
 
@@ -140,21 +61,4 @@ void initTFT()
   TFT_HEIGHT = SCREEN_HEIGHT;
 
   // No touch calibration needed for Arduino_GFX (handled in setupLVGLforArduinoGFX)
-#else
-  // LovyanGFX initialization for other displays
-  tft.init();
-
-
-  TFT_HEIGHT = tft.height();
-  TFT_WIDTH = tft.width();
-
-  tft.initDMA();
-  tft.fillScreen(TFT_BLACK);
-
-  #ifdef TOUCH_INPUT
-    #if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)
-      touchCalibrate();
-    #endif
-  #endif
-#endif
 }

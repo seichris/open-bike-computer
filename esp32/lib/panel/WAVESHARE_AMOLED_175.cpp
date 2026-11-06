@@ -20,14 +20,11 @@
 #include "../power_management/power_management.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
-#endif
 #include "../../utils/src/touchInterruptGate.hpp"
 
-#ifdef USE_ARDUINO_GFX
 
 #include <cstring>
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
@@ -1349,4 +1346,3 @@ void setupLVGLforArduinoGFX() {
   Serial.println("LVGL 9 initialized with Arduino_GFX");
 }
 
-#endif // USE_ARDUINO_GFX

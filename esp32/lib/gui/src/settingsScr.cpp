@@ -9,9 +9,6 @@
 #include "settingsScr.hpp"
 
 bool needReboot = false;
-#ifndef DISABLE_COMPASS
-extern Compass compass;
-#endif
 
 /**
  * @brief Back button event
@@ -25,44 +22,6 @@ static void back(lv_event_t *event) {
   } else
     loadMainScreen();
 }
-
-/**
- * @brief Touch Calibration
- *
- * @param event
- */
-static void touchCalib(lv_event_t *event) {
-#ifndef USE_ARDUINO_GFX
-  repeatCalib = true;
-  tft.fillScreen(TFT_BLACK);
-  touchCalibrate();
-  repeatCalib = false;
-  isMainScreen = false;
-  tft.fillScreen(TFT_BLACK);
-  lv_screen_load(settingsScreen);
-  lv_obj_invalidate(lv_scr_act());
-#endif
-}
-
-/**
- * @brief Compass Calibration
- *
- * @param event
- */
-#if defined(ENABLE_COMPASS) && !defined(DISABLE_COMPASS)
-static void compassCalib(lv_event_t *event) {
-#ifndef USE_ARDUINO_GFX
-  tft.fillScreen(TFT_BLACK);
-#endif
-  compass.calibrate();
-#ifndef USE_ARDUINO_GFX
-  tft.fillScreen(TFT_BLACK);
-#endif
-  isMainScreen = false;
-  lv_screen_load(settingsScreen);
-  lv_obj_invalidate(lv_scr_act());
-}
-#endif
 
 /**
  * @brief Map Setting
@@ -104,27 +63,7 @@ void createSettingsScr() {
   lv_obj_t *btnLabel;
   lv_obj_t *btn;
 
-#if defined(ENABLE_COMPASS) && !defined(DISABLE_COMPASS)
-  // Compass Calibration
-  btn = lv_btn_create(settingsButtons);
-  lv_obj_set_size(btn, TFT_WIDTH - 30, 40 * scale);
-  btnLabel = lv_label_create(btn);
-  lv_obj_set_style_text_font(btnLabel, fontLarge, 0);
-  lv_label_set_text_static(btnLabel, "Compass Calibration");
-  lv_obj_center(btnLabel);
-  lv_obj_add_event_cb(btn, compassCalib, LV_EVENT_CLICKED, NULL);
-#endif
 
-#ifdef TOUCH_INPUT
-  // Touch Calibration
-  btn = lv_btn_create(settingsButtons);
-  lv_obj_set_size(btn, TFT_WIDTH - 30, 40 * scale);
-  btnLabel = lv_label_create(btn);
-  lv_obj_set_style_text_font(btnLabel, fontLarge, 0);
-  lv_label_set_text_static(btnLabel, "Touch Calibration");
-  lv_obj_center(btnLabel);
-  lv_obj_add_event_cb(btn, touchCalib, LV_EVENT_CLICKED, NULL);
-#endif
 
   // Map Settings
   btn = lv_btn_create(settingsButtons);

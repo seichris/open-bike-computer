@@ -30,10 +30,6 @@
 #include <esp_system.h>
 #include <esp_wifi.h>
 #include <stdint.h>
-#ifndef DISABLE_WEB_SERVER
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-#endif
 #include <SolarCalculator.h>
 
 // Hardware includes
@@ -43,33 +39,8 @@
 #include "usb_recovery_status.hpp"
 #include "tft.hpp"
 
-#ifdef HMC5883L
-#include "compass.hpp"
-#endif
-
-#ifdef QMC5883
-#include "compass.hpp"
-#endif
-
-#ifdef IMU_MPU9250
-#include "compass.hpp"
-#endif
-
-#ifdef BME280
-#include "bme.hpp"
-#endif
-
-#ifdef MPU6050
-#include "imu.hpp"
-#endif
-
 #ifdef HAS_HARDWARE_GPS
 extern xSemaphoreHandle gpsMutex;
-#endif
-
-#ifndef DISABLE_WEB_SERVER
-#include "webpage.h"
-#include "webserver.h"
 #endif
 
 #include "battery.hpp"
@@ -480,9 +451,6 @@ static void armOwnershipPairingAfterRenderedComparison() {
 }
 #endif
 extern Gps gps;
-#ifdef ENABLE_COMPASS
-Compass compass;
-#endif
 
 std::vector<wayPoint> trackData;
 
@@ -691,12 +659,8 @@ static void showShutdownDeferredNotice(uint8_t failedStage) {
   lv_obj_add_flag(lv_layer_top(), LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(lv_layer_bottom(), LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
-#ifdef USE_ARDUINO_GFX
   displayPowerManager.requestState(display_power::State::Dimmed);
   displayPowerManager.applyPendingPanelChange();
-#else
-  tftOn(24);
-#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   currentDisplayMode = display_inactivity::Mode::Dimmed;
 #endif
@@ -1757,8 +1721,7 @@ void setup() {
 #ifdef WAVESHARE_AMOLED_175
   // Configure Wire directly below; do not preemptively bit-bang the shared bus.
 #endif
-#if defined(POWER_SAVE) || defined(WAVESHARE_AMOLED_175) ||                   \
-    defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -1830,18 +1793,6 @@ void setup() {
 #endif
   ride_automation_runtime::beginFirmwareShadow();
 #endif
-#endif
-
-#ifdef BME280
-  initBME();
-#endif
-
-#ifdef ENABLE_COMPASS
-  compass.init();
-#endif
-
-#ifdef ENABLE_IMU
-  initIMU();
 #endif
 
   battery.initADC();
@@ -2175,29 +2126,6 @@ void setup() {
 #ifdef HAS_HARDWARE_GPS
   initGpsTask();
   log_i("Checkpoint C: GPS Task Init Done");
-#endif
-
-#ifndef DISABLE_CLI
-  initCLI();
-  log_i("Checkpoint D: CLI Init Done");
-  initCLITask();
-  log_i("Checkpoint E: CLI Task Init Done");
-#endif
-
-#ifndef DISABLE_WEB_SERVER
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!MDNS.begin(hostname))
-      log_e("nDNS init error");
-
-    log_i("mDNS initialized");
-  }
-#endif
-
-#ifndef DISABLE_WEB_SERVER
-  if (WiFi.status() == WL_CONNECTED && enableWeb) {
-    configureWebServer();
-    server.begin();
-  }
 #endif
 
   if (WiFi.getMode() == WIFI_OFF)
@@ -2841,17 +2769,6 @@ void loop() {
   logSystemDebugHeartbeat();
   logPowerMetricsReport();
 
-#ifndef DISABLE_WEB_SERVER
-  // Deleting recursive directories in webfile server
-  if (enableWeb && deleteDir) {
-    deleteDir = false;
-    if (deleteDirRecursive(deletePath.c_str())) {
-      updateList = true;
-      eventRefresh.send("refresh", nullptr, millis());
-      eventRefresh.send("Folder deleted", "updateStatus", millis());
-    }
-  }
-#endif
 
   const uint32_t schedulerNow = millis();
   const BLEDebugStats schedulerBleStats = bleNavServer.getDebugStats();

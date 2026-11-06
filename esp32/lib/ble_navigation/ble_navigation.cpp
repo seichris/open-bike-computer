@@ -58,9 +58,7 @@ extern Power power;
 #include "../device_debug/device_debug_http.hpp"
 #include "../boot_diagnostics/boot_diagnostics.hpp"
 #include "../display_power/display_power_policy.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
-#endif
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
@@ -4843,7 +4841,6 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
             clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED)) {
       featureFlags |= device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE;
     }
-#ifdef USE_ARDUINO_GFX
     if (clientVersion >= device_capabilities_protocol::
                              AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION) {
       featureFlags |=
@@ -4854,7 +4851,6 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
     }
-#endif
     if (clientVersion >= device_capabilities_protocol::
                              EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::
@@ -6029,7 +6025,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   }
   case 12:
-#ifdef USE_ARDUINO_GFX
     if (!displayPowerManager.requestUserBrightness(settingValue)) {
       Serial.printf("BLE Settings: brightness persistence failed from %s\n",
                     source == nullptr ? "unknown" : source);
@@ -6039,9 +6034,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: brightness = %u%% (saved, pending)\n",
                   displayPowerManager.savedBrightnessPercent());
 #endif
-#else
-    Serial.println("BLE Settings: brightness unsupported on this target");
-#endif
     return;
   case display_power::kAutomaticDisplayOffSettingID:
     if (!display_power::isBooleanSettingValue(settingValue)) {
@@ -6050,7 +6042,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                     source == nullptr ? "unknown" : source);
       return;
     }
-#ifdef USE_ARDUINO_GFX
     if (!display_power::applyAutomaticDisplayOffSetting(displayPowerManager,
                                                         settingValue)) {
       Serial.printf("BLE Settings: automatic display-off persistence failed from %s\n",
@@ -6059,12 +6050,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     }
     Serial.printf("BLE Settings: automaticDisplayOff = %s (saved)\n",
                   settingValue == 1 ? "on" : "off");
-#else
-    Serial.println("BLE Settings: automatic display-off unsupported on this target");
-#endif
     return;
   case display_power::kDisplayInactivityTimeoutsSettingID: {
-#ifdef USE_ARDUINO_GFX
     display_power::InactivityTimeouts timeouts;
     if (!display_power::decodeInactivityTimeouts(settingValue, timeouts)) {
       Serial.printf(
@@ -6083,10 +6070,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         "BLE Settings: display inactivity timeouts dim=%us off=%us (saved)\n",
         static_cast<unsigned>(timeouts.dimAfterSeconds),
         static_cast<unsigned>(timeouts.displayOffAfterSeconds));
-#else
-    Serial.println(
-        "BLE Settings: display inactivity timeouts unsupported on this target");
-#endif
     return;
   }
   case 13: {

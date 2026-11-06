@@ -16,9 +16,7 @@ static void diagnosticMarkerEvent(lv_event_t *) {
       queued ? "Marker queued; export logs later" : "Recorder unavailable; marker not saved");
 }
 #endif
-#ifdef USE_ARDUINO_GFX
 #include "../../display_power/display_power.hpp"
-#endif
 
 lv_obj_t *deviceSettingsScreen; // Device Settings Screen
 
@@ -62,9 +60,6 @@ static void deviceSettingsEvent(lv_event_t *event) {
   }
 #endif
   if (strcmp(option, "back") == 0) {
-#ifndef USE_ARDUINO_GFX
-    cfg.saveUInt(PKEYS::KDEF_BRIGT, defBright);
-#endif
     lv_screen_load(settingsScreen);
   }
 }
@@ -76,31 +71,7 @@ static void deviceSettingsEvent(lv_event_t *event) {
  */
 static void brightnessEvent(lv_event_t *e) {
   lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-#ifdef USE_ARDUINO_GFX
   displayPowerManager.requestUserBrightness(lv_slider_get_value(obj));
-#else
-  defBright = lv_slider_get_value(obj);
-  tftOn(defBright);
-#endif
-}
-
-/**
- * @brief Upgrade firmware event
- *
- * @param event
- */
-static void upgradeEvent(lv_event_t *event) {
-  createMsgUpgrade();
-  lv_screen_load(msgUpgrade);
-  if (!checkFileUpgrade()) {
-    lv_label_set_text_static(msgUprgdText,
-                             LV_SYMBOL_WARNING " No Firmware found!");
-  } else {
-    lv_label_set_text_static(msgUprgdText,
-                             LV_SYMBOL_WARNING " Firmware found!");
-    lv_obj_clear_flag(btnMsgUpgrade, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(contMeter, LV_OBJ_FLAG_HIDDEN);
-  }
 }
 
 /**
@@ -263,25 +234,10 @@ void createDeviceSettingsScr() {
                       (char *)"rideAlert");
 #endif
 
-  // Upgrade button
-  list = lv_list_add_btn(deviceSettingsOptions, NULL, NULL);
-  btn = lv_btn_create(list);
-  lv_obj_set_size(btn, TFT_WIDTH - 45, 40 * scale);
-  label = lv_label_create(btn);
-  lv_obj_set_style_text_font(label, fontLarge, 0);
-  lv_label_set_text_static(label, "Firmware Upgrade");
-  lv_obj_center(label);
-  lv_obj_add_event_cb(btn, upgradeEvent, LV_EVENT_CLICKED, NULL);
-
   // Brightness Slider
-#ifdef USE_ARDUINO_GFX
   createBrightSlider(deviceSettingsOptions, LV_SYMBOL_SETTINGS, "Brightness", 5,
                      100, displayPowerManager.savedBrightnessPercent(),
                      brightnessEvent, LV_EVENT_VALUE_CHANGED);
-#else
-  createBrightSlider(deviceSettingsOptions, LV_SYMBOL_SETTINGS, "Brightness", 5,
-                     255, defBright, brightnessEvent, LV_EVENT_VALUE_CHANGED);
-#endif
 
   // Back button
   btn = lv_btn_create(deviceSettingsScreen);

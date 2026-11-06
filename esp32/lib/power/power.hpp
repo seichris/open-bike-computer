@@ -14,11 +14,9 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <driver/rtc_io.h>
-#ifndef DISABLE_BLUETOOTH
 #include <esp_bt.h>
 #ifndef CONFIG_BT_NIMBLE_ENABLED
 #include <esp_bt_main.h>
-#endif
 #endif
 #include "../gui/src/globalGuiDef.h"
 #include "lvgl.h"

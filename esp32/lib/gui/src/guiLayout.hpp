@@ -17,14 +17,6 @@ constexpr uint8_t MAP_TOOLBAR_OFFSET = 92;
 constexpr uint8_t MAP_TOOLBAR_SPACE = 54;
 constexpr uint8_t MAP_TOOLBAR_INSET = 12;
 constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN = 30;
-#elif defined(LARGE_SCREEN)
-constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 100;
-constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;
-constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 50;
-constexpr uint8_t MAP_TOOLBAR_OFFSET = 100;
-constexpr uint8_t MAP_TOOLBAR_SPACE = 60;
-constexpr uint8_t MAP_TOOLBAR_INSET = 10;
-constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN = 24;
 #else
 constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 100;
 constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;

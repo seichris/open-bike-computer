@@ -67,23 +67,3 @@ void initGpsTask()
  *
  * @param param
  */
-#ifndef DISABLE_CLI
-void cliTask(void *param) 
-{
-  ESP_LOGV(TAG, "CLI Task - running on core %d", xPortGetCoreID());
-  ESP_LOGV(TAG, "Stack size: %d", uxTaskGetStackHighWaterMark(NULL));
-  while(1) 
-  {
-    wcli.loop();
-    vTaskDelay(60 / portTICK_PERIOD_MS);
-  }
-  vTaskDelete(NULL);
-}
-
-/**
- * @brief Init CLI task
- *
- */
-void initCLITask() { xTaskCreatePinnedToCore(cliTask, "cliTask ", 20000, NULL, 1, NULL, 1); }
-
-#endif
