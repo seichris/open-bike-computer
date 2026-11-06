@@ -34,8 +34,8 @@ implementation. These are source observations, not live release or device proof.
 | `tools/factory_release_manifest.py` | Schema-2 factory releases already sign the archive and descriptor identity. Extend packaging with a distinct web operation contract; a factory archive alone does not authorize a preservation-safe recovery. |
 | `tools/firmware_manifest.py` | OTA signatures use P-256/SHA-256 and a fixed schema-1 field list. Do not append unsigned web fields to this format or change existing OTA signature semantics. |
 | `.github/workflows/firmware-release-candidate.yml`, `firmware-release.yml` | Candidate builds are unprivileged; the protected default-branch publisher validates and signs their artifacts. Preserve this separation and create-only publication. |
-| `esp32/partitions.csv` | Production has dual 3 MiB apps, 9 MiB FFat, and a 960 KiB coredump allocation on 16 MiB flash. |
-| `esp32/partitions_remote_debug.csv` | Development uses one 6 MiB app while retaining the production FFat start at `0x610000`. It is a different layout, not a second supported production recovery layout by default. |
+| `esp32/partitions.csv` | Production has dual 4 MiB apps, 7 MiB FFat, and a 960 KiB coredump allocation on 16 MiB flash (generation 2; the dual-3-MiB/9 MiB generation remains in `esp32/partition_layouts.json` for recovery and migration). |
+| `esp32/partitions_remote_debug.csv` | Development uses one 8 MiB app while retaining the production FFat start at `0x810000`. It is a different layout, not a second supported production recovery layout by default. |
 | `docs/firmware-factory-release.md`, `tools/verify_firmware_boot_acceptance.py` | Production disables USB CDC and continuous serial diagnostics. Current production boot acceptance uses owner-authenticated app diagnostics; debug `BOOT_META` cannot verify production bytes. |
 | Website `app/`, `package.json`, `next.config.ts` | Bicino is a separate Next.js App Router application. Add the page and browser logic there; firmware packaging and release authority stay here. |
 

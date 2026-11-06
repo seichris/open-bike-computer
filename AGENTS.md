@@ -299,6 +299,13 @@ embedded Git/profile identity; it does not contain those SHA-256 values or prove
 on-device byte equality. Flash readback or a runtime image digest is required
 for that stronger claim.
 
+Partition layouts are versioned in `esp32/partition_layouts.json` (generation 2:
+dual 4 MiB production slots, one 8 MiB developer slot, 7 MiB FFat at
+`0x810000`). Read `docs/partition-layout-migration.md` before changing a layout
+or flashing a current image onto a board that still has the generation-1
+(3 MiB/6 MiB, FFat at `0x610000`) table: that relocates FFat, and firmware then
+refuses to format the stale data. Never let a layout change happen implicitly.
+
 ### GitHub firmware CI
 
 PRs and merge groups select affected checks behind `CI Gate`; the same CI does

@@ -1,12 +1,14 @@
-# Developer and diagnostic images include extra renderer, automation, input,
-# or timing code and can exceed a 3 MiB production OTA slot. They are
-# development-only, USB-flashed images, so a single 6 MiB app slot preserves
-# the production profile's FFat start at 0x610000. Switching profiles therefore
-# cannot relocate or format fallback map/diagnostic data.
-# Name,   Type, SubType, Offset, Size, Flags
-nvs,      data, nvs,     ,      0x5000,
-otadata,  data, ota,     ,      0x2000,
-app0,     app,  ota_0,   ,      0x600000,
-ffat,     data, fat,     ,      0x900000,
+# Developer layout esp32s3-16m-single8m-ffat7m-v1 (generation 2). Developer and
+# diagnostic images include extra renderer, automation, input, or timing code
+# and can exceed a production OTA slot. They are development-only, USB-flashed
+# images, so one 8 MiB app slot keeps the production FFat start (0x810000) and
+# size. Switching between current profiles therefore never relocates or formats
+# FFat. Flashing this table over a generation-1 device does relocate FFat; the
+# firmware then refuses to format the stale contents (docs/partition-layout-migration.md).
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x800000,
+ffat,     data, fat,      0x810000, 0x700000,
 # Retain panic evidence in the otherwise-unused 960 KiB tail of 16 MiB flash.
-coredump, data, coredump,,      0x0F0000,
+coredump, data, coredump, 0xf10000, 0xf0000,

@@ -751,6 +751,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", recovery)
 
+    def test_release_and_recovery_stage_layout_ota_channels(self) -> None:
+        release = workflow_source("firmware-release.yml")
+        publish_job = mapping_block(release, "publish", indent=2)
+        recovery = mapping_block(release, "recover-pages", indent=2)
+        signing_step = next(
+            block
+            for block in sequence_mapping_blocks(publish_job, "steps", indent=4)
+            if "name: Generate signed manifests" in block
+        )
+        # Both jobs stage the legacy and dual-4-MiB channels through one tool;
+        # neither may copy a single latest manifest over the legacy path.
+        for block in (signing_step, recovery):
+            self.assertIn("tools/firmware_ota_channels.py", block)
+            self.assertIn("--public-dir public/firmware", block)
+            self.assertNotIn('"public/firmware/${target}/manifest.json"', block)
+        self.assertIn('--output "${release_assets}/${target}.manifest.json"', signing_step)
+        self.assertLess(signing_step.index("tools/web_flasher_manifest.py"),
+                        signing_step.index("tools/firmware_ota_channels.py"))
+        self.assertIn("exactly four OTA channel manifests", recovery)
+
     def test_production_ci_extracts_and_checks_factory_bundles(self) -> None:
         general_ci = workflow_source("ci.yml")
 
@@ -1231,6 +1251,29 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         self.assertIn("format('Partial CI Gate ({0})', inputs.scope)", gate)
         promotion = (WORKFLOW_SCRIPTS_ROOT / "dispatch_promotion_ci.py").read_text(encoding="utf-8")
         self.assertIn("run.get('event') in ('pull_request', 'workflow_dispatch')", promotion)
+
+    def test_firmware_core_builds_free_the_runner_disk_first(self) -> None:
+        # A cold core key keeps the 6.4 GB verified store, a 5.8 GB entry and a
+        # 1.9 GB transport copy side by side; every Linux job that builds a core
+        # removes the image's unused SDKs before it restores anything.
+        for workflow, job in (
+            ("ci.yml", "esp32"),
+            ("firmware-diagnostics.yml", "esp32-diagnostics"),
+            ("speaker-firmware.yml", "esp32-speaker"),
+            ("firmware-runtime-refresh.yml", "firmware-build-validation"),
+        ):
+            with self.subTest(workflow=workflow):
+                block = mapping_block(workflow_source(workflow), job, indent=2)
+                steps = sequence_mapping_blocks(block, "steps", indent=4)
+                free = [index for index, step in enumerate(steps) if "uses: ./.github/actions/free-runner-disk" in step]
+                restore = [index for index, step in enumerate(steps) if "uses: ./.github/actions/firmware-build-cache" in step]
+                builds = [index for index, step in enumerate(steps) if "tools/build_firmware.py" in step]
+                self.assertEqual(1, len(free), workflow)
+                self.assertTrue(builds, workflow)
+                self.assertLess(free[0], min(restore + builds), workflow)
+        action = (REPO_ROOT / ".github/actions/free-runner-disk/action.yml").read_text(encoding="utf-8")
+        self.assertIn("FIRMWARE_RUNNER_DISK schema=1 status=freed", action)
+        self.assertIn('if [[ "${RUNNER_OS:-}" != "Linux" ]]', action)
 
     def test_core_entries_publish_only_from_main_and_restore_read_only(self) -> None:
         esp32 = mapping_block(workflow_source("ci.yml"), "esp32", indent=2)

@@ -647,22 +647,29 @@ enum DeviceTransferPacketRoutingPolicy {
 
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
+    // The horn and rotating-bell recordings were removed from the firmware.
+    // Their raw values stay decodable so legacy device state and persisted
+    // settings parse, but they are never offered or sent: firmware keeps raw
+    // values 2, 3 and 5 reserved and rejects them.
     case plasticBicycleHorn = 2
-    // Decode legacy device state without offering the removed recording in
-    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
 
+    /// The sounds the current firmware plays; the picker offers exactly these.
     static let allCases: [DeviceSound] = [
         .bellDing,
-        .plasticBicycleHorn,
-        .squeezeHorn,
     ]
 
-    static let defaultSelection: DeviceSound = .plasticBicycleHorn
+    static let defaultSelection: DeviceSound = .bellDing
     static let defaultVolumePercent: Double = 70
+
+    /// A legacy or persisted value that the current firmware no longer plays
+    /// falls back to the default instead of selecting a rejected ID.
+    static func selectable(_ sound: DeviceSound) -> DeviceSound {
+        allCases.contains(sound) ? sound : defaultSelection
+    }
 
     static func normalizedVolumePercent(_ volumePercent: Double) -> Double {
         guard volumePercent.isFinite else { return defaultVolumePercent }
@@ -701,11 +708,11 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .bellDing:
             return "Bell Ding"
         case .plasticBicycleHorn:
-            return "Bicycle Horn"
+            return "Bicycle Horn (Legacy)"
         case .rotatingBicycleBell:
             return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
-            return "Squeeze Horn"
+            return "Squeeze Horn (Legacy)"
         }
     }
 
@@ -1538,6 +1545,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
+    private var isPhoneNavigationActive = false
     private var lastConnectedPeripheralIdentifier: UUID?
     
     // MARK: - Reconnection with Exponential Backoff (Optimization #14)
@@ -1604,6 +1612,10 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
     var transferConnectionEpoch: UInt64 { rideDeliveryConnectionGeneration }
+    /// System uptime of the last transport disconnect and connect, for the
+    /// transfer manager's link-loss window (which mirrors the firmware's).
+    private(set) var transportLinkLostUptime: TimeInterval?
+    private(set) var transportLinkConnectedUptime: TimeInterval?
 
     private var rideDeliveryConnectionGeneration: UInt64 = 0
     private var rideTransportStateMachine = RideBLETransportStateMachineV1(
@@ -2015,9 +2027,7 @@ class BLEManager: NSObject, ObservableObject {
         let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
-        selectedDeviceSound = restoredSound == .rotatingBicycleBell
-            ? .defaultSelection
-            : restoredSound
+        selectedDeviceSound = DeviceSound.selectable(restoredSound)
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
@@ -2930,6 +2940,16 @@ class BLEManager: NSObject, ObservableObject {
         log("Disconnecting from peripheral")
     }
 
+    /// Phone navigation needs the single Bicino link. Starting it after this
+    /// phone yielded to a Watch-direct ride asks that ride to hand the link
+    /// back; the yield stays until the Watch's exact release arrives.
+    func setPhoneNavigationActive(_ active: Bool) {
+        guard isPhoneNavigationActive != active else { return }
+        isPhoneNavigationActive = active
+        guard active else { return }
+        _ = requestWatchDirectRideReconciliation(forExplicitDiscovery: false)
+    }
+
     func handleWatchDirectRidePreparationRequest(
         _ request: WatchDirectRidePreparationRequestV1,
         phoneNavigationActive: Bool
@@ -3156,10 +3176,14 @@ class BLEManager: NSObject, ObservableObject {
               let preparationID = watchDirectRidePreparationID else {
             return false
         }
+        // Whatever prompted the request, active phone navigation needs the
+        // link back now rather than when the Watch ride ends.
         guard let request = try?
                 WatchDirectRideReconciliationRequestV1(
                     preparationID: preparationID,
-                    deviceID: deviceID
+                    deviceID: deviceID,
+                    purpose: isPhoneNavigationActive
+                        ? .phoneNavigation : .releaseWhenIdle
                 ) else {
             pairingStatusMessage = nil
             pairingError =
@@ -3195,11 +3219,20 @@ class BLEManager: NSObject, ObservableObject {
                     )
                 }
         }
-        log(
-            forExplicitDiscovery
-                ? "Requested Apple Watch direct ride reconciliation for discovery"
-                : "Requested Apple Watch direct ride reconciliation on foreground"
-        )
+        if request.purpose == .phoneNavigation {
+            log("Requested Apple Watch direct ride handback for iPhone navigation")
+            diagnosticsRecorder?.record(
+                category: .ble,
+                event: "watch_direct_handback_requested",
+                fields: ["reason": "phone_navigation"]
+            )
+        } else {
+            log(
+                forExplicitDiscovery
+                    ? "Requested Apple Watch direct ride reconciliation for discovery"
+                    : "Requested Apple Watch direct ride reconciliation on foreground"
+            )
+        }
         return true
     }
 
@@ -10484,6 +10517,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 )
         )
         log("Connected to: \(peripheral.name ?? "Unknown")")
+        transportLinkConnectedUptime = ProcessInfo.processInfo.systemUptime
         diagnosticsRecorder?.record(
             category: .ble,
             event: "transport_connected",
@@ -10520,6 +10554,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         locallyForgottenPeripheralIdentifiers.remove(peripheral.identifier)
         log("Disconnected from: \(peripheral.name ?? "Unknown")")
+        transportLinkLostUptime = ProcessInfo.processInfo.systemUptime
         
         if let error = error {
             log("Disconnect error: \(error.localizedDescription)")
@@ -11342,7 +11377,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 let deviceHonkEnabled = powerButtonConfig[0] == 1
                 isPowerButtonHonkEnabled = deviceHonkEnabled
                 if deviceHonkEnabled {
-                    selectedDeviceSound = deviceSound
+                    selectedDeviceSound = DeviceSound.selectable(deviceSound)
                     deviceSoundVolumePercent = Double(powerButtonConfig[2])
                 }
                 saveSettings()

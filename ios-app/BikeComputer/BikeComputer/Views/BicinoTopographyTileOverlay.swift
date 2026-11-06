@@ -5,11 +5,15 @@ import SwiftUI
 import UIKit
 
 /// Local transparent contours only. The signed companion stays in WGS-84; only
-/// the MapKit presentation is remapped for wholly mainland-China selections.
+/// the MapKit presentation is remapped where Apple Maps draws mainland China in
+/// GCJ-02.
 nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked Sendable {
   let receipt: TopographyCompanionReceipt
   private let store: TopographyCompanionStore
   private let mapBounds: MKMapRect
+  /// Whether any of the selection lies in mainland China. Such an overlay reads
+  /// each point the way Apple Maps draws it: GCJ-02 inside the region and
+  /// WGS-84 elsewhere, so a selection across the border lines up on both sides.
   let alignsChina: Bool
   let hasTerrainFeatures: Bool
   private let taskLock = NSLock()
@@ -32,17 +36,14 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
     let northwestCoordinate = CLLocationCoordinate2D(latitude: bounds[3], longitude: bounds[0])
     let southeastCoordinate = CLLocationCoordinate2D(latitude: bounds[1], longitude: bounds[2])
-    let northwest = MKMapPoint(
+    let unshifted = BicinoTopographyTileOverlay.mapRect(northwestCoordinate, southeastCoordinate)
+    mapBounds =
       alignsChina
-        ? CoordinateConverter.wgs84ToGCJ02(coordinate: northwestCoordinate)
-        : northwestCoordinate)
-    let southeast = MKMapPoint(
-      alignsChina
-        ? CoordinateConverter.wgs84ToGCJ02(coordinate: southeastCoordinate)
-        : southeastCoordinate)
-    mapBounds = MKMapRect(
-      x: northwest.x, y: northwest.y, width: southeast.x - northwest.x,
-      height: southeast.y - northwest.y)
+      ? unshifted.union(
+        BicinoTopographyTileOverlay.mapRect(
+          BicinoTopographyTileOverlay.gcj02(northwestCoordinate),
+          BicinoTopographyTileOverlay.gcj02(southeastCoordinate)))
+      : unshifted
     super.init(urlTemplate: nil)
     canReplaceMapContent = false
     tileSize = CGSize(width: 256, height: 256)
@@ -71,43 +72,136 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let store = TopographyCompanionStore(url: url, receipt: receipt)
     let metadata = try await store.validate()
     try Task.checkCancellation()
-    let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
-    let corners = [
-      (bounds[1], bounds[0]), (bounds[1], bounds[2]),
-      (bounds[3], bounds[0]), (bounds[3], bounds[2]),
-    ]
-    let chinaCorners = corners.filter {
-      CoordinateConverter.isInChina(lat: $0.0, lon: $0.1)
-    }.count
-    guard chinaCorners == 0 || chinaCorners == corners.count else {
-      throw TopographyMapKitTileWarp.WarpError.extent
-    }
     return BicinoTopographyTileOverlay(
-      store: store, metadata: metadata, alignsChina: chinaCorners == corners.count
+      store: store, metadata: metadata,
+      alignsChina: alignsChina(boundsE7: metadata.boundsE7)
     )
   }
 
+  /// Whether any of a selection lies in mainland China, where Apple Maps
+  /// draws GCJ-02.
+  static func alignsChina(boundsE7: [Int]) -> Bool {
+    let bounds = boundsE7.map { Double($0) / 10_000_000 }
+    return MainlandChinaRegion.coverage(
+      south: bounds[1], west: bounds[0], north: bounds[3], east: bounds[2]) != .none
+  }
+
   func coordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D {
-    let coordinate = CLLocationCoordinate2D(
-      latitude: atan(sinh(worldY / 6_378_137)) * 180 / .pi,
-      longitude: worldX / 6_378_137 * 180 / .pi)
-    return alignsChina ? CoordinateConverter.wgs84ToGCJ02(coordinate: coordinate) : coordinate
+    Self.coordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
   }
 
   func world(_ coordinate: CLLocationCoordinate2D) -> (Double, Double) {
+    Self.world(coordinate, alignsChina: alignsChina)
+  }
+
+  /// Where terrain at these WGS-84 world metres is drawn, or nil when the
+  /// tile there shows other terrain. Beside mainland China's border a MapKit
+  /// pixel takes the mainland reading, so a label or relief cell from across
+  /// the border would sit on shifted mainland contours.
+  func drawnCoordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D? {
+    Self.drawnCoordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+  }
+
+  /// The corners of a square terrain-relief cell with this south-west corner,
+  /// as drawn, or nil when the tile at its centre shows other terrain. The
+  /// cell moves whole with its centre, so one across the border keeps its
+  /// shape.
+  func reliefCorners(worldX: Double, worldY: Double, size: Double) -> [CLLocationCoordinate2D]? {
+    Self.reliefCorners(worldX: worldX, worldY: worldY, size: size, alignsChina: alignsChina)
+  }
+
+  static func coordinate(worldX: Double, worldY: Double, alignsChina: Bool) -> CLLocationCoordinate2D {
+    let latitude = atan(sinh(worldY / 6_378_137)) * 180 / .pi
+    let longitude = worldX / 6_378_137 * 180 / .pi
     let point =
       alignsChina
-      ? CoordinateConverter.gcj02ToWGS84(lat: coordinate.latitude, lon: coordinate.longitude)
-      : (lat: coordinate.latitude, lon: coordinate.longitude)
-    let latitude = max(-85.05112878, min(85.05112878, point.lat)) * .pi / 180
-    return (point.lon * .pi / 180 * 6_378_137, log(tan(.pi / 4 + latitude / 2)) * 6_378_137)
+      ? GCJ02.mapKit(fromWGS84: latitude, longitude: longitude)
+      : (latitude: latitude, longitude: longitude)
+    return CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
+  }
+
+  static func world(_ coordinate: CLLocationCoordinate2D, alignsChina: Bool) -> (Double, Double) {
+    let point =
+      alignsChina
+      ? GCJ02.wgs84(fromMapKit: coordinate.latitude, longitude: coordinate.longitude)
+      : (latitude: coordinate.latitude, longitude: coordinate.longitude)
+    return worldPoint(latitude: point.latitude, longitude: point.longitude)
+  }
+
+  static func drawnCoordinate(worldX: Double, worldY: Double, alignsChina: Bool)
+    -> CLLocationCoordinate2D?
+  {
+    let drawn = coordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+    guard alignsChina else { return drawn }
+    let shown = world(drawn, alignsChina: true)
+    return abs(shown.0 - worldX) < 1 && abs(shown.1 - worldY) < 1 ? drawn : nil
+  }
+
+  static func reliefCorners(worldX: Double, worldY: Double, size: Double, alignsChina: Bool)
+    -> [CLLocationCoordinate2D]?
+  {
+    let corners = [(0.0, 0.0), (size, 0), (size, size), (0, size)].map {
+      coordinate(worldX: worldX + $0.0, worldY: worldY + $0.1, alignsChina: false)
+    }
+    guard alignsChina else { return corners }
+    let centerX = worldX + size / 2
+    let centerY = worldY + size / 2
+    guard drawnCoordinate(worldX: centerX, worldY: centerY, alignsChina: true) != nil else {
+      return nil
+    }
+    let center = coordinate(worldX: centerX, worldY: centerY, alignsChina: false)
+    return MainlandChinaRegion.contains(latitude: center.latitude, longitude: center.longitude)
+      ? corners.map(gcj02) : corners
+  }
+
+  static func worldPoint(latitude: Double, longitude: Double) -> (Double, Double) {
+    let radians = max(-85.05112878, min(85.05112878, latitude)) * .pi / 180
+    return (longitude * .pi / 180 * 6_378_137, log(tan(.pi / 4 + radians / 2)) * 6_378_137)
+  }
+
+  /// Where Apple Maps would draw a point of mainland China.
+  private static func gcj02(_ coordinate: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+    let converted = GCJ02.fromWGS84(latitude: coordinate.latitude, longitude: coordinate.longitude)
+    return CLLocationCoordinate2D(latitude: converted.latitude, longitude: converted.longitude)
+  }
+
+  private static func mapRect(
+    _ northwest: CLLocationCoordinate2D, _ southeast: CLLocationCoordinate2D
+  ) -> MKMapRect {
+    let topLeft = MKMapPoint(northwest)
+    let bottomRight = MKMapPoint(southeast)
+    return MKMapRect(
+      x: topLeft.x, y: topLeft.y, width: bottomRight.x - topLeft.x,
+      height: bottomRight.y - topLeft.y)
   }
 
   func labelAnchors(in rect: MKMapRect) async throws -> [ContourLabelAnchor] {
-    let nw = world(MKMapPoint(x: rect.minX, y: rect.minY).coordinate)
-    let se = world(MKMapPoint(x: rect.maxX, y: rect.maxY).coordinate)
+    let area = Self.labelArea(for: rect, alignsChina: alignsChina)
     return try await store.labels(
-      west: Int(nw.0) - 256, south: Int(se.1) - 256, east: Int(se.0) + 256, north: Int(nw.1) + 256)
+      west: area.west, south: area.south, east: area.east, north: area.north)
+  }
+
+  /// The WGS-84 world metres whose labels can fall in `rect`, plus a margin.
+  /// Across mainland China's border part of the rect is shifted and part is
+  /// not, so an overlay reaching the mainland covers both readings of the
+  /// rect's corners.
+  static func labelArea(for rect: MKMapRect, alignsChina: Bool)
+    -> (west: Int, south: Int, east: Int, north: Int)
+  {
+    let corners = [MKMapPoint(x: rect.minX, y: rect.minY), MKMapPoint(x: rect.maxX, y: rect.maxY)]
+      .map(\.coordinate)
+    let points = corners.flatMap { corner -> [(Double, Double)] in
+      let unshifted = worldPoint(latitude: corner.latitude, longitude: corner.longitude)
+      guard alignsChina else { return [unshifted] }
+      let shifted = GCJ02.toWGS84(latitude: corner.latitude, longitude: corner.longitude)
+      return [unshifted, worldPoint(latitude: shifted.latitude, longitude: shifted.longitude)]
+    }
+    let xs = points.map(\.0)
+    let ys = points.map(\.1)
+    return (
+      west: Int(xs.min()!) - 256, south: Int(ys.min()!) - 256,
+      east: Int(xs.max()!) + 256, north: Int(ys.max()!) + 256
+    )
   }
 
   func terrain(near coordinate: CLLocationCoordinate2D) async throws -> [TerrainGrid] {
@@ -331,7 +425,9 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
         }
         var annotations: [BicinoContourLabelAnnotation] = []
         for anchor in anchors {
-          let coordinate = overlay.coordinate(worldX: Double(anchor.x), worldY: Double(anchor.y))
+          guard let coordinate = overlay.drawnCoordinate(
+            worldX: Double(anchor.x), worldY: Double(anchor.y))
+          else { continue }
           let p = mapView.convert(coordinate, toPointTo: mapView)
           let textWidth = ("\(anchor.elevation) m" as NSString).size(withAttributes: [
             .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
@@ -430,18 +526,16 @@ final class TerrainReliefOverlay: NSObject, MKOverlay {
       for y in 0..<32 {
         for x in 0..<32 {
           let indices = [y * 33 + x, y * 33 + x + 1, (y + 1) * 33 + x + 1, (y + 1) * 33 + x]
-          guard indices.allSatisfy({ grid.nodes[$0].height != -32768 }) else { continue }
-          let points = indices.map { i in
-            MKMapPoint(
-              source.coordinate(
-                worldX: Double(grid.x * 4096 + (i % 33) * 128),
-                worldY: Double(grid.y * 4096 + (i / 33) * 128)))
-          }
+          guard indices.allSatisfy({ grid.nodes[$0].height != -32768 }),
+            let corners = source.reliefCorners(
+              worldX: Double(grid.x * 4096 + x * 128), worldY: Double(grid.y * 4096 + y * 128),
+              size: 128)
+          else { continue }
           let node = grid.nodes[indices[0]]
           result.append(
             Cell(
-              points: points, shade: CGFloat(node.shade) / 255, elevation: node.height,
-              slope: node.slope))
+              points: corners.map(MKMapPoint.init), shade: CGFloat(node.shade) / 255,
+              elevation: node.height, slope: node.slope))
         }
       }
     }

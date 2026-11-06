@@ -3756,6 +3756,33 @@ extension NavigationProtocolTests {
         )
     }
 
+    static func testActionStatusChipLargeTextLayout() {
+        let sourceURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Views/ActionStatusChip.swift"
+        )
+        guard let source = try? String(contentsOf: sourceURL, encoding: .utf8) else {
+            assert(false, "status chip source should be available to the integration test")
+            return
+        }
+
+        let compactSource = source.filter { !$0.isWhitespace }
+        assert(
+            compactSource.contains(
+                "privatestaticletshape=RoundedRectangle(cornerRadius:32)"
+            ) &&
+                compactSource.contains(".background(.regularMaterial,in:Self.shape)") &&
+                compactSource.contains(".overlay(Self.shape.stroke(") &&
+                !compactSource.contains("Capsule("),
+            "status chips stay capsules only while short, so wrapped large text stays inside their corners"
+        )
+        assert(
+            compactSource.contains(
+                ".dynamicTypeSize(...DynamicTypeSize.xxxLarge).frame(width:22,height:22)"
+            ),
+            "a status chip's symbol stops growing at XXXL in its own slot instead of spilling into the text"
+        )
+    }
+
     static func testDeviceScreenUISettingsWiring() {
         let sourceURL = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
@@ -4951,6 +4978,102 @@ extension NavigationProtocolTests {
                     "the original observing connection reconciles its activation acknowledgement")
     }
 
+    @MainActor
+    static func testOfflineMapManagerAdoptsLiveAttemptOfTakenOverUpload() {
+        func status(_ state: String, _ sequence: Int, session: String = "map-1-manifest",
+                    error: String? = nil) -> MapTransferDeviceStatus {
+            let errorField = error.map { ",\"error\":{\"code\":\"\($0)\",\"message\":\"attempts exhausted\"}" } ?? ""
+            return try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
+            {"activeMapId":"map-0","activeSessionId":"map-0-manifest","activation":{"status":"\(state)","sequence":\(sequence),"sessionId":"\(session)","mapId":"map-1"\(errorField)}}
+            """.utf8))
+        }
+        let acceptedKey = "offlineMap.lastTransfer.acceptedSequence"
+        for ending in ["installed", "failed"] {
+            let suite = "offline-map-taken-over-\(ending)-\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                assert(false, "test defaults should create")
+                return
+            }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            // An upload taken over during reception stores no baseline: stream
+            // statuses number their own sequence.
+            defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+            let manager = OfflineMapManager(defaults: defaults)
+            let bleManager = BLEManager()
+            manager.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+
+            // Between the upload and its activation the device still reports
+            // this session's result from an earlier attempt, under a sequence
+            // above the stream's.
+            for (state, sequence) in [("receiving", 40), ("ready", 41), ("failed", 120), ("installed", 120)] {
+                bleManager.applyAuthenticatedMapTransferStatus(status(state, sequence))
+                manager.reconcileLastTransfer(bleManager: bleManager)
+                assertEqual(manager.lastTransferOutcome, "unconfirmed",
+                            "\(state) cannot end an upload taken over without a baseline")
+                assert(defaults.object(forKey: acceptedKey) == nil,
+                       "\(state) is not adopted as the upload's live attempt")
+            }
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 121, session: "map-2-manifest"))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assert(defaults.object(forKey: acceptedKey) == nil,
+                   "another session's live attempt is not adopted")
+
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 121))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(defaults.integer(forKey: acceptedKey), 121,
+                        "the session's first live attempt becomes the baseline")
+            assertEqual(manager.lastTransferOutcome, "unconfirmed", "a live attempt keeps the upload pending")
+            bleManager.applyAuthenticatedMapTransferStatus(status("recovering", 121, error: "stream_active_write"))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            bleManager.applyAuthenticatedMapTransferStatus(status("activating", 122))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(manager.lastTransferOutcome, "unconfirmed", "the device's retry keeps the upload pending")
+            assertEqual(defaults.integer(forKey: acceptedKey), 121, "a retry continues the adopted attempt")
+
+            bleManager.applyAuthenticatedMapTransferStatus(
+                status(ending, 122, error: ending == "failed" ? "activation_retry_limit" : nil))
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(manager.lastTransferOutcome, ending,
+                        "the retry's \(ending) result ends the upload taken over mid-way")
+            assertEqual(manager.errorMessage, ending == "failed"
+                ? "The Bike Computer could not install this map after several tries. Upload it again." : nil,
+                        "the final retry failure reads as the device's give-up")
+        }
+
+        // An activation already live when the upload was taken over binds the
+        // first attempt too.
+        let suite = "offline-map-taken-over-activating-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        manager.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+        bleManager.applyAuthenticatedMapTransferStatus(status("activating", 8))
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        bleManager.applyAuthenticatedMapTransferStatus(status("installed", 8))
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(manager.lastTransferOutcome, "installed",
+                    "an activation live at take-over completes its upload")
+
+        // Another connection's transfer stays unbound: it adopts nothing.
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.removeObject(forKey: acceptedKey)
+        let unbound = OfflineMapManager(defaults: defaults)
+        unbound.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch &+ 1)
+        bleManager.applyAuthenticatedMapTransferStatus(status("activating", 9))
+        unbound.reconcileLastTransfer(bleManager: bleManager)
+        assert(defaults.object(forKey: acceptedKey) == nil,
+               "a transfer observed in another connection adopts no attempt")
+    }
+
     static func testOfflineMapPolygonClosesRing() {
         let request = OfflineMapJobRequest.customPolygon(ring: [
             CLLocationCoordinate2D(latitude: 1, longitude: 2),
@@ -5865,6 +5988,14 @@ extension NavigationProtocolTests {
             .pending,
             "matching device activation blocks a redundant archive upload"
         )
+        assertEqual(CachedPackRecoveryDecision.evaluate(
+            expectedSessionId: "session-new", activeSessionId: "session-old",
+            activationStatus: "recovering", activationSessionId: "session-new"
+        ), .pending, "a device retrying this session blocks a redundant archive upload")
+        assertEqual(ExistingMapStreamAttemptDisposition.evaluate(
+            expectedSessionID: "session-new", activeSessionID: "session-old",
+            activationStatus: "recovering", activationSessionID: "session-new"
+        ), .awaitDevice, "a device retrying this session is awaited instead of sent the map again")
         assertEqual(
             CachedPackRecoveryDecision.evaluate(
                 expectedSessionId: "session-new",
@@ -6165,6 +6296,40 @@ extension NavigationProtocolTests {
                     .installed, "activation sequence wrap is a forward transition")
         assertEqual(evaluate(acceptedSequence: 9, activationSequence: 8).decision,
                     .pending("installed"), "another acknowledged attempt cannot complete this operation")
+        assertEqual(evaluate(acceptedSequence: 8, activationStatus: "recovering", activationSequence: 8).decision,
+                    .pending("recovering"), "the device keeps an acknowledged attempt between its retries")
+        assertEqual(evaluate(acceptedSequence: 8, activationSequence: 9).decision, .installed,
+                    "a device retry of the acknowledged attempt completes it under the next sequence")
+        assertEqual(evaluate(previousSequence: nil, acceptedSequence: 8, activationStatus: "failed",
+                             activationSequence: 10, activationError: "activation_retry_limit").decision,
+                    .failed("activation_retry_limit"),
+                    "the device's last retry ends the acknowledged attempt without a pre-upload sequence")
+        assertEqual(evaluate(previousSequence: 9, acceptedSequence: 8, activationSequence: 9).decision,
+                    .pending("installed"), "a status from before the upload never completes a later attempt")
+        for status in ["receiving", "paused", "finalizing", "ready", "idle", "prepared", "failed", nil] as [String?] {
+            assertEqual(MapActivationReconciler.attemptSequence(status: status, sequence: 1), nil,
+                        "stream reception numbers its own sequence and shares some status words")
+        }
+        assertEqual(MapActivationReconciler.attemptSequence(status: "recovering", sequence: 9), 9,
+                    "an activation status binds an upload taken over mid-way to its attempt")
+        for status in ["receiving", "paused", "finalizing", "ready", "idle", "prepared", "failed", "installed",
+                       nil] as [String?] {
+            assertEqual(MapActivationReconciler.liveAttemptSequence(status: status, sequence: 1), nil,
+                        "a stream or terminal status is never adopted as a live attempt")
+        }
+        for status in ["activating", "recovering"] {
+            assertEqual(MapActivationReconciler.liveAttemptSequence(status: status, sequence: 9), 9,
+                        "\(status) is a live attempt an upload without a baseline can adopt")
+        }
+        assertEqual(evaluate(previousSequence: nil, acceptedSequence: nil, activationStatus: "failed",
+                             activationSequence: 9, activationError: "activation_retry_limit").decision,
+                    .pending("failed"), "a result left from before an upload taken over mid-way cannot end it")
+        let managerURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputer/Managers/OfflineMapManager.swift")
+        let managerSource = try! String(contentsOf: managerURL, encoding: .utf8)
+        assert(managerSource.contains("previousSequence: attemptSequence,") &&
+               managerSource.contains("Int(attemptSequence),"),
+               "an upload taken over mid-way keeps only an activation sequence as its baseline")
         assertEqual(evaluate(activationSequence: 8, activationSessionId: "foreign-session").decision,
                     .pending("active map is map-1; waiting for current activation"),
                     "another content session cannot complete this operation")
@@ -6483,6 +6648,132 @@ extension NavigationProtocolTests {
             assert(false, "a rotated token during HTTP status await cannot complete activation")
         }
         assert(bleManager.mapTransferActiveMapId != "stale-map", "late old-token HTTP status cannot overwrite BLE state")
+    }
+
+    static func testMapActivationConfirmationFollowsDeviceRetries() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            FirmwareRequestCaptureProtocol.handler = nil
+        }
+        let defaults = UserDefaults(suiteName: "map-retry-confirmation-\(UUID().uuidString)")!
+        let manager = OfflineMapManager(defaults: defaults)
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.setConnectedDeviceIDForTesting("map-test-device")
+        bleManager.deviceTransferSessionToken = "map-test-token"
+        let client = MapTransferDeviceClient(
+            baseURL: URL(string: "http://192.168.4.20:8080")!,
+            session: session
+        )
+        let clock = TestClock()
+        let advancePollClock: (UInt64) async throws -> Void = { nanoseconds in
+            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+        }
+        // Each device retry starts under the next sequence; the last status repeats.
+        var statusRequests = 0
+        func serve(_ activations: [String]) {
+            statusRequests = 0
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                let activation = activations[min(statusRequests, activations.count - 1)]
+                statusRequests += 1
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        Data("{\"activeMapId\":\"old-map\",\"activation\":\(activation)}".utf8))
+            }
+        }
+        func confirm() async -> (MapActivationConfirmationResult?, Error?) {
+            var confirmation: MapActivationConfirmationResult?
+            var failure: Error?
+            await runMainActorAsyncTest {
+                do {
+                    confirmation = try await manager.confirmActivatedMap(
+                        expectedMapId: "map-1", sessionId: "session-1",
+                        previousMapId: "old-map", previousSessionId: "old-session",
+                        previousSequence: 7, acceptedSequence: 8,
+                        client: client, bleManager: bleManager,
+                        timeout: 0.2, pollIntervalNanoseconds: 1_000_000,
+                        now: clock.now, sleep: advancePollClock)
+                } catch {
+                    failure = error
+                }
+            }
+            return (confirmation, failure)
+        }
+        let firstAttempt = """
+        {"status":"activating","sequence":8,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":40}
+        """
+        let betweenAttempts = """
+        {"status":"recovering","sequence":8,"sessionId":"session-1","step":3,"steps":3,"progress":40,"error":{"code":"stream_active_write","message":"active map pointer write failed"}}
+        """
+
+        serve([firstAttempt, betweenAttempts,
+               #"{"status":"activating","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":0}"#,
+               #"{"status":"installed","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":100}"#])
+        let retried = await confirm()
+        assertEqual(retried.0, .installed, "a device retry that installs the map completes the confirmation")
+        assert(retried.1 == nil, "the failed first attempt is not reported while the device retries")
+        assertEqual(statusRequests, 4, "confirmation waits through the retry before reporting")
+
+        serve([firstAttempt, betweenAttempts,
+               #"{"status":"activating","sequence":9,"sessionId":"session-1","mapId":"map-1","step":3,"steps":3,"progress":0}"#,
+               #"{"status":"failed","sequence":9,"sessionId":"session-1","mapId":"map-1","error":{"code":"activation_retry_limit","message":"map activation kept failing; upload the map again"}}"#])
+        let exhausted = await confirm()
+        assert(exhausted.0 == nil, "the device's retry limit is not reported as installed or still running")
+        assertEqual(exhausted.1?.localizedDescription,
+                    "The Bike Computer could not install this map after several tries. Upload it again.",
+                    "the retry limit reads as a request to upload again")
+
+        // Without Wi-Fi status the loop reads BLE, whose compact status carries codes without messages.
+        FirmwareRequestCaptureProtocol.handler = { _, _ in throw URLError(.timedOut) }
+        func confirmOverBLE(_ activations: [String]) async -> (MapActivationConfirmationResult?, Error?) {
+            var pending = activations.map { activation in
+                try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+                    from: Data("{\"activeMapId\":\"old-map\",\"activation\":\(activation)}".utf8))
+            }
+            bleManager.applyAuthenticatedMapTransferStatus(pending.removeFirst())
+            var confirmation: MapActivationConfirmationResult?
+            var failure: Error?
+            await runMainActorAsyncTest {
+                do {
+                    confirmation = try await manager.confirmActivatedMap(
+                        expectedMapId: "map-1", sessionId: "session-1",
+                        previousMapId: "old-map", previousSessionId: "old-session",
+                        previousSequence: 7, acceptedSequence: 8,
+                        client: client, bleManager: bleManager,
+                        timeout: 0.2, pollIntervalNanoseconds: 1_000_000,
+                        now: clock.now, sleep: { nanoseconds in
+                            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+                            guard !pending.isEmpty else { return }
+                            let next = pending.removeFirst()
+                            await MainActor.run { bleManager.applyAuthenticatedMapTransferStatus(next) }
+                        })
+                } catch {
+                    failure = error
+                }
+            }
+            return (confirmation, failure)
+        }
+        let bleBetweenAttempts = #"{"status":"recovering","sequence":8,"sessionId":"session-1","error":{"code":"stream_active_write"}}"#
+        let bleRetried = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"installed","sequence":9,"sessionId":"session-1","mapId":"map-1","terminalCode":"installed"}"#])
+        assertEqual(bleRetried.0, .installed, "BLE status confirms a device retry that installs the map")
+        let bleExhausted = await confirmOverBLE([firstAttempt, bleBetweenAttempts,
+            #"{"status":"failed","sequence":9,"sessionId":"session-1","mapId":"map-1","error":{"code":"activation_retry_limit"},"terminalCode":"activation_retry_limit"}"#])
+        assertEqual(bleExhausted.1?.localizedDescription,
+                    "The Bike Computer could not install this map after several tries. Upload it again.",
+                    "BLE status reports the retry limit by its code alone")
+
+        for failure in ["activation_retry_limit", "activation_retry_limit: map activation kept failing; upload the map again"] {
+            assertEqual(OfflineMapPlatformError.mapActivationFailed(failure).localizedDescription,
+                        "The Bike Computer could not install this map after several tries. Upload it again.",
+                        "BLE status reports the retry limit by code, with or without its message")
+        }
+        assertEqual(OfflineMapPlatformError.mapActivationFailed("file_sha256").localizedDescription,
+                    "Map activation failed: file_sha256", "other device failures keep their code")
+        assertEqual(MapActivationFailureText.statusFailure(code: "file_sha256", message: "sha mismatch"),
+                    "sha mismatch", "HTTPS status keeps the device's own message for other failures")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
@@ -6996,6 +7287,236 @@ extension NavigationProtocolTests {
                 } catch { }
             }
         }
+    }
+
+    static func testFirmwareSlotCapacityPolicy() {
+        let legacy = FirmwareSlotLayout.legacySlotBytes
+        let current = FirmwareSlotLayout.currentSlotBytes
+        let reserve = FirmwareSlotLayout.applicationReserveBytes
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: true, maxImageBytes: current),
+                    .slot(current), "an eligible dual-4-MiB device reports its inactive slot")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: true, maxImageBytes: nil),
+                    .unknown, "older status without capacity stays unknown")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: nil, maxImageBytes: current),
+                    .unknown, "capacity without eligibility is not trusted")
+        assertEqual(FirmwareSlotLayout.capacity(otaEligible: false, maxImageBytes: 8_388_608),
+                    .ineligible, "a single-slot developer layout reports its running slot only")
+        assertEqual(FirmwareSlotLayout.channels(for: .slot(current)).map(\.pathComponent),
+                    ["dual4m", nil], "migrated devices prefer the dual-4-MiB channel")
+        for capacity in [FirmwareSlotCapacity.slot(legacy), .unknown, .ineligible, .slot(current - 1)] {
+            assertEqual(FirmwareSlotLayout.channels(for: capacity).map(\.pathComponent), [nil],
+                        "\(capacity) is served only the legacy-compatible channel")
+        }
+        assert(FirmwareSlotLayout.channels(for: .slot(2 * 1024 * 1024)).isEmpty,
+               "a smaller unknown slot receives no channel")
+        for (bytes, capacity, fits) in [
+            (legacy - reserve, FirmwareSlotCapacity.slot(legacy), true),
+            (legacy - reserve + 1, .slot(legacy), false),
+            (legacy - reserve + 1, .unknown, false),
+            (current - reserve, .slot(current), true),
+            (current - reserve + 1, .slot(current), false),
+            (0, .slot(current), false)
+        ] as [(Int, FirmwareSlotCapacity, Bool)] {
+            assertEqual(FirmwareSlotLayout.fits(imageBytes: bytes, capacity: capacity), fits,
+                        "\(bytes) bytes against \(capacity) keeps the 64 KiB reserve")
+        }
+        func manifest(size: Int) -> FirmwareReleaseManifest {
+            FirmwareReleaseManifest(schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.0",
+                                    build: 120, gitSha: String(repeating: "a", count: 40), size: size,
+                                    sha256: String(repeating: "b", count: 64),
+                                    url: URL(string: "https://firmware.invalid/image.bin")!,
+                                    minUpdaterProtocol: 1, signature: "s")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: legacy), capacity: .slot(legacy))
+            assert(false, "a dual-4-MiB image is rejected on a legacy slot")
+        } catch {
+            assertEqual(error as? FirmwareUpdateError,
+                        .layoutMigrationRequired(version: "0.4.0", build: 120),
+                        "a larger-layout image asks for the USB migration before any write")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: current), capacity: .slot(current))
+            assert(false, "an image without its reserve is rejected")
+        } catch {
+            assertEqual(error as? FirmwareUpdateError,
+                        .imageExceedsDeviceSlot(imageBytes: current, slotBytes: current),
+                        "an oversized image is rejected before any write")
+        }
+        do {
+            try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .slot(current))
+        } catch {
+            assert(false, "a migrated device accepts an image above 3 MiB: \(error)")
+        }
+        for (code, expected) in [(nil, "inactive_ota_partition_missing"),
+                                 ("running_partition_missing", "running_partition_missing")] as [(String?, String)] {
+            do {
+                try FirmwareUpdateManager.requireImageFits(manifest(size: 3_500_000), capacity: .ineligible,
+                                                           eligibilityCode: code)
+                assert(false, "an ineligible device is rejected")
+            } catch {
+                assertEqual(error as? FirmwareUpdateError, .otaIneligible(expected),
+                            "ineligibility is reported as such, never as a needed migration")
+            }
+        }
+    }
+
+    @MainActor
+    static func testFirmwareManifestChannelSelection() async {
+        let key = P256.Signing.PrivateKey()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+        let base = "https://firmware.invalid/firmware/WAVESHARE_AMOLED_175"
+        func signed(build: Int, size: Int, updater: Int = 1,
+                    signer: P256.Signing.PrivateKey? = nil) -> Data {
+            var manifest = FirmwareReleaseManifest(
+                schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.4.\(build)", build: build,
+                gitSha: String(repeating: "c", count: 40), size: size,
+                sha256: String(repeating: "d", count: 64),
+                url: URL(string: "https://firmware.invalid/\(build).bin")!,
+                minUpdaterProtocol: updater, signature: nil)
+            let payload = Data(FirmwareManifestSignatureVerifier.canonicalPayload(for: manifest).utf8)
+            manifest = FirmwareReleaseManifest(
+                schemaVersion: manifest.schemaVersion, target: manifest.target, version: manifest.version,
+                build: manifest.build, gitSha: manifest.gitSha, size: manifest.size, sha256: manifest.sha256,
+                url: manifest.url, minUpdaterProtocol: manifest.minUpdaterProtocol,
+                signature: try! (signer ?? key).signature(for: payload).derRepresentation.base64EncodedString())
+            return try! JSONEncoder().encode(manifest)
+        }
+        let legacy = signed(build: 110, size: 3_000_000)
+        let migrated = signed(build: 120, size: 3_500_000)
+        struct Case { let name: String; let maxImageBytes: Int?; let published: [String: Data]
+                      let build: Int?; let requests: [String]; let notice: Int?
+                      var failure: FirmwareUpdateError? = nil; var serverErrors: Set<String> = [] }
+        let cases = [
+            Case(name: "migrated device", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 120, requests: ["/dual4m/manifest.json"], notice: nil),
+            Case(name: "migrated device before the first dual-4-MiB release", maxImageBytes: 4_194_304,
+                 published: ["/manifest.json": legacy],
+                 build: 110, requests: ["/dual4m/manifest.json", "/manifest.json"], notice: nil),
+            Case(name: "legacy device left behind", maxImageBytes: 3_145_728,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json", "/dual4m/manifest.json"], notice: 120),
+            Case(name: "legacy device on a shared release", maxImageBytes: 3_145_728,
+                 published: ["/dual4m/manifest.json": legacy, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json", "/dual4m/manifest.json"], notice: nil),
+            Case(name: "unknown capacity", maxImageBytes: nil,
+                 published: ["/dual4m/manifest.json": migrated, "/manifest.json": legacy],
+                 build: 110, requests: ["/manifest.json"], notice: nil),
+            Case(name: "oversized legacy channel", maxImageBytes: 3_145_728,
+                 published: ["/manifest.json": migrated],
+                 build: nil, requests: ["/manifest.json"], notice: nil,
+                 failure: .invalidManifest),
+            // Only "not published" falls back; every other dual-4-MiB failure
+            // is reported instead of silently serving the legacy build.
+            Case(name: "dual-4-MiB release needs a newer app", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000, updater: 2),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .unsupportedUpdaterProtocol),
+            Case(name: "mis-signed dual-4-MiB release", maxImageBytes: 4_194_304,
+                 published: ["/dual4m/manifest.json": signed(build: 130, size: 3_500_000,
+                                                             signer: P256.Signing.PrivateKey()),
+                             "/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 failure: .invalidManifestSignature),
+            Case(name: "dual-4-MiB channel server error", maxImageBytes: 4_194_304,
+                 published: ["/manifest.json": legacy],
+                 build: nil, requests: ["/dual4m/manifest.json"], notice: nil,
+                 serverErrors: ["/dual4m/manifest.json"]),
+            Case(name: "no channel published", maxImageBytes: 4_194_304, published: [:],
+                 build: nil, requests: ["/dual4m/manifest.json", "/manifest.json"], notice: nil,
+                 failure: .notPublished)
+        ]
+        for testCase in cases {
+            let suite = "firmware-channel-test.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var requests: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                let path = String(request.url!.absoluteString.dropFirst(base.count))
+                requests.append(path)
+                let body = testCase.published[path]
+                let status = testCase.serverErrors.contains(path) ? 500 : body == nil ? 404 : 200
+                return (HTTPURLResponse(url: request.url!, statusCode: status,
+                                        httpVersion: nil, headerFields: nil)!, body ?? Data())
+            }
+            let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+            manager.manifestBaseURLString = "https://firmware.invalid/firmware"
+            manager.manifestPublicKeyForTesting = key.publicKey.x963Representation.base64EncodedString()
+            let ble = BLEManager()
+            let capacity = testCase.maxImageBytes.map { #","maxImageBytes":\#($0)"# } ?? ""
+            _ = ble.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(
+                    (#"{"enabled":false,"mode":"","firmware":{"target":"WAVESHARE_AMOLED_175","otaEligible":true,"eligibilityCode":"eligible""#
+                        + capacity + "}}").utf8))
+            do {
+                let manifest = try await manager.fetchLatestManifestForTesting(bleManager: ble)
+                assertEqual(manifest.build, testCase.build ?? -1, "\(testCase.name) selects its channel")
+            } catch {
+                assert(testCase.build == nil, "\(testCase.name) fetch failed: \(error)")
+                if let failure = testCase.failure {
+                    assertEqual(error as? FirmwareUpdateError, failure, "\(testCase.name) reports its cause")
+                }
+            }
+            assertEqual(requests, testCase.requests, "\(testCase.name) requests only fitting channels")
+            assertEqual(manager.layoutMigrationNotice?.build, testCase.notice,
+                        "\(testCase.name) explains a newer layout-only release")
+        }
+    }
+
+    @MainActor
+    static func testFirmwareInstallRejectsOversizedImageBeforeAnyWrite() async {
+        let suite = "firmware-slot-test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FirmwarePausedDownloadProtocol.self]
+        let session = URLSession(configuration: configuration)
+        var downloads = 0
+        FirmwarePausedDownloadProtocol.onStart = { _ in Task { @MainActor in downloads += 1 } }
+        defer { session.invalidateAndCancel(); FirmwarePausedDownloadProtocol.onStart = nil }
+        let manager = FirmwareUpdateManager(defaults: defaults, session: session)
+        // Verified manifest for a dual-4-MiB release that no longer fits 3 MiB.
+        let manifest = FirmwareReleaseManifest(
+            schemaVersion: 1, target: "WAVESHARE_AMOLED_175", version: "0.5.0", build: 130,
+            gitSha: String(repeating: "e", count: 40), size: 3_200_000,
+            sha256: String(repeating: "f", count: 64),
+            url: URL(string: "https://firmware.invalid/130.bin")!, minUpdaterProtocol: 1, signature: "s")
+        manager.setVerifiedManifestForTesting(manifest)
+        let ble = BLEManager()
+        ble.setConnectedDeviceIDForTesting("ota-slot-device")
+        ble.isConnected = true
+        ble.isNavigationReady = true
+        ble.firmwareTarget = manifest.target
+        ble.firmwareBuild = 105
+        var packets: [String] = []
+        let legacyStatus = #"{"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"normal","correlation":0},"firmware":{"target":"WAVESHARE_AMOLED_175","otaEligible":true,"eligibilityCode":"eligible","maxImageBytes":3145728}}"#
+        ble.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96, canSend: { true }, write: { packet in
+                let text = String(decoding: packet, as: UTF8.self)
+                packets.append(text)
+                if text == "DSTS" {
+                    Task { @MainActor in
+                        _ = ble.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(legacyStatus.utf8))
+                    }
+                }
+            }))
+        manager.installLatest(bleManager: ble)
+        for _ in 0..<400 where manager.errorMessage == nil {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        assertEqual(manager.errorMessage,
+                    FirmwareUpdateError.layoutMigrationRequired(version: "0.5.0", build: 130).errorDescription,
+                    "a legacy-layout device is told to migrate instead of attempting OTA")
+        assertEqual(packets, ["DSTS"], "only the fresh status read happens; no maintenance or transfer command")
+        assertEqual(downloads, 0, "the image is never downloaded")
+        assert(defaults.data(forKey: "firmware.pendingUpdate") == nil, "no pending operation is recorded")
+        assert(!manager.isUpdateAllowed(manifest, bleManager: ble), "the install button stays disabled")
     }
 
     @MainActor
@@ -8739,6 +9260,512 @@ extension NavigationProtocolTests {
             applyTimeout.code,
             DeviceNetworkJoinPolicy.configurationApplyTimeoutCode,
             "the bounded apply failure retains its typed diagnostic code"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .target
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.associated,
+            "an observed accessory association proceeds before the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .other
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.continueWaiting,
+            "another active network keeps waiting for the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: 5,
+                observation: .unavailable
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.continueWaiting,
+            "no active network keeps waiting for the system callback"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.applyWaitDecision(
+                elapsed: DeviceNetworkJoinPolicy.configurationApplyTimeout,
+                observation: .unavailable
+            ),
+            DeviceNetworkJoinPolicy.ApplyWaitDecision.timedOut,
+            "the bounded apply window still ends the wait"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.applyObservationIntervalNanoseconds >=
+                1_000_000_000 &&
+                DeviceNetworkJoinPolicy.applyObservationIntervalNanoseconds <=
+                5_000_000_000,
+            "association is observed a few times within the apply window"
+        )
+        let lateError = DeviceNetworkJoinPolicy.lateCallbackFields(
+            error: NSError(
+                domain: DeviceNetworkJoinPolicy.hotspotErrorDomain,
+                code: 7,
+                userInfo: nil
+            ),
+            elapsed: 72.4
+        )
+        assertEqual(
+            lateError["phase"] ?? "",
+            "late_callback",
+            "a system callback after the wait is attributed as late"
+        )
+        assertEqual(
+            lateError["applyResult"] ?? "",
+            "error",
+            "a late error keeps its result"
+        )
+        assertEqual(
+            lateError["applyErrorDomain"] ?? "",
+            DeviceNetworkJoinPolicy.hotspotErrorDomain,
+            "a late error keeps its domain"
+        )
+        assertEqual(lateError["applyErrorCode"] ?? "", "7", "a late error keeps its code")
+        assertEqual(lateError["durationMs"] ?? "", "72400", "a late callback records its delay")
+        let lateAccepted = DeviceNetworkJoinPolicy.lateCallbackFields(
+            error: nil,
+            elapsed: 61
+        )
+        assertEqual(
+            lateAccepted["applyResult"] ?? "",
+            "accepted",
+            "a late success is recorded as accepted"
+        )
+        assert(
+            lateAccepted["applyErrorDomain"] == nil,
+            "a late success carries no error fields"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .other
+            ),
+            "an accepted configuration that never joined is recognised"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .unavailable
+            ),
+            "an accepted configuration with no active network is recognised"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: true,
+                observation: .target
+            ),
+            "a joined configuration is not a retry case"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                applyAccepted: false,
+                observation: .other
+            ),
+            "a rejected configuration keeps the typed error path"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.ApplyResolution.allCases.map(\.rawValue),
+            ["callback", "associated", "timeout", "refused"],
+            "a refused apply (no lease or an outstanding apply) is labelled apart from a timed-out one"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: true) &&
+                !DeviceNetworkJoinPolicy.retryJoinsOnce(afterAcceptedWithoutAssociation: false),
+            "only the retry after an unjoined persistent configuration joins once"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: true
+            ) > DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: false
+            ) &&
+                DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                    afterAcceptedWithoutAssociation: true
+                ) <= 5_000_000_000,
+            "the join-once retry waits longer for the removal, still bounded"
+        )
+    }
+
+    static func testDeviceNetworkStaleAssociationPolicy() async {
+        let noRoute = DeviceTransferServerProbeResult(
+            outcome: .transportError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorNotConnectedToInternet
+            ),
+            diagnostics: DeviceTransferPinnedSessionSnapshot(metricsAvailable: true)
+        )
+        assert(
+            noRoute.indicatesNoRoute,
+            "a -1009 failure before any connection attempt means no route to the accessory"
+        )
+        var connected = DeviceTransferPinnedSessionSnapshot(metricsAvailable: true)
+        connected.transactionCount = 1
+        connected.connectStarted = true
+        assert(
+            !DeviceTransferServerProbeResult(
+                outcome: .transportError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorNotConnectedToInternet
+                ),
+                diagnostics: connected
+            ).indicatesNoRoute,
+            "a failure after the connection started is not a missing route"
+        )
+        assert(
+            !DeviceTransferServerProbeResult(
+                outcome: .transportError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorTimedOut
+                ),
+                diagnostics: DeviceTransferPinnedSessionSnapshot()
+            ).indicatesNoRoute,
+            "a timeout is not a missing route"
+        )
+        let ready = DeviceTransferServerProbeResult(
+            outcome: .ready,
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        assert(!ready.indicatesNoRoute, "a ready probe is not a missing route")
+        assertEqual(
+            DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(after: 2, probe: noRoute),
+            3,
+            "consecutive no-route probes count up"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(after: 2, probe: ready),
+            0,
+            "a probe that reached the device resets the count"
+        )
+
+        let count = DeviceNetworkJoinPolicy.staleAssociationProbeCount
+        let minimum = DeviceNetworkJoinPolicy.staleAssociationMinimumElapsed
+        assert(
+            count >= 3 && minimum >= 5 &&
+                minimum < DeviceTransferServerProbePolicy.absoluteTimeout / 2,
+            "stale detection waits past a healthy association's third-probe answer and keeps most of the probe window"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count,
+                elapsed: minimum
+            ),
+            "a confirmed association with no route past the threshold is stale"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count - 1,
+                elapsed: minimum + 10
+            ),
+            "fewer consecutive no-route probes keep probing"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .target,
+                consecutiveNoRouteProbes: count + 2,
+                elapsed: minimum - 0.1
+            ),
+            "an early run of no-route probes keeps probing"
+        )
+        assert(
+            !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .other,
+                consecutiveNoRouteProbes: count + 4,
+                elapsed: minimum + 10
+            ) && !DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                observation: .unavailable,
+                consecutiveNoRouteProbes: count + 4,
+                elapsed: minimum + 10
+            ),
+            "only a confirmed accessory association can be stale"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(rejoinsUsed: 0) &&
+                !DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(rejoinsUsed: 1),
+            "a stale association is re-joined once per join"
+        )
+        assert(
+            DeviceNetworkJoinPolicy.retryJoinsOnce(
+                afterAcceptedWithoutAssociation: false,
+                afterStaleAssociation: true
+            ),
+            "the re-join after a stale association joins once"
+        )
+        assertEqual(
+            DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                afterAcceptedWithoutAssociation: false,
+                afterStaleAssociation: true
+            ),
+            DeviceNetworkJoinPolicy.unassociatedRetrySettleDelayNanoseconds,
+            "the re-join waits the longer settle for the configuration removal"
+        )
+        let fields = DeviceNetworkJoinPolicy.staleRejoinFields(
+            consecutiveNoRouteProbes: 5,
+            elapsed: 6.8
+        )
+        assertEqual(fields["phase"] ?? "", "stale_rejoin", "the abandoned window is recorded as a stale re-join")
+        assertEqual(fields["result"] ?? "", "stale_association", "the record names the stale association")
+        assertEqual(fields["kind"] ?? "", "join_once", "the re-join is a join-once application")
+        assertEqual(fields["consecutiveEarlyFailures"] ?? "", "5", "the record keeps the no-route probe count")
+        assertEqual(fields["durationMs"] ?? "", "6800", "the record keeps the time spent probing")
+
+        // The probe window ends early only when the caller abandons it as
+        // stale; a healthy association still answers by its third probe, and
+        // without the hook the window runs to its timeout.
+        var now: TimeInterval = 0
+        var consecutive = 0
+        var abandonedAt = 0
+        let abandoned = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in noRoute },
+            observe: { _, _, _, _ in },
+            abandon: { attempt, elapsed, probe in
+                consecutive = DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                    after: consecutive,
+                    probe: probe
+                )
+                guard DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                    observation: .target,
+                    consecutiveNoRouteProbes: consecutive,
+                    elapsed: elapsed
+                ) else { return false }
+                abandonedAt = attempt
+                return true
+            }
+        )
+        assert(
+            abandoned?.indicatesNoRoute == true && abandonedAt >= count &&
+                now >= minimum &&
+                now < DeviceTransferServerProbePolicy.absoluteTimeout / 2,
+            "a stale association ends the window within a few probes, well before the probe timeout"
+        )
+        now = 0
+        var healthyProbes = 0
+        var healthyNoRoute = 0
+        let healthy = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in
+                healthyProbes += 1
+                return healthyProbes < 3 ? noRoute : ready
+            },
+            observe: { _, _, _, _ in },
+            abandon: { _, elapsed, probe in
+                healthyNoRoute = DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                    after: healthyNoRoute,
+                    probe: probe
+                )
+                return DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                    observation: .target,
+                    consecutiveNoRouteProbes: healthyNoRoute,
+                    elapsed: elapsed
+                )
+            }
+        )
+        assert(
+            healthy?.isReady == true && healthyProbes == 3,
+            "an association that answers by the third probe is never abandoned"
+        )
+        now = 0
+        var defaultProbes = 0
+        let exhausted = try? await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: DeviceTransferServerProbePolicy.absoluteTimeout,
+            clock: { now },
+            sleep: { now += TimeInterval($0) / 1_000_000_000 },
+            probe: { _ in
+                defaultProbes += 1
+                return noRoute
+            },
+            observe: { _, _, _, _ in }
+        )
+        assert(
+            exhausted?.indicatesNoRoute == true &&
+                now >= DeviceTransferServerProbePolicy.absoluteTimeout &&
+                defaultProbes > count,
+            "without the stale hook the probe window still runs to its timeout"
+        )
+
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let source = try? String(
+            contentsOf: transferManagerURL,
+            encoding: .utf8
+        ), let joinStart = source.range(
+            of: "private func joinDeviceNetworkIfNeeded("
+        )?.lowerBound,
+        let applyStart = source.range(
+            of: "private func apply(",
+            range: joinStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "device network join source should be available")
+            return
+        }
+        let joinSource = String(source[joinStart..<applyStart])
+        assert(
+            joinSource.components(
+                separatedBy: "waitForTransferServerOrStaleAssociation("
+            ).count == 3 &&
+                joinSource.contains(
+                    "afterStaleAssociation: rejoinAfterStaleAssociation"
+                ) &&
+                joinSource.contains("staleRejoinsUsed += 1"),
+            "both probe paths of the join abandon a stale association and re-join once"
+        )
+    }
+
+    static func testDeviceTransferLinkRebindPolicy() {
+        typealias Policy = DeviceTransferLinkRebindPolicy
+        func link(
+            ready: Bool = true, device: String? = "bike-a", epoch: UInt64 = 9,
+            revision: UInt64 = 1, mode: String = "diagnostics",
+            token: String? = "tok", generation: UInt32 = 7
+        ) -> Policy.Link {
+            Policy.Link(navigationReady: ready, deviceID: device, connectionEpoch: epoch,
+                        statusRevision: revision, mode: mode, sessionToken: token,
+                        transferGeneration: generation)
+        }
+        func decide(
+            _ value: Policy.Link, token: String? = "tok", generation: UInt32? = 7
+        ) -> Policy.Decision {
+            Policy.decision(leaseDeviceID: "bike-a", leaseMode: "diagnostics", leaseEpoch: 3,
+                            authorizedToken: token, authorizedGeneration: generation, link: value)
+        }
+        assertEqual(decide(link(epoch: 3)), Policy.Decision.keep, "the link that authorized the session needs no rebind")
+        assertEqual(decide(link()), Policy.Decision.rebind, "the same device showing the same session on a new link is rebound")
+        assertEqual(
+            decide(link(ready: false, device: nil, revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "no link yet keeps waiting for the owner to come back"
+        )
+        assertEqual(
+            decide(link(revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "a new link without a transfer status yet keeps waiting"
+        )
+        assertEqual(
+            decide(link(ready: false, revision: 0, mode: "", token: nil, generation: 0)),
+            Policy.Decision.wait, "a link that has yet to authenticate keeps waiting"
+        )
+        assertEqual(decide(link(device: "bike-b")), Policy.Decision.stale, "another device is a stale owner")
+        assertEqual(
+            decide(link(mode: "", token: nil, generation: 0)),
+            Policy.Decision.stale, "a fresh empty status means the device tore the session down"
+        )
+        assertEqual(decide(link(token: "other")), Policy.Decision.stale, "a different token is another session")
+        assertEqual(decide(link(generation: 8)), Policy.Decision.stale, "a rotated generation is another session")
+        assertEqual(decide(link(mode: "map")), Policy.Decision.stale, "a different mode is another session")
+        assertEqual(
+            decide(link(), token: nil, generation: nil),
+            Policy.Decision.stale, "a session that never authorized a token has nothing to carry over"
+        )
+        assert(
+            Policy.linkWindow == 15 && Policy.windowCap == 45,
+            "the wait mirrors the firmware's window and cap"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: nil), 115,
+            "with no link back the firmware gives up 15 s after the loss"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 90), 115,
+            "a connect before the loss is the lost link itself"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 110), 125,
+            "a link that came back moves the deadline to 15 s from that link"
+        )
+        assertEqual(
+            Policy.deadline(lossUptime: 100, lastConnectUptime: 140), 145,
+            "the deadline never passes 45 s after the loss"
+        )
+        assert(
+            !Policy.expired(now: 114.9, lossUptime: 100, lastConnectUptime: nil) &&
+                Policy.expired(now: 115, lossUptime: 100, lastConnectUptime: nil) &&
+                !Policy.expired(now: 120, lossUptime: 100, lastConnectUptime: 110),
+            "the wait is anchored at the loss, not at the cleanup call"
+        )
+        assert(
+            Policy.remoteCleared(
+                leaseDeviceID: "bike-a",
+                link: link(revision: 1, mode: "", token: nil, generation: 0)
+            ),
+            "a fresh empty status on the same device means the session already ended"
+        )
+        assert(
+            Policy.remoteCleared(
+                leaseDeviceID: "bike-a",
+                link: link(revision: 1, mode: "", token: "", generation: 0)
+            ),
+            "an empty token reads as no session too"
+        )
+        assert(
+            !Policy.remoteCleared(leaseDeviceID: "bike-a", link: link()) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(revision: 0, mode: "", token: nil, generation: 0)
+                ) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(device: "bike-b", revision: 1, mode: "", token: nil, generation: 0)
+                ) &&
+                !Policy.remoteCleared(
+                    leaseDeviceID: "bike-a",
+                    link: link(ready: false, revision: 1, mode: "", token: nil, generation: 0)
+                ),
+            "a live session, no status yet, another device or an unauthenticated link are not a cleared remote"
+        )
+        assert(
+            Policy.shouldRequestStatus(now: 10, lastRequest: nil) &&
+                !Policy.shouldRequestStatus(now: 11, lastRequest: 10) &&
+                Policy.shouldRequestStatus(now: 12, lastRequest: 10),
+            "a status is requested at most every two seconds while waiting"
+        )
+
+        let transferManagerURL = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift"
+        )
+        guard let source = try? String(contentsOf: transferManagerURL, encoding: .utf8),
+              let cleanupStart = source.range(
+                of: "private func cleanupOperation(bleManager: BLEManager) async -> Bool {"
+              )?.lowerBound,
+              let cleanupEnd = source.range(
+                of: "func releaseFirmwareAfterReboot(",
+                range: cleanupStart..<source.endIndex
+              )?.lowerBound else {
+            assert(false, "device transfer cleanup source should be available")
+            return
+        }
+        let cleanupSource = String(source[cleanupStart..<cleanupEnd])
+        assert(
+            cleanupSource.contains("await self.rebindAfterLinkLoss(bleManager: bleManager)") &&
+                cleanupSource.contains("let lease = self.operationLease ?? lease") &&
+                cleanupSource.range(of: "rebindAfterLinkLoss")!.lowerBound <
+                    cleanupSource.range(of: "let alreadyClear")!.lowerBound,
+            "the session exit rebinds the lease to a replacing link before deciding ownership"
+        )
+        assert(
+            cleanupSource.contains("case .stale(remoteCleared: true) =") &&
+                cleanupSource.range(of: "rebindAfterLinkLoss")!.lowerBound <
+                    cleanupSource.range(of: "coordinator.finish(lease, remoteClear: clear)")!.lowerBound,
+            "a status the rebind itself requested on the replacing link, showing no session, completes the cleanup as remotely clear"
+        )
+        guard let rebindStart = source.range(
+            of: "private func rebindAfterLinkLoss(bleManager: BLEManager) async -> LinkRebindOutcome {"
+        )?.lowerBound else {
+            assert(false, "the link rebind source should be available")
+            return
+        }
+        let rebindSource = String(source[rebindStart..<cleanupStart])
+        assert(
+            rebindSource.contains("let remoteCleared = answeredOwnRequest &&") &&
+                rebindSource.contains("statusRequest = (link.connectionEpoch, link.statusRevision)"),
+            "only a status answered on the same link to the rebind's own request can clear the remote"
         )
     }
 
@@ -10712,6 +11739,42 @@ extension NavigationProtocolTests {
         assert(assembled.library?.isComplete == true && assembled.nextOffset == nil,
                "only a complete snapshot enables commands")
         assertEqual(pages.ingest(firstPage).library?.maps.count, 6, "late duplicate pages cannot replace a complete snapshot")
+        // A busy device serves one four-map BLE page from whatever offset it
+        // last served; the HTTPS status lists every map. Neither may reshape
+        // Saved Maps while the device stays busy.
+        func busyPage(_ page: DeviceMapLibrary, revision: UInt32 = 9, error: String = "library_owner") -> DeviceMapLibrary {
+            DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: true,
+                revision: revision, error: error, selectedSessionID: "", maps: page.maps,
+                offset: page.offset, total: page.total)
+        }
+        var wholeInventory = firstPage; wholeInventory.maps = pagedMaps; wholeInventory.total = 6
+        for busy in [busyPage(lastPage), busyPage(firstPage), busyPage(wholeInventory)] {
+            let shown = pages.ingest(busy)
+            assertEqual(shown.library?.maps.map(\.sessionID), pagedMaps.map(\.sessionID),
+                        "busy pages keep the last whole inventory in Saved Maps")
+            assert(shown.library?.busy == true && shown.library?.isComplete == false && shown.nextOffset == nil,
+                   "a busy inventory is never reuse authority and does not page")
+            assertEqual(shown.library?.error, "library_owner", "busy pages still report the device's state")
+        }
+        let settled = pages.ingest(lastPage)
+        assert(settled.library?.isComplete == true && settled.library?.maps.count == 6 && settled.nextOffset == nil,
+               "the same revision settles without reassembling pages")
+        assertEqual(pages.ingest(busyPage(firstPage, revision: 10)).library?.maps.count, 6,
+                    "a busy revision change keeps the list until the device settles")
+        let nextFirst = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 11, error: "", selectedSessionID: "", maps: Array(pagedMaps.prefix(4)), offset: 0, total: 5)
+        let reassembling = pages.ingest(nextFirst)
+        assert(reassembling.library?.maps.count == 6 && reassembling.library?.isComplete == false &&
+               reassembling.nextOffset == 4, "a new revision keeps the previous list visible while it pages")
+        let nextLast = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 11, error: "", selectedSessionID: "", maps: [pagedMaps[5]], offset: 4, total: 5)
+        let replaced = pages.ingest(nextLast)
+        assert(replaced.library?.isComplete == true && replaced.library?.maps.map(\.sessionID) ==
+               (Array(pagedMaps.prefix(4)) + [pagedMaps[5]]).map(\.sessionID), "the next whole snapshot replaces the list")
+        pages = DeviceMapLibraryPages()
+        let unlisted = pages.ingest(busyPage(lastPage))
+        assert(unlisted.library?.known == false && unlisted.library?.maps.isEmpty == true &&
+               unlisted.library?.busy == true, "one busy page is never shown as the whole SD card")
         pages = DeviceMapLibraryPages()
         assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
 
@@ -10739,6 +11802,21 @@ extension NavigationProtocolTests {
                 .localizedDescription.contains("damaged"), "a damaged SD copy is repaired by removal, then reinstall")
         assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_session_conflict\"}}")
                 .localizedDescription.contains("Another copy"), "a protected or different copy needs an explicit choice")
+        let readyPending = OfflineMapPlatformError.serverStatus(409,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_ready_pending\",\"message\":\"another verified stream is pending activation\"}}")
+            .localizedDescription
+        assert(readyPending.contains("Restart the Bike Computer") && !readyPending.contains("{"),
+               "a stranded verified upload names the restart remedy instead of raw JSON")
+        for code in ["activation_busy", "operation_busy"] {
+            let busy = OfflineMapPlatformError.serverStatus(409, "{\"ok\":false,\"error\":{\"code\":\"\(code)\"}}")
+                .localizedDescription
+            assert(busy.contains("still installing another map") && !busy.contains("{"),
+                   "\(code) explains that another installation must finish first")
+        }
+        assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
+            "{\"error\":{\"code\":\"stream_ready_pending\"}}")), "a pending installation is not an SD-library action")
+        assert(DeviceMapLibrary.errorDescription("library_owner").contains("restart the Bike Computer"),
+               "an owner refusal says the device retries and how to clear it")
         assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
             "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")), "repair refusals are not resumable")
         assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(500, "{}")) &&

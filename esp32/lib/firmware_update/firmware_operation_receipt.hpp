@@ -100,6 +100,24 @@ private:
   }
   Storage &storage_; Record current_{}; unsigned slot_=1; bool ready_=false;
 };
+// Reconciles an Accepted receipt with the image this boot is running.
+enum class ReconcileAction : uint8_t { Keep, Install, Fail, Unresolved };
+// runningAccepted: the running image is valid (or USB-provisioned), not a
+// pending-verify OTA boot. USB recovery and the signed layout migration write
+// app0 outside OTA, and a migration also moves the slots, so a receipt can
+// name a slot whose bytes are no longer its image. A pending OTA boot must
+// still prove its exact bytes before it is confirmed (Unresolved keeps
+// bootloader rollback); an accepted image that replaced them resolves the
+// operation as Failed instead of leaving an unacknowledgeable receipt.
+constexpr ReconcileAction reconcileAction(bool runningFromReceiptSlot,
+                                          bool receiptBytesMatch,
+                                          bool runningAccepted) {
+  if (!runningFromReceiptSlot)
+    return runningAccepted ? ReconcileAction::Fail : ReconcileAction::Keep;
+  if (!receiptBytesMatch)
+    return runningAccepted ? ReconcileAction::Fail : ReconcileAction::Unresolved;
+  return runningAccepted ? ReconcileAction::Install : ReconcileAction::Keep;
+}
 const char *phaseName(Phase phase);
 bool load(Record &record);
 bool accept(const Record &record);

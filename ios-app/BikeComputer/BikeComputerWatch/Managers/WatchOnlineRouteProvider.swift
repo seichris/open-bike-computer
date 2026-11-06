@@ -35,6 +35,7 @@ final class WatchOnlineRouteProvider: NavigationRouteProvider {
         let routes = try response.routes.map {
             try WatchMapKitRouteAdapter.route(
                 from: $0,
+                source: request.source.coordinate,
                 sourceLabel: request.source.label,
                 destinationLabel: request.destination.label,
                 localeIdentifier: request.localeIdentifier
@@ -73,11 +74,17 @@ final class WatchOnlineRouteProvider: NavigationRouteProvider {
 private enum WatchMapKitRouteAdapter {
     static func route(
         from mapKitRoute: MKRoute,
+        source: RouteCoordinateV1,
         sourceLabel: String,
         destinationLabel: String,
         localeIdentifier: String
     ) throws -> NavigationRouteV1 {
-        let points = coordinates(from: mapKitRoute.polyline).map(normalize)
+        // Read in order from the requested start, so a route near a
+        // mainland-China border keeps to its own side.
+        let points = RouteCoordinateNormalizationV1.mapKitToWGS84(
+            routeCoordinates(from: mapKitRoute.polyline),
+            startingNear: source
+        )
         guard let first = points.first,
               let last = points.last,
               let bounds = RouteBoundsV1.enclosing(points) else {
@@ -95,7 +102,11 @@ private enum WatchMapKitRouteAdapter {
         var priorEnd = 0
         var steps: [NavigationRouteStepV1] = []
         for (sourceIndex, mapStep) in mapKitRoute.steps.enumerated() {
-            let stepPoints = coordinates(from: mapStep.polyline).map(normalize)
+            // A step starts where the previous one ended.
+            let stepPoints = RouteCoordinateNormalizationV1.mapKitToWGS84(
+                routeCoordinates(from: mapStep.polyline),
+                startingNear: points[min(priorEnd, points.count - 1)]
+            )
             guard let stepStart = stepPoints.first,
                   let stepEnd = stepPoints.last else {
                 if sourceIndex == mapKitRoute.steps.count - 1 {
@@ -157,7 +168,7 @@ private enum WatchMapKitRouteAdapter {
             name: mapKitRoute.name.isEmpty ? nil : mapKitRoute.name,
             points: points,
             steps: steps,
-            normalizationVersion: 1
+            normalizationVersion: RouteCoordinateNormalizationV1.mapKitVersion
         )
         try route.validate()
         return route
@@ -178,13 +189,12 @@ private enum WatchMapKitRouteAdapter {
         return result
     }
 
-    private static func normalize(
-        _ coordinate: CLLocationCoordinate2D
-    ) -> RouteCoordinateV1 {
-        RouteCoordinateNormalizationV1.mapKitToWGS84(RouteCoordinateV1(
-            latitude: coordinate.latitude,
-            longitude: coordinate.longitude
-        ))
+    private static func routeCoordinates(
+        from polyline: MKPolyline
+    ) -> [RouteCoordinateV1] {
+        coordinates(from: polyline).map {
+            RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude)
+        }
     }
 
     private static func nearestIndex(

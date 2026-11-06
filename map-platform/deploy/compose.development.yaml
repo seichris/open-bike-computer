@@ -1,5 +1,5 @@
-# control-plane-source-commit: 8104250ca68499a50c9ec68b9102f13fe1ab5965
-# worker-source-commit: 8104250ca68499a50c9ec68b9102f13fe1ab5965
+# control-plane-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
+# worker-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
 # These digest-pinned images are the development deployment manifest. The
 # development promotion advances the API, maintenance, and worker together,
@@ -10,8 +10,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:3cd641df582e31e3650fac9b398fa98e1c27f6de463437930c6225b895598348
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:3cd641df582e31e3650fac9b398fa98e1c27f6de463437930c6225b895598348
 
 services:
   map-platform-api:
@@ -21,7 +21,7 @@ services:
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
       MAP_PLATFORM_DEPLOYMENT_CHANNEL: ${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-development}
-      MAP_PLATFORM_GENERATION_PROFILE_POLICY: /app/config/generation-profile-policy-v2.json
+      MAP_PLATFORM_GENERATION_PROFILE_POLICY: /app/config/generation-profile-policy-v5.json
       MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST: ${MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST:-}
       MAP_PLATFORM_ADMIN_TOKEN: ${MAP_PLATFORM_ADMIN_TOKEN:-}
       MAP_PLATFORM_DOWNLOAD_SECRET: ${MAP_PLATFORM_DOWNLOAD_SECRET:?set MAP_PLATFORM_DOWNLOAD_SECRET in Coolify secrets}

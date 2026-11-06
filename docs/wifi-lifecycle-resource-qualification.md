@@ -213,7 +213,7 @@ nonshipping profiles compile both actual adapters with
 - `WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION`
 
 They inherit their corresponding production profile's behavior, signed-artifact
-trust, full renderer, persistent diagnostics and two 3 MiB OTA slots. They do not
+trust, full renderer, persistent diagnostics and two 4 MiB OTA slots. They do not
 inherit the single-slot developer layout, browser service, development signer or
 detailed diagnostics. The attestation path enforces the same 64 KiB application
 reserve as production; a size failure remains a blocker. The exact distinct

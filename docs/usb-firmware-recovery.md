@@ -34,7 +34,11 @@ origin; automatic availability is not physical qualification. The original
 `test-vector.json` remains the legacy fixture; `rescue-test-vector.json` binds
 the new policy using the same public test key.
 
-The implemented recipe supports the existing dual-3-MiB layout only. It writes
+The rescue recipe exists for the dual-3-MiB layout (`<target>.web-recovery.json`,
+unchanged contract, published only while the image fits a 3 MiB slot with its
+reserve) and for the dual-4-MiB layout (`<target>.web-recovery-dual4m.json`,
+`minFlasherVersion=3`). The separate, ordered layout migration and its gate are
+described in [partition layouts](partition-layout-migration.md). Each rescue writes
 and verifies app0 before replacing OTA selection with the pinned Arduino app0
 bootstrap. It preserves bootloader/table, app1, NVS, FFat, coredump, and SD. This
 deliberately uses a named deterministic ROM rescue recipe rather than pretending
@@ -48,10 +52,34 @@ Known wrong-model/newer/conflicting builds are blocked; unidentified firmware
 cannot provide downgrade protection and the user must acknowledge that risk.
 Fully blank chips and damaged bootloader/table remain incompatible.
 
-The new producer rejects unsupported layouts/bootstrap bytes rather than silently
-emitting unsafe packages. Future partition/toolchain changes must update and test
-this contract before using the release workflow. No migration is inferred from a
-larger application binary.
+The producer rejects unsupported layouts/bootstrap bytes rather than silently
+emitting unsafe packages, and requires the factory bundle to carry the current
+registered production table. Future partition/toolchain changes must update
+`esp32/partition_layouts.json` and this contract before using the release
+workflow. No migration is inferred from a larger application binary.
+
+## Signed image identity records
+
+The same publisher step also emits `<TARGET>.image-identity.json`, so the website
+can recognize a release's application bytes on a device without reading whole
+OTA slots and without a website catalog change per release. It uses the same
+envelope and key as the recovery recipe, but signs `bicino-image-identity-v1\n`
+followed by the canonical payload, so neither document type can verify as the
+other. The payload binds target, production environment, version, build, full
+Git SHA and release tag to the exact application image: `size`, `sha256`,
+`headLength` (4096, or the whole image if shorter), `headSha256` of those first
+bytes, and `tail`, the last 32 bytes (the ESP-IDF appended image digest). It is
+derived from the dual-4-MiB rescue recipe, which every release carries; the
+dual-3-MiB rescue is omitted once the image outgrows a 3 MiB slot. The publisher
+refuses an image that differs from that recipe's signed application write. `descriptor` repeats the app description's version, project name and ELF
+SHA-256 as read by the publisher; it is informational and never identity.
+
+The website rules an image out of a slot exactly when the slot's first 4 KiB or
+its 32 bytes at `size - 32` differ, and calls a slot recognized only after a
+SHA-256 of the whole image. Releases published before this record existed are
+recognized from their signed OTA manifests and a reviewed website catalog.
+`tools/web-flasher/identity-test-vector.json` is the public test-key fixture for
+this record, shared byte-for-byte with the website.
 
 ## Quiet status protocol (qualification profiles only)
 
@@ -109,9 +137,12 @@ Still required to close #483:
 - Physical interruption/retry evidence for app erase/write and OTA metadata.
   Mock browser tests cover fresh-session retry of unknown partial/erased slots;
   damaged bootloader/table remain blocked and require a separate procedure.
-- #461's measured layout decision and matching developer layout, followed by a
-  distinct migration recipe with overlap/erase analysis, FFat restore policy,
-  and representative power-loss tests. No larger-slot OTA release before that.
+- #461's dual-4-MiB layout, developer layout and signed migration recipe are
+  implemented ([partition layouts](partition-layout-migration.md)); the recipe is
+  signed `qualificationRequired` and stays unadmitted until its per-board
+  physical gates (migration readback, preservation, FFat recreate, OTA into both
+  slots, cold boot and power-loss retry) pass. Legacy devices keep a compatible
+  OTA channel meanwhile.
 - Separately qualified first-install and factory-reset operations if exposed.
 
 Keep these per-target hardware gates visible until their evidence is complete.

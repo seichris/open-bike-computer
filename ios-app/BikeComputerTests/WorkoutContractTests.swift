@@ -8361,6 +8361,17 @@ private struct WorkoutContractTestSuite {
                 ),
             "expanded destination search must own the keyboard-safe layout ahead of supporting map chrome"
         )
+        var startRowFitsScreenWidth = false
+        if let rowStart = compactContent.range(
+            of: "privatefuncrouteAndWorkoutStartRow(maxHeight:CGFloat)->someView{"
+        )?.upperBound,
+           let rowEnd = compactContent.range(
+            of: "privatevarrouteAlternativesPanel:someView{",
+            range: rowStart..<compactContent.endIndex
+           )?.lowerBound {
+            startRowFitsScreenWidth =
+                !compactContent[rowStart..<rowEnd].contains("fixedSize(")
+        }
         expect(
             compactContent.contains(
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
@@ -8372,12 +8383,19 @@ private struct WorkoutContractTestSuite {
                     "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
                 )
                 && compactContent.contains(
-                    "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
+                    "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
-                ),
-            "the collapsed destination row must keep the full blue Start Workout label visible and honor recording ownership"
+                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
+                )
+                && startRowFitsScreenWidth,
+            "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
+        )
+        expect(
+            compactContent.contains(
+                ".frame(maxWidth:proxy.size.width).ignoresSafeArea(.container,edges:.bottom)"
+            ),
+            "a child wider than the screen must not push the map control rail off screen"
         )
         expect(
             compactContent.contains(

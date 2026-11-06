@@ -61,6 +61,15 @@ constexpr Phase resolve(const Snapshot &snapshot) {
   return Phase::Welcome;
 }
 
+// Ownership is loaded with BLE, which starts after the waiting screen is first
+// drawn. Until BLE's first snapshot arrives, present the fail-closed claimed
+// state BLE itself uses when ownership storage is unavailable, so an owned
+// device never shows the add-device Welcome. An unclaimed device then moves
+// to Welcome on that first snapshot.
+constexpr Snapshot ownershipUnknownSnapshot() {
+  return {true, false, false, false, false, 0};
+}
+
 constexpr Content content(Phase phase) {
   switch (phase) {
   case Phase::Welcome:

@@ -4,12 +4,15 @@ import configparser
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 project_dir = Path(__file__).resolve().parents[2]
 repo_root = project_dir.parent
+sys.path.insert(0, str(project_dir / "tools"))
+import partition_layouts  # noqa: E402
 config = configparser.ConfigParser(interpolation=None)
 config.read(project_dir / "platformio.ini")
 
@@ -168,6 +171,60 @@ assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in waveshare_sdkconfig
+# No profile has a PPP consumer; the Arduino default would link lwIP PPP.
+assert "CONFIG_LWIP_PPP_SUPPORT=n" in waveshare_sdkconfig
+# Nothing routes between the access point and another network either.
+assert "CONFIG_LWIP_IP_FORWARD=n" in waveshare_sdkconfig
+assert "CONFIG_LWIP_IPV6=n" in waveshare_sdkconfig
+assert "CONFIG_LWIP_IPV4_NAPT=n" in waveshare_sdkconfig
+
+
+# Production-slot profiles (both *_PRODUCTION environments and everything that
+# extends them) compile ESP_LOGx out; every other profile keeps the Arduino
+# default so diagnostics serial output is unchanged.
+def extends_production(section: str) -> bool:
+    current = section
+    seen: set[str] = set()
+    while current and current not in seen:
+        seen.add(current)
+        if current.endswith("_PRODUCTION"):
+            return True
+        current = config.get(current, "extends", fallback="").strip()
+    return False
+
+
+assert "CONFIG_LOG_DEFAULT_LEVEL" not in waveshare_sdkconfig
+production_log_profiles = {
+    section for section in config.sections()
+    if section.startswith("env:WAVESHARE_AMOLED_") and extends_production(section)
+}
+assert {
+    "env:WAVESHARE_AMOLED_175_PRODUCTION",
+    "env:WAVESHARE_AMOLED_206_PRODUCTION",
+    "env:WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
+    "env:WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
+    "env:WAVESHARE_AMOLED_175_PERSONAL",
+    "env:WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION",
+    "env:WAVESHARE_AMOLED_175_USB_RECOVERY_VALIDATION",
+} <= production_log_profiles
+for section in config.sections():
+    if not section.startswith("env:WAVESHARE_AMOLED_"):
+        continue
+    sdk = inherited_option(section, "custom_sdkconfig")
+    if section in production_log_profiles:
+        # The Arduino default member must be switched off explicitly, or the
+        # choice keeps CONFIG_LOG_DEFAULT_LEVEL=1 (measured: identical image).
+        assert "CONFIG_LOG_DEFAULT_LEVEL_ERROR=n" in sdk, section
+        assert "CONFIG_LOG_DEFAULT_LEVEL_NONE=y" in sdk, section
+        assert "CONFIG_LOG_MAXIMUM_EQUALS_DEFAULT=y" in sdk, section
+        # The production list extends the shared Waveshare settings.
+        assert "CONFIG_LWIP_PPP_SUPPORT=n" in sdk, section
+        assert "CONFIG_LWIP_IP_FORWARD=n" in sdk, section
+        assert "CONFIG_LWIP_IPV6=n" in sdk, section
+        assert "CONFIG_LWIP_IPV4_NAPT=n" in sdk, section
+        assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
+    else:
+        assert "CONFIG_LOG_DEFAULT_LEVEL" not in sdk, section
 waveshare_unflags = config.get("waveshare_amoled_common", "build_unflags")
 assert "-Wl,--wrap=log_printf" in waveshare_unflags
 waveshare_flags = config.get("waveshare_amoled_common", "build_flags")
@@ -198,6 +255,8 @@ assert "-DBLE_RADIO_CHARACTERIZATION=1" not in waveshare_flags
 assert "-DBLE_TX_POWER_DBM=" not in waveshare_flags
 assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" not in waveshare_flags
 assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in waveshare_flags
+# The variant's RGB_BUILTIN digitalWrite hook would link the RMT driver.
+assert "-DESP32_ARDUINO_NO_RGB_BUILTIN" in waveshare_flag_lines
 waveshare_dependencies = config.get("waveshare_amoled_common", "lib_deps")
 assert waveshare_dependencies.count("https://github.com/jgauchia/NeoGPS.git") == 1
 assert (
@@ -343,20 +402,53 @@ for environment in large_diagnostic_profiles:
         == "partitions_remote_debug.csv"
     )
 
-for partition_name in ("partitions.csv", "partitions_remote_debug.csv"):
-    partition_rows = [
-        [field.strip() for field in line.split(",")]
-        for line in (project_dir / partition_name).read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    assert partition_rows[-2][0] == "ffat"
-    assert partition_rows[-1][:5] == [
-        "coredump",
-        "data",
-        "coredump",
-        "",
-        "0x0F0000",
-    ]
+# esp32/partition_layouts.json is the numeric source of truth. Each current
+# CSV must render exactly its registered table, and only current layouts have
+# CSVs: the legacy generation is kept for recovery and migration recipes.
+layouts = partition_layouts.load()
+production_layout = layouts.current("production")
+development_layout = layouts.current("development")
+assert production_layout.csv == "partitions.csv"
+assert development_layout.csv == "partitions_remote_debug.csv"
+assert sorted(path.name for path in project_dir.glob("*.csv")) == [
+    "partitions.csv",
+    "partitions_remote_debug.csv",
+]
+for layout in (production_layout, development_layout):
+    rows = partition_layouts.parse_csv(project_dir / layout.csv)
+    assert rows == layout.partitions, layout.csv
+    assert partition_layouts.encode_table(rows) == layout.table_bytes()
+# Profile switching within the current generation never relocates FFat, and the
+# coredump keeps its retained panic evidence at the same place in every layout.
+assert production_layout.ffat == development_layout.ffat
+assert production_layout.ffat.offset == 0x810000
+assert production_layout.ffat.size == 0x700000
+assert [slot.size for slot in production_layout.application_slots] == [
+    0x400000,
+    0x400000,
+]
+assert [slot.size for slot in development_layout.application_slots] == [0x800000]
+for layout in layouts.layouts:
+    assert layout.partition("coredump").record() == (
+        "coredump", 0x01, 0x03, 0xF10000, 0xF0000
+    )
+production_behaviour = (
+    "_PRODUCTION",
+    "_LIFECYCLE_QUALIFICATION",
+    "_PERSONAL",
+    "_USB_RECOVERY_VALIDATION",
+)
+waveshare_profiles = [
+    section
+    for section in config.sections()
+    if re.match(r"env:WAVESHARE_(AMOLED|EPAPER)_", section)
+]
+assert waveshare_profiles
+for section in waveshare_profiles:
+    layout = layouts.for_csv(inherited_option(section, "board_build.partitions"))
+    assert layout.status == "current", section
+    if section.endswith(production_behaviour):
+        assert layout is production_layout, section
 
 light_sleep_profiles = {
     "env:WAVESHARE_AMOLED_175_LIGHT_SLEEP": (
@@ -400,6 +492,10 @@ for environment, (base, target) in light_sleep_profiles.items():
     assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA" not in sdkconfig
     assert "CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT" not in sdkconfig
     assert "CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN" not in sdkconfig
+    assert "CONFIG_LWIP_PPP_SUPPORT=n" in sdkconfig
+    assert "CONFIG_LWIP_IP_FORWARD=n" in sdkconfig
+    assert "CONFIG_LWIP_IPV6=n" in sdkconfig
+    assert "CONFIG_LWIP_IPV4_NAPT=n" in sdkconfig
     flags = config.get(environment, "build_flags")
     assert f"${{{base}.build_flags}}" in flags
     assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1" in flags

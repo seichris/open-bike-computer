@@ -100,10 +100,13 @@ inline uint32_t crcUpdate(uint32_t crc, const uint8_t *data, size_t length) {
   return crc;
 }
 
-inline bool readIndex(const std::string &root,
-                      MapNearbyVector<map_poi_index::Entry> &entries,
-                      Cancel cancel, void *context, Status &status) {
-  entries.clear();
+// Streams the whole index through its validator. visitor may be null; the
+// declared entry count is reported only for a complete, valid index.
+inline bool streamIndex(const std::string &root,
+                        map_poi_index::StreamValidator::Visitor visitor,
+                        void *visitorContext, Cancel cancel, void *context,
+                        Status &status, uint32_t &entryCount) {
+  entryCount = 0;
   File file = open(root + "/assets/nearby-pois.fpi");
   if (!file) {
     status = openFailureStatus(errno);
@@ -119,12 +122,7 @@ inline bool readIndex(const std::string &root,
     status = Status::Corrupt;
     return false;
   }
-  auto append = [](const map_poi_index::Entry &entry, void *destination) {
-    static_cast<MapNearbyVector<map_poi_index::Entry> *>(destination)
-        ->push_back(entry);
-    return true;
-  };
-  map_poi_index::StreamValidator validator(append, &entries);
+  map_poi_index::StreamValidator validator(visitor, visitorContext);
   std::array<uint8_t, 4096> buffer{};
   uint32_t remaining = size;
   while (remaining != 0) {
@@ -143,12 +141,43 @@ inline bool readIndex(const std::string &root,
     }
     remaining -= count;
   }
-  if (!validator.finish() || entries.size() != validator.entryCount()) {
+  if (!validator.finish()) {
     status = Status::Corrupt;
     return false;
   }
+  entryCount = validator.entryCount();
   status = Status::Ok;
   return true;
+}
+
+inline bool readIndex(const std::string &root,
+                      MapNearbyVector<map_poi_index::Entry> &entries,
+                      Cancel cancel, void *context, Status &status) {
+  entries.clear();
+  auto append = [](const map_poi_index::Entry &entry, void *destination) {
+    static_cast<MapNearbyVector<map_poi_index::Entry> *>(destination)
+        ->push_back(entry);
+    return true;
+  };
+  uint32_t entryCount = 0;
+  if (!streamIndex(root, append, &entries, cancel, context, status,
+                   entryCount))
+    return false;
+  if (entries.size() != entryCount) {
+    status = Status::Corrupt;
+    return false;
+  }
+  return true;
+}
+
+// Map activation needs only the index's validity: the same complete stream,
+// CRC and ordering checks as readIndex, without materializing up to 16,384
+// entries that queries would never use (they stream the file themselves).
+inline bool validateIndex(const std::string &root, Cancel cancel,
+                          void *context, Status &status) {
+  uint32_t entryCount = 0;
+  return streamIndex(root, nullptr, nullptr, cancel, context, status,
+                     entryCount);
 }
 
 // Only demonstrable on-disk format/checksum failures invalidate runtime health.

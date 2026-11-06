@@ -20,12 +20,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from build_firmware import (
+    _require_no_exception_library_objects,
+    _require_stack_protector_scope,
     BuildError,
     WAVESHARE_PLATFORM_URL,
     _bootstrap_build_cache_identity,
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
+    _record_build_phase_timings,
     _deterministic_build_environment,
     _require_dynamic_tls_link,
     _verified_platformio_project_config,
@@ -46,6 +49,7 @@ from generated_sdkconfig import (
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
     PRODUCTION_APPLICATION_RESERVE_BYTES,
+    PRODUCTION_LAYOUT_SUFFIXES,
     _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -54,6 +58,12 @@ from generated_sdkconfig import (
     recognized_generated_sdkconfigs,
 )
 from record_flash_plan import record_flash_plan
+from firmware_compile_cache import STACK_PROTECTED_LIBRARIES
+if __package__:
+    from .elf_fixtures import write_elf_object
+else:
+    from elf_fixtures import write_elf_object
+import partition_layouts
 from pioarduino_custom_core import (
     IDF_EXACT_REQUIREMENTS,
     UPSTREAM_AMBIENT_UV_FALLBACK,
@@ -70,6 +80,11 @@ from pioarduino_custom_core import (
     UPSTREAM_PENV_URLLIB3_REQUIREMENT,
     UPSTREAM_PLATFORMIO_REQUIREMENT,
     UPSTREAM_ROOT_INSTALL_COMMAND,
+)
+
+PARTITION_LAYOUTS = partition_layouts.load()
+PRODUCTION_SLOT_BYTES = (
+    PARTITION_LAYOUTS.current("production").application_slots[0].size
 )
 
 
@@ -343,6 +358,18 @@ class FirmwareBuildTests(unittest.TestCase):
         firmware.write_bytes(b"real firmware")
         firmware.with_suffix(".bin").write_bytes(b"real flash image")
         (firmware.parent / "bootloader.bin").write_bytes(b"real bootloader")
+        # Every Waveshare build must leave Arduino_GFX objects without unwind
+        # tables and keep the stack canary on each input-parsing library only.
+        write_elf_object(
+            firmware.parent / "lib306/GFX Library for Arduino/Arduino_GFX.cpp.o",
+            (".text", ".literal"),
+        )
+        for library in sorted(STACK_PROTECTED_LIBRARIES):
+            write_elf_object(
+                firmware.parent / f"lib0a1/{library}/{library}.cpp.o",
+                (".text", ".literal"),
+                ("__stack_chk_fail", "__stack_chk_guard"),
+            )
         (self.project_dir / f"sdkconfig.{environment}").write_text(
             GENERATED_CONFIG, encoding="utf-8"
         )
@@ -444,41 +471,45 @@ class FirmwareBuildTests(unittest.TestCase):
         self,
         environment=None,
         *,
-        ota_data_offset=0xE000,
-        app_offset=0x10000,
-        app_size=0x300000,
+        layout=None,
+        ota_data_offset=None,
+        app_offset=None,
+        app_size=None,
     ):
+        """Write the environment's registry table, or a deliberately odd one."""
         environment = environment or self.environment
         build_dir = self.project_dir / ".pio/build" / environment
         build_dir.mkdir(parents=True, exist_ok=True)
-        partition_entry = struct.Struct("<HBBII16sI")
-        partition_table = b"".join(
-            (
-                partition_entry.pack(
-                    0x50AA, 0x01, 0x02, 0x9000, 0x5000, b"nvs", 0
-                ),
-                partition_entry.pack(
-                    0x50AA,
-                    0x01,
-                    0x00,
-                    ota_data_offset,
-                    0x2000,
-                    b"otadata",
-                    0,
-                ),
-                partition_entry.pack(
-                    0x50AA,
-                    0x00,
-                    0x10,
-                    app_offset,
-                    app_size,
-                    b"app0",
-                    0,
-                ),
-                b"\xff" * partition_entry.size,
+        if layout is None:
+            layout = PARTITION_LAYOUTS.current(
+                "production"
+                if environment.endswith(PRODUCTION_LAYOUT_SUFFIXES)
+                else "development"
             )
+        partitions = []
+        for partition in layout.partitions:
+            if partition.name == "otadata" and ota_data_offset is not None:
+                partition = partition_layouts.Partition(
+                    partition.name,
+                    partition.type,
+                    partition.subtype,
+                    ota_data_offset,
+                    partition.size,
+                )
+            if partition.name == "app0" and (
+                app_offset is not None or app_size is not None
+            ):
+                partition = partition_layouts.Partition(
+                    partition.name,
+                    partition.type,
+                    partition.subtype,
+                    partition.offset if app_offset is None else app_offset,
+                    partition.size if app_size is None else app_size,
+                )
+            partitions.append(partition)
+        (build_dir / "partitions.bin").write_bytes(
+            partition_layouts.encode_table(partitions)
         )
-        (build_dir / "partitions.bin").write_bytes(partition_table)
 
     def write_core_attestation(self, environment=None):
         environment = environment or self.environment
@@ -964,6 +995,41 @@ build_src_filter =
         self.assertTrue(firmware.is_file())
         self.assertIn("uploadEligible=0", output.getvalue())
 
+    def test_dirty_build_never_consults_the_transport_publisher(self):
+        # record_generated_sdkconfig_defaults returns None for a source
+        # identity that is not a full Git SHA, so neither the publisher nor
+        # the manifest status recorder runs; the build stays upload-ineligible.
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write("; intentional local diagnostic change\n")
+
+        def runner(command, cwd):
+            self.write_firmware()
+            return subprocess.CompletedProcess(command, 0)
+
+        output = StringIO()
+        with (
+            patch(
+                "build_firmware.record_generated_sdkconfig_defaults",
+                return_value=None,
+            ),
+            patch(
+                "build_firmware.publish_shared_core",
+                side_effect=AssertionError("a dirty build must not publish"),
+            ),
+            redirect_stdout(output),
+        ):
+            firmware = build_firmware(
+                self.project_dir,
+                self.environment,
+                runner=runner,
+            )
+
+        self.assertTrue(firmware.is_file())
+        self.assertIn("uploadEligible=0", output.getvalue())
+        self.assertNotIn("sharedCoreTransport", output.getvalue())
+
     def test_build_subprocesses_preserve_hydrated_bytecode(self):
         # Hydration gives source files new mtimes but retains attested .pyc
         # contents. Real recursive Python imports must not rewrite that tree.
@@ -1334,7 +1400,10 @@ build_src_filter =
         )
         calls = []
 
-        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+        # A shifted table is not a registered layout; isolate offset derivation.
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}), patch(
+            "generated_sdkconfig._require_current_partition_layout"
+        ):
             manifest_path = record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
@@ -1455,7 +1524,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
         )
 
         with patch.dict(
@@ -1482,7 +1551,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES)
         )
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
@@ -1503,7 +1572,7 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
         )
 
         with patch.dict(
@@ -1530,11 +1599,80 @@ build_src_filter =
             self.project_dir / ".pio" / "build" / production / "firmware.bin"
         )
         firmware.write_bytes(
-            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES)
         )
 
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def _production_attestation_inputs(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        (self.project_dir / "sdkconfig.defaults").write_text(
+            GENERATED_CONFIG, encoding="utf-8"
+        )
+        self.write_firmware(production)
+        return production, core
+
+    def test_attestation_rejects_legacy_and_unknown_partition_layouts(self):
+        production, core = self._production_attestation_inputs()
+        legacy = PARTITION_LAYOUTS.legacy("production")
+        shifted_ffat = [
+            partition_layouts.Partition(
+                p.name, p.type, p.subtype, p.offset, p.size - 0x1000
+            )
+            if p.name == "ffat"
+            else p
+            for p in PARTITION_LAYOUTS.current("production").partitions
+        ]
+        for label, table in (
+            ("legacy", legacy.table_bytes()),
+            ("unknown", partition_layouts.encode_table(shifted_ffat)),
+        ):
+            with self.subTest(label):
+                (
+                    self.project_dir / ".pio/build" / production / "partitions.bin"
+                ).write_bytes(table)
+                with patch.dict(
+                    os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+                ), self.assertRaisesRegex(
+                    GeneratedSdkconfigError, "not a current layout"
+                ):
+                    record_generated_sdkconfig_defaults(
+                        self.project_dir, production
+                    )
+
+    def test_attestation_rejects_development_layout_for_production(self):
+        production, core = self._production_attestation_inputs()
+        self.write_partition_table(
+            production, layout=PARTITION_LAYOUTS.current("development")
+        )
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError, "current production partition layout"
+        ):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def test_attestation_rejects_image_beyond_reserve_of_current_slots(self):
+        production, core = self._production_attestation_inputs()
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        # Fits a 4 MiB slot but would not keep the reserve: always rejected.
+        firmware.write_bytes(
+            b"x" * (PRODUCTION_SLOT_BYTES - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+        )
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(GeneratedSdkconfigError, "application reserve"):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+        self.assertEqual(PRODUCTION_SLOT_BYTES, 0x400000)
 
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()
@@ -2438,7 +2576,7 @@ build_src_filter =
                 "build_firmware.record_generated_sdkconfig_defaults",
                 return_value=fake_manifest,
             ),
-            patch("build_firmware.publish_shared_core"),
+            patch("build_firmware.publish_shared_core", return_value="present"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 
@@ -2878,5 +3016,85 @@ build_src_filter =
             )
 
 
+class NoExceptionLibraryObjectTests(unittest.TestCase):
+    def test_build_fails_when_gfx_objects_keep_exception_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            environment = "WAVESHARE_AMOLED_175_PRODUCTION"
+            gfx = project / ".pio/build" / environment / "lib306/GFX Library for Arduino"
+            with self.assertRaisesRegex(BuildError, "no-exception library verification failed: no objects"):
+                _require_no_exception_library_objects(project, environment)
+            write_elf_object(gfx / "Arduino_GFX.cpp.o", (".text", ".literal"))
+            output = StringIO()
+            with redirect_stdout(output):
+                _require_no_exception_library_objects(project, environment)
+            self.assertIn(f"FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 environment={environment} objects=1", output.getvalue())
+            write_elf_object(gfx / "Arduino_G.cpp.o", (".text", ".eh_frame"))
+            with self.assertRaisesRegex(BuildError, r"exception tables: lib306/GFX Library for Arduino/Arduino_G\.cpp\.o"):
+                _require_no_exception_library_objects(project, environment)
+
+    def test_build_fails_when_the_stack_protector_leaves_its_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            environment = "WAVESHARE_AMOLED_175_PRODUCTION"
+            build_dir = project / ".pio/build" / environment
+            with self.assertRaisesRegex(BuildError, "stack protector scope verification failed: protected libraries without any built object"):
+                _require_stack_protector_scope(project, environment)
+            for library in STACK_PROTECTED_LIBRARIES:
+                write_elf_object(build_dir / f"lib0a1/{library}/{library}.cpp.o", (".text",), ("__stack_chk_fail",))
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",))
+            output = StringIO()
+            with redirect_stdout(output):
+                _require_stack_protector_scope(project, environment)
+            self.assertIn(
+                f"FIRMWARE_STACK_PROTECTOR_SCOPE schema=1 environment={environment} "
+                f"protectedLibraries={len(STACK_PROTECTED_LIBRARIES)} protectedObjects={len(STACK_PROTECTED_LIBRARIES)} "
+                f"guardedObjects={len(STACK_PROTECTED_LIBRARIES)} unprotectedObjects=1",
+                output.getvalue(),
+            )
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",), ("__stack_chk_guard",))
+            with self.assertRaisesRegex(BuildError, r"still use the stack protector: src/main\.cpp\.o"):
+                _require_stack_protector_scope(project, environment)
+
+
+class SharedCoreTransportRecordTests(unittest.TestCase):
+    def test_build_manifest_records_the_shared_core_transport_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+            recorded = _record_build_phase_timings(
+                manifest_path, {"total": 1}, "skipped"
+            )
+
+            self.assertEqual(recorded["sharedCoreTransport"], "skipped")
+            self.assertEqual(recorded["phaseTimingsMs"], {"total": 1})
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["sharedCoreTransport"], "skipped")
+
+    def test_every_publisher_outcome_is_recordable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            for status in ("ineligible", "present", "published", "skipped"):
+                manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+                recorded = _record_build_phase_timings(manifest_path, {"total": 1}, status)
+
+                self.assertEqual(recorded["sharedCoreTransport"], status)
+
+    def test_unknown_shared_core_transport_status_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "current.json"
+            manifest_path.write_text(json.dumps({"schema": 1}), encoding="utf-8")
+
+            for status in ("unknown", None, ""):
+                with self.assertRaisesRegex(BuildError, "shared core transport status is invalid"):
+                    _record_build_phase_timings(manifest_path, {"total": 1}, status)
+
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8")), {"schema": 1}
+            )
+
 if __name__ == "__main__":
     unittest.main()
+

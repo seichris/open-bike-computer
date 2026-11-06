@@ -11,10 +11,13 @@ from pathlib import Path
 
 IMAGE_REPOSITORY = "ghcr.io/seichris/open-bike-computer-map-platform"
 # Preserve the previous converter for rollback while admitting the attested
-# contract-1 converter. Arbitrary workers cannot become production converters.
+# contract-1, reviewed Brotli security and approved topography converters.
+# Arbitrary workers cannot become production converters.
 PROMOTION_CONVERTER_DIGESTS = (
     "142957ae0d5f08d366b657f9bacb0ce17d85bfac9c5d98c644bc1b02188a59c8",
     "d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9",
+    "6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14",
+    "d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00",
 )
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 REFERENCE_PATTERN = re.compile(

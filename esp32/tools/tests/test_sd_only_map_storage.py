@@ -84,6 +84,7 @@ RENDERER_ENTRY_POINTS = (
     "bool mapFilesAvailable()",
     "bool findMapBlock(",
     "Maps::MapBlock *Maps::readMapBlock(String fileName)",
+    "map_probe_diagnostics::Result\nMaps::activateVectorMapFolderOnStorageOwner(",
     "map_probe_diagnostics::Result\nMaps::probeVectorMapFolderOnStorageOwner(",
     "bool Maps::switchVectorMapFolderOnStorageOwner(",
     "bool Maps::requestStorageControl(",
@@ -160,7 +161,12 @@ def storage_harness(mutate=None, mutate_entry=None):
     harness = harness.replace("// PRODUCTION_HEADER", header)
     harness = harness.replace("// PRODUCTION_UNAVAILABLE_ROOT", unavailable_root)
     harness = harness.replace("// PRODUCTION_METHODS", methods)
-    harness = harness.replace("// PRODUCTION_ACTIVE_MAP_STATUS", status)
+    # The status reader keeps its snapshot and cache in .bss through the
+    # firmware's StartupConstructed template; the sliced source needs it too.
+    startup_constructed = "\n".join(
+        line for line in source("lib/utils/src/startup_constructed.hpp").splitlines()
+        if not line.startswith("#pragma"))
+    harness = harness.replace("// PRODUCTION_ACTIVE_MAP_STATUS", startup_constructed + "\n" + status)
     return harness.replace("// PRODUCTION_ENABLE_MAP", entry)
 
 
@@ -192,6 +198,58 @@ class BootPinnedStorageTests(unittest.TestCase):
     def test_backend_is_pinned_and_maps_never_resolve_to_ffat(self):
         result = run_harness(storage_harness(), "storage_pin")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_ffat_never_formats_bytes_of_unknown_provenance(self):
+        mutations = {
+            "format without a durable ownership record": lambda methods: mutated(
+                methods,
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                "    (void)internal_storage::recordGeometry(assessment);\n"
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat");'),
+            "format before recording ownership": lambda methods: mutated(
+                methods,
+                "    if (internal_storage::recordGeometry(assessment))\n"
+                '      mounted = FFat.begin(true, "/sdcard", 20, "ffat");',
+                '    mounted = FFat.begin(true, "/sdcard", 20, "ffat") &&\n'
+                "              internal_storage::recordGeometry(assessment);"),
+            "mount without wear-levelling evidence": lambda methods: mutated(
+                methods,
+                "assessment.erased, assessment.record, assessment.wearLevellingValid",
+                "assessment.erased, assessment.record, true"),
+            "relocated volume mounted": lambda methods: mutated(
+                methods, "plan == InternalMountPlan::MountExisting",
+                "plan != InternalMountPlan::FormatErased"),
+            "owned volume not reformatted": lambda methods: mutated(
+                methods, ' || FFat.begin(true, "/sdcard", 20, "ffat");', ";"),
+            "adopted volume never recorded": lambda methods: mutated(
+                methods,
+                "    if (mounted)\n      (void)internal_storage::recordGeometry(assessment);\n",
+                ""),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate), "storage_ffat_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_ffat_decision_line_reports_every_format(self):
+        # The partition-layout gates read STORAGE_FFAT from serial: AMOLED
+        # profiles compile out ESP_LOGI, and a reformat after a failed mount
+        # must not read as a plain mount.
+        mutations = {
+            "decision logged with ESP_LOGI": lambda methods: mutated(
+                methods, 'Serial.printf("STORAGE_FFAT',
+                'ESP_LOGI(TAG, "STORAGE_FFAT'),
+            "first format not reported": lambda methods: mutated(
+                methods, "    formatted = mounted;\n", "    formatted = false;\n"),
+            "reformat reported as a plain mount": lambda methods: mutated(
+                methods, "formatted = mounted && !plainMount;",
+                "formatted = false;"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                result = run_harness(storage_harness(mutate), "storage_ffat_log_mutant")
+                self.assertEqual(result.returncode, 42, result.stderr)
 
     def test_live_backend_switch_or_ffat_map_root_is_detected(self):
         mutations = {
@@ -296,8 +354,8 @@ class SdOnlyRendererStorageTests(unittest.TestCase):
                 "map_probe_diagnostics::Result result;\n  " + gate,
                 "map_probe_diagnostics::Result result;\n  if (false)"),
             "root switch loads fonts and indexes": (
-                "const std::string &folder) {\n  " + gate,
-                "const std::string &folder) {\n  if (false)"),
+                "map_font_asset::Asset *validatedFont) {\n  " + gate,
+                "map_font_asset::Asset *validatedFont) {\n  if (false)"),
             "queued storage work is admitted": (
                 "  if (!mapFilesAvailable()) return false;\n"
                 "  if (work == nullptr",
@@ -349,8 +407,16 @@ class SdOnlyMapCallerContractTests(unittest.TestCase):
                     "mapTransferHttp.configure(8080, &deviceTransferHttp);"):
             self.assertLess(bind, setup.index(use), use)
         for owner in ("ride_diagnostics::begin(", "MapTransferInstaller mapInstaller(",
-                      "mapTransferHttp.configure(", "mapView.initMap(", "initLVGL();"):
+                      "mapTransferHttp.configure(", "startUserInterface();"):
             self.assertLess(pin, setup.index(owner), owner)
+        # The interface sizes the map view and builds LVGL without map I/O.
+        interface = main[main.index("static void startUserInterface()"):
+                         main.index("void setup()")]
+        for step in ("mapView.initMap(", "initLVGL();"):
+            self.assertIn(step, interface)
+        for storage_use in ("storage.", "mapInstaller", "activateVectorMapFolder",
+                            "bleNavServer"):
+            self.assertNotIn(storage_use, interface)
         gate = setup.index("if (!storage.mapStorageAvailable()) {")
         recovery = setup.index("mapInstaller.recoverInterruptedActivation()")
         self.assertLess(gate, setup.index("} else {", gate))

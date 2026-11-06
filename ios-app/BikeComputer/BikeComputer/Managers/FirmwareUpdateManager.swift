@@ -27,6 +27,9 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
     case postRebootVerificationFailed
     case downloadSizeMismatch
     case downloadHashMismatch
+    case imageExceedsDeviceSlot(imageBytes: Int, slotBytes: Int)
+    case layoutMigrationRequired(version: String, build: Int)
+    case notPublished
     case serverError(String)
 
     var errorDescription: String? {
@@ -68,6 +71,14 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
             return "Downloaded firmware size does not match the manifest"
         case .downloadHashMismatch:
             return "Downloaded firmware hash does not match the manifest"
+        case .imageExceedsDeviceSlot(let imageBytes, let slotBytes):
+            return "Firmware image (\(imageBytes) bytes) does not fit this device's "
+                + "\(slotBytes)-byte firmware slot. No firmware was written."
+        case .layoutMigrationRequired(let version, let build):
+            return "Firmware \(version) (\(build)) needs a one-time USB update of the "
+                + "device storage layout at bicino.com/update. No firmware was written."
+        case .notPublished:
+            return "Firmware is not published at this address"
         case .serverError(let message):
             return message
         }
@@ -131,9 +142,81 @@ nonisolated final class FirmwareHTTPSRedirectPolicy: NSObject, URLSessionTaskDel
     }
 }
 
+/// Release OTA channel for devices whose inactive slot holds `slotBytes`.
+nonisolated struct FirmwareOTAChannel: Equatable {
+    let slotBytes: Int
+    /// Directory under `<base>/<target>/`; the legacy channel keeps the
+    /// historical `manifest.json` that older apps read.
+    let pathComponent: String?
+}
+
+/// What the device last reported about the slot an OTA would write.
+nonisolated enum FirmwareSlotCapacity: Equatable {
+    case slot(Int)
+    case ineligible
+    case unknown
+}
+
+/// Production OTA slot sizes from esp32/partition_layouts.json; the
+/// firmware-slot contract test pins these numbers to that registry.
+nonisolated enum FirmwareSlotLayout {
+    static let applicationReserveBytes = 65_536
+    static let legacySlotBytes = 3_145_728
+    static let currentSlotBytes = 4_194_304
+    /// Largest slot first. Images on a smaller channel fit every larger slot.
+    static let channels = [
+        FirmwareOTAChannel(slotBytes: currentSlotBytes, pathComponent: "dual4m"),
+        FirmwareOTAChannel(slotBytes: legacySlotBytes, pathComponent: nil)
+    ]
+
+    /// Only an eligible device's fresh inactive-slot size counts. Unknown or
+    /// older reports are treated as the smallest supported slot; never infer
+    /// a migrated layout from firmware version or build.
+    static func capacity(otaEligible: Bool?, maxImageBytes: Int?) -> FirmwareSlotCapacity {
+        if otaEligible == false {
+            return .ineligible
+        }
+        if otaEligible == true, let bytes = maxImageBytes, bytes > 0 {
+            return .slot(bytes)
+        }
+        return .unknown
+    }
+
+    static func slotBytes(for capacity: FirmwareSlotCapacity) -> Int {
+        if case .slot(let bytes) = capacity {
+            return bytes
+        }
+        return legacySlotBytes
+    }
+
+    /// Channels whose images fit, preferred first.
+    static func channels(for capacity: FirmwareSlotCapacity) -> [FirmwareOTAChannel] {
+        let slot = slotBytes(for: capacity)
+        return channels.filter { $0.slotBytes <= slot }
+    }
+
+    static func fits(imageBytes: Int, capacity: FirmwareSlotCapacity) -> Bool {
+        imageBytes > 0 && imageBytes <= slotBytes(for: capacity) - applicationReserveBytes
+    }
+}
+
+/// A newer release exists only for a larger layout than this device has.
+struct FirmwareLayoutMigrationNotice: Equatable {
+    let version: String
+    let build: Int
+
+    static let title = "Storage Layout Update"
+    static let updateURL = URL(string: "https://bicino.com/update")!
+    var message: String {
+        "Firmware \(version) (\(build)) needs a one-time USB update of this Bike "
+            + "Computer's storage layout at bicino.com/update. Until then it keeps "
+            + "receiving updates that fit its current layout over Bluetooth."
+    }
+}
+
 nonisolated enum FirmwareDownload {
     static let maximumManifestBytes = 2048 // device begin-body contract
-    static let maximumImageBytes = 3 * 1024 * 1024 // both production OTA slots
+    static let maximumImageBytes = FirmwareSlotLayout.currentSlotBytes
 
     static func read(_ url: URL, session: URLSession, maximumBytes: Int,
                      expectedSHA256: String? = nil) async throws -> Data {
@@ -146,6 +229,9 @@ nonisolated enum FirmwareDownload {
         request.httpShouldHandleCookies = false
         let (bytes, response) = try await session.bytes(for: request, delegate: FirmwareHTTPSRedirectPolicy())
         defer { bytes.task.cancel() } // including headers, decode, oversize and cancellation errors
+        if (response as? HTTPURLResponse)?.statusCode == 404 {
+            throw FirmwareUpdateError.notPublished
+        }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let finalURL = http.url, FirmwareHTTPSRedirectPolicy.allows(finalURL) else {
             throw FirmwareUpdateError.serverError("Firmware server request failed")
@@ -334,6 +420,7 @@ final class FirmwareUpdateManager: ObservableObject {
     @Published private(set) var storageMigrationNotice:
         FirmwareStorageMigrationNotice?
     @Published private(set) var isStorageMigrationAlertPresented = false
+    @Published private(set) var layoutMigrationNotice: FirmwareLayoutMigrationNotice?
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)? {
         didSet {
@@ -430,6 +517,9 @@ final class FirmwareUpdateManager: ObservableObject {
                         bleManager: bleManager
                     )
                 try requireRequestedConnection()
+                // The eligibility check just refreshed DSTS: compare against
+                // the installed table before downloading or writing anything.
+                try Self.requireImageFits(manifest, capacity: Self.deviceCapacity(bleManager))
                 bleManager.beginFirmwareMaintenanceReconnect()
                 defer { bleManager.endFirmwareMaintenanceReconnect() }
                 self.latestManifest = manifest
@@ -511,14 +601,21 @@ final class FirmwareUpdateManager: ObservableObject {
                 let initialDeviceStatus = try await client.status()
                 try requireTransferOwner()
                 var operation = initialDeviceStatus.firmwareOperation
+                // Reconciling an earlier operation never depends on this image.
+                if operation?.protocolVersion == 1,
+                   let retained = self.loadRetainedResult(deviceID: transferDeviceID),
+                   retained.deviceID == bleManager.connectedDeviceID,
+                   operation?.matches(operationID: retained.operationID, image: retained.imageSHA256) == true,
+                   ["installed", "failed", "acknowledged"].contains(operation?.result ?? "") {
+                    operation = try await client.acknowledge(operationID: retained.operationID!, image: retained.imageSHA256!)
+                    try requireTransferOwner()
+                }
+                // The maintenance owner reports the exact slot `begin` erases.
+                try Self.requireImageFits(manifest, capacity: FirmwareSlotLayout.capacity(
+                    otaEligible: initialDeviceStatus.otaEligible,
+                    maxImageBytes: initialDeviceStatus.maxImageBytes),
+                    eligibilityCode: initialDeviceStatus.eligibilityCode)
                 if operation?.protocolVersion == 1 {
-                    if let retained = self.loadRetainedResult(deviceID: transferDeviceID),
-                       retained.deviceID == bleManager.connectedDeviceID,
-                       operation?.matches(operationID: retained.operationID, image: retained.imageSHA256) == true,
-                       ["installed", "failed", "acknowledged"].contains(operation?.result ?? "") {
-                        operation = try await client.acknowledge(operationID: retained.operationID!, image: retained.imageSHA256!)
-                        try requireTransferOwner()
-                    }
                     guard let revision = operation?.admissionRevision, let epoch = operation?.admissionEpoch,
                           epoch.count == 32,
                           ["unavailable", "acknowledged"].contains(operation?.result ?? ""),
@@ -682,12 +779,44 @@ final class FirmwareUpdateManager: ObservableObject {
         guard !bleManager.firmwareTarget.isEmpty else {
             throw FirmwareUpdateError.missingFirmwareTarget
         }
-        guard let baseURL = URL(string: manifestBaseURLString) else {
+        let target = bleManager.firmwareTarget
+        let capacity = Self.deviceCapacity(bleManager)
+        let channels = FirmwareSlotLayout.channels(for: capacity)
+        guard !channels.isEmpty else {
+            throw FirmwareUpdateError.imageExceedsDeviceSlot(
+                imageBytes: FirmwareSlotLayout.legacySlotBytes,
+                slotBytes: FirmwareSlotLayout.slotBytes(for: capacity))
+        }
+        // Prefer the largest channel the installed slot accepts. A smaller
+        // channel's images fit too, so it is the fallback only while a larger
+        // channel is not published; every other failure is reported.
+        var manifest: FirmwareReleaseManifest?
+        for channel in channels {
+            do {
+                manifest = try await fetchManifest(target: target, channel: channel)
+                break
+            } catch FirmwareUpdateError.notPublished where channel != channels.last {
+                continue
+            }
+        }
+        guard let manifest else {
+            throw FirmwareUpdateError.notPublished
+        }
+        await refreshLayoutMigrationNotice(target: target, capacity: capacity,
+                                           compatible: manifest)
+        return manifest
+    }
+
+    private func fetchManifest(target: String,
+                               channel: FirmwareOTAChannel) async throws -> FirmwareReleaseManifest {
+        guard var manifestURL = URL(string: manifestBaseURLString) else {
             throw FirmwareUpdateError.invalidManifest
         }
-        let manifestURL = baseURL
-            .appendingPathComponent(bleManager.firmwareTarget)
-            .appendingPathComponent("manifest.json")
+        manifestURL.appendPathComponent(target)
+        if let component = channel.pathComponent {
+            manifestURL.appendPathComponent(component)
+        }
+        manifestURL.appendPathComponent("manifest.json")
         lastManifestURLString = manifestURL.absoluteString
         let data = try await FirmwareDownload.read(manifestURL, session: session,
                                                   maximumBytes: FirmwareDownload.maximumManifestBytes)
@@ -695,22 +824,79 @@ final class FirmwareUpdateManager: ObservableObject {
         guard manifest.isSupportedByApp else {
             throw FirmwareUpdateError.unsupportedUpdaterProtocol
         }
-        guard manifest.target == bleManager.firmwareTarget else {
+        guard manifest.target == target else {
             throw FirmwareUpdateError.targetMismatch
         }
         guard !manifest.version.isEmpty,
               FirmwareSourceIdentity.fullSHA(manifest.gitSha, target: manifest.target,
                                               version: manifest.version, build: manifest.build) != nil,
               manifest.size > 0,
-              manifest.size <= FirmwareDownload.maximumImageBytes,
+              manifest.size <= channel.slotBytes - FirmwareSlotLayout.applicationReserveBytes,
               !manifest.sha256.isEmpty,
               manifest.signature?.isEmpty == false else {
             throw FirmwareUpdateError.invalidManifest
         }
-        guard FirmwareManifestSignatureVerifier.verify(manifest) else {
+        guard verifySignature(manifest) else {
             throw FirmwareUpdateError.invalidManifestSignature
         }
         return manifest
+    }
+
+    private func verifySignature(_ manifest: FirmwareReleaseManifest) -> Bool {
+#if HOST_TESTING
+        if let publicKey = manifestPublicKeyForTesting {
+            return FirmwareManifestSignatureVerifier.verify(manifest, publicKeyBase64: publicKey)
+        }
+#endif
+        return FirmwareManifestSignatureVerifier.verify(manifest)
+    }
+
+    /// A device whose slots are smaller than the newest channel stays on its
+    /// compatible channel; tell the owner why instead of stranding it silently.
+    private func refreshLayoutMigrationNotice(target: String,
+                                              capacity: FirmwareSlotCapacity,
+                                              compatible: FirmwareReleaseManifest) async {
+        guard let newest = FirmwareSlotLayout.channels.first,
+              case .slot(let slotBytes) = capacity,
+              slotBytes < newest.slotBytes else {
+            layoutMigrationNotice = nil
+            return
+        }
+        let compatibleURL = lastManifestURLString
+        defer { lastManifestURLString = compatibleURL }
+        guard let candidate = try? await fetchManifest(target: target, channel: newest),
+              candidate.build > compatible.build,
+              !FirmwareSlotLayout.fits(imageBytes: candidate.size, capacity: capacity) else {
+            layoutMigrationNotice = nil
+            return
+        }
+        layoutMigrationNotice = FirmwareLayoutMigrationNotice(
+            version: candidate.version, build: candidate.build)
+    }
+
+    static func deviceCapacity(_ bleManager: BLEManager) -> FirmwareSlotCapacity {
+        FirmwareSlotLayout.capacity(otaEligible: bleManager.firmwareOTAEligible,
+                                    maxImageBytes: bleManager.firmwareMaximumImageBytes)
+    }
+
+    static func requireImageFits(_ manifest: FirmwareReleaseManifest,
+                                 capacity: FirmwareSlotCapacity,
+                                 eligibilityCode: String? = nil) throws {
+        // Ineligibility is not a slot-size problem; never ask for a migration.
+        if capacity == .ineligible {
+            throw FirmwareUpdateError.otaIneligible(
+                eligibilityCode ?? "inactive_ota_partition_missing")
+        }
+        guard FirmwareSlotLayout.fits(imageBytes: manifest.size, capacity: capacity) else {
+            if manifest.size <= FirmwareSlotLayout.currentSlotBytes
+                - FirmwareSlotLayout.applicationReserveBytes {
+                throw FirmwareUpdateError.layoutMigrationRequired(
+                    version: manifest.version, build: manifest.build)
+            }
+            throw FirmwareUpdateError.imageExceedsDeviceSlot(
+                imageBytes: manifest.size,
+                slotBytes: FirmwareSlotLayout.slotBytes(for: capacity))
+        }
     }
 
     private func validateInstall(_ manifest: FirmwareReleaseManifest, bleManager: BLEManager) throws {
@@ -727,7 +913,9 @@ final class FirmwareUpdateManager: ObservableObject {
 
     func isUpdateAllowed(_ manifest: FirmwareReleaseManifest, bleManager: BLEManager) -> Bool {
         guard manifest.target == bleManager.firmwareTarget,
-              !isCurrentFirmware(manifest, bleManager: bleManager) else {
+              !isCurrentFirmware(manifest, bleManager: bleManager),
+              FirmwareSlotLayout.fits(imageBytes: manifest.size,
+                                      capacity: Self.deviceCapacity(bleManager)) else {
             return false
         }
         return manifest.build > bleManager.firmwareBuild || allowDeveloperDowngrade
@@ -1072,8 +1260,16 @@ final class FirmwareUpdateManager: ObservableObject {
     }
 
 #if HOST_TESTING
+    /// Host tests sign fixtures with their own P-256 key; app builds always
+    /// verify against the release key.
+    var manifestPublicKeyForTesting: String?
+
     func setVerifiedManifestForTesting(_ manifest: FirmwareReleaseManifest) {
         latestManifest = manifest
+    }
+
+    func fetchLatestManifestForTesting(bleManager: BLEManager) async throws -> FirmwareReleaseManifest {
+        try await fetchLatestManifest(bleManager: bleManager)
     }
 #endif
 }

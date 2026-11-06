@@ -1,0 +1,39 @@
+name: Free runner disk for firmware builds
+description: >-
+  Remove the hosted Linux runner image's unused SDKs before a firmware build.
+  A cold custom-core build keeps the verified 6.4 GB PlatformIO store below
+  esp32/.pio/open-bike-build, publishes a 5.8 GB core cache entry next to it
+  and gzips a 1.9 GB transport copy, and the image's default free space has
+  not held all three (jobs compiled, passed every gate and then failed with
+  ENOSPC while packing the archive). None of the removed trees is an input to
+  the build: it runs the repository-owned Python runtime and pinned
+  PlatformIO packages, so the image's .NET, Android, Haskell, Swift, CodeQL
+  and PowerShell toolsets only cost disk. Prints the free space before and
+  after so the saving stays visible in every run.
+runs:
+  using: composite
+  steps:
+    - name: Remove unused SDKs from the runner image
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${RUNNER_OS:-}" != "Linux" ]]; then
+          echo "FIRMWARE_RUNNER_DISK schema=1 status=skipped os=${RUNNER_OS:-unknown}"
+          exit 0
+        fi
+        before=$(df --output=avail -B1 / | tail -1 | tr -d ' ')
+        for tree in \
+          /usr/share/dotnet \
+          /usr/local/lib/android \
+          /opt/ghc \
+          /usr/local/.ghcup \
+          /usr/share/swift \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/powershell; do
+          if [[ -e "$tree" ]]; then
+            sudo rm -rf "$tree"
+          fi
+        done
+        after=$(df --output=avail -B1 / | tail -1 | tr -d ' ')
+        echo "FIRMWARE_RUNNER_DISK schema=1 status=freed freeBeforeBytes=${before} freeAfterBytes=${after} freedBytes=$((after - before))"
+        df -h /

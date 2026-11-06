@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "description": "Authoritative 16 MiB ESP32-S3 partition layouts for the Waveshare AMOLED boards. esp32/tools/partition_layouts.py validates this file, the PlatformIO CSVs, built partition tables and the signed USB recovery/migration recipes against it. The website consumes a byte-identical copy as a test fixture. Never edit a published layout; add a new id instead.",
+  "flashBytes": "0x1000000",
+  "partitionTableOffset": "0x8000",
+  "partitionTableBytes": "0xc00",
+  "applicationReserveBytes": "0x10000",
+  "layouts": [
+    {
+      "id": "esp32s3-16m-dual3m-ffat9m-v1",
+      "generation": 1,
+      "role": "production",
+      "status": "legacy",
+      "partitionTableSha256": "6d6e105907099b7344b9c167d2615a9a7f43d8c6926229cf5837720e6674cbbf",
+      "partitions": [
+        {"name": "nvs", "type": "data", "subtype": "nvs", "offset": "0x9000", "size": "0x5000"},
+        {"name": "otadata", "type": "data", "subtype": "ota", "offset": "0xe000", "size": "0x2000"},
+        {"name": "app0", "type": "app", "subtype": "ota_0", "offset": "0x10000", "size": "0x300000"},
+        {"name": "app1", "type": "app", "subtype": "ota_1", "offset": "0x310000", "size": "0x300000"},
+        {"name": "ffat", "type": "data", "subtype": "fat", "offset": "0x610000", "size": "0x900000"},
+        {"name": "coredump", "type": "data", "subtype": "coredump", "offset": "0xf10000", "size": "0xf0000"}
+      ]
+    },
+    {
+      "id": "esp32s3-16m-single6m-ffat9m-v1",
+      "generation": 1,
+      "role": "development",
+      "status": "legacy",
+      "partitionTableSha256": "7dd5955a3be2f162301cd46e83ba8d6ce83a106e47f49308937b71e3fb9fc7ce",
+      "partitions": [
+        {"name": "nvs", "type": "data", "subtype": "nvs", "offset": "0x9000", "size": "0x5000"},
+        {"name": "otadata", "type": "data", "subtype": "ota", "offset": "0xe000", "size": "0x2000"},
+        {"name": "app0", "type": "app", "subtype": "ota_0", "offset": "0x10000", "size": "0x600000"},
+        {"name": "ffat", "type": "data", "subtype": "fat", "offset": "0x610000", "size": "0x900000"},
+        {"name": "coredump", "type": "data", "subtype": "coredump", "offset": "0xf10000", "size": "0xf0000"}
+      ]
+    },
+    {
+      "id": "esp32s3-16m-dual4m-ffat7m-v1",
+      "generation": 2,
+      "role": "production",
+      "status": "current",
+      "csv": "partitions.csv",
+      "partitionTableSha256": "60ec28f83fc0df24e71c4a52440e19342a7ea1fc09807962ae08f4eefa77dea1",
+      "partitions": [
+        {"name": "nvs", "type": "data", "subtype": "nvs", "offset": "0x9000", "size": "0x5000"},
+        {"name": "otadata", "type": "data", "subtype": "ota", "offset": "0xe000", "size": "0x2000"},
+        {"name": "app0", "type": "app", "subtype": "ota_0", "offset": "0x10000", "size": "0x400000"},
+        {"name": "app1", "type": "app", "subtype": "ota_1", "offset": "0x410000", "size": "0x400000"},
+        {"name": "ffat", "type": "data", "subtype": "fat", "offset": "0x810000", "size": "0x700000"},
+        {"name": "coredump", "type": "data", "subtype": "coredump", "offset": "0xf10000", "size": "0xf0000"}
+      ]
+    },
+    {
+      "id": "esp32s3-16m-single8m-ffat7m-v1",
+      "generation": 2,
+      "role": "development",
+      "status": "current",
+      "csv": "partitions_remote_debug.csv",
+      "partitionTableSha256": "cf7f29eb12d1d8b35f317d5520a55fabc21ae2ac558c16fc981dfa5a1f217364",
+      "partitions": [
+        {"name": "nvs", "type": "data", "subtype": "nvs", "offset": "0x9000", "size": "0x5000"},
+        {"name": "otadata", "type": "data", "subtype": "ota", "offset": "0xe000", "size": "0x2000"},
+        {"name": "app0", "type": "app", "subtype": "ota_0", "offset": "0x10000", "size": "0x800000"},
+        {"name": "ffat", "type": "data", "subtype": "fat", "offset": "0x810000", "size": "0x700000"},
+        {"name": "coredump", "type": "data", "subtype": "coredump", "offset": "0xf10000", "size": "0xf0000"}
+      ]
+    }
+  ],
+  "migrations": [
+    {
+      "id": "dual3m-to-dual4m-v1",
+      "source": "esp32s3-16m-dual3m-ffat9m-v1",
+      "destination": "esp32s3-16m-dual4m-ffat7m-v1"
+    }
+  ]
+}

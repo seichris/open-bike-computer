@@ -3,6 +3,7 @@
 #include <new>
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
+#include "iso8601_utc.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
 #include "catalog_v2.hpp"
 #include <mbedtls/sha256.h>
@@ -537,7 +538,7 @@ bool utcNow(char *out, std::size_t capacity) {
     return false;
   struct tm utc = {};
   gmtime_r(&now, &utc);
-  return strftime(out, capacity, "%Y-%m-%dT%H:%M:%SZ", &utc) > 0;
+  return time_format::formatUtcIso8601(out, capacity, utc);
 }
 
 uint32_t persistentBootSequence(uint32_t requested) {

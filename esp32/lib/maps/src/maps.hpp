@@ -450,9 +450,16 @@ private:
 #endif
   void (*pendingStorageControl_)(void *) = nullptr;
   void *pendingStorageControlContext_ = nullptr;
+  // A probe that passes its block/font contract may hand the validated label
+  // font to the immediately following root switch on the same storage owner.
   map_probe_diagnostics::Result
-  probeVectorMapFolderOnStorageOwner(const std::string &folder);
-  bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
+  probeVectorMapFolderOnStorageOwner(const std::string &folder,
+                                     map_font_asset::Asset *validatedFont = nullptr);
+  bool switchVectorMapFolderOnStorageOwner(
+      const std::string &folder, map_font_asset::Asset *validatedFont = nullptr);
+  // Probe, then switch when loadable, validating the label font once.
+  map_probe_diagnostics::Result
+  activateVectorMapFolderOnStorageOwner(const std::string &folder);
   void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
   bool stopRenderWorker();
@@ -713,10 +720,10 @@ public:
   // Called once by setup() with Storage::mapStorageRoot(), before any render.
   // Sets the legacy default folder without touching storage.
   void bindMapStorageRoot(const char *root);
-  bool setVectorMapFolder(const std::string &folder);
-  bool probeVectorMapFolder(const std::string &folder);
+  // Boot-time activation on the UI task before the render worker owns storage.
+  // Returns the probe result; RootSwitchFailed means the old root remains.
   map_probe_diagnostics::Result
-  probeVectorMapFolderDetailed(const std::string &folder);
+  activateVectorMapFolderDetailed(const std::string &folder);
   bool requestVectorMapFolderActivation(const std::string &folder);
   // Bounded command admission; callback/context must live through completion.
   // Runs between jobs on the sole map storage owner, never on the UI task.

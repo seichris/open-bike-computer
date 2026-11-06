@@ -452,12 +452,23 @@ bool FirmwareUpdateHttpServer::reconcileOperationReceipt(bool runningAccepted) {
   if (record.phase != receipt::Phase::Accepted) return true;
   const esp_partition_t *running = esp_ota_get_running_partition();
   if (!running) return false;
+  auto apply = [](receipt::ReconcileAction action) {
+    switch (action) {
+    case receipt::ReconcileAction::Keep: return true;
+    case receipt::ReconcileAction::Install: return receipt::finish(true);
+    case receipt::ReconcileAction::Fail: return receipt::finish(false);
+    case receipt::ReconcileAction::Unresolved: return false;
+    }
+    return false;
+  };
   if (running->address != record.partitionAddress) {
-    // Previous image booted: selection never completed, or bootloader rolled back.
-    // Do not infer which from version strings or a maintenance correlation.
-    return runningAccepted ? receipt::finish(false) : true;
+    // Previous image booted: selection never completed, or bootloader rolled
+    // back, or a USB layout migration moved the slots. Do not infer which from
+    // version strings or a maintenance correlation.
+    return apply(receipt::reconcileAction(false, false, runningAccepted));
   }
-  if (record.imageBytes > running->size) return false;
+  if (record.imageBytes > running->size)
+    return apply(receipt::reconcileAction(true, false, runningAccepted));
   // Hash the exact signed uploaded byte range, not the ESP app-descriptor hash.
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
@@ -475,8 +486,8 @@ bool FirmwareUpdateHttpServer::reconcileOperationReceipt(bool runningAccepted) {
   const char *hex = "0123456789abcdef";
   char encoded[65]{};
   for (unsigned i=0;i<32;++i) { encoded[2*i]=hex[digest[i]>>4]; encoded[2*i+1]=hex[digest[i]&15]; }
-  if (std::strcmp(encoded, record.image) != 0) return false;
-  return runningAccepted ? receipt::finish(true) : true;
+  return apply(receipt::reconcileAction(
+      true, std::strcmp(encoded, record.image) == 0, runningAccepted));
 #else
   (void)runningAccepted;
   return true;

@@ -70,9 +70,18 @@ public:
   InstallerSeam installer_;
   TransferSeam transfer;
   TransferSeam *transferServer_=&transfer;
-  int finishes=0,releases=0,exits=0,errorReports=0;
+  int finishes=0,releases=0,exits=0,errorReports=0,recoveries=0,retries=0,deferrals=0;
+  bool recoveryDue=true;
   void lockState() {} void unlockState() {}
-  bool recoverCommitDisposition(const CommitRecovery &) {return false;}
+  enum class CommitRecoveryResult {Completed,Failed,Deferred};
+  CommitRecoveryResult recoveryResult=CommitRecoveryResult::Failed;
+  bool throwRecovery=false;
+  CommitRecoveryResult recoverCommitDisposition(const CommitRecovery &) {
+    ++recoveries;if(throwRecovery) throw std::bad_alloc();return recoveryResult;
+  }
+  bool commitRecoveryDue() const {return recoveryDue;}
+  void scheduleCommitRecoveryRetry() {++retries;}
+  void deferCommitRecoveryRetry() {++deferrals;}
   bool observeOperationRevision(uint64_t) {return true;}
   void rememberOwnerRecovery(const char *code) {if(firstRecovery.empty()) firstRecovery=code;}
   void setLastError(const std::string &code,const std::string &) {
@@ -159,6 +168,31 @@ int main(int argc,char **argv) {
   assert(!worker.terminalCleanupReported_);
   worker.executeOperationTask();
   assert(worker.finishes==1 && worker.releases==1 && worker.exits==1);
+  // An armed disposition waits out its backoff; a failed attempt schedules
+  // the next one instead of retrying on the following pass.
+  assert(worker.recoveries==0 && worker.retries==0);
+  worker.commitRecovery_.armed=true;worker.commitRecovery_.identity="accepted";
+  worker.recoveryDue=false;worker.executeOperationTask();
+  assert(worker.recoveries==0 && worker.retries==0);
+  worker.recoveryDue=true;worker.executeOperationTask();
+  assert(worker.recoveries==1 && worker.retries==1 && worker.commitRecovery_.armed);
+  // Waiting behind this session's running attempt checks again later without
+  // spending an attempt; a completed disposition retires the recovery.
+  worker.recoveryResult=MapTransferHttpServer::CommitRecoveryResult::Deferred;
+  worker.executeOperationTask();
+  assert(worker.recoveries==2 && worker.retries==1 && worker.deferrals==1);
+  assert(worker.commitRecovery_.armed);
+  worker.recoveryResult=MapTransferHttpServer::CommitRecoveryResult::Completed;
+  worker.executeOperationTask();
+  assert(worker.recoveries==3 && worker.retries==1 && worker.deferrals==1);
+  assert(!worker.commitRecovery_.armed && worker.commitRecovery_.identity.empty());
+  // An attempt that unwinds on allocation failure spends the attempt and
+  // backs off, as an owner attempt does, instead of rerunning next pass.
+  worker.commitRecovery_.armed=true;worker.commitRecovery_.identity="accepted";
+  worker.throwRecovery=true;worker.operationTaskSubmitted_=true;
+  worker.executeOperationTask();
+  assert(worker.recoveries==4 && worker.retries==2 && worker.deferrals==1);
+  assert(worker.commitRecovery_.armed && !worker.operationTaskSubmitted_);
 }
 '''
         with tempfile.TemporaryDirectory(prefix='map-terminal-cleanup-') as temporary:

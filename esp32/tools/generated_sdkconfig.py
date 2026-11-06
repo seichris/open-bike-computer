@@ -23,6 +23,12 @@ from firmware_build_identity import (
     firmware_git_identity,
     git_commit_source_date_epoch,
 )
+from partition_layouts import (
+    APPLICATION_RESERVE_BYTES,
+    Layout,
+    LayoutError,
+    load as load_partition_layouts,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -36,7 +42,10 @@ FLASH_PLAN_FILENAME = "open-bike-flash-plan.json"
 FLASH_PLAN_PORT_PLACEHOLDER = "__OPEN_BIKE_UPLOAD_PORT__"
 FLASH_PLAN_APP_OFFSET_PLACEHOLDER = "__OPEN_BIKE_APP_OFFSET__"
 FLASH_PLAN_MAX_BYTES = 1024 * 1024
-PRODUCTION_APPLICATION_RESERVE_BYTES = 64 * 1024
+PRODUCTION_APPLICATION_RESERVE_BYTES = APPLICATION_RESERVE_BYTES
+# Release candidates and their lifecycle qualifications are OTA artifacts: they
+# must use the current production layout and keep the reserve in its slots.
+PRODUCTION_LAYOUT_SUFFIXES = ("_PRODUCTION", "_LIFECYCLE_QUALIFICATION")
 ESP_PARTITION_TABLE_MAX_BYTES = 0xC00
 ESP_PARTITION_ENTRY = struct.Struct("<HBBII16sI")
 ESP_PARTITION_MAGIC = 0x50AA
@@ -1009,6 +1018,71 @@ def _archive_linkname(project_dir: Path, path: Path) -> str:
     return link
 
 
+# Headroom kept beyond the archive's own bytes: the manifest, sidecars and the
+# filesystem's own bookkeeping while the entry is written and renamed.
+CORE_ARCHIVE_FREE_MARGIN = 256 * 1024 * 1024
+
+
+def _core_archive_bytes(project_dir: Path, environment: str) -> int:
+    """Bytes the core archive will occupy, before it is written.
+
+    Mirrors the writer: every member costs a ustar header block, a name or
+    link target longer than the 100-byte ustar field adds a PAX extended header
+    and its record block (most members of a PlatformIO store do), and regular
+    files add their data rounded up to the tar block size. The walk is the
+    writer's, so a missing root fails here with the writer's message. On the
+    1.75 production store this reproduces the archive to within the trailer.
+    """
+    total = 0
+    for logical_root, root, required in _core_artifact_roots(project_dir, environment):
+        if not os.path.lexists(root):
+            if required:
+                raise GeneratedSdkconfigError(
+                    f"required custom-core output is missing: {root}"
+                )
+            continue
+        for path in _walk_archive_tree(root):
+            relative = path.relative_to(root).as_posix()
+            name = logical_root if relative == "." else f"{logical_root}/{relative}"
+            metadata = path.lstat()
+            total += 512
+            if len(name.encode("utf-8")) > 100:
+                total += 1024
+            if stat.S_ISREG(metadata.st_mode):
+                total += metadata.st_size + (-metadata.st_size % 512)
+            elif (
+                stat.S_ISLNK(metadata.st_mode)
+                and len(_archive_linkname(project_dir, path).encode("utf-8")) > 100
+            ):
+                total += 1024
+    # Two end-of-archive blocks and the final record padding.
+    return total + 64 * 1024
+
+
+def _require_core_archive_space(
+    environment_root: Path, environment: str, archive_bytes: int
+) -> None:
+    """Fail before writing when the entry cannot fit next to the build.
+
+    A runner or workstation that compiled the whole image and then dies with
+    ENOSPC half-way through a multi-gigabyte archive wastes the build and
+    leaves the cause unclear; the numbers are printed on every publication so
+    the headroom stays visible.
+    """
+    free = shutil.disk_usage(environment_root).free
+    print(
+        "FIRMWARE_CORE_CACHE schema=1 status=publishing "
+        f"environment={environment} archiveBytes={archive_bytes} freeBytes={free}",
+        flush=True,
+    )
+    if free < archive_bytes + CORE_ARCHIVE_FREE_MARGIN:
+        raise GeneratedSdkconfigError(
+            "core cache entry needs about "
+            f"{(archive_bytes + CORE_ARCHIVE_FREE_MARGIN) / 2**30:.1f} GiB free below "
+            f"{environment_root}, {free / 2**30:.1f} GiB available"
+        )
+
+
 def _write_core_archive(
     archive_path: Path,
     project_dir: Path,
@@ -1505,6 +1579,9 @@ def _publish_core_cache_entry(
                 environment_config, temporary / f"sdkconfig.{environment}"
             )
         archive_path = temporary / CORE_ARCHIVE_FILENAME
+        _require_core_archive_space(
+            environment_root, environment, _core_archive_bytes(project_dir, environment)
+        )
         inventory_sha256, entry_count = _write_core_archive(
             archive_path, project_dir, environment
         )
@@ -1627,6 +1704,35 @@ def _application_partition_from_partition_table(path: Path) -> tuple[int, int]:
             "application slot"
         )
     return selected_partitions[0]
+
+
+def _require_current_partition_layout(path: Path, environment: str) -> Layout:
+    """Require one of esp32/partition_layouts.json's current exact tables.
+
+    Every Waveshare profile shares the current FFat geometry, so USB-switching
+    between them never relocates internal storage. A legacy or unknown table
+    would be a silent layout migration and fails the build instead.
+    """
+    try:
+        table = path.read_bytes()
+        layout = load_partition_layouts().identify(table)
+    except (OSError, LayoutError) as error:
+        raise GeneratedSdkconfigError(
+            f"could not check the verified partition table layout: {error}"
+        ) from error
+    if layout is None or layout.status != "current":
+        raise GeneratedSdkconfigError(
+            "verified partition table is not a current layout in "
+            "partition_layouts.json"
+        )
+    if environment.endswith(PRODUCTION_LAYOUT_SUFFIXES) and (
+        layout.role != "production"
+    ):
+        raise GeneratedSdkconfigError(
+            "production-behavior firmware must use the current production "
+            f"partition layout, not {layout.id}"
+        )
+    return layout
 
 
 def _parse_esptool_options(
@@ -1919,7 +2025,7 @@ def _validated_flash_plan(
             )
         if (
             offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
-            and environment.endswith(("_PRODUCTION", "_LIFECYCLE_QUALIFICATION"))
+            and environment.endswith(PRODUCTION_LAYOUT_SUFFIXES)
             and application_partition_size - size
             < PRODUCTION_APPLICATION_RESERVE_BYTES
         ):
@@ -2023,6 +2129,7 @@ def _validated_flash_plan(
         raise GeneratedSdkconfigError(
             "verified esptool command may rewrite an attested flash image"
         )
+    _require_current_partition_layout(build_dir / "partitions.bin", environment)
     return {
         "schema": FLASH_PLAN_SCHEMA,
         "environment": environment,
