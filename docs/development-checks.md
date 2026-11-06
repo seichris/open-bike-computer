@@ -190,7 +190,11 @@ shared code and is counted. Every other file must
 match its baseline exactly: a higher count fails, and so does a lower one until
 `--update-baseline` records it, so a count cannot grow back. Board differences
 belong in `esp32/lib/board/boards/<target>.hpp` as data, or in a file gated as
-a whole. The test runs inside the display power and redraw policy host check,
+a whole. The same scan rejects every use of the retired IceNav-era board and
+feature macros (`USE_ARDUINO_GFX`, the `DISABLE_*` flags and the rest listed
+in the test) in those trees and in `platformio.ini`, because a surviving
+`#ifndef DISABLE_*` would compile code in without any error. The test runs
+inside the display power and redraw policy host check,
 which every `esp32/` change selects; `--list` prints the current counts and
 exemptions. See `docs/plans/board-support-architecture-plan.md` for the layout
 it protects.

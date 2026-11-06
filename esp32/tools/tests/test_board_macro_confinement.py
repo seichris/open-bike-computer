@@ -29,6 +29,19 @@ SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".inc", ".ino"}
 # Board definitions and the panel selector are where target macros belong.
 EXEMPT_PREFIXES = ("lib/board/",)
 EXEMPT_FILES = {"lib/panel/panelSelect.hpp"}
+# Macros of the removed IceNav-era boards and of the feature flags every
+# Waveshare profile used to set (plan milestone M0). None may come back: a
+# surviving `#ifndef DISABLE_*` would compile code in without any error.
+RETIRED_MACROS = (
+    "ICENAV_BOARD", "TDECK_ESP32S3", "ELECROW_ESP32", "MAKERF_ESP32S3",
+    "ESP32_N16R4", "ESP32S3_N16R8", "USE_ARDUINO_GFX", "DISABLE_CLI",
+    "DISABLE_RADIO", "DISABLE_COMPASS", "DISABLE_GESTURES",
+    "DISABLE_WEB_SERVER", "DISABLE_OTA_UPGRADE", "DISABLE_ADVANCED_GUI",
+    "DISABLE_MAPS", "DISABLE_TOUCH", "ENABLE_COMPASS", "ENABLE_BME",
+    "ENABLE_IMU", "BME280", "MPU6050", "LARGE_SCREEN", "TOUCH_INPUT",
+    "POWER_SAVE",
+)
+RETIRED = re.compile(r"\b(?:" + "|".join(RETIRED_MACROS) + r")\b")
 
 CONDITIONAL = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b")
 OPENING = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
@@ -45,15 +58,40 @@ def firmware_targets() -> list[str]:
     return targets
 
 
+def strip_comments(text: str) -> str:
+    """Remove // and /* */ comments in one left-to-right pass, keeping string
+    and character literals (and the newlines of block comments) so that a /*
+    inside a line comment or a literal cannot hide the code after it."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        pair = text[i:i + 2]
+        if pair == "//":
+            end = text.find("\n", i)
+            i = n if end == -1 else end
+        elif pair == "/*":
+            end = text.find("*/", i + 2)
+            end = n if end == -1 else end + 2
+            out.append("\n" * text.count("\n", i, end))
+            i = end
+        elif ch == '"' or (ch == "'" and (i == 0 or not text[i - 1].isalnum())):
+            j = i + 1
+            while j < n and text[j] not in (ch, "\n"):
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def logical_lines(text: str) -> list[str]:
     """Source lines without comments, with backslash continuations joined."""
-    text = re.sub(
-        r"/\*.*?\*/", lambda m: "\n" * m.group().count("\n"), text, flags=re.S
-    )
     joined: list[str] = []
     pending = ""
-    for line in text.split("\n"):
-        line = re.sub(r"//.*", "", line)
+    for line in strip_comments(text).split("\n"):
         if line.rstrip().endswith("\\"):
             pending += line.rstrip()[:-1] + " "
             continue
@@ -96,19 +134,31 @@ def gates_whole_file(lines: list[str], hits: list[int], negated: re.Pattern) -> 
     return False
 
 
-def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str]]:
-    """Return baseline-relevant counts and the exemption reason per file."""
+def retired_macro_uses(lines: list[str]) -> list[int]:
+    return [i for i, line in enumerate(lines) if RETIRED.search(line)]
+
+
+def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str], list[str]]:
+    """Return baseline-relevant counts, the exemption reason per file and
+    every use of a retired macro."""
     alternation = "|".join(map(re.escape, targets))
     macro = re.compile(r"\b(?:" + alternation + r")\b")
     negated = re.compile(r"!\s*defined\s*\(?\s*(?:" + alternation + r")\b")
     counts: dict[str, int] = {}
     exempt: dict[str, str] = {}
+    retired: list[str] = []
+    ini = (ROOT / "platformio.ini").read_text(encoding="utf-8")
+    for number, line in enumerate(ini.splitlines(), 1):
+        if RETIRED.search(line.split(";", 1)[0]):
+            retired.append(f"platformio.ini:{number}: {line.strip()}")
     for scan_dir in SCAN_DIRS:
         for path in sorted((ROOT / scan_dir).rglob("*")):
             if path.suffix not in SUFFIXES or not path.is_file():
                 continue
             relative = path.relative_to(ROOT).as_posix()
             lines = logical_lines(path.read_text(encoding="utf-8", errors="replace"))
+            for index in retired_macro_uses(lines):
+                retired.append(f"{relative}:{index + 1}: {lines[index].strip()}")
             hits = target_directive_lines(lines, macro)
             if not hits:
                 continue
@@ -118,7 +168,7 @@ def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str]]:
                 exempt[relative] = "gated as a whole file"
             else:
                 counts[relative] = len(hits)
-    return counts, exempt
+    return counts, exempt, retired
 
 
 def load_baseline() -> dict:
@@ -166,8 +216,10 @@ def compare(targets: list[str], counts: dict[str, int], baseline: dict) -> list[
 
 def main(argv: list[str]) -> int:
     targets = firmware_targets()
-    counts, exempt = scan(targets)
+    counts, exempt, retired = scan(targets)
     if "--list" in argv:
+        for use in retired:
+            print(f"retired {use}")
         for path, reason in sorted(exempt.items()):
             print(f"exempt  {path}: {reason}")
         for path, count in sorted(counts.items()):
@@ -182,7 +234,11 @@ def main(argv: list[str]) -> int:
                 print(f"{path}: {before.get(path, 0)} -> {counts.get(path, 0)}")
         print(f"wrote {BASELINE_PATH.relative_to(ROOT)}")
         return 0
-    problems = compare(targets, counts, load_baseline())
+    problems = [
+        f"{use}: retired board or feature macro; the code it guarded was "
+        "removed in plan milestone M0 and must not return"
+        for use in retired
+    ] + compare(targets, counts, load_baseline())
     for problem in problems:
         print(problem)
     if problems:
