@@ -45,7 +45,8 @@ class SleepAuditTests(unittest.TestCase):
         start = source.index("bool readRegisterBlock8Once(")
         end = source.index("bool readRegister16(", start)
         function = source[start:end]
-        prefix = r'''
+        # The real board file supplies board::i2c::stopBetweenWriteAndRead.
+        prefix = f'#include "{ROOT}/esp32/lib/board/board.hpp"\n' + r'''
 #include <cassert>
 #include <cstdint>
 #include <cstring>

@@ -319,7 +319,7 @@ int main() {
             with self.subTest(path.name):
                 self.assertIsNone(stream, stream and stream.group(0))
         probe = STORAGE[STORAGE.index("bool writableProbeSucceeded("):
-                        STORAGE.index("#if defined(WAVESHARE_AMOLED_175)",
+                        STORAGE.index("uint8_t removableCardType(",
                                       STORAGE.index("bool writableProbeSucceeded("))]
         self.assertNotIn("fopen(", re.sub(r"//[^\n]*", "", probe))
 

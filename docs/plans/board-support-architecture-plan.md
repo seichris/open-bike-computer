@@ -193,7 +193,11 @@ namespace gnss { constexpr bool fitted = false; constexpr uint8_t tx = 43, rx = 
 An optional pin a board does not route is `board::noPin`. `include/hal.hpp`
 keeps the old pin names (`TFT_QSPI_CLK`, `TCH_I2C_INT`, `WAVESHARE_SDMMC_CLK`
 and the rest) as aliases of this data until their users read `board::`
-directly.
+directly. A board file may also define a few `BOARD_*` capability macros for
+the places only the preprocessor can gate (PMIC write paths that must not
+exist on a board without the capability, C configuration headers); each one
+is `static_assert`ed equal to its `board::` value. The first is
+`BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`.
 
 The AMOLED definitions take their values from `hardware/README.md`, which stays
 the authoritative pinout. `board.hpp` replaces `board_traits.hpp` and absorbs
@@ -339,7 +343,22 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   shared files; 11 more files are exempt as whole-file gates. `panelSelect.hpp` keeps
   its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
   not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
-  it merges.
+  it merges. Merged as #766 on 2026-11-06.
+- **M3, 2026-11-06, in review.** `storage.cpp`, `ride_diagnostics.cpp`,
+  `axp2101.cpp`, `i2c_bus.cpp`/`.hpp`, `settings.cpp`, `display.hpp`,
+  `touch.hpp`, `lv_conf.h`, `task_data_placement.hpp`,
+  `ipc_stack_budget.hpp`, `battery.cpp`, `runtime_watchdog_diagnostics.cpp`
+  and the whole-file gates of `lib/waveshare_board` hold no board macro. The
+  always-true membership lists are gone with their legacy else branches,
+  per-board constants read `board::display`, `board::i2c`, `board::power` and
+  `board::layout`, and the 2.06 display-enable recovery follows
+  `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`. Baseline: 109 conditionals in 17
+  files. Two deliberate unifications on the 2.06 I2C path (a checked
+  `Wire.begin`, `probe()` through `withRetries`) are covered by its boot
+  smoke. The AMOLED-only guards that #442 keeps (`touch.hpp`'s whole-file
+  gate, `speaker.cpp`, `sleep_audit`, `route_elevation_config.hpp`,
+  `firmware_update_http.cpp`, `device_debug`, three `ble_navigation.cpp`
+  sites) wait for the part interfaces of M4.
 
 ### The confinement test
 

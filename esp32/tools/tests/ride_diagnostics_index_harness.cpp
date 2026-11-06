@@ -22,6 +22,16 @@ struct Storage { const char* diagnosticsRootPath(){return root.c_str();} } stora
 constexpr size_t kMaximumChunks=256,kChunkBytes=256*1024;
 bool requestStillAuthorized(device_transfer::HttpTransferServer*,const device_transfer::HttpRequest&){return true;}
 bool isClosedChunk(uint32_t,uint32_t){return true;}
+// The production writer reports its phases to the runtime watchdog; the host
+// harness only needs those calls to compile.
+namespace runtime_watchdog_diagnostics {
+enum class Role { RideDiagnosticsWriter };
+enum class Phase { Waiting, DiagnosticsWrite, DiagnosticsFlush, DiagnosticsRecovery };
+inline void registerCurrentTask(Role, Phase) {}
+inline void notePhase(Role, Phase, uint32_t = 0) {}
+inline void heartbeat(Role, uint32_t = 0) {}
+} // namespace runtime_watchdog_diagnostics
+
 // PRODUCTION_FUNCTIONS
 
 int main(int argc, char **argv) {

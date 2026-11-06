@@ -31,6 +31,16 @@ bool recordInternal(Level,const char*,const char*,const char*,bool,unsigned boot
 }
 struct QueuedEvent { bool clearsFaultCapsule; unsigned faultCapsuleChecksum; };
 bool flushFaultCapsulesIfPossible(bool beforeSealCutoff = false);
+// The production writer reports its phases to the runtime watchdog; the host
+// harness only needs those calls to compile.
+namespace runtime_watchdog_diagnostics {
+enum class Role { RideDiagnosticsWriter };
+enum class Phase { Waiting, DiagnosticsWrite, DiagnosticsFlush, DiagnosticsRecovery };
+inline void registerCurrentTask(Role, Phase) {}
+inline void notePhase(Role, Phase, uint32_t = 0) {}
+inline void heartbeat(Role, uint32_t = 0) {}
+} // namespace runtime_watchdog_diagnostics
+
 // PRODUCTION_FUNCTIONS
 
 int main() {

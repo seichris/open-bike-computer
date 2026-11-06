@@ -7,6 +7,7 @@
  */
 
 #include "settings.hpp"
+#include "../board/board.hpp"
 
 static const char *TAG PROGMEM = "Settings";
 
@@ -57,72 +58,30 @@ static uint16_t defaultCompassX() {
   return (TFT_WIDTH / 2) - (100 * scale);
 }
 
-static uint16_t defaultCompassY() {
-#ifdef WAVESHARE_AMOLED_206
-  return 112;
-#else
-  return 80;
-#endif
-}
+static uint16_t defaultCompassY() { return board::layout::compassY; }
 
 static uint16_t defaultCoordX() {
   return (TFT_WIDTH / 2) - (90 * scale);
 }
 
-static uint16_t defaultCoordY() {
-#ifdef WAVESHARE_AMOLED_206
-  return 42;
-#else
-  return 30;
-#endif
-}
+static uint16_t defaultCoordY() { return board::layout::coordY; }
 
-static uint16_t defaultAltitudeX() {
-#ifdef WAVESHARE_AMOLED_206
-  return 12;
-#else
-  return 8;
-#endif
-}
+static uint16_t defaultAltitudeX() { return board::layout::altitudeX; }
 
 static uint16_t defaultAltitudeY() {
-#ifdef WAVESHARE_AMOLED_206
-  return TFT_HEIGHT - 148;
-#else
-  return TFT_HEIGHT - 170;
-#endif
+  return TFT_HEIGHT - board::layout::altitudeBottomInset;
 }
 
-static uint16_t defaultSpeedX() {
-#ifdef WAVESHARE_AMOLED_206
-  return 12;
-#else
-  return 1;
-#endif
-}
+static uint16_t defaultSpeedX() { return board::layout::speedX; }
 
 static uint16_t defaultSpeedY() {
-#ifdef WAVESHARE_AMOLED_206
-  return TFT_HEIGHT - 104;
-#else
-  return TFT_HEIGHT - 130;
-#endif
+  return TFT_HEIGHT - board::layout::speedBottomInset;
 }
 
-static uint16_t defaultSunX() {
-#ifdef WAVESHARE_AMOLED_206
-  return TFT_WIDTH - 92;
-#else
-  return 170;
-#endif
-}
+static uint16_t defaultSunX() { return board::layout::sunX; }
 
 static uint16_t defaultSunY() {
-#ifdef WAVESHARE_AMOLED_206
-  return TFT_HEIGHT - 154;
-#else
-  return TFT_HEIGHT - 170;
-#endif
+  return TFT_HEIGHT - board::layout::sunBottomInset;
 }
 
 /**

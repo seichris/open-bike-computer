@@ -5,7 +5,6 @@
     "WAVESHARE_AMOLED_206"
   ],
   "files": {
-    "lib/battery/battery.cpp": 3,
     "lib/ble_navigation/ble_navigation.cpp": 7,
     "lib/device_debug/device_debug_http.cpp": 2,
     "lib/device_debug/device_debug_input.hpp": 1,
@@ -13,26 +12,15 @@
     "lib/gui/src/guiLayout.hpp": 2,
     "lib/gui/src/mainScr.cpp": 9,
     "lib/gui/src/mainScr.hpp": 1,
-    "lib/lvgl/lv_conf.h": 2,
     "lib/maps/src/maps.cpp": 2,
     "lib/maps/src/maps.hpp": 1,
     "lib/panel/WAVESHARE_AMOLED_175.cpp": 13,
-    "lib/power/power.cpp": 2,
+    "lib/power/power.cpp": 1,
     "lib/power/sleep_audit.hpp": 1,
     "lib/power_management/power_management.cpp": 1,
     "lib/ride_automation/ride_automation_runtime.cpp": 1,
-    "lib/ride_diagnostics/ride_diagnostics.cpp": 21,
     "lib/route_elevation/route_elevation_config.hpp": 1,
-    "lib/runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.cpp": 3,
-    "lib/settings/settings.cpp": 8,
     "lib/speaker/speaker.cpp": 2,
-    "lib/storage/storage.cpp": 17,
-    "lib/utils/src/task_data_placement.hpp": 1,
-    "lib/waveshare_board/axp2101.cpp": 8,
-    "lib/waveshare_board/display.hpp": 3,
-    "lib/waveshare_board/i2c_bus.cpp": 9,
-    "lib/waveshare_board/i2c_bus.hpp": 2,
-    "lib/waveshare_board/touch.hpp": 2,
     "src/main.cpp": 63
   }
 }

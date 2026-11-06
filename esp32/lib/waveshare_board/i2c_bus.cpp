@@ -9,7 +9,6 @@
 #include "i2c_retry_log.hpp"
 #endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
@@ -92,8 +91,8 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
   lastFailureLogMs = now;
 }
 
-#ifdef WAVESHARE_AMOLED_206
-void recoverAfterFailure() {
+// Used where board::i2c::recoverOnFailure is set (the 2.06).
+[[maybe_unused]] void recoverAfterFailure() {
   i2cStats.recoveryAttempts++;
   if (busConfigured) {
     Wire.end();
@@ -106,7 +105,6 @@ void recoverAfterFailure() {
     Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
   }
 }
-#endif
 
 uint32_t retryStartTime() {
 #if DEVICE_REMOTE_DEBUG
@@ -181,9 +179,9 @@ bool withRetries(uint8_t address, uint16_t reg, const char *label,
     }
 
     i2cStats.failedTransactions++;
-#ifdef WAVESHARE_AMOLED_206
-    recoverAfterFailure();
-#endif
+    if constexpr (board::i2c::recoverOnFailure) {
+      recoverAfterFailure();
+    }
     if (attempt + 1 < attempts) {
       delay(2);
     }
@@ -202,7 +200,6 @@ void configureBus(uint32_t clockHz) {
       power_management::LockDomain::I2c);
   ensureMutex();
   activeClockHz = clockHz;
-#ifdef WAVESHARE_AMOLED_175
   busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   if (busConfigured) {
     Wire.setClock(activeClockHz);
@@ -212,16 +209,6 @@ void configureBus(uint32_t clockHz) {
                 busConfigured ? "configured" : "configuration failed",
                 I2C_SDA_PIN, I2C_SCL_PIN,
                 static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
-#else
-  Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.begin();
-  Wire.setClock(activeClockHz);
-  Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
-  busConfigured = true;
-  Serial.printf("Waveshare I2C: configured SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
-                I2C_SDA_PIN, I2C_SCL_PIN,
-                static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
-#endif
 }
 
 const Stats &stats() { return i2cStats; }
@@ -245,41 +232,6 @@ void debugScan(Stream &out, uint8_t firstAddress, uint8_t lastAddress) {
 }
 
 bool probe(uint8_t address, const char *label, uint8_t attempts) {
-#ifdef WAVESHARE_AMOLED_175
-  if (attempts == 0) {
-    attempts = 1;
-  }
-
-  power_management::ScopedLock powerLock(
-      power_management::LockDomain::I2c);
-  BusLock lock;
-  if (!lock.ok()) {
-    i2cStats.failedTransactions++;
-    logFailure(label, "probe", address);
-    i2cStats.missingDevices++;
-    return false;
-  }
-
-  const uint32_t startedMs = retryStartTime();
-  for (uint8_t attempt = 0; attempt < attempts; ++attempt) {
-    Wire.beginTransmission(address);
-    if (Wire.endTransmission() == 0) {
-      if (attempt > 0) {
-        logRetryResult(address, UINT16_MAX, "probe", attempt + 1, true, startedMs);
-      }
-      return true;
-    }
-    i2cStats.failedTransactions++;
-    if (attempt + 1 < attempts) {
-      delay(2);
-    }
-  }
-
-  logRetryResult(address, UINT16_MAX, "probe", attempts, false, startedMs);
-  logFailure(label, "probe", address);
-  i2cStats.missingDevices++;
-  return false;
-#else
   bool ok = withRetries(address, UINT16_MAX, label, "probe", attempts, [address]() {
     Wire.beginTransmission(address);
     return Wire.endTransmission() == 0;
@@ -288,7 +240,6 @@ bool probe(uint8_t address, const char *label, uint8_t attempts) {
     i2cStats.missingDevices++;
   }
   return ok;
-#endif
 }
 
 bool writeRegister8(uint8_t address, uint8_t reg, uint8_t value,
@@ -429,7 +380,7 @@ bool ensureAxp2101PowerButtonOffLevel(
       });
 }
 
-#ifdef WAVESHARE_AMOLED_206
+#if BOARD_PMIC_DISPLAY_ENABLE_RECOVERY
 bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
                                 uint8_t attempts) {
   result = {};
@@ -530,11 +481,8 @@ bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
                      [address, reg, data, len]() {
                        Wire.beginTransmission(address);
                        Wire.write(reg);
-#ifdef WAVESHARE_AMOLED_175
-                       if (Wire.endTransmission() != 0) {
-#else
-                       if (Wire.endTransmission(false) != 0) {
-#endif
+                       if (Wire.endTransmission(
+                               board::i2c::stopBetweenWriteAndRead) != 0) {
                          return false;
                        }
 
@@ -560,15 +508,13 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
   power_management::ScopedLock powerLock(power_management::LockDomain::I2c);
   BusLock lock;
   if (!lock.ok()) return false;
-  // Intentionally not withRetries(): on 2.06 even its final failed attempt
-  // resets/reconfigures the bus. Observation must not do that.
+  // Intentionally not withRetries(): where the board recovers the bus on
+  // failure (the 2.06), even its final failed attempt resets/reconfigures
+  // the bus. Observation must not do that.
   Wire.beginTransmission(address);
   Wire.write(reg); // address pointer only, not a register-value write
-#ifdef WAVESHARE_AMOLED_175
-  if (Wire.endTransmission() != 0) return false;
-#else
-  if (Wire.endTransmission(false) != 0) return false;
-#endif
+  if (Wire.endTransmission(board::i2c::stopBetweenWriteAndRead) != 0)
+    return false;
   delay(2); // retain the existing board read transaction timing
   if (Wire.requestFrom(address, len, static_cast<uint8_t>(true)) != len)
     return false;
@@ -595,11 +541,8 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                        Wire.beginTransmission(address);
                        Wire.write(reg >> 8);
                        Wire.write(reg & 0xFF);
-#ifdef WAVESHARE_AMOLED_175
-                       const uint8_t status = Wire.endTransmission();
-#else
-                       const uint8_t status = Wire.endTransmission(false);
-#endif
+                       const uint8_t status = Wire.endTransmission(
+                           board::i2c::stopBetweenWriteAndRead);
                        if (status != 0) {
                          if (trace)
                            trace->failure(TransactionPhase::Transmit, status);
@@ -624,4 +567,3 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

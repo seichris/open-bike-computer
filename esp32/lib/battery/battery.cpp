@@ -9,9 +9,7 @@
 
 #include "battery.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "axp2101.hpp"
-#endif
 
 /**
  * @brief Battery Class constructor
@@ -105,17 +103,8 @@ bool Battery::readBatteryStatus(uint8_t &percentage, bool &charging) {
   bool latestCharging = false;
   bool readSucceeded = false;
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   readSucceeded = waveshare_board::axp2101::readBatteryStatus(
       latestPercentage, latestCharging);
-#elif defined(ADC1) || defined(ADC2)
-  const float rawLevel = readLegacyBattery();
-  if (isfinite(rawLevel)) {
-    latestPercentage =
-        static_cast<uint8_t>(constrain(lroundf(rawLevel), 0L, 100L));
-    readSucceeded = true;
-  }
-#endif
 
   cachedBatteryPercentageValid = readSucceeded;
   if (!readSucceeded) {
@@ -135,11 +124,7 @@ bool Battery::readBatteryPercent(uint8_t &percentage) {
 }
 
 float Battery::readBattery() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   uint8_t percentage = 0;
   return readBatteryPercent(percentage) ? static_cast<float>(percentage)
                                         : 0.0f;
-#else
-  return readLegacyBattery();
-#endif
 }

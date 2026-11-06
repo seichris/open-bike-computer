@@ -610,11 +610,9 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("controller_.sample(true, nowMs)", sample)
 
     def test_amoled_profiles_move_fixed_lvgl_pool_to_psram(self):
-        psram_gate = (
-            "#if defined(BOARD_HAS_PSRAM) && "
-            "(defined(WAVESHARE_AMOLED_175) || "
-            "defined(WAVESHARE_AMOLED_206))"
-        )
+        # Every board has PSRAM, so the pool placement keys on that flag alone
+        # and host builds without it keep the internal-RAM fallback.
+        psram_gate = "#if defined(BOARD_HAS_PSRAM)"
         for config in (LV_CONFIG, LV_CONFIG_TEMPLATE):
             self.assertIn(psram_gate, config)
             self.assertIn(

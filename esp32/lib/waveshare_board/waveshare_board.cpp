@@ -5,7 +5,6 @@
 
 #include "waveshare_board.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include "axp2101.hpp"
 #include <Wire.h>
@@ -50,4 +49,3 @@ void initializePowerManagement() {
 
 } // namespace waveshare_board
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
