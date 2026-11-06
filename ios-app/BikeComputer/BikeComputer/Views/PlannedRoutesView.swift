@@ -271,13 +271,7 @@ struct SavedRoutesSettingsSection: View {
                 destinationStore.removeFavorite(favorite)
             } else {
                 destinationStore.addFavorite(
-                    SavedDestination(
-                        name: route.destination.label,
-                        coordinate: CLLocationCoordinate2D(
-                            latitude: route.destination.coordinate.latitude,
-                            longitude: route.destination.coordinate.longitude
-                        )
-                    ),
+                    SavedRouteFavoritePolicy.favorite(for: route),
                     savedRouteID: route.id
                 )
             }

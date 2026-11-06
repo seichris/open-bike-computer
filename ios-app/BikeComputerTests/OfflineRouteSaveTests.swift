@@ -246,6 +246,7 @@ struct OfflineRouteSaveTests {
         try corruptionDeletionAndReplacement()
         try stravaRetention()
         try boundedArchiveReads()
+        try savedRouteFavoriteCoordinates()
         try automaticWatchTransfer()
         try watchTransferExpiryRecovery()
         try pendingDeletionAdmission()
