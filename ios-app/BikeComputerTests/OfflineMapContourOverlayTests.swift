@@ -225,6 +225,22 @@ struct OfflineMapContourOverlayTests {
               "labels across the border are queried from both sides' WGS-84 areas")
         check(!covers(unshiftedArea, shenzhenHill),
               "the view's own area alone would miss the Shenzhen hill's labels")
+        // Beside the border a MapKit pixel takes the mainland reading, so a
+        // Hong Kong label there would sit on shifted Shenzhen contours.
+        func label(_ hill: (latitude: Double, longitude: Double), alignsChina: Bool = true) -> CLLocationCoordinate2D? {
+            let point = BicinoTopographyTileOverlay.worldPoint(latitude: hill.latitude, longitude: hill.longitude)
+            return BicinoTopographyTileOverlay.labelCoordinate(worldX: point.0, worldY: point.1, alignsChina: alignsChina)
+        }
+        func near(_ coordinate: CLLocationCoordinate2D?, _ latitude: Double, _ longitude: Double) -> Bool {
+            guard let coordinate else { return false }
+            return abs(coordinate.latitude - latitude) < 1e-7 && abs(coordinate.longitude - longitude) < 1e-7
+        }
+        let besideBorder = (latitude: 22.52727, longitude: 114.08211)
+        check(label(besideBorder) == nil && near(label(besideBorder, alignsChina: false), 22.52727, 114.08211),
+              "a Hong Kong label beside the border is skipped where the tile shows Shenzhen")
+        check(near(label(hongKongHill), hongKongHill.latitude, hongKongHill.longitude) &&
+              near(label(shenzhenHill), shenzhenDrawn.latitude, shenzhenDrawn.longitude),
+              "labels elsewhere sit where their own contours are drawn")
         print("Offline map contour overlay tests passed")
     }
 }

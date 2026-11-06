@@ -87,6 +87,22 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
   }
 
   func coordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D {
+    Self.coordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+  }
+
+  func world(_ coordinate: CLLocationCoordinate2D) -> (Double, Double) {
+    Self.world(coordinate, alignsChina: alignsChina)
+  }
+
+  /// Where a contour label at these WGS-84 world metres is drawn, or nil when
+  /// the tile there shows other terrain. Beside mainland China's border a
+  /// MapKit pixel takes the mainland reading, so a label from across the
+  /// border would sit on shifted mainland contours.
+  func labelCoordinate(worldX: Double, worldY: Double) -> CLLocationCoordinate2D? {
+    Self.labelCoordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+  }
+
+  static func coordinate(worldX: Double, worldY: Double, alignsChina: Bool) -> CLLocationCoordinate2D {
     let latitude = atan(sinh(worldY / 6_378_137)) * 180 / .pi
     let longitude = worldX / 6_378_137 * 180 / .pi
     let point =
@@ -96,12 +112,21 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     return CLLocationCoordinate2D(latitude: point.latitude, longitude: point.longitude)
   }
 
-  func world(_ coordinate: CLLocationCoordinate2D) -> (Double, Double) {
+  static func world(_ coordinate: CLLocationCoordinate2D, alignsChina: Bool) -> (Double, Double) {
     let point =
       alignsChina
       ? GCJ02.wgs84(fromMapKit: coordinate.latitude, longitude: coordinate.longitude)
       : (latitude: coordinate.latitude, longitude: coordinate.longitude)
-    return Self.worldPoint(latitude: point.latitude, longitude: point.longitude)
+    return worldPoint(latitude: point.latitude, longitude: point.longitude)
+  }
+
+  static func labelCoordinate(worldX: Double, worldY: Double, alignsChina: Bool)
+    -> CLLocationCoordinate2D?
+  {
+    let drawn = coordinate(worldX: worldX, worldY: worldY, alignsChina: alignsChina)
+    guard alignsChina else { return drawn }
+    let shown = world(drawn, alignsChina: true)
+    return abs(shown.0 - worldX) < 1 && abs(shown.1 - worldY) < 1 ? drawn : nil
   }
 
   static func worldPoint(latitude: Double, longitude: Double) -> (Double, Double) {
@@ -375,7 +400,9 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
         }
         var annotations: [BicinoContourLabelAnnotation] = []
         for anchor in anchors {
-          let coordinate = overlay.coordinate(worldX: Double(anchor.x), worldY: Double(anchor.y))
+          guard let coordinate = overlay.labelCoordinate(
+            worldX: Double(anchor.x), worldY: Double(anchor.y))
+          else { continue }
           let p = mapView.convert(coordinate, toPointTo: mapView)
           let textWidth = ("\(anchor.elevation) m" as NSString).size(withAttributes: [
             .font: UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)

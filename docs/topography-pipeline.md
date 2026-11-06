@@ -66,8 +66,9 @@ companion pairs. No provider has thereby gained production approval.
   For selections that reach the app's mainland-China coordinate region
   ([details](mapkit-china-coordinates.md)), the iPhone resamples the WGS-84
   companion tiles on demand: each MapKit pixel that Apple Maps draws in
-  GCJ-02 reads its WGS-84 source pixel, and every other pixel keeps its
-  position. A selection across the border, such as most selections of
+  GCJ-02 reads its WGS-84 source pixel, pixels inside the region that the
+  offset left without terrain stay transparent, and every other pixel keeps
+  its position. A selection across the border, such as most selections of
   Shenzhen or Xiamen, therefore lines up on both sides. No uniform
   geographic offset is applied. The signed companion and ESP32 map remain
   WGS-84.

@@ -6,14 +6,26 @@ import ImageIO
 /// mainland China in GCJ-02, so each requested MapKit pixel that Apple Maps
 /// shifts looks up its contour colour at the corresponding WGS-84 pixel, and
 /// every other pixel keeps its own. A tile across mainland China's border
-/// samples one source area for each side. This changes only the iPhone
-/// presentation; the saved and device artifacts stay in WGS-84.
+/// samples one source area for each side. Where GCJ-02 moved mainland terrain
+/// away from the border, the pixels it left behind stay transparent. This
+/// changes only the iPhone presentation; the saved and device artifacts stay
+/// in WGS-84.
 nonisolated enum TopographyMapKitTileWarp {
     typealias TileLoader = @Sendable (_ z: Int, _ x: Int, _ y: Int, _ scale: Int) async throws -> Data?
 
-    /// A source position in WGS-84 pixels, and whether Apple Maps shifts the
-    /// MapKit pixel it belongs to.
-    private struct Point { let x: Double; let y: Double; let shifted: Bool }
+    /// Where a MapKit pixel's colour comes from.
+    private enum Reading {
+        /// Outside mainland China: the pixel at the same position.
+        case unshifted
+        /// Mainland China: the WGS-84 pixel GCJ-02 moved here.
+        case shifted
+        /// Inside mainland China, but GCJ-02 moved this terrain elsewhere and
+        /// nothing here: transparent.
+        case empty
+    }
+
+    /// A source position in WGS-84 pixels, and how its MapKit pixel reads.
+    private struct Point { let x: Double; let y: Double; let reading: Reading }
 
     /// The stitched source rectangle that one side of the border samples.
     private struct SourceWindow {
@@ -45,13 +57,14 @@ nonisolated enum TopographyMapKitTileWarp {
         let latitude = atan(sinh(.pi * (1 - 2 * y / world))) * 180 / .pi
         let wgs = GCJ02.wgs84(fromMapKit: latitude, longitude: longitude)
         guard wgs.latitude != latitude || wgs.longitude != longitude else {
-            return Point(x: x, y: y, shifted: false)
+            let inMainland = MainlandChinaRegion.contains(latitude: latitude, longitude: longitude)
+            return Point(x: x, y: y, reading: inMainland ? .empty : .unshifted)
         }
         let radians = wgs.latitude * .pi / 180
         return Point(
             x: (wgs.longitude + 180) / 360 * world,
             y: (1 - asinh(tan(radians)) / .pi) / 2 * world,
-            shifted: true
+            reading: .shifted
         )
     }
 
@@ -104,16 +117,17 @@ nonisolated enum TopographyMapKitTileWarp {
             for cellX in 0..<count {
                 let left = Double(cellX * step), top = Double(cellY * step)
                 let half = Double(step) / 2, full = Double(step)
-                let sides = [
+                let readings = [
                     grid[cellY * (count + 1) + cellX], grid[cellY * (count + 1) + cellX + 1],
                     grid[(cellY + 1) * (count + 1) + cellX], grid[(cellY + 1) * (count + 1) + cellX + 1],
                     sample(left + half, top + half), sample(left + half, top),
                     sample(left + half, top + full), sample(left, top + half), sample(left + full, top + half),
-                ].map(\.shifted)
-                guard sides.contains(!sides[0]) else { continue }
+                ].map(\.reading)
+                guard readings.contains(where: { $0 != readings[0] }) else { continue }
                 var points = [Point]()
                 points.reserveCapacity(step * step)
                 for row in 0..<step {
+                    try Task.checkCancellation()
                     for column in 0..<step {
                         points.append(sample(left + Double(column) + 0.5, top + Double(row) + 0.5))
                     }
@@ -127,11 +141,11 @@ nonisolated enum TopographyMapKitTileWarp {
         // RGBA arrays for every channel caused millions of hashes and
         // retain/release pairs per tile, delaying MapKit's replies during a zoom
         // gesture.
-        var windows: [Bool: SourceWindow] = [:]
+        var windows: [Reading: SourceWindow] = [:]
         var hasSource = false
-        for shifted in [false, true] {
-            let points = grid.filter { $0.shifted == shifted } +
-                exact.values.joined().filter { $0.shifted == shifted }
+        for reading in [Reading.unshifted, .shifted] {
+            let points = grid.filter { $0.reading == reading } +
+                exact.values.joined().filter { $0.reading == reading }
             guard let firstPoint = points.first else { continue }
             var lowX = firstPoint.x, highX = firstPoint.x
             var lowY = firstPoint.y, highY = firstPoint.y
@@ -183,7 +197,7 @@ nonisolated enum TopographyMapKitTileWarp {
                     }
                 }
             }
-            windows[shifted] = window
+            windows[reading] = window
         }
         guard hasSource else { return nil }
 
@@ -197,8 +211,8 @@ nonisolated enum TopographyMapKitTileWarp {
             throw WarpError.outputTile
         }
         let empty = SourceWindow(minX: 0, minY: 0, width: 0, pixels: [])
-        let unshifted = windows[false] ?? empty
-        let shifted = windows[true] ?? empty
+        let unshifted = windows[.unshifted] ?? empty
+        let shifted = windows[.shifted] ?? empty
         try unshifted.pixels.withUnsafeBufferPointer { unshiftedPixels in
             try shifted.pixels.withUnsafeBufferPointer { shiftedPixels in
                 for pixelY in 0..<side {
@@ -209,12 +223,12 @@ nonisolated enum TopographyMapKitTileWarp {
                         let cellX = pixelX / step
                         let sourceX: Double
                         let sourceY: Double
-                        let isShifted: Bool
+                        let reading: Reading
                         if let points = exact[cellY * count + cellX] {
                             let point = points[(pixelY - cellY * step) * step + pixelX - cellX * step]
                             sourceX = point.x - 0.5
                             sourceY = point.y - 0.5
-                            isShifted = point.shifted
+                            reading = point.reading
                         } else {
                             let fractionalX = (Double(pixelX) + 0.5 - Double(cellX * step)) / Double(step)
                             let upperLeft = grid[cellY * (count + 1) + cellX]
@@ -229,8 +243,14 @@ nonisolated enum TopographyMapKitTileWarp {
                                 upperLeft.y, upperRight.y, lowerLeft.y, lowerRight.y,
                                 fractionalX, fractionalY
                             ) - 0.5
-                            isShifted = upperLeft.shifted
+                            reading = upperLeft.reading
                         }
+                        let outputIndex = (pixelY * side + pixelX) * 4
+                        guard reading != .empty else {
+                            for channel in 0..<4 { output[outputIndex + channel] = 0 }
+                            continue
+                        }
+                        let isShifted = reading == .shifted
                         let pixels = isShifted ? shiftedPixels : unshiftedPixels
                         let minX = isShifted ? shifted.minX : unshifted.minX
                         let minY = isShifted ? shifted.minY : unshifted.minY
@@ -239,7 +259,6 @@ nonisolated enum TopographyMapKitTileWarp {
                         let top = Int(floor(sourceY))
                         let fractionX = sourceX - Double(left)
                         let fractionY = sourceY - Double(top)
-                        let outputIndex = (pixelY * side + pixelX) * 4
                         // Each side's window spans its points' extrema plus a
                         // one-pixel bilinear border, so all four neighbours are
                         // inside it.

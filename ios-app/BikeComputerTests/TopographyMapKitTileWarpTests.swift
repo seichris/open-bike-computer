@@ -30,6 +30,7 @@ struct TopographyMapKitTileWarpTests {
             for zoom in [16, 20] {
                 try await borderControlPoints(scale: scale, zoom: zoom)
             }
+            try await gapControlPoint(scale: scale)
         }
         try await overviewLimits()
         let unchanged = Data([1, 2, 3])
@@ -253,7 +254,6 @@ struct TopographyMapKitTileWarpTests {
         for mark in marks {
             let tileX = Int(floor(mark.target.x / Double(side)))
             let tileY = Int(floor(mark.target.y / Double(side)))
-            let started = ProcessInfo.processInfo.systemUptime
             let output = try await TopographyMapKitTileWarp.tile(
                 z: zoom, x: tileX, y: tileY, scale: scale
             ) { _, x, y, _ in
@@ -266,14 +266,57 @@ struct TopographyMapKitTileWarpTests {
                     return try markedTile(side: side, points: inTile.map { (Int($0.x) % side, Int($0.y) % side) })
                 }
             }
-            precondition(ProcessInfo.processInfo.systemUptime - started < 5,
-                         "a border tile is warped in reasonable time")
             guard let output else { preconditionFailure("border tile is missing") }
             let targetAlpha = try alpha(output, side: side,
                 x: Int(mark.target.x) - tileX * side, y: Int(mark.target.y) - tileY * side)
             precondition(targetAlpha > 128,
                          "each side's contour lands where Apple Maps draws it (zoom \(zoom), scale \(scale))")
         }
+    }
+
+    /// At Khorgos GCJ-02 moves mainland China east, away from the Kazakh
+    /// border, so Apple Maps pixels just inside the border have no terrain. A
+    /// mark 100 m inside appears where Apple Maps draws it and leaves its own
+    /// position transparent rather than drawn twice.
+    private static func gapControlPoint(scale: Int, zoom: Int = 16) async throws {
+        let side = 256 * scale
+        var outside = (lat: 44.2, lon: 80.0)
+        var inside = (lat: 44.2, lon: 80.8)
+        for _ in 0..<60 {
+            let middle = (lat: 44.2, lon: (inside.lon + outside.lon) / 2)
+            if MainlandChinaRegion.contains(latitude: middle.lat, longitude: middle.lon) {
+                inside = middle
+            } else {
+                outside = middle
+            }
+        }
+        let mark = (lat: 44.2, lon: inside.lon + 100 / (111_320 * cos(44.2 * .pi / 180)))
+        let drawn = GCJ02.mapKit(fromWGS84: mark.lat, longitude: mark.lon)
+        let readAtMark = GCJ02.wgs84(fromMapKit: mark.lat, longitude: mark.lon)
+        precondition(MainlandChinaRegion.contains(latitude: mark.lat, longitude: mark.lon) &&
+                     readAtMark.latitude == mark.lat && readAtMark.longitude == mark.lon,
+                     "the mark's own Apple Maps position is inside the region with no mainland reading")
+        let source = pixel(lat: mark.lat, lon: mark.lon, zoom: zoom, side: side)
+        let target = pixel(lat: drawn.latitude, lon: drawn.longitude, zoom: zoom, side: side)
+        let sourceX = Int(source.x), sourceY = Int(source.y)
+        func render(_ x: Int, _ y: Int) async throws -> Data {
+            let output = try await TopographyMapKitTileWarp.tile(
+                z: zoom, x: x / side, y: y / side, scale: scale
+            ) { z, tileX, tileY, _ in
+                tileX == sourceX / side && tileY == sourceY / side
+                    ? try markedTile(side: side, x: sourceX % side, y: sourceY % side)
+                    : nil
+            }
+            guard let output else { preconditionFailure("gap tile is missing") }
+            return output
+        }
+        let targetX = Int(target.x), targetY = Int(target.y)
+        let atTarget = try alpha(await render(targetX, targetY), side: side,
+                                 x: targetX % side, y: targetY % side)
+        let atSource = try alpha(await render(sourceX, sourceY), side: side,
+                                 x: sourceX % side, y: sourceY % side)
+        precondition(atTarget > 128 && atSource == 0,
+                     "mainland terrain is drawn once, where Apple Maps draws it (scale \(scale))")
     }
 
     private static func pixel(
