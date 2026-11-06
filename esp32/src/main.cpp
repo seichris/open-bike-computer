@@ -1773,35 +1773,9 @@ void setup() {
     configureTouchWakeInterrupt();
   }
 #endif
-#ifdef POWER_SAVE
-#ifdef ICENAV_BOARD
-  gpio_hold_dis(GPIO_NUM_46);
-  gpio_hold_dis((gpio_num_t)BOARD_BOOT_PIN);
-  gpio_deep_sleep_hold_dis();
-#endif
-#endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::WakeConfiguration);
-#endif
-
-#ifdef TDECK_ESP32S3
-  pinMode(BOARD_POWERON, OUTPUT);
-  digitalWrite(BOARD_POWERON, HIGH);
-  pinMode(GPIO_NUM_16, INPUT);
-  pinMode(SD_CS, OUTPUT);
-  pinMode(RADIO_CS_PIN, OUTPUT);
-  pinMode(TFT_SPI_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
-  digitalWrite(RADIO_CS_PIN, HIGH);
-  digitalWrite(TFT_SPI_CS, HIGH);
-  pinMode(SPI_MISO, INPUT_PULLUP);
-#endif
-
-#ifdef ICENAV_BOARD
-  // Initialize SD card CS pin
-  pinMode(SD_CS, OUTPUT);
-  digitalWrite(SD_CS, HIGH);
 #endif
 
 #ifdef WAVESHARE_AMOLED_206

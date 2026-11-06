@@ -144,9 +144,6 @@ void initTFT()
   // LovyanGFX initialization for other displays
   tft.init();
 
-  #ifdef TDECK_ESP32S3
-    tft.setRotation(1);
-  #endif
 
   TFT_HEIGHT = tft.height();
   TFT_WIDTH = tft.width();

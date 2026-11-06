@@ -737,19 +737,6 @@ esp_err_t Storage::mountRemovableStorage() {
   esp_err_t ret;
 
   sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-#ifdef TDECK_ESP32S3
-  host.slot = SPI2_HOST;
-#endif
-#ifdef ICENAV_BOARD
-  host.slot = SPI2_HOST;
-#endif
-#ifdef ESP32S3_N16R8
-  host.slot = SPI2_HOST;
-#endif
-#ifdef ESP32_N16R4
-  host.slot = HSPI_HOST;
-  host.command_timeout_ms = 1000;
-#endif
 
   sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
   slot_config.gpio_cs = (gpio_num_t)SD_CS;

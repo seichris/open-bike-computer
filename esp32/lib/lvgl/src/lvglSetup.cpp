@@ -19,7 +19,6 @@ lv_style_t styleThemeBkg;  // New Main Background Style
 lv_style_t styleObjectBkg; // New Objects Background Color
 lv_style_t styleObjectSel; // New Objects Selected Color
 
-lv_group_t *scrGroup; // Screen group
 lv_group_t *keyGroup; // GPIO group
 lv_obj_t *powerMsg;   // Power Message
 
@@ -154,37 +153,6 @@ void IRAM_ATTR touchRead(lv_indev_t *indev_driver, lv_indev_data_t *data) {
 }
 #endif
 
-#ifdef TDECK_ESP32S3
-/**
- * @brief LVGL T-DECK keyboard read
- *
- */
-uint32_t keypadGetKey() {
-  char key_ch = 0;
-  Wire.requestFrom(0x55, 1);
-  while (Wire.available() > 0) {
-    key_ch = Wire.read();
-  }
-  return key_ch;
-}
-
-/**
- * @brief LVGL T-DECK keyboard read
- *
- */
-void IRAM_ATTR keypadRead(lv_indev_t *indev_driver, lv_indev_data_t *data) {
-  static uint32_t last_key = 0;
-  uint32_t act_key;
-  act_key = keypadGetKey();
-  if (act_key != 0) {
-    data->state = LV_INDEV_STATE_PRESSED;
-    last_key = act_key;
-  } else
-    data->state = LV_INDEV_STATE_RELEASED;
-
-  data->key = last_key;
-}
-#endif
 
 #ifdef POWER_SAVE
 
@@ -369,14 +337,6 @@ void initLVGL() {
   lv_indev_set_read_cb(indev_drv, touchRead);
 #endif
 
-#ifdef TDECK_ESP32S3
-  scrGroup = lv_group_create();
-  lv_group_set_default(scrGroup);
-  lv_indev_t *indev_keypad = lv_indev_create();
-  lv_indev_set_type(indev_keypad, LV_INDEV_TYPE_KEYPAD);
-  lv_indev_set_read_cb(indev_keypad, keypadRead);
-  lv_indev_set_group(indev_keypad, lv_group_get_default());
-#endif
 
 #ifdef POWER_SAVE
   lv_indev_t *indev_gpio = lv_indev_create();

@@ -271,13 +271,12 @@ watchdog heartbeat. Late ACKs do not authorize forced sleep or reset.
 Maintenance/early-startup paths without an initialized display do not attempt
 unsafe display initialization; RTC and serial retain the failure evidence.
 
-The only existing manual-suspend caller is the legacy non-Arduino-GFX LVGL
-`gpioClickEvent`, registered with `POWER_SAVE` in T-Deck and Elecrow profiles.
-Neither Waveshare profile registers that callback. This change deliberately
-refuses that legacy manual MCU-suspend action too, rather than retain a storage
-barrier bypass; implementing a reversible suspend/resume barrier is an explicit
-remaining compatibility gate. The button's existing sleep message is replaced
-with an unavailable notice so it does not promise entry into sleep.
+No caller requests a manual MCU suspend. The only one was the legacy LVGL
+`gpioClickEvent` of the removed IceNav-era boards, and this change deliberately
+refuses that action rather than retain a storage barrier bypass; implementing a
+reversible suspend/resume barrier is an explicit remaining compatibility gate.
+The button's existing sleep message is replaced with an unavailable notice so it
+does not promise entry into sleep.
 
 ## Selection metadata power-loss recovery
 

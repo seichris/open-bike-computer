@@ -31,7 +31,6 @@ extern lv_obj_t *deviceSettingsScreen; // Device Settings Screen
 extern lv_obj_t *gpxDetailScreen;       // Add Waypoint Screen
 extern lv_obj_t *listGPXScreen;   // List Waypoint Screen
 
-extern lv_group_t * scrGroup;          // Screen group
 extern lv_group_t * keyGroup;          // GPIO group
 
 extern bool needReboot;                // Flag to force device reboot

@@ -34,52 +34,6 @@ static void gpxDetailScreenEvent(lv_event_t *event) {
   lv_event_code_t code = lv_event_get_code(event);
   lv_obj_t *tagName = (lv_obj_t *)lv_event_get_target(event);
 
-#ifdef TDECK_ESP32S3
-  if (code == LV_EVENT_KEY) {
-    if (lv_indev_get_key(lv_indev_active()) == 13) // Enter Key
-    {
-      createWptFile();
-      GPXParser gpx;
-
-      switch (gpxAction) {
-      case WPT_ADD:
-        addWpt.name = (char *)lv_textarea_get_text(tagName);
-        if (strcmp(addWpt.name, "") != 0) {
-          gpx.filePath = wptFile;
-          gpx.addWaypoint(addWpt);
-        }
-        break;
-      case GPX_EDIT:
-        char *newName = (char *)lv_textarea_get_text(tagName);
-        if (strcmp(loadWpt.name, newName) != 0) {
-          gpx.filePath = gpxFileFolder.c_str();
-          if (gpxWaypoint)
-            gpx.editTagAttrOrElem(gpxWaypointTag, nullptr, gpxNameElem,
-                                  loadWpt.name, newName);
-          if (gpxTrack)
-            gpx.editTagAttrOrElem(gpxTrackTag, nullptr, gpxNameElem,
-                                  loadWpt.name, newName);
-        }
-        break;
-      }
-
-      isMainScreen = true;
-      mapView.redrawMap = true;
-      gpxAction = WPT_NONE;
-      lv_refr_now(display);
-      loadMainScreen();
-    }
-
-    if (lv_indev_get_key(lv_indev_active()) == 35) // # Key (ESCAPE)
-    {
-      isMainScreen = true;
-      mapView.redrawMap = true;
-      gpxAction = WPT_NONE;
-      lv_refr_now(display);
-      loadMainScreen();
-    }
-  }
-#endif
 
   if (code == LV_EVENT_READY) {
     if (lv_display_get_rotation(display) == LV_DISPLAY_ROTATION_270) {
@@ -233,18 +187,11 @@ void createGpxDetailScreen() {
   lv_obj_add_state(gpxTagValue, LV_STATE_FOCUSED);
   lv_obj_add_event_cb(gpxTagValue, gpxDetailScreenEvent, LV_EVENT_ALL,
                       gpxDetailScreen);
-#ifndef TDECK_ESP32S3
   lv_obj_t *keyboard = lv_keyboard_create(gpxDetailScreen);
   lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_UPPER);
   lv_keyboard_set_textarea(keyboard, gpxTagValue);
-#endif
 
-#ifdef TDECK_ESP32S3
-  lv_group_add_obj(scrGroup, gpxTagValue);
-  lv_group_focus_obj(gpxTagValue);
-#endif
 
-#ifndef TDECK_ESP32S3
   // Rotate Screen button
   static lv_style_t editBtnStyleOn;
   lv_style_init(&editBtnStyleOn);
@@ -260,7 +207,6 @@ void createGpxDetailScreen() {
   lv_obj_t *rotateScreenLbl = lv_label_create(rotateScreenBtn);
   lv_label_set_text(rotateScreenLbl, LV_SYMBOL_LOOP);
   lv_obj_center(rotateScreenLbl);
-#endif
 
   gpxTag = lv_label_create(gpxDetailScreen);
   lv_obj_set_style_text_font(gpxTag, fontOptions, 0);
