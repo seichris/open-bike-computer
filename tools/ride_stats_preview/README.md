@@ -2,9 +2,11 @@
 
 The iPhone settings preview is composed from sample tiles rendered by the
 **actual ESP32 screen helpers and LVGL 9.2.2**. It is not a SwiftUI grid with
-approximate fonts. The renderer is `esp32/lib/gui/src/rideTelemetryScr.cpp`;
-`generate_ride_stats_preview.py` extracts its production helpers and compiles
-those helpers with the production layout, presenters, fonts and typography.
+approximate fonts. The renderer is `esp32/lib/gui/src/rideTelemetryScr.cpp` with the slot
+presentation of `rideStatsAmoled.cpp` (the e-paper replay compiles
+`rideStatsEpaper.cpp`); `generate_ride_stats_preview.py` extracts the screen's
+production helpers and compiles them with the family file, the production
+layout, presenters, fonts and typography.
 
 The app uses the paired device's `firmwareTarget` to select the round 466 × 466
 1.75-inch display or the rectangular 410 × 502 2.06-inch display. Before device

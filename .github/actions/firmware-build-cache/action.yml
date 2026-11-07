@@ -44,7 +44,7 @@ runs:
         CORE_HASH: ${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}
       run: |
         set -euo pipefail
-        [[ "$ENVIRONMENT" =~ ^WAVESHARE_AMOLED_(175|206)(_[A-Z0-9_]+)?$ ]]
+        [[ "$ENVIRONMENT" =~ ^(WAVESHARE_AMOLED_(175|206)|WAVESHARE_EPAPER_397)(_[A-Z0-9_]+)?$ ]]
         [[ -n "$RUNTIME_HASH" && -n "$CORE_HASH" ]]
         host="${RUNNER_OS}-${RUNNER_ARCH}"
         {

@@ -27,6 +27,9 @@ int main() {
   static_assert(TCH_I2C_INT == board::touch::interrupt);
   static_assert(BOARD_BOOT_PIN == board::buttons::boot);
   static_assert(board::touch::resetOnGpio == (TCH_I2C_RST != board::noPin));
+  // EXT1 light-sleep wake needs an RTC GPIO (0 to 21 on the ESP32-S3): the
+  // 1.75 TP_INT qualifies, the 2.06's GPIO38 does not.
+  static_assert(board::touch::ext1WakeSource == (board::touch::interrupt <= 21));
   assert(ui_scheduler::gpioWakeReasons(0, TCH_I2C_INT, BOARD_BOOT_PIN) == 0);
   const auto touch = ui_scheduler::gpioWakeReasons(
       1ULL << schematicTouchPin, TCH_I2C_INT, BOARD_BOOT_PIN);

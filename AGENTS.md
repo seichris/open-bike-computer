@@ -314,7 +314,10 @@ libraries retain production and lifecycle qualification; renderer/debug/radio
 inputs also select their distinct profiles. Common board, runtime and configuration
 changes qualify both 175 and 206 with all four regular profiles. Unknown libraries
 retain the full selected hardware matrix. A 206-specific path cannot select only
-175. Explicit manual hardware selection and release CI retain every regular profile.
+175. Automatic runs also build the experimental e-paper ordinary and production
+profiles for any change that can reach that image; e-paper-named sources select
+only its six profiles. Explicit manual hardware selection and release CI retain
+every regular profile, and their `all` selection stays AMOLED-only.
 Image reserve, debug-route exclusions, factory packaging and lifecycle assertions
 remain mandatory. Zone fixtures run once with both board definitions under CI Gate.
 

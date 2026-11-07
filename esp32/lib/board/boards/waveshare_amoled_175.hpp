@@ -39,6 +39,9 @@ constexpr uint8_t columnOffset = 6;
 // whether the 90-degree rotation is offered on this panel.
 constexpr uint8_t defaultRotation = 1;
 constexpr bool rotation90Enabled = true;
+// RGB565 colour panel that animates at the LVGL frame rate.
+constexpr bool monochrome = false;
+constexpr bool animations = true;
 }  // namespace display
 
 namespace i2c {
@@ -50,6 +53,9 @@ constexpr uint8_t scl = 14;
 // and whether a failed transaction resets and reconfigures the bus.
 constexpr bool stopBetweenWriteAndRead = true;
 constexpr bool recoverOnFailure = false;
+// Configure Wire directly at boot; never preemptively bit-bang the shared bus
+// before PMIC inspection (the 2.06 does).
+constexpr bool recoverAtBoot = false;
 }  // namespace i2c
 
 namespace touch {
@@ -60,10 +66,23 @@ constexpr uint8_t address = 0x5A;
 constexpr uint8_t interrupt = 11;
 constexpr bool resetOnGpio = false;
 constexpr uint8_t reset = noPin;
+// GPIO11 is an RTC GPIO, so TP_INT joins BOOT in the EXT1 light-sleep wake
+// mask. While the display is dimmed or off the CST9217 reader keeps polling
+// and a low TP_INT level counts as a wake request, because the latched edge
+// alone cannot restore the UI.
+constexpr bool ext1WakeSource = true;
+constexpr bool wakePolling = true;
+// The CST9217 reports two contacts; the standalone Map uses the second one
+// for pinch zoom and the idle zoom-out backdrop.
+constexpr bool multiTouch = true;
 }  // namespace touch
 
 namespace buttons {
 constexpr uint8_t boot = 0;
+// No side keys: BOOT and the PMIC PWR key confirm pairing.
+constexpr uint8_t up = noPin;
+constexpr uint8_t center = noPin;
+constexpr uint8_t down = noPin;
 }  // namespace buttons
 
 namespace sd {
@@ -88,6 +107,13 @@ constexpr bool qualifiedPowerControl = true;
 constexpr bool displayEnableRecovery = false;
 }  // namespace power
 
+namespace wifi {
+// Allocate the resident transfer Wi-Fi resources before BLE: a first transfer
+// after a ride found enough total RAM but no 32 KiB contiguous block on this
+// board. The 2.06 keeps its original startup order until qualified.
+constexpr bool prepareBeforeBle = true;
+}  // namespace wifi
+
 namespace gnss {
 // UART pads only; no module is populated on this model.
 constexpr bool fitted = false;
@@ -111,6 +137,16 @@ constexpr uint16_t speedX = 1;
 constexpr uint16_t speedBottomInset = 130;
 constexpr uint16_t sunX = 170;
 constexpr uint16_t sunBottomInset = 170;
+// Map screen geometry read by gui_layout: the UI space reserved below a
+// non-fullscreen map, the anchor of the rider inside the map viewport, and
+// the toolbar button offsets.
+constexpr uint16_t mapNonFullscreenReservedHeight = 100;
+constexpr uint8_t mapAnchorXPercent = 50;
+constexpr uint8_t mapAnchorYPercent = 50;
+constexpr uint8_t mapToolbarOffset = 80;
+constexpr uint8_t mapToolbarSpace = 50;
+constexpr uint8_t mapToolbarInset = 10;
+constexpr uint8_t mapToolbarFullscreenBottomMargin = 24;
 }  // namespace layout
 
 }  // namespace board

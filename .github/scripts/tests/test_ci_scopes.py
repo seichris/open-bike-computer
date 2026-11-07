@@ -15,6 +15,9 @@ from dispatch_promotion_ci import eligible
 from diagnostic_changes import changed
 
 
+EPAPER_PAIR = ('WAVESHARE_EPAPER_397', 'WAVESHARE_EPAPER_397_PRODUCTION')
+
+
 class ScopeTests(unittest.TestCase):
     def test_promotion_and_mixed_diff(self):
         locks=list(scope.COMPOSE_LOCKS)
@@ -29,10 +32,10 @@ class ScopeTests(unittest.TestCase):
     def test_firmware_profiles_and_boards(self):
         full=components.select_firmware_targets('175')
         targets=scope.firmware_targets(['esp32/lib/device_transfer/durable_operation.cpp'],full)
-        self.assertEqual(targets,tuple(t for t in full if t.endswith(('_PRODUCTION','_LIFECYCLE_QUALIFICATION'))))
+        self.assertEqual(targets,tuple(t for t in full if t.endswith(('_PRODUCTION','_LIFECYCLE_QUALIFICATION')))+EPAPER_PAIR)
         self.assertIn('WAVESHARE_AMOLED_175_REMOTE_DEBUG',scope.firmware_targets(['esp32/lib/device_debug/device_debug_http.cpp'],full))
         for path in ('esp32/platformio.ini','esp32/tools/build_firmware.py','esp32/include/board.h','esp32/lib/panel/WAVESHARE_AMOLED_175.cpp'):
-            self.assertEqual(scope.firmware_targets([path],full),scope.board_firmware_targets(('175','206')),path)
+            self.assertEqual(scope.firmware_targets([path],full),scope.board_firmware_targets(('175','206'))+EPAPER_PAIR,path)
         for path in ('esp32/waveshare_206_hello.cpp','esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'):
             self.assertTrue(all('206' in t for t in scope.firmware_targets([path],full)))
         self.assertEqual(scope.firmware_targets(None,full),full)
@@ -53,15 +56,15 @@ class ScopeTests(unittest.TestCase):
                          'esp32/lib/map_transfer/map_stream_compiled_trust.cpp',
                          'esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc'):
                 # Exact suffixes: plain lifecycle must not ride along with the POI image.
-                self.assertEqual(scope.firmware_targets([path], full), expected, path)
+                self.assertEqual(scope.firmware_targets([path], full), expected + EPAPER_PAIR, path)
 
-    def test_docs_and_ci_inputs_do_not_expand_to_unrequested_boards(self):
+    def test_docs_and_ci_inputs_keep_the_requested_amoled_family(self):
         full = components.select_firmware_targets('175')
         ble = 'esp32/lib/ble_navigation/ble_navigation.cpp'
         self.assertEqual(scope.firmware_targets([ble, 'docs/ble-protocol.md'], full),
                          scope.firmware_targets([ble], full))
         for path in ('.github/workflows/ci.yml', 'tools/dev_check.py'):
-            self.assertEqual(scope.firmware_targets([path], full), full)
+            self.assertEqual(scope.firmware_targets([path], full), full + EPAPER_PAIR)
         # Lifecycle adapter implementations and shared board/build inputs retain
         # broader qualification; manual/release scopes preserve the chosen matrix.
         for path in ('esp32/lib/firmware_update/firmware_update_http.cpp',
@@ -70,6 +73,37 @@ class ScopeTests(unittest.TestCase):
                           scope.firmware_targets([path], full))
         self.assertEqual(scope.firmware_targets(None, components.select_firmware_targets('all')),
                          components.select_firmware_targets('all'))
+
+    def test_automatic_selection_builds_epaper_whenever_a_change_can_reach_it(self):
+        full = components.select_firmware_targets('175')
+        epaper = components.select_firmware_targets('397')
+        # E-paper-named sources, alone or with docs, select only their board.
+        for paths in (['esp32/lib/epaper_display/epaper_display.cpp'],
+                      ['esp32/lib/gui/src/epaperRideStats.hpp', 'docs/epaper-refresh-qualification.md'],
+                      ['esp32/lib/panel/WAVESHARE_EPAPER_397.hpp', 'esp32/tools/tests/test_epaper_display.cpp']):
+            self.assertEqual(scope.firmware_targets(paths, full), epaper, paths)
+        ble = 'esp32/lib/ble_navigation/ble_navigation.cpp'
+        self.assertEqual(scope.firmware_targets(['esp32/lib/epaper_display/ssd1677.hpp', ble], full),
+                         scope.amoled_firmware_targets([ble], full) + epaper)
+        # Shared libraries, board, build and CI inputs add diagnostics-on and
+        # diagnostics-off e-paper images in both partition layouts.
+        for path in (ble, 'esp32/lib/storage/storage.cpp', 'esp32/lib/gui/src/mainScr.cpp',
+                     'esp32/src/main.cpp', 'esp32/platformio.ini', 'esp32/lib/panel/panelSelect.hpp',
+                     '.github/actions/firmware-build-cache/action.yml', 'tools/build_evidence.py'):
+            targets = scope.firmware_targets([path], full)
+            self.assertEqual([t for t in targets if 'EPAPER' in t], list(EPAPER_PAIR), path)
+            self.assertEqual([t for t in targets if 'EPAPER' not in t], list(scope.amoled_firmware_targets([path], full)), path)
+        # 206-named sources never reach the e-paper image; docs and tests alone add no e-paper build.
+        for paths in (['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'], ['esp32/waveshare_206_hello.cpp', 'docs/x.md'],
+                      ['docs/x.md', '.github/scripts/tests/test_ci_scopes.py']):
+            self.assertFalse([t for t in scope.firmware_targets(paths, full) if 'EPAPER' in t], paths)
+        # A CI edit beside a 206 change can still break the e-paper recipe.
+        self.assertEqual(scope.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp', '.github/workflows/ci.yml'], full),
+                         scope.board_firmware_targets(('206',)) + EPAPER_PAIR)
+        # Manual, release and core-warm requests keep exactly their matrix.
+        for hardware in ('175', '206', '397', 'all'):
+            requested = components.select_firmware_targets(hardware)
+            self.assertEqual(scope.firmware_targets(None, requested), requested, hardware)
 
     def test_shared_fast_inputs_keep_only_their_consumers(self):
         fixture = ['protocol/fixtures/workout-zones-v1.json', 'docs/example.md']

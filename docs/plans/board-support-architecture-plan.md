@@ -164,9 +164,10 @@ esp32/lib/board/
   policy/
     waveshare_amoled_175.hpp        allowed PMIC writes, rail expectations
     …
-  startup/
-    amoled.cpp                      bring-up sequence for the AMOLED family
-    epaper.cpp                      bring-up sequence for the e-paper family
+esp32/lib/board_startup/            the startup part (M2), its own library so that
+  board_startup.hpp                 lib/board stays a leaf of the dependency finder
+  amoled.cpp                        the AMOLED family's bodies of the boot and loop steps
+  epaper.cpp                        the e-paper family's
 ```
 
 A definition is data only: nested namespaces of plain `constexpr` values and
@@ -225,7 +226,7 @@ fitted device, chosen at build time from the board definition the way
 | SD storage | mount, unmount, card identity from board wiring | SDMMC one-bit; SPI shared | membership lists in `storage.cpp` |
 | Sensors | present, sample, identity | QMI8658, SHTC3, RTC; none | `waveshare_board/*`, `WAVESHARE_*_DIAGNOSTICS` flags |
 | Audio | present, play, mute | ES8311 speaker path; none | `speaker` library behind AMOLED conditionals |
-| Startup | the body of each boot stage for this family | AMOLED; e-paper | interleaved in `main.cpp` |
+| Startup | the body of each boot stage for this family | AMOLED; e-paper | `lib/board_startup/` behind `board::startup` (M2); `main.cpp` keeps the stage order |
 
 The boot-stage list (the normal sequence `startup` through `ready`, ids 1–15,
 plus the safe-mode, diagnostic-hold and firmware-maintenance states) is a
@@ -255,6 +256,12 @@ New UI for one family goes into that family's presentation files. New UI for
 both goes into the shared layer and is drawn by each stack. A `#ifdef` on a
 board macro inside `gui/` or `maps/` is the signal that something is in the
 wrong layer.
+
+Since M4 the contracts are `map_scheduler` (`lib/gui/src/mapSchedulerFamily.hpp`)
+for the main screen's base-render decisions, `ride_stats_family`
+(`lib/gui/src/rideStatsFamily.hpp`) for the Ride Stats slots, and the three
+`Maps` members defined per family in `lib/maps/src/mapCamera{Amoled,Epaper}.cpp`;
+a family file is named after its family and gated as a whole.
 
 ### Capabilities
 
@@ -303,11 +310,17 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 ## Migration
 
 M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
-2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
-`lib/board/` when it merges `main`. M3 followed on 2026-11-06 and merged on
-2026-11-07; #442 merged `main` through it the same day. M2 and M4 still wait for #442 to merge:
-the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and
-migrating them first would only create conflicts.
+2026-11-06. M3 followed on 2026-11-06 and merged on 2026-11-07. #442
+reconciled its `board_traits.hpp` and e-paper traits against `lib/board/`
+when it merged `main` through #767 the same day: `board.hpp` selects the
+third target, `boards/waveshare_epaper_397.hpp` carries the e-paper data
+(including the `epd`, `audio` and side-key values that
+`include/board_traits.hpp` now aliases), the storage migration path is
+skipped by data (`sd::legacySpiCs == noPin`), and the confinement baseline
+was raised once for the e-paper branches in shared files, to 204
+conditionals in 32 files. M2 and M4 are built on #442's branch and merge
+after it: the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp`
+heavily, and migrating them on `main` first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
 host tests and, where it touches boot or power, a boot capture per affected
 board. A milestone that preserves behaviour still needs that capture: boot
@@ -317,7 +330,7 @@ sequencing is where the PMIC policies live.
 | --- | --- | --- | --- | --- |
 | M0 | Prune legacy boards | Remove the six legacy environments, their `hal.hpp` blocks and the 24 conditionals in ten files; drop the now-dead `DISABLE_*` branches and legacy `lib_deps` that no Waveshare build uses | No legacy macro anywhere under `esp32/`; Waveshare images unchanged in behaviour | None (nothing built changes); confirm with the CI matrix |
 | M1 | Confinement test and board selector | Add `lib/board/board.hpp` and move `board_traits.hpp` into it; add the ratchet test with a baseline of today's counts; register it in `checks.json` and CI routing | Test fails on any new board macro outside the allowlist or any count above baseline | None |
-| M2 | Startup split | Move `main.cpp`'s boot sequencing into `lib/board/startup/{amoled,epaper}.cpp` behind `board::startup::stage(...)`; keep stage ids and names | `main.cpp` has zero board macros; `BOOT_STAGE` sequence identical | Boot capture per board with its PMIC gate: 1.75 read-only, 2.06 display-enable-only, e-paper ALDO3-only |
+| M2 | Startup split | Move the family-specific bodies of `main.cpp`'s boot and loop steps into `lib/board_startup/{amoled,epaper}.cpp` behind `board::startup`; `main.cpp` keeps the stage order, and differences between the boards of one family become board data | `main.cpp` has zero board macros; `BOOT_STAGE` sequence identical | Boot capture per board with its PMIC gate: 1.75 read-only, 2.06 display-enable-only, e-paper ALDO3-only |
 | M3 | Membership lists to board data | `storage.cpp`, `ride_diagnostics.cpp`, `axp2101.cpp`, `i2c_bus.cpp`, `settings.cpp`, `display_power.cpp`, `lv_conf.h`, `task_data_placement.hpp`, `ipc_stack_budget.hpp` read `board::` constants | Those files have zero board macros | SD mount and boot smoke per board |
 | M4 | Presentation split | Move the e-paper branches of `mainScr.cpp`, `maps.cpp`, `rideTelemetryScr.cpp` into family presentation modules behind the scheduler contract | Zero board macros under `gui/` and `maps/`; both policy host tests pass unchanged | Navigation and workout smoke per board |
 | M5 | Position source | Put `gps.cpp` behind the position-source interface as the GNSS implementation; the phone path becomes the default implementation; retire `HAS_HARDWARE_GPS` and `AT6558D_GPS` | Navigation consumes one interface; AMOLED behaviour unchanged | None until a GNSS board exists |
@@ -397,6 +410,58 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   the `WiFi.h` loss M0's review found and the `storage.hpp` loss of the #442
   merge; framework and `lib_deps` libraries come from
   `ldf_external_libraries.json`, tied to the runtime lock.
+
+- **M2, 2026-11-07, in review on #442's branch.** `main.cpp` holds no board
+  macro; the baseline is 127 conditionals in 31 files. The always-true
+  membership guards went with their legacy else branches, and the
+  family-specific bodies of the boot and loop steps live in
+  `lib/board_startup/` behind `board::startup`, each compiled for its family
+  only: `amoled.cpp` owns the wake sources, the firmware maintenance mode,
+  the speaker and PWR-key start and the PWR-key pairing input; `epaper.cpp`
+  owns the side-key wake sources and reader, the panel and key polling, the
+  20 ms wait cap and the asynchronous comparison gate. `main.cpp` keeps the
+  stage order and enters and completes every stage, so the `BOOT_STAGE`
+  sequence is unchanged. Differences between the two AMOLED boards became
+  board data: `i2c::recoverAtBoot` (the 2.06 bit-bangs the bus before PMIC
+  inspection), `touch::ext1WakeSource` and `touch::wakePolling` (the 1.75's
+  RTC-capable TP_INT) and `wifi::prepareBeforeBle` (the 1.75's early
+  transfer Wi-Fi preparation); the e-paper's disconnected-shutdown opt-out
+  reads `power::qualifiedPowerControl`, the deferred-notice dimming reads
+  `display::brightness`, and the 2.06 display-probe hold after PMIC
+  inspection reads `power::displayEnableRecovery` (only the 2.06
+  `_DISPLAY_TEST` profile defines the probe flag). Two e-paper guards that
+  only skipped no-op stubs are gone: the speaker shutdown poll and the
+  ride-automation shadow start run on every board. The startup part is its own library,
+  `lib/board_startup/`, rather than `lib/board/startup/`, so that the data
+  library stays a leaf of PlatformIO's dependency finder (see #768).
+  Hardware gate: a boot capture per board is owed before merge.
+
+- **M4, 2026-11-07, in review on M2's branch.** `gui/` and `maps/` hold no
+  board macro; the baseline is 61 conditionals in 22 files. Board facts
+  became data: `display::round` sizes the map overscan floor, the POI clip
+  radius and the social badge; `display::monochrome` (new) selects the
+  e-paper's white background, black lines, hatched areas and marker backing;
+  `display::animations` (new) gates the destination-picker spinner;
+  `board::layout` carries the map toolbar and reserved-height geometry;
+  `touch::multiTouch` (new) drives the 1.75's pinch zoom, zoom-out backdrop,
+  contact count and multi-touch suppression; the pairing copy follows the
+  routed centre key (`buttons::center`; the side keys are `noPin` on the
+  AMOLED boards) through a `ConfirmInput` argument. The two presentation stacks sit behind
+  two contracts: `map_scheduler` (`lib/gui/src/mapSchedulerFamily.hpp`;
+  `mapSchedulerAmoled.cpp` wraps `map_render_policy::Scheduler`,
+  `mapSchedulerEpaper.cpp` the e-paper policy with its heading filter,
+  disposition ledger and frame provenance) and `ride_stats_family`
+  (`lib/gui/src/rideStatsFamily.hpp`; the AMOLED widget set with fonts paired
+  across columns versus the e-paper set with its sign column). In `lib/maps`
+  the e-paper-only `Maps` members are family-neutral (`CameraState`,
+  `FramePublication`, `captureCameraState`, `setCameraHeading`, the request
+  provenance) and three members are defined per family in
+  `mapCameraAmoled.cpp` / `mapCameraEpaper.cpp`: `serviceStableCamera`,
+  `readyFrameCovered` and `captureRequestProvenance`. `mainScr.cpp` keeps
+  the LVGL tick, the pipeline calls and the shared decision effects. Both
+  policy host tests (`test_map_render_policy.cpp`,
+  `test_epaper_navigation_policy.cpp`) are unchanged. Hardware gate: the
+  navigation and workout smoke per board is owed before merge.
 
 ### The confinement test
 

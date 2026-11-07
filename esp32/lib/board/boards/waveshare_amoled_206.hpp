@@ -39,6 +39,9 @@ constexpr uint8_t columnOffset = 22;
 // whether the 90-degree rotation is offered on this panel.
 constexpr uint8_t defaultRotation = 0;
 constexpr bool rotation90Enabled = false;
+// RGB565 colour panel that animates at the LVGL frame rate.
+constexpr bool monochrome = false;
+constexpr bool animations = true;
 }  // namespace display
 
 namespace i2c {
@@ -50,6 +53,9 @@ constexpr uint8_t scl = 14;
 // and whether a failed transaction resets and reconfigures the bus.
 constexpr bool stopBetweenWriteAndRead = false;
 constexpr bool recoverOnFailure = true;
+// Bit-bang the shared bus free before PMIC inspection, which may write the
+// display-enable bit.
+constexpr bool recoverAtBoot = true;
 }  // namespace i2c
 
 namespace touch {
@@ -58,10 +64,21 @@ constexpr uint8_t address = 0x38;
 constexpr uint8_t interrupt = 38;
 constexpr bool resetOnGpio = true;
 constexpr uint8_t reset = 9;
+// GPIO38 is not an RTC GPIO, so TP_INT cannot be an EXT1 wake source; the
+// FT3168 interrupt latches a wake reason while awake and idle reads stay
+// interrupt-gated, with no polling while the display is dimmed or off.
+constexpr bool ext1WakeSource = false;
+constexpr bool wakePolling = false;
+// The FT3168 path reports one contact; no pinch zoom.
+constexpr bool multiTouch = false;
 }  // namespace touch
 
 namespace buttons {
 constexpr uint8_t boot = 0;
+// No side keys: BOOT and the PMIC PWR key confirm pairing.
+constexpr uint8_t up = noPin;
+constexpr uint8_t center = noPin;
+constexpr uint8_t down = noPin;
 }  // namespace buttons
 
 namespace sd {
@@ -86,6 +103,12 @@ constexpr bool qualifiedPowerControl = true;
 constexpr bool displayEnableRecovery = true;
 }  // namespace power
 
+namespace wifi {
+// The original startup order: transfer Wi-Fi is prepared on first use, not
+// before BLE (the 1.75 does), until that is qualified here.
+constexpr bool prepareBeforeBle = false;
+}  // namespace wifi
+
 namespace gnss {
 // UART pads only; no module is populated on this model.
 constexpr bool fitted = false;
@@ -109,6 +132,16 @@ constexpr uint16_t speedX = 12;
 constexpr uint16_t speedBottomInset = 104;
 constexpr uint16_t sunX = 410 - 92;
 constexpr uint16_t sunBottomInset = 154;
+// Map screen geometry read by gui_layout: the UI space reserved below a
+// non-fullscreen map, the anchor of the rider inside the map viewport, and
+// the toolbar button offsets.
+constexpr uint16_t mapNonFullscreenReservedHeight = 72;
+constexpr uint8_t mapAnchorXPercent = 50;
+constexpr uint8_t mapAnchorYPercent = 50;
+constexpr uint8_t mapToolbarOffset = 92;
+constexpr uint8_t mapToolbarSpace = 54;
+constexpr uint8_t mapToolbarInset = 12;
+constexpr uint8_t mapToolbarFullscreenBottomMargin = 30;
 }  // namespace layout
 
 }  // namespace board

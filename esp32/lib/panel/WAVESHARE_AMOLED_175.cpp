@@ -1,3 +1,4 @@
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "full_frame_allocation.hpp"
 #include <cstdlib>
 /**
@@ -1342,3 +1343,4 @@ void setupLVGLforArduinoGFX() {
   Serial.println("LVGL 9 initialized with Arduino_GFX");
 }
 
+#endif  // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

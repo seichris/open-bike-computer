@@ -13,6 +13,7 @@
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../ble_navigation/gps_input_freshness.hpp"
 #include "../../ble_navigation/screen_configuration.hpp"
+#include "mapSchedulerFamily.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
@@ -33,12 +34,8 @@
 #include <cmath>
 #include <cstring>
 #include <type_traits>
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "../../panel/WAVESHARE_AMOLED_175.hpp"
-#endif
-#if defined(WAVESHARE_AMOLED_175)
+#include "../../panel/panelSelect.hpp"
 #include "../../utils/src/mapPinchZoom.hpp"
-#endif
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -54,9 +51,6 @@ int heading = 0;              // Heading value (Compass or GPS)
 extern Gps gps;
 extern Battery battery;
 extern wayPoint loadWpt;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-extern bool touchPressed;
-#endif
 
 uint8_t toolBarOffset = gui_layout::MAP_TOOLBAR_OFFSET;
 uint8_t toolBarSpace = gui_layout::MAP_TOOLBAR_SPACE;
@@ -163,7 +157,6 @@ struct DestinationPickerView {
 };
 static DestinationPickerView navigationDestinationPicker;
 static ui_update_policy::ChangeTracker uiChangeTracker;
-static map_render_policy::Scheduler mapRenderScheduler;
 static uint32_t lastRideStatsUpdateMs = 0;
 static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
@@ -234,6 +227,14 @@ uint64_t navigationSignature() {
 
 uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
+  // Where packet identity is presentation provenance (the e-paper), identical
+  // coordinates from a newer accepted BLE fix must still advance the
+  // foreground/disposition state.
+  const map_scheduler::FixProvenance provenance = map_scheduler::fixProvenance();
+  if (provenance.tracked) {
+    hashScalar(hash, provenance.sequence);
+    hashScalar(hash, provenance.capturedAtMs);
+  }
   const auto sourceSample = gps_input_freshness::presentationSample(
       gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
   // A source can expire without changing any GPSDATA field. Make that
@@ -456,16 +457,18 @@ static void noteMapRenderReasons(uint32_t reasons) {
 }
 
 void requestMapRender(map_render_policy::Reason reason) {
-  mapRenderScheduler.request(reason);
+  map_scheduler::request(reason);
   noteMapRenderReasons(map_render_policy::reasonMask(reason));
   mapView.isPosMoved = true;
   mapView.redrawMap = true;
 }
 
-#if defined(WAVESHARE_AMOLED_175)
-static map_pinch_zoom::Controller mapPinchController;
+// Two-finger Map zoom exists where the touch controller reports a second
+// contact (board::touch::multiTouch); every other board keeps the controller
+// idle and the helpers below answer as if no second contact ever arrived.
+[[maybe_unused]] static map_pinch_zoom::Controller mapPinchController;
 
-static bool standaloneMapAcceptsMultiTouch() {
+[[maybe_unused]] static bool standaloneMapAcceptsMultiTouch() {
   return isMainScreen &&
          (activeTile == MAP
 #if MAP_POIS_RUNTIME_ENABLED
@@ -475,7 +478,7 @@ static bool standaloneMapAcceptsMultiTouch() {
          mapSet.vectorMap;
 }
 
-static map_pinch_zoom::Frame
+[[maybe_unused]] static map_pinch_zoom::Frame
 pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
   map_pinch_zoom::Frame frame;
   frame.sequence = touchFrame.sequence;
@@ -490,6 +493,9 @@ pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
 }
 
 static void processMapPinchZoom() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   const auto touchFrame = getTouchFrameSnapshot();
   map_pinch_zoom::Decision decision;
   if (!standaloneMapAcceptsMultiTouch()) {
@@ -531,30 +537,35 @@ static void processMapPinchZoom() {
   }
 }
 
-bool mapPinchOwnsInput() { return mapPinchController.ownsInput(); }
+bool mapPinchOwnsInput() {
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.ownsInput();
+  }
+  return false;
+}
 
 bool mapPinchBlocksMapRender() {
-  return mapPinchController.blocksMapRender();
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.blocksMapRender();
+  }
+  return false;
 }
 
 bool mapMultiTouchSuppressesPrimary() {
-  return isPrimaryTouchSuppressed();
+  if constexpr (board::touch::multiTouch) {
+    return isPrimaryTouchSuppressed();
+  }
+  return false;
 }
-#else
-static void processMapPinchZoom() {}
-bool mapPinchOwnsInput() { return false; }
-bool mapPinchBlocksMapRender() { return false; }
-bool mapMultiTouchSuppressesPrimary() { return false; }
-#endif
 
 static uint8_t currentMapTouchContactCount() {
-#if defined(WAVESHARE_AMOLED_175)
-  return getTouchFrameSnapshot().count;
-#elif defined(WAVESHARE_AMOLED_206)
-  return touchPressed ? 1 : 0;
-#else
-  return 0;
-#endif
+  if constexpr (board::touch::multiTouch) {
+    return getTouchFrameSnapshot().count;
+  } else if constexpr (board::display::touch) {
+    return touchPressed ? 1 : 0;
+  } else {
+    return 0;
+  }
 }
 
 static void processDeferredMapTap() {
@@ -569,8 +580,10 @@ static void processDeferredMapTap() {
   }
 }
 
-#if defined(WAVESHARE_AMOLED_175)
 static void serviceMapPinchZoomOutBackdrop() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   static uint32_t idleSinceMs = 0;
   const bool canPrepare =
       isMainScreen && activeTile == MAP && mapSet.vectorMap &&
@@ -597,16 +610,12 @@ static void serviceMapPinchZoomOutBackdrop() {
   // retrying so map input remains responsive.
   idleSinceMs = millis();
 }
-#else
-static void serviceMapPinchZoomOutBackdrop() {}
-#endif
 
 bool isMapScreenActive() { return activeTile == MAP || activeTile == NEARBY; }
 
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
 bool shouldInterruptMapRenderForScreenCycle() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   if (!isMainScreen) {
     return false;
   }
@@ -626,11 +635,11 @@ bool shouldInterruptMapRenderForScreenCycle() {
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
-  return mapRenderSettings.tapToSwitchScreens &&
-         (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
-#else
+  if constexpr (board::display::touch) {
+    return mapRenderSettings.tapToSwitchScreens &&
+           (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
+  }
   return false;
-#endif
 }
 
 static const ScreenMapRenderSettings &mapStyleSettingsForTile(tileName tile) {
@@ -661,7 +670,7 @@ static void applyMapInstanceProfile(
           screen_configuration_protocol::ScreenType::MapNavigation) {
     return;
   }
-  const auto &source = instance.mapProfile;
+  const auto source = screen_configuration::effectiveMapProfile(instance.mapProfile);
   ScreenMapRenderSettings &target =
       instance.type != screen_configuration_protocol::ScreenType::MapNavigation
           ? mapRenderSettings.mapStyle
@@ -740,8 +749,7 @@ static void revealPendingMapTileIfReady();
 
 static void acceptPublishedMapFrame(uint32_t nowMs) {
   mapTileTransition.noteFramePublished();
-  (void)mapView.takeFramePublication();
-  mapRenderScheduler.markRendered(nowMs, currentMapFix());
+  map_scheduler::markFramePublished(nowMs, currentMapFix);
   revealPendingMapTileIfReady();
 }
 
@@ -870,6 +878,7 @@ static int16_t navigationArrowAngle(uint8_t iconID) {
 
 static void setNavigationDistanceLabel(lv_obj_t *label,
                                        uint16_t distanceMeters) {
+  distanceMeters = map_scheduler::presentedDistanceMeters(distanceMeters);
   char text[24];
   if (distanceMeters >= 1000) {
     const uint16_t deciKilometers = (distanceMeters + 50U) / 100U;
@@ -972,7 +981,7 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapView.redrawMap = false;
   noteMapRenderReasons(
       map_render_policy::reasonMask(map_render_policy::Reason::Screen));
-  mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
+  map_scheduler::markSubmittedForRenderAhead(nowMs, currentMapFix);
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
   mapRenderAheadInstanceID = targetInstanceID;
@@ -1040,7 +1049,9 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(statusContent, 12, 0);
 
-    if (status.code == DestinationPickerStatusCode::Calculating) {
+    // A spinner needs a panel that can animate; the e-paper shows the text.
+    if (board::display::animations &&
+        status.code == DestinationPickerStatusCode::Calculating) {
       lv_obj_t *spinner = lv_spinner_create(statusContent);
       lv_obj_set_size(spinner, 54, 54);
       lv_spinner_set_anim_params(spinner, 900, 220);
@@ -1310,8 +1321,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     acceptPublishedMapFrame(nowMs);
   }
   if (mapView.takeRenderFailure()) {
-    mapRenderScheduler.markInterrupted();
-    noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
+    noteMapRenderReasons(map_scheduler::markInterrupted());
     mapView.isPosMoved = true;
     mapView.redrawMap = true;
   }
@@ -1341,32 +1351,21 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
       uiChangeTracker.take(ui_update_policy::Source::Gps);
   const bool routeChanged =
       uiChangeTracker.take(ui_update_policy::Source::Route);
-  if (gpsChanged || routeChanged) {
-    mapRenderScheduler.observe(currentMapFix());
-  }
-
-  if (mapRenderScheduler.hasPendingWork()) {
-    const bool followPosition =
-        mapView.followGps || activeTile == MAP_GUIDANCE;
-    const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
-    const map_render_policy::Decision decision =
-        mapRenderScheduler.evaluate(nowMs, followPosition, courseUp);
-    if (decision.render) {
-      mapRenderScheduler.commit(decision);
-      noteMapRenderReasons(decision.reasons);
-      if (followPosition) {
-        mapView.followGps = true;
-        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-      } else {
-        mapView.isPosMoved = true;
-      }
-      mapView.redrawMap = true;
-      log_i("Map scheduler: request reasons=0x%02lx distance=%.1fm "
-            "heading=%u",
-            static_cast<unsigned long>(decision.reasons),
-            decision.distanceMeters,
-            static_cast<unsigned>(decision.headingDeltaDegrees));
+  map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix);
+  const bool followPosition =
+      mapView.followGps || activeTile == MAP_GUIDANCE;
+  const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
+  const map_scheduler::Decision decision =
+      map_scheduler::evaluate(nowMs, followPosition, courseUp);
+  if (decision.render) {
+    noteMapRenderReasons(decision.reasons);
+    if (followPosition) {
+      mapView.followGps = true;
+      mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+    } else {
+      mapView.isPosMoved = true;
     }
+    mapView.redrawMap = true;
   }
 
   return navigationOverlayChanged;
@@ -1394,6 +1393,9 @@ void updateMainScreen(lv_timer_t *t) {
 #if MAP_POIS_RUNTIME_ENABLED
   serviceNearbyScreen(nowMs);
 #endif
+  // Capture after publication/foreground servicing so the next complete frame
+  // records the exact logical state it represents (the e-paper's provenance).
+  map_scheduler::captureFrameProvenance();
 
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
@@ -1546,13 +1548,13 @@ void updateMap(lv_event_t *event) {
         return;
       }
       mapView.isPosMoved = false;
-      mapRenderScheduler.markSubmitted(submittedAtMs, currentMapFix());
+      map_scheduler::markSubmitted(submittedAtMs, currentMapFix);
     } else {
       power_metrics::MapRenderMeasurement powerMeasurement;
       mapView.generateRenderMap(zoom);
       powerMeasurement.finish(true);
       mapView.isPosMoved = false;
-      mapRenderScheduler.markRendered(millis(), currentMapFix());
+      map_scheduler::markRendered(millis(), currentMapFix);
     }
     if (mapView.takeDeferredVectorRedraw())
       requestMapRender(map_render_policy::Reason::Heading);
@@ -2906,6 +2908,7 @@ static void showScreenInstance(uint8_t index) {
       !instance->enabled) {
     return;
   }
+  map_scheduler::screenInstanceChanged();
   activeScreenInstanceIndex = index;
   activeScreenInstanceID = instance->id;
   activeScreenPayloadSignature =
@@ -3088,11 +3091,11 @@ void createMainScr() {
   lv_obj_set_style_bg_color(mainScreen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mainScreen, LV_OPA_COVER, 0);
 
-#if defined(WAVESHARE_AMOLED_175)
-  // The CST9217's second contact belongs exclusively to the standalone Map.
-  // Other screens continue receiving their primary LVGL pointer unchanged.
-  setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
-#endif
+  if constexpr (board::touch::multiTouch) {
+    // The CST9217's second contact belongs exclusively to the standalone Map.
+    // Other screens continue receiving their primary LVGL pointer unchanged.
+    setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
+  }
 
   // SIMPLIFIED: No tileview, just map directly on screen
   // Create a simple container for the map that takes the full screen

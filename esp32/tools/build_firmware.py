@@ -935,7 +935,7 @@ def _custom_core_project_text(source_text: str) -> str:
         if section_match is not None:
             section = section_match.group(1)
         if (
-            section.startswith("env:WAVESHARE_AMOLED_")
+            section.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_397"))
             and re.fullmatch(r"build_src_filter\s*=\s*\r?\n?", line)
             is not None
         ):
@@ -1536,7 +1536,7 @@ def _pioarduino_toolchain_bootstrap_ready(
     retry when the expected replacement package and compiler are positively
     present; an arbitrary failed build must still fail closed.
     """
-    if not environment.startswith("WAVESHARE_AMOLED_"):
+    if not environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         return False
     package = (
         project_dir
@@ -1925,7 +1925,7 @@ def build_firmware(
                     raise BuildError(
                         "firmware source identity changed during the deterministic build"
                     )
-                if environment.startswith("WAVESHARE_AMOLED_"):
+                if environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
                     _require_dynamic_tls_link(project_dir, environment)
                     _require_no_exception_library_objects(project_dir, environment)
                     _require_stack_protector_scope(project_dir, environment)
@@ -1969,7 +1969,7 @@ def build_firmware(
                         shared_core_transport,
                     )
                 if (
-                    environment.startswith("WAVESHARE_AMOLED_")
+                    environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397"))
                     and FULL_GIT_SHA.fullmatch(expected_identity) is not None
                     and manifest is None
                 ):
@@ -2033,7 +2033,7 @@ def upload_firmware(
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
-    if not environment.startswith("WAVESHARE_AMOLED_"):
+    if not environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         raise BuildError(
             "verified upload is limited to attested WAVESHARE_AMOLED profiles"
         )

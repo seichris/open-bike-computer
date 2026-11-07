@@ -796,6 +796,15 @@ static void drawCurrentPositionMarker(lv_event_t *event) {
   const int16_t size = lv_obj_get_width(marker);
   const lv_color_t color =
       lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
+  if constexpr (board::display::monochrome) {
+    // A white backing keeps the black marker distinguishable over black roads.
+    lv_draw_rect_dsc_t backing;
+    lv_draw_rect_dsc_init(&backing);
+    backing.bg_color = lv_color_white();
+    backing.bg_opa = LV_OPA_COVER;
+    backing.radius = LV_RADIUS_CIRCLE;
+    lv_draw_rect(layer, &backing, &bounds);
+  }
 
   if (routeOverlay.hasRoute() || hasCurrentNavigationData()) {
     drawNavigationMarker(layer, bounds, size, color,
@@ -961,9 +970,9 @@ Maps::Maps() {}
 #ifndef TFT_LIGHTGREY
 #define TFT_LIGHTGREY 0xC618
 #endif
-#ifndef BACKGROUND_COLOR
-#define BACKGROUND_COLOR 0x0000
-#endif
+// Map canvas background: white on a monochrome panel, black elsewhere.
+static constexpr uint16_t kMapBackgroundColor =
+    board::display::monochrome ? 0xFFFF : 0x0000;
 
 // Stubbed out render map functions for now to focus on vector maps
 uint16_t Maps::lon2posx(float f_lon, uint8_t zoom, uint16_t tileSize) {
@@ -1961,7 +1970,13 @@ bool Maps::fillPolygon(
           std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
-      std::fill(row + startX, row + endX, p.color);
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal hatching instead of a fill.
+        for (int32_t x = startX; x < endX; ++x)
+          row[x] = ((x + pixelY) % 16 == 0) ? 0x0000 : 0xFFFF;
+      } else {
+        std::fill(row + startX, row + endX, p.color);
+      }
     }
   }
   return true;
@@ -2870,7 +2885,7 @@ bool Maps::readVectorMap(
   const ScreenMapRenderSettings &style = context.style;
   const bool mapNavigationActive = context.guidanceScreenActive;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
-  surface.clear(BACKGROUND_COLOR);
+  surface.clear(kMapBackgroundColor);
   poiReservedRegions.clear();
   poiLayoutSignature = 1469598103934665603ULL;
 
@@ -3068,6 +3083,10 @@ bool Maps::readVectorMap(
       projectedPolygon.points.clear();
       projectedPolygon.points.reserve(projectedGround->size() + 1U);
       projectedPolygon.color = polygon.color;
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal area hatching is distinct from roads and route weight.
+        projectedPolygon.color = 0xFFFF;
+      }
       int16_t minX = 32767;
       int16_t minY = 32767;
       int16_t maxX = -32768;
@@ -3102,6 +3121,7 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
+      projectedPolygon.typeId = polygon.typeId;
       return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
@@ -3212,8 +3232,11 @@ bool Maps::readVectorMap(
           !isLineVisible(line.typeId, line.color, line.width, blockStyle)) {
         continue;
       }
-      const uint16_t displayColor = map_line_style::displayColor(
-          line.typeId, line.color, line.width, mapNavigationActive);
+      const uint16_t displayColor =
+          board::display::monochrome
+              ? 0x0000
+              : map_line_style::displayColor(line.typeId, line.color,
+                                             line.width, mapNavigationActive);
       const uint8_t baseWidth =
           shouldBoostLineWidth(line.typeId, line.width)
               ? blockStyle.streetLineWidth
@@ -4106,11 +4129,7 @@ bool Maps::readVectorMap(
     const map_poi_layout::Viewport poiViewport{
         static_cast<float>(poiSurface.width),
         static_cast<float>(poiSurface.height),
-#if defined(WAVESHARE_AMOLED_175)
-        TFT_WIDTH * 0.5F
-#else
-        0.0F
-#endif
+        board::display::round ? TFT_WIDTH * 0.5F : 0.0F,
     };
     poiCandidates.reserve(map_poi_layout::kMaximumCandidates);
     MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReserved;
@@ -4736,6 +4755,7 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
   request.context = captureRenderContextForScreen(
       nowMs, mapVisible, guidanceScreenActive);
+  captureRequestProvenance(request);
   request.styleSignature = styleSignature(request.context.style);
   request.navigationSignature =
       navigationSignatureForScreen(guidanceScreenActive);
@@ -4804,7 +4824,11 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
 
   request.rotationRad = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
-    if (hasPresentedPose && presentedPose.headingValid) {
+    if (cameraHeadingValid_) {
+      // The family's filtered camera heading wins where it is set.
+      request.rotationRad =
+          -cameraHeadingDegrees_ * 3.14159265358979323846 / 180.0;
+    } else if (hasPresentedPose && presentedPose.headingValid) {
       request.rotationRad =
           -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
     } else if (publishedMapFrame &&
@@ -5239,6 +5263,11 @@ void Maps::renderWorkerLoop() {
       result.renderStridePixels = request.renderStridePixels;
       result.rotationRad = request.rotationRad;
       result.followPosition = request.context.followPosition;
+      result.capturedFixSequence = request.capturedFixSequence;
+      result.capturedFixAtMs = request.capturedFixAtMs;
+      result.capturedSpeedKmh = request.capturedSpeedKmh;
+      result.capturedHeadingDegrees = request.capturedHeadingDegrees;
+      result.capturedHeadingValid = request.capturedHeadingValid;
       result.projection = makeRequestProjection(request);
       result.viewport.zoom = request.zoom;
       result.viewport.rasterOriginX = request.center.x;
@@ -5507,8 +5536,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     const auto projected = readyRenderResult.projection.projectWorld(current);
     double desiredRotation = readyRenderResult.rotationRad;
     if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
-      desiredRotation =
-          -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+      if (cameraHeadingValid_) {
+        desiredRotation =
+            -cameraHeadingDegrees_ * 3.14159265358979323846 / 180.0;
+      } else {
+        desiredRotation = -presentedPose.headingDegrees *
+                          3.14159265358979323846 / 180.0;
+      }
     } else if (rotationMode == ROT_NORTH_UP) {
       desiredRotation = 0.0;
     }
@@ -5516,22 +5550,9 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
         readyRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
         desiredRotation * 180.0 / 3.14159265358979323846) *
         3.14159265358979323846 / 180.0;
-    const bool covered = map_profile_protocol::STABLE_CAMERA_ENABLED
-        ? map_camera::cropCovered(
-            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
-            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
-            readyRenderResult.overscanPixels, MAP_RENDER_SAFETY_PIXELS,
-            MAP_RENDER_ROUND_VIEWPORT)
-        : projected.valid && map_presentation::frameCoversViewport(
-            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
-            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
-            {projected.x, projected.y},
-            {readyRenderResult.projection.anchorX() -
-                 readyRenderResult.overscanPixels,
-             readyRenderResult.projection.anchorY() -
-                 readyRenderResult.overscanPixels},
-            rotationDelta, MAP_RENDER_SAFETY_PIXELS,
-            MAP_RENDER_ROUND_VIEWPORT);
+    const bool covered = readyFrameCovered(readyRenderResult, projected.valid,
+                                           projected.x, projected.y,
+                                           rotationDelta);
     if (!covered) {
 #if FIRMWARE_DIAGNOSTICS
       renderer_diagnostics::noteJobForWindow(
@@ -5617,6 +5638,16 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
   visibleRenderResult = result;
   cameraLag.reflected(result.requestedAtMs);
+  recoveryPending_ = false;
+  visibleFrameAcceptedAtMs_ = nowMs;
+  framePublication_ = {
+      result.version.sequence,
+      result.capturedFixSequence,
+      result.capturedFixAtMs,
+      result.capturedSpeedKmh,
+      result.capturedHeadingDegrees,
+      result.capturedHeadingValid,
+  };
   lastCompletedRenderDurationMs = std::max<uint32_t>(250U, result.durationMs);
   visibleProjection = result.projection;
   hasVisibleProjection = true;
@@ -5997,59 +6028,6 @@ bool Maps::presentationGestureOwnsTransforms() const {
          pinchPresentation.active || pinchPresentation.settlementPending;
 }
 
-void Maps::serviceStableCamera(uint32_t nowMs) {
-  if (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
-      !publishedMapFrame || !hasVisibleProjection)
-    return;
-  const bool current = renderResultStillCurrent(visibleRenderResult);
-  const auto target = visibleRenderResult.followPosition && hasPresentedPose
-      ? map_transform::WorldPoint{presentedPose.position.x, presentedPose.position.y}
-      : visibleRenderResult.center;
-  double bearing = visibleRenderResult.rotationRad;
-  if (rotationMode == ROT_NORTH_UP)
-    bearing = 0;
-  else if (hasPresentedPose && presentedPose.headingValid)
-    bearing = -presentedPose.headingDegrees * map_presentation::kPi / 180.0;
-  const bool required = !current ||
-      map_camera::needsRefresh(visibleProjection, target, bearing);
-  cameraLag.observe(required, nowMs);
-  renderer_diagnostics::CameraSample sample;
-  sample.enabled = true;
-  sample.hidden = false;
-  sample.updateRequired = required;
-  sample.frameSequence = visibleRenderResult.version.sequence;
-  sample.sceneGeneration = visibleRenderResult.sceneGeneration;
-  sample.sceneReused = visibleRenderResult.sceneReused;
-  sample.requestedAtMs = visibleRenderResult.requestedAtMs;
-  sample.observedAtMs = nowMs;
-  sample.lagMs = cameraLag.age(nowMs);
-  sample.displayedBearingTenths = static_cast<int16_t>(std::lround(
-      visibleRenderResult.rotationRad * 1800 / map_presentation::kPi));
-  sample.targetBearingTenths = static_cast<int16_t>(std::lround(
-      bearing * 1800 / map_presentation::kPi));
-  sample.markerAngleTenths = hasPresentedPose && presentedPose.headingValid
-      ? static_cast<uint16_t>(std::lround(map_camera::markerAngle(
-            visibleProjection, {presentedPose.position.x, presentedPose.position.y},
-            presentedPose.headingDegrees) * 10)) % 3600
-      : 0;
-  sample.effectiveTopScalePermille = visibleProjection.isBirdsEye()
-      ? static_cast<uint16_t>(std::lround(visibleProjection.config().topEdgeScale * 1000))
-      : 1000;
-  sample.requestedMode = isMapGuidanceScreenActive()
-      ? mapRenderSettings.mapNavigationRotationMode : mapRenderSettings.mapRotationMode;
-  sample.effectiveMode = visibleRenderResult.effectiveRotationMode;
-  sample.labelDensity = visibleRenderResult.labelDensity;
-  sample.labelOrientation = visibleRenderResult.labelOrientation;
-  renderer_diagnostics::noteCameraForWindow(
-      visibleRenderResult.version.diagnosticsWindowId, sample);
-  cameraEvidence = sample;
-  if (required && uint32_t(nowMs - lastCameraRequestMs) >= map_camera::kRefreshIntervalMs) {
-    RenderRequest request;
-    if (buildRenderRequest(zoom, nowMs, request) && submitRenderRequest(request))
-      lastCameraRequestMs = nowMs;
-  }
-}
-
 renderer_diagnostics::CameraSample Maps::captureCameraMetadata() const {
   // Called only by the UI task at the completed full-panel flush boundary.
   // A gesture or another screen does not inherit stale map evidence.
@@ -6115,6 +6093,79 @@ bool Maps::takeFramePublication() {
   return pending;
 }
 
+bool Maps::takeFramePublication(FramePublication &publication) {
+  const bool pending = framePublicationPending;
+  if (pending)
+    publication = framePublication_;
+  framePublicationPending = false;
+  return pending;
+}
+
+void Maps::setCameraHeading(double degrees, bool valid) {
+  cameraHeadingDegrees_ = map_presentation::normalizeDegrees(degrees);
+  cameraHeadingValid_ = valid;
+}
+
+Maps::CameraState Maps::captureCameraState() const {
+  CameraState state;
+  state.hasBase = publishedMapFrame && hasVisibleProjection;
+  state.baseCompatible =
+      state.hasBase && renderResultStillCurrent(visibleRenderResult);
+  state.mapCoverageAvailable = state.hasBase && publishedMapFound;
+  state.baseAcceptedAtMs = visibleFrameAcceptedAtMs_;
+  if (state.hasBase) {
+    state.baseFixSequence = visibleRenderResult.capturedFixSequence;
+    state.baseCameraSequence = visibleRenderResult.version.sequence;
+  }
+
+  if (state.hasBase && hasPresentedPose) {
+    const map_transform::WorldPoint rider{presentedPose.position.x,
+                                          presentedPose.position.y};
+    const auto projected = visibleProjection.projectWorld(rider);
+    state.riderProjected = projected.valid;
+    if (projected.valid) {
+      const double x = projected.x - visibleRenderResult.overscanPixels;
+      const double y = projected.y - visibleRenderResult.overscanPixels;
+      const double anchorX = visibleProjection.anchorX() -
+                             visibleRenderResult.overscanPixels;
+      const double anchorY = visibleProjection.anchorY() -
+                             visibleRenderResult.overscanPixels;
+      state.riderOffsetPixels = std::hypot(x - anchorX, y - anchorY);
+      state.riderInsideViewport =
+          x >= MAP_RENDER_SAFETY_PIXELS &&
+          y >= MAP_RENDER_SAFETY_PIXELS &&
+          x < visibleRenderResult.viewportWidth - MAP_RENDER_SAFETY_PIXELS &&
+          y < visibleRenderResult.viewportHeight - MAP_RENDER_SAFETY_PIXELS;
+    }
+  }
+  if (state.hasBase && cameraHeadingValid_ &&
+      rotationMode == ROT_COURSE_UP) {
+    const double renderedDegrees =
+        -visibleRenderResult.rotationRad * 180.0 /
+        map_presentation::kPi;
+    state.headingDeltaDegrees = map_presentation::headingDeltaDegrees(
+        renderedDegrees, cameraHeadingDegrees_);
+  }
+
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) == pdTRUE) {
+    const map_render_job::State jobState = renderJobs.state();
+    state.renderRunning = jobState == map_render_job::State::Rendering;
+    const uint32_t activeSequence =
+        state.renderRunning ? renderJobs.active().sequence : 0;
+    state.successorPending =
+        state.renderRunning && latestRenderRequestValid &&
+        latestRenderRequest.version.sequence > activeSequence;
+    if (latestRenderRequestValid) {
+      state.latestRequestedFixSequence =
+          latestRenderRequest.capturedFixSequence;
+    }
+    xSemaphoreGive(renderStateMutex);
+  }
+  state.recoveryPending = recoveryPending_;
+  return state;
+}
+
 bool Maps::takeRenderFailure() {
   if (renderStateMutex == nullptr)
     return false;
@@ -6122,6 +6173,8 @@ bool Maps::takeRenderFailure() {
     return false;
   const bool pending = renderFailurePending;
   renderFailurePending = false;
+  if (pending)
+    recoveryPending_ = true;
   xSemaphoreGive(renderStateMutex);
   return pending;
 }
@@ -6958,6 +7011,9 @@ void Maps::deleteMapScrSprites() {
   lastCameraRequestMs = 0;
   publishedMapFound = false;
   framePublicationPending = false;
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  recoveryPending_ = false;
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
@@ -7035,6 +7091,9 @@ void Maps::createMapScrSprites() {
   publishedMapFound = false;
   framePublicationPending = false;
   hasVisibleProjection = false;
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  recoveryPending_ = false;
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   ++projectionEpoch;
@@ -8185,7 +8244,7 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   }
 
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-  lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
+  lv_obj_set_style_bg_color(mapTile, lv_color_hex(kMapBackgroundColor), 0);
   lv_obj_set_style_bg_opa(mapTile, LV_OPA_COVER, 0);
   lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
                      pinchPresentation.pivotLocalY);
@@ -8468,11 +8527,7 @@ void Maps::updateSocialOverlay() {
   const bool courseUp=rotationMode==ROT_COURSE_UP && hasPresentedPose &&
       presentedPose.headingValid && std::isfinite(presentedPose.headingDegrees);
   const double w=lv_obj_get_width(mapTile),h=lv_obj_get_height(mapTile);
-#ifdef WAVESHARE_AMOLED_175
-  const bool round=true;
-#else
-  const bool round=false;
-#endif
+  const bool round=board::display::round;
   // One persisted size for every map screen; footprint, edge placement and
   // grouping all use the same scaled badge.
   const uint16_t scale=social_riders::clampMarkerScale(mapRenderSettings.friendMarkerScalePercent);

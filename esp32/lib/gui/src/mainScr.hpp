@@ -89,9 +89,7 @@ bool shouldInterruptMapRenderForScreenCycle();
 bool mapPinchOwnsInput();
 bool mapPinchBlocksMapRender();
 bool mapMultiTouchSuppressesPrimary();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 extern volatile bool waveshareBootScreenCyclePending;
-#endif
 
 void createMainScr();
 void toggleNavigationScreen();

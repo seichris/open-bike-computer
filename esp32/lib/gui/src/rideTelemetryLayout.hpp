@@ -381,6 +381,18 @@ constexpr ZonePresentation makeZonePresentation(
 }
 
 constexpr Layout makeLayout(int32_t width, int32_t height) {
+  if (width == 480 && height == 800) {
+    // The 3.97-inch e-paper portrait layout: fixed cells leave clear row
+    // spacing and the bottom status/controls area free. AMOLED geometry is
+    // unchanged.
+    // 12 px margins and gutter leave each cell wide enough for a 99:59:59
+    // ride clock in the 48 px tabular font.
+    return {width, height, {0, 0, width, height}, {24, 12, 432, 24},
+            {24, 60, 432, 96}, {24, 164, 432, 24},
+            {{{12, 236, 222, 104}, {246, 236, 222, 104},
+              {12, 376, 222, 104}, {246, 376, 222, 104},
+              {12, 516, 222, 104}, {246, 516, 222, 104}}}};
+  }
   constexpr int32_t columnGap = 12;
   const bool round = usesRoundScreenSafeArea(width, height);
   const int32_t metricFirstY = round ? 126 : 136;
