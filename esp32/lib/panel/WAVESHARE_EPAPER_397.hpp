@@ -15,6 +15,7 @@ void setupLVGLforArduinoGFX(); // Shared RGB565 LVGL setup entry point.
 bool hasFullScreenRgb565Buffer();
 // Shared input observers have an explicit absent-touch result on this board.
 inline waveshare_board::touch::TouchFrame getTouchFrameSnapshot() { return {}; }
+inline bool touchPressed = false;
 inline uint32_t getTouchActivityGeneration() { return 0; }
 inline bool isPrimaryTouchSuppressed() { return false; }
 inline bool hasUnattemptedTouchInterrupt() { return false; }

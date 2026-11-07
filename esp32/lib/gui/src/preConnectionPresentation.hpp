@@ -70,19 +70,23 @@ constexpr Snapshot ownershipUnknownSnapshot() {
   return {true, false, false, false, false, 0};
 }
 
-constexpr Content content(Phase phase) {
+// Which physical input confirms the pairing comparison: the AMOLED boards
+// accept BOOT or the PMIC PWR key, the e-paper its center side key.
+enum class ConfirmInput : uint8_t { EitherDeviceButton, CenterKey };
+
+constexpr Content content(Phase phase,
+                          ConfirmInput confirm = ConfirmInput::EitherDeviceButton) {
   switch (phase) {
   case Phase::Welcome:
     return {Group::Welcome, Artwork::None, "Welcome",
             "Download the Bicino app\nand add your new device!"};
   case Phase::PairingComparison:
-#ifdef WAVESHARE_EPAPER_397
-    return {Group::Pairing, Artwork::None, "Confirm this code",
-            "If it matches your iPhone,\nclick the center key."};
-#else
+    if (confirm == ConfirmInput::CenterKey) {
+      return {Group::Pairing, Artwork::None, "Confirm this code",
+              "If it matches your iPhone,\nclick the center key."};
+    }
     return {Group::Pairing, Artwork::None, "Confirm this code",
             "If it matches your iPhone,\npress either device button."};
-#endif
   case Phase::PairingConfirmed:
     return {Group::Status, Artwork::PairingConfirmed, "Confirmed here",
             "Tap Codes Match\non your iPhone."};

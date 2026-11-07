@@ -13,10 +13,7 @@
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../ble_navigation/gps_input_freshness.hpp"
 #include "../../ble_navigation/screen_configuration.hpp"
-#ifdef WAVESHARE_EPAPER_397
-#include "../../epaper_display/epaper_display.hpp"
-#include "epaperNavigationPolicy.hpp"
-#endif
+#include "mapSchedulerFamily.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
@@ -37,12 +34,8 @@
 #include <cmath>
 #include <cstring>
 #include <type_traits>
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../../panel/panelSelect.hpp"
-#endif
-#if defined(WAVESHARE_AMOLED_175)
 #include "../../utils/src/mapPinchZoom.hpp"
-#endif
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -58,9 +51,6 @@ int heading = 0;              // Heading value (Compass or GPS)
 extern Gps gps;
 extern Battery battery;
 extern wayPoint loadWpt;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
-extern bool touchPressed;
-#endif
 
 uint8_t toolBarOffset = gui_layout::MAP_TOOLBAR_OFFSET;
 uint8_t toolBarSpace = gui_layout::MAP_TOOLBAR_SPACE;
@@ -167,14 +157,6 @@ struct DestinationPickerView {
 };
 static DestinationPickerView navigationDestinationPicker;
 static ui_update_policy::ChangeTracker uiChangeTracker;
-#ifdef WAVESHARE_EPAPER_397
-static epaper_navigation_policy::Scheduler epaperNavigationScheduler;
-static epaper_navigation_policy::HeadingFilter epaperHeadingFilter;
-static epaper_navigation_policy::DispositionLedger epaperDispositionLedger;
-static uint32_t epaperArmedRenderReasons = 0;
-#else
-static map_render_policy::Scheduler mapRenderScheduler;
-#endif
 static uint32_t lastRideStatsUpdateMs = 0;
 static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {9, 0},  {11, 6}, {18, 7}, {13, 11}, {15, 18}, {9, 14},
@@ -245,13 +227,14 @@ uint64_t navigationSignature() {
 
 uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
-#ifdef WAVESHARE_EPAPER_397
-  // Packet identity is presentation provenance. Identical coordinates from a
-  // newer accepted BLE fix must still advance foreground/disposition state.
-  const BLEDebugStats epaperBle = bleNavServer.getDebugStats();
-  hashScalar(hash, epaperBle.gpsPacketCount);
-  hashScalar(hash, epaperBle.lastGpsCapturedAtMs);
-#endif
+  // Where packet identity is presentation provenance (the e-paper), identical
+  // coordinates from a newer accepted BLE fix must still advance the
+  // foreground/disposition state.
+  const map_scheduler::FixProvenance provenance = map_scheduler::fixProvenance();
+  if (provenance.tracked) {
+    hashScalar(hash, provenance.sequence);
+    hashScalar(hash, provenance.capturedAtMs);
+  }
   const auto sourceSample = gps_input_freshness::presentationSample(
       gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
   // A source can expire without changing any GPSDATA field. Make that
@@ -449,117 +432,6 @@ static map_render_policy::Fix currentMapFix() {
           headingValid};
 }
 
-#ifdef WAVESHARE_EPAPER_397
-static epaper_navigation_policy::Reason
-epaperReasonForMapReason(map_render_policy::Reason reason) {
-  using EpaperReason = epaper_navigation_policy::Reason;
-  switch (reason) {
-  case map_render_policy::Reason::Position:
-    return EpaperReason::Position;
-  case map_render_policy::Reason::Heading:
-    return EpaperReason::Heading;
-  case map_render_policy::Reason::Route:
-    return EpaperReason::RouteSession;
-  case map_render_policy::Reason::Style:
-  case map_render_policy::Reason::Zoom:
-    return EpaperReason::MapContext;
-  case map_render_policy::Reason::Screen:
-    return EpaperReason::Screen;
-  case map_render_policy::Reason::Recovery:
-  case map_render_policy::Reason::Other:
-  default:
-    return EpaperReason::Recovery;
-  }
-}
-
-static uint32_t mapReasonsForEpaperReasons(uint32_t reasons) {
-  uint32_t mapped = 0;
-  using EpaperReason = epaper_navigation_policy::Reason;
-  using MapReason = map_render_policy::Reason;
-  if (reasons & epaper_navigation_policy::reasonMask(EpaperReason::Position))
-    mapped |= map_render_policy::reasonMask(MapReason::Position);
-  if (reasons & epaper_navigation_policy::reasonMask(EpaperReason::Heading))
-    mapped |= map_render_policy::reasonMask(MapReason::Heading);
-  if (reasons & epaper_navigation_policy::reasonMask(
-                    EpaperReason::MaximumDeferral))
-    mapped |= map_render_policy::reasonMask(MapReason::Position);
-  if (reasons & epaper_navigation_policy::reasonMask(EpaperReason::Screen))
-    mapped |= map_render_policy::reasonMask(MapReason::Screen);
-  if (reasons & epaper_navigation_policy::reasonMask(EpaperReason::MapContext))
-    mapped |= map_render_policy::reasonMask(MapReason::Style);
-  if (reasons & epaper_navigation_policy::reasonMask(
-                    EpaperReason::RouteSession))
-    mapped |= map_render_policy::reasonMask(MapReason::Route);
-  if (reasons & epaper_navigation_policy::reasonMask(EpaperReason::Recovery))
-    mapped |= map_render_policy::reasonMask(MapReason::Recovery);
-  return mapped;
-}
-
-static epaper_navigation_policy::Fix currentEpaperFix(uint32_t nowMs) {
-  const BLEDebugStats ble = bleNavServer.getDebugStats();
-  const auto filtered = epaperHeadingFilter.current();
-  return {
-      ble.gpsPacketCount,
-      ble.lastGpsCapturedAtMs != 0 ? ble.lastGpsCapturedAtMs : nowMs,
-      static_cast<double>(gps.gpsData.speed),
-      filtered.degrees,
-      filtered.valid,
-  };
-}
-
-static epaper_navigation_policy::CameraState currentEpaperCameraState() {
-  const Maps::EpaperCameraState source = mapView.captureEpaperCameraState();
-  return {
-      source.hasBase,
-      source.baseCompatible,
-      source.mapCoverageAvailable,
-      source.riderProjected,
-      source.riderInsideViewport,
-      source.riderOffsetPixels,
-      source.headingDeltaDegrees,
-      source.baseAcceptedAtMs,
-      source.baseFixSequence,
-      source.baseCameraSequence,
-      source.renderRunning,
-      source.successorPending,
-      source.latestRequestedFixSequence,
-  };
-}
-
-#if FIRMWARE_DIAGNOSTICS
-static const char *dispositionName(
-    epaper_navigation_policy::Disposition disposition) {
-  using Disposition = epaper_navigation_policy::Disposition;
-  switch (disposition) {
-  case Disposition::Foreground: return "foreground";
-  case Disposition::Base: return "base";
-  case Disposition::Coalesced: return "coalesced";
-  case Disposition::Duplicate: return "duplicate";
-  case Disposition::Invalid: return "invalid";
-  case Disposition::Stale: return "stale";
-  case Disposition::Deadband: return "deadband";
-  case Disposition::Incompatible: return "incompatible";
-  case Disposition::None:
-  default: return "none";
-  }
-}
-#endif
-
-static void logDisposition(
-    const epaper_navigation_policy::DispositionEvent &event) {
-#if FIRMWARE_DIAGNOSTICS
-  if (event.disposition != epaper_navigation_policy::Disposition::None) {
-    Serial.printf("EPAPER_NAV_DISPOSITION fix=%lu disposition=%s newer=%lu\n",
-                  static_cast<unsigned long>(event.sequence),
-                  dispositionName(event.disposition),
-                  static_cast<unsigned long>(event.newerSequence));
-  }
-#else
-  (void)event;
-#endif
-}
-#endif
-
 static void noteMapRenderReasons(uint32_t reasons) {
   using PolicyReason = map_render_policy::Reason;
   using MetricsReason = power_metrics::MapRenderReason;
@@ -585,20 +457,18 @@ static void noteMapRenderReasons(uint32_t reasons) {
 }
 
 void requestMapRender(map_render_policy::Reason reason) {
-#ifdef WAVESHARE_EPAPER_397
-  epaperNavigationScheduler.request(epaperReasonForMapReason(reason));
-#else
-  mapRenderScheduler.request(reason);
-#endif
+  map_scheduler::request(reason);
   noteMapRenderReasons(map_render_policy::reasonMask(reason));
   mapView.isPosMoved = true;
   mapView.redrawMap = true;
 }
 
-#if defined(WAVESHARE_AMOLED_175)
-static map_pinch_zoom::Controller mapPinchController;
+// Two-finger Map zoom exists where the touch controller reports a second
+// contact (board::touch::multiTouch); every other board keeps the controller
+// idle and the helpers below answer as if no second contact ever arrived.
+[[maybe_unused]] static map_pinch_zoom::Controller mapPinchController;
 
-static bool standaloneMapAcceptsMultiTouch() {
+[[maybe_unused]] static bool standaloneMapAcceptsMultiTouch() {
   return isMainScreen &&
          (activeTile == MAP
 #if MAP_POIS_RUNTIME_ENABLED
@@ -608,7 +478,7 @@ static bool standaloneMapAcceptsMultiTouch() {
          mapSet.vectorMap;
 }
 
-static map_pinch_zoom::Frame
+[[maybe_unused]] static map_pinch_zoom::Frame
 pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
   map_pinch_zoom::Frame frame;
   frame.sequence = touchFrame.sequence;
@@ -623,6 +493,9 @@ pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
 }
 
 static void processMapPinchZoom() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   const auto touchFrame = getTouchFrameSnapshot();
   map_pinch_zoom::Decision decision;
   if (!standaloneMapAcceptsMultiTouch()) {
@@ -664,30 +537,35 @@ static void processMapPinchZoom() {
   }
 }
 
-bool mapPinchOwnsInput() { return mapPinchController.ownsInput(); }
+bool mapPinchOwnsInput() {
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.ownsInput();
+  }
+  return false;
+}
 
 bool mapPinchBlocksMapRender() {
-  return mapPinchController.blocksMapRender();
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.blocksMapRender();
+  }
+  return false;
 }
 
 bool mapMultiTouchSuppressesPrimary() {
-  return isPrimaryTouchSuppressed();
+  if constexpr (board::touch::multiTouch) {
+    return isPrimaryTouchSuppressed();
+  }
+  return false;
 }
-#else
-static void processMapPinchZoom() {}
-bool mapPinchOwnsInput() { return false; }
-bool mapPinchBlocksMapRender() { return false; }
-bool mapMultiTouchSuppressesPrimary() { return false; }
-#endif
 
 static uint8_t currentMapTouchContactCount() {
-#if defined(WAVESHARE_AMOLED_175)
-  return getTouchFrameSnapshot().count;
-#elif defined(WAVESHARE_AMOLED_206)
-  return touchPressed ? 1 : 0;
-#else
-  return 0;
-#endif
+  if constexpr (board::touch::multiTouch) {
+    return getTouchFrameSnapshot().count;
+  } else if constexpr (board::display::touch) {
+    return touchPressed ? 1 : 0;
+  } else {
+    return 0;
+  }
 }
 
 static void processDeferredMapTap() {
@@ -702,8 +580,10 @@ static void processDeferredMapTap() {
   }
 }
 
-#if defined(WAVESHARE_AMOLED_175)
 static void serviceMapPinchZoomOutBackdrop() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   static uint32_t idleSinceMs = 0;
   const bool canPrepare =
       isMainScreen && activeTile == MAP && mapSet.vectorMap &&
@@ -730,26 +610,12 @@ static void serviceMapPinchZoomOutBackdrop() {
   // retrying so map input remains responsive.
   idleSinceMs = millis();
 }
-#else
-static void serviceMapPinchZoomOutBackdrop() {}
-#endif
 
 bool isMapScreenActive() { return activeTile == MAP || activeTile == NEARBY; }
 
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
-#ifdef WAVESHARE_EPAPER_397
-static uint32_t currentEpaperAcceptedGpsSequence() {
-  return bleNavServer.getDebugStats().gpsPacketCount;
-}
-
-static uint32_t currentEpaperBaseCameraSequence() {
-  return mapView.epaperVisibleCameraSequence();
-}
-#endif
-
 bool shouldInterruptMapRenderForScreenCycle() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (!isMainScreen) {
     return false;
   }
@@ -769,15 +635,11 @@ bool shouldInterruptMapRenderForScreenCycle() {
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
-#ifdef WAVESHARE_EPAPER_397
+  if constexpr (board::display::touch) {
+    return mapRenderSettings.tapToSwitchScreens &&
+           (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
+  }
   return false;
-#else
-  return mapRenderSettings.tapToSwitchScreens &&
-         (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
-#endif
-#else
-  return false;
-#endif
 }
 
 static const ScreenMapRenderSettings &mapStyleSettingsForTile(tileName tile) {
@@ -887,24 +749,7 @@ static void revealPendingMapTileIfReady();
 
 static void acceptPublishedMapFrame(uint32_t nowMs) {
   mapTileTransition.noteFramePublished();
-#ifdef WAVESHARE_EPAPER_397
-  Maps::EpaperFramePublication publication;
-  if (mapView.takeFramePublication(publication)) {
-    const epaper_navigation_policy::Fix captured{
-        publication.capturedFixSequence,
-        publication.capturedFixAtMs,
-        publication.capturedSpeedKmh,
-        publication.capturedHeadingDegrees,
-        publication.capturedHeadingValid,
-    };
-    epaperNavigationScheduler.markPublished(nowMs, captured);
-    logDisposition(
-        epaperDispositionLedger.base(publication.capturedFixSequence));
-  }
-#else
-  (void)mapView.takeFramePublication();
-  mapRenderScheduler.markRendered(nowMs, currentMapFix());
-#endif
+  map_scheduler::markFramePublished(nowMs, currentMapFix);
   revealPendingMapTileIfReady();
 }
 
@@ -1033,10 +878,7 @@ static int16_t navigationArrowAngle(uint8_t iconID) {
 
 static void setNavigationDistanceLabel(lv_obj_t *label,
                                        uint16_t distanceMeters) {
-#ifdef WAVESHARE_EPAPER_397
-  distanceMeters =
-      epaper_navigation_policy::quantizeDistanceMeters(distanceMeters);
-#endif
+  distanceMeters = map_scheduler::presentedDistanceMeters(distanceMeters);
   char text[24];
   if (distanceMeters >= 1000) {
     const uint16_t deciKilometers = (distanceMeters + 50U) / 100U;
@@ -1139,16 +981,7 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapView.redrawMap = false;
   noteMapRenderReasons(
       map_render_policy::reasonMask(map_render_policy::Reason::Screen));
-#ifdef WAVESHARE_EPAPER_397
-  const epaper_navigation_policy::Fix submittedFix = currentEpaperFix(nowMs);
-  epaperNavigationScheduler.markSubmitted(
-      nowMs, submittedFix,
-      epaper_navigation_policy::reasonMask(
-          epaper_navigation_policy::Reason::Screen));
-  epaperArmedRenderReasons = 0;
-#else
-  mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
-#endif
+  map_scheduler::markSubmittedForRenderAhead(nowMs, currentMapFix);
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
   mapRenderAheadInstanceID = targetInstanceID;
@@ -1216,8 +1049,9 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(statusContent, 12, 0);
 
-#ifndef WAVESHARE_EPAPER_397
-    if (status.code == DestinationPickerStatusCode::Calculating) {
+    // A spinner needs a panel that can animate; the e-paper shows the text.
+    if (board::display::animations &&
+        status.code == DestinationPickerStatusCode::Calculating) {
       lv_obj_t *spinner = lv_spinner_create(statusContent);
       lv_obj_set_size(spinner, 54, 54);
       lv_spinner_set_anim_params(spinner, 900, 220);
@@ -1228,7 +1062,6 @@ static void renderDestinationPicker(DestinationPickerView &picker) {
       lv_obj_set_style_arc_color(spinner, lv_color_white(),
                                  LV_PART_INDICATOR);
     }
-#endif
 
     lv_obj_t *label = lv_label_create(statusContent);
     lv_obj_set_width(label, LV_PCT(100));
@@ -1488,14 +1321,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
     acceptPublishedMapFrame(nowMs);
   }
   if (mapView.takeRenderFailure()) {
-#ifdef WAVESHARE_EPAPER_397
-    epaperNavigationScheduler.markInterrupted();
-    noteMapRenderReasons(mapReasonsForEpaperReasons(
-        epaperNavigationScheduler.pendingForcedReasons()));
-#else
-    mapRenderScheduler.markInterrupted();
-    noteMapRenderReasons(mapRenderScheduler.pendingForcedReasons());
-#endif
+    noteMapRenderReasons(map_scheduler::markInterrupted());
     mapView.isPosMoved = true;
     mapView.redrawMap = true;
   }
@@ -1525,109 +1351,22 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
       uiChangeTracker.take(ui_update_policy::Source::Gps);
   const bool routeChanged =
       uiChangeTracker.take(ui_update_policy::Source::Route);
-#ifdef WAVESHARE_EPAPER_397
-  if (gpsChanged || routeChanged) {
-    const BLEDebugStats ble = bleNavServer.getDebugStats();
-    const map_render_policy::Fix course = currentMapFix();
-    const uint32_t capturedAtMs =
-        gpsChanged && ble.lastGpsCapturedAtMs != 0
-            ? ble.lastGpsCapturedAtMs
-            : nowMs;
-    const auto filtered = epaperHeadingFilter.observe(
-        {ble.gpsPacketCount, capturedAtMs,
-         static_cast<double>(gps.gpsData.speed),
-         static_cast<double>(course.headingDegrees), course.headingValid});
-    mapView.setEpaperCameraHeading(filtered.degrees, filtered.valid);
-    const epaper_navigation_policy::Fix fix = currentEpaperFix(nowMs);
-    epaperNavigationScheduler.observe(fix);
-    if (gpsChanged)
-      logDisposition(epaperDispositionLedger.accept(fix.sequence));
-  }
-
-  const epaper_navigation_policy::CameraState camera =
-      currentEpaperCameraState();
-  if (camera.hasBase && camera.baseCompatible &&
-      camera.mapCoverageAvailable && camera.riderProjected &&
-      camera.riderInsideViewport) {
-    logDisposition(epaperDispositionLedger.foreground(
-        epaperNavigationScheduler.latestFix().sequence));
-  }
-
-  if (epaperArmedRenderReasons == 0 &&
-      epaperNavigationScheduler.hasPendingWork()) {
-    const bool followPosition =
-        mapView.followGps || activeTile == MAP_GUIDANCE;
-    const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
-    const epaper_navigation_policy::Decision decision =
-        epaperNavigationScheduler.evaluate(nowMs, camera, followPosition,
-                                           courseUp);
-    if (decision.submitBase) {
-      epaperArmedRenderReasons = decision.reasons;
-      noteMapRenderReasons(mapReasonsForEpaperReasons(decision.reasons));
-      if (decision.urgent)
-        epaper::prioritize();
-      if (followPosition) {
-        mapView.followGps = true;
-        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-      } else {
-        mapView.isPosMoved = true;
-      }
-      mapView.redrawMap = true;
-      log_i("E-paper map scheduler: request reasons=0x%02lx pixels=%.1f "
-            "heading=%.1f running=%u replace=%u",
-            static_cast<unsigned long>(decision.reasons),
-            camera.riderOffsetPixels, camera.headingDeltaDegrees,
-            decision.keepRunning ? 1U : 0U,
-            decision.replacePending ? 1U : 0U);
+  map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix);
+  const bool followPosition =
+      mapView.followGps || activeTile == MAP_GUIDANCE;
+  const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
+  const map_scheduler::Decision decision =
+      map_scheduler::evaluate(nowMs, followPosition, courseUp);
+  if (decision.render) {
+    noteMapRenderReasons(decision.reasons);
+    if (followPosition) {
+      mapView.followGps = true;
+      mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
+    } else {
+      mapView.isPosMoved = true;
     }
+    mapView.redrawMap = true;
   }
-
-#if FIRMWARE_DIAGNOSTICS
-  static uint32_t lastDispositionSummaryMs = 0;
-  if (lastDispositionSummaryMs == 0 ||
-      static_cast<uint32_t>(nowMs - lastDispositionSummaryMs) >= 30000U) {
-    lastDispositionSummaryMs = nowMs;
-    const auto &counters = epaperDispositionLedger.counters();
-    Serial.printf("EPAPER_NAV_COUNTER accepted=%lu foreground=%lu base=%lu "
-                  "coalesced=%lu ignored=%lu pending=%lu\n",
-                  static_cast<unsigned long>(counters.accepted),
-                  static_cast<unsigned long>(counters.foreground),
-                  static_cast<unsigned long>(counters.base),
-                  static_cast<unsigned long>(counters.coalesced),
-                  static_cast<unsigned long>(counters.ignored),
-                  static_cast<unsigned long>(
-                      epaperDispositionLedger.pendingSequence()));
-  }
-#endif
-#else
-  if (gpsChanged || routeChanged) {
-    mapRenderScheduler.observe(currentMapFix());
-  }
-
-  if (mapRenderScheduler.hasPendingWork()) {
-    const bool followPosition =
-        mapView.followGps || activeTile == MAP_GUIDANCE;
-    const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
-    const map_render_policy::Decision decision =
-        mapRenderScheduler.evaluate(nowMs, followPosition, courseUp);
-    if (decision.render) {
-      mapRenderScheduler.commit(decision);
-      noteMapRenderReasons(decision.reasons);
-      if (followPosition) {
-        mapView.followGps = true;
-        mapView.centerOnGps(gps.gpsData.latitude, gps.gpsData.longitude);
-      } else {
-        mapView.isPosMoved = true;
-      }
-      mapView.redrawMap = true;
-      log_i("Map scheduler: request reasons=0x%02lx distance=%.1fm "
-            "heading=%u",
-            static_cast<unsigned long>(decision.reasons),
-            decision.distanceMeters,
-            static_cast<unsigned>(decision.headingDeltaDegrees));
-    }
-  }
-#endif
 
   return navigationOverlayChanged;
 }
@@ -1654,13 +1393,9 @@ void updateMainScreen(lv_timer_t *t) {
 #if MAP_POIS_RUNTIME_ENABLED
   serviceNearbyScreen(nowMs);
 #endif
-#ifdef WAVESHARE_EPAPER_397
-  // Capture after publication/foreground servicing so the next complete LVGL
-  // frame records the exact logical state it represents. The display library
-  // owns the snapshot and never reaches back into GUI or map state.
-  epaper::setFrameProvenance(currentEpaperAcceptedGpsSequence(),
-                             currentEpaperBaseCameraSequence());
-#endif
+  // Capture after publication/foreground servicing so the next complete frame
+  // records the exact logical state it represents (the e-paper's provenance).
+  map_scheduler::captureFrameProvenance();
 
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
@@ -1813,27 +1548,13 @@ void updateMap(lv_event_t *event) {
         return;
       }
       mapView.isPosMoved = false;
-#ifdef WAVESHARE_EPAPER_397
-      const epaper_navigation_policy::Fix submittedFix =
-          currentEpaperFix(submittedAtMs);
-      epaperNavigationScheduler.markSubmitted(
-          submittedAtMs, submittedFix, epaperArmedRenderReasons);
-      epaperArmedRenderReasons = 0;
-#else
-      mapRenderScheduler.markSubmitted(submittedAtMs, currentMapFix());
-#endif
+      map_scheduler::markSubmitted(submittedAtMs, currentMapFix);
     } else {
       power_metrics::MapRenderMeasurement powerMeasurement;
       mapView.generateRenderMap(zoom);
       powerMeasurement.finish(true);
       mapView.isPosMoved = false;
-#ifdef WAVESHARE_EPAPER_397
-      epaperNavigationScheduler.markPublished(
-          millis(), currentEpaperFix(millis()));
-      epaperArmedRenderReasons = 0;
-#else
-      mapRenderScheduler.markRendered(millis(), currentMapFix());
-#endif
+      map_scheduler::markRendered(millis(), currentMapFix);
     }
     if (mapView.takeDeferredVectorRedraw())
       requestMapRender(map_render_policy::Reason::Heading);
@@ -3187,9 +2908,7 @@ static void showScreenInstance(uint8_t index) {
       !instance->enabled) {
     return;
   }
-#ifdef WAVESHARE_EPAPER_397
-  epaper::invalidateContext();
-#endif
+  map_scheduler::screenInstanceChanged();
   activeScreenInstanceIndex = index;
   activeScreenInstanceID = instance->id;
   activeScreenPayloadSignature =
@@ -3372,11 +3091,11 @@ void createMainScr() {
   lv_obj_set_style_bg_color(mainScreen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mainScreen, LV_OPA_COVER, 0);
 
-#if defined(WAVESHARE_AMOLED_175)
-  // The CST9217's second contact belongs exclusively to the standalone Map.
-  // Other screens continue receiving their primary LVGL pointer unchanged.
-  setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
-#endif
+  if constexpr (board::touch::multiTouch) {
+    // The CST9217's second contact belongs exclusively to the standalone Map.
+    // Other screens continue receiving their primary LVGL pointer unchanged.
+    setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
+  }
 
   // SIMPLIFIED: No tileview, just map directly on screen
   // Create a simple container for the map that takes the full screen

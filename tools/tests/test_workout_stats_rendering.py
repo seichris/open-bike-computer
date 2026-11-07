@@ -318,7 +318,8 @@ class WorkoutStatsRenderingTests(unittest.TestCase):
         source = (GUI / "rideTelemetryScr.cpp").read_text()
         # Compile the actual shared renderer helpers, not a rewritten model.
         helpers = source.split("ride_metric_typography::Role metricFontRole()", 1)[1]
-        helpers = "ride_metric_typography::Role metricFontRole()" + helpers.split("lv_obj_t *createPage(", 1)[0]
+        helpers = "ride_metric_typography::Role metricFontRole()" + helpers.split(
+            "// End of the label helpers shared with rideStatsFamily.", 1)[0]
         fonts = "".join(custom_font_data(GUI / filename, symbol) for filename, symbol in [
             ("rideValueFont64.c", "ride_value_font_64"),
             ("rideValueFont56.c", "ride_value_font_56"),

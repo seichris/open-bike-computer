@@ -5,11 +5,9 @@
 
 namespace map_render_policy {
 
-#ifdef WAVESHARE_EPAPER_397
-constexpr uint32_t kMinimumRenderIntervalMs = 4000;
-#else
+// Cadence of the AMOLED scheduler below; the e-paper runs
+// epaper_navigation_policy::Scheduler with its own cadence instead.
 constexpr uint32_t kMinimumRenderIntervalMs = 750;
-#endif
 constexpr double kMovementThresholdMeters = 8.0;
 constexpr uint16_t kHeadingThresholdDegrees = 12;
 
