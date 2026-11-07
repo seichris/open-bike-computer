@@ -213,9 +213,7 @@ static bool processWaveshareBootButton() {
   const bool hadInput = physicalLatchedPress || pressed ||
                         deviceDebugHttp.bootPressRequested();
 
-  // A comparison code that has not reached the panel yet keeps the gate armed.
-  if (bleNavServer.hasOwnershipPairingCode() &&
-      !board::startup::pairingComparisonPresented()) {
+  if (board::startup::keepBootPairingGateArmed()) {
     waveshareBootPairingGate.arm();
   }
   if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {

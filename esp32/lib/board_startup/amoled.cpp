@@ -186,7 +186,7 @@ void processInput(bool) {}
 
 uint32_t limitWaitMs(uint32_t waitMs) { return waitMs; }
 
-bool pairingComparisonPresented() { return true; }
+bool keepBootPairingGateArmed() { return false; }
 
 bool takePowerButtonEvents(
     waveshare_board::axp2101::PowerButtonEvents &events) {

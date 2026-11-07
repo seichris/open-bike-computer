@@ -420,8 +420,12 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   inspection), `touch::ext1WakeSource` and `touch::wakePolling` (the 1.75's
   RTC-capable TP_INT) and `wifi::prepareBeforeBle` (the 1.75's early
   transfer Wi-Fi preparation); the e-paper's disconnected-shutdown opt-out
-  reads `power::qualifiedPowerControl` and the deferred-notice dimming reads
-  `display::brightness`. The startup part is its own library,
+  reads `power::qualifiedPowerControl`, the deferred-notice dimming reads
+  `display::brightness`, and the 2.06 display-probe hold after PMIC
+  inspection reads `power::displayEnableRecovery` (only the 2.06
+  `_DISPLAY_TEST` profile defines the probe flag). Two e-paper guards that
+  only skipped no-op stubs are gone: the speaker shutdown poll and the
+  ride-automation shadow start run on every board. The startup part is its own library,
   `lib/board_startup/`, rather than `lib/board/startup/`, so that the data
   library stays a leaf of PlatformIO's dependency finder (see #768).
   Hardware gate: a boot capture per board is owed before merge.

@@ -10,6 +10,7 @@
 
 #include <algorithm>
 
+#include "ble_navigation.hpp"
 #include "board.hpp"
 #include "board_input.hpp"
 #include "epaper_display.hpp"
@@ -71,7 +72,9 @@ uint32_t limitWaitMs(uint32_t waitMs) {
 #endif
 }
 
-bool pairingComparisonPresented() { return epaper::pairingPresented(); }
+bool keepBootPairingGateArmed() {
+  return bleNavServer.hasOwnershipPairingCode() && !epaper::pairingPresented();
+}
 
 bool takePowerButtonEvents(waveshare_board::axp2101::PowerButtonEvents &) {
   return false;

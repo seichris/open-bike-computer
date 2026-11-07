@@ -63,11 +63,12 @@ void processInput(bool inputAllowed);
 uint32_t limitWaitMs(uint32_t waitMs);
 
 // Ownership pairing input.
-// Whether the pairing comparison is visible on the panel. The AMOLED panel
-// flushes synchronously and reports it through appDisplayFlushCompleted();
-// the e-paper presents asynchronously, and the BOOT gate stays armed until
-// its waveform has completed.
-bool pairingComparisonPresented();
+// Whether the BOOT pairing gate must stay armed on this loop pass. The e-paper
+// presents frames asynchronously, so it keeps the gate armed while a pairing
+// code exists and the comparison has not reached the panel; the AMOLED panel
+// flushes synchronously and reports it through appDisplayFlushCompleted(), so
+// it never re-arms here and keeps BLE out of the button path.
+bool keepBootPairingGateArmed();
 // Reads and clears the PMIC PWR-key events (AMOLED). False when the family
 // has no PWR-key input: the e-paper's side keys go through lib/board_input.
 bool takePowerButtonEvents(waveshare_board::axp2101::PowerButtonEvents &events);
