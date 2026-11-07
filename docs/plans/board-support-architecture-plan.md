@@ -257,6 +257,12 @@ both goes into the shared layer and is drawn by each stack. A `#ifdef` on a
 board macro inside `gui/` or `maps/` is the signal that something is in the
 wrong layer.
 
+Since M4 the contracts are `map_scheduler` (`lib/gui/src/mapSchedulerFamily.hpp`)
+for the main screen's base-render decisions, `ride_stats_family`
+(`lib/gui/src/rideStatsFamily.hpp`) for the Ride Stats slots, and the three
+`Maps` members defined per family in `lib/maps/src/mapCamera{Amoled,Epaper}.cpp`;
+a family file is named after its family and gated as a whole.
+
 ### Capabilities
 
 - **Compile time:** shared code reads `board::display.touch`,
@@ -429,6 +435,33 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   `lib/board_startup/`, rather than `lib/board/startup/`, so that the data
   library stays a leaf of PlatformIO's dependency finder (see #768).
   Hardware gate: a boot capture per board is owed before merge.
+
+- **M4, 2026-11-07, in review on M2's branch.** `gui/` and `maps/` hold no
+  board macro; the baseline is 61 conditionals in 22 files. Board facts
+  became data: `display::round` sizes the map overscan floor, the POI clip
+  radius and the social badge; `display::monochrome` (new) selects the
+  e-paper's white background, black lines, hatched areas and marker backing;
+  `display::animations` (new) gates the destination-picker spinner;
+  `board::layout` carries the map toolbar and reserved-height geometry;
+  `touch::multiTouch` (new) drives the 1.75's pinch zoom, zoom-out backdrop,
+  contact count and multi-touch suppression; the pairing copy follows the
+  side keys (`buttons::up/center/down`, `noPin` on the AMOLED boards)
+  through a `ConfirmInput` argument. The two presentation stacks sit behind
+  two contracts: `map_scheduler` (`lib/gui/src/mapSchedulerFamily.hpp`;
+  `mapSchedulerAmoled.cpp` wraps `map_render_policy::Scheduler`,
+  `mapSchedulerEpaper.cpp` the e-paper policy with its heading filter,
+  disposition ledger and frame provenance) and `ride_stats_family`
+  (`lib/gui/src/rideStatsFamily.hpp`; the AMOLED widget set with fonts paired
+  across columns versus the e-paper set with its sign column). In `lib/maps`
+  the e-paper-only `Maps` members are family-neutral (`CameraState`,
+  `FramePublication`, `captureCameraState`, `setCameraHeading`, the request
+  provenance) and three members are defined per family in
+  `mapCameraAmoled.cpp` / `mapCameraEpaper.cpp`: `serviceStableCamera`,
+  `readyFrameCovered` and `captureRequestProvenance`. `mainScr.cpp` keeps
+  the LVGL tick, the pipeline calls and the shared decision effects. Both
+  policy host tests (`test_map_render_policy.cpp`,
+  `test_epaper_navigation_policy.cpp`) are unchanged. Hardware gate: the
+  navigation and workout smoke per board is owed before merge.
 
 ### The confinement test
 
