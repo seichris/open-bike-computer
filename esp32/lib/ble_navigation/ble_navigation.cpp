@@ -23,6 +23,8 @@ extern Power power;
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
 #include "ble_connection_policy.hpp"
+#include "ble_disconnect_diagnostics.hpp"
+#include "../device_transfer/transfer_link_grace_policy.hpp"
 #include "ride_command_admission.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
@@ -60,9 +62,7 @@ extern Power power;
 #include "../device_debug/device_debug_http.hpp"
 #include "../boot_diagnostics/boot_diagnostics.hpp"
 #include "../display_power/display_power_policy.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
-#endif
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
@@ -85,10 +85,12 @@ extern Power power;
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cctype>
 #include <cstring>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -208,6 +210,441 @@ static_assert(BLE_HS_CONN_HANDLE_NONE == ble_connection_policy::noConnection,
               "single-connection policy must match NimBLE's empty handle");
 static uint16_t activeConnHandle = BLE_HS_CONN_HANDLE_NONE;
 static bool unauthTimeoutDisconnectRequested = false;
+// NimBLE delivers the GAP disconnect reason only through its event listener,
+// which the host calls before the server callback (`ble_gap_conn_broken`).
+// The listener keeps the last reason and handle; `onDisconnect` pairs them
+// with the active link and `disconnectActive()` records them.
+static std::atomic<int32_t> lastGapDisconnectReason{0};
+static std::atomic<uint16_t> lastGapDisconnectHandle{BLE_HS_CONN_HANDLE_NONE};
+static std::atomic<int32_t> pendingDisconnectGapReason{0};
+static std::atomic<uint32_t> activeConnectionStartMs{0};
+static std::atomic<uint8_t> localDisconnectCause{0};
+static std::atomic<uint8_t> pendingOwnershipDisconnectCause{0};
+
+static int bleGapEventListener(ble_gap_event *event, void *) {
+  if (event != nullptr && event->type == BLE_GAP_EVENT_DISCONNECT) {
+    lastGapDisconnectReason.store(event->disconnect.reason,
+                                  std::memory_order_release);
+    lastGapDisconnectHandle.store(event->disconnect.conn.conn_handle,
+                                  std::memory_order_release);
+  }
+  return 0;
+}
+
+static void noteLocalDisconnectCause(
+    ble_disconnect_diagnostics::LocalCause cause) {
+  localDisconnectCause.store(static_cast<uint8_t>(cause),
+                             std::memory_order_release);
+}
+
+static void rebindTransferAfterLinkGrace();
+
+static void recordTransferLinkGrace(const char *phase, uint32_t durationMs) {
+  char fields[64] = {};
+  const int written =
+      std::snprintf(fields, sizeof(fields),
+                    "{\"phase\":\"%s\",\"durationMs\":%lu}", phase,
+                    static_cast<unsigned long>(durationMs));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "transfer",
+                                   "ble_link_grace", fields);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NimBLE host-task liveness probes.
+//
+// A phone write is answered only after the host task has run the
+// characteristic callback. A write the phone gives up on after 15 s while the
+// link stays up is therefore a callback or the controller hand-off blocking
+// the host task, a host task starved of CPU, or a radio that never carried
+// the write. The probes below tell those apart from existing field keys only:
+// `ble host_activity` (a callback or the notification hand-off held the host
+// task for 100 ms or more), `ble lock_wait` (a mutex wait on a BLE or
+// transfer path) and `ble host_heartbeat` (the host task's own scheduling
+// latency, measured through NimBLE's event queue).
+// ---------------------------------------------------------------------------
+static constexpr uint32_t kHostProbeReportMs = 100;
+static constexpr uint32_t kHostProbeWarningMs = 1000;
+// What the host task is doing right now (a callback site, "notify" while a
+// notification is handed to the controller, or "idle"), and the last thing it
+// finished; both are string literals, read by the heartbeat timer task.
+static std::atomic<const char *> nimbleHostActivity{"idle"};
+static std::atomic<const char *> nimbleHostActivityLast{"idle"};
+// The NimBLE host task, learned from the first heartbeat it handles.
+static std::atomic<TaskHandle_t> nimbleHostTask{nullptr};
+// Largest heartbeat latency, beats handled and longest host-task activity
+// while a transfer session is enabled: written by the host task, reset and
+// reported by the loop task (`ble host_heartbeat` phase `transfer_summary`).
+// A summary is a measurement even when no threshold record fired.
+static std::atomic<uint32_t> transferWindowMaxBeatMs{0};
+static std::atomic<uint32_t> transferWindowBeats{0};
+static std::atomic<uint32_t> transferWindowMaxActivityMs{0};
+static std::atomic<const char *> transferWindowMaxActivitySite{"none"};
+
+// Until the host task is known every caller counts as it; afterwards only the
+// host task marks activity, so a scope entered on another task can neither
+// corrupt the activity nor be reported as host-task time.
+static bool onNimbleHostTask() {
+  const TaskHandle_t host = nimbleHostTask.load(std::memory_order_acquire);
+  return host == nullptr || host == xTaskGetCurrentTaskHandle();
+}
+
+static ride_diagnostics::Level hostProbeLevel(uint32_t durationMs) {
+  return durationMs >= kHostProbeWarningMs ? ride_diagnostics::Level::Warning
+                                           : ride_diagnostics::Level::Info;
+}
+
+// Probe records are captured where they happen (on the host task, on the
+// esp_timer task, under a mutex) into this ring and written by the loop task
+// from process(). No probe therefore enters the recorder under a lock, on
+// the host task or on the esp_timer task; `eventUptimeMs` carries the
+// capture time. A full ring counts drops and reports them once drained.
+struct ProbeRecord {
+  ride_diagnostics::Level level;
+  const char *category;
+  const char *event;
+  char fields[176];
+};
+static constexpr uint8_t kProbeMailboxCapacity = 8;
+static ProbeRecord probeMailbox[kProbeMailboxCapacity];
+static uint8_t probeMailboxHead = 0;
+static uint8_t probeMailboxCount = 0;
+static uint32_t probeMailboxDrops = 0;
+static portMUX_TYPE probeMailboxMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void queueProbeRecord(ride_diagnostics::Level level,
+                             const char *category, const char *event,
+                             const char *fields) {
+  portENTER_CRITICAL(&probeMailboxMux);
+  if (probeMailboxCount < kProbeMailboxCapacity) {
+    ProbeRecord &slot = probeMailbox[static_cast<uint8_t>(
+        (probeMailboxHead + probeMailboxCount) % kProbeMailboxCapacity)];
+    slot.level = level;
+    slot.category = category;
+    slot.event = event;
+    std::strncpy(slot.fields, fields, sizeof(slot.fields) - 1);
+    slot.fields[sizeof(slot.fields) - 1] = '\0';
+    ++probeMailboxCount;
+  } else {
+    ++probeMailboxDrops;
+  }
+  portEXIT_CRITICAL(&probeMailboxMux);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+}
+
+// Loop task only.
+static void drainProbeRecords() {
+  for (;;) {
+    ProbeRecord record;
+    uint32_t drops = 0;
+    portENTER_CRITICAL(&probeMailboxMux);
+    const bool have = probeMailboxCount > 0;
+    if (have) {
+      record = probeMailbox[probeMailboxHead];
+      probeMailboxHead =
+          static_cast<uint8_t>((probeMailboxHead + 1) % kProbeMailboxCapacity);
+      --probeMailboxCount;
+    } else {
+      drops = probeMailboxDrops;
+      probeMailboxDrops = 0;
+    }
+    portEXIT_CRITICAL(&probeMailboxMux);
+    if (!have) {
+      if (drops != 0) {
+        char fields[48] = {};
+        const int written =
+            std::snprintf(fields, sizeof(fields), "{\"droppedCount\":%lu}",
+                          static_cast<unsigned long>(drops));
+        if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+          (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                         "ble", "probe_dropped", fields);
+        }
+      }
+      return;
+    }
+    (void)ride_diagnostics::record(record.level, record.category,
+                                   record.event, record.fields);
+  }
+}
+
+static const char *taskNameOf(TaskHandle_t task) {
+  if (task == nullptr) return "none";
+  const char *name = pcTaskGetName(task);
+  return name == nullptr ? "unknown" : name;
+}
+
+static void recordHostActivity(const char *site, uint32_t durationMs) {
+  char fields[112] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"eventUptimeMs\":%lu}", site,
+      static_cast<unsigned long>(durationMs),
+      static_cast<unsigned long>(millis()));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    queueProbeRecord(hostProbeLevel(durationMs), "ble", "host_activity",
+                     fields);
+  }
+}
+
+// Marks what the host task is doing for the heartbeat and records the span
+// when it took 100 ms or more. Scopes nest: the innermost site is the one the
+// heartbeat reports.
+class HostActivityScope {
+public:
+  explicit HostActivityScope(const char *site)
+      : site_(site), startedMs_(millis()), active_(onNimbleHostTask()),
+        previous_(active_ ? nimbleHostActivity.exchange(
+                                site, std::memory_order_acq_rel)
+                          : nullptr) {}
+  ~HostActivityScope() {
+    if (!active_) return;
+    nimbleHostActivity.store(previous_, std::memory_order_release);
+    nimbleHostActivityLast.store(site_, std::memory_order_release);
+    const uint32_t durationMs = millis() - startedMs_;
+    if (durationMs >
+        transferWindowMaxActivityMs.load(std::memory_order_relaxed)) {
+      transferWindowMaxActivityMs.store(durationMs, std::memory_order_relaxed);
+      transferWindowMaxActivitySite.store(site_, std::memory_order_relaxed);
+    }
+    if (durationMs >= kHostProbeReportMs) recordHostActivity(site_, durationMs);
+  }
+  HostActivityScope(const HostActivityScope &) = delete;
+  HostActivityScope &operator=(const HostActivityScope &) = delete;
+
+private:
+  const char *site_;
+  uint32_t startedMs_;
+  bool active_;
+  const char *previous_;
+};
+
+static void recordLockWait(const char *site, uint32_t waitedMs,
+                           TaskHandle_t holder, bool taken) {
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
+      "\"reason\":\"%s\",\"eventUptimeMs\":%lu}",
+      site, static_cast<unsigned long>(waitedMs), taskNameOf(holder),
+      taken ? "waited" : "timeout", static_cast<unsigned long>(millis()));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    queueProbeRecord(taken ? hostProbeLevel(waitedMs)
+                           : ride_diagnostics::Level::Warning,
+                     "ble", "lock_wait", fields);
+  }
+}
+
+// Takes a mutex like xSemaphoreTake and records a wait of 100 ms or more with
+// the task that held the mutex when the wait began.
+static bool takeTrackedMutex(SemaphoreHandle_t mutex, TickType_t waitTicks,
+                             const char *site) {
+  if (mutex == nullptr) return false;
+  if (xSemaphoreTake(mutex, 0) == pdTRUE) return true;
+  const TaskHandle_t holder = xSemaphoreGetMutexHolder(mutex);
+  const uint32_t startedMs = millis();
+  const bool taken = xSemaphoreTake(mutex, waitTicks) == pdTRUE;
+  const uint32_t waitedMs = millis() - startedMs;
+  if (waitedMs >= kHostProbeReportMs)
+    recordLockWait(site, waitedMs, holder, taken);
+  return taken;
+}
+
+// Host-task heartbeat: once a second the esp_timer task posts an event to
+// NimBLE's default event queue, which only the host task drains. The
+// handler's delay is the host task's scheduling latency, whatever the cause.
+// `ble host_heartbeat` records `late` (handled 500 ms or more after the
+// post), `stalled` (still unhandled a second after the post; recorded once,
+// with what the host task was doing) and `resumed` (the stalled beat finally
+// handled): `latencyMs` is the post-to-handler delay, `durationMs` the CPU
+// time the host task consumed meanwhile (near zero while blocked or starved)
+// and `state` the activity observed when the stall was recorded, or the last
+// activity the host task finished before a late beat.
+// The host task's CPU time is read from FreeRTOS run-time statistics; both
+// Waveshare profiles keep them on the microsecond esp_timer clock. A build
+// without that clock omits `durationMs` instead of reporting zero.
+#if defined(CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS) && \
+    defined(CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER)
+#define BLE_HOST_RUN_TIME_AVAILABLE 1
+#else
+#define BLE_HOST_RUN_TIME_AVAILABLE 0
+#endif
+static struct ble_npl_event hostHeartbeatEvent;
+static esp_timer_handle_t hostHeartbeatTimer = nullptr;
+static std::atomic<uint32_t> hostHeartbeatPostedMs{0}; // 0: none in flight
+static std::atomic<uint32_t> hostHeartbeatRunTimeAtPostUs{0};
+static std::atomic<bool> hostHeartbeatRunTimeKnown{false};
+static std::atomic<bool> hostHeartbeatStalled{false};
+static std::atomic<bool> hostHeartbeatStartedRecorded{false};
+static std::atomic<const char *> hostHeartbeatStallActivity{"idle"};
+static constexpr uint64_t kHostHeartbeatPeriodUs = 1000000;
+static constexpr uint32_t kHostHeartbeatLateMs = 500;
+static constexpr uint32_t kHostHeartbeatStallMs = 1000;
+
+static uint32_t nimbleHostRunTimeUs() {
+#if BLE_HOST_RUN_TIME_AVAILABLE
+  const TaskHandle_t task = nimbleHostTask.load(std::memory_order_acquire);
+  if (task == nullptr) return 0;
+  TaskStatus_t status = {};
+  vTaskGetInfo(task, &status, pdFALSE, eInvalid);
+  return static_cast<uint32_t>(status.ulRunTimeCounter);
+#else
+  return 0;
+#endif
+}
+
+static uint32_t hostHeartbeatRanUs() {
+  if (!hostHeartbeatRunTimeKnown.load(std::memory_order_acquire)) return 0;
+  return nimbleHostRunTimeUs() -
+         hostHeartbeatRunTimeAtPostUs.load(std::memory_order_acquire);
+}
+
+static void recordHostHeartbeat(const char *phase, uint32_t latencyMs,
+                                uint32_t ranUs, const char *activity) {
+  char fields[160] = {};
+#if BLE_HOST_RUN_TIME_AVAILABLE
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"latencyMs\":%lu,\"durationMs\":%lu,"
+      "\"state\":\"%s\",\"eventUptimeMs\":%lu}",
+      phase, static_cast<unsigned long>(latencyMs),
+      static_cast<unsigned long>(ranUs / 1000),
+      activity == nullptr ? "idle" : activity,
+      static_cast<unsigned long>(millis()));
+#else
+  (void)ranUs;
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"latencyMs\":%lu,\"state\":\"%s\","
+      "\"eventUptimeMs\":%lu}",
+      phase, static_cast<unsigned long>(latencyMs),
+      activity == nullptr ? "idle" : activity,
+      static_cast<unsigned long>(millis()));
+#endif
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    queueProbeRecord(hostProbeLevel(latencyMs), "ble", "host_heartbeat",
+                     fields);
+  }
+}
+
+// Runs on the NimBLE host task.
+static void hostHeartbeatEventHandler(struct ble_npl_event *event) {
+  (void)event;
+  nimbleHostTask.store(xTaskGetCurrentTaskHandle(), std::memory_order_release);
+  const uint32_t postedMs =
+      hostHeartbeatPostedMs.load(std::memory_order_acquire);
+  if (postedMs == 0) return;
+  const uint32_t latencyMs = millis() - postedMs;
+  const uint32_t ranUs = hostHeartbeatRanUs();
+  const bool stalled =
+      hostHeartbeatStalled.exchange(false, std::memory_order_acq_rel);
+  hostHeartbeatPostedMs.store(0, std::memory_order_release);
+  transferWindowBeats.fetch_add(1, std::memory_order_relaxed);
+  if (latencyMs > transferWindowMaxBeatMs.load(std::memory_order_relaxed))
+    transferWindowMaxBeatMs.store(latencyMs, std::memory_order_relaxed);
+  // Once per boot: the timer runs, the host task drains NimBLE's queue and the
+  // probe ring reaches the recorder, so silence afterwards is a measurement.
+  if (!hostHeartbeatStartedRecorded.exchange(true, std::memory_order_acq_rel))
+    recordHostHeartbeat("started", latencyMs, ranUs, "idle");
+  if (stalled) {
+    recordHostHeartbeat(
+        "resumed", latencyMs, ranUs,
+        hostHeartbeatStallActivity.load(std::memory_order_acquire));
+  } else if (latencyMs >= kHostHeartbeatLateMs) {
+    recordHostHeartbeat("late", latencyMs, ranUs,
+                        nimbleHostActivityLast.load(std::memory_order_acquire));
+  }
+}
+
+// Runs on the esp_timer task; never more than one beat is in flight.
+static void hostHeartbeatTimerHandler(void *) {
+  const uint32_t nowMs = millis();
+  const uint32_t postedMs =
+      hostHeartbeatPostedMs.load(std::memory_order_acquire);
+  if (postedMs != 0) {
+    const uint32_t ageMs = nowMs - postedMs;
+    if (ageMs >= kHostHeartbeatStallMs &&
+        !hostHeartbeatStalled.exchange(true, std::memory_order_acq_rel)) {
+      const char *activity =
+          nimbleHostActivity.load(std::memory_order_acquire);
+      hostHeartbeatStallActivity.store(activity, std::memory_order_release);
+      recordHostHeartbeat("stalled", ageMs, hostHeartbeatRanUs(), activity);
+    }
+    return;
+  }
+  hostHeartbeatRunTimeKnown.store(
+      nimbleHostTask.load(std::memory_order_acquire) != nullptr,
+      std::memory_order_release);
+  hostHeartbeatRunTimeAtPostUs.store(nimbleHostRunTimeUs(),
+                                     std::memory_order_release);
+  hostHeartbeatStalled.store(false, std::memory_order_release);
+  hostHeartbeatPostedMs.store(nowMs == 0 ? 1 : nowMs,
+                              std::memory_order_release);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &hostHeartbeatEvent);
+}
+
+// Loop task only: opens a measurement window when a transfer session is
+// enabled and reports it when the session ends.
+static bool transferWindowOpen = false;
+
+static void observeTransferWindow(bool sessionEnabled) {
+  if (sessionEnabled == transferWindowOpen) return;
+  transferWindowOpen = sessionEnabled;
+  if (sessionEnabled) {
+    transferWindowMaxBeatMs.store(0, std::memory_order_relaxed);
+    transferWindowBeats.store(0, std::memory_order_relaxed);
+    transferWindowMaxActivityMs.store(0, std::memory_order_relaxed);
+    transferWindowMaxActivitySite.store("none", std::memory_order_relaxed);
+    return;
+  }
+  const char *site =
+      transferWindowMaxActivitySite.load(std::memory_order_relaxed);
+  char fields[176] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"transfer_summary\",\"latencyMs\":%lu,"
+      "\"durationMs\":%lu,\"state\":\"%s\",\"sampleCount\":%lu}",
+      static_cast<unsigned long>(
+          transferWindowMaxBeatMs.load(std::memory_order_relaxed)),
+      static_cast<unsigned long>(
+          transferWindowMaxActivityMs.load(std::memory_order_relaxed)),
+      site == nullptr ? "none" : site,
+      static_cast<unsigned long>(
+          transferWindowBeats.load(std::memory_order_relaxed)));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
+                                   "host_heartbeat", fields);
+  }
+}
+
+static void startHostHeartbeat() {
+  if (hostHeartbeatTimer != nullptr) return;
+  ble_npl_event_init(&hostHeartbeatEvent, hostHeartbeatEventHandler, nullptr);
+  esp_timer_create_args_t args = {};
+  args.callback = hostHeartbeatTimerHandler;
+  args.arg = nullptr;
+  args.dispatch_method = ESP_TIMER_TASK;
+  args.name = "ble_host_beat";
+  args.skip_unhandled_events = true;
+  if (esp_timer_create(&args, &hostHeartbeatTimer) != ESP_OK) {
+    hostHeartbeatTimer = nullptr;
+    return;
+  }
+  if (esp_timer_start_periodic(hostHeartbeatTimer, kHostHeartbeatPeriodUs) !=
+      ESP_OK) {
+    esp_timer_delete(hostHeartbeatTimer);
+    hostHeartbeatTimer = nullptr;
+  }
+}
+
+#if !BLE_RADIO_CHARACTERIZATION
+static uint16_t transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+// NimBLE reuses connection handles, so the handle alone cannot tell a new
+// link from the one that last carried a profile request; the link's connect
+// time distinguishes them.
+static uint32_t transferProfileLinkStartMs = 0;
+static bool transferProfileApplied = false;
+#endif
 // Start of the unauthenticated client's window (ble_connection_policy): set
 // when a link is accepted, and under the ownership lock when CONFIRM registers
 // ownership on it, in the same critical section that clears the pairing.
@@ -425,6 +862,8 @@ static const char *connectionProfileName(
     return "navigation";
   case ble_radio_policy::ConnectionProfile::Idle:
     return "idle";
+  case ble_radio_policy::ConnectionProfile::Transfer:
+    return "transfer";
   case ble_radio_policy::ConnectionProfile::Unset:
   default:
     return "unset";
@@ -1183,7 +1622,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   }
 
   if (timing != nullptr) timing->allocated();
-  if (xSemaphoreTake(pendingMapInputMutex, portMAX_DELAY) != pdTRUE) {
+  if (!takeTrackedMutex(pendingMapInputMutex, portMAX_DELAY, "map_input")) {
     free(input.data);
     return false;
   }
@@ -1301,6 +1740,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
 #ifdef BLE_DEV_RANDOM_IDENTITY
   NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, true);
   NimBLEDevice::init(deviceName);
+  NimBLEDevice::setCustomGapHandler(bleGapEventListener);
   ble_addr_t randomAddress;
   if (ble_hs_id_gen_rnd(1, &randomAddress) == 0 &&
       ble_hs_id_set_rnd(randomAddress.val) == 0) {
@@ -1320,6 +1760,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
     NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_RANDOM, false);
   }
   NimBLEDevice::init(deviceName);
+  NimBLEDevice::setCustomGapHandler(bleGapEventListener);
   if (hasStableIdentity && ble_hs_id_set_rnd(identity.address) == 0) {
     formatBleAddress(identity.address, advertisedAddress,
                      sizeof(advertisedAddress));
@@ -1483,6 +1924,10 @@ static bool decodeSessionPayload(
     bleDebugStats.updateWith([](BLEDebugStats &stats) {
       stats.authenticated = false;
     });
+    pendingOwnershipDisconnectCause.store(
+        static_cast<uint8_t>(
+            ble_disconnect_diagnostics::LocalCause::OwnershipLost),
+        std::memory_order_release);
     ownershipDisconnectPending = true;
     Serial.println("BLE: Ownership session was lost; disconnect requested");
   }
@@ -1511,14 +1956,81 @@ static bool decodeOwnershipHandshake(const std::string &frame,
                               frame, payload, "ownership command", true);
 }
 
+static bool isNimbleCallbackContext();
+
+// Waits for the ownership mutex. From a NimBLE callback the wait is bounded:
+// the host task must keep answering ATT writes, because a write left without
+// its response makes the phone drop the link after 15 s and leaves the next
+// link's AUTH exchange unserved behind it (seen under transfer load, where the
+// mutex was held for longer than that). A wait past the report threshold, and
+// every timeout, records the task that held the mutex so the holder can be
+// identified from the device log.
+static constexpr uint32_t kOwnershipCallbackWaitMs = 1000;
+static constexpr uint32_t kOwnershipWaitReportMs = 100;
+
+static void recordOwnershipLockWait(const char *site, uint32_t waitedMs,
+                                    bool taken, TaskHandle_t holder) {
+  const char *holderName =
+      holder == nullptr ? "none" : pcTaskGetName(holder);
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
+      "\"reason\":\"%s\"}",
+      site, static_cast<unsigned long>(waitedMs),
+      holderName == nullptr ? "unknown" : holderName,
+      taken ? "waited" : "timeout");
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(taken ? ride_diagnostics::Level::Info
+                                         : ride_diagnostics::Level::Warning,
+                                   "ble", "ownership_lock", fields);
+  }
+}
+
+// The requested wait, capped to the callback limit when called from a NimBLE
+// callback.
+static TickType_t ownershipWaitTicks(TickType_t requested) {
+  const TickType_t callbackLimit = pdMS_TO_TICKS(kOwnershipCallbackWaitMs);
+  return isNimbleCallbackContext() ? std::min(requested, callbackLimit)
+                                   : requested;
+}
+
+static void noteOwnershipLockWaited(const char *site, uint32_t waitedMs) {
+  if (waitedMs >= kOwnershipWaitReportMs)
+    recordOwnershipLockWait(site, waitedMs, true, nullptr);
+}
+
+static bool takeOwnershipMutex(TickType_t waitTicks, const char *site) {
+  if (deviceOwnershipMutex == nullptr) return false;
+  const uint32_t startedMs = millis();
+  const bool taken =
+      xSemaphoreTake(deviceOwnershipMutex, ownershipWaitTicks(waitTicks)) ==
+      pdTRUE;
+  const uint32_t waitedMs = millis() - startedMs;
+  if (!taken) {
+    recordOwnershipLockWait(site, waitedMs, false,
+                            xSemaphoreGetMutexHolder(deviceOwnershipMutex));
+    return false;
+  }
+  noteOwnershipLockWaited(site, waitedMs);
+  return true;
+}
+
 // Execution and revocation are serialized by the ownership mutex. Admission to
 // the queue is provisional; configuration persists only after an authorized
 // apply, and the caller performs that flash write after this lock is released.
 bool BLENavigationServer::applyAuthorizedRideCommand(
     ride_command_admission::Authorization admitted,
     bool (*apply)(void *), void *context) {
-  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
-      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr) return false;
+  const uint32_t waitStartedMs = millis();
+  if (xSemaphoreTake(deviceOwnershipMutex, ownershipWaitTicks(portMAX_DELAY)) !=
+      pdTRUE) {
+    recordOwnershipLockWait("ride_command", millis() - waitStartedMs, false,
+                            xSemaphoreGetMutexHolder(deviceOwnershipMutex));
+    return false;
+  }
+  noteOwnershipLockWaited("ride_command", millis() - waitStartedMs);
   const ride_command_admission::Authorization current{
       ridePayloadGeneration.load(std::memory_order_acquire),
       deviceOwnership.authenticatedRideLeaseGeneration(millis())};
@@ -1722,8 +2234,13 @@ sendWireNotification(NimBLECharacteristic *characteristic,
   // NimBLE-Arduino 1.4's characteristic notify() API returns void and drops
   // the host result. Use the underlying free-form server notification so a
   // finite ATT/L2CAP buffer condition can preserve and retry this exact frame.
-  const int result = ble_gatts_notify_custom(
-      connectionHandle, characteristic->getHandle(), payload);
+  int result;
+  {
+    // The controller can hold the host task here while its buffers drain.
+    HostActivityScope activity("notify");
+    result = ble_gatts_notify_custom(connectionHandle,
+                                     characteristic->getHandle(), payload);
+  }
   xSemaphoreGive(notificationTransportMutex);
   if (result == 0) {
     return TransportResult::Sent;
@@ -1786,6 +2303,7 @@ static void processDeferredNotifications() {
 
 static void deferredNotificationEventHandler(struct ble_npl_event *event) {
   (void)event;
+  HostActivityScope activity("deferred_drain");
   // Clear the pending hint before draining, but keep the scheduling gate held
   // until the handler is done. A producer that races the drain therefore
   // leaves a pending hint for the owner task without queueing a second copy
@@ -1840,6 +2358,7 @@ static void completeBleSessionAuthentication() {
   });
   ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                            "authenticated", "{}");
+  rebindTransferAfterLinkGrace();
   queueOwnershipUiUpdate();
 }
 
@@ -2332,6 +2851,10 @@ static void handleAuthPayload(const std::string &frame) {
       bleDebugStats.updateWith([](BLEDebugStats &stats) {
         stats.authenticated = false;
       });
+      pendingOwnershipDisconnectCause.store(
+          static_cast<uint8_t>(
+              ble_disconnect_diagnostics::LocalCause::OwnershipInvalidated),
+          std::memory_order_release);
       ownershipDisconnectPending = true;
       Serial.println("BLE: Ownership command invalidated session; disconnect requested");
     }
@@ -2708,10 +3231,16 @@ struct ActiveMapStatusSnapshot {
 // Keep filesystem/manifest work out of the JSON composition frame. The VFS
 // stat path is deep enough that combining both phases can consume most of the
 // Arduino loop task stack during an iPhone status request.
+// Both objects carry non-zero defaults; as plain statics their whole
+// initializer images would sit in .data. StartupConstructed keeps them in
+// .bss, value-initialized during static initialization.
+static StartupConstructed<ActivePresentationCache> activePresentationCacheStorage;
+static StartupConstructed<ActiveMapStatusSnapshot> activeMapStatusSnapshotStorage;
+
 __attribute__((noinline)) static const ActiveMapStatusSnapshot &
 readActiveMapStatusSnapshot() {
-  static ActivePresentationCache activePresentationCache;
-  static ActiveMapStatusSnapshot snapshot;
+  ActivePresentationCache &activePresentationCache = activePresentationCacheStorage.value;
+  ActiveMapStatusSnapshot &snapshot = activeMapStatusSnapshotStorage.value;
 
   if (!storage.mapStorageAvailable()) {
     // Without a card there is no active map, and FFat is never searched for
@@ -3906,6 +4435,19 @@ static uint64_t currentAuthenticatedTransferSessionId() {
   return sessionId;
 }
 
+// The owner rebinding the transfer session inside the grace window; the
+// same owner is the only one who can authenticate, so no token rotates.
+static void rebindTransferAfterLinkGrace() {
+  if (!deviceTransferHttp.bleLinkGraceActive())
+    return;
+  const uint32_t elapsedMs =
+      deviceTransferHttp.bleLinkGraceElapsedMs(millis());
+  if (deviceTransferHttp.bindAuthenticatedBleSession(
+          currentAuthenticatedTransferSessionId())) {
+    recordTransferLinkGrace("rebound", elapsedMs);
+  }
+}
+
 static void processPendingTransferControl() {
   const ble_transfer::Request request = pendingTransferControl.take();
   if (request.empty()) {
@@ -4323,7 +4865,6 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
             clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED)) {
       featureFlags |= device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE;
     }
-#ifdef USE_ARDUINO_GFX
     if (clientVersion >= device_capabilities_protocol::
                              AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION) {
       featureFlags |=
@@ -4334,7 +4875,6 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
     }
-#endif
     if (clientVersion >= device_capabilities_protocol::
                              EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::
@@ -5538,7 +6078,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   }
   case 12:
-#ifdef USE_ARDUINO_GFX
     if (!displayPowerManager.requestUserBrightness(settingValue)) {
       Serial.printf("BLE Settings: brightness persistence failed from %s\n",
                     source == nullptr ? "unknown" : source);
@@ -5548,9 +6087,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: brightness = %u%% (saved, pending)\n",
                   displayPowerManager.savedBrightnessPercent());
 #endif
-#else
-    Serial.println("BLE Settings: brightness unsupported on this target");
-#endif
     return;
   case display_power::kAutomaticDisplayOffSettingID:
     if (!display_power::isBooleanSettingValue(settingValue)) {
@@ -5559,7 +6095,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                     source == nullptr ? "unknown" : source);
       return;
     }
-#ifdef USE_ARDUINO_GFX
     if (!display_power::applyAutomaticDisplayOffSetting(displayPowerManager,
                                                         settingValue)) {
       Serial.printf("BLE Settings: automatic display-off persistence failed from %s\n",
@@ -5568,12 +6103,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     }
     Serial.printf("BLE Settings: automaticDisplayOff = %s (saved)\n",
                   settingValue == 1 ? "on" : "off");
-#else
-    Serial.println("BLE Settings: automatic display-off unsupported on this target");
-#endif
     return;
   case display_power::kDisplayInactivityTimeoutsSettingID: {
-#ifdef USE_ARDUINO_GFX
     display_power::InactivityTimeouts timeouts;
     if (!display_power::decodeInactivityTimeouts(settingValue, timeouts)) {
       Serial.printf(
@@ -5592,10 +6123,6 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         "BLE Settings: display inactivity timeouts dim=%us off=%us (saved)\n",
         static_cast<unsigned>(timeouts.dimAfterSeconds),
         static_cast<unsigned>(timeouts.displayOffAfterSeconds));
-#else
-    Serial.println(
-        "BLE Settings: display inactivity timeouts unsupported on this target");
-#endif
     return;
   }
   case 13: {
@@ -6075,6 +6602,8 @@ static bool handleFirmwareMaintenancePayload(
       // A hotspot start may have suspended this owner's HTTP token when BLE
       // briefly disconnected. Rebinding issues a fresh token before DSTS is
       // reported; bindAuthenticatedBleSession records any ownership conflict.
+      // Inside a transfer's link-loss grace window the rebind keeps the token.
+      rebindTransferAfterLinkGrace();
       deviceTransferHttp.bindAuthenticatedBleSession(
           currentAuthenticatedTransferSessionId());
       queueTransferControl(ble_transfer::Action::None,
@@ -6096,6 +6625,7 @@ class MyMaintenanceRejectedCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *) override {
+    HostActivityScope activity("maintenance_rejected");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     Serial.println(
@@ -6107,8 +6637,7 @@ static bool resetOwnershipConnectionState() {
   if (!deviceOwnershipReady) {
     return true;
   }
-  if (deviceOwnershipMutex == nullptr ||
-      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) {
+  if (!takeOwnershipMutex(portMAX_DELAY, "connection_reset")) {
     return false;
   }
   deviceOwnership.resetConnection();
@@ -6130,6 +6659,7 @@ public:
   }
 
   void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
+    HostActivityScope activity("connect");
     if (desc == nullptr) {
       Serial.println("BLE: Rejected connection without a handle");
       return;
@@ -6234,8 +6764,21 @@ public:
       xSemaphoreGive(destinationCatalogReassemblerMutex);
     }
     Serial.println("BLE: iOS client connected!");
+    activeConnectionStartMs.store(millis(), std::memory_order_release);
+    localDisconnectCause.store(0, std::memory_order_release);
+    pendingOwnershipDisconnectCause.store(0, std::memory_order_release);
+    pendingDisconnectGapReason.store(0, std::memory_order_release);
     ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
                              "connected", "{}");
+    {
+      // A link appearing while a transfer's link-loss grace window is open
+      // moves its deadline (policy-bounded); the owner's reconnect under
+      // transfer load has been seen to need several links.
+      const uint32_t graceRemainingMs =
+          deviceTransferHttp.extendBleLinkGraceForLink(millis());
+      if (graceRemainingMs != 0)
+        recordTransferLinkGrace("extended", graceRemainingMs);
+    }
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     // Stop advertising when connected
     NimBLEDevice::stopAdvertising();
@@ -6243,6 +6786,7 @@ public:
 
   void onDisconnect(NimBLEServer *pServer,
                     ble_gap_conn_desc *desc) override {
+    HostActivityScope activity("disconnect");
     if (desc == nullptr || !ble_connection_policy::endSession(
                                activeConnHandle, desc->conn_handle,
                                [] { return resetOwnershipConnectionState(); })) {
@@ -6258,6 +6802,12 @@ public:
     portENTER_CRITICAL(&radioDebugMux);
     radioDebugSnapshot.connectionParametersValid = false;
     portEXIT_CRITICAL(&radioDebugMux);
+    pendingDisconnectGapReason.store(
+        lastGapDisconnectHandle.load(std::memory_order_acquire) ==
+                desc->conn_handle
+            ? lastGapDisconnectReason.load(std::memory_order_acquire)
+            : 0,
+        std::memory_order_release);
     disconnectActive();
   }
 
@@ -6270,6 +6820,7 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
+    const bool disconnectedWhileAuthenticated = bleSessionAuthenticated;
     // A firmware maintenance hotspot can briefly interrupt BLE while the Wi-Fi
     // radio starts. Revoke its HTTP token and active client immediately, but
     // keep the listener alive so the same owner can reauthenticate and receive
@@ -6278,10 +6829,33 @@ public:
     const bool suspendedFirmwareTransfer =
         firmware_maintenance::active() &&
         deviceTransferHttp.suspendFirmwareAuthenticatedBleSession();
-    if (!suspendedFirmwareTransfer)
+    // A map or diagnostics transfer keeps its token, generation, listener and
+    // in-flight client for a short grace window: the owner's link comes back
+    // within seconds after a supervision timeout and only the owner can
+    // authenticate. process() runs the fail-closed teardown unchanged when
+    // the window expires without a rebind.
+    // Only the owner's own link, lost without the firmware asking (no local
+    // cause: not the unauthenticated deadline, not an ownership revocation),
+    // opens a window; a later disconnect inside an open window keeps that
+    // window's deadline instead of restarting it.
+    const bool firmwareRequestedDisconnect =
+        localDisconnectCause.load(std::memory_order_acquire) != 0;
+    const transfer_link_grace_policy::LinkLoss linkLoss =
+        (suspendedFirmwareTransfer || firmware_maintenance::active())
+            ? transfer_link_grace_policy::LinkLoss::TearDown
+            : deviceTransferHttp.suspendOwnerBleSessionForLinkLoss(
+                  millis(), disconnectedWhileAuthenticated,
+                  firmwareRequestedDisconnect);
+    const bool transferLinkGrace =
+        linkLoss != transfer_link_grace_policy::LinkLoss::TearDown;
+    if (linkLoss == transfer_link_grace_policy::LinkLoss::Started) {
+      recordTransferLinkGrace("started",
+                              transfer_link_grace_policy::graceMs);
+    }
+    if (!suspendedFirmwareTransfer && !transferLinkGrace)
       deviceTransferHttp.clearAuthenticatedBleSession();
     resetScreenConfigurationTransport();
-    if (!suspendedFirmwareTransfer) {
+    if (!suspendedFirmwareTransfer && !transferLinkGrace) {
       queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
                            ble_transfer::NotifyNone);
     }
@@ -6345,8 +6919,26 @@ public:
       stats.connected = false;
       stats.authenticated = false;
     });
-    ride_diagnostics::record(ride_diagnostics::Level::Info, "ble",
-                             "disconnected", "{}");
+    {
+      char disconnectFields[ble_disconnect_diagnostics::FIELDS_CAPACITY] = {};
+      const uint32_t startMs =
+          activeConnectionStartMs.load(std::memory_order_acquire);
+      const int written = ble_disconnect_diagnostics::formatFields(
+          disconnectFields, sizeof(disconnectFields),
+          pendingDisconnectGapReason.load(std::memory_order_acquire),
+          startMs == 0 ? 0 : millis() - startMs,
+          disconnectedWhileAuthenticated,
+          ble_disconnect_diagnostics::localCauseFromValue(
+              localDisconnectCause.load(std::memory_order_acquire)));
+      ride_diagnostics::record(
+          ride_diagnostics::Level::Info, "ble", "disconnected",
+          written > 0 &&
+                  static_cast<size_t>(written) < sizeof(disconnectFields)
+              ? disconnectFields
+              : "{}");
+      pendingDisconnectGapReason.store(0, std::memory_order_release);
+      localDisconnectCause.store(0, std::memory_order_release);
+    }
     ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     bleDebugStats.updateWith([](BLEDebugStats &stats) {
       ++stats.disconnectCount;
@@ -6398,6 +6990,7 @@ public:
   }
 
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("nav");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -6668,6 +7261,7 @@ public:
 class MyRouteCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("route");
     DeliveryCallbackScope timing(1);
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
@@ -6732,6 +7326,7 @@ public:
 class MyGPSCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("gps");
     DeliveryCallbackScope timing(2);
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
@@ -6823,6 +7418,7 @@ class MyWorkoutTelemetryCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("workout");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -6925,6 +7521,7 @@ public:
   }
 
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("ride_automation");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -6944,6 +7541,7 @@ class MyScreenConfigurationCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("screen");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7036,6 +7634,7 @@ public:
 class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("settings");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
@@ -7155,6 +7754,7 @@ public:
 class MyAuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
+    HostActivityScope activity("auth");
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     std::string value = pChar->getValue();
@@ -7349,6 +7949,7 @@ void BLENavigationServer::init(const char *deviceName) {
                                              std::memory_order_release);
     deferredNotificationEventReady.store(true, std::memory_order_release);
   }
+  startHostHeartbeat();
   NimBLEDevice::setPower(configuredTxPowerLevel());
   NimBLEDevice::setMTU(512); // Increase MTU for route geometry
 
@@ -7477,6 +8078,7 @@ bool BLENavigationServer::pollShutdownQuiescence() {
 
 void BLENavigationServer::process() {
   processCompletedDiagnosticsSessionStart();
+  drainProbeRecords();
   scheduleDeferredNotificationEvent();
   // The unauthenticated deadline uses the pairing state read under the
   // ownership lock, never the snapshot another task may have just cleared: a
@@ -7513,6 +8115,8 @@ void BLENavigationServer::process() {
     if (connected && ownershipDisconnectPending) {
       ownershipDisconnectPending = false;
       unauthTimeoutDisconnectRequested = true;
+      noteLocalDisconnectCause(ble_disconnect_diagnostics::localCauseFromValue(
+          pendingOwnershipDisconnectCause.load(std::memory_order_acquire)));
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
         pServer->disconnect(activeConnHandle);
@@ -7525,6 +8129,8 @@ void BLENavigationServer::process() {
         ble_connection_policy::unauthenticatedDeadlinePassed(
             millis(), windowStartMs, deadlinePairingActive)) {
       unauthTimeoutDisconnectRequested = true;
+      noteLocalDisconnectCause(
+          ble_disconnect_diagnostics::LocalCause::UnauthenticatedDeadline);
       if (pServer != nullptr &&
           activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
         pServer->disconnect(activeConnHandle);
@@ -7617,10 +8223,22 @@ void BLENavigationServer::process() {
   if (connected && ownershipDisconnectPending) {
     ownershipDisconnectPending = false;
     unauthTimeoutDisconnectRequested = true;
+    noteLocalDisconnectCause(ble_disconnect_diagnostics::localCauseFromValue(
+        pendingOwnershipDisconnectCause.load(std::memory_order_acquire)));
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
       pServer->disconnect(activeConnHandle);
     }
   }
+  {
+    const uint32_t graceElapsedMs =
+        deviceTransferHttp.bleLinkGraceElapsedMs(millis());
+    if (deviceTransferHttp.expireBleLinkGraceIfDue(millis())) {
+      recordTransferLinkGrace("expired", graceElapsedMs);
+      queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
+                           ble_transfer::NotifyNone);
+    }
+  }
+  syncTransferConnectionProfile();
   const uint32_t windowStartMs =
       unauthenticatedWindowStartMs.load(std::memory_order_acquire);
   if (deadlineStateRead && connected && !bleSessionAuthenticated &&
@@ -7629,6 +8247,8 @@ void BLENavigationServer::process() {
           millis(), windowStartMs, deadlinePairingActive)) {
     Serial.println("BLE: Disconnecting unauthenticated client after timeout");
     unauthTimeoutDisconnectRequested = true;
+    noteLocalDisconnectCause(
+        ble_disconnect_diagnostics::LocalCause::UnauthenticatedDeadline);
     if (pServer != nullptr && activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
       pServer->disconnect(activeConnHandle);
     }
@@ -7712,6 +8332,54 @@ void BLENavigationServer::setNavigationActivity(bool active) {
   radioNavigationActive.store(active, std::memory_order_release);
 #else
   (void)active;
+#endif
+}
+
+void BLENavigationServer::syncTransferConnectionProfile() {
+  const bool sessionEnabled = deviceTransferHttp.isSessionEnabled();
+  observeTransferWindow(sessionEnabled);
+#if !BLE_RADIO_CHARACTERIZATION
+  const uint16_t handle = activeConnHandle;
+  if (pServer == nullptr || !connected || handle == BLE_HS_CONN_HANDLE_NONE) {
+    transferProfileHandle = BLE_HS_CONN_HANDLE_NONE;
+    transferProfileLinkStartMs = 0;
+    transferProfileApplied = false;
+    return;
+  }
+  const uint32_t linkStartMs =
+      activeConnectionStartMs.load(std::memory_order_acquire);
+  if (handle != transferProfileHandle ||
+      linkStartMs != transferProfileLinkStartMs) {
+    // A new link starts from the phone's defaults; request again if needed.
+    transferProfileHandle = handle;
+    transferProfileLinkStartMs = linkStartMs;
+    transferProfileApplied = false;
+  }
+  // Only the authenticated owner link gets the transfer profile: a link that
+  // has yet to authenticate keeps the phone's own parameters, so the AUTH
+  // exchange of the owner's reconnect during a transfer is not slowed by the
+  // relaxed interval and latency.
+  const bool transferActive = sessionEnabled && bleSessionAuthenticated;
+  if (transferActive == transferProfileApplied)
+    return;
+  // During a transfer the Wi-Fi radio, TLS and SD hashing compete with BLE;
+  // the transfer profile's six-second supervision timeout keeps the owner
+  // link alive through that, and its zero latency keeps every connection
+  // event a chance to answer the phone. The navigation profile returns when
+  // the session ends on the same link.
+  const ble_radio_policy::ConnectionParameters &parameters =
+      ble_radio_policy::connectionParameters(
+          transferActive ? ble_radio_policy::ConnectionProfile::Transfer
+                         : ble_radio_policy::ConnectionProfile::Navigation);
+  pServer->updateConnParams(handle, parameters.minimumIntervalUnits,
+                            parameters.maximumIntervalUnits,
+                            parameters.latency,
+                            parameters.supervisionTimeoutUnits);
+  transferProfileApplied = transferActive;
+  (void)ride_diagnostics::record(
+      ride_diagnostics::Level::Info, "ble", "connection_profile",
+      transferActive ? "{\"state\":\"transfer\"}"
+                     : "{\"state\":\"navigation\"}");
 #endif
 }
 

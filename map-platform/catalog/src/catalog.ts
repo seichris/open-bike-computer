@@ -1114,6 +1114,7 @@ export async function attachLibrary(
     artifact: ArtifactRow,
     env: Env,
   ) => Promise<boolean> = verifyArtifactObject,
+  clock = new Date(),
 ): Promise<LibraryMapResponse> {
   const publication = await env.DB.prepare(
     `SELECT pe.map_entry_id
@@ -1135,7 +1136,7 @@ export async function attachLibrary(
       : normalizeAlias(aliasValue);
   const aliasSource =
     aliasValue === undefined || aliasValue === null ? "generated" : "creator";
-  const now = new Date().toISOString();
+  const now = clock.toISOString();
   const staleLeases = await env.DB.prepare(
     `SELECT a.*
        FROM artifact_deletion_leases lease

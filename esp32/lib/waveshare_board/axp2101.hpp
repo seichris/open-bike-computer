@@ -5,7 +5,6 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include <Arduino.h>
 
@@ -52,4 +51,3 @@ bool initializePowerState();
 
 } // namespace waveshare_board::axp2101
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

@@ -416,6 +416,162 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261030-block-clip-worker",
+      "candidateGitSha": "7bc631125b80abf6ec55092d76ea56c0e3de4a82",
+      "producerBuildSha256": "4515531e5b0c818bf93a05e8f553c7dfdda77f17ce8fb12678c779e92e94cd05",
+      "workerImageDigest": "sha256:488559ec0ea38282168752ae6ed34f69bbc1cc7d6c637090b12cd90485206cd3",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 104,
+      "firmwareGitSha": "483ac42937fa3d982410d82b591f2c2ec13a39f0",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "dd34fc09debf41c00b595c2f444929b946bc9271761c701119c71271edd09b9c",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T04:43:04Z",
+      "approvedBy": "seichris (2026-10-30 instruction to merge and deploy the map worker for dev and prod; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
+      "promotionId": "msr-20261030-clip-diagnostics",
+      "candidateGitSha": "c2d2985fd638e6be5272bc3049ef058deb4ca24e",
+      "producerBuildSha256": "88993a97067fb2dc64e4fb8fce69d7a3db52bfb2914af83ff0afdb162a1a31b1",
+      "workerImageDigest": "sha256:7143012f9f48be43ab80389546c4f29acb8f7b5a1d4ce09ff16dd84a15eef697",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "1bf20b964aff1062581cd8407b8da6084076f0c59058f40af72a63094bbef878",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T15:51:39Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 'Yes, do them' for the two P3 cleanups from the #681 review; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
+      "promotionId": "msr-20261030-clip-edge-cases",
+      "candidateGitSha": "1d5b19240fa6741aa1030eb4e2d7de0115862d11",
+      "producerBuildSha256": "97ed61023ed1a989a1399cd36fd0f265be7563ddfd254834fd7b61dddf4da027",
+      "workerImageDigest": "sha256:be7dadc2f444645dca707467d8fb269c3600f18a30f4dd7d82e43475e767c427",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 104,
+      "firmwareGitSha": "483ac42937fa3d982410d82b591f2c2ec13a39f0",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "7ae3412f034719b2a8c3ead46b360a96224feb11136fa3086cbd40e893a0f310",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T09:41:28Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 'Do this task here' for the clip edge-case fixes of #681; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
+      "promotionId": "msr-20261030-firmware-build106",
+      "candidateGitSha": "1d5b19240fa6741aa1030eb4e2d7de0115862d11",
+      "producerBuildSha256": "97ed61023ed1a989a1399cd36fd0f265be7563ddfd254834fd7b61dddf4da027",
+      "workerImageDigest": "sha256:be7dadc2f444645dca707467d8fb269c3600f18a30f4dd7d82e43475e767c427",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "a070178e3e1bc12b3a1b806a432950542909a72505f185b16ac8eb1fdbcf44ab",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-30T13:27:11Z",
+      "approvedBy": "seichris (standing CLAUDE.md permission to merge and deploy without confirmation; 2026-10-30 instruction to coordinate with the 'Dual 4 MiB OTA slots implementation' session for merging and deploying; firmware identity handed off by that session after it published v0.3.4-release.14; software release review recorded by assistant)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
+      "promotionId": "msr-20261104-brotli-security",
+      "candidateGitSha": "ef49abbb47b527a16b440eeb7238b2ce5a184f93",
+      "producerBuildSha256": "cf355d747acc33734d6e1853985add6b2b88fdf400beb978a4056549adaef9b2",
+      "workerImageDigest": "sha256:6f1bbf736b6cc77159ffbee8c880d75bdbc307ccd5139b8beb3f92128e1cfd14",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "4ca86afa7165616f6a392412f6177c78653d04edd3a7b5090fc9a38b7c7f33f7",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-04T11:22:52Z",
+      "approvedBy": "Codex (software security release review under Chris's explicit 2026-11-04 request to fix Brotli and certificate trust; optional hardware matrix, zero physical runs)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
+      "promotionId": "msr-20261105-topo-production",
+      "candidateGitSha": "8baaf9804ebba273cfce3a7397ec6db341f49260",
+      "producerBuildSha256": "eb2f92fad79327cea3adcf406dc83bd9b0f8fe7cf9335c49448d8c4318c3a7a2",
+      "workerImageDigest": "sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 106,
+      "firmwareGitSha": "1c70b5562c6417e85d1365dda8bfb99c611ec9f9",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "508d6f0e636dcb83323ea825878cffec97d180868c5ae23d9b367874fbcaadd7",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-05T14:11:49Z",
+      "approvedBy": "Claude (software review under Chris's explicit 2026-11-05 decision to enable topographic maps in production: 'sources are approved. topo is fine. prod server policy should be the newest policy too', and '1.75 only, accept risk'; optional hardware matrix, zero physical runs)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }

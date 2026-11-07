@@ -8,7 +8,21 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from build_firmware import _application_build_cache_identity
-from firmware_compile_cache import configure_metadata_identity, relocate_core_text
+from firmware_compile_cache import (
+    STACK_PROTECTED_LIBRARIES,
+    configure_metadata_identity,
+    elf_section_names,
+    elf_undefined_symbols,
+    library_name,
+    object_overrides,
+    relocate_core_text,
+    verify_no_exception_objects,
+    verify_stack_protector_scope,
+)
+if __package__:
+    from .elf_fixtures import write_elf_object
+else:
+    from elf_fixtures import write_elf_object
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
@@ -77,6 +91,140 @@ class FirmwareCompileCacheTests(unittest.TestCase):
         self.assertEqual(first, _application_build_cache_identity(project, "WAVESHARE_AMOLED_175", "b" * 40, "1" * 64))
         self.assertNotEqual(first, _application_build_cache_identity(project, "WAVESHARE_AMOLED_175", "a" * 40, "2" * 64))
 
+    def test_gfx_library_objects_compile_without_exceptions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            env = Mock()
+            substitutions = {"$PROJECT_DIR": str(project), "$PIOENV": "WAVESHARE_AMOLED_175"}
+            env.subst.side_effect = lambda value: substitutions.get(value, value)
+            flags = {
+                "CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fstack-protector", "-fexceptions"],
+            }
+            env.get.side_effect = lambda name, default=None: flags.get(name, default)
+            configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
+            callback = env.AddBuildMiddleware.call_args.args[0]
+            env.Object.return_value = [Mock()]
+            libdeps = project / ".pio/open-bike-build/platformio/WAVESHARE_AMOLED_175/libdeps/WAVESHARE_AMOLED_175"
+            gfx = Mock()
+            gfx.srcnode.return_value.get_abspath.return_value = str(libdeps / "GFX Library for Arduino/src/Arduino_GFX.cpp")
+            self.assertIs(callback(env, gfx), env.Object.return_value[0])
+            # Both flag lists lose -fexceptions; the overrides go last, after $CCFLAGS.
+            # GFX is outside the protected set, so it also loses the stack protector.
+            self.assertEqual(env.Object.call_args.kwargs, {
+                "CXXFLAGS": ["-std=gnu++2b", "-fno-rtti"],
+                "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fno-exceptions", "-fno-stack-protector"],
+            })
+            # A protected library keeps the framework flags untouched.
+            node = Mock()
+            node.srcnode.return_value.get_abspath.return_value = str(libdeps / "NimBLE-Arduino/src/NimBLEDevice.cpp")
+            callback(env, node)
+            self.assertEqual(env.Object.call_args.kwargs, {})
+            # Other objects keep exceptions but lose the stack protector, C sources included.
+            for relative in ("lib/gui/src/mainScr.cpp", "GFX Library for Arduino/src/font.c"):
+                node = Mock()
+                node.srcnode.return_value.get_abspath.return_value = str((libdeps if not relative.startswith("lib/") else project) / relative)
+                callback(env, node)
+                self.assertEqual(env.Object.call_args.kwargs, {
+                    "CXXFLAGS": ["-std=gnu++2b", "-fexceptions", "-fno-rtti"],
+                    "CCFLAGS": ["-Os", ("-include", "include/nimble_connection_config.h"), "-fexceptions", "-fno-stack-protector"],
+                }, relative)
+
+    def test_library_identity_comes_from_the_library_root_only(self):
+        store = ".pio/open-bike-build/platformio/ENV"
+        self.assertEqual(library_name(("lib", "map_transfer", "map_transfer.cpp")), "map_transfer")
+        self.assertEqual(library_name((*store.split("/"), "libdeps", "ENV", "NimBLE-Arduino", "src", "NimBLEDevice.cpp")), "NimBLE-Arduino")
+        self.assertEqual(library_name((*store.split("/"), "packages", "framework-arduinoespressif32", "libraries", "WiFi", "src", "WiFi.cpp")), "WiFi")
+        self.assertEqual(library_name(("lib306", "GFX Library for Arduino", "display", "Arduino_CO5300.cpp.o")), "GFX Library for Arduino")
+        self.assertEqual(library_name((".pio", "open-bike-build", "platformio", "ENV", "packages", "framework-arduinoespressif32", "libraries", "Network", "src", "NetworkClient.cpp.o")), "Network")
+        for parts in (("src", "main.cpp"), ("src", "main.cpp.o"), ("FrameworkArduino", "HardwareSerial.cpp.o"),
+                      (*store.split("/"), "packages", "framework-arduinoespressif32", "cores", "esp32", "Esp.cpp"),
+                      ("maps", "lib"), ("lib",)):
+            self.assertIsNone(library_name(parts), parts)
+
+    def test_stack_protector_stays_on_input_parsing_libraries_only(self):
+        env = Mock()
+        flags = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fstack-protector"]}
+        env.get.side_effect = lambda name, default=None: flags.get(name, default)
+        # The checkout lives under directories named after protected libraries;
+        # those ancestors must never make an object count as protected.
+        project = Path("/srv/maps/WiFi/project")
+        store = project / ".pio/open-bike-build/platformio/ENV"
+        for library in STACK_PROTECTED_LIBRARIES:
+            self.assertEqual(object_overrides(env, project / "lib" / library / "src/parser.cpp", project), {}, library)
+            self.assertEqual(object_overrides(env, store / "libdeps/ENV" / library / "src/host.c", project), {}, library)
+            self.assertEqual(object_overrides(env, store / "packages/framework-arduinoespressif32/libraries" / library / "src/lib.cpp", project), {}, library)
+        without = {"CXXFLAGS": ["-std=gnu++2b"], "CCFLAGS": ["-Os", "-fno-stack-protector"]}
+        for source in ("src/main.cpp", "lib/gui/src/mainScr.cpp", "lib/power/power.c", "lib/images/src/navup.c",
+                       ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/cores/esp32/HardwareSerial.cpp",
+                       ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.cpp"):
+            self.assertEqual(object_overrides(env, project / source, project), without, source)
+        # Assembly sources and headers are left alone.
+        for source in ("src/https_server.crt.S", "lib/gui/src/gui.h"):
+            self.assertEqual(object_overrides(env, project / source, project), {}, source)
+
+    def test_stack_protector_scope_is_verified_from_symbol_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # The build directory sits under a directory named like a protected library.
+            build_dir = Path(directory).resolve() / "maps" / ".pio/build/WAVESHARE_AMOLED_175_PRODUCTION"
+            with self.assertRaisesRegex(RuntimeError, "without any built object"):
+                verify_stack_protector_scope(build_dir)
+            for library in STACK_PROTECTED_LIBRARIES:
+                write_elf_object(build_dir / f"lib0a1/{library}/{library}.cpp.o", (".text",), ("__stack_chk_fail", "__stack_chk_guard"))
+                write_elf_object(build_dir / f"lib0a1/{library}/helper.cpp.o", (".text",))
+            write_elf_object(build_dir / "src/main.cpp.o", (".text",), ("memcpy",))
+            write_elf_object(build_dir / "FrameworkArduino/HardwareSerial.cpp.o", (".text",))
+            write_elf_object(build_dir / "lib306/GFX Library for Arduino/Arduino_GFX.cpp.o", (".text",))
+            # Framework libraries are mirrored under their package path in the build directory.
+            framework = build_dir / ".pio/open-bike-build/platformio/ENV/packages/framework-arduinoespressif32/libraries"
+            write_elf_object(framework / "Wire/src/Wire.cpp.o", (".text",))
+            write_elf_object(framework / "WiFi/src/WiFi.cpp.o", (".text",), ("__stack_chk_fail",))
+            counts = verify_stack_protector_scope(build_dir)
+            self.assertEqual(counts, {
+                "protectedLibraries": len(STACK_PROTECTED_LIBRARIES),
+                "protectedObjects": 2 * len(STACK_PROTECTED_LIBRARIES) + 1,
+                "guardedObjects": len(STACK_PROTECTED_LIBRARIES) + 1,
+                "unprotectedObjects": 4,
+            })
+            self.assertEqual(sorted(elf_undefined_symbols(build_dir / "lib0a1/gpx/gpx.cpp.o")), ["__stack_chk_fail", "__stack_chk_guard"])
+            # An unprotected object that still imports the canary fails the build.
+            write_elf_object(build_dir / "lib1c8/gui/mainScr.cpp.o", (".text",), ("__stack_chk_fail",))
+            with self.assertRaisesRegex(RuntimeError, r"outside the protected libraries still use the stack protector: lib1c8/gui/mainScr\.cpp\.o"):
+                verify_stack_protector_scope(build_dir)
+            (build_dir / "lib1c8/gui/mainScr.cpp.o").unlink()
+            # A protected library whose objects lost the canary fails the build.
+            write_elf_object(build_dir / "lib0a1/gpx/gpx.cpp.o", (".text",))
+            with self.assertRaisesRegex(RuntimeError, "no longer import the stack canary: gpx"):
+                verify_stack_protector_scope(build_dir)
+            # A protected library with no object at all fails the build.
+            shutil.rmtree(build_dir / "lib0a1/gpx")
+            with self.assertRaisesRegex(RuntimeError, "without any built object: gpx"):
+                verify_stack_protector_scope(build_dir)
+
+    def test_no_exception_objects_are_verified_from_their_section_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build_dir = Path(directory).resolve()
+            gfx = build_dir / "lib306/GFX Library for Arduino"
+            with self.assertRaisesRegex(RuntimeError, "no objects"):
+                verify_no_exception_objects(build_dir)
+            write_elf_object(gfx / "Arduino_GFX.cpp.o", (".text", ".literal", ".rela.text", ".symtab", ".strtab"))
+            write_elf_object(gfx / "display/Arduino_CO5300.cpp.o", (".text.draw", ".rodata", ".debug_info"))
+            self.assertEqual(verify_no_exception_objects(build_dir), 2)
+            self.assertEqual(elf_section_names(gfx / "Arduino_GFX.cpp.o"),
+                             ["", ".text", ".literal", ".rela.text", ".symtab", ".strtab", ".shstrtab"])
+            # An unrelated library keeps its tables without failing the check.
+            write_elf_object(build_dir / "lib123/NimBLE-Arduino/NimBLEDevice.cpp.o", (".text", ".eh_frame"))
+            self.assertEqual(verify_no_exception_objects(build_dir), 2)
+            write_elf_object(gfx / "databus/Arduino_ESP32QSPI.cpp.o", (".text", ".eh_frame", ".rela.eh_frame"))
+            with self.assertRaisesRegex(RuntimeError, r"exception tables: lib306/GFX Library for Arduino/databus/Arduino_ESP32QSPI\.cpp\.o"):
+                verify_no_exception_objects(build_dir)
+            write_elf_object(gfx / "databus/Arduino_ESP32QSPI.cpp.o", (".text", ".gcc_except_table.fn", ".literal"))
+            with self.assertRaisesRegex(RuntimeError, "exception tables"):
+                verify_no_exception_objects(build_dir)
+            (gfx / "databus/Arduino_ESP32QSPI.cpp.o").write_bytes(b"not an object")
+            with self.assertRaisesRegex(ValueError, "not a 32-bit little-endian ELF"):
+                verify_no_exception_objects(build_dir)
+
     def test_identity_header_changes_only_metadata_compilation(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
@@ -98,6 +246,9 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             env.Clone.return_value.Object.return_value = [Mock()]
             self.assertIs(callback(env, metadata), env.Clone.return_value.Object.return_value[0])
             clone = env.Clone.return_value
+            # The metadata object is outside the protected set, so the identity
+            # environment also drops the stack protector.
+            self.assertEqual(clone.Object.call_args.kwargs, {"CXXFLAGS": [], "CCFLAGS": ["-fno-stack-protector"]})
             self.assertEqual(clone.Depends.call_count, 2)
             header = Path(clone.Depends.call_args.args[1])
             before = header.read_text()

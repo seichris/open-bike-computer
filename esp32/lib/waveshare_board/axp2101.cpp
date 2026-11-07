@@ -5,11 +5,23 @@
 
 #include "axp2101.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
-
 #include "i2c_bus.hpp"
 #include "axp2101_register_policy.hpp"
 #include "waveshare_board.hpp"
+#include "../board/board.hpp"
+
+// The one-way display-enable recovery exists only on a board whose PMIC policy
+// allows it (board::power::displayEnableRecovery) and only in profiles that
+// request it with WAVESHARE_206_FORCE_AXP_DISPLAY. Every other build keeps
+// the read-only policy.
+#if defined(WAVESHARE_206_FORCE_AXP_DISPLAY) && WAVESHARE_206_FORCE_AXP_DISPLAY
+#if !BOARD_PMIC_DISPLAY_ENABLE_RECOVERY
+#error "WAVESHARE_206_FORCE_AXP_DISPLAY requested on a board without display-enable recovery"
+#endif
+#define AXP2101_DISPLAY_ENABLE_RECOVERY 1
+#else
+#define AXP2101_DISPLAY_ENABLE_RECOVERY 0
+#endif
 
 namespace waveshare_board::axp2101 {
 
@@ -214,14 +226,14 @@ bool initializePowerState() {
       panelPower.enableChanged ? 1 : 0, panelPower.voltageChanged ? 1 : 0);
   return read && powerConfigured;
 #endif
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
   Serial.println("Probing AXP2101 with 2.06 display-enable-only recovery...");
 #else
   Serial.println("Probing AXP2101 without changing output rails...");
 #endif
   if (!begin()) {
     Serial.println("AXP2101 not found");
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
     Serial.println("BOOT_PMIC schema=1 mode=display-enable-only available=0 "
                    "railState=unknown displayRecovery=0 "
                    "powerButtonOffConfigured=0 powerButtonConfigRead=0");
@@ -262,7 +274,7 @@ bool initializePowerState() {
         static_cast<unsigned>(requestedPowerButtonOffLevel),
         static_cast<unsigned>(observedPowerButtonOffLevel), powerButtonConfig);
   }
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
   const char *bootPmicMode = powerButtonOffConfigured
                                  ? "display-enable-only"
                                  : "power-button-config-failed";
@@ -275,7 +287,7 @@ bool initializePowerState() {
   uint8_t ldoEnable = 0;
   bool ldoReadOk = readRegister(AXP2101_LDO_ENABLE_REG, ldoEnable);
   const bool statusReadOk = readPowerStatus(status);
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
   i2c::Axp2101DisplayEnableResult displayEnable;
   const bool displayRecoveryOk =
       i2c::ensureAxp2101DisplayEnabled(displayEnable);
@@ -289,7 +301,7 @@ bool initializePowerState() {
                 displayEnable.before, displayEnable.after);
 #endif
   if (statusReadOk) {
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
     Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
                   "status1=0x%02X status2=0x%02X vbus=%s battery=%s "
                   "currentDir=%u charge=%u ldo=0x%02X ldoRead=%d\n",
@@ -343,7 +355,7 @@ bool initializePowerState() {
                   powerButtonConfigReadOk ? 1 : 0, powerButtonConfig);
 #endif
   } else {
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
     Serial.printf("AXP2101: preserving every non-display PMIC rail bit; "
                   "status read failed ldo=0x%02X ldoRead=%d\n",
                   ldoEnable, ldoReadOk ? 1 : 0);
@@ -380,7 +392,7 @@ bool initializePowerState() {
                   powerButtonConfigReadOk ? 1 : 0, powerButtonConfig);
 #endif
   }
-#if defined(WAVESHARE_AMOLED_206) && defined(WAVESHARE_206_FORCE_AXP_DISPLAY)
+#if AXP2101_DISPLAY_ENABLE_RECOVERY
   return displayRecoveryOk && powerButtonOffConfigured;
 #else
   return powerButtonOffConfigured;
@@ -388,5 +400,3 @@ bool initializePowerState() {
 }
 
 } // namespace waveshare_board::axp2101
-
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

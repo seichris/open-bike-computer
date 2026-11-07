@@ -21,14 +21,11 @@
 #include "../power_management/power_management.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
-#endif
 #include "../../utils/src/touchInterruptGate.hpp"
 
-#ifdef USE_ARDUINO_GFX
 
 #include <cstring>
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
@@ -48,9 +45,10 @@
 extern void appDisplayFlushCompleted();
 extern void appRemoteDebugPointerActivity();
 
-// Define Global Variables declared extern in hal.hpp
-uint8_t GPS_TX = GPIO_NUM_43;
-uint8_t GPS_RX = GPIO_NUM_44;
+// Runtime copies of the board's GNSS UART pads, declared extern in hal.hpp;
+// settings.cpp may override them from the preferences store.
+uint8_t GPS_TX = board::gnss::tx;
+uint8_t GPS_RX = board::gnss::rx;
 
 // ============================================================================
 // DISPLAY CONFIGURATION (Arduino_GFX)
@@ -1336,20 +1334,13 @@ void setupLVGLforArduinoGFX() {
 
   Serial.println("✓ LVGL 9 Display registered");
 
-#ifndef DISABLE_TOUCH
   // Initialize touch driver using LVGL 9 API
   lv_indev_t *indev_drv = lv_indev_create();
   lv_indev_set_type(indev_drv, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev_drv, my_touchpad_read);
 
   Serial.println("✓ LVGL 9 Touch driver registered");
-#else
-  Serial.println(
-      "! TOUCH DISABLED via DISABLE_TOUCH flag (Required for SD Card usage)");
-#endif
   Serial.println("LVGL 9 initialized with Arduino_GFX");
 }
 
-#endif // USE_ARDUINO_GFX
-
-#endif
+#endif  // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

@@ -36,7 +36,12 @@ def flags(target):
 
 PLATFORM_DEFINES = ('ARDUINO=10812', 'ARDUINO_ARCH_ESP32', 'ESP_PLATFORM',
                     'BOARD_HAS_PSRAM', 'MBEDTLS_VERSION_NUMBER=0x03000000',
-                    'MBEDTLS_VERSION_MAJOR=3', 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1')
+                    'MBEDTLS_VERSION_MAJOR=3', 'CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1',
+                    # FreeRTOS run-time statistics on the esp_timer clock: the
+                    # Arduino core's ESP32-S3 sdkconfig, shared by every regular
+                    # profile and overridden by none.
+                    'CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=1',
+                    'CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=1')
 # Separate host/diagnostic experiments and the isolated, manually built POI
 # qualification signer, absent from every regular CI profile.
 UNDEFINED_IN_REGULAR_PROFILES = {'DEVICE_OWNERSHIP_HOST_TEST', 'BLE_DEV_RANDOM_IDENTITY',

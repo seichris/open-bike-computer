@@ -16,7 +16,6 @@
 void loadMainScreen();
 
 static void back(lv_event_t *event);
-static void touchCalib(lv_event_t *event);
 static void compassCalib(lv_event_t *event);
 static void mapSettings(lv_event_t *event);
 static void deviceSettings(lv_event_t *event);

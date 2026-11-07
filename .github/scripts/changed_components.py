@@ -55,6 +55,7 @@ FIRMWARE_RENDER_TEST_PATHS = {
 }
 FIRMWARE_HOST_PATH_PREFIXES = (
     ".github/actions/firmware-build-cache/",
+    ".github/actions/free-runner-disk/",
     ".github/actions/require-immutable-releases/",
     ".github/actions/require-firmware-release-controls/",
 )
@@ -155,6 +156,8 @@ SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
 CHECK_REGISTRY = "tools/development/checks.json"
+# These operators have behavioral tests in the always-run development suite.
+DEVELOPMENT_ONLY_PATHS = {"tools/social-demo"}
 IOS_FAST_ONLY_PATHS = {
     "tools/development/swift-sources.json", "tools/development/swift_compile.py",
     "tools/replay_scenario.py", "ios-app/tests/scenario-replay/main.swift",
@@ -212,7 +215,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
             # consumer mapping is required; neither a green skip nor full CI is
             # a substitute for that decision.
             if (path.startswith(("tools/", "protocol/", ".github/"))
-                    and not path.endswith(".md") and path != CHECK_REGISTRY
+                    and not path.endswith(".md") and path != CHECK_REGISTRY and path not in DEVELOPMENT_ONLY_PATHS
                     and not path.startswith(("tools/development/tests/", ".github/scripts/tests/"))
                     and not any(_classify_known_paths([path], registry_components=registry_components).values())):
                 raise ValueError(f'unclassified CI input: {path}; add an explicit consumer mapping')
@@ -254,9 +257,10 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         elif path.startswith("tools/development/") and not path.startswith("tools/development/tests/"):
             return {component: True for component in COMPONENTS}
 
-        if (path.startswith(".github/actions/firmware-build-cache/")
+        if (path.startswith((".github/actions/firmware-build-cache/", ".github/actions/free-runner-disk/"))
                 or path == ".github/scripts/firmware_core_artifact.py"):
-            # Every firmware build restores through these; host tests cover their unit tests.
+            # Every firmware build frees the runner disk and restores through
+            # these; host tests cover their unit and workflow-policy tests.
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 

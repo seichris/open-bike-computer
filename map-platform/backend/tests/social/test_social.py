@@ -202,6 +202,34 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [])
         self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['outgoing'], [])
 
+    def test_friend_sharing_renewal_rotates_epoch_and_restarts_sequence(self):
+        self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
+        consent = self.enable_friend_sharing().json()
+        state = self.friend_state({self.ids['bob']: consent['epoch']}, sequence=100)
+        published = self.call('alice', 'POST', '/friend-sharing/state', state)
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertEqual(published.json()['accepted'], [self.ids['bob']])
+
+        # The demo renews 30 seconds before expiry and restarts its sequence.
+        # Exercise the real API twice, without disabling consent in between.
+        for _ in range(2):
+            self.clock = consent['sharingExpiresAt'] - 30
+            renewed = self.enable_friend_sharing()
+            self.assertEqual(renewed.status_code, 200, renewed.text)
+            renewed = renewed.json()
+            self.assertTrue(renewed['sharing'])
+            self.assertNotEqual(renewed['epoch'], consent['epoch'])
+            self.assertEqual(renewed['sharingExpiresAt'], self.clock + 4*3600)
+            stale = self.friend_state({self.ids['bob']: consent['epoch']}, sequence=101)
+            self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', stale).json()['accepted'], [])
+            state = self.friend_state({self.ids['bob']: renewed['epoch']}, sequence=0)
+            published = self.call('alice', 'POST', '/friend-sharing/state', state)
+            self.assertEqual(published.status_code, 200, published.text)
+            self.assertEqual(published.json()['accepted'], [self.ids['bob']])
+            self.assertEqual(self.call('bob', 'GET', '/friend-sharing').json()['riders'][0]['sequence'], 0)
+            self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [])
+            consent = renewed
+
     def test_friend_sharing_stop_epochs_replays_and_rollout(self):
         self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
         path = f"/friend-sharing/{self.ids['bob']}/consent"

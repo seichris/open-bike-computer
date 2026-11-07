@@ -57,10 +57,10 @@ current image onto a board with the older 3 MiB/6 MiB generation does move FFat;
 see [partition layouts](partition-layout-migration.md) before doing so. OTA
 release artifacts continue to use only the production layout. Production builds
 must retain at least 64 KiB in each application slot; the locked build helper
-rejects an image that merely fits but leaves less reserve. The two embedded horn recordings are
-stored as mono PCM and expanded to their original identical-channel stereo
-streams during playback. The unused rotating-bell recording was removed; sound
-ID `3` remains reserved so older clients and persisted settings fail closed.
+rejects an image that merely fits but leaves less reserve. The embedded horn
+recordings were removed in November 2026, after the unused rotating-bell
+recording; sound IDs `2`, `3` and `5` remain reserved so older clients and
+persisted settings fail closed.
 
 Each production profile keeps the canonical hardware target in firmware
 metadata (`WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206`). The profile suffix

@@ -16,6 +16,13 @@ int main() {
                 world_radio_config::ENABLED);
   static_assert(!route_elevation_config::supportsClient(31));
   static_assert(route_elevation_config::supportsClient(32) == route_elevation_config::ENABLED);
+#if defined(ROUTE_ELEVATION_SCREEN)
+  static_assert(route_elevation_config::ENABLED == (ROUTE_ELEVATION_SCREEN != 0));
+#elif defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  static_assert(route_elevation_config::ENABLED);
+#else
+  static_assert(!route_elevation_config::ENABLED);
+#endif
   constexpr uint8_t expectedSupported = static_cast<uint8_t>(
       0x1F | (world_radio_config::ENABLED ? 0x20 : 0) |
       (route_elevation_config::ENABLED ? 0x40 : 0) |

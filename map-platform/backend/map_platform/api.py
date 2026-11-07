@@ -105,7 +105,11 @@ from .source_cache import (
     default_backend_data_root,
 )
 from .sources import SourceIndex
-from .topography_sources import load_topography_source_policy, require_production_topography_approval
+from .topography_sources import (
+    load_topography_source_policy,
+    require_production_topography_approval,
+    topography_generation_enabled,
+)
 from .strava_client import StravaTransport
 from .strava_integrations import (
     StravaIntegrationError,
@@ -672,7 +676,11 @@ def create_app(
             "status": "ok",
             "deploymentChannel": deployment_channel,
             "generationProfilePolicySha256": generation_profile_policy.sha256,
-            "topography": topography_source_policy.public_summary(),
+            "topography": topography_source_policy.public_summary(
+                generation_enabled=topography_generation_enabled(
+                    generation_profile_policy, topography_source_policy, deployment_channel,
+                ),
+            ),
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
             "admissionPolicyVersion": admission_policy.policy_version,

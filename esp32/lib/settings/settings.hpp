@@ -24,9 +24,6 @@ struct MapSettings {
   bool showMapScale;    // Scale in map screen
 };
 
-#ifndef USE_ARDUINO_GFX
-#include <EasyPreferences.hpp>
-#else
 // Dummy enums and constants for Arduino_GFX compatibility
 enum class PKEYS {
   KCOMP_OFFSET_X,
@@ -118,16 +115,12 @@ public:
 };
 
 extern EasyPreferencesDummy cfg;
-#endif
 // These headers participate in gps/settings/GUI dependency cycles. Resolve
 // direct dependencies explicitly, not via LDF's traversal-dependent -I set.
 #include "../battery/battery.hpp"
 #include "../gps/gps.hpp"
 #include "../tft/tft.hpp"
 #include <NMEAGPS.h>
-#ifndef DISABLE_COMPASS
-#include "compass.hpp"
-#endif
 
 extern uint8_t minZoom;       // Min Zoom Level
 extern uint8_t maxZoom;       // Max Zoom Level
@@ -150,8 +143,6 @@ extern uint16_t speedPosX;    // Speed widget position X
 extern uint16_t speedPosY;    // Speed widget position Y
 extern uint16_t sunPosX;      // Sunrise/sunset position X
 extern uint16_t sunPosY;      // Sunrise/sunset position Y
-extern bool enableWeb;        // Enable/disable web file server
-extern int8_t tempOffset;     // BME Temperature offset
 extern bool calculateDST;     // Calculate DST flag
 
 extern MapSettings mapSet;

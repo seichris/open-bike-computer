@@ -1,4 +1,5 @@
 #include "device_transfer_http.hpp"
+#include "transfer_link_grace_policy.hpp"
 #include "commit_boundary_policy.hpp"
 #include "lifecycle_resource_event.hpp"
 #include "renderer_stack_metrics.hpp"
@@ -301,20 +302,110 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
   if (sessionId == 0)
     return false;
   lockState();
-  if (enabled_ && authenticatedBleSessionId_ != 0 &&
-      authenticatedBleSessionId_ != sessionId) {
+  switch (transfer_link_grace_policy::rebind(enabled_, bleLinkGraceActive_,
+                                             authenticatedBleSessionId_,
+                                             sessionId)) {
+  case transfer_link_grace_policy::Rebind::Reject:
     rememberError("ble_session_changed", "BLE owner changed");
     unlockState();
     return false;
-  }
-  if (authenticatedBleSessionId_ != sessionId) {
+  case transfer_link_grace_policy::Rebind::Keep:
+    break;
+  case transfer_link_grace_policy::Rebind::Adopt:
+    // The owner is back inside the grace window: the token, the generation
+    // and any in-flight request stay valid on the new BLE session.
+    authenticatedBleSessionId_ = sessionId;
+    bleLinkGraceActive_ = false;
+    bleLinkGraceDeadlineMs_ = 0;
+    bleLinkGraceLossMs_ = 0;
+    break;
+  case transfer_link_grace_policy::Rebind::Rotate:
     authenticatedBleSessionId_ = sessionId;
     if (enabled_ && sessionToken_.empty())
       sessionToken_ = generateSessionToken();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    break;
   }
   unlockState();
   return true;
+}
+
+transfer_link_grace_policy::LinkLoss
+HttpTransferServer::suspendOwnerBleSessionForLinkLoss(uint32_t nowMs,
+                                                      bool linkWasAuthenticated,
+                                                      bool firmwareRequested) {
+  lockState();
+  const bool starts =
+      !bleLinkGraceActive_ &&
+      transfer_link_grace_policy::startsGrace(
+          enabled_, authenticatedBleSessionId_, commitBoundary_.active(),
+          false, mode_, linkWasAuthenticated, firmwareRequested);
+  const transfer_link_grace_policy::LinkLoss result =
+      transfer_link_grace_policy::linkLoss(bleLinkGraceActive_, starts);
+  if (result == transfer_link_grace_policy::LinkLoss::Started) {
+    bleLinkGraceActive_ = true;
+    bleLinkGraceDeadlineMs_ = nowMs + transfer_link_grace_policy::graceMs;
+    bleLinkGraceLossMs_ = nowMs;
+  }
+  unlockState();
+  return result;
+}
+
+bool HttpTransferServer::bleLinkGraceActive() const {
+  lockState();
+  const bool active = bleLinkGraceActive_;
+  unlockState();
+  return active;
+}
+
+uint32_t HttpTransferServer::extendBleLinkGraceForLink(uint32_t nowMs) {
+  lockState();
+  uint32_t remainingMs = 0;
+  // An expired window waits for process() to tear the session down; a link
+  // arriving in that gap must not revive it.
+  if (bleLinkGraceActive_ &&
+      !transfer_link_grace_policy::graceExpired(nowMs,
+                                                bleLinkGraceDeadlineMs_)) {
+    bleLinkGraceDeadlineMs_ = transfer_link_grace_policy::extendedDeadlineMs(
+        nowMs, bleLinkGraceLossMs_, bleLinkGraceDeadlineMs_);
+    remainingMs = transfer_link_grace_policy::isAfter(bleLinkGraceDeadlineMs_,
+                                                      nowMs)
+                      ? bleLinkGraceDeadlineMs_ - nowMs
+                      : 0;
+  }
+  unlockState();
+  return remainingMs;
+}
+
+uint32_t HttpTransferServer::bleLinkGraceElapsedMs(uint32_t nowMs) const {
+  lockState();
+  const uint32_t elapsedMs =
+      bleLinkGraceActive_ ? nowMs - bleLinkGraceLossMs_ : 0;
+  unlockState();
+  return elapsedMs;
+}
+
+bool HttpTransferServer::expireBleLinkGraceIfDue(uint32_t nowMs) {
+  lockState();
+  const bool due =
+      bleLinkGraceActive_ &&
+      transfer_link_grace_policy::graceExpired(nowMs, bleLinkGraceDeadlineMs_);
+  if (due) {
+    bleLinkGraceActive_ = false;
+    bleLinkGraceDeadlineMs_ = 0;
+    bleLinkGraceLossMs_ = 0;
+  }
+  unlockState();
+  if (due)
+    clearAuthenticatedBleSession();
+  return due;
+}
+
+bool HttpTransferServer::isSessionEnabled() const {
+  lockState();
+  const bool enabled = enabled_;
+  unlockState();
+  return enabled;
 }
 
 bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
@@ -324,6 +415,9 @@ bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
     return false;
   }
   authenticatedBleSessionId_ = 0;
+  bleLinkGraceActive_ = false;
+  bleLinkGraceDeadlineMs_ = 0;
+  bleLinkGraceLossMs_ = 0;
   sessionToken_.clear();
   currentRequestAuthorized_ = false;
   transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
@@ -338,6 +432,9 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   const bool wasEnabled = enabled_;
   const bool commitInProgress = commitBoundary_.active();
   authenticatedBleSessionId_ = 0;
+  bleLinkGraceActive_ = false;
+  bleLinkGraceDeadlineMs_ = 0;
+  bleLinkGraceLossMs_ = 0;
   if (commitInProgress) {
     // The authenticated request already crossed the serialized activation
     // boundary. A coincident BLE disconnect must not interrupt boot selection
@@ -1746,14 +1843,99 @@ void HttpTransferServer::signalStatusChanged() {
     callback();
 }
 
-void HttpTransferServer::lockState() const {
-  if (stateMutex_ != nullptr)
-    xSemaphoreTake(stateMutex_, portMAX_DELAY);
+// `transfer state_lock`: the server's state mutex waited for (`wait`: the
+// task in `origin` waited while the task in `state` held it) or held
+// (`held`: by the task in `state`) for 100 ms or more. `code` is the address
+// of the call that took the lock, for addr2line against the build's ELF. The
+// NimBLE host task takes this lock from the transfer-status write callback,
+// so a long hold by the HTTP worker or the loop task delays the phone's write
+// response. Both records are written by unlockState() after the give, so the
+// recorder (a zero-wait producer take, never blocking) is never entered under
+// this lock. Below the one-second warning level at most one record per phase
+// and second is kept.
+static constexpr uint32_t kStateLockReportMs = 100;
+static constexpr uint32_t kStateLockWarningMs = 1000;
+static uint32_t stateLockLastReportMs[2] = {0, 0};
+
+static uintptr_t callSiteAddress(const void *returnAddress) {
+  uintptr_t pc = reinterpret_cast<uintptr_t>(returnAddress);
+#if defined(__XTENSA__)
+  // Windowed-call return addresses carry the window increment in the top bits;
+  // the call instruction itself sits three bytes before the return address.
+  if ((pc & 0x80000000U) != 0)
+    pc = (pc & 0x3fffffffU) | 0x40000000U;
+  if (pc >= 3)
+    pc -= 3;
+#endif
+  return pc;
 }
 
-void HttpTransferServer::unlockState() const {
-  if (stateMutex_ != nullptr)
-    xSemaphoreGive(stateMutex_);
+static void recordStateLock(bool held, uint32_t durationMs,
+                            TaskHandle_t holder, const void *site) {
+  const uint32_t nowMs = millis();
+  uint32_t &lastReportMs = stateLockLastReportMs[held ? 1 : 0];
+  if (durationMs < kStateLockWarningMs && lastReportMs != 0 &&
+      static_cast<uint32_t>(nowMs - lastReportMs) < 1000)
+    return;
+  lastReportMs = nowMs == 0 ? 1 : nowMs;
+  const char *holderName = holder == nullptr ? "none" : pcTaskGetName(holder);
+  const char *selfName = pcTaskGetName(nullptr);
+  char fields[192] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"durationMs\":%lu,\"state\":\"%s\","
+      "\"origin\":\"%s\",\"code\":\"0x%08lx\"}",
+      held ? "held" : "wait", static_cast<unsigned long>(durationMs),
+      holderName == nullptr ? "unknown" : holderName,
+      selfName == nullptr ? "unknown" : selfName,
+      static_cast<unsigned long>(callSiteAddress(site)));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(durationMs >= kStateLockWarningMs
+                                       ? ride_diagnostics::Level::Warning
+                                       : ride_diagnostics::Level::Info,
+                                   "transfer", "state_lock", fields);
+  }
+}
+
+// Not inlined: the recorded call site is this function's return address.
+__attribute__((noinline)) void HttpTransferServer::lockState() const {
+  if (stateMutex_ == nullptr)
+    return;
+  uint32_t waitedMs = 0;
+  TaskHandle_t holder = nullptr;
+  const void *holderSite = nullptr;
+  if (xSemaphoreTake(stateMutex_, 0) != pdTRUE) {
+    holder = xSemaphoreGetMutexHolder(stateMutex_);
+    holderSite = stateLockSite_;
+    const uint32_t startedMs = millis();
+    xSemaphoreTake(stateMutex_, portMAX_DELAY);
+    waitedMs = millis() - startedMs;
+  }
+  // The wait is kept for unlockState(): nothing is recorded under the lock.
+  stateLockedMs_ = millis();
+  stateLockSite_ = __builtin_return_address(0);
+  stateLockWaitMs_ = waitedMs;
+  stateLockWaitHolder_ = holder;
+  stateLockWaitSite_ = holderSite;
+}
+
+__attribute__((noinline)) void HttpTransferServer::unlockState() const {
+  if (stateMutex_ == nullptr)
+    return;
+  const uint32_t heldMs = millis() - stateLockedMs_;
+  const void *site = stateLockSite_;
+  const uint32_t waitedMs = stateLockWaitMs_;
+  const TaskHandle_t waitHolder = stateLockWaitHolder_;
+  const void *waitSite = stateLockWaitSite_;
+  stateLockSite_ = nullptr;
+  stateLockWaitMs_ = 0;
+  stateLockWaitHolder_ = nullptr;
+  stateLockWaitSite_ = nullptr;
+  xSemaphoreGive(stateMutex_);
+  if (waitedMs >= kStateLockReportMs)
+    recordStateLock(false, waitedMs, waitHolder, waitSite);
+  if (heldMs >= kStateLockReportMs)
+    recordStateLock(true, heldMs, xTaskGetCurrentTaskHandle(), site);
 }
 
 void HttpTransferServer::lockTlsIdentity() const {

@@ -1,249 +1,50 @@
 /**
  * @file hal.hpp
- * @author Jordi Gauchía (jgauchia@jgauchia.com)
- * @brief  Boards Pin definitions
- * @version 0.2.2
- * @date 2025-05
+ * @brief Board pin names kept for existing code.
+ *
+ * The values live in the selected board definition under lib/board/boards/.
+ * New code reads board:: directly; these names remain until their users move.
  */
 
 #pragma once
 
-/**
- * @brief ICENAV BOARD pin definition
- *
- */
-#ifdef ICENAV_BOARD
-#define I2C_SDA_PIN GPIO_NUM_38
-#define I2C_SCL_PIN GPIO_NUM_39
+#include "../lib/board/board.hpp"
 
-uint8_t GPS_TX = GPIO_NUM_43;
-uint8_t GPS_RX = GPIO_NUM_44;
+// I2C bus shared by the PMIC, touch controller, RTC and IMU.
+#define I2C_SDA_PIN (static_cast<gpio_num_t>(board::i2c::sda))
+#define I2C_SCL_PIN (static_cast<gpio_num_t>(board::i2c::scl))
 
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-extern const uint8_t SD_CS = GPIO_NUM_1;
-extern const uint8_t SD_MISO = GPIO_NUM_41;
-extern const uint8_t SD_MOSI = GPIO_NUM_2;
-extern const uint8_t SD_CLK = GPIO_NUM_42;
-#endif
-
-/**
- * @brief LilyGO T-DECK BOARD pin definition
- *
- */
-#ifdef TDECK_ESP32S3
-#define I2C_SDA_PIN GPIO_NUM_18
-#define I2C_SCL_PIN GPIO_NUM_8
-#define BOARD_POWERON GPIO_NUM_10
-
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-uint8_t GPS_TX = GPIO_NUM_43;
-uint8_t GPS_RX = GPIO_NUM_44;
-
-extern const uint8_t TFT_SPI_CS = GPIO_NUM_12;
-extern const uint8_t RADIO_CS_PIN = GPIO_NUM_9;
-extern const uint8_t SPI_MISO = GPIO_NUM_38;
-
-extern const uint8_t SD_CS = GPIO_NUM_39;
-extern const uint8_t SD_MISO = GPIO_NUM_38;
-extern const uint8_t SD_MOSI = GPIO_NUM_41;
-extern const uint8_t SD_CLK = GPIO_NUM_40;
-#endif
-
-/**
- * @brief ELECROW ESP32 Terminal BOARD pin definition
- *
- */
-#ifdef ELECROW_ESP32
-#define I2C_SDA_PIN GPIO_NUM_38
-#define I2C_SCL_PIN GPIO_NUM_39
-
-// UART PORT
-// uint8_t GPS_TX = GPIO_NUM_44;  // UART PIN Terminal Port
-// uint8_t GPS_RX = GPIO_NUM_43;  // UART PIN Terminal Port
-// Alternative to UART PORT
-uint8_t GPS_TX = GPIO_NUM_40; // Analog PIN Terminal Port
-uint8_t GPS_RX = GPIO_NUM_19; // Digital PIN Terminal Port
-
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-extern const uint8_t SD_CS = GPIO_NUM_1;
-extern const uint8_t SD_MISO = GPIO_NUM_41;
-extern const uint8_t SD_MOSI = GPIO_NUM_2;
-extern const uint8_t SD_CLK = GPIO_NUM_42;
-#endif
-
-/**
- * @brief MAKERFABS ESP32S3 BOARD pin definition
- *
- */
-#ifdef MAKERF_ESP32S3
-#define I2C_SDA_PIN GPIO_NUM_38
-#define I2C_SCL_PIN GPIO_NUM_39
-
-uint8_t GPS_TX = GPIO_NUM_17;
-uint8_t GPS_RX = GPIO_NUM_18;
-
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-extern const uint8_t SD_CS = GPIO_NUM_1;
-extern const uint8_t SD_MISO = GPIO_NUM_41;
-extern const uint8_t SD_MOSI = GPIO_NUM_2;
-extern const uint8_t SD_CLK = GPIO_NUM_42;
-#endif
-
-/**
- * @brief ESP32_N16R4 BOARD pin definition
- *
- */
-#ifdef ESP32_N16R4
-#define I2C_SDA_PIN GPIO_NUM_38
-#define I2C_SCL_PIN GPIO_NUM_39
-
-uint8_t GPS_TX = GPIO_NUM_25;
-uint8_t GPS_RX = GPIO_NUM_26;
-
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-extern const uint8_t TFT_SPI_SCLK = GPIO_NUM_14;
-extern const uint8_t TFT_SPI_MOSI = GPIO_NUM_13;
-extern const uint8_t TFT_SPI_MISO = GPIO_NUM_27;
-extern const uint8_t TFT_SPI_DC = GPIO_NUM_15;
-extern const uint8_t TFT_SPI_CS = GPIO_NUM_2;
-extern const uint8_t TFT_SPI_RST = GPIO_NUM_32;
-
-extern const uint8_t TCH_SPI_SCLK = GPIO_NUM_14;
-extern const uint8_t TCH_SPI_MOSI = GPIO_NUM_13;
-extern const uint8_t TCH_SPI_MISO = GPIO_NUM_27;
-extern const uint8_t TCH_SPI_INT = GPIO_NUM_5;
-extern const uint8_t TCH_SPI_CS = GPIO_NUM_18;
-
-extern const uint8_t TCH_I2C_PORT = 0;
-extern const uint8_t TCH_I2C_SDA = GPIO_NUM_38;
-extern const uint8_t TCH_I2C_SCL = GPIO_NUM_39;
-extern const uint8_t TCH_I2C_INT = GPIO_NUM_40;
-
-extern const uint8_t SD_CS = GPIO_NUM_4;
-extern const uint8_t SD_MISO = GPIO_NUM_19;
-extern const uint8_t SD_MOSI = GPIO_NUM_23;
-extern const uint8_t SD_CLK = GPIO_NUM_12;
-#endif
-
-/**
- * @brief ESP32S3_N16R8 BOARD pin definition
- *
- */
-#ifdef ESP32S3_N16R8
-#define I2C_SDA_PIN GPIO_NUM_38
-#define I2C_SCL_PIN GPIO_NUM_39
-
-uint8_t GPS_TX = GPIO_NUM_17;
-uint8_t GPS_RX = GPIO_NUM_18;
-
-extern const uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-
-extern const uint8_t TFT_SPI_SCLK = GPIO_NUM_12;
-extern const uint8_t TFT_SPI_MOSI = GPIO_NUM_11;
-extern const uint8_t TFT_SPI_MISO = GPIO_NUM_13;
-extern const uint8_t TFT_SPI_DC = GPIO_NUM_3;
-extern const uint8_t TFT_SPI_CS = GPIO_NUM_10;
-extern const uint8_t TFT_SPI_RST = GPIO_NUM_6;
-
-extern const uint8_t TCH_SPI_SCLK = GPIO_NUM_12;
-extern const uint8_t TCH_SPI_MOSI = GPIO_NUM_11;
-extern const uint8_t TCH_SPI_MISO = GPIO_NUM_13;
-extern const uint8_t TCH_SPI_INT = GPIO_NUM_5;
-extern const uint8_t TCH_SPI_CS = GPIO_NUM_4;
-
-extern const uint8_t TCH_I2C_PORT = 0;
-extern const uint8_t TCH_I2C_SDA = GPIO_NUM_38;
-extern const uint8_t TCH_I2C_SCL = GPIO_NUM_39;
-extern const uint8_t TCH_I2C_INT = GPIO_NUM_40;
-
-extern const uint8_t SD_CS = GPIO_NUM_21;
-extern const uint8_t SD_MISO = GPIO_NUM_13;
-extern const uint8_t SD_MOSI = GPIO_NUM_11;
-extern const uint8_t SD_CLK = GPIO_NUM_12;
-#endif
-
-/**
- * @brief TFT Invert color
- *
- */
-constexpr bool TFT_INVERT = true;
-
-/**
- * @brief WAVESHARE ESP32-S3 AMOLED pin definitions.
- * Corrected from official Waveshare schematics/examples.
- */
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-// I2C Bus (Shared by AXP2101, CST9217, TCA9554, RTC, IMU)
-#define I2C_SDA_PIN GPIO_NUM_15
-#define I2C_SCL_PIN GPIO_NUM_14
-
-// GPS UART
+// GPS UART pads; the values are defined beside the panel driver.
 extern uint8_t GPS_TX;
 extern uint8_t GPS_RX;
 
-constexpr uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
+constexpr uint8_t BOARD_BOOT_PIN = board::buttons::boot;
 
-// Display Pins (CO5300 QSPI Driver)
-constexpr uint8_t TFT_QSPI_CS = GPIO_NUM_12;
-#ifdef WAVESHARE_AMOLED_206
-constexpr uint8_t TFT_QSPI_CLK = GPIO_NUM_11;
-constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_8;
-#else
-constexpr uint8_t TFT_QSPI_CLK = GPIO_NUM_38;
-constexpr uint8_t TFT_QSPI_RST = GPIO_NUM_39;
-#endif
-constexpr uint8_t TFT_QSPI_D0 = GPIO_NUM_4;
-constexpr uint8_t TFT_QSPI_D1 = GPIO_NUM_5;
-constexpr uint8_t TFT_QSPI_D2 = GPIO_NUM_6;
-constexpr uint8_t TFT_QSPI_D3 = GPIO_NUM_7;
+// Display pins (CO5300 QSPI driver).
+constexpr uint8_t TFT_QSPI_CS = board::display::cs;
+constexpr uint8_t TFT_QSPI_CLK = board::display::clk;
+constexpr uint8_t TFT_QSPI_RST = board::display::reset;
+constexpr uint8_t TFT_QSPI_D0 = board::display::d0;
+constexpr uint8_t TFT_QSPI_D1 = board::display::d1;
+constexpr uint8_t TFT_QSPI_D2 = board::display::d2;
+constexpr uint8_t TFT_QSPI_D3 = board::display::d3;
 
-// Touch Pins on shared I2C bus.
-constexpr uint8_t TCH_I2C_SDA = GPIO_NUM_15;
-constexpr uint8_t TCH_I2C_SCL = GPIO_NUM_14; // Same as main I2C bus
-#ifdef WAVESHARE_AMOLED_206
-constexpr uint8_t TCH_I2C_INT = GPIO_NUM_38;
-constexpr uint8_t TCH_I2C_RST = GPIO_NUM_9;
-constexpr uint8_t TCH_I2C_ADDR = 0x38; // FT3168 Address
-#else
-// Vendor schematic: TP_INT is GPIO11. GPIO21 is the QMI8658 INT2 net;
-// using it here silently loses touch events when idle polling is disabled.
-constexpr uint8_t TCH_I2C_INT = GPIO_NUM_11;
-// NOTE: Touch Reset is controlled by TCA9554 I/O Expander (0x20), NOT a GPIO!
-// Do NOT use GPIO 20 - it is USB D+ and will break serial monitor.
-constexpr uint8_t TCH_I2C_ADDR = 0x5A; // CST9217 Address (verified)
-#endif
+// Touch controller on the shared I2C bus.
+constexpr uint8_t TCH_I2C_SDA = board::i2c::sda;
+constexpr uint8_t TCH_I2C_SCL = board::i2c::scl;
+constexpr uint8_t TCH_I2C_INT = board::touch::interrupt;
+constexpr uint8_t TCH_I2C_ADDR = board::touch::address;
+// A GPIO only where board::touch::resetOnGpio is true; the 1.75 resets its
+// controller through the TCA9554 expander and routes no pin here.
+constexpr uint8_t TCH_I2C_RST = board::touch::reset;
 
-// microSD in vendor-native one-bit SDMMC mode. Both Waveshare boards route
-// the same CLK/CMD/D0 pins; their SPI CS/D3 traces are unused in one-bit mode.
-constexpr uint8_t WAVESHARE_SDMMC_CLK = GPIO_NUM_2;
-constexpr uint8_t WAVESHARE_SDMMC_CMD = GPIO_NUM_1;
-constexpr uint8_t WAVESHARE_SDMMC_D0 = GPIO_NUM_3;
+// microSD in vendor-native one-bit SDMMC mode.
+constexpr uint8_t WAVESHARE_SDMMC_CLK = board::sd::clk;
+constexpr uint8_t WAVESHARE_SDMMC_CMD = board::sd::cmd;
+constexpr uint8_t WAVESHARE_SDMMC_D0 = board::sd::d0;
 
-// Temporary migration-only SPI compatibility path. These are the former HSPI
-// pins; normal steady-state storage must use the native SDMMC constants above.
-#ifdef WAVESHARE_AMOLED_206
-constexpr uint8_t WAVESHARE_LEGACY_SD_CS = GPIO_NUM_17;
-#else
-constexpr uint8_t WAVESHARE_LEGACY_SD_CS = GPIO_NUM_41;
-#endif
-constexpr uint8_t WAVESHARE_LEGACY_SD_MOSI = GPIO_NUM_1;
-constexpr uint8_t WAVESHARE_LEGACY_SD_MISO = GPIO_NUM_3;
-constexpr uint8_t WAVESHARE_LEGACY_SD_CLK = GPIO_NUM_2;
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
-
-#if defined(WAVESHARE_EPAPER_397)
-#include "board_traits.hpp"
-#define I2C_SDA_PIN GPIO_NUM_41
-#define I2C_SCL_PIN GPIO_NUM_42
-constexpr uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
-constexpr int WAVESHARE_SDMMC_CLK = board_traits::sdClock;
-constexpr int WAVESHARE_SDMMC_CMD = board_traits::sdCommand;
-constexpr int WAVESHARE_SDMMC_D0 = board_traits::sdData;
-extern uint8_t GPS_TX;
-extern uint8_t GPS_RX;
-#endif
+// Migration-only SPI compatibility path on the former HSPI pins.
+constexpr uint8_t WAVESHARE_LEGACY_SD_CS = board::sd::legacySpiCs;
+constexpr uint8_t WAVESHARE_LEGACY_SD_MOSI = board::sd::legacySpiMosi;
+constexpr uint8_t WAVESHARE_LEGACY_SD_MISO = board::sd::legacySpiMiso;
+constexpr uint8_t WAVESHARE_LEGACY_SD_CLK = board::sd::legacySpiClk;

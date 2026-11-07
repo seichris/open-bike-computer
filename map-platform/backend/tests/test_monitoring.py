@@ -582,7 +582,12 @@ class MapMonitoringStoreTests(unittest.TestCase):
             phases,
         )
         with tempfile.TemporaryDirectory() as tmp:
-            store = MapMonitoringStore(Path(tmp) / "map-monitoring.sqlite3")
+            # The fixture job is dated 2026-08-06; the store's retention cutoff
+            # follows the wall clock, so the test keeps its own clock in range.
+            store = MapMonitoringStore(
+                Path(tmp) / "map-monitoring.sqlite3",
+                clock=lambda: 1_786_320_100,
+            )
             self.assertTrue(store.record_job(job))
             json.dumps(store.summary(), allow_nan=False)
 

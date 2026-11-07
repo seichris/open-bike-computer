@@ -552,6 +552,99 @@ or deferred pruning exposes more closed chunks, the index fails explicitly with
 `diagnostics_index_unreadable`; it never advertises a truncated subset as a
 complete inventory. Retry after the lease ends and retention runs.
 
+### BLE link loss evidence
+
+`ble ownership_lock` records a wait for the firmware's ownership mutex that
+took at least 100 ms (`reason` `waited`) or timed out (`reason` `timeout`,
+level warning): `phase` names the waiting site (`ride_command` for a ride or
+ride-automation write, `connection_reset` for a link connect or disconnect), `durationMs` the wait, and `state` the task that
+held the mutex when the wait timed out. A NimBLE callback never waits longer
+than one second, so an ATT write is answered even while another task holds the
+mutex; the rejected frame is retried by the phone.
+
+Four more probes locate a phone write that goes unanswered while the link
+stays up (the app's 15-second write timeout during a LAN transfer):
+
+- `ble host_activity` records a NimBLE callback (`phase` `settings`, `nav`,
+  `gps`, `route`, `auth`, `workout`, `ride_automation`, `screen`,
+  `maintenance_rejected`, `connect`, `disconnect`), the deferred notification
+  drain (`deferred_drain`) or the hand-off of one notification to the
+  controller (`notify`) that held the host task for a `durationMs` of 100 ms
+  or more (warning from one second). The phone's write response waits for
+  the callback to return, so this is the direct measure of a blocked
+  callback.
+- `ble lock_wait` records a wait of 100 ms or more for the map-input mutex
+  on the route, GPS and settings write path (`phase` `map_input`); `state`
+  names the task that held it and `reason` whether the wait ended with the
+  lock (`waited`) or without it (`timeout`).
+- `transfer state_lock` records the transfer server's state mutex waited for
+  (`phase` `wait`: the task in `origin` waited `durationMs` while the task in
+  `state` held it) or held (`held`, by the task in `state`) for 100 ms or
+  more; `code` is the address of the call that took the lock, resolved with
+  `xtensa-esp32s3-elf-addr2line -e firmware.elf` for the exact build. The
+  transfer-status write callback takes this lock on the host task, so a long
+  hold by `device_http` or `loopTask` delays the write response.
+- `ble host_heartbeat` is the host task's own scheduling latency: once a
+  second the esp_timer task posts an event to NimBLE's default event queue,
+  which only the host task drains. `late` (`latencyMs` of 500 ms or more),
+  `stalled` (a beat still unhandled after a second, recorded once with
+  `state` = what the host task was doing at that moment) and `resumed` (the
+  stalled beat handled, `latencyMs` = the whole delay). `durationMs` is the
+  CPU time the host task consumed during the delay: near zero while it was
+  blocked (a `lock_wait`, `state_lock` or `notify` record names the wait) or
+  starved by the Wi-Fi and controller tasks that outrank it on core 0, and
+  large while it was busy. It comes from FreeRTOS run-time statistics on the
+  microsecond esp_timer clock, which both Waveshare profiles keep; a build
+  without that clock omits the field rather than reporting zero.
+
+`ble host_heartbeat` also records `started` once per boot (the first beat:
+the timer runs, the host task drains NimBLE's queue and the probe records reach
+the recorder, so silence afterwards is a measurement) and `transfer_summary`
+when a transfer session ends: `latencyMs` is the largest heartbeat latency,
+`durationMs` the longest host-task activity and `state` its site, and
+`sampleCount` the beats handled while the session was enabled.
+
+The `ble` probes are captured where they happen and written by the loop task
+on its next pass, so their record time is the write time and `eventUptimeMs`
+the capture time; `ble probe_dropped` (`droppedCount`) means more than eight
+probe records waited for one pass. The `transfer state_lock` records are
+written by the task that releases the lock, after the release.
+
+Read them together: a stalled heartbeat with `state` `notify` and
+`host_activity` `notify` records is the controller refusing packets (the
+radio, not a lock); `state` `settings` with a `state_lock` `wait` from
+`nimble_host` is the status lock; a stalled heartbeat with `state` `idle`, no
+waits and a near-zero `durationMs` is the host task not being scheduled; and
+no records at all while the phone still times out means the write never
+reached the host, a radio-level loss.
+
+Every `ble disconnected` event of the active link carries why it ended:
+
+| Field | Meaning |
+| --- | --- |
+| `disconnectReason` | NimBLE's host status for the GAP disconnect event, `0x200` plus the HCI reason: `520` connection supervision timeout (the radio link was lost), `531` the peer ended it, `534` the firmware ended it, `546` LL response timeout, `571` unacceptable connection parameters, `574` the connection never established. `0` when the GAP event was not observed for the active link. |
+| `durationMs` | Milliseconds since the matching `ble connected` event. |
+| `state` | `authenticated` when the owner session was authenticated at the moment of the loss, otherwise `unauthenticated`. |
+| `reason` | The firmware's own cause when it requested the disconnect: `unauthenticated_deadline` (the 12-second window for an unauthenticated client, 120 seconds while pairing), `ownership_lost`, `ownership_invalidated`; `remote` when the peer, the link or the controller ended it. |
+
+Read `disconnectReason` and `reason` together: `534` with a named `reason` is a
+deliberate firmware disconnect, `520` with `remote` is a link that timed out
+under the phone's or the device's radio, and `531` with `remote` is the app
+or iOS closing the link. A map or diagnostics transfer no longer dies with the
+link: `transfer ble_link_grace` records `phase` `started` (`durationMs` = the
+15-second window) when the owner link is lost during such a session,
+`extended` (`durationMs` = the time left until the moved deadline) when a BLE
+link appears while the window is open (the deadline moves to 15 seconds from
+that link, never later than 45 seconds after the loss), `rebound`
+(`durationMs` since the loss) when the same owner re-authenticated in time, or
+`expired` (`durationMs` since the loss) when the window ran out and the
+fail-closed teardown ran. `ble connection_profile` with `state` `transfer` or
+`navigation` records the connection-parameter request firmware makes on the
+authenticated owner link while a transfer session is enabled and when it ends;
+a link that has yet to authenticate keeps the phone's own parameters, and a new link is recognised by its connect time, not only its NimBLE handle (handles are reused). A transfer that still ends with
+"connection ended after N of M bytes (network error -1005)" on the phone
+therefore pairs with an `expired` grace or with a non-transfer mode.
+
 ## I2C retry attribution on remote-debug firmware
 
 The Waveshare remote-debug profiles emit `I2C_RETRY schema=1` on USB serial

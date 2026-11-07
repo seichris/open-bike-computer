@@ -106,7 +106,7 @@ class DetectWorkerChangeTests(unittest.TestCase):
             )
         )
 
-    def test_promotion_scope_includes_policy_and_ci_inputs(self) -> None:
+    def test_promotion_scope_includes_policy_and_deploy_tool_inputs(self) -> None:
         for root in detect_worker_change.PROMOTION_INPUT_ROOTS:
             with self.subTest(root=root):
                 self.assertTrue(
@@ -116,11 +116,35 @@ class DetectWorkerChangeTests(unittest.TestCase):
             detect_worker_change.promotion_inputs_changed(
                 [
                     ".github/workflows/ci.yml",
+                    ".github/workflows/map-platform-ci.yml",
                     "docs/readme.md",
                     "map-platform/deploy/compose.yaml",
                 ]
             )
         )
+
+    def test_image_workflow_push_paths_match_promotion_scope(self) -> None:
+        # A run defers to a newer main commit that changes a promotion input,
+        # so every such commit must start its own run, and nothing else should.
+        repo_root = MODULE_PATH.parents[2]
+        lines = (repo_root / ".github/workflows/map-platform-image.yml").read_text().splitlines()
+        trigger_paths: list[str] = []
+        in_paths = False
+        for line in lines[lines.index("  push:") + 1:]:
+            if not line.startswith("    "):
+                break
+            if line == "    paths:":
+                in_paths = True
+            elif in_paths and line.startswith("      - "):
+                trigger_paths.append(line.removeprefix("      - ").strip('"'))
+            else:
+                in_paths = False
+        expected = [
+            f"{root}/**" if (repo_root / root).is_dir() else root
+            for root in detect_worker_change.PROMOTION_INPUT_ROOTS
+        ]
+        self.assertEqual(len(trigger_paths), len(set(trigger_paths)))
+        self.assertEqual(sorted(expected), sorted(trigger_paths))
 
     def test_unknown_git_range_is_conservative(self) -> None:
         self.assertIsNone(

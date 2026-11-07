@@ -609,17 +609,12 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("physicalOverridePending_.store(true", sample)
         self.assertIn("controller_.sample(true, nowMs)", sample)
 
-    def test_waveshare_profiles_move_fixed_lvgl_pool_to_psram(self):
+    def test_amoled_profiles_move_fixed_lvgl_pool_to_psram(self):
+        # Every board has PSRAM, so the pool placement keys on that flag alone
+        # and host builds without it keep the internal-RAM fallback.
+        psram_gate = "#if defined(BOARD_HAS_PSRAM)"
         for config in (LV_CONFIG, LV_CONFIG_TEMPLATE):
-            profile_gate = config.index("#if defined(BOARD_HAS_PSRAM)")
-            fallback = config.index("#else", profile_gate)
-            psram_gate = config[profile_gate:fallback]
-            for profile in (
-                "WAVESHARE_AMOLED_175",
-                "WAVESHARE_AMOLED_206",
-                "WAVESHARE_EPAPER_397",
-            ):
-                self.assertIn(f"defined({profile})", psram_gate)
+            self.assertIn(psram_gate, config)
             self.assertIn(
                 "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
             )
@@ -628,6 +623,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
                 "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
                 config,
             )
+            profile_gate = config.index(psram_gate)
+            fallback = config.index("#else", profile_gate)
             self.assertIn(
                 "#undef LV_MEM_POOL_ALLOC", config[fallback:]
             )

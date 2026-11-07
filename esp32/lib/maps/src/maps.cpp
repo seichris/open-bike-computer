@@ -6468,122 +6468,14 @@ void Maps::coords2map(double lat, double lon, tileBounds bound,
  * @brief Load No Map Image
  *
  */
-#ifndef USE_ARDUINO_GFX
-void Maps::showNoMap(TFT_eSprite &map) {
-  map.drawPngFile(noMapFile, (Maps::mapScrWidth / 2) - 50,
-                  (Maps::mapScrHeight / 2) - 50);
-  map.drawCenterString("NO MAP FOUND", (Maps::mapScrWidth / 2),
-                       (Maps::mapScrHeight >> 1) + 65, &fonts::DejaVu18);
-}
-#else
 // Removed duplicate showNoMap
 // void Maps::showNoMap(lv_obj_t *canvas) { ... }
-#endif
 
 /**
  * @brief Draw map widgets
  *
  */
 void Maps::drawMapWidgets(const MapSettings &mapSettings) {
-  // Simplified widgets - commenting out unsupported TFT calls
-  /*
-  Maps::mapSprite.setTextColor(TFT_WHITE, TFT_WHITE);
-
-  uint16_t mapHeading = 0;
-#ifdef ENABLE_COMPASS
-  if (mapSettings.mapRotationComp)
-    mapHeading = compass.getHeading();
-  else
-    mapHeading = gps.gpsData.heading;
-#else
-  mapHeading = gps.gpsData.heading;
-#endif
-
-  if (mapSettings.showMapCompass)
-  {
-    Maps::mapSprite.fillRectAlpha(Maps::mapScrWidth - 48, 0, 48, 48, 95,
-TFT_BLACK);
-    if (mapSettings.compassRotation)
-      Maps::mapSprite.pushImageRotateZoom(Maps::mapScrWidth - 24, 24, 24, 24,
-360 - mapHeading, 1, 1, 48, 48, (uint16_t *)mini_compass, TFT_BLACK);
-    else
-      Maps::mapSprite.pushImage(Maps::mapScrWidth - 48, 0, 48, 48, (uint16_t
-*)mini_compass, TFT_BLACK);
-  }
-
-  uint16_t mapHeight = 0;
-  if (mapSettings.mapFullScreen)
-    mapHeight = Maps::mapScrFull;
-  else
-    mapHeight = Maps::mapScrHeight;
-
-  uint8_t toolBarOffset = 0;
-  uint8_t toolBarSpace = 0;
-#ifdef LARGE_SCREEN
-  toolBarOffset = 100;
-  toolBarSpace = 60;
-#endif
-#ifndef LARGE_SCREEN
-  toolBarOffset = 80;
-  toolBarSpace = 50;
-#endif
-
-  if (showMapToolBar)
-  {
-    if (mapSettings.mapFullScreen)
-      Maps::mapSprite.pushImage(10, mapHeight - toolBarOffset, 48, 48, (uint16_t
-*)collapse, TFT_BLACK);
-    else
-      Maps::mapSprite.pushImage(10, mapHeight - toolBarOffset, 48, 48, (uint16_t
-*)expand, TFT_BLACK);
-
-      // Maps::mapSprite.fillRectAlpha(10, mapHeight - toolBarOffset, 48, 48,
-50, TFT_BLACK);
-
-    Maps::mapSprite.pushImage(10, mapHeight - (toolBarOffset + toolBarSpace),
-48, 48, (uint16_t *)zoomout, TFT_BLACK);
-    // Maps::mapSprite.fillRectAlpha(10, mapHeight - (toolBarOffset +
-toolBarSpace), 48, 48, 50, TFT_BLACK);
-
-    Maps::mapSprite.pushImage(10, mapHeight - (toolBarOffset + (2 *
-toolBarSpace)), 48, 48, (uint16_t *)zoomin, TFT_BLACK);
-    // Maps::mapSprite.fillRectAlpha(10, mapHeight - (toolBarOffset + (2 *
-toolBarSpace)), 48, 48, 50, TFT_BLACK);
-
-    // if (!mapSettings.vectorMap)
-    // {
-    //   Maps::mapSprite.pushImage(tft.width() - 58, mapHeight - toolBarOffset,
-48, 48, (uint16_t *)move, TFT_BLACK);
-    // }
-  }
-
-  Maps::mapSprite.fillRectAlpha(0, 0, 50, 32, 95, TFT_BLACK);
-  Maps::mapSprite.pushImage(0, 4, 24, 24, (uint16_t *)zoom_ico, TFT_BLACK);
-  Maps::mapSprite.drawNumber(zoom, 26, 8, &fonts::FreeSansBold9pt7b);
-
-  if (mapSettings.showMapSpeed)
-  {
-    Maps::mapSprite.fillRectAlpha(0, mapHeight - 32, 70, 32, 95, TFT_BLACK);
-    Maps::mapSprite.pushImage(0, mapHeight - 28, 24, 24, (uint16_t *)speed_ico,
-TFT_BLACK); Maps::mapSprite.drawNumber(gps.gpsData.speed, 26, mapHeight - 24,
-&fonts::FreeSansBold9pt7b);
-  }
-
-  if (!mapSettings.vectorMap)
-    if (mapSettings.showMapScale)
-    {
-      Maps::mapSprite.fillRectAlpha(Maps::mapScrWidth - 70, mapHeight - 32, 70,
-Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
-      // Maps::mapSprite.drawFastHLine(Maps::mapScrWidth - 65, mapHeight - 14,
-60);
-      // Maps::mapSprite.drawFastVLine(Maps::mapScrWidth - 65, mapHeight - 19,
-10);
-      // Maps::mapSprite.drawFastVLine(Maps::mapScrWidth - 5, mapHeight - 19,
-10);
-      // Maps::mapSprite.drawCenterString(map_scale[zoom], Maps::mapScrWidth -
-35, mapHeight - 24);
-    }
-  */
   // ... reimplement widgets as LVGL objects calling createMapWidgets() or
   // similar
 }
@@ -8806,106 +8698,9 @@ void Maps::updateArrowColor() {
  *
  * @param zoom -> Zoom Level
  */
-#ifndef USE_ARDUINO_GFX
-void Maps::generateRenderMap(uint8_t zoom) {
-  Maps::mapTileSize = Maps::renderMapTileSize;
-  Maps::zoomLevel = zoom;
-
-  bool foundRoundMap = false;
-  bool missingMap = false;
-
-  if (Maps::followGps)
-    Maps::currentMapTile = Maps::getMapTile(
-        gps.gpsData.longitude, gps.gpsData.latitude, Maps::zoomLevel, 0, 0);
-  else
-    Maps::currentMapTile =
-        Maps::getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                         Maps::zoomLevel, 0, 0);
-
-  // Detects if tile changes from actual GPS position
-  if (strcmp(Maps::currentMapTile.file, Maps::oldMapTile.file) != 0 ||
-      Maps::currentMapTile.zoom != Maps::oldMapTile.zoom ||
-      Maps::currentMapTile.tilex != Maps::oldMapTile.tilex ||
-      Maps::currentMapTile.tiley != Maps::oldMapTile.tiley) {
-    Maps::isMapFound = Maps::mapTempSprite.drawPngFile(
-        Maps::currentMapTile.file, Maps::mapTileSize, Maps::mapTileSize);
-
-  } else {
-    Maps::oldMapTile = Maps::currentMapTile;
-    strcpy(Maps::oldMapTile.file, Maps::currentMapTile.file);
-
-    // Maps::mapTempSprite.fillScreen(TFT_BLACK);
-    // Maps::showNoMap(Maps::mapTempSprite);
-    ESP_LOGW(TAG, "Render Map not found (render map disabled)");
-  }
-  else {
-    Maps::oldMapTile = Maps::currentMapTile;
-    strcpy(Maps::oldMapTile.file, Maps::currentMapTile.file);
-
-    Maps::totalBounds =
-        Maps::getTileBounds(Maps::currentMapTile.tilex,
-                            Maps::currentMapTile.tiley, Maps::zoomLevel);
-
-    int8_t startX = -1;
-    int8_t startY = -1;
-
-    for (int8_t y = startX; y <= startX + 2; y++) {
-      for (int8_t x = startY; x <= startY + 2; x++) {
-
-        if (x == 0 && y == 0)
-          continue; // Skip Center Tile
-
-        Maps::roundMapTile =
-            getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                       Maps::zoomLevel, x, y);
-
-        foundRoundMap = Maps::mapTempSprite.drawPngFile(
-            Maps::roundMapTile.file, (x - startX) * Maps::mapTileSize,
-            (y - startY) * Maps::mapTileSize);
-        if (!foundRoundMap) {
-          Maps::mapTempSprite.fillRect((x - startX) * Maps::mapTileSize,
-                                       (y - startY) * Maps::mapTileSize,
-                                       Maps::mapTileSize, Maps::mapTileSize,
-                                       TFT_BLACK);
-          Maps::mapTempSprite.drawPngFile(noMapFile,
-                                          ((x - startX) * Maps::mapTileSize) +
-                                              (Maps::mapTileSize / 2) - 50,
-                                          ((y - startY) * Maps::mapTileSize) +
-                                              (Maps::mapTileSize / 2) - 50);
-          missingMap = true;
-        } else {
-          tileBounds currentBounds =
-              Maps::getTileBounds(Maps::roundMapTile.tilex,
-                                  Maps::roundMapTile.tiley, Maps::zoomLevel);
-
-          if (currentBounds.lat_min < Maps::totalBounds.lat_min)
-            Maps::totalBounds.lat_min = currentBounds.lat_min;
-          if (currentBounds.lat_max > Maps::totalBounds.lat_max)
-            Maps::totalBounds.lat_max = currentBounds.lat_max;
-          if (currentBounds.lon_min < Maps::totalBounds.lon_min)
-            Maps::totalBounds.lon_min = currentBounds.lon_min;
-          if (currentBounds.lon_max > Maps::totalBounds.lon_max)
-            Maps::totalBounds.lon_max = currentBounds.lon_max;
-        }
-      }
-    }
-
-    if (!missingMap) {
-      if (Maps::isCoordInBounds(Maps::destLat, Maps::destLon,
-                                Maps::totalBounds))
-        Maps::coords2map(Maps::destLat, Maps::destLon, Maps::totalBounds,
-                         &(Maps::wptPosX), &(Maps::wptPosY));
-    } else {
-      Maps::wptPosX = -1;
-    }
-  }
-}
-}
-#else
 void Maps::generateRenderMap(uint8_t zoom) {
   // Render Map not supported in Arduino_GFX mode
 }
-#endif
 
 /**
  * @brief Display Map (Stub for Vector Maps/Arduino_GFX)
@@ -9347,54 +9142,7 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
  * @param dirY
  */
 void Maps::preloadTiles(int8_t dirX, int8_t dirY) {
-#ifndef USE_ARDUINO_GFX
-  int16_t preloadWidth =
-      (dirX != 0) ? renderMapTileSize : renderMapTileSize * 2;
-  int16_t preloadHeight =
-      (dirY != 0) ? renderMapTileSize : renderMapTileSize * 2;
-
-  TFT_eSprite preloadSprite = TFT_eSprite(&tft);
-  preloadSprite.createSprite(preloadWidth, preloadHeight);
-
-  int16_t startX = tileX + dirX;
-  int16_t startY = tileY + dirY;
-
-  for (int8_t i = 0; i < 2; ++i) {
-    int16_t tileToLoadX = startX + ((dirX == 0) ? i - 1 : 0);
-    int16_t tileToLoadY = startY + ((dirY == 0) ? i - 1 : 0);
-
-    Maps::roundMapTile =
-        Maps::getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                         Maps::zoomLevel, tileToLoadX, tileToLoadY);
-
-    bool foundTile = preloadSprite.drawPngFile(
-        Maps::roundMapTile.file, (dirX != 0) ? i * renderMapTileSize : 0,
-        (dirY != 0) ? i * renderMapTileSize : 0);
-
-    if (!foundTile) {
-      preloadSprite.fillRect((dirX != 0) ? i * renderMapTileSize : 0,
-                             (dirY != 0) ? i * renderMapTileSize : 0,
-                             renderMapTileSize, renderMapTileSize,
-                             TFT_LIGHTGREY);
-    }
-  }
-
-  if (dirX != 0) {
-    mapTempSprite.scroll(dirX * renderMapTileSize, 0);
-    mapTempSprite.pushImage((dirX > 0 ? renderMapTileSize * 2 : 0), 0,
-                            preloadWidth, preloadHeight,
-                            preloadSprite.frameBuffer(0));
-  } else if (dirY != 0) {
-    mapTempSprite.scroll(0, dirY * renderMapTileSize);
-    mapTempSprite.pushImage(0, (dirY > 0 ? renderMapTileSize * 2 : 0),
-                            preloadWidth, preloadHeight,
-                            preloadSprite.frameBuffer(0));
-  }
-
-  preloadSprite.deleteSprite();
-#else
   // Preloading not implemented for LVGL/Arduino_GFX yet
   (void)dirX;
   (void)dirY;
-#endif
 }

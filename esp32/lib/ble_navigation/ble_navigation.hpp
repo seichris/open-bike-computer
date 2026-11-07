@@ -312,6 +312,10 @@ public:
 
   /** Publish current navigation activity for opt-in radio experiments. */
   void setNavigationActivity(bool active);
+  // Production request of the relaxed connection profile while a transfer
+  // session is enabled, restored when it ends; a no-op in characterization
+  // builds, which manage the profiles themselves.
+  void syncTransferConnectionProfile();
 
   /**
    * @brief Clear the registered iPhone owner after physical recovery input.

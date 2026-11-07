@@ -14,6 +14,7 @@
 #include "device_transfer_network_protocol.hpp"
 #include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
+#include "transfer_link_grace_policy.hpp"
 
 namespace device_transfer {
 
@@ -127,6 +128,24 @@ public:
   bool bindAuthenticatedBleSession(uint64_t sessionId);
   void clearAuthenticatedBleSession();
   bool suspendFirmwareAuthenticatedBleSession();
+  // A BLE link ended during a map or diagnostics transfer: the authenticated
+  // owner's own link lost without the firmware asking opens the policy's
+  // grace window (token, generation, listener and in-flight client stay); a
+  // later disconnect inside an open window keeps that window's deadline;
+  // anything else means the immediate teardown.
+  transfer_link_grace_policy::LinkLoss suspendOwnerBleSessionForLinkLoss(
+      uint32_t nowMs, bool linkWasAuthenticated, bool firmwareRequested);
+  bool bleLinkGraceActive() const;
+  // A BLE link appeared while the window is open: the deadline moves per the
+  // policy (a full window from now, within the cap from the loss). Returns
+  // the time left until the deadline afterwards, 0 when no window is open.
+  uint32_t extendBleLinkGraceForLink(uint32_t nowMs);
+  // Milliseconds since the loss that opened the window, 0 when none is open.
+  uint32_t bleLinkGraceElapsedMs(uint32_t nowMs) const;
+  // Tears the session down (clearAuthenticatedBleSession) once the window has
+  // passed without the owner rebinding; returns whether it did.
+  bool expireBleLinkGraceIfDue(uint32_t nowMs);
+  bool isSessionEnabled() const;
   bool prepareTlsIdentityRotation();
   bool commitTlsIdentityRotation(
       const std::string &expectedCertificateSha256);
@@ -174,9 +193,21 @@ private:
   std::string sessionToken_;
   TransferTlsIdentityStore tlsIdentityStore_;
   uint64_t authenticatedBleSessionId_ = 0;
+  bool bleLinkGraceActive_ = false;
+  uint32_t bleLinkGraceDeadlineMs_ = 0;
+  uint32_t bleLinkGraceLossMs_ = 0;
   WiFiServer server_{8080};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
   mutable SemaphoreHandle_t tlsIdentityMutex_ = nullptr;
+  // State-lock probe: the code address that took the lock and when. Written
+  // under the lock; a waiter reads them before taking it.
+  mutable uint32_t stateLockedMs_ = 0;
+  mutable const void *stateLockSite_ = nullptr;
+  // A wait the current holder went through before taking the lock; reported
+  // by unlockState() after the give, never under the lock.
+  mutable uint32_t stateLockWaitMs_ = 0;
+  mutable TaskHandle_t stateLockWaitHolder_ = nullptr;
+  mutable const void *stateLockWaitSite_ = nullptr;
   std::string lastErrorCode_;
   std::string lastErrorMessage_;
   uint32_t errorSequence_ = 0;

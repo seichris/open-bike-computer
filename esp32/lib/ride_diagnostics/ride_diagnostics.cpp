@@ -3,6 +3,7 @@
 #include <new>
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
+#include "iso8601_utc.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
 #include "catalog_v2.hpp"
 #include <mbedtls/sha256.h>
@@ -16,19 +17,15 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include <esp_attr.h>
 #include <esp_random.h>
-#endif
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../storage/storage.hpp"
 #include "../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 #include "../utils/src/task_data_placement.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../boot_diagnostics/boot_diagnostics.hpp"
-#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -88,11 +85,7 @@ using detail::validateFieldsJson;
 using detail::validFaultCapsule;
 using detail::validFaultCapsuleEnvelope;
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 RTC_NOINIT_ATTR FaultCapsuleState retainedFaultCapsule;
-#else
-FaultCapsuleState retainedFaultCapsule = {};
-#endif
 
 FaultCapsuleState currentFaultCapsule = {};
 FaultCapsuleState pendingFaultCapsule = {};
@@ -109,7 +102,6 @@ std::atomic<bool> shutdownSealReady{false};
 live_v2::Ring *liveRing = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 // Queue control remains in internal RAM. Only task-owned event payloads live
 // in PSRAM; no ISR or flash-cache-disabled path accesses these queues.
 StaticQueue_t normalQueueControl{};
@@ -131,7 +123,6 @@ QueueHandle_t createEventQueue(UBaseType_t capacity, uint8_t *&events,
   }
   return queue;
 }
-#endif
 TaskHandle_t writerTaskHandle = nullptr;
 std::atomic<bool> recorderResourcesReady{false};
 std::atomic<bool> recorderWriterReady{false};
@@ -448,13 +439,11 @@ void initializeFaultCapsules() {
 
   memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
   currentFaultCapsule.bootSequence = selectedBootSequence;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   const boot_diagnostics::Snapshot snapshot = boot_diagnostics::snapshot();
   currentFaultCapsule.resetReason = snapshot.resetReason;
   currentFaultCapsule.activeStage = static_cast<uint16_t>(snapshot.activeStage);
   currentFaultCapsule.completedStage =
       static_cast<uint16_t>(snapshot.completedStage);
-#endif
   sealFaultCapsule(currentFaultCapsule);
   portEXIT_CRITICAL(&faultCapsuleMux);
   faultCapsulesInitialized.store(true, std::memory_order_release);
@@ -537,7 +526,7 @@ bool utcNow(char *out, std::size_t capacity) {
     return false;
   struct tm utc = {};
   gmtime_r(&now, &utc);
-  return strftime(out, capacity, "%Y-%m-%dT%H:%M:%SZ", &utc) > 0;
+  return time_format::formatUtcIso8601(out, capacity, utc);
 }
 
 uint32_t persistentBootSequence(uint32_t requested) {
@@ -585,24 +574,20 @@ enum class ActiveFileCloseResult : uint8_t {
 ActiveFileCloseResult closeActiveFile() {
   if (activeDescriptor < 0)
     return ActiveFileCloseResult::Ready;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
       nextSequence.load(std::memory_order_relaxed));
-#endif
   const int flushResult = storage != nullptr
                               ? storage->syncDescriptor(activeDescriptor)
                               : ::fsync(activeDescriptor);
   const int closeResult = storage != nullptr
                               ? storage->closeDescriptor(activeDescriptor)
                               : ::close(activeDescriptor);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting,
       nextSequence.load(std::memory_order_relaxed));
-#endif
   activeDescriptor = -1;
   if (flushResult != 0)
     return ActiveFileCloseResult::FlushFailed;
@@ -908,12 +893,10 @@ struct FaultCapsuleWriteReceipt {
 
 bool writeQueuedEvent(const QueuedEvent &event) {
   FaultCapsuleWriteReceipt receipt{event};
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::DiagnosticsWrite,
       event.sequence);
-#endif
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded()) {
     abandonActiveChunkAfterUncertainWrite();
     storageErrors.fetch_add(1);
@@ -981,12 +964,10 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   const uint32_t nowMs = millis();
   if (event.critical || event.clearsFaultCapsule ||
       static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     runtime_watchdog_diagnostics::notePhase(
         runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
         event.sequence);
-#endif
     if (storage->syncDescriptor(activeDescriptor) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
@@ -1207,11 +1188,9 @@ void updateMemoryDeferral(MemoryDeferral &deferral, bool refused,
 }
 
 void writerTask(void *) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
       runtime_watchdog_diagnostics::Phase::Waiting);
-#endif
   storage_policy::RecoveryBackoff recovery;
   MemoryDeferral deferral;
   lastStorageAvailable.store(
@@ -1251,10 +1230,8 @@ void writerTask(void *) {
     const bool mayDequeue =
         !transitionPaused && (!recorderHealthy || (recordsWaiting && !memoryWait));
     if (memoryWait) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
-#endif
       // Records stay queued; overflow is counted as queue_full. Producer
       // notifications cannot shorten this wait into a sampling loop.
       vTaskDelay(pdMS_TO_TICKS(storage_policy::kBackgroundIoRetryMs));
@@ -1287,18 +1264,14 @@ void writerTask(void *) {
       writeQueuedEvent(event);
       noteMaximum(maximumWriteDurationMs,
                   static_cast<uint32_t>(millis() - startedMs));
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
-#endif
     } else if (!memoryWait &&
                ((!hasNext && !lockMissed) || transitionPaused)) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
-#endif
       // A notification is latched even if admission races this wait. Retain a
       // bounded timeout for checkpoint/recovery/heartbeat housekeeping.
       (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
@@ -1326,12 +1299,10 @@ void writerTask(void *) {
          static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) &&
         ioAdmitted()) {
       checkpointRequested.store(false, std::memory_order_release);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
           nextSequence.load(std::memory_order_relaxed));
-#endif
       if (storage->syncDescriptor(activeDescriptor) == 0) {
         lastCheckpointMs = nowMs;
       } else {
@@ -1340,12 +1311,10 @@ void writerTask(void *) {
         storageErrors.fetch_add(1);
         updateFaultCapsule(Level::Error, "storage", "flush_failed", true);
       }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           nextSequence.load(std::memory_order_relaxed));
-#endif
     }
     // Recovery probes the pinned backend with a create/write/fsync/unlink.
     // It waits a backoff interval after the fault, is never started without
@@ -1356,22 +1325,18 @@ void writerTask(void *) {
                (storageRecoveryAllowedProbe == nullptr ||
                 storageRecoveryAllowedProbe()) &&
                ioAdmitted()) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::DiagnosticsRecovery,
           nextSequence.load(std::memory_order_relaxed));
-#endif
       if (storage->ensureDiagnosticsSdMounted())
         recovery.reset();
       else
         recovery.probeFailed(nowMs);
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           nextSequence.load(std::memory_order_relaxed));
-#endif
     }
     updateMemoryDeferral(deferral,
                          sampled && !storage_policy::admitsBackgroundIo(headroom),
@@ -1578,20 +1543,12 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   lastStorageAvailable.store(storage->getDiagnosticsSdLoaded(),
                              std::memory_order_release);
   if (normalQueue == nullptr) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     normalQueue = createEventQueue(kNormalQueueCapacity, normalQueueEvents,
                                    normalQueueControl);
-#else
-    normalQueue = xQueueCreate(kNormalQueueCapacity, sizeof(QueuedEvent));
-#endif
   }
   if (criticalQueue == nullptr) {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
     criticalQueue = createEventQueue(kCriticalQueueCapacity,
                                      criticalQueueEvents, criticalQueueControl);
-#else
-    criticalQueue = xQueueCreate(kCriticalQueueCapacity, sizeof(QueuedEvent));
-#endif
   }
   if (producerMutex == nullptr)
     producerMutex = xSemaphoreCreateMutex();
@@ -1607,12 +1564,10 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
       producerMutex != nullptr && queueMutationMutex != nullptr &&
       faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
       retentionMutex != nullptr;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (liveRing == nullptr) {
     void *memory = heap_caps_malloc(sizeof(live_v2::Ring), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (memory != nullptr) liveRing = new (memory) live_v2::Ring();
   }
-#endif
   recorderResourcesReady.store(resourcesReady, std::memory_order_release);
   if (!resourcesReady) {
     Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
@@ -1979,7 +1934,7 @@ bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId
 }
 
 bool markLocalIssue(const char *code) {
-#if PERSISTENT_RIDE_DIAGNOSTICS && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397))
+#if PERSISTENT_RIDE_DIAGNOSTICS
   if (!validIssueCode(code)) return false;
   uint8_t id[16];
   esp_fill_random(id, sizeof(id));

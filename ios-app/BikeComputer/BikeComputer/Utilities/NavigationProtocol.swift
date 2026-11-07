@@ -708,7 +708,13 @@ enum NavigationHeading {
         let x = cos(lat1) * sin(lat2) -
             sin(lat1) * cos(lat2) * cos(deltaLongitude)
         guard abs(x) > 1e-12 || abs(y) > 1e-12 else { return nil }
-        return normalized(atan2(y, x) * 180 / .pi)
+        // atan2 yields (-180, 180]; `normalized` treats a negative value as
+        // Core Location's invalid-course sentinel, so bring every westward
+        // bearing into [0, 360) first or a leg heading west, or due north
+        // with the slightest westward skew, would be dropped and the last
+        // valid course would stick.
+        let degrees = atan2(y, x) * 180 / .pi
+        return normalized(degrees < 0 ? degrees + 360 : degrees)
     }
 }
 

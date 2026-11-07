@@ -246,6 +246,7 @@ struct OfflineRouteSaveTests {
         try corruptionDeletionAndReplacement()
         try stravaRetention()
         try boundedArchiveReads()
+        try savedRouteFavoriteCoordinates()
         try automaticWatchTransfer()
         try watchTransferExpiryRecovery()
         try pendingDeletionAdmission()
@@ -253,6 +254,7 @@ struct OfflineRouteSaveTests {
         try offlineNavigationAndLateDirections()
         try mapKitPlanningRegression()
         try selectedMapKitSaving()
+        try multiStopRouteTests()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
     }
@@ -789,6 +791,17 @@ struct OfflineRouteSaveTests {
         let chinaDraft = try OfflineRouteSaveDraft.plannedMapKit(china, createdAt: f.now)
         check(chinaDraft.archive.route.points == china.points && chinaDraft.archive.route.normalizationVersion == china.normalizationVersion,
             "China coordinates are not normalized a second time when saved")
+        let hongKongPoints = [CLLocationCoordinate2D(latitude: 22.2810, longitude: 114.1600),
+                              CLLocationCoordinate2D(latitude: 22.2820, longitude: 114.1610)]
+        let hongKong = try MapKitRouteAdapter.route(from: TestRoute(instructions: "Continue", coordinates: hongKongPoints))
+        // MKPolyline stores map points, so coordinates come back within millimetres.
+        func shift(_ route: NavigationRouteV1, _ input: CLLocationCoordinate2D) -> Double {
+            NavigationGeometryV1.distance(from: route.points[0],
+                to: RouteCoordinateV1(latitude: input.latitude, longitude: input.longitude))
+        }
+        check(hongKong.points.count == 2 && shift(hongKong, hongKongPoints[0]) < 0.01 && shift(china, chinaPoints[0]) > 100 &&
+            hongKong.normalizationVersion == 2 && china.normalizationVersion == 2,
+            "Apple Maps routes are WGS-84 in Hong Kong and stay unshifted; only mainland China is normalized, as version 2")
     }
 
     static func boundedArchiveReads() throws {

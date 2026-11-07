@@ -340,7 +340,7 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
-            visibleSavedRoutePreview == nil
+            visibleSavedRoutePreview == nil && !isSimulationMode
                 ? (isNavigating ? .followWithHeading : .follow) : .none
         
         // Configure map appearance
@@ -459,6 +459,12 @@ struct MapViewContainer: UIViewRepresentable {
         let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
         
         if isSimulationMode, let simPos = simulatedPosition {
+            // The simulated position and course own the camera: MapKit
+            // tracking would re-enable the real user location and swing the
+            // camera between the phone's compass and the simulated course.
+            if uiView.userTrackingMode != .none {
+                uiView.setUserTrackingMode(.none, animated: false)
+            }
             // Hide real user location
             if uiView.showsUserLocation {
                 uiView.showsUserLocation = false
@@ -670,6 +676,7 @@ struct MapViewContainer: UIViewRepresentable {
             }
             let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                 isNavigating: isNavigating,
+                isSimulationMode: isSimulationMode,
                 isOfflineMapSelectionActive: isOfflineMapSelectionActive ||
                     displayedSavedRouteOverlay != nil || isOnlinePOISearchActive,
                 isDestinationSelectionActive: isDestinationSelectionActive

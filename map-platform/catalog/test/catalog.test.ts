@@ -2994,6 +2994,9 @@ describe("validation", () => {
 
 describe("catalog lifecycle boundaries", () => {
   it("keeps unqualified topographic maps out of every promotion entry point", async () => {
+    // Both deployed environments enable topographic promotion since
+    // 2026-11-05; the switch remains the incident control, so pin its off state.
+    const disabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "0" };
     const candidate = developmentTopographicPublication("topography-gated");
     await finalizePublication(
       env,
@@ -3004,10 +3007,10 @@ describe("catalog lifecycle boundaries", () => {
       verifyTestArtifact,
     );
     expect(
-      (await listPromotionCandidates(env, null, 100)).mapEntryIds,
+      (await listPromotionCandidates(disabled, null, 100)).mapEntryIds,
     ).not.toContain(candidate.mapEntryId);
     await expect(
-      createPromotionGrant(env, candidate.mapEntryId),
+      createPromotionGrant(disabled, candidate.mapEntryId),
     ).rejects.toMatchObject({
       status: 409,
       message: "topographic promotion is not qualified",
@@ -3141,9 +3144,14 @@ describe("catalog lifecycle boundaries", () => {
       );
     }
     const ids = maps.map((map) => map.mapEntryId).sort();
-    const first = await listPromotionCandidates(env, null, 1);
+    // Earlier tests leave topographic development maps behind in the shared
+    // database; keep them out of this standard-map pagination check.
+    const standard = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "0" };
+    const first = await listPromotionCandidates(standard, null, 1);
     expect(first).toEqual({ mapEntryIds: [ids[0]], nextCursor: ids[0] });
-    expect(await listPromotionCandidates(env, first.nextCursor, 100)).toEqual({
+    expect(
+      await listPromotionCandidates(standard, first.nextCursor, 100),
+    ).toEqual({
       mapEntryIds: ids.slice(1),
       nextCursor: null,
     });
@@ -3152,9 +3160,9 @@ describe("catalog lifecycle boundaries", () => {
     )
       .bind(ids[0])
       .run();
-    expect((await listPromotionCandidates(env, null, 100)).mapEntryIds).toEqual(
-      ids.slice(1),
-    );
+    expect(
+      (await listPromotionCandidates(standard, null, 100)).mapEntryIds,
+    ).toEqual(ids.slice(1));
     await expect(createPromotionGrant(env, ids[0])).rejects.toMatchObject({
       status: 409,
     });
@@ -3500,6 +3508,8 @@ describe("catalog lifecycle boundaries", () => {
         recreatedLibrary.libraryId,
         undefined,
         "production",
+        verifyTestArtifact,
+        new Date("2026-11-01T00:01:15.000Z"),
       ),
     ).rejects.toMatchObject({ status: 409 });
     await env.DB.prepare(

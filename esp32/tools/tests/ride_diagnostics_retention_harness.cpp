@@ -77,6 +77,16 @@ bool parseUnsigned(const char *value, uint32_t &out);
 #define opendir testOpenDirectory
 #define readdir testReadDirectory
 #define closedir testCloseDirectory
+// The production writer reports its phases to the runtime watchdog; the host
+// harness only needs those calls to compile.
+namespace runtime_watchdog_diagnostics {
+enum class Role { RideDiagnosticsWriter };
+enum class Phase { Waiting, DiagnosticsWrite, DiagnosticsFlush, DiagnosticsRecovery };
+inline void registerCurrentTask(Role, Phase) {}
+inline void notePhase(Role, Phase, uint32_t = 0) {}
+inline void heartbeat(Role, uint32_t = 0) {}
+} // namespace runtime_watchdog_diagnostics
+
 // PRODUCTION_FUNCTIONS
 #undef opendir
 #undef readdir

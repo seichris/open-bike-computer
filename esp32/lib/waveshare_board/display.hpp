@@ -6,37 +6,19 @@
 #pragma once
 
 #include <Arduino.h>
+#include "../board/board.hpp"
 
 namespace waveshare_board::display {
 
-#if defined(WAVESHARE_EPAPER_397)
-constexpr uint16_t LOGICAL_WIDTH = 480;
-constexpr uint16_t LOGICAL_HEIGHT = 800;
-constexpr uint16_t ACTIVE_WIDTH = 480;
-constexpr uint16_t ACTIVE_HEIGHT = 800;
-#elif defined(WAVESHARE_AMOLED_206)
-constexpr uint16_t LOGICAL_WIDTH = 410;
-constexpr uint16_t LOGICAL_HEIGHT = 502;
-constexpr uint16_t ACTIVE_WIDTH = 410;
-constexpr uint16_t ACTIVE_HEIGHT = 502;
-#else
-constexpr uint16_t LOGICAL_WIDTH = 466;
-constexpr uint16_t LOGICAL_HEIGHT = 466;
-constexpr uint16_t ACTIVE_WIDTH = 466;
-constexpr uint16_t ACTIVE_HEIGHT = 466;
-#endif
+constexpr uint16_t LOGICAL_WIDTH = board::display::width;
+constexpr uint16_t LOGICAL_HEIGHT = board::display::height;
+constexpr uint16_t ACTIVE_WIDTH = board::display::width;
+constexpr uint16_t ACTIVE_HEIGHT = board::display::height;
 
-#ifdef WAVESHARE_AMOLED_206
-// Waveshare's 2.06 Arduino examples use:
-// Arduino_CO5300(..., 410, 502, 22, 0, 0, 0)
-constexpr uint8_t ARDUINO_CO5300_COL_OFFSET1 = 22;
-#else
-// Vendor Waveshare Arduino examples use:
-// Arduino_CO5300(..., 466, 466, 6, 0, 0, 0)
-// The ESP-IDF BSP applies the same effective panel gap with
-// esp_lcd_panel_set_gap(panel_handle, 6, 0).
-constexpr uint8_t ARDUINO_CO5300_COL_OFFSET1 = 6;
-#endif
+// Arduino_CO5300(..., width, height, columnOffset, 0, 0, 0): the vendor
+// examples use 6 on the 1.75 and 22 on the 2.06, and the ESP-IDF BSP applies
+// the same panel gap with esp_lcd_panel_set_gap().
+constexpr uint8_t ARDUINO_CO5300_COL_OFFSET1 = board::display::columnOffset;
 constexpr uint8_t ARDUINO_CO5300_ROW_OFFSET1 = 0;
 constexpr uint8_t ARDUINO_CO5300_COL_OFFSET2 = 0;
 constexpr uint8_t ARDUINO_CO5300_ROW_OFFSET2 = 0;
@@ -45,12 +27,11 @@ constexpr uint8_t ROTATION_0 = 0;
 constexpr uint8_t ROTATION_90 = 1;
 constexpr uint8_t MAX_SUPPORTED_ROTATION = ROTATION_90;
 
-#ifdef WAVESHARE_AMOLED_175
-constexpr uint8_t DEFAULT_ROTATION = ROTATION_90;
-constexpr bool ROTATION_90_ENABLED = true;
-#else
-constexpr uint8_t DEFAULT_ROTATION = ROTATION_0;
-constexpr bool ROTATION_90_ENABLED = false;
-#endif
+constexpr uint8_t DEFAULT_ROTATION = board::display::defaultRotation;
+constexpr bool ROTATION_90_ENABLED = board::display::rotation90Enabled;
+static_assert(DEFAULT_ROTATION <= MAX_SUPPORTED_ROTATION,
+              "the board's default rotation is not supported");
+static_assert(ROTATION_90_ENABLED || DEFAULT_ROTATION != ROTATION_90,
+              "the board starts rotated but does not offer that rotation");
 
 } // namespace waveshare_board::display

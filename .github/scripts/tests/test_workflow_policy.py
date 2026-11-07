@@ -1256,6 +1256,29 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         promotion = (WORKFLOW_SCRIPTS_ROOT / "dispatch_promotion_ci.py").read_text(encoding="utf-8")
         self.assertIn("run.get('event') in ('pull_request', 'workflow_dispatch')", promotion)
 
+    def test_firmware_core_builds_free_the_runner_disk_first(self) -> None:
+        # A cold core key keeps the 6.4 GB verified store, a 5.8 GB entry and a
+        # 1.9 GB transport copy side by side; every Linux job that builds a core
+        # removes the image's unused SDKs before it restores anything.
+        for workflow, job in (
+            ("ci.yml", "esp32"),
+            ("firmware-diagnostics.yml", "esp32-diagnostics"),
+            ("speaker-firmware.yml", "esp32-speaker"),
+            ("firmware-runtime-refresh.yml", "firmware-build-validation"),
+        ):
+            with self.subTest(workflow=workflow):
+                block = mapping_block(workflow_source(workflow), job, indent=2)
+                steps = sequence_mapping_blocks(block, "steps", indent=4)
+                free = [index for index, step in enumerate(steps) if "uses: ./.github/actions/free-runner-disk" in step]
+                restore = [index for index, step in enumerate(steps) if "uses: ./.github/actions/firmware-build-cache" in step]
+                builds = [index for index, step in enumerate(steps) if "tools/build_firmware.py" in step]
+                self.assertEqual(1, len(free), workflow)
+                self.assertTrue(builds, workflow)
+                self.assertLess(free[0], min(restore + builds), workflow)
+        action = (REPO_ROOT / ".github/actions/free-runner-disk/action.yml").read_text(encoding="utf-8")
+        self.assertIn("FIRMWARE_RUNNER_DISK schema=1 status=freed", action)
+        self.assertIn('if [[ "${RUNNER_OS:-}" != "Linux" ]]', action)
+
     def test_core_entries_publish_only_from_main_and_restore_read_only(self) -> None:
         esp32 = mapping_block(workflow_source("ci.yml"), "esp32", indent=2)
         self.assertIn("    permissions:\n      actions: read\n      contents: read\n", esp32)

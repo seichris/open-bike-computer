@@ -9,10 +9,14 @@ enum MapTrackingBehavior: Equatable {
 enum MapTrackingPolicy {
     static func desiredMode(
         isNavigating: Bool,
+        isSimulationMode: Bool = false,
         isOfflineMapSelectionActive: Bool,
         isDestinationSelectionActive: Bool
     ) -> MapTrackingBehavior {
-        guard !isOfflineMapSelectionActive,
+        // Test navigation drives the camera from the simulated position and
+        // course; MapKit tracking would keep re-centring on the phone's real
+        // location and compass and fight it.
+        guard !isSimulationMode, !isOfflineMapSelectionActive,
               !isDestinationSelectionActive else { return .none }
         return isNavigating ? .followWithHeading : .follow
     }

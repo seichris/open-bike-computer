@@ -3,9 +3,7 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include <esp_attr.h>
-#endif
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -13,11 +11,7 @@
 namespace runtime_watchdog_diagnostics {
 namespace {
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 RTC_NOINIT_ATTR policy::RetainedState retainedState;
-#else
-policy::RetainedState retainedState = {};
-#endif
 
 policy::PreviousSnapshot previousSnapshot = {};
 portMUX_TYPE snapshotMux = portMUX_INITIALIZER_UNLOCKED;
@@ -139,7 +133,6 @@ void captureTaskWatchdogFromIsr(uint32_t watchdogUptimeMs,
 
 } // namespace runtime_watchdog_diagnostics
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 namespace {
 
 void discardTaskWatchdogMessage(void *, const char *) {}
@@ -154,4 +147,3 @@ extern "C" void esp_task_wdt_isr_user_handler(void) {
       static_cast<uint32_t>(xTaskGetTickCountFromISR()) * portTICK_PERIOD_MS,
       static_cast<uint32_t>(failingCoreMask));
 }
-#endif

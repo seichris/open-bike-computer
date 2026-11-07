@@ -5,10 +5,10 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include <Arduino.h>
 #include "i2c_transaction_trace.hpp"
+#include "../board/board.hpp"
 
 namespace waveshare_board::i2c {
 
@@ -23,7 +23,8 @@ struct Stats {
 };
 
 void configureBus(uint32_t clockHz = DEFAULT_CLOCK_HZ);
-const Stats &stats();
+// A snapshot of the counters, safe to read from any task.
+Stats stats();
 void debugScan(Stream &out = Serial, uint8_t firstAddress = 0x08,
                uint8_t lastAddress = 0x77);
 
@@ -56,7 +57,7 @@ bool ensureAxp2101PowerButtonOffLevel(
     uint8_t level, Axp2101PowerButtonOffLevelResult &result,
     uint8_t attempts = 3);
 
-#ifdef WAVESHARE_AMOLED_206
+#if BOARD_PMIC_DISPLAY_ENABLE_RECOVERY
 struct Axp2101DisplayEnableResult {
   uint8_t before = 0;
   uint8_t after = 0;
@@ -104,4 +105,3 @@ bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206 || WAVESHARE_EPAPER_397

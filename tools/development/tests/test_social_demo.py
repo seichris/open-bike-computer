@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import math
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,104 @@ loader.exec_module(demo)
 
 
 class SocialDemoTests(unittest.TestCase):
+    def test_formation_follows_position_heading_and_keeps_cleo_visible(self):
+        track = demo.FollowingTrack()
+        for latitude, longitude in ((31.2, 121.4), (1.3, 103.8), (70, 179.999), (-70, -179.999)):
+            for heading in (0, 90, 180, 270):
+                anchor = track.anchor({'riders': [{'profile': {'id':'target'}, 'latitude':latitude,
+                    'longitude':longitude, 'age':1, 'course':heading, 'speed':4}]}, 'target')
+                for slug, (forward, right) in demo.FORMATION.items():
+                    fix = track.sample(slug, anchor, 90, 1000, 12, 'epoch', 'target')
+                    lat1, lat2 = math.radians(latitude), math.radians(fix['latitude'])
+                    dl = math.radians(fix['longitude']-longitude)
+                    distance = 6371000*2*math.asin(math.sqrt(math.sin((lat2-lat1)/2)**2 +
+                        math.cos(lat1)*math.cos(lat2)*math.sin(dl/2)**2))
+                    bearing = math.degrees(math.atan2(math.sin(dl)*math.cos(lat2),
+                        math.cos(lat1)*math.sin(lat2)-math.sin(lat1)*math.cos(lat2)*math.cos(dl))) % 360
+                    expected = (heading+math.degrees(math.atan2(right,forward))) % 360
+                    self.assertAlmostEqual(distance,math.hypot(forward,right),places=5)
+                    self.assertAlmostEqual((bearing-expected+180)%360-180,0,places=5)
+                    self.assertEqual(fix['epochs'], {'target':'epoch'})
+                    self.assertEqual(fix['course'], heading)
+                    self.assertEqual(fix['speed'], 4)
+                    self.assertTrue(-180 <= fix['longitude'] <= 180)
+
+    def test_anchor_never_uses_other_riders_stale_or_invalid_positions(self):
+        track = demo.FollowingTrack()
+        own = {'profile':{'id':'target'},'latitude':1.3,'longitude':103.8,'age':0,'course':120}
+        self.assertIsNotNone(track.anchor({'riders':[own]}, 'target'))
+        for update in ({'age':16}, {'age':math.nan}, {'age':-1}, {'latitude':math.inf},
+                       {'longitude':181}, {'profile':{'id':'somebody-else'}}):
+            self.assertIsNone(track.anchor({'riders':[own | update]}, 'target'))
+        self.assertIsNone(track.anchor({'riders':[]}, 'target'))
+        self.assertIsNotNone(track.anchor({'riders':[own | {'course':None}]}, 'target'))
+        self.assertEqual(track.course,120, 'A missing course retains direction while stationary')
+
+    def test_following_clears_on_revocation_and_recovers_without_replaying_position(self):
+        own = {'profile':{'id':'target'},'latitude':1.3,'longitude':103.8,'age':1,'course':90}
+        snapshot = {'riders':[own]}
+        events = []
+        class Account:
+            def __init__(self, slug, name):
+                self.slug, self.name, self.username = slug, name, slug
+                self.epoch, self.sequence, self.lease_deadline = None, 0, 0
+            def change_consent(self, target, enabled):
+                events.append((self.slug,'consent',enabled))
+                self.epoch = 'epoch' if enabled else None
+                self.lease_deadline = math.inf if enabled else 0
+                self.sequence = 0
+            def call(self, method, path, body=None):
+                if method == 'GET':
+                    self_test.assertEqual(self.slug, 'ava')
+                    if isinstance(snapshot, Exception): raise snapshot
+                    return snapshot
+                events.append((self.slug,'publish',body))
+                return {'accepted':['target']}
+        self_test = self
+        accounts = [Account(slug,name) for slug,name,_ in demo.RIDERS]
+        track = demo.FollowingTrack()
+        with patch.object(demo,'STOPPED',False):
+            self.assertTrue(all(s['publishing'] for s in demo.publish_tick(accounts,'target',90,track)))
+            self.assertEqual(len([e for e in events if e[1]=='publish']),3, 'Cleo also publishes during filming')
+            events.clear(); snapshot = {'riders':[]}
+            states = demo.publish_tick(accounts,'target',93,track)
+            self.assertFalse(any(s['publishing'] for s in states))
+            self.assertEqual(events,[(slug,'consent',False) for slug,_,_ in demo.RIDERS])
+            events.clear(); snapshot = RuntimeError('never-print-this')
+            states = demo.publish_tick(accounts,'target',96,track)
+            self.assertEqual(events,[])
+            self.assertNotIn('never-print-this',json.dumps(states))
+            snapshot = {'riders':[own | {'longitude':104}]}
+            states = demo.publish_tick(accounts,'target',99,track)
+            self.assertTrue(all(s['publishing'] for s in states))
+            self.assertTrue(all(e[2]['longitude'] > 103.99 for e in events if e[1]=='publish'))
+            self.assertNotIn('latitude',json.dumps(states))
+            events.clear()
+            for a in accounts: a.lease_deadline = 0
+            demo.publish_tick(accounts,'target',100,track)
+            self.assertEqual(len([e for e in events if e[1]=='consent' and e[2]]),3, 'Long runs renew demo leases')
+            events.clear()
+            # A slow snapshot request must not turn a now-stale fix into a fresh demo publication.
+            with patch.object(demo.time,'monotonic',side_effect=[0]+[20]*6):
+                states = demo.publish_tick(accounts,'target',103,track)
+            self.assertFalse(any(s['publishing'] for s in states))
+            self.assertFalse(any(e[1]=='publish' for e in events))
+
+    def test_follow_flags_reach_only_the_fixed_development_operator(self):
+        args = types.SimpleNamespace(action='run',duration=3600,replace=False,follow_me=True,
+                                     until_stopped=True,ssh_host='cool-ts')
+        with patch.object(demo.subprocess,'run',return_value=types.SimpleNamespace(returncode=0)) as run:
+            demo.operate(args)
+        call = run.call_args
+        self.assertEqual(call.args[0][:2],['ssh','-o'])
+        payload = json.loads(call.kwargs['input'])
+        self.assertTrue(payload['followMe'])
+        self.assertTrue(payload['untilStopped'])
+        # Parse/compile the exact embedded remote program to catch quoting errors.
+        import shlex
+        program = shlex.split(call.args[0][-1])[2]
+        compile(program,'remote-demo-bootstrap','exec')
+
     def test_only_the_development_project_can_run(self):
         demo.guard_environment({'BICINO_SOCIAL_ENVIRONMENT':'development','BICINO_FIREBASE_PROJECT_ID':'bicino-dev'})
         for environment in ({}, {'BICINO_SOCIAL_ENVIRONMENT':'production','BICINO_FIREBASE_PROJECT_ID':'bicino-dev'},

@@ -2,74 +2,80 @@ import Foundation
 
 /// Coordinate-space conversion shared by iPhone route export and Watch
 /// online routing. Core Location positions are WGS-84; Apple route geometry
-/// in mainland China is represented in GCJ-02.
+/// is GCJ-02 inside `MainlandChinaRegion` and WGS-84 elsewhere.
 nonisolated enum RouteCoordinateNormalizationV1 {
-    private static let earthSemiMajorAxis = 6_378_245.0
-    private static let eccentricitySquared = 0.00669342162296594323
+    /// `NavigationRouteV1.normalizationVersion` of routes normalized from Apple
+    /// Maps. Version 1 treated a rectangle from 0.8293 to 55.8271° N and 72.004
+    /// to 135.5° E as GCJ-02, which also shifted Hong Kong, Macau, Taiwan and
+    /// neighbouring countries; version 2 uses `MainlandChinaRegion`.
+    static let mapKitVersion: UInt16 = 2
 
     static func isInMainlandChina(_ coordinate: RouteCoordinateV1) -> Bool {
-        coordinate.latitude >= 0.8293 && coordinate.latitude <= 55.8271 &&
-            coordinate.longitude >= 72.004 && coordinate.longitude <= 135.5
+        MainlandChinaRegion.contains(
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude
+        )
     }
 
+    /// `reference` is a known WGS-84 position, such as the GPS fix a location
+    /// was made from. It settles a coordinate shared across a mainland border
+    /// only when it lies at one of the two readings.
     static func mapKitToWGS84(
-        _ coordinate: RouteCoordinateV1
+        _ coordinate: RouteCoordinateV1,
+        near reference: RouteCoordinateV1? = nil
     ) -> RouteCoordinateV1 {
-        guard isInMainlandChina(coordinate) else { return coordinate }
-        var latitude = coordinate.latitude
-        var longitude = coordinate.longitude
-        for _ in 0..<3 {
-            let projected = wgs84ToMapKit(RouteCoordinateV1(
-                latitude: latitude,
-                longitude: longitude
-            ))
-            latitude += coordinate.latitude - projected.latitude
-            longitude += coordinate.longitude - projected.longitude
-        }
-        return RouteCoordinateV1(
-            latitude: latitude,
-            longitude: longitude
+        let converted = GCJ02.wgs84(
+            fromMapKit: coordinate.latitude,
+            longitude: coordinate.longitude,
+            near: reference.map { (latitude: $0.latitude, longitude: $0.longitude) }
         )
+        return RouteCoordinateV1(
+            latitude: converted.latitude,
+            longitude: converted.longitude
+        )
+    }
+
+    /// Normalizes Apple route geometry in order. A coordinate that a mainland
+    /// border makes ambiguous keeps the side of the point before it, so a route
+    /// that stays on one side reads correctly however far apart its points
+    /// are. `start`, where the route was requested from, is the reference for
+    /// the first point. Past a border crossing, a route is misread until it
+    /// leaves the few hundred metres where both readings exist.
+    static func mapKitToWGS84(
+        _ coordinates: [RouteCoordinateV1],
+        startingNear start: RouteCoordinateV1?
+    ) -> [RouteCoordinateV1] {
+        var inMainland: Bool?
+        return coordinates.map { coordinate in
+            let point: RouteCoordinateV1
+            if let inMainland {
+                let converted = GCJ02.wgs84(
+                    fromMapKit: coordinate.latitude,
+                    longitude: coordinate.longitude,
+                    inMainland: inMainland
+                )
+                point = RouteCoordinateV1(
+                    latitude: converted.latitude,
+                    longitude: converted.longitude
+                )
+            } else {
+                point = mapKitToWGS84(coordinate, near: start)
+            }
+            inMainland = isInMainlandChina(point)
+            return point
+        }
     }
 
     static func wgs84ToMapKit(
         _ coordinate: RouteCoordinateV1
     ) -> RouteCoordinateV1 {
-        guard isInMainlandChina(coordinate) else { return coordinate }
-        let x = coordinate.longitude - 105
-        let y = coordinate.latitude - 35
-        var latitudeDelta = transformLatitude(x: x, y: y)
-        var longitudeDelta = transformLongitude(x: x, y: y)
-        let radians = coordinate.latitude / 180 * .pi
-        var magic = sin(radians)
-        magic = 1 - eccentricitySquared * magic * magic
-        let squareRoot = sqrt(magic)
-        latitudeDelta = latitudeDelta * 180 /
-            ((earthSemiMajorAxis * (1 - eccentricitySquared)) /
-                (magic * squareRoot) * .pi)
-        longitudeDelta = longitudeDelta * 180 /
-            (earthSemiMajorAxis / squareRoot * cos(radians) * .pi)
-        return RouteCoordinateV1(
-            latitude: coordinate.latitude + latitudeDelta,
-            longitude: coordinate.longitude + longitudeDelta
+        let converted = GCJ02.mapKit(
+            fromWGS84: coordinate.latitude,
+            longitude: coordinate.longitude
         )
-    }
-
-    private static func transformLatitude(x: Double, y: Double) -> Double {
-        var value = -100 + 2 * x + 3 * y + 0.2 * y * y +
-            0.1 * x * y + 0.2 * sqrt(abs(x))
-        value += (20 * sin(6 * x * .pi) + 20 * sin(2 * x * .pi)) * 2 / 3
-        value += (20 * sin(y * .pi) + 40 * sin(y / 3 * .pi)) * 2 / 3
-        value += (160 * sin(y / 12 * .pi) + 320 * sin(y * .pi / 30)) * 2 / 3
-        return value
-    }
-
-    private static func transformLongitude(x: Double, y: Double) -> Double {
-        var value = 300 + x + 2 * y + 0.1 * x * x +
-            0.1 * x * y + 0.1 * sqrt(abs(x))
-        value += (20 * sin(6 * x * .pi) + 20 * sin(2 * x * .pi)) * 2 / 3
-        value += (20 * sin(x * .pi) + 40 * sin(x / 3 * .pi)) * 2 / 3
-        value += (150 * sin(x / 12 * .pi) + 300 * sin(x / 30 * .pi)) * 2 / 3
-        return value
+        return RouteCoordinateV1(
+            latitude: converted.latitude,
+            longitude: converted.longitude
+        )
     }
 }
