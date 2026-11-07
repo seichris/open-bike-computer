@@ -105,6 +105,7 @@ lv_obj_t *lv_layer_top() { return &top; }
 lv_obj_t *lv_layer_bottom() { return &bottom; }
 void lv_obj_add_flag(lv_obj_t*,int) { ++hidden; }
 void lv_obj_clear_flag(lv_obj_t*,int) { ++shown; }
+namespace board::display { constexpr bool brightness = true; }
 namespace display_power { enum class State { Dimmed }; }
 namespace display_inactivity { enum class Mode { Active, Dimmed }; }
 display_inactivity::Mode currentDisplayMode=display_inactivity::Mode::Active;

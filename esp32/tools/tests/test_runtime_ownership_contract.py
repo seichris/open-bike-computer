@@ -17,9 +17,15 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         prepare = setup.index("operationOwner()->prepareWiFi()")
         self.assertLess(setup.index("Network.begin()"), prepare)
         self.assertLess(prepare, setup.index("bleNavServer.init("))
-        # 1.75-only and outside maintenance; 2.06 startup order is unchanged.
-        guard = setup.rindex("#if", 0, prepare)
-        self.assertTrue(setup.startswith("#if defined(WAVESHARE_AMOLED_175)\n", guard))
+        # 1.75-only by board data and outside maintenance; the 2.06 startup
+        # order is unchanged.
+        guard = setup.rindex("if constexpr (board::wifi::prepareBeforeBle) {", 0, prepare)
+        self.assertLess(guard, prepare)
+        self.assertIn("constexpr bool prepareBeforeBle = true;",
+                      source("lib/board/boards/waveshare_amoled_175.hpp"))
+        for other in ("waveshare_amoled_206", "waveshare_epaper_397"):
+            self.assertIn("constexpr bool prepareBeforeBle = false;",
+                          source(f"lib/board/boards/{other}.hpp"))
         self.assertLess(setup.rindex("if (!firmware_maintenance::active()) {", 0, prepare), prepare)
         # A crash or hang in early preparation must not repeat toward safe mode.
         deferral = setup.index("consecutiveEarlyFailures != 0")
@@ -342,9 +348,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         setup = main[main.index("void setup()") : main.index("void loop()")]
         storage_done = setup.index(
             "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);")
-        guard = ("#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || "
-                 "defined(WAVESHARE_EPAPER_397)\n")
-        waveshare = setup[setup.rindex(guard, 0, storage_done):]
+        waveshare = setup[storage_done:]
         # The real waiting screen is on the panel before any map recovery work.
         # Recovery still precedes the diagnostics writer, Wi-Fi preparation,
         # BLE and acceptance, so a map failure keeps OTA rollback and safe mode.
@@ -383,23 +387,18 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         apply_update = apply_update[:apply_update.index("\n}\n")]
         self.assertIn("if (pending) {", apply_update)
         self.assertIn("updateWaitingOwnershipStatus(nextSnapshot);", apply_update)
-        # Waveshare builds never run the legacy splash, which draws outside
-        # LVGL and would otherwise overwrite the early waiting-screen frame.
-        other_boards = ("#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && "
-                        "!defined(WAVESHARE_EPAPER_397)\n")
-        splash = setup.index("splashScreen();")
-        self.assertEqual(setup.count("splashScreen();"), 1)
-        self.assertTrue(setup[:splash].rstrip().endswith(
-            other_boards + '  log_i("Loading Splash Screen...");'))
-        # One static frame: setup never runs LVGL timers or input callbacks.
+        # The legacy splash, which drew outside LVGL and would overwrite the
+        # early waiting-screen frame, went with the legacy boards; nothing in
+        # setup() is board-gated any more.
+        self.assertNotIn("splashScreen();", setup)
+        for target in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206",
+                       "WAVESHARE_EPAPER_397"):
+            self.assertNotIn(target, main)
+        # One static frame: setup never runs LVGL timers or input callbacks,
+        # and loads the waiting screen exactly once, before map recovery.
         self.assertNotIn("lv_timer_handler", setup)
-        self.assertEqual(setup.count("startUserInterface();"), 2)
-        self.assertIn(other_boards, setup)
-        # Other boards keep their original late waiting-screen load.
-        self.assertEqual(setup.count("lv_screen_load(waitingScreen);"), 2)
-        late = setup.rindex("lv_screen_load(waitingScreen);")
-        self.assertTrue(setup[:late].rstrip().endswith(
-            '#else\n  log_i("Loading Waiting Screen...");'))
+        self.assertEqual(setup.count("startUserInterface();"), 1)
+        self.assertEqual(setup.count("lv_screen_load(waitingScreen);"), 1)
 
     def test_ready_reporting_follows_boot_confirmation(self):
         main = source("src/main.cpp")

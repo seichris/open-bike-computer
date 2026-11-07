@@ -50,6 +50,9 @@ constexpr uint8_t scl = 14;
 // and whether a failed transaction resets and reconfigures the bus.
 constexpr bool stopBetweenWriteAndRead = true;
 constexpr bool recoverOnFailure = false;
+// Configure Wire directly at boot; never preemptively bit-bang the shared bus
+// before PMIC inspection (the 2.06 does).
+constexpr bool recoverAtBoot = false;
 }  // namespace i2c
 
 namespace touch {
@@ -60,6 +63,12 @@ constexpr uint8_t address = 0x5A;
 constexpr uint8_t interrupt = 11;
 constexpr bool resetOnGpio = false;
 constexpr uint8_t reset = noPin;
+// GPIO11 is an RTC GPIO, so TP_INT joins BOOT in the EXT1 light-sleep wake
+// mask. While the display is dimmed or off the CST9217 reader keeps polling
+// and a low TP_INT level counts as a wake request, because the latched edge
+// alone cannot restore the UI.
+constexpr bool ext1WakeSource = true;
+constexpr bool wakePolling = true;
 }  // namespace touch
 
 namespace buttons {
@@ -87,6 +96,13 @@ constexpr bool qualifiedPowerControl = true;
 // qualified on the 2.06 only; see BOARD_PMIC_DISPLAY_ENABLE_RECOVERY below.
 constexpr bool displayEnableRecovery = false;
 }  // namespace power
+
+namespace wifi {
+// Allocate the resident transfer Wi-Fi resources before BLE: a first transfer
+// after a ride found enough total RAM but no 32 KiB contiguous block on this
+// board. The 2.06 keeps its original startup order until qualified.
+constexpr bool prepareBeforeBle = true;
+}  // namespace wifi
 
 namespace gnss {
 // UART pads only; no module is populated on this model.

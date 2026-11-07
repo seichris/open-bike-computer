@@ -7,6 +7,9 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 BLE_CPP = REPO_ROOT / "esp32/lib/ble_navigation/ble_navigation.cpp"
 BLE_HPP = REPO_ROOT / "esp32/lib/ble_navigation/ble_navigation.hpp"
 MAIN_CPP = REPO_ROOT / "esp32/src/main.cpp"
+# The maintenance mode is the AMOLED family's startup part.
+STARTUP_CPP = REPO_ROOT / "esp32/lib/board_startup/amoled.cpp"
+EPAPER_STARTUP_CPP = REPO_ROOT / "esp32/lib/board_startup/epaper.cpp"
 
 
 class FirmwareMaintenanceBleContractTests(unittest.TestCase):
@@ -15,27 +18,40 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
         cls.ble_cpp = BLE_CPP.read_text(encoding="utf-8")
         cls.ble_hpp = BLE_HPP.read_text(encoding="utf-8")
         cls.main_cpp = MAIN_CPP.read_text(encoding="utf-8")
+        cls.startup_cpp = STARTUP_CPP.read_text(encoding="utf-8")
 
     def test_authentication_timeout_uses_live_ble_state(self):
         self.assertIn("bool isAuthenticated() const;", self.ble_hpp)
         self.assertRegex(
-            self.main_cpp,
+            self.startup_cpp,
             r"authenticationTimedOut\(\s*maintenanceElapsed,\s*"
             r"bleNavServer\.isAuthenticated\(\)\)",
         )
         self.assertNotRegex(
-            self.main_cpp,
+            self.startup_cpp,
             r"authenticationTimedOut\(\s*maintenanceElapsed,\s*false\)",
         )
         self.assertRegex(
-            self.main_cpp,
+            self.startup_cpp,
             r"!commitOwnsReboot\s*&&\s*!transferStatus\.enabled\s*&&\s*"
             r"firmware_maintenance::policy::authenticationTimedOut",
         )
 
+    def test_maintenance_mode_is_hosted_by_the_amoled_family_only(self):
+        # setup() and loop() defer to the family; the e-paper never enters the
+        # mode, matching its firmware_maintenance_unsupported BLE answer.
+        self.assertIn("if (board::startup::beginFirmwareMaintenance()) {", self.main_cpp)
+        self.assertIn("if (board::startup::processFirmwareMaintenance()) {", self.main_cpp)
+        self.assertNotIn("firmware_maintenance::policy", self.main_cpp)
+        self.assertIn("if (!firmware_maintenance::active()) {", self.startup_cpp)
+        epaper = EPAPER_STARTUP_CPP.read_text(encoding="utf-8")
+        self.assertIn("bool beginFirmwareMaintenance() { return false; }", epaper)
+        self.assertIn("bool processFirmwareMaintenance() { return false; }", epaper)
+        self.assertIn('"firmware_maintenance_unsupported"', self.ble_cpp)
+
     def test_maintenance_button_requires_a_fresh_release_and_records_exit(self):
-        self.assertIn("bootButtonExitRequested(", self.main_cpp)
-        self.assertIn("exit_boot_button", self.main_cpp)
+        self.assertIn("bootButtonExitRequested(", self.startup_cpp)
+        self.assertIn("exit_boot_button", self.startup_cpp)
         self.assertIn("exit_ble_command", self.ble_cpp)
 
     def test_native_and_fallback_channels_share_maintenance_dispatch(self):
