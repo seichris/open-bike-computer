@@ -21,18 +21,25 @@ cross-check cannot see either because it adds every include directory.
 This test replays those rules (PlatformIO 6.1.18, ``builder/tools/piolib.py``
 and ``fs.match_src_files``; SCons 4.8.1 ``Scanner/C.py``) over ``esp32/lib``
 and ``esp32/src`` and fails on any include that one of the libraries could not
-resolve. Libraries installed from ``lib_deps`` live outside the repository and
-are not scanned; none of them includes a repository header by bare name, so
-on this tree they only add include paths, and the check errs toward reporting
-an include that a relative path fixes. Run ``--list`` to print each library's
-dependencies, or ``--root DIR`` to check another ``esp32`` tree (it needs that
-tree's ``platformio.ini`` for the ``-I`` build flags).
+resolve. The Arduino framework libraries and the ``lib_deps`` packages live
+outside the repository; ``ldf_external_libraries.json`` beside this file
+records, from the locked runtime's package store, each one's headers and the
+other external libraries whose directories its compile receives, so a
+repository library that reaches ``WiFi.h`` only through another library's
+header is reported the same way. The data is tied to the runtime lock and is
+regenerated with ``--update-externals STORE_DIR`` (a
+``.pio/open-bike-build/platformio/<env>`` directory of a finished build).
+Externals never include repository headers, so they are not scanned on this
+tree. Run ``--list`` to print each library's dependencies, or ``--root DIR``
+to check another ``esp32`` tree (it needs that tree's ``platformio.ini`` for
+the ``-I`` build flags).
 """
 from __future__ import annotations
 
 import argparse
 import configparser
 import glob
+import hashlib
 import json
 import os
 import pathlib
@@ -40,6 +47,9 @@ import re
 import sys
 import tempfile
 import unittest
+
+EXTERNALS_FILE = pathlib.Path(__file__).with_name("ldf_external_libraries.json")
+RUNTIME_LOCK = pathlib.Path("tools/firmware-runtime/lock-v1.json")
 
 HEADER_EXT = ["h", "hpp"]
 ASM_EXT = ["S", "spp", "SPP", "sx", "s", "asm", "ASM"]
@@ -144,6 +154,30 @@ class Library:
         return match_src_files(self.src_dir, self.src_filter, SOURCE_EXT)
 
 
+class ExternalLibrary(Library):
+    """A framework library or lib_deps package known only from the generated data."""
+
+    def __init__(self, name: str, kind: str, headers: list[str]):
+        virtual = pathlib.Path("<external>") / name
+        super().__init__(virtual, name, virtual, [virtual], [])
+        self.kind, self.headers = kind, set(headers)
+
+    def search_files(self) -> list[pathlib.Path]:
+        return []
+
+    def describe(self) -> str:
+        return f"the {self.name} {'framework' if self.kind == 'framework' else 'lib_deps'} library"
+
+
+def load_externals(data: dict) -> list[ExternalLibrary]:
+    libraries = {name: ExternalLibrary(name, entry["kind"], entry["headers"]) for name, entry in data["libraries"].items()}
+    for name, entry in data["libraries"].items():
+        libraries[name].depbuilders = [libraries[dep] for dep in entry["paths"] if dep in libraries]
+        libraries[name].scanned = True
+    # lib_deps packages precede the framework libraries in PlatformIO's discovery order.
+    return sorted(libraries.values(), key=lambda lib: (lib.kind != "lib_deps", lib.name))
+
+
 class Project(Library):
     def __init__(self, root: pathlib.Path):
         super().__init__(root, "project", root / "src",
@@ -156,9 +190,13 @@ class Project(Library):
 class Finder:
     """The dependency finder and the include paths it hands each library."""
 
-    def __init__(self, root: pathlib.Path, compile_dirs: list[pathlib.Path] | None = None):
+    def __init__(self, root: pathlib.Path, compile_dirs: list[pathlib.Path] | None = None,
+                 externals: dict | None = None):
         self.root = root.resolve()
         self.project = Project(self.root)
+        if externals is None and EXTERNALS_FILE.is_file():
+            externals = json.loads(EXTERNALS_FILE.read_text())
+        self.externals = load_externals(externals) if externals else []
         lib_dir = self.root / "lib"
         self.libraries = [lib for lib in (Library.from_dir(d) for d in sorted(lib_dir.iterdir())
                                           if d.is_dir() and d.name != "__cores__") if lib] if lib_dir.is_dir() else []
@@ -173,10 +211,14 @@ class Finder:
         self._scan(self.project)
 
     def owner(self, file: pathlib.Path) -> Library | None:
-        for lib in self.libraries:
+        for lib in self.libraries + self.externals:
             if lib.contains(file):
                 return lib
         return None
+
+    def external_for(self, name: str) -> ExternalLibrary | None:
+        """The external library that provides a header name, in PlatformIO's search order."""
+        return next((lib for lib in self.externals if name in lib.headers), None)
 
     def found_includes(self, file: pathlib.Path, lib: Library) -> list[pathlib.Path]:
         """SCons' classic scanner: quoted includes search the file's directory first, angled ones last;
@@ -190,6 +232,10 @@ class Finder:
                 if candidate.is_file():
                     found.append((f"{opening} {name} {closing}", candidate.resolve()))
                     break
+            else:
+                external = self.external_for(name)
+                if external is not None:
+                    found.append((f"{opening} {name} {closing}", external.path / name))
         return [candidate for _, candidate in sorted(found)]
 
     def implicit_includes(self, lib: Library, files: list[pathlib.Path]) -> list[pathlib.Path]:
@@ -265,6 +311,11 @@ class Finder:
                 if hit is not None:
                     queue.append(hit.resolve())
                     continue
+                external = self.external_for(name)
+                if external is not None:
+                    if external.path not in paths:
+                        problems.add((str(file.relative_to(self.root)), name, external.describe()))
+                    continue
                 elsewhere = next((d / name for d in self.discovery_dirs if (d / name).is_file()), None)
                 if elsewhere is None:
                     # Not on any include path: a repository file by that relative name is still a defect.
@@ -277,8 +328,9 @@ class Finder:
         return sorted(problems)
 
     def report(self) -> list[str]:
+        """Problems of the project and of every library the finder reached; others are never built."""
         lines = []
-        for lib in [self.project] + self.libraries:
+        for lib in [self.project] + [lib for lib in self.libraries if lib.scanned]:
             for file, name, owner in self.unresolved(lib):
                 lines.append(f"{lib.name}: {file} includes \"{name}\" from {owner}, which its compile does not receive")
         return lines
@@ -304,6 +356,52 @@ def build_flag_include_dirs(root: pathlib.Path) -> list[pathlib.Path]:
     return dirs
 
 
+def runtime_identity(root: pathlib.Path) -> dict:
+    """What the external data is tied to: the runtime lock and the platform pin."""
+    identity = {}
+    lock = root / RUNTIME_LOCK
+    if lock.is_file():
+        identity["runtimeLockSha256"] = hashlib.sha256(lock.read_bytes()).hexdigest()
+    ini = root / "platformio.ini"
+    if ini.is_file():
+        match = re.search(r"^platform\s*=\s*(\S+)", ini.read_text(), re.M)
+        if match:
+            identity["platform"] = match.group(1)
+    return identity
+
+
+def generate_externals(root: pathlib.Path, store: pathlib.Path) -> dict:
+    """Describe the framework libraries and lib_deps packages of a finished build's private store."""
+    dirs: list[tuple[str, pathlib.Path]] = []
+    for libdeps in sorted((store / "libdeps").glob("*/")):
+        dirs += [("lib_deps", d) for d in sorted(libdeps.iterdir()) if d.is_dir()]
+    framework = store / "packages" / "framework-arduinoespressif32" / "libraries"
+    dirs += [("framework", d) for d in sorted(framework.iterdir()) if d.is_dir()]
+    libraries: dict[str, tuple[str, Library]] = {}
+    for kind, directory in dirs:
+        lib = Library.from_dir(directory)
+        if lib is not None and (lib.search_files() or any(lib.include_dirs())):
+            libraries[lib.name] = (kind, lib)
+    # Dependencies among the externals, with the same discovery and cycle rules.
+    finder = Finder.__new__(Finder)
+    finder.root, finder.externals, finder.libraries = store, [], [lib for _, lib in libraries.values()]
+    finder.project = Project(store)
+    finder.project.scanned = True
+    finder.discovery_dirs = [d for lib in finder.libraries for d in lib.include_dirs()]
+    finder.compile_dirs, finder._repository_files, finder._paths = [], [], {}
+    for lib in finder.libraries:
+        finder._scan(lib)
+    data = {"libraries": {}}
+    data.update(runtime_identity(root))
+    for name, (kind, lib) in sorted(libraries.items()):
+        headers = sorted({str(f.relative_to(d)) for d in lib.include_dirs() if d.is_dir()
+                          for f in d.rglob("*") if f.is_file() and f.suffix.lstrip(".") in HEADER_EXT})
+        others = {other.name for other in finder.libraries
+                  if other is not lib and set(other.include_dirs()) & finder.include_paths(lib)}
+        data["libraries"][name] = {"kind": kind, "headers": headers, "paths": sorted(others)}
+    return data
+
+
 def _tree(root: pathlib.Path, files: dict[str, str]) -> pathlib.Path:
     for name, text in files.items():
         path = root / name
@@ -320,9 +418,9 @@ class FinderRuleTests(unittest.TestCase):
     def tearDown(self):
         self._temporary.cleanup()
 
-    def finder(self, files: dict[str, str], compile_dirs=()) -> Finder:
+    def finder(self, files: dict[str, str], compile_dirs=(), externals: dict | None = None) -> Finder:
         _tree(self.root, files)
-        return Finder(self.root, [self.root / d for d in compile_dirs])
+        return Finder(self.root, [self.root / d for d in compile_dirs], externals or {"libraries": {}})
 
     def library(self, finder: Finder, name: str) -> Library:
         return next(lib for lib in finder.libraries if lib.name == name)
@@ -462,8 +560,52 @@ class FinderRuleTests(unittest.TestCase):
         self.assertEqual(self.names(finder.project.depbuilders), ["a"])
 
 
+    def test_second_entry_into_a_library_scans_nothing_new(self):
+        # Deep mode replaces the passed files with the library's own sources on every
+        # entry, so a header-only library reached from two includers still carries nothing.
+        finder = self.finder({
+            "src/main.cpp": '#include "a.hpp"\n#include "b.hpp"\n',
+            "lib/a/a.hpp": "", "lib/a/a.cpp": '#include "b.hpp"\n',
+            "lib/b/b.hpp": '#include "c.hpp"\n', "lib/c/c.hpp": "",
+        })
+        self.assertEqual(self.names(self.library(finder, "b").depbuilders), [])
+        self.assertEqual(finder.report(), [
+            'project: lib/b/b.hpp includes "c.hpp" from lib/c, which its compile does not receive',
+            'a: lib/b/b.hpp includes "c.hpp" from lib/c, which its compile does not receive'])
+
+    def test_unreached_libraries_are_not_graded(self):
+        finder = self.finder({
+            "src/main.cpp": "",
+            "lib/orphan/orphan.cpp": '#include "missing_everywhere.hpp"\n#include "b.hpp"\n', "lib/b/b.hpp": "",
+        })
+        self.assertFalse(self.library(finder, "orphan").scanned)
+        self.assertEqual(finder.report(), [])
+
+    def test_external_libraries_propagate_like_repository_ones(self):
+        externals = {"libraries": {
+            "WiFi": {"kind": "framework", "headers": ["WiFi.h"], "paths": ["Network"]},
+            "Network": {"kind": "framework", "headers": ["NetworkClient.h"], "paths": []},
+        }}
+        finder = self.finder({
+            "src/main.cpp": '#include "a.hpp"\n#include "d.hpp"\n',
+            # a includes WiFi itself and so receives Network through it.
+            "lib/a/a.hpp": "", "lib/a/a.cpp": '#include <WiFi.h>\n#include <NetworkClient.h>\n',
+            # d reaches WiFi.h only through the header-only b, as lib/lvgl did through power.hpp.
+            "lib/b/b.hpp": '#include <WiFi.h>\n',
+            "lib/d/d.hpp": "", "lib/d/d.cpp": '#include "b.hpp"\n',
+        }, externals=externals)
+        self.assertEqual(self.names(self.library(finder, "a").depbuilders), ["Network", "WiFi"])
+        self.assertEqual(finder.report(), ['d: lib/b/b.hpp includes "WiFi.h" from the WiFi framework library, which its compile does not receive'])
+
+
 class RepositoryTests(unittest.TestCase):
     root = pathlib.Path(__file__).resolve().parents[2]
+
+    def test_external_library_data_matches_the_locked_runtime(self):
+        data = json.loads(EXTERNALS_FILE.read_text())
+        self.assertEqual({k: data.get(k) for k in ("runtimeLockSha256", "platform")}, runtime_identity(self.root),
+                         "the runtime changed: regenerate with --update-externals <.pio/open-bike-build/platformio/ENV>")
+        self.assertIn("WiFi", data["libraries"])
 
     def test_every_library_resolves_its_includes(self):
         finder = Finder(self.root)
@@ -474,9 +616,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--root", type=pathlib.Path, help="esp32 directory to check (default: this repository's)")
     parser.add_argument("--list", action="store_true", help="print each library's dependencies and stop")
+    parser.add_argument("--update-externals", type=pathlib.Path, metavar="STORE_DIR",
+                        help="regenerate ldf_external_libraries.json from a finished build's private store")
     args, rest = parser.parse_known_args(argv)
     if args.root is not None:
         RepositoryTests.root = args.root.resolve()
+    if args.update_externals is not None:
+        data = generate_externals(RepositoryTests.root, args.update_externals.resolve())
+        EXTERNALS_FILE.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+        print(f"wrote {EXTERNALS_FILE.name}: {len(data['libraries'])} external libraries")
+        return 0
     if args.list:
         finder = Finder(RepositoryTests.root)
         for lib in [finder.project] + finder.libraries:

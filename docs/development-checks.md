@@ -194,13 +194,19 @@ elsewhere can remove; the `-fsyntax-only` cross-check cannot see this because
 it adds every directory. The test walks `esp32/lib` and `esp32/src` and fails
 on any include that a library's compile would not find, naming the library,
 the file and the header's owner. Include other libraries' headers by relative
-path (`../storage/storage.hpp`) instead of relying on propagation. Libraries
-installed from `lib_deps` are not in the repository and are not scanned; none
-of them includes a repository header by bare name, so on this tree they only
-add paths and the check errs toward reporting an include that a relative path
-fixes. `--list` prints every library's dependencies and `--root DIR` checks
-another `esp32` tree (which needs its `platformio.ini` for the `-I` build
-flags); it runs inside the host check that every `esp32/` change selects.
+path (`../storage/storage.hpp`) instead of relying on propagation. The Arduino
+framework libraries and the `lib_deps` packages are outside the repository;
+`esp32/tools/tests/ldf_external_libraries.json` records, from the locked
+runtime's package store, each one's headers and the other external libraries
+whose directories its compile receives, so a repository library that reaches
+`WiFi.h` only through another library's header is reported the same way (the
+#766 case). The data is tied to the runtime lock and the platform pin and must
+be regenerated when they change:
+`python3 tools/tests/test_ldf_include_paths.py --update-externals .pio/open-bike-build/platformio/<env>`
+after a finished build. `--list` prints every library's dependencies and
+`--root DIR` checks another `esp32` tree (which needs its `platformio.ini` for
+the `-I` build flags); it runs inside the host check that every `esp32/`
+change selects.
 
 ## Board-macro confinement
 
