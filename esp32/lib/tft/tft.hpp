@@ -12,9 +12,6 @@
 #include "../storage/storage.hpp"
 #include "../panel/panelSelect.hpp"
 
-// Use Arduino_GFX for CO5300 AMOLED
-#include "../panel/WAVESHARE_AMOLED_175.hpp"
-
 static const char* calibrationFile PROGMEM = "/spiffs/TouchCal";
 extern bool repeatCalib;
 

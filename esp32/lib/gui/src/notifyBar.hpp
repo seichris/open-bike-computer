@@ -8,7 +8,7 @@
 #include "battery.hpp"
 #include "globalGuiDef.h"
 #include "settings.hpp"
-#include "storage.hpp"
+#include "../../storage/storage.hpp"
 #include "tasks.hpp"
 
 void createNotifyBar();

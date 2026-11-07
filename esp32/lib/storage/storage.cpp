@@ -119,6 +119,10 @@ SPIClass &waveshareMigrationBus() {
 bool waveshareMigrationBusBegun = false;
 
 void endWaveshareMigrationBus() {
+  // A board without the former HSPI chip select never had a migration bus.
+  if constexpr (board::sd::legacySpiCs == board::noPin) {
+    return;
+  }
   SD.end();
   if (waveshareMigrationBusBegun) {
     waveshareMigrationBus().end();
@@ -499,13 +503,20 @@ esp_err_t Storage::mountRemovableStorage() {
               SD_MMC.end();
               Serial.printf(
                   "SDIO: native-summary ok=0 attempts=%u elapsedMs=%lu "
-                  "next=legacy_spi_migration\n",
+                  "next=%s\n",
                   static_cast<unsigned>(nativeAttempts),
-                  (unsigned long)(millis() - mountStartMs));
+                  (unsigned long)(millis() - mountStartMs),
+                  board::sd::legacySpiCs == board::noPin
+                      ? "no-migration"
+                      : "legacy_spi_migration");
             }
             return mountResult.ok;
           },
           [&]() {
+            // Only boards that once carried the HSPI layout try the SPI path.
+            if constexpr (board::sd::legacySpiCs == board::noPin) {
+              return false;
+            }
             Serial.printf(
                 "SDIO: compatibility bus=HSPI reason=native_mount_failed "
                 "freqHz=%lu pins[cs=%d mosi=%d miso=%d sck=%d]\n",

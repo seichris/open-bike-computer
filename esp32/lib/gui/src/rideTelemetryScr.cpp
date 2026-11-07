@@ -13,10 +13,14 @@
 #include "rideTelemetryLayout.hpp"
 #include "rideTelemetryPresenter.hpp"
 #include "ride_stats_widget.hpp"
+#ifdef WAVESHARE_EPAPER_397
+#include "epaperRideStats.hpp"
+#endif
 #include "mainScr.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
 #include "../../utils/src/startup_constructed.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
@@ -33,6 +37,9 @@ struct MetricLabels {
 struct ConfigurableSlotView {
   MetricLabels labels{};
   lv_obj_t *heart = nullptr;
+#ifdef WAVESHARE_EPAPER_397
+  lv_obj_t *sign = nullptr;
+#endif
   std::array<lv_obj_t *, ride_telemetry_layout::kMaximumZoneCount>
       zoneSegments{};
   lv_obj_t *zoneHeart = nullptr;
@@ -433,6 +440,9 @@ void setConfigurableSlotHidden(ConfigurableSlotView &slot, bool hidden) {
   set(slot.labels.title);
   set(slot.labels.value);
   set(slot.heart);
+#ifdef WAVESHARE_EPAPER_397
+  set(slot.sign);
+#endif
   for (lv_obj_t *segment : slot.zoneSegments)
     set(segment);
   set(slot.zoneHeart);
@@ -456,6 +466,10 @@ void createConfigurableSlot(std::size_t index) {
     slot.labels = createMetric(ridePage, "", rect);
   }
   slot.heart = createHeartIcon(ridePage);
+#ifdef WAVESHARE_EPAPER_397
+  slot.sign = lv_label_create(ridePage);
+  lv_obj_set_style_text_color(slot.sign, lv_color_white(), 0);
+#endif
   for (lv_obj_t *&segment : slot.zoneSegments) {
     segment = lv_obj_create(ridePage);
     lv_obj_remove_style_all(segment);
@@ -547,10 +561,16 @@ void updateConfigurableSlots(
   const auto &layout = currentRideStatsLayout();
   std::array<ride_stats_widget::Presentation,
              ride_telemetry_layout::kConfigurableSlotCount> widgets{};
+  for (std::size_t index = 0; index < widgets.size(); ++index) {
+#ifdef WAVESHARE_EPAPER_397
+    widgets[index] = epaper_ride_stats::make(layout.slots[index], model);
+#else
+    widgets[index] = ride_stats_widget::make(layout.slots[index], model);
+#endif
+  }
+#ifndef WAVESHARE_EPAPER_397
   std::array<const lv_font_t *, ride_telemetry_layout::kConfigurableSlotCount>
       sharedFonts{};
-  for (std::size_t index = 0; index < widgets.size(); ++index)
-    widgets[index] = ride_stats_widget::make(layout.slots[index], model);
   for (std::size_t right = 2; right < widgets.size(); right += 2) {
     const auto &leftWidget = widgets[right - 1];
     const auto &rightWidget = widgets[right];
@@ -574,6 +594,7 @@ void updateConfigurableSlots(
         metricFontRole());
     sharedFonts[right - 1] = sharedFonts[right] = font;
   }
+#endif
   for (std::size_t index = 0; index < configurableSlots.size(); ++index) {
     ConfigurableSlotView &slot = configurableSlots[index];
     setConfigurableSlotHidden(slot, true);
@@ -584,7 +605,11 @@ void updateConfigurableSlots(
     const auto rect =
         ride_telemetry_layout::configurableSlotRect(rideLayout, index);
     char title[40]{};
+#ifdef WAVESHARE_EPAPER_397
+    if (widget.unit[0] != '\0')
+#else
     if (index == 0 && widget.unit[0] != '\0')
+#endif
       std::snprintf(title, sizeof(title), "%s %s", widget.title, widget.unit);
     else
       std::snprintf(title, sizeof(title), "%s", widget.title);
@@ -597,6 +622,57 @@ void updateConfigurableSlots(
       continue;
     }
     lv_obj_clear_flag(slot.labels.value, LV_OBJ_FLAG_HIDDEN);
+#ifdef WAVESHARE_EPAPER_397
+    const auto cell = ride_telemetry_layout::configurableValueRect(rideLayout, index);
+    const bool heart = widget.kind == ride_stats_widget::PresentationKind::HeartWithValue;
+    const auto heartSize = ride_telemetry_layout::heartRateHeartSize(rideLayout.screenWidth);
+    const auto heartGap = ride_telemetry_layout::heartRateHeartGap(rideLayout.screenWidth);
+    const int32_t heartBlock = heart ? heartSize + heartGap : 0;
+    const auto role = epaper_ride_stats::isZoneRange(layout.slots[index])
+        ? ride_metric_typography::Role::Zone
+        : index == 0 ? ride_metric_typography::Role::Hero : metricFontRole();
+    const char *format = epaper_ride_stats::maximumFormat(layout.slots[index], model);
+    const auto *font = ride_metric_typography::fontForText(
+        format, cell.width - heartBlock - 4 - (widget.isAltitude ? 8 : 0),
+        cell.height, role);
+    // One box fits the widest supported format. Centre it, with the altitude
+    // sign column and heart icon, under the centred title. Every position
+    // depends only on the widget and its font, never on the live value.
+    const int32_t signWidth =
+        widget.isAltitude && font ? lv_text_get_width("-", 1, font, 0) : 0;
+    const int32_t signBlock = signWidth ? signWidth + 8 : 0;
+    const char *digits = widget.isAltitude && format[0] == '-' ? format + 1 : format;
+    int32_t valueWidth = cell.width - heartBlock - signBlock;
+    if (font)
+      valueWidth = std::min<int32_t>(
+          valueWidth, lv_text_get_width(digits, std::strlen(digits), font, 0) + 4);
+    const int32_t left =
+        cell.x + std::max<int32_t>(0, (cell.width - signBlock - valueWidth - heartBlock) / 2);
+    const ride_telemetry_layout::Rect value{left + signBlock, cell.y, valueWidth, cell.height};
+    if (heart) {
+      lv_obj_set_pos(slot.heart, value.right() + heartGap,
+                      value.y + (value.height - heartSize) / 2);
+      lv_obj_set_size(slot.heart, heartSize, heartSize);
+      if (widget.available) lv_obj_clear_flag(slot.heart, LV_OBJ_FLAG_HIDDEN);
+    }
+    const char *text = widget.value.data();
+    if (signBlock) {
+      // Reserve a sign column even when the value is positive or unavailable.
+      // Neither the sign nor the digits move when crossing zero.
+      const ride_telemetry_layout::Rect signRect{left, cell.y, signWidth, cell.height};
+      const bool negative = widget.available && text[0] == '-' && text[1] != '-';
+      applyMetricText(slot.sign, negative ? "-" : "", signRect, font,
+                      LV_TEXT_ALIGN_LEFT);
+      lv_obj_clear_flag(slot.sign, LV_OBJ_FLAG_HIDDEN);
+      if (negative) ++text;
+    }
+    // Unexpected/unsupported values fail closed; never silently clip or
+    // resize a live cell. Availability does not change its font or anchor.
+    if (font && (!ride_metric_typography::supportsText(font, text) ||
+        lv_text_get_width(text, std::strlen(text), font, 0) > value.width - 4))
+      text = "--";
+    applyMetricText(slot.labels.value, text, value, font, LV_TEXT_ALIGN_RIGHT);
+#else
     if (widget.kind == ride_stats_widget::PresentationKind::HeartWithValue) {
       setHeartValue(slot.labels.value, slot.heart, widget.value.data(), rect,
                      widget.available, sharedFonts[index]);
@@ -607,6 +683,7 @@ void updateConfigurableSlots(
           index == 0 ? ride_metric_typography::Role::Hero : metricFontRole(),
           sharedFonts[index]);
     }
+#endif
   }
 }
 

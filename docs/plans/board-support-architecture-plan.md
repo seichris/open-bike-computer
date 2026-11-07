@@ -305,7 +305,7 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
 2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
 `lib/board/` when it merges `main`. M3 followed on 2026-11-06 and merged on
-2026-11-07; #442 merged `main` through it the same day. M2 and M4 still wait for #442 to merge:
+2026-11-07; #442 merged `main` through it the same day. M2 and M4 still wait for #442 to merge. #442 merged main through #767 on 2026-11-07: `board.hpp` selects the third target, `boards/waveshare_epaper_397.hpp` carries the e-paper data (including the `epd`, `audio` and side-key values that `include/board_traits.hpp` now aliases), the storage migration path is skipped by data (`sd::legacySpiCs == noPin`), and the confinement baseline was raised once for the e-paper branches in shared files, to 204 conditionals in 32 files:
 the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and
 migrating them first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
