@@ -6,6 +6,7 @@
 #include "waitingScr.hpp"
 
 #include "../../bicino_style/bicino_visual_style.hpp"
+#include "../../board/board.hpp"
 #include "../../images/src/bicino_app_qr.h"
 #include "../../images/src/bicino_logo.h"
 #include "battery.hpp"
@@ -15,6 +16,12 @@
 #include "waitingScreenLayout.hpp"
 
 #include <cstring>
+
+// The e-paper confirms the pairing comparison with its center side key.
+static constexpr pre_connection_presentation::ConfirmInput kPairingConfirmInput =
+    board::buttons::center != board::noPin
+        ? pre_connection_presentation::ConfirmInput::CenterKey
+        : pre_connection_presentation::ConfirmInput::EitherDeviceButton;
 
 lv_obj_t *waitingScreen = nullptr;
 volatile bool gpsReceivedFromApp = false;
@@ -181,7 +188,7 @@ void applyPhase(Phase phase, uint32_t pairingCode) {
   }
 
   const pre_connection_presentation::Content content =
-      pre_connection_presentation::content(phase);
+      pre_connection_presentation::content(phase, kPairingConfirmInput);
   const bool welcome = content.group == Group::Welcome;
   const bool pairing = content.group == Group::Pairing;
   const bool status = content.group == Group::Status;
@@ -248,7 +255,8 @@ void createWaitingScr() {
 
   welcomeGroup = createTransparentGroup(waitingScreen);
   const pre_connection_presentation::Content welcomeContent =
-      pre_connection_presentation::content(Phase::Welcome);
+      pre_connection_presentation::content(Phase::Welcome,
+                                           kPairingConfirmInput);
   createLabel(welcomeGroup, layout.welcomeHeadline, &lv_font_montserrat_38,
               lv_color_white(), welcomeContent.headline);
   lv_obj_t *qr = lv_image_create(welcomeGroup);
@@ -260,7 +268,8 @@ void createWaitingScr() {
 
   pairingGroup = createTransparentGroup(waitingScreen);
   const pre_connection_presentation::Content pairingContent =
-      pre_connection_presentation::content(Phase::PairingComparison);
+      pre_connection_presentation::content(Phase::PairingComparison,
+                                           kPairingConfirmInput);
   createLabel(pairingGroup, layout.pairingHeadline,
               &lv_font_montserrat_38, lv_color_white(),
               pairingContent.headline);

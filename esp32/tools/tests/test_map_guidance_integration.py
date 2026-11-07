@@ -9,6 +9,18 @@ MAIN_SCREEN_SOURCE = (
 MAP_RENDERER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.cpp"
 ).read_text(encoding="utf-8")
+MAP_SCHEDULER_AMOLED_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "mapSchedulerAmoled.cpp"
+).read_text(encoding="utf-8")
+MAP_SCHEDULER_EPAPER_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "mapSchedulerEpaper.cpp"
+).read_text(encoding="utf-8")
+MAP_CAMERA_AMOLED_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapCameraAmoled.cpp"
+).read_text(encoding="utf-8")
+MAP_CAMERA_EPAPER_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapCameraEpaper.cpp"
+).read_text(encoding="utf-8")
 MAP_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
 ).read_text(encoding="utf-8")
@@ -143,7 +155,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", stable)
         self.assertNotIn("lv_obj_add_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", stable)
         self.assertNotIn("desiredRotation", stable)
-        presenter = function_body(MAP_RENDERER_SOURCE, "void Maps::serviceStableCamera")
+        presenter = function_body(MAP_CAMERA_AMOLED_SOURCE, "void Maps::serviceStableCamera")
         self.assertIn("cameraLag.observe(required, nowMs)", presenter)
         self.assertIn("sample.hidden = false", presenter)
         self.assertIn("visibleRenderResult.labelOrientation", presenter)
@@ -159,28 +171,30 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         self.assertNotIn("lastPresentationMs", prepare)
         self.assertNotIn("nowMs - lastPresentationMs < 4000", prepare)
+        # The family scheduler is evaluated after the pipeline and the overlay.
         self.assertLess(
             prepare.index("mapView.serviceRenderPipeline(nowMs)"),
-            prepare.index("epaperNavigationScheduler.evaluate"),
+            prepare.index("map_scheduler::evaluate"),
         )
         self.assertLess(
             prepare.index("mapView.updatePositionOverlay()"),
-            prepare.index("epaperNavigationScheduler.evaluate"),
+            prepare.index("map_scheduler::evaluate"),
         )
-        self.assertIn("mapView.takeFramePublication(publication)", MAIN_SCREEN_SOURCE)
-        self.assertIn("publication.capturedFixSequence", MAIN_SCREEN_SOURCE)
+        evaluate = function_body(MAP_SCHEDULER_EPAPER_SOURCE,
+                                 "Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp)")
+        self.assertIn("epaperNavigationScheduler.evaluate", evaluate)
+        self.assertIn("mapView.takeFramePublication(publication)", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertIn("publication.capturedFixSequence", MAP_SCHEDULER_EPAPER_SOURCE)
 
     def test_epaper_camera_keeps_compatible_base_and_has_one_submitter(self):
-        presenter = function_body(MAP_RENDERER_SOURCE, "void Maps::serviceStableCamera")
-        epaper_branch = presenter.split("#ifdef WAVESHARE_EPAPER_397", 1)[1].split(
-            "#else", 1
-        )[0]
+        epaper_branch = function_body(MAP_CAMERA_EPAPER_SOURCE, "void Maps::serviceStableCamera")
         self.assertNotIn("cameraLag.expired", epaper_branch)
         self.assertNotIn("submitRenderRequest", epaper_branch)
         self.assertNotIn("lv_label_set_text", epaper_branch)
         self.assertNotIn('"Recentering - current map remains visible"', EPAPER_UI_SOURCE)
         self.assertIn("baseCompatible", epaper_branch)
-        self.assertIn("epaperArmedRenderReasons", MAIN_SCREEN_SOURCE)
+        self.assertIn("epaperArmedRenderReasons", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertNotIn("epaperNavigationScheduler", MAIN_SCREEN_SOURCE)
 
     def test_epaper_route_windows_are_soft_and_hard_invalidations_recompose(self):
         process = function_body(EPAPER_UI_SOURCE, "void process()")
@@ -200,7 +214,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("snapshot.acceptedGpsSequence", worker)
         self.assertIn("currentAcceptedGpsSequence.load", submit)
         self.assertIn("currentBaseCameraSequence.load", submit)
-        self.assertIn("epaper::setFrameProvenance(", MAIN_SCREEN_SOURCE)
+        self.assertIn("epaper::setFrameProvenance(", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertIn("map_scheduler::captureFrameProvenance()", MAIN_SCREEN_SOURCE)
         self.assertNotIn('#include "mainScr.hpp"', EPAPER_DISPLAY_SOURCE)
         self.assertLess(
             worker.index("mailbox.finish(true)"),
@@ -241,7 +256,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         request = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
         )
-        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
+        # The round 1.75 panel keeps the 64-pixel floor; rectangular panels render
+        # the full overscan. Both read the board definition.
+        self.assertIn("MAP_RENDER_ROUND_VIEWPORT = board::display::round", MAP_HEADER_SOURCE)
+        self.assertIn("board::display::round ? 64 : MAP_RENDER_OVERSCAN_PIXELS", MAP_HEADER_SOURCE)
         self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
         self.assertIn("map_presentation::refreshLeadPixels", request)
         self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)
@@ -295,10 +313,16 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("std::swap(bufMapScreenSize, bufMapTempSize)", publish)
         self.assertIn("lv_canvas_set_buffer(canvasMap, bufMapScreen", publish)
         self.assertIn("lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", publish)
+        # The coverage rule is the family's (readyFrameCovered); both keep the
+        # viewport-coverage proof ahead of the buffer swap.
         self.assertLess(
-            publish.index("frameCoversViewport"),
+            publish.index("readyFrameCovered("),
             publish.index("std::swap(bufMapScreen, bufMapTemp)"),
         )
+        for family in (MAP_CAMERA_AMOLED_SOURCE, MAP_CAMERA_EPAPER_SOURCE):
+            covered = function_body(family, "bool Maps::readyFrameCovered")
+            self.assertIn("map_camera::cropCovered", covered)
+            self.assertIn("map_presentation::frameCoversViewport", covered)
 
     def test_live_route_and_marker_share_presented_frame_transform(self):
         foreground = function_body(MAP_RENDERER_SOURCE, "void Maps::renderLiveForeground")
@@ -477,8 +501,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn(
             "uiChangeTracker.take(ui_update_policy::Source::Route)", prepare
         )
-        self.assertIn("if (gpsChanged || routeChanged)", prepare)
-        self.assertIn("mapRenderScheduler.observe(currentMapFix())", prepare)
+        self.assertIn("map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix)", prepare)
+        observe = function_body(MAP_SCHEDULER_AMOLED_SOURCE, "void observe(uint32_t, bool gpsChanged, bool routeChanged")
+        self.assertIn("if (gpsChanged || routeChanged)", observe)
+        self.assertIn("mapRenderScheduler.observe(course())", observe)
 
     def test_idle_guidance_screen_keeps_birdseye_3d_enabled(self):
         capture = function_body(

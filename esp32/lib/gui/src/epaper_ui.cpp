@@ -213,7 +213,7 @@ void process() {
   const BLEDebugStats ble = bleNavServer.getDebugStats();
   const epaper::Status panel = epaper::status();
   const bool stale = !ble.lastGpsPacketMs || now - ble.lastGpsPacketMs > 10000;
-  const Maps::EpaperCameraState camera = mapView.captureEpaperCameraState();
+  const Maps::CameraState camera = mapView.captureCameraState();
   const bool mapActive = isMapScreenActive() || isMapGuidanceScreenActive();
   const bool noCoverage =
       mapActive && camera.hasBase && !camera.mapCoverageAvailable;

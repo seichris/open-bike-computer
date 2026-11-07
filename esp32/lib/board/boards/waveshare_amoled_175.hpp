@@ -39,6 +39,9 @@ constexpr uint8_t columnOffset = 6;
 // whether the 90-degree rotation is offered on this panel.
 constexpr uint8_t defaultRotation = 1;
 constexpr bool rotation90Enabled = true;
+// RGB565 colour panel that animates at the LVGL frame rate.
+constexpr bool monochrome = false;
+constexpr bool animations = true;
 }  // namespace display
 
 namespace i2c {
@@ -69,10 +72,17 @@ constexpr uint8_t reset = noPin;
 // alone cannot restore the UI.
 constexpr bool ext1WakeSource = true;
 constexpr bool wakePolling = true;
+// The CST9217 reports two contacts; the standalone Map uses the second one
+// for pinch zoom and the idle zoom-out backdrop.
+constexpr bool multiTouch = true;
 }  // namespace touch
 
 namespace buttons {
 constexpr uint8_t boot = 0;
+// No side keys: BOOT and the PMIC PWR key confirm pairing.
+constexpr uint8_t up = noPin;
+constexpr uint8_t center = noPin;
+constexpr uint8_t down = noPin;
 }  // namespace buttons
 
 namespace sd {
@@ -127,6 +137,16 @@ constexpr uint16_t speedX = 1;
 constexpr uint16_t speedBottomInset = 130;
 constexpr uint16_t sunX = 170;
 constexpr uint16_t sunBottomInset = 170;
+// Map screen geometry read by gui_layout: the UI space reserved below a
+// non-fullscreen map, the anchor of the rider inside the map viewport, and
+// the toolbar button offsets.
+constexpr uint16_t mapNonFullscreenReservedHeight = 100;
+constexpr uint8_t mapAnchorXPercent = 50;
+constexpr uint8_t mapAnchorYPercent = 50;
+constexpr uint8_t mapToolbarOffset = 80;
+constexpr uint8_t mapToolbarSpace = 50;
+constexpr uint8_t mapToolbarInset = 10;
+constexpr uint8_t mapToolbarFullscreenBottomMargin = 24;
 }  // namespace layout
 
 }  // namespace board

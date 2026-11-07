@@ -393,7 +393,7 @@
       "name": "Two-finger Map zoom host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_cst9217_touch_frame.cpp \\\n  -o ${TMPDIR}/test_cst9217_touch_frame\n${TMPDIR}/test_cst9217_touch_frame\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_pinch_zoom.cpp \\\n  -o ${TMPDIR}/test_map_pinch_zoom\n${TMPDIR}/test_map_pinch_zoom",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_cst9217_touch_frame.cpp \\\n  -o ${TMPDIR}/test_cst9217_touch_frame\n${TMPDIR}/test_cst9217_touch_frame\ng++ -std=c++17 -Wall -Wextra -Werror -DWAVESHARE_AMOLED_175 \\\n  tools/tests/test_map_pinch_zoom.cpp \\\n  -o ${TMPDIR}/test_map_pinch_zoom\n${TMPDIR}/test_map_pinch_zoom",
       "tools": [
         "python3",
         "g++"

@@ -1,7 +1,9 @@
 // Compiled with renderer_helpers.inc extracted from the production screen.
 // No reimplementation of LVGL text sizing, heart placement, or row pairing.
 #include "rideMetricTypography.hpp"
+#include "rideStatsFamily.hpp"
 #include "rideTelemetryLayout.hpp"
+#include "rideTelemetryText.hpp"
 #include "ride_stats_widget.hpp"
 #ifdef WAVESHARE_EPAPER_397
 #include "epaperRideStats.hpp"
@@ -25,6 +27,14 @@ int previewSensorMask = 0;
 const auto &currentRideStatsLayout() { return previewLayout; }
 void hideLegacyWorkoutMetrics() {} // Preview owns no legacy page.
 #include "renderer_helpers.inc"
+// The slot presentation is the production family file of this configuration:
+// the e-paper replay defines WAVESHARE_EPAPER_397, the AMOLED preview
+// WAVESHARE_AMOLED_175 (one binary renders both AMOLED layouts).
+#ifdef WAVESHARE_EPAPER_397
+#include "rideStatsEpaper.cpp"
+#else
+#include "rideStatsAmoled.cpp"
+#endif
 
 static int nominalSize(const lv_font_t *font) {
   for (auto candidate : std::array<std::pair<const lv_font_t *, int>, 9>{{
