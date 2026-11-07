@@ -5,7 +5,6 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
 
@@ -24,4 +23,3 @@ void initializePowerManagement();
 
 } // namespace waveshare_board
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

@@ -180,11 +180,9 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
 
     def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
-        gate = (
-            "#if defined(BOARD_HAS_PSRAM) && "
-            "(defined(WAVESHARE_AMOLED_175) || "
-            "defined(WAVESHARE_AMOLED_206))"
-        )
+        # Every board has PSRAM; host builds without the flag keep the
+        # internal-RAM fallback.
+        gate = "#if defined(BOARD_HAS_PSRAM)"
         allocator = (
             "heap_caps_aligned_alloc(16, (size), "
             "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"

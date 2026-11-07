@@ -26,13 +26,9 @@
 #include "power_metrics.hpp"
 #include <Arduino_GFX_Library.h>
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "hal.hpp"
 #include "../ble_navigation/ble_navigation.hpp"
 #include "../speaker/speaker.hpp"
-#else
-extern const uint8_t BOARD_BOOT_PIN;
-#endif
 
 void Power::begin() {
   sleep_audit::begin();

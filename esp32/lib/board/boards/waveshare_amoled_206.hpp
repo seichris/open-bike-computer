@@ -33,12 +33,23 @@ constexpr uint8_t d0 = 4;
 constexpr uint8_t d1 = 5;
 constexpr uint8_t d2 = 6;
 constexpr uint8_t d3 = 7;
+// Arduino_CO5300 panel gap (column offset 1) from the vendor examples.
+constexpr uint8_t columnOffset = 22;
+// waveshare_board::display rotation index the firmware starts with, and
+// whether the 90-degree rotation is offered on this panel.
+constexpr uint8_t defaultRotation = 0;
+constexpr bool rotation90Enabled = false;
 }  // namespace display
 
 namespace i2c {
 // Shared by the AXP2101, FT3168, RTC and IMU.
 constexpr uint8_t sda = 15;
 constexpr uint8_t scl = 14;
+// Whether a register read sends a stop condition between the address write
+// and the read (the CST9217 path) or uses a repeated start (the FT3168 path),
+// and whether a failed transaction resets and reconfigures the bus.
+constexpr bool stopBetweenWriteAndRead = false;
+constexpr bool recoverOnFailure = true;
 }  // namespace i2c
 
 namespace touch {
@@ -70,6 +81,9 @@ constexpr bool axp2101 = true;
 // This board's PMIC policy allows only the display-enable recovery bit;
 // capture_boot.py gates it with --require-pmic-display-enable-only.
 constexpr bool qualifiedPowerControl = true;
+// One-way display-enable recovery (AXP2101 register 0x90 bit 0x80) is
+// qualified on the 2.06 only; see BOARD_PMIC_DISPLAY_ENABLE_RECOVERY below.
+constexpr bool displayEnableRecovery = true;
 }  // namespace power
 
 namespace gnss {
@@ -84,4 +98,23 @@ constexpr uint32_t flashBytes = 16u * 1024u * 1024u;
 constexpr uint32_t psramBytes = 8u * 1024u * 1024u;
 }  // namespace memory
 
+namespace layout {
+// Default positions of the stock main-screen widgets on this panel, read by
+// the settings defaults. Presentation data; M4 may move it with the screens.
+constexpr uint16_t compassY = 112;
+constexpr uint16_t coordY = 42;
+constexpr uint16_t altitudeX = 12;
+constexpr uint16_t altitudeBottomInset = 148;
+constexpr uint16_t speedX = 12;
+constexpr uint16_t speedBottomInset = 104;
+constexpr uint16_t sunX = 410 - 92;
+constexpr uint16_t sunBottomInset = 154;
+}  // namespace layout
+
 }  // namespace board
+
+// Preprocessor-visible capability for code that must not exist on boards
+// without it (PMIC write paths). Keep it equal to board::power.
+#define BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 1
+static_assert(BOARD_PMIC_DISPLAY_ENABLE_RECOVERY == board::power::displayEnableRecovery,
+              "capability macro and board data disagree");

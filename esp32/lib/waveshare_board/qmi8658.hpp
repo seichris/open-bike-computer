@@ -5,7 +5,6 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
 
@@ -59,4 +58,3 @@ const char *orientationName(Orientation orientation);
 
 } // namespace waveshare_board::imu
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

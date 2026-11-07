@@ -46,11 +46,13 @@ main_source = (project_dir / "src/main.cpp").read_text()
 assert '#include "ipc_stack_budget.hpp"' in main_source
 # Exercise effective SDK values, including the failing pinned-Arduino value
 # and the S3 default that leaves too little reserve on the observed crash path.
+# The budget no longer depends on a board macro: every image is a Waveshare
+# board, so a translation unit without one is held to the same floor.
 compiler = shutil.which("c++") or shutil.which("g++")
 assert compiler, "a C++ compiler is required for the effective IPC config gate"
 with tempfile.TemporaryDirectory() as temporary:
     stub_dir = Path(temporary)
-    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "LEGACY_BOARD"):
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "NO_BOARD_MACRO"):
         for size in (None, 1024, 1280, 1536, 2048):
             (stub_dir / "sdkconfig.h").write_text(
                 "" if size is None else f"#define CONFIG_ESP_IPC_TASK_STACK_SIZE {size}\n"
@@ -60,7 +62,7 @@ with tempfile.TemporaryDirectory() as temporary:
                  f"-D{board}", "-I", str(stub_dir), "-I", str(project_dir / "include"), "-"],
                 input='#include "ipc_stack_budget.hpp"\n', text=True, capture_output=True,
             )
-            accepted = board == "LEGACY_BOARD" or (size is not None and size >= 1536)
+            accepted = size is not None and size >= 1536
             assert (result.returncode == 0) == accepted, (board, size, result.stderr)
             if not accepted:
                 assert "Waveshare Bluetooth IPC stack requires" in result.stderr

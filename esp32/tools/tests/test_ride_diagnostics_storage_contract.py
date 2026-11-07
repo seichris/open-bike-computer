@@ -100,7 +100,7 @@ int main() {
         )
         self.assertIn("&writerTaskHandle, 1);", RECORDER)
         waveshare_init = STORAGE.split("esp_err_t Storage::initSD()", 1)[1].split(
-            "#elif defined(SPI_SHARED)", 1
+            "esp_err_t Storage::initSPIFFS()", 1
         )[0]
         self.assertIn("SD_MMC.setPins(", waveshare_init)
         self.assertIn('SD_MMC.begin("/sdcard", true, false,', waveshare_init)
@@ -319,7 +319,7 @@ int main() {
             with self.subTest(path.name):
                 self.assertIsNone(stream, stream and stream.group(0))
         probe = STORAGE[STORAGE.index("bool writableProbeSucceeded("):
-                        STORAGE.index("#if defined(WAVESHARE_AMOLED_175)",
+                        STORAGE.index("uint8_t removableCardType(",
                                       STORAGE.index("bool writableProbeSucceeded("))]
         self.assertNotIn("fopen(", re.sub(r"//[^\n]*", "", probe))
 

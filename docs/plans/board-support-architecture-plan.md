@@ -193,7 +193,11 @@ namespace gnss { constexpr bool fitted = false; constexpr uint8_t tx = 43, rx = 
 An optional pin a board does not route is `board::noPin`. `include/hal.hpp`
 keeps the old pin names (`TFT_QSPI_CLK`, `TCH_I2C_INT`, `WAVESHARE_SDMMC_CLK`
 and the rest) as aliases of this data until their users read `board::`
-directly.
+directly. A board file may also define a few `BOARD_*` capability macros for
+the places only the preprocessor can gate (PMIC write paths that must not
+exist on a board without the capability, C configuration headers); each one
+is `static_assert`ed equal to its `board::` value. The first is
+`BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`.
 
 The AMOLED definitions take their values from `hardware/README.md`, which stays
 the authoritative pinout. `board.hpp` replaces `board_traits.hpp` and absorbs
@@ -300,9 +304,9 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 
 M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
 2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
-`lib/board/` when it merges `main`. M2 to M4 still wait for #442: the e-paper
-PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and migrating them
-first would only create conflicts.
+`lib/board/` when it merges `main`. M3 followed on 2026-11-06. M2 and M4 still wait for #442:
+the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and
+migrating them first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
 host tests and, where it touches boot or power, a boot capture per affected
 board. A milestone that preserves behaviour still needs that capture: boot
@@ -339,7 +343,38 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   shared files; 11 more files are exempt as whole-file gates. `panelSelect.hpp` keeps
   its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
   not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
-  it merges.
+  it merges. Merged as #766 on 2026-11-06.
+- **M3, 2026-11-06, in review.** `storage.cpp`, `ride_diagnostics.cpp`,
+  `axp2101.cpp`, `i2c_bus.cpp`/`.hpp`, `settings.cpp`, `display.hpp`,
+  `touch.hpp`, `lv_conf.h`, `task_data_placement.hpp`,
+  `ipc_stack_budget.hpp`, `battery.cpp`, `runtime_watchdog_diagnostics.cpp`
+  and the whole-file gates of `lib/waveshare_board` hold no board macro. The
+  always-true membership lists are gone with their legacy else branches,
+  per-board constants read `board::display`, `board::i2c`, `board::power` and
+  `board::layout`, and the 2.06 display-enable recovery follows
+  `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`. Baseline: 109 conditionals in 17
+  files. Two deliberate unifications in `i2c_bus.cpp`: the 2.06
+  `configureBus` keeps the result of `Wire.begin` (a failed driver install
+  no longer pretends the bus is up; `recoverAfterFailure` re-begins it on the
+  next failed transaction, as the 2.06 always did, and records the result),
+  and the 1.75 `probe()` goes through
+  `withRetries` like the 2.06 (same steps, plus the recovered-transaction
+  count). Both boards' boot smoke covers them. Review pass 3 found that the
+  pinned TwoWire keeps its mutex taken when a transaction runs on a bus whose
+  driver install failed (`endTransmission()` returns before releasing it once
+  `begin()` has freed the buffers), so the next `begin()` or `end()` waited
+  forever; `ensureBusConfigured()` now reinstalls the driver before any
+  transaction and skips it when that fails, on both boards, with a
+  fault-injection host test. For #442: the e-paper board
+  file needs `board::i2c::stopBetweenWriteAndRead = false` and
+  `recoverOnFailure = false` (its reads used a repeated start and never
+  recovered), `board::power::displayEnableRecovery = false` with
+  `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 0`, `board::display::defaultRotation =
+  0` and `rotation90Enabled = false`, and the 1.75 `board::layout` values;
+  `display.hpp` conflicts outright. The AMOLED-only guards that #442 keeps (`touch.hpp`'s whole-file
+  gate, `speaker.cpp`, `sleep_audit`, `route_elevation_config.hpp`,
+  `firmware_update_http.cpp`, `device_debug`, three `ble_navigation.cpp`
+  sites) wait for the part interfaces of M4.
 
 ### The confinement test
 
