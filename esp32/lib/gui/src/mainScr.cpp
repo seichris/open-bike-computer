@@ -749,7 +749,7 @@ static void revealPendingMapTileIfReady();
 
 static void acceptPublishedMapFrame(uint32_t nowMs) {
   mapTileTransition.noteFramePublished();
-  map_scheduler::markFramePublished(nowMs, currentMapFix());
+  map_scheduler::markFramePublished(nowMs, currentMapFix);
   revealPendingMapTileIfReady();
 }
 
@@ -981,7 +981,7 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapView.redrawMap = false;
   noteMapRenderReasons(
       map_render_policy::reasonMask(map_render_policy::Reason::Screen));
-  map_scheduler::markSubmittedForRenderAhead(nowMs, currentMapFix());
+  map_scheduler::markSubmittedForRenderAhead(nowMs, currentMapFix);
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
   mapRenderAheadInstanceID = targetInstanceID;
@@ -1351,7 +1351,7 @@ static bool prepareVisibleMapUpdate(uint32_t nowMs) {
       uiChangeTracker.take(ui_update_policy::Source::Gps);
   const bool routeChanged =
       uiChangeTracker.take(ui_update_policy::Source::Route);
-  map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix());
+  map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix);
   const bool followPosition =
       mapView.followGps || activeTile == MAP_GUIDANCE;
   const bool courseUp = mapView.rotationMode == Maps::ROT_COURSE_UP;
@@ -1548,13 +1548,13 @@ void updateMap(lv_event_t *event) {
         return;
       }
       mapView.isPosMoved = false;
-      map_scheduler::markSubmitted(submittedAtMs, currentMapFix());
+      map_scheduler::markSubmitted(submittedAtMs, currentMapFix);
     } else {
       power_metrics::MapRenderMeasurement powerMeasurement;
       mapView.generateRenderMap(zoom);
       powerMeasurement.finish(true);
       mapView.isPosMoved = false;
-      map_scheduler::markRendered(millis(), currentMapFix());
+      map_scheduler::markRendered(millis(), currentMapFix);
     }
     if (mapView.takeDeferredVectorRedraw())
       requestMapRender(map_render_policy::Reason::Heading);

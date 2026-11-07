@@ -501,10 +501,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn(
             "uiChangeTracker.take(ui_update_policy::Source::Route)", prepare
         )
-        self.assertIn("map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix())", prepare)
+        self.assertIn("map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix)", prepare)
         observe = function_body(MAP_SCHEDULER_AMOLED_SOURCE, "void observe(uint32_t, bool gpsChanged, bool routeChanged")
         self.assertIn("if (gpsChanged || routeChanged)", observe)
-        self.assertIn("mapRenderScheduler.observe(course)", observe)
+        self.assertIn("mapRenderScheduler.observe(course())", observe)
 
     def test_idle_guidance_screen_keeps_birdseye_3d_enabled(self):
         capture = function_body(

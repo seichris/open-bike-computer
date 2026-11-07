@@ -33,25 +33,28 @@ struct FixProvenance {
   uint32_t capturedAtMs = 0;
 };
 
+// The main screen's current course fix. It scans the route for the course-up
+// heading, so a family calls it only where it needs the fix.
+using CourseFix = map_render_policy::Fix (*)();
+
 void request(map_render_policy::Reason reason);
 FixProvenance fixProvenance();
 // Feeds the latest course fix once a GPS or route change was observed.
 void observe(uint32_t nowMs, bool gpsChanged, bool routeChanged,
-             const map_render_policy::Fix &course);
+             CourseFix course);
 // Decides whether a base render is wanted now and logs the family's reasons.
 Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp);
 // A vector render job was accepted for the visible screen.
-void markSubmitted(uint32_t nowMs, const map_render_policy::Fix &course);
+void markSubmitted(uint32_t nowMs, CourseFix course);
 // A render-ahead job for the next map screen was accepted.
-void markSubmittedForRenderAhead(uint32_t nowMs,
-                                 const map_render_policy::Fix &course);
+void markSubmittedForRenderAhead(uint32_t nowMs, CourseFix course);
 // A synchronous raster render completed on the UI task.
-void markRendered(uint32_t nowMs, const map_render_policy::Fix &course);
+void markRendered(uint32_t nowMs, CourseFix course);
 // A render job failed; returns the forced reasons now pending.
 uint32_t markInterrupted();
 // The render pipeline published a worker frame; consumes mapView's
 // publication record.
-void markFramePublished(uint32_t nowMs, const map_render_policy::Fix &course);
+void markFramePublished(uint32_t nowMs, CourseFix course);
 // Distance as the family presents it on the guidance labels.
 uint16_t presentedDistanceMeters(uint16_t distanceMeters);
 // Before LVGL draws the frame: snapshot the logical state it represents.

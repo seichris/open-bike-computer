@@ -445,8 +445,8 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   `board::layout` carries the map toolbar and reserved-height geometry;
   `touch::multiTouch` (new) drives the 1.75's pinch zoom, zoom-out backdrop,
   contact count and multi-touch suppression; the pairing copy follows the
-  side keys (`buttons::up/center/down`, `noPin` on the AMOLED boards)
-  through a `ConfirmInput` argument. The two presentation stacks sit behind
+  routed centre key (`buttons::center`; the side keys are `noPin` on the
+  AMOLED boards) through a `ConfirmInput` argument. The two presentation stacks sit behind
   two contracts: `map_scheduler` (`lib/gui/src/mapSchedulerFamily.hpp`;
   `mapSchedulerAmoled.cpp` wraps `map_render_policy::Scheduler`,
   `mapSchedulerEpaper.cpp` the e-paper policy with its heading filter,

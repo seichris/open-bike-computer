@@ -156,11 +156,12 @@ FixProvenance fixProvenance() {
 }
 
 void observe(uint32_t nowMs, bool gpsChanged, bool routeChanged,
-             const map_render_policy::Fix &course) {
+             CourseFix courseFix) {
   if (!(gpsChanged || routeChanged)) {
     return;
   }
   const BLEDebugStats ble = bleNavServer.getDebugStats();
+  const map_render_policy::Fix course = courseFix();
   const uint32_t capturedAtMs =
       gpsChanged && ble.lastGpsCapturedAtMs != 0
           ? ble.lastGpsCapturedAtMs
@@ -227,15 +228,14 @@ Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp) {
   return result;
 }
 
-void markSubmitted(uint32_t nowMs, const map_render_policy::Fix &) {
+void markSubmitted(uint32_t nowMs, CourseFix) {
   const epaper_navigation_policy::Fix submittedFix = currentEpaperFix(nowMs);
   epaperNavigationScheduler.markSubmitted(nowMs, submittedFix,
                                           epaperArmedRenderReasons);
   epaperArmedRenderReasons = 0;
 }
 
-void markSubmittedForRenderAhead(uint32_t nowMs,
-                                 const map_render_policy::Fix &) {
+void markSubmittedForRenderAhead(uint32_t nowMs, CourseFix) {
   const epaper_navigation_policy::Fix submittedFix = currentEpaperFix(nowMs);
   epaperNavigationScheduler.markSubmitted(
       nowMs, submittedFix,
@@ -244,7 +244,7 @@ void markSubmittedForRenderAhead(uint32_t nowMs,
   epaperArmedRenderReasons = 0;
 }
 
-void markRendered(uint32_t nowMs, const map_render_policy::Fix &) {
+void markRendered(uint32_t nowMs, CourseFix) {
   epaperNavigationScheduler.markPublished(nowMs, currentEpaperFix(nowMs));
   epaperArmedRenderReasons = 0;
 }
@@ -255,7 +255,7 @@ uint32_t markInterrupted() {
       epaperNavigationScheduler.pendingForcedReasons());
 }
 
-void markFramePublished(uint32_t nowMs, const map_render_policy::Fix &) {
+void markFramePublished(uint32_t nowMs, CourseFix) {
   Maps::FramePublication publication;
   if (mapView.takeFramePublication(publication)) {
     const epaper_navigation_policy::Fix captured{

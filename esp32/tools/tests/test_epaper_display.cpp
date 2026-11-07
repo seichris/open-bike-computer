@@ -59,9 +59,14 @@ int main() {
                 board_traits::epdCs == 10 && board_traits::epdDc == 9 &&
                 board_traits::epdReset == 46 && board_traits::epdBusy == 3);
   static_assert(board_traits::up == 4 && board_traits::center == 5 && board_traits::down == 6);
+  // The same board rule waitingScr.cpp applies: a routed centre key confirms.
+  static_assert(board::buttons::center != board::noPin);
+  constexpr auto confirm = board::buttons::center != board::noPin
+      ? pre_connection_presentation::ConfirmInput::CenterKey
+      : pre_connection_presentation::ConfirmInput::EitherDeviceButton;
   assert(std::strstr(pre_connection_presentation::content(
-      pre_connection_presentation::Phase::PairingComparison,
-      pre_connection_presentation::ConfirmInput::CenterKey).copy, "center key"));
+      pre_connection_presentation::Phase::PairingComparison, confirm).copy,
+      "center key"));
   static_assert(frameBytes == 48000 && rgbBytes == 768000);
   static_assert(waiting_screen_layout::isValid(
       waiting_screen_layout::makeLayout(480, 800)));

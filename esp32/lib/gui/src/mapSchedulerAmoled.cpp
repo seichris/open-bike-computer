@@ -27,9 +27,9 @@ void request(map_render_policy::Reason reason) {
 FixProvenance fixProvenance() { return {}; }
 
 void observe(uint32_t, bool gpsChanged, bool routeChanged,
-             const map_render_policy::Fix &course) {
+             CourseFix course) {
   if (gpsChanged || routeChanged) {
-    mapRenderScheduler.observe(course);
+    mapRenderScheduler.observe(course());
   }
 }
 
@@ -54,17 +54,16 @@ Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp) {
   return result;
 }
 
-void markSubmitted(uint32_t nowMs, const map_render_policy::Fix &course) {
-  mapRenderScheduler.markSubmitted(nowMs, course);
+void markSubmitted(uint32_t nowMs, CourseFix course) {
+  mapRenderScheduler.markSubmitted(nowMs, course());
 }
 
-void markSubmittedForRenderAhead(uint32_t nowMs,
-                                 const map_render_policy::Fix &course) {
-  mapRenderScheduler.markSubmitted(nowMs, course);
+void markSubmittedForRenderAhead(uint32_t nowMs, CourseFix course) {
+  mapRenderScheduler.markSubmitted(nowMs, course());
 }
 
-void markRendered(uint32_t nowMs, const map_render_policy::Fix &course) {
-  mapRenderScheduler.markRendered(nowMs, course);
+void markRendered(uint32_t nowMs, CourseFix course) {
+  mapRenderScheduler.markRendered(nowMs, course());
 }
 
 uint32_t markInterrupted() {
@@ -72,10 +71,9 @@ uint32_t markInterrupted() {
   return mapRenderScheduler.pendingForcedReasons();
 }
 
-void markFramePublished(uint32_t nowMs,
-                        const map_render_policy::Fix &course) {
+void markFramePublished(uint32_t nowMs, CourseFix course) {
   (void)mapView.takeFramePublication();
-  mapRenderScheduler.markRendered(nowMs, course);
+  mapRenderScheduler.markRendered(nowMs, course());
 }
 
 uint16_t presentedDistanceMeters(uint16_t distanceMeters) {
