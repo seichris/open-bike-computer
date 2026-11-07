@@ -60,7 +60,8 @@ int main() {
                 board_traits::epdReset == 46 && board_traits::epdBusy == 3);
   static_assert(board_traits::up == 4 && board_traits::center == 5 && board_traits::down == 6);
   assert(std::strstr(pre_connection_presentation::content(
-      pre_connection_presentation::Phase::PairingComparison).copy, "center key"));
+      pre_connection_presentation::Phase::PairingComparison,
+      pre_connection_presentation::ConfirmInput::CenterKey).copy, "center key"));
   static_assert(frameBytes == 48000 && rgbBytes == 768000);
   static_assert(waiting_screen_layout::isValid(
       waiting_screen_layout::makeLayout(480, 800)));

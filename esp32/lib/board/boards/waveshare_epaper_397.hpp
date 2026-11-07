@@ -48,6 +48,8 @@ constexpr uint8_t d3 = noPin;
 constexpr uint8_t columnOffset = 0;
 constexpr uint8_t defaultRotation = 0;
 constexpr bool rotation90Enabled = false;
+// 1-bit panel: map features draw black on white and areas are hatched.
+constexpr bool monochrome = true;
 }  // namespace display
 
 namespace i2c {
@@ -70,6 +72,7 @@ constexpr bool resetOnGpio = false;
 constexpr uint8_t reset = noPin;
 constexpr bool ext1WakeSource = false;
 constexpr bool wakePolling = false;
+constexpr bool multiTouch = false;
 }  // namespace touch
 
 namespace buttons {
@@ -141,6 +144,16 @@ constexpr uint16_t speedX = 1;
 constexpr uint16_t speedBottomInset = 130;
 constexpr uint16_t sunX = 170;
 constexpr uint16_t sunBottomInset = 170;
+// Map screen geometry read by gui_layout: the UI space reserved below a
+// non-fullscreen map, the anchor of the rider inside the map viewport, and
+// the toolbar button offsets.
+constexpr uint16_t mapNonFullscreenReservedHeight = 100;
+constexpr uint8_t mapAnchorXPercent = 50;
+constexpr uint8_t mapAnchorYPercent = 50;
+constexpr uint8_t mapToolbarOffset = 80;
+constexpr uint8_t mapToolbarSpace = 50;
+constexpr uint8_t mapToolbarInset = 10;
+constexpr uint8_t mapToolbarFullscreenBottomMargin = 24;
 }  // namespace layout
 
 }  // namespace board

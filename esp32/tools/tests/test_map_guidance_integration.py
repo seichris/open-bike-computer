@@ -241,7 +241,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         request = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
         )
-        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
+        # The round 1.75 panel keeps the 64-pixel floor; rectangular panels render
+        # the full overscan. Both read the board definition.
+        self.assertIn("MAP_RENDER_ROUND_VIEWPORT = board::display::round", MAP_HEADER_SOURCE)
+        self.assertIn("board::display::round ? 64 : MAP_RENDER_OVERSCAN_PIXELS", MAP_HEADER_SOURCE)
         self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
         self.assertIn("map_presentation::refreshLeadPixels", request)
         self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)

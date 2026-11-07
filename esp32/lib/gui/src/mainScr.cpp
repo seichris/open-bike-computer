@@ -37,9 +37,7 @@
 #include <cmath>
 #include <cstring>
 #include <type_traits>
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../../panel/panelSelect.hpp"
-#endif
 #if defined(WAVESHARE_AMOLED_175)
 #include "../../utils/src/mapPinchZoom.hpp"
 #endif
@@ -58,9 +56,6 @@ int heading = 0;              // Heading value (Compass or GPS)
 extern Gps gps;
 extern Battery battery;
 extern wayPoint loadWpt;
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
-extern bool touchPressed;
-#endif
 
 uint8_t toolBarOffset = gui_layout::MAP_TOOLBAR_OFFSET;
 uint8_t toolBarSpace = gui_layout::MAP_TOOLBAR_SPACE;
@@ -749,7 +744,6 @@ static uint32_t currentEpaperBaseCameraSequence() {
 #endif
 
 bool shouldInterruptMapRenderForScreenCycle() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   if (!isMainScreen) {
     return false;
   }
@@ -769,15 +763,11 @@ bool shouldInterruptMapRenderForScreenCycle() {
       digitalRead(BOARD_BOOT_PIN) == LOW) {
     return true;
   }
-#ifdef WAVESHARE_EPAPER_397
+  if constexpr (board::display::touch) {
+    return mapRenderSettings.tapToSwitchScreens &&
+           (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
+  }
   return false;
-#else
-  return mapRenderSettings.tapToSwitchScreens &&
-         (touchPressed || digitalRead(TCH_I2C_INT) == LOW);
-#endif
-#else
-  return false;
-#endif
 }
 
 static const ScreenMapRenderSettings &mapStyleSettingsForTile(tileName tile) {

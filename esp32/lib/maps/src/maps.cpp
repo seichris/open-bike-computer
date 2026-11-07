@@ -799,15 +799,15 @@ static void drawCurrentPositionMarker(lv_event_t *event) {
   const int16_t size = lv_obj_get_width(marker);
   const lv_color_t color =
       lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
-#ifdef WAVESHARE_EPAPER_397
-  // A white backing keeps the black marker distinguishable over black roads.
-  lv_draw_rect_dsc_t backing;
-  lv_draw_rect_dsc_init(&backing);
-  backing.bg_color = lv_color_white();
-  backing.bg_opa = LV_OPA_COVER;
-  backing.radius = LV_RADIUS_CIRCLE;
-  lv_draw_rect(layer, &backing, &bounds);
-#endif
+  if constexpr (board::display::monochrome) {
+    // A white backing keeps the black marker distinguishable over black roads.
+    lv_draw_rect_dsc_t backing;
+    lv_draw_rect_dsc_init(&backing);
+    backing.bg_color = lv_color_white();
+    backing.bg_opa = LV_OPA_COVER;
+    backing.radius = LV_RADIUS_CIRCLE;
+    lv_draw_rect(layer, &backing, &bounds);
+  }
 
   if (routeOverlay.hasRoute() || hasCurrentNavigationData()) {
     drawNavigationMarker(layer, bounds, size, color,
@@ -973,12 +973,9 @@ Maps::Maps() {}
 #ifndef TFT_LIGHTGREY
 #define TFT_LIGHTGREY 0xC618
 #endif
-#if defined(WAVESHARE_EPAPER_397)
-#define BACKGROUND_COLOR 0xFFFF
-#endif
-#ifndef BACKGROUND_COLOR
-#define BACKGROUND_COLOR 0x0000
-#endif
+// Map canvas background: white on a monochrome panel, black elsewhere.
+static constexpr uint16_t kMapBackgroundColor =
+    board::display::monochrome ? 0xFFFF : 0x0000;
 
 // Stubbed out render map functions for now to focus on vector maps
 uint16_t Maps::lon2posx(float f_lon, uint8_t zoom, uint16_t tileSize) {
@@ -1976,12 +1973,13 @@ bool Maps::fillPolygon(
           std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
-#ifdef WAVESHARE_EPAPER_397
-      for (int32_t x = startX; x < endX; ++x)
-        row[x] = ((x + pixelY) % 16 == 0) ? 0x0000 : 0xFFFF;
-#else
-      std::fill(row + startX, row + endX, p.color);
-#endif
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal hatching instead of a fill.
+        for (int32_t x = startX; x < endX; ++x)
+          row[x] = ((x + pixelY) % 16 == 0) ? 0x0000 : 0xFFFF;
+      } else {
+        std::fill(row + startX, row + endX, p.color);
+      }
     }
   }
   return true;
@@ -2890,7 +2888,7 @@ bool Maps::readVectorMap(
   const ScreenMapRenderSettings &style = context.style;
   const bool mapNavigationActive = context.guidanceScreenActive;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
-  surface.clear(BACKGROUND_COLOR);
+  surface.clear(kMapBackgroundColor);
   poiReservedRegions.clear();
   poiLayoutSignature = 1469598103934665603ULL;
 
@@ -3088,10 +3086,10 @@ bool Maps::readVectorMap(
       projectedPolygon.points.clear();
       projectedPolygon.points.reserve(projectedGround->size() + 1U);
       projectedPolygon.color = polygon.color;
-#ifdef WAVESHARE_EPAPER_397
-      // Sparse diagonal area hatching is distinct from roads and route weight.
-      projectedPolygon.color = 0xFFFF;
-#endif
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal area hatching is distinct from roads and route weight.
+        projectedPolygon.color = 0xFFFF;
+      }
       int16_t minX = 32767;
       int16_t minY = 32767;
       int16_t maxX = -32768;
@@ -3126,9 +3124,7 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
-#ifdef WAVESHARE_EPAPER_397
       projectedPolygon.typeId = polygon.typeId;
-#endif
       return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
@@ -3239,12 +3235,11 @@ bool Maps::readVectorMap(
           !isLineVisible(line.typeId, line.color, line.width, blockStyle)) {
         continue;
       }
-#ifdef WAVESHARE_EPAPER_397
-      const uint16_t displayColor = 0x0000;
-#else
-      const uint16_t displayColor = map_line_style::displayColor(
-          line.typeId, line.color, line.width, mapNavigationActive);
-#endif
+      const uint16_t displayColor =
+          board::display::monochrome
+              ? 0x0000
+              : map_line_style::displayColor(line.typeId, line.color,
+                                             line.width, mapNavigationActive);
       const uint8_t baseWidth =
           shouldBoostLineWidth(line.typeId, line.width)
               ? blockStyle.streetLineWidth
@@ -4137,11 +4132,7 @@ bool Maps::readVectorMap(
     const map_poi_layout::Viewport poiViewport{
         static_cast<float>(poiSurface.width),
         static_cast<float>(poiSurface.height),
-#if defined(WAVESHARE_AMOLED_175)
-        TFT_WIDTH * 0.5F
-#else
-        0.0F
-#endif
+        board::display::round ? TFT_WIDTH * 0.5F : 0.0F,
     };
     poiCandidates.reserve(map_poi_layout::kMaximumCandidates);
     MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReserved;
@@ -8441,7 +8432,7 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   }
 
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-  lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
+  lv_obj_set_style_bg_color(mapTile, lv_color_hex(kMapBackgroundColor), 0);
   lv_obj_set_style_bg_opa(mapTile, LV_OPA_COVER, 0);
   lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
                      pinchPresentation.pivotLocalY);
@@ -8724,11 +8715,7 @@ void Maps::updateSocialOverlay() {
   const bool courseUp=rotationMode==ROT_COURSE_UP && hasPresentedPose &&
       presentedPose.headingValid && std::isfinite(presentedPose.headingDegrees);
   const double w=lv_obj_get_width(mapTile),h=lv_obj_get_height(mapTile);
-#ifdef WAVESHARE_AMOLED_175
-  const bool round=true;
-#else
-  const bool round=false;
-#endif
+  const bool round=board::display::round;
   // One persisted size for every map screen; footprint, edge placement and
   // grouping all use the same scaled badge.
   const uint16_t scale=social_riders::clampMarkerScale(mapRenderSettings.friendMarkerScalePercent);
