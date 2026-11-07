@@ -129,9 +129,18 @@ assert "build_timestamp_from_source_date_epoch" in prebuild_source
 assert 'git_sha = f"unverified-{detected_git_sha}"' in prebuild_source
 assert "Waveshare firmware builds must use tools/build_firmware.py" in prebuild_source
 assert "#define LV_FONT_MONTSERRAT_42 0" in lv_conf_source
-epaper_include_block = r"#ifdef WAVESHARE_EPAPER_397(?:(?!#endif).)*epaperNavigationPolicy\.hpp"
-assert re.search(epaper_include_block, main_screen_source, re.DOTALL)
-assert re.search(epaper_include_block, maps_source, re.DOTALL)
+# The e-paper navigation policy is reached only through the e-paper family
+# files, each gated as a whole; the shared main-screen and map sources name
+# neither the policy nor a board.
+epaper_include_block = r"#if defined\(WAVESHARE_EPAPER_397\)(?:(?!#endif).)*epaperNavigationPolicy\.hpp"
+for family_source in (
+    (project_dir / "lib/gui/src/mapSchedulerEpaper.cpp").read_text(),
+    (project_dir / "lib/maps/src/mapCameraEpaper.cpp").read_text(),
+):
+    assert re.search(epaper_include_block, family_source, re.DOTALL)
+for shared_source in (main_screen_source, maps_source):
+    assert "epaperNavigationPolicy.hpp" not in shared_source
+    assert "WAVESHARE_EPAPER_397" not in shared_source
 # Stale #line overrides would misnumber every later AMOLED log and assertion.
 for source in (main_screen_source, maps_source):
     assert not re.search(r"^\s*#line\b", source, re.M)

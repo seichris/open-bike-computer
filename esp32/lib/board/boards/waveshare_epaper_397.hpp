@@ -48,8 +48,10 @@ constexpr uint8_t d3 = noPin;
 constexpr uint8_t columnOffset = 0;
 constexpr uint8_t defaultRotation = 0;
 constexpr bool rotation90Enabled = false;
-// 1-bit panel: map features draw black on white and areas are hatched.
+// 1-bit panel: map features draw black on white and areas are hatched; a
+// waveform takes seconds, so nothing animates.
 constexpr bool monochrome = true;
+constexpr bool animations = false;
 }  // namespace display
 
 namespace i2c {

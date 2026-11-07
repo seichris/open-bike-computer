@@ -39,8 +39,9 @@ constexpr uint8_t columnOffset = 6;
 // whether the 90-degree rotation is offered on this panel.
 constexpr uint8_t defaultRotation = 1;
 constexpr bool rotation90Enabled = true;
-// RGB565 colour panel.
+// RGB565 colour panel that animates at the LVGL frame rate.
 constexpr bool monochrome = false;
+constexpr bool animations = true;
 }  // namespace display
 
 namespace i2c {
