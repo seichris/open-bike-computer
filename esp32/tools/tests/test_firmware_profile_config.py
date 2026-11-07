@@ -149,7 +149,8 @@ assert main_source.index("recoverInterruptedActivation()") < main_source.index(
 assert main_source.index("std::fflush(stdout)") < main_source.index(
     'bleNavServer.init("BikeComputer")'
 )
-assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
+# One SYS heartbeat: the legacy-board variant went with the membership guards (M2).
+assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 1
 
 waveshare_sdkconfig = config.get("waveshare_common", "custom_sdkconfig")
 qualification_sdkconfig = inherited_option(

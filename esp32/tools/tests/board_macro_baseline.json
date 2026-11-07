@@ -36,7 +36,6 @@
     "lib/speaker/speaker.cpp": 2,
     "lib/waveshare_board/axp2101.cpp": 5,
     "lib/waveshare_board/i2c_bus.cpp": 3,
-    "lib/waveshare_board/i2c_bus.hpp": 1,
-    "src/main.cpp": 77
+    "lib/waveshare_board/i2c_bus.hpp": 1
   }
 }

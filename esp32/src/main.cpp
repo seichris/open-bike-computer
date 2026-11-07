@@ -24,11 +24,6 @@
 #include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
-#ifdef WAVESHARE_EPAPER_397
-#include "epaper_display.hpp"
-#include "board_input.hpp"
-#include "epaper_ui.hpp"
-#endif
 #include <esp_bt.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -40,7 +35,7 @@
 // Hardware includes
 #include "gps.hpp"
 #include "hal.hpp"
-#include "board_traits.hpp"
+#include "board_startup.hpp"
 #include "storage.hpp"
 #include "usb_recovery_status.hpp"
 #include "tft.hpp"
@@ -59,7 +54,6 @@ extern xSemaphoreHandle gpsMutex;
 #include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
 #include "firmware_maintenance.hpp"
-#include "firmware_maintenance_policy.hpp"
 #include "firmware_metadata.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
@@ -106,98 +100,6 @@ ride_diagnostics::RideDiagnosticsHttp rideDiagnosticsHttp;
 static void queueDeviceTransferStatusNotification() {
   bleNavServer.requestDeviceTransferStatusNotification();
 }
-
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-static void setupFirmwareMaintenanceMode() {
-  deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
-  firmwareUpdateHttp.configure(&deviceTransferHttp);
-  deviceTransferHttp.noteStatusChanged("maintenance_boot_baseline");
-  deviceTransferHttp.setStatusChangedCallback(
-      queueDeviceTransferStatusNotification);
-  boot_diagnostics::markFirmwareMaintenance();
-  firmware_maintenance::setStage(
-      firmware_maintenance::Stage::AwaitingAuthentication);
-  // Preserve boot diagnostics before NimBLE allocates its tasks and buffers,
-  // matching the normal startup ordering contract.
-  (void)std::fflush(stdout);
-  bleNavServer.init("BikeComputer");
-  power_management::completeStartup();
-  Serial.printf(
-      "FIRMWARE_MAINTENANCE: ready correlation=%lu internal_free=%u "
-      "dma_free=%u\n",
-      static_cast<unsigned long>(firmware_maintenance::correlation()),
-      static_cast<unsigned>(heap_caps_get_free_size(
-          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-      static_cast<unsigned>(
-          heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
-}
-
-static void processFirmwareMaintenanceMode() {
-  bleNavServer.process();
-  deviceTransferHttp.process();
-  const device_transfer::HttpTransferStatus transferStatus =
-      deviceTransferHttp.status();
-  const uint32_t now = millis();
-
-  const firmware_maintenance::Stage stage = firmware_maintenance::stage();
-  const bool commitOwnsReboot =
-      stage == firmware_maintenance::Stage::Committing ||
-      stage == firmware_maintenance::Stage::Rebooting;
-  static firmware_maintenance::policy::BootButtonExitState bootButtonExit;
-  if (!commitOwnsReboot && !firmware_maintenance::exitRequested() &&
-      firmware_maintenance::policy::bootButtonExitRequested(
-          bootButtonExit, digitalRead(BOARD_BOOT_PIN) == LOW, now)) {
-    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "ota", "exit_boot_button", "{}");
-    firmware_maintenance::requestExit();
-  }
-
-  const uint32_t maintenanceElapsed =
-      now - firmware_maintenance::activeSinceMs();
-  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
-      !transferStatus.enabled &&
-      firmware_maintenance::policy::authenticationTimedOut(
-          maintenanceElapsed, bleNavServer.isAuthenticated())) {
-    deviceTransferHttp.setLastError(
-        "maintenance_authentication_timeout",
-        "owner authentication did not complete before the deadline");
-    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "ota", "exit_auth_timeout", "{}");
-    firmware_maintenance::requestExit();
-  } else if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
-             firmware_maintenance::policy::transferTimedOut(
-                 now, transferStatus.lastUsefulTrafficMs,
-                 transferStatus.enabled,
-                 transferStatus.authorizedRequestInProgress)) {
-    deviceTransferHttp.setLastError(
-        "maintenance_inactivity_timeout",
-        "firmware transfer made no useful progress before the deadline");
-    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "ota", "exit_inactivity", "{}");
-    firmware_maintenance::requestExit();
-  }
-  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
-      maintenanceElapsed >=
-          firmware_maintenance::kOverallDeadlineMs) {
-    deviceTransferHttp.setLastError(
-        "maintenance_deadline",
-        "firmware maintenance exceeded its overall deadline");
-    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "ota", "exit_deadline", "{}");
-    firmware_maintenance::requestExit();
-  }
-
-  if (firmware_maintenance::exitRequested() && !commitOwnsReboot) {
-    const bool disabled = firmwareUpdateHttp.setEnabled(false);
-    if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
-      Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
-      delay(250);
-      power.deviceRestart();
-    }
-  }
-  delay(5);
-}
-#endif
 
 static bool diagnosticsStorageRecoveryAllowed() {
   const device_transfer::HttpTransferStatus status =
@@ -311,10 +213,11 @@ static bool processWaveshareBootButton() {
   const bool hadInput = physicalLatchedPress || pressed ||
                         deviceDebugHttp.bootPressRequested();
 
-#ifdef WAVESHARE_EPAPER_397
-  if (bleNavServer.hasOwnershipPairingCode() && !epaper::pairingPresented())
+  // A comparison code that has not reached the panel yet keeps the gate armed.
+  if (bleNavServer.hasOwnershipPairingCode() &&
+      !board::startup::pairingComparisonPresented()) {
     waveshareBootPairingGate.arm();
-#endif
+  }
   if (waveshareBootPairingGate.blocksInput(pressed, now, DEBOUNCE_MS)) {
     return hadInput;
   }
@@ -383,11 +286,8 @@ static bool processWaveshareBootButton() {
 }
 
 static bool processWavesharePowerButton() {
-#ifdef WAVESHARE_EPAPER_397
-  return false;
-#endif
   waveshare_board::axp2101::PowerButtonEvents events;
-  if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(events)) {
+  if (!board::startup::takePowerButtonEvents(events)) {
     return false;
   }
   const bool hadInput =
@@ -414,28 +314,6 @@ static bool processWavesharePowerButton() {
   return hadInput;
 }
 
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-static void notifyAutomaticLightSleepGpioWake(uint64_t gpioMask) {
-#ifdef WAVESHARE_EPAPER_397
-  constexpr uint64_t kButtonWakeMask =
-      (1ULL << BOARD_BOOT_PIN) | (1ULL << board_traits::up) |
-      (1ULL << board_traits::center) | (1ULL << board_traits::down);
-  if ((gpioMask & kButtonWakeMask) != 0) {
-    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
-  }
-#else
-  const uint32_t reasons =
-      ui_scheduler::gpioWakeReasons(gpioMask, TCH_I2C_INT, BOARD_BOOT_PIN);
-  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Touch)) {
-    ui_scheduler::notify(ui_scheduler::WakeReason::Touch);
-  }
-  if (ui_scheduler::hasReason(reasons, ui_scheduler::WakeReason::Boot)) {
-    ui_scheduler::notify(ui_scheduler::WakeReason::Boot);
-  }
-#endif
-}
-#endif
-
 static void armOwnershipPairingAfterRenderedComparison() {
   uint32_t pairingGeneration = 0;
   if (!bleNavServer.ownershipPairingRenderedRequest(pairingGeneration)) {
@@ -451,16 +329,9 @@ static void armOwnershipPairingAfterRenderedComparison() {
   waveshareBootHandledPairingConfirmation = false;
   waveshareBootReleaseStartMs = 0;
   waveshareBootPressStartMs = 0;
-#ifndef WAVESHARE_EPAPER_397
-  waveshare_board::axp2101::PowerButtonEvents stalePowerButtonEvents;
-  if (!waveshare_board::axp2101::readAndClearPowerButtonEvents(
-          stalePowerButtonEvents)) {
+  if (!board::startup::discardStalePairingInput()) {
     return;
   }
-
-#else
-  board_input::requireFreshPairingInput();
-#endif
   wavesharePowerPairingGate.arm(pairingGeneration);
   wavesharePowerPairingGeneration = pairingGeneration;
   if (bleNavServer.armOwnershipPairingConfirmation(pairingGeneration)) {
@@ -679,9 +550,10 @@ static void showShutdownDeferredNotice(uint8_t failedStage) {
   lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
   displayPowerManager.requestState(display_power::State::Dimmed);
   displayPowerManager.applyPendingPanelChange();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  currentDisplayMode = display_inactivity::Mode::Dimmed;
-#endif
+  // Only a panel with brightness control is dimmed; the e-paper keeps its mode.
+  if constexpr (board::display::brightness) {
+    currentDisplayMode = display_inactivity::Mode::Dimmed;
+  }
   // Refresh only; never run LVGL timers or input callbacks in this fallback.
   lv_refr_now(display);
 }
@@ -1502,9 +1374,11 @@ static void logPowerMetricsReport() {
 }
 
 static void processDisconnectedShutdown() {
-#ifdef WAVESHARE_EPAPER_397
-  return; // Whole-board sleep/wake remains behind the physical hardware gate.
-#endif
+  if constexpr (!board::power::qualifiedPowerControl) {
+    // Whole-board sleep/wake remains behind this board's physical hardware
+    // gate.
+    return;
+  }
   static disconnected_shutdown_policy::Tracker shutdownTracker;
   const bool connected = bleNavServer.isConnected();
   const bool ownershipClaimed = bleNavServer.isOwnershipClaimed();
@@ -1566,11 +1440,8 @@ void setup() {
       []() {
         deviceTransferHttp.pollShutdown();
         mapTransferHttp.submitPendingOperationTask();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+        // A board without the speaker path answers quiescent at once.
         const bool audioStopped = waveshare_board::speaker::pollShutdownQuiescence();
-#else
-        const bool audioStopped = true;
-#endif
         const bool bleWritesStopped = bleNavServer.pollShutdownQuiescence();
         return bleWritesStopped && audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
                mapTransferHttp.shutdownQuiescent();
@@ -1673,78 +1544,51 @@ void setup() {
   boot_diagnostics::completeStage(boot_diagnostics::Stage::CoreServices);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::WakeConfiguration);
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
+  power_management::setGpioWakeNotifier(board::startup::notifyGpioWake);
 #endif
   if (!firmware_maintenance::active())
     displayPowerManager.begin();
   log_i("Starting Setup...");
 
-#ifdef WAVESHARE_AMOLED_175
-  // Configure Wire directly below; do not preemptively bit-bang the shared bus.
-#endif
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
   if (!firmware_maintenance::active()) {
     attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
                     latchWaveshareBootScreenCycle, FALLING);
-    uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
-#ifdef WAVESHARE_AMOLED_175
-    ext1WakeMask |= 1ULL << TCH_I2C_INT;
-#endif
-#ifdef WAVESHARE_EPAPER_397
-    pinMode(board_traits::up, INPUT_PULLUP);
-    pinMode(board_traits::center, INPUT_PULLUP);
-    pinMode(board_traits::down, INPUT_PULLUP);
-    ext1WakeMask |= (1ULL << board_traits::up) |
-                    (1ULL << board_traits::center) |
-                    (1ULL << board_traits::down);
-#endif
-    power_management::configureExt1Wakeup(ext1WakeMask);
+    power_management::configureExt1Wakeup(
+        board::startup::configureWakeSources());
     configureTouchWakeInterrupt();
   }
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::WakeConfiguration);
 
-#ifdef WAVESHARE_AMOLED_206
-  // Recover the shared bus before PMIC inspection on the 2.06-inch board.
+  // The 2.06-inch board recovers the shared bus before PMIC inspection; the
+  // others configure Wire directly and never preemptively bit-bang the bus.
   // PMIC inspection may set only the established display-enable bit for
   // compatibility with older images; every other output bit remains intact.
   boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
-  waveshare_board::recoverI2CBus();
+  if constexpr (board::i2c::recoverAtBoot) {
+    waveshare_board::recoverI2CBus();
+  }
   waveshare_board::i2c::configureBus();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::I2cBus);
   boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
 #ifdef WAVESHARE_DISPLAY_PROBE
-  boot_diagnostics::markDiagnosticHold();
-  Serial.println("Waveshare 2.06 display probe complete; holding before RTC/IMU/SD/LVGL/BLE/touch init");
-  while (true) {
-    delay(1000);
+  if constexpr (board::power::displayEnableRecovery) {
+    // The display-enable write happened in PMIC inspection: hold here so the
+    // probe is checked before anything else touches the board.
+    boot_diagnostics::markDiagnosticHold();
+    Serial.println("Waveshare 2.06 display probe complete; holding before RTC/IMU/SD/LVGL/BLE/touch init");
+    while (true) {
+      delay(1000);
+    }
   }
 #endif
-#endif
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_EPAPER_397)
-  boot_diagnostics::enterStage(boot_diagnostics::Stage::I2cBus);
-  waveshare_board::i2c::configureBus();
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::I2cBus);
-#elif !defined(WAVESHARE_AMOLED_206)
-  Wire.setPins(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.begin();
-#endif
-
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_EPAPER_397)
-  boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
-  waveshare_board::initializePowerManagement();
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
-#endif
-
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  if (firmware_maintenance::active()) {
-    setupFirmwareMaintenanceMode();
+  if (board::startup::beginFirmwareMaintenance()) {
     return;
   }
-#endif
   boot_diagnostics::enterStage(boot_diagnostics::Stage::ClockAndSensors);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
@@ -1758,9 +1602,8 @@ void setup() {
 #ifdef WAVESHARE_SHTC3_DIAGNOSTICS
   waveshare_board::shtc3::begin();
 #endif
-#ifndef WAVESHARE_EPAPER_397
+  // A no-op where the ride-automation shadow is not compiled.
   ride_automation_runtime::beginFirmwareShadow();
-#endif
 #endif
 
   battery.initADC();
@@ -1844,9 +1687,7 @@ void setup() {
   // BLE and boot acceptance, so map failures keep OTA rollback and safe mode.
   boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
   startUserInterface();
-#ifdef WAVESHARE_EPAPER_397
-  board_input::begin();
-#endif
+  board::startup::beginInput();
   lv_screen_load(waitingScreen);
   lv_refr_now(display);
   (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "boot",
@@ -2080,60 +1921,54 @@ void setup() {
 
   if (WiFi.getMode() == WIFI_OFF)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-#if defined(WAVESHARE_AMOLED_175)
-  // The default event loop and boot safety checks are complete. Allocate the
-  // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
-  // Network.begin() accepts the already-created default event loop.
-  if (!firmware_maintenance::active()) {
-    (void)Network.begin();
-    // First-transfer initialization after a ride can find enough total RAM but
-    // no 32 KiB contiguous internal block. Allocate the existing resident Wi-Fi
-    // resources before BLE pools/tasks fragment the heap. The native owner keeps
-    // the driver in NULL mode with empty RAM credentials until an authenticated
-    // transfer starts; this does not start the radio or an access point.
-    // Preparation runs before boot is ready, so a driver crash or hang would
-    // count toward safe mode. After an unfinished boot, defer to first-use
-    // initialization under its unchanged floor instead of repeating it.
-    device_transfer::NetworkStartResult prepared;
-    const char *code = "deferred_unfinished_boot";
-    const bool deferred = boot_diagnostics::snapshot().consecutiveEarlyFailures != 0;
-    if (deferred) {
-      prepared.after.internalFree = static_cast<uint32_t>(
-          heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-      prepared.after.internalLargest = static_cast<uint32_t>(
-          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    } else {
-      prepared = firmwareUpdateHttp.operationOwner()->prepareWiFi();
-      code = device_transfer::networkStartCode(prepared.failedStep);
+  if constexpr (board::wifi::prepareBeforeBle) {
+    // The default event loop and boot safety checks are complete. Allocate the
+    // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
+    // Network.begin() accepts the already-created default event loop.
+    if (!firmware_maintenance::active()) {
+      (void)Network.begin();
+      // First-transfer initialization after a ride can find enough total RAM but
+      // no 32 KiB contiguous internal block. Allocate the existing resident Wi-Fi
+      // resources before BLE pools/tasks fragment the heap. The native owner keeps
+      // the driver in NULL mode with empty RAM credentials until an authenticated
+      // transfer starts; this does not start the radio or an access point.
+      // Preparation runs before boot is ready, so a driver crash or hang would
+      // count toward safe mode. After an unfinished boot, defer to first-use
+      // initialization under its unchanged floor instead of repeating it.
+      device_transfer::NetworkStartResult prepared;
+      const char *code = "deferred_unfinished_boot";
+      const bool deferred = boot_diagnostics::snapshot().consecutiveEarlyFailures != 0;
+      if (deferred) {
+        prepared.after.internalFree = static_cast<uint32_t>(
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        prepared.after.internalLargest = static_cast<uint32_t>(
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+      } else {
+        prepared = firmwareUpdateHttp.operationOwner()->prepareWiFi();
+        code = device_transfer::networkStartCode(prepared.failedStep);
+      }
+      char fields[256] = {};
+      snprintf(fields, sizeof(fields),
+               "{\"phase\":\"boot_prepare\",\"code\":\"%s\",\"errorCode\":%ld,"
+               "\"freeInternalBytes\":%lu,\"largestInternalBytes\":%lu}",
+               code, static_cast<long>(prepared.espError),
+               static_cast<unsigned long>(prepared.after.internalFree),
+               static_cast<unsigned long>(prepared.after.internalLargest));
+      (void)ride_diagnostics::record(
+          prepared.ok() && !deferred ? ride_diagnostics::Level::Info
+                                     : ride_diagnostics::Level::Warning,
+          "wifi", "boot_prepared", fields);
+      // A failed preparation stays a typed transfer failure. Navigation and BLE
+      // still boot; never bypass the memory floor or retry partial driver init.
     }
-    char fields[256] = {};
-    snprintf(fields, sizeof(fields),
-             "{\"phase\":\"boot_prepare\",\"code\":\"%s\",\"errorCode\":%ld,"
-             "\"freeInternalBytes\":%lu,\"largestInternalBytes\":%lu}",
-             code, static_cast<long>(prepared.espError),
-             static_cast<unsigned long>(prepared.after.internalFree),
-             static_cast<unsigned long>(prepared.after.internalLargest));
-    (void)ride_diagnostics::record(
-        prepared.ok() && !deferred ? ride_diagnostics::Level::Info
-                                   : ride_diagnostics::Level::Warning,
-        "wifi", "boot_prepared", fields);
-    // A failed preparation stays a typed transfer failure. Navigation and BLE
-    // still boot; never bypass the memory floor or retry partial driver init.
   }
-#endif
 
-  // The splash draws outside LVGL and is compiled out for Arduino_GFX
-  // panels; the waiting screen was already presented before map recovery.
+  // The waiting screen was already presented before map recovery.
   boot_diagnostics::completeStage(
       boot_diagnostics::Stage::ApplicationServices);
 
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Speaker);
-#ifndef WAVESHARE_EPAPER_397
-  waveshare_board::speaker::begin();
-  if (!waveshare_board::axp2101::setPowerButtonEventMonitoring(true)) {
-    Serial.println("AXP2101: PWR button-event monitoring unavailable");
-  }
-#endif
+  board::startup::beginAudio();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Speaker);
 
   // Initialize BLE early so device is discoverable while showing waiting screen
@@ -2197,21 +2032,9 @@ void loop() {
     delay(1000);
     return;
   }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  // E-paper reports firmware maintenance as unsupported and never schedules
-  // this reboot, matching setup(), which enters maintenance only on AMOLED.
-  if (firmware_maintenance::active()) {
-    processFirmwareMaintenanceMode();
+  if (board::startup::processFirmwareMaintenance()) {
     return;
   }
-  if (firmware_maintenance::stage() ==
-          firmware_maintenance::Stage::RebootPending &&
-      millis() - firmware_maintenance::activeSinceMs() >= 750) {
-    Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
-    Serial.flush();
-    power.deviceRestart();
-  }
-#endif
   uint32_t now = millis();
   ride_diagnostics::process(now);
   const uint32_t wakeReasons =
@@ -2605,8 +2428,7 @@ void loop() {
   }
 
   const display_inactivity::Mode displayModeBeforeUpdate = currentDisplayMode;
-#ifdef WAVESHARE_AMOLED_175
-  constexpr bool kDecodedTouchPollingRequired = true;
+  constexpr bool kDecodedTouchPollingRequired = board::touch::wakePolling;
   if (display_inactivity::shouldPollTouchWhileDisplayInactive(
           displayModeBeforeUpdate, kDecodedTouchPollingRequired)) {
     // LVGL is throttled while dimmed and paused while off. Keep only the
@@ -2614,16 +2436,15 @@ void loop() {
     // the UI. Tickless builds may light-sleep between these throttled polls.
     readTouch();
   }
-#endif
   bool touchWake = ui_scheduler::hasReason(
       wakeReasons, ui_scheduler::WakeReason::Touch);
-#ifdef WAVESHARE_AMOLED_175
-  // TP_INT (GPIO11) may return HIGH before the latched edge is serviced. Keep
-  // its current LOW level as a supplemental wake signal; decoded-frame
-  // activity from the throttled reader remains authoritative.
-  touchWake = display_inactivity::touchWakeRequested(
-      currentDisplayMode, touchWake, isTouchWakeSourceActive());
-#endif
+  if constexpr (board::touch::wakePolling) {
+    // TP_INT may return HIGH before the latched edge is serviced. Keep its
+    // current LOW level as a supplemental wake signal; decoded-frame activity
+    // from the throttled reader remains authoritative.
+    touchWake = display_inactivity::touchWakeRequested(
+        currentDisplayMode, touchWake, isTouchWakeSourceActive());
+  }
   bool observedTouchActivity = false;
   const display_inactivity::Update displayUpdate =
       updateDisplayInactivityPolicy(now, touchWake, observedTouchActivity);
@@ -2639,13 +2460,7 @@ void loop() {
     lv_obj_invalidate(lv_screen_active());
   }
 
-#ifdef WAVESHARE_EPAPER_397
-  epaper::poll();
-  if (!shutdownDeferredNoticeShown) {
-    board_input::process();
-    epaper_ui::process();
-  }
-#endif
+  board::startup::processInput(!shutdownDeferredNoticeShown);
   bool runLvglHandler = !waitScreenRefresh && !shutdownDeferredNoticeShown;
   constexpr uint32_t kDimmedLvglCadenceMs = 100;
   if (currentDisplayMode == display_inactivity::Mode::DisplayOff) {
@@ -2740,19 +2555,6 @@ void loop() {
   deadline.lvglBlocked = waitScreenRefresh;
   deadline.displayOff =
       currentDisplayMode == display_inactivity::Mode::DisplayOff;
-#ifdef WAVESHARE_EPAPER_397
-  // The contacts are polled independently of LVGL and the waveform worker.
-#if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT
-  // All four active-low contacts are wake sources in this opt-in profile, so
-  // the regular scheduler deadline can be used without 20 ms polling wakes.
-  pendingUiWakeReasons =
-      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
-#else
   pendingUiWakeReasons = ui_scheduler::wait(
-      std::min<uint32_t>(20, ui_scheduler::nextWaitMs(deadline)));
-#endif
-#else
-  pendingUiWakeReasons =
-      ui_scheduler::wait(ui_scheduler::nextWaitMs(deadline));
-#endif
+      board::startup::limitWaitMs(ui_scheduler::nextWaitMs(deadline)));
 }
