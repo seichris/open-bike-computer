@@ -38,9 +38,7 @@
 #include <cstring>
 #include <type_traits>
 #include "../../panel/panelSelect.hpp"
-#if defined(WAVESHARE_AMOLED_175)
 #include "../../utils/src/mapPinchZoom.hpp"
-#endif
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
@@ -590,10 +588,12 @@ void requestMapRender(map_render_policy::Reason reason) {
   mapView.redrawMap = true;
 }
 
-#if defined(WAVESHARE_AMOLED_175)
-static map_pinch_zoom::Controller mapPinchController;
+// Two-finger Map zoom exists where the touch controller reports a second
+// contact (board::touch::multiTouch); every other board keeps the controller
+// idle and the helpers below answer as if no second contact ever arrived.
+[[maybe_unused]] static map_pinch_zoom::Controller mapPinchController;
 
-static bool standaloneMapAcceptsMultiTouch() {
+[[maybe_unused]] static bool standaloneMapAcceptsMultiTouch() {
   return isMainScreen &&
          (activeTile == MAP
 #if MAP_POIS_RUNTIME_ENABLED
@@ -603,7 +603,7 @@ static bool standaloneMapAcceptsMultiTouch() {
          mapSet.vectorMap;
 }
 
-static map_pinch_zoom::Frame
+[[maybe_unused]] static map_pinch_zoom::Frame
 pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
   map_pinch_zoom::Frame frame;
   frame.sequence = touchFrame.sequence;
@@ -618,6 +618,9 @@ pinchFrameFromTouch(const waveshare_board::touch::TouchFrame &touchFrame) {
 }
 
 static void processMapPinchZoom() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   const auto touchFrame = getTouchFrameSnapshot();
   map_pinch_zoom::Decision decision;
   if (!standaloneMapAcceptsMultiTouch()) {
@@ -659,30 +662,35 @@ static void processMapPinchZoom() {
   }
 }
 
-bool mapPinchOwnsInput() { return mapPinchController.ownsInput(); }
+bool mapPinchOwnsInput() {
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.ownsInput();
+  }
+  return false;
+}
 
 bool mapPinchBlocksMapRender() {
-  return mapPinchController.blocksMapRender();
+  if constexpr (board::touch::multiTouch) {
+    return mapPinchController.blocksMapRender();
+  }
+  return false;
 }
 
 bool mapMultiTouchSuppressesPrimary() {
-  return isPrimaryTouchSuppressed();
+  if constexpr (board::touch::multiTouch) {
+    return isPrimaryTouchSuppressed();
+  }
+  return false;
 }
-#else
-static void processMapPinchZoom() {}
-bool mapPinchOwnsInput() { return false; }
-bool mapPinchBlocksMapRender() { return false; }
-bool mapMultiTouchSuppressesPrimary() { return false; }
-#endif
 
 static uint8_t currentMapTouchContactCount() {
-#if defined(WAVESHARE_AMOLED_175)
-  return getTouchFrameSnapshot().count;
-#elif defined(WAVESHARE_AMOLED_206)
-  return touchPressed ? 1 : 0;
-#else
-  return 0;
-#endif
+  if constexpr (board::touch::multiTouch) {
+    return getTouchFrameSnapshot().count;
+  } else if constexpr (board::display::touch) {
+    return touchPressed ? 1 : 0;
+  } else {
+    return 0;
+  }
 }
 
 static void processDeferredMapTap() {
@@ -697,8 +705,10 @@ static void processDeferredMapTap() {
   }
 }
 
-#if defined(WAVESHARE_AMOLED_175)
 static void serviceMapPinchZoomOutBackdrop() {
+  if constexpr (!board::touch::multiTouch) {
+    return;
+  }
   static uint32_t idleSinceMs = 0;
   const bool canPrepare =
       isMainScreen && activeTile == MAP && mapSet.vectorMap &&
@@ -725,9 +735,6 @@ static void serviceMapPinchZoomOutBackdrop() {
   // retrying so map input remains responsive.
   idleSinceMs = millis();
 }
-#else
-static void serviceMapPinchZoomOutBackdrop() {}
-#endif
 
 bool isMapScreenActive() { return activeTile == MAP || activeTile == NEARBY; }
 
@@ -3362,11 +3369,11 @@ void createMainScr() {
   lv_obj_set_style_bg_color(mainScreen, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(mainScreen, LV_OPA_COVER, 0);
 
-#if defined(WAVESHARE_AMOLED_175)
-  // The CST9217's second contact belongs exclusively to the standalone Map.
-  // Other screens continue receiving their primary LVGL pointer unchanged.
-  setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
-#endif
+  if constexpr (board::touch::multiTouch) {
+    // The CST9217's second contact belongs exclusively to the standalone Map.
+    // Other screens continue receiving their primary LVGL pointer unchanged.
+    setMultiTouchSuppressionPolicy(standaloneMapAcceptsMultiTouch);
+  }
 
   // SIMPLIFIED: No tileview, just map directly on screen
   // Create a simple container for the map that takes the full screen
