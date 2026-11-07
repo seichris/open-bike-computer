@@ -58,6 +58,8 @@ constexpr uint8_t scl = 42;
 // and a failed transaction never resets or reconfigures the bus.
 constexpr bool stopBetweenWriteAndRead = false;
 constexpr bool recoverOnFailure = false;
+// Configure Wire directly at boot; the bus is never bit-banged.
+constexpr bool recoverAtBoot = false;
 }  // namespace i2c
 
 namespace touch {
@@ -66,6 +68,8 @@ constexpr uint8_t address = 0x00;
 constexpr uint8_t interrupt = noPin;
 constexpr bool resetOnGpio = false;
 constexpr uint8_t reset = noPin;
+constexpr bool ext1WakeSource = false;
+constexpr bool wakePolling = false;
 }  // namespace touch
 
 namespace buttons {
@@ -92,7 +96,9 @@ constexpr uint8_t legacySpiClk = clk;
 namespace power {
 constexpr bool axp2101 = true;
 // The PMIC policy is e-paper-ALDO3-only (see axp2101.cpp); the AMOLED
-// read-only and display-enable gates of capture_boot.py do not apply.
+// read-only and display-enable gates of capture_boot.py do not apply, and
+// whole-board sleep/wake (the disconnected shutdown) stays behind the
+// physical hardware gate.
 constexpr bool qualifiedPowerControl = false;
 constexpr bool displayEnableRecovery = false;
 }  // namespace power
@@ -106,6 +112,11 @@ constexpr uint8_t out = 48;
 constexpr uint8_t in = 21;
 constexpr uint8_t enable = 39;
 }  // namespace audio
+
+namespace wifi {
+// Transfer Wi-Fi is prepared on first use, not before BLE.
+constexpr bool prepareBeforeBle = false;
+}  // namespace wifi
 
 namespace gnss {
 // UART pads only; no module is populated on this model.

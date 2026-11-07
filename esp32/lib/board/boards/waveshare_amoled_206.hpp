@@ -50,6 +50,9 @@ constexpr uint8_t scl = 14;
 // and whether a failed transaction resets and reconfigures the bus.
 constexpr bool stopBetweenWriteAndRead = false;
 constexpr bool recoverOnFailure = true;
+// Bit-bang the shared bus free before PMIC inspection, which may write the
+// display-enable bit.
+constexpr bool recoverAtBoot = true;
 }  // namespace i2c
 
 namespace touch {
@@ -58,6 +61,11 @@ constexpr uint8_t address = 0x38;
 constexpr uint8_t interrupt = 38;
 constexpr bool resetOnGpio = true;
 constexpr uint8_t reset = 9;
+// GPIO38 is not an RTC GPIO, so TP_INT cannot be an EXT1 wake source; the
+// FT3168 interrupt latches a wake reason while awake and idle reads stay
+// interrupt-gated, with no polling while the display is dimmed or off.
+constexpr bool ext1WakeSource = false;
+constexpr bool wakePolling = false;
 }  // namespace touch
 
 namespace buttons {
@@ -85,6 +93,12 @@ constexpr bool qualifiedPowerControl = true;
 // qualified on the 2.06 only; see BOARD_PMIC_DISPLAY_ENABLE_RECOVERY below.
 constexpr bool displayEnableRecovery = true;
 }  // namespace power
+
+namespace wifi {
+// The original startup order: transfer Wi-Fi is prepared on first use, not
+// before BLE (the 1.75 does), until that is qualified here.
+constexpr bool prepareBeforeBle = false;
+}  // namespace wifi
 
 namespace gnss {
 // UART pads only; no module is populated on this model.
