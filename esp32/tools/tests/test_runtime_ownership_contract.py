@@ -342,7 +342,8 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         setup = main[main.index("void setup()") : main.index("void loop()")]
         storage_done = setup.index(
             "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);")
-        guard = "#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)\n"
+        guard = ("#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || "
+                 "defined(WAVESHARE_EPAPER_397)\n")
         waveshare = setup[setup.rindex(guard, 0, storage_done):]
         # The real waiting screen is on the panel before any map recovery work.
         # Recovery still precedes the diagnostics writer, Wi-Fi preparation,
@@ -382,18 +383,18 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         apply_update = apply_update[:apply_update.index("\n}\n")]
         self.assertIn("if (pending) {", apply_update)
         self.assertIn("updateWaitingOwnershipStatus(nextSnapshot);", apply_update)
-        # AMOLED builds never run the legacy splash, which draws outside LVGL
-        # and would otherwise overwrite the early waiting-screen frame.
+        # Waveshare builds never run the legacy splash, which draws outside
+        # LVGL and would otherwise overwrite the early waiting-screen frame.
+        other_boards = ("#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206) && "
+                        "!defined(WAVESHARE_EPAPER_397)\n")
         splash = setup.index("splashScreen();")
         self.assertEqual(setup.count("splashScreen();"), 1)
         self.assertTrue(setup[:splash].rstrip().endswith(
-            "#if !defined(WAVESHARE_AMOLED_175) && !defined(WAVESHARE_AMOLED_206)\n"
-            '  log_i("Loading Splash Screen...");'))
+            other_boards + '  log_i("Loading Splash Screen...");'))
         # One static frame: setup never runs LVGL timers or input callbacks.
         self.assertNotIn("lv_timer_handler", setup)
         self.assertEqual(setup.count("startUserInterface();"), 2)
-        self.assertIn("#if !defined(WAVESHARE_AMOLED_175) && "
-                      "!defined(WAVESHARE_AMOLED_206)\n", setup)
+        self.assertIn(other_boards, setup)
         # Other boards keep their original late waiting-screen load.
         self.assertEqual(setup.count("lv_screen_load(waitingScreen);"), 2)
         late = setup.rindex("lv_screen_load(waitingScreen);")
