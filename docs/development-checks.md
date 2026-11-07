@@ -174,6 +174,34 @@ Compare total runner-minutes as well as wall time on the next 5–10 natural PR 
 full/manual/release lane finds an omitted relevant failure. Revert the selector and
 workflow changes to restore the broad policy; do not raise runner resource limits.
 
+## Library include paths
+
+`esp32/tools/tests/test_ldf_include_paths.py` replays how PlatformIO's
+dependency finder (`lib_ldf_mode = deep`) compiles each firmware library: a
+library receives its own include directories, the complete include-path set
+of each library it depends on directly, only the own directories of a
+dependency that closes a cycle, and the `-I` directories of the shared build
+flags (`-I include`); nothing else of the project reaches a library's compile
+line. Dependencies are discovered from the library's own source files, with
+each file's includes taken in SCons' order (the include token with its quote
+characters, compared as text, so quoted names come before angled ones and
+upper case before lower case), which decides which edge of a cycle breaks; a
+header-only library carries nothing, and the headers of other libraries are
+not scanned on the including library's behalf. A header that includes another
+library's header by bare name therefore compiles only while some non-circular
+dependency happens to carry that directory, which an unrelated include change
+elsewhere can remove; the `-fsyntax-only` cross-check cannot see this because
+it adds every directory. The test walks `esp32/lib` and `esp32/src` and fails
+on any include that a library's compile would not find, naming the library,
+the file and the header's owner. Include other libraries' headers by relative
+path (`../storage/storage.hpp`) instead of relying on propagation. Libraries
+installed from `lib_deps` are not in the repository and are not scanned; none
+of them includes a repository header by bare name, so on this tree they only
+add paths and the check errs toward reporting an include that a relative path
+fixes. `--list` prints every library's dependencies and `--root DIR` checks
+another `esp32` tree (which needs its `platformio.ini` for the `-I` build
+flags); it runs inside the host check that every `esp32/` change selects.
+
 ## Board-macro confinement
 
 `esp32/tools/tests/test_board_macro_confinement.py` keeps firmware-target
