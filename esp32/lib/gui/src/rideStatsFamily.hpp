@@ -14,9 +14,10 @@
 
 #pragma once
 
-#include "globalGuiDef.h"
 #include "rideTelemetryLayout.hpp"
 #include "ride_stats_widget.hpp"
+
+#include <lvgl.h>
 
 #include <array>
 #include <cstddef>

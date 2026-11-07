@@ -9,9 +9,10 @@
 
 #pragma once
 
-#include "globalGuiDef.h"
 #include "rideMetricTypography.hpp"
 #include "rideTelemetryLayout.hpp"
+
+#include <lvgl.h>
 
 ride_metric_typography::Role metricFontRole();
 ride_telemetry_layout::Rect metricValueRect(

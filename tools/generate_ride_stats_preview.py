@@ -38,6 +38,10 @@ INPUTS = (
     'esp32/lib/gui/src/rideTelemetryPresenter.hpp',
     'esp32/lib/gui/src/ride_stats_widget.hpp',
     'esp32/lib/gui/src/epaperRideStats.hpp',
+    'esp32/lib/gui/src/rideStatsFamily.hpp',
+    'esp32/lib/gui/src/rideStatsAmoled.cpp',
+    'esp32/lib/gui/src/rideStatsEpaper.cpp',
+    'esp32/lib/gui/src/rideTelemetryText.hpp',
     'esp32/lib/gui/src/rideValueFont56.c',
     'esp32/lib/gui/src/rideValueFont64.c',
     'esp32/lib/gui/src/rideSpeedFont84.c',
@@ -91,6 +95,7 @@ set(LV_CONF_BUILD_DISABLE_THORVG_INTERNAL ON CACHE BOOL "" FORCE)
 add_subdirectory("{lvgl}" lvgl)
 add_executable(emit_preview "{ROOT}/tools/ride_stats_preview/emit_preview.cpp"
  "{GUI}/rideValueFont56.c" "{GUI}/rideValueFont64.c" "{GUI}/rideSpeedFont84.c")
+target_compile_definitions(emit_preview PRIVATE WAVESHARE_AMOLED_175=1)
 target_include_directories(emit_preview PRIVATE "{GUI}" "{build}")
 target_link_libraries(emit_preview PRIVATE lvgl m)
 add_executable(test_epaper_workout "{ROOT}/tools/tests/test_epaper_workout_rendering.cpp"
