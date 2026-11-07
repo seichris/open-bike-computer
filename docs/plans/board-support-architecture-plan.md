@@ -11,8 +11,9 @@ shared sources.
 Prepared on 2026-10-30 from GitHub `main` at
 `6e9ad040be4c28a74d79706723a0aac56115089b`, with the experimental e-paper
 support in PR #442 (`feature/waveshare-epaper-397`, head `532a6678`) still
-pending. Measurements below were taken on that PR head because it is the first
-tree with three display-bearing boards; `main` today has two.
+pending; #442 merged on 2026-11-07 (see Progress). Measurements below were
+taken on that PR head because it was the first tree with three
+display-bearing boards; `main` had two until #442 merged.
 
 Boards in scope:
 
@@ -20,7 +21,7 @@ Boards in scope:
 | --- | --- | --- |
 | Waveshare ESP32-S3-Touch-AMOLED-1.75 | Production | Round 466×466 AMOLED, touch, AXP2101 read-only policy |
 | Waveshare ESP32-S3-Touch-AMOLED-2.06 | Production | 410×502 AMOLED, touch, display-enable-only PMIC recovery |
-| Waveshare ESP32-S3-ePaper-3.97 | Experimental (#442) | 480×800 e-paper, buttons, ALDO3-only PMIC writes |
+| Waveshare ESP32-S3-ePaper-3.97 | Experimental (#442, merged 2026-11-07; excluded from release CI) | 480×800 e-paper, buttons, ALDO3-only PMIC writes |
 | 1.75 with a GNSS module | Candidate | The 1.75 has unpopulated GPS pads; a fitted variant would be a new target |
 | Other ESP32-S3 boards | Candidate | Different display, power chip, sensors or radios on the same SoC |
 | IceNav-era boards (T-Deck, Elecrow, MakerFabs, N16R4, N16R8, IceNav) | To be removed (M0) | Not built by CI; images stamp `unverified-…`; removal decided 2026-10-30 |
@@ -30,6 +31,9 @@ partition layouts, release gates or physical acceptance rules; it says where
 future changes should land and in what order.
 
 ## Current state
+
+This section describes the tree as it was on 2026-10-30, when the plan was
+written. Progress, below, records what the milestones have changed since.
 
 ### What the code does today
 
@@ -318,9 +322,11 @@ third target, `boards/waveshare_epaper_397.hpp` carries the e-paper data
 `include/board_traits.hpp` now aliases), the storage migration path is
 skipped by data (`sd::legacySpiCs == noPin`), and the confinement baseline
 was raised once for the e-paper branches in shared files, to 204
-conditionals in 32 files. M2 and M4 are built on #442's branch and merge
-after it: the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp`
-heavily, and migrating them on `main` first would only create conflicts.
+conditionals in 32 files. M2 and M4 were built on #442's branch and merged
+after it on 2026-11-07 (#442 as `208ba571`, M2 as #770 `023e7fbd`, M4 as
+#772 `b6d032c0`): the e-paper PR changed `main.cpp`, `mainScr.cpp` and
+`maps.cpp` heavily, and migrating them on `main` first would only have
+created conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
 host tests and, where it touches boot or power, a boot capture per affected
 board. A milestone that preserves behaviour still needs that capture: boot
@@ -336,9 +342,11 @@ sequencing is where the PMIC policies live.
 | M5 | Position source | Put `gps.cpp` behind the position-source interface as the GNSS implementation; the phone path becomes the default implementation; retire `HAS_HARDWARE_GPS` and `AT6558D_GPS` | Navigation consumes one interface; AMOLED behaviour unchanged | None until a GNSS board exists |
 | M6 | First variant through the checklist | Add one new variant (the GNSS 1.75 or another board) using only the per-variant steps above | The ratchet test's allowlist gains no entry; CI builds the variant automatically | The variant's own gates |
 
-M0 and M1 shipped in one pull request (see Progress). M2 is the largest and
-riskiest; split it by family if the review grows past the three-pass limit. M5
-has no user-visible effect on its own and can wait until a GNSS board is real.
+M0 and M1 shipped in one pull request, M2 and M4 as a stack on #442 (see
+Progress). M2 was the largest and riskiest and merged within its three-pass
+limit without a split. M5 has no user-visible effect on its own and waits
+until a GNSS board is real; the fitted 1.75 on the maintainer's bench is
+that board once it is tested (see Decisions).
 
 ### Progress
 
@@ -400,8 +408,11 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   `sd::legacySpiCs = noPin`), `include/board_traits.hpp` aliases it, and the
   storage migration path is selected by that data instead of the target
   macro. The branch's confinement baseline rose once, to 204 conditionals in
-  32 files, for its e-paper branches in shared files. Its CI is green; the
-  pull request waits for the maintainer's panel gates.
+  32 files, for its e-paper branches in shared files. Merged as `208ba571`
+  on 2026-11-07 on the maintainer's recorded risk acceptance ("Merge, accept
+  risk"): the second-panel and generation-2 layout checks on the 3.97 board
+  stay owed, the e-paper profiles remain experimental and excluded from
+  release CI, and the AMOLED builds of the merged head passed CI.
 - **Include-path guard, #768, merged 2026-11-07.** Not a milestone, but it
   closes the failure class that bit M0 and the #442 merge:
   `esp32/tools/tests/test_ldf_include_paths.py` replays PlatformIO's
@@ -411,8 +422,8 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   merge; framework and `lib_deps` libraries come from
   `ldf_external_libraries.json`, tied to the runtime lock.
 
-- **M2, 2026-11-07, in review on #442's branch.** `main.cpp` holds no board
-  macro; the baseline is 127 conditionals in 31 files. The always-true
+- **M2, done 2026-11-07, merged as #770 (`023e7fbd`).** `main.cpp` holds no
+  board macro; the baseline is 127 conditionals in 31 files. The always-true
   membership guards went with their legacy else branches, and the
   family-specific bodies of the boot and loop steps live in
   `lib/board_startup/` behind `board::startup`, each compiled for its family
@@ -434,10 +445,20 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   ride-automation shadow start run on every board. The startup part is its own library,
   `lib/board_startup/`, rather than `lib/board/startup/`, so that the data
   library stays a leaf of PlatformIO's dependency finder (see #768).
-  Hardware gate: a boot capture per board is owed before merge.
+  Hardware gate: the 1.75 boot capture passed on the stack head `f8b31c83`
+  (M4 stacked on this milestone) on 2026-11-07 at 14:21Z, board
+  `waveshare-175-c`:
+  attested build and upload-only, then `capture_boot.py
+  --require-pmic-read-only --require-ready` exit 0 with `BOOT_META
+  git=f8b31c83…`, `BOOT_PMIC mode=read-only railState=current-preserved`,
+  the same-boot `SDIO: summary ok=1 backend=sdmmc` and the ready stage at
+  11803 ms, zero blocked PMIC writes and zero diagnostic errors. The 2.06
+  display-enable-only capture and the e-paper ALDO3-only capture were not
+  run: merged on the maintainer's recorded risk acceptance, and both stay
+  owed.
 
-- **M4, 2026-11-07, in review on M2's branch.** `gui/` and `maps/` hold no
-  board macro; the baseline is 61 conditionals in 22 files. Board facts
+- **M4, done 2026-11-07, merged as #772 (`b6d032c0`).** `gui/` and `maps/`
+  hold no board macro; the baseline is 61 conditionals in 22 files. Board facts
   became data: `display::round` sizes the map overscan floor, the POI clip
   radius and the social badge; `display::monochrome` (new) selects the
   e-paper's white background, black lines, hatched areas and marker backing;
@@ -461,7 +482,29 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   the LVGL tick, the pipeline calls and the shared decision effects. Both
   policy host tests (`test_map_render_policy.cpp`,
   `test_epaper_navigation_policy.cpp`) are unchanged. Hardware gate: the
-  navigation and workout smoke per board is owed before merge.
+  1.75 smoke passed on `f8b31c83` after the M2 boot capture, in the
+  maintainer's app-driven runs: screen cycling between guidance, map and
+  Ride Stats, the SD map rendering, pinch zoom and the display modes with a
+  clean device log (14:35–14:44Z), then Test Navigation route guidance and a
+  short workout with Ride Stats (maintainer-reported, about 15:00Z). The
+  2.06 smoke and the e-paper's base-render admission, Ride Stats cells and
+  pairing copy on the 3.97 panel were not run: merged on the maintainer's
+  recorded risk acceptance, and they stay owed.
+- **Stack merged 2026-11-07.** `main` at `b6d032c0` carries #442
+  (`208ba571`, 14:58Z), M2 (#770, `023e7fbd`, 15:21Z) and M4 (#772,
+  `b6d032c0`, 15:42Z), each merged from a `main`-synced head with its own
+  green CI Gate. The 1.75 gate for M2 and M4 ran once on the stack head
+  `f8b31c83` and is recorded in the evidence comments of #770 and #772. The
+  maintainer accepted the untested items in writing on each pull request
+  ("Merge, accept risk"); the recovery for any of them is a revert of its
+  merge commit. Still owed on hardware, in order: the 2.06 boot capture
+  with the display-enable-only gate plus its SD-mount and navigation and
+  workout smoke, which cover M2, M3 and M4 together; the e-paper panel
+  checks (second panel, generation-2 layout, base-render admission, Ride
+  Stats cells, pairing copy). `lib/panel/panelSelect.hpp` still selects the
+  panel header by target macro and keeps its exemption in the confinement
+  test; moving that choice into `lib/board/` is open and belongs to no
+  milestone yet. M5 and M6 wait for the GNSS 1.75 session.
 
 ### The confinement test
 
@@ -474,7 +517,8 @@ selects:
   `custom_firmware_target` values in `platformio.ini`, so a new board is
   covered as soon as it has an environment.
 - Allows them without limit in `lib/board/**`, `lib/panel/panelSelect.hpp`
-  (until M3 and M4 absorb it) and in any file whose single target conditional
+  (still exempt after M4; the panel header choice has not moved into
+  `lib/board/`) and in any file whose single target conditional
   is a positive gate around all of its code with no else branch. That
   whole-file gate is how a translation unit stays
   out of the other boards' images, and it is what keeps #442's e-paper-named
@@ -482,8 +526,10 @@ selects:
 - Holds `board_macro_baseline.json` mapping every other file to its exact
   count. A count above or below the baseline fails; `--update-baseline`
   records a lower count so it cannot grow back, and reaching zero removes the
-  entry. The e-paper branches inside shared files that #442 adds raise the
-  baseline once, visibly, when it merges; M2 to M4 then lower it.
+  entry. The e-paper branches inside shared files that #442 added raised the
+  baseline once, visibly, to 204 conditionals in 32 files when it merged; M2
+  lowered it to 127 in 31 and M4 to 61 in 22, the count on `main` since
+  `b6d032c0`.
 
 ## Costs and limits
 
@@ -525,8 +571,8 @@ Still open:
 
 - [hardware/README.md](../../hardware/README.md): authoritative pinouts and
   bring-up rules per board.
-- `hardware/waveshare-epaper-397.md` (lands with #442): the e-paper
-  implementation and qualification record.
+- [hardware/waveshare-epaper-397.md](../../hardware/waveshare-epaper-397.md)
+  (merged with #442): the e-paper implementation and qualification record.
 - [docs/development-checks.md](../development-checks.md): CI selection and the
   per-board scope table.
 - [docs/partition-layout-migration.md](../partition-layout-migration.md):
