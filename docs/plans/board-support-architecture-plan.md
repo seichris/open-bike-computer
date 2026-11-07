@@ -304,7 +304,8 @@ its own boot capture with the 1.75 read-only PMIC gate; and an entry in
 
 M0 and M1 ran from `main` before #442 merged, by the maintainer's decision on
 2026-11-06; #442 reconciles its `board_traits.hpp` and e-paper traits against
-`lib/board/` when it merges `main`. M3 followed on 2026-11-06. M2 and M4 still wait for #442:
+`lib/board/` when it merges `main`. M3 followed on 2026-11-06 and merged on
+2026-11-07; #442 merged `main` through it the same day. M2 and M4 still wait for #442 to merge:
 the e-paper PR changes `main.cpp`, `mainScr.cpp` and `maps.cpp` heavily, and
 migrating them first would only create conflicts.
 Each milestone is a separate pull request with the REVIEW.md record, its own
@@ -344,7 +345,7 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
   not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
   it merges. Merged as #766 on 2026-11-06.
-- **M3, 2026-11-06, in review.** `storage.cpp`, `ride_diagnostics.cpp`,
+- **M3, done 2026-11-06, merged as #767 on 2026-11-07.** `storage.cpp`, `ride_diagnostics.cpp`,
   `axp2101.cpp`, `i2c_bus.cpp`/`.hpp`, `settings.cpp`, `display.hpp`,
   `touch.hpp`, `lv_conf.h`, `task_data_placement.hpp`,
   `ipc_stack_budget.hpp`, `battery.cpp`, `runtime_watchdog_diagnostics.cpp`
@@ -359,7 +360,10 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   next failed transaction, as the 2.06 always did, and records the result),
   and the 1.75 `probe()` goes through
   `withRetries` like the 2.06 (same steps, plus the recovered-transaction
-  count). Both boards' boot smoke covers them. Review pass 3 found that the
+  count). The 1.75 boot smoke passed on the merged head (`BOOT_META`, the I2C
+  configured line, `BOOT_PMIC mode=read-only`, the same-boot `SDIO: summary
+  ok=1 backend=sdmmc` and the ready stage); the 2.06 smoke is deferred on the
+  maintainer's recorded acceptance and stays owed. Review pass 3 found that the
   pinned TwoWire keeps its mutex taken when a transaction runs on a bus whose
   driver install failed (`endTransmission()` returns before releasing it once
   `begin()` has freed the buffers), so the next `begin()` or `end()` waited
@@ -375,6 +379,24 @@ has no user-visible effect on its own and can wait until a GNSS board is real.
   gate, `speaker.cpp`, `sleep_audit`, `route_elevation_config.hpp`,
   `firmware_update_http.cpp`, `device_debug`, three `ble_navigation.cpp`
   sites) wait for the part interfaces of M4.
+- **#442 reconciled with `main`, 2026-11-07.** The e-paper branch merged
+  `main` through #767: `board.hpp` requires exactly one of the three targets,
+  `boards/waveshare_epaper_397.hpp` carries the e-paper data (display, I2C
+  with repeated-start reads and no recovery, SDMMC, side keys, SSD1677 and
+  codec pins, the ALDO3-only PMIC policy, the 1.75 layout values and
+  `sd::legacySpiCs = noPin`), `include/board_traits.hpp` aliases it, and the
+  storage migration path is selected by that data instead of the target
+  macro. The branch's confinement baseline rose once, to 204 conditionals in
+  32 files, for its e-paper branches in shared files. Its CI is green; the
+  pull request waits for the maintainer's panel gates.
+- **Include-path guard, #768, merged 2026-11-07.** Not a milestone, but it
+  closes the failure class that bit M0 and the #442 merge:
+  `esp32/tools/tests/test_ldf_include_paths.py` replays PlatformIO's
+  dependency finder, so a header that includes another library's header by
+  bare name fails in the host suite instead of in a cold build. It reproduces
+  the `WiFi.h` loss M0's review found and the `storage.hpp` loss of the #442
+  merge; framework and `lib_deps` libraries come from
+  `ldf_external_libraries.json`, tied to the runtime lock.
 
 ### The confinement test
 
@@ -426,7 +448,9 @@ Still open:
 
 2. Whether a GNSS 1.75 is a real target. The 1.75 pads are unpopulated, so it
    needs a fitted module and its own bench board before M5 and M6 are worth
-   doing.
+   doing. A 1.75 with a fitted module exists on the maintainer's bench
+   (2026-11-07); its qualification is deferred, so the decision stays open
+   until it is tested.
 3. Confirm the rule that a variant is always its own image, including for an
    optional GNSS module.
 4. Target naming for variants (`WAVESHARE_AMOLED_175_GNSS`). Board files live
