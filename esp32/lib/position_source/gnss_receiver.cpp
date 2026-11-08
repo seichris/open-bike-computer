@@ -214,11 +214,63 @@ void readerTask(void *) {
 }
 }  // namespace
 
+#if FIRMWARE_DIAGNOSTICS
+// Passive look at the candidate receiver lines before the UART claims them:
+// with a pull-down a driven-high (idle UART) line still reads high and an
+// unconnected pad reads low; with a pull-up a driven-low line reads low; edges
+// within a short window show traffic. Inputs only, nothing is driven. Besides
+// the board's rx/tx this also checks the H2 header's UART0 pads (GPIO43/44),
+// the pins an earlier hardware note called the GPS pads, so a receiver wired
+// there is found as well.
+void probeLines() {
+  const uint8_t candidates[] = {board::gnss::rx, board::gnss::tx, 43, 44};
+  char report[160] = {};
+  size_t used = 0;
+  for (size_t i = 0; i < sizeof(candidates); ++i) {
+    const uint8_t pin = candidates[i];
+    bool seen = false;
+    for (size_t j = 0; j < i; ++j)
+      seen = seen || candidates[j] == pin;
+    if (seen || pin == board::noPin)
+      continue;
+    pinMode(pin, INPUT_PULLDOWN);
+    delay(5);
+    const bool highWithPullDown = digitalRead(pin) == HIGH;
+    pinMode(pin, INPUT_PULLUP);
+    delay(5);
+    const bool highWithPullUp = digitalRead(pin) == HIGH;
+    uint32_t edges = 0;
+    int last = digitalRead(pin);
+    const uint32_t start = micros();
+    while (static_cast<uint32_t>(micros() - start) < 300'000U) {
+      const int level = digitalRead(pin);
+      if (level != last) {
+        ++edges;
+        last = level;
+      }
+    }
+    pinMode(pin, INPUT);
+    const char *level = highWithPullDown && highWithPullUp ? "driven_high"
+                        : (!highWithPullDown && !highWithPullUp) ? "driven_low"
+                                                                 : "floating";
+    used += static_cast<size_t>(snprintf(report + used, sizeof(report) - used,
+                                         " pin%u=%s:%lu", static_cast<unsigned>(pin),
+                                         level, static_cast<unsigned long>(edges)));
+    if (used >= sizeof(report) - 1)
+      break;
+  }
+  Serial.printf("BOOT_GNSS_LINES schema=1%s\n", report);
+}
+#endif
+
 void begin() {
   portENTER_CRITICAL(&mux);
   state.fitted = true;
   portEXIT_CRITICAL(&mux);
   releaseReset();
+#if FIRMWARE_DIAGNOSTICS
+  probeLines();
+#endif
   probe.begin(board::gnss::baud, millis());
   port.setRxBufferSize(1024);
   port.begin(probe.current(), SERIAL_8N1, board::gnss::rx, board::gnss::tx);

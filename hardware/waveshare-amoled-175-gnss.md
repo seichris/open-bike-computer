@@ -53,6 +53,12 @@ and its `--require-pmic-read-only` gate.
   3 s after each fix; the phone's positions apply otherwise and keep feeding
   ride automation throughout. A fresh receiver fix counts as navigation input
   like a phone position.
+- Diagnostics profiles first print `BOOT_GNSS_LINES schema=1 pin18=<level>:<edges>
+  pin17=... pin43=... pin44=...`, a passive look at the board's receive and
+  transmit pins and at the H2 header's UART0 pads: `driven_high` or
+  `driven_low` means something drives the line, `floating` means nothing is
+  connected, and the edge count over 300 ms shows traffic. It separates an
+  unfitted link from a silent module and finds a receiver wired to the header.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18
   tx=17 reset=expander baud=<rate> probe=pending|retry|ok bytes=<n>
   sentences=<n> invalid=<n> resetPulses=<n>`, printed when the port opens, on
