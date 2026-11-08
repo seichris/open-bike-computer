@@ -38,11 +38,48 @@ bool firstBytesReported = false;
 // parsed). Diagnostics profiles also print one raw sample of the stream.
 uint32_t decodeCompleted = 0;
 uint32_t decodeInvalid = 0;
+// Sentence types seen (by the five characters after '$'): the parser closes
+// an interval only on RMC, so a stream without RMC never yields a fix.
+enum SentenceType : uint8_t { kRmc, kGga, kGll, kGsa, kGsv, kVtg, kZda, kOther, kTypeCount };
+uint32_t typeCounts[kTypeCount] = {};
+char typeHeader[6] = {};
+uint8_t typeHeaderLength = 0;
+bool typeHeaderCounted = false;
 #if FIRMWARE_DIAGNOSTICS
-char sample[321] = {};
+char sample[1201] = {};
 uint16_t sampleLength = 0;
 bool sampleReported = false;
 #endif
+
+void tallySentenceType(char c) {
+  if (c == '$') {
+    typeHeaderLength = 0;
+    typeHeaderCounted = false;
+    return;
+  }
+  if (typeHeaderCounted)
+    return;
+  if (typeHeaderLength < 5) {
+    typeHeader[typeHeaderLength++] = c;
+    return;
+  }
+  typeHeaderCounted = true;
+  const char *type = typeHeader + 2;  // after the two-character talker
+  auto is = [type](const char *name) {
+    return type[0] == name[0] && type[1] == name[1] && type[2] == name[2];
+  };
+  SentenceType which = kOther;
+  if (typeHeader[0] == 'G') {
+    if (is("RMC")) which = kRmc;
+    else if (is("GGA")) which = kGga;
+    else if (is("GLL")) which = kGll;
+    else if (is("GSA")) which = kGsa;
+    else if (is("GSV")) which = kGsv;
+    else if (is("VTG")) which = kVtg;
+    else if (is("ZDA")) which = kZda;
+  }
+  ++typeCounts[which];
+}
 constexpr uint8_t kMaxResetPulses = 3;
 bool fixReported = false;
 uint32_t lastFixLogMs = 0;
@@ -62,7 +99,7 @@ GnssStatus snapshot() {
 
 void printBoot(const char *probeState) {
   const GnssStatus s = snapshot();
-  char line[288] = {};
+  char line[352] = {};
   size_t used = static_cast<size_t>(snprintf(
       line, sizeof(line), "BOOT_GNSS schema=1 fitted=1 module=%s transport=%s reset=%s ",
       position_source::moduleName(), kUart ? "uart" : "i2c",
@@ -102,7 +139,8 @@ void printBoot(const char *probeState) {
     // parser's completed sentences over rejected bytes.
     snprintf(line + used, sizeof(line) - used,
              "probe=%s bytes=%lu sentences=%lu invalid=%lu resetPulses=%u "
-             "fixes=%lu sats=%u/%u fixStatus=%u decode=%lu/%lu",
+             "fixes=%lu sats=%u/%u fixStatus=%u decode=%lu/%lu "
+             "types=%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu",
              probeState, static_cast<unsigned long>(s.bytes),
              static_cast<unsigned long>(s.validSentences),
              static_cast<unsigned long>(s.invalidSentences),
@@ -112,7 +150,15 @@ void printBoot(const char *probeState) {
              static_cast<unsigned>(GPS.sat_count),
              static_cast<unsigned>(fix.status),
              static_cast<unsigned long>(decodeCompleted),
-             static_cast<unsigned long>(decodeInvalid));
+             static_cast<unsigned long>(decodeInvalid),
+             static_cast<unsigned long>(typeCounts[kRmc]),
+             static_cast<unsigned long>(typeCounts[kGga]),
+             static_cast<unsigned long>(typeCounts[kGll]),
+             static_cast<unsigned long>(typeCounts[kGsa]),
+             static_cast<unsigned long>(typeCounts[kGsv]),
+             static_cast<unsigned long>(typeCounts[kVtg]),
+             static_cast<unsigned long>(typeCounts[kZda]),
+             static_cast<unsigned long>(typeCounts[kOther]));
   }
   Serial.println(line);
 }
@@ -183,6 +229,7 @@ uint32_t consume(const uint8_t *data, size_t len) {
       ++valid;
     else if (event == NmeaLineValidator::Event::Invalid)
       ++invalid;
+    tallySentenceType(c);
     const NMEAGPS::decode_t decoded = GPS.decode(c);
     if (decoded == NMEAGPS::DECODE_COMPLETED)
       ++decodeCompleted;
@@ -209,7 +256,10 @@ uint32_t consume(const uint8_t *data, size_t len) {
 #if FIRMWARE_DIAGNOSTICS
   if (!sampleReported && sampleLength == sizeof(sample) - 1) {
     sampleReported = true;
-    Serial.printf("GNSS: sample: %s\n", sample);
+    for (uint16_t offset = 0; offset < sampleLength; offset += 400) {
+      Serial.printf("GNSS: sample %u: %.400s\n",
+                    static_cast<unsigned>(offset / 400), sample + offset);
+    }
   }
   if (!firstBytesReported && firstByteCount == sizeof(firstBytes)) {
     firstBytesReported = true;

@@ -95,8 +95,9 @@ and its `--require-pmic-read-only` gate.
   probe=pending|retry|ok ... fixes=<parser intervals completed>
   sats=<used in the fix>/<in view> fixStatus=<NeoGPS status of the last
   interval: 0 none, 3 standard> decode=<sentences the parser completed>/<bytes
-  it rejected>`; diagnostics profiles also print `GNSS: sample: <320 bytes
-  of the stream as text>` once after the probe locked.
+  it rejected> types=<RMC/GGA/GLL/GSA/GSV/VTG/ZDA/other sentences seen>`;
+  diagnostics profiles also print `GNSS: sample n: <1200 bytes of the
+  stream as text, in three lines>` once after the probe locked.
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
