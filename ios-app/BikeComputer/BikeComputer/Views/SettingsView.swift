@@ -5,6 +5,7 @@
 //  Settings view for runtime map configuration via BLE
 //
 
+import Combine
 import SwiftUI
 import UIKit
 import CoreLocation
