@@ -173,6 +173,7 @@ on the maintainer's Mac.
 | 2026-11-08 08:23 | `aae0348f` ordinary (record with fix, satellite and status fields), at a window | Capture 17 (300 s, gate passed): `sentences=4822 invalid=0 bytes=266014` but `fixes=0 sats=0/0 fixStatus=0` for the whole window: the NMEA parser completes no interval and sees no satellite although every sentence passes the checksum validator. A parsing problem, not a sky problem; the next image counts the parser's outcomes and prints a raw sample of the stream. |
 | 2026-11-08 08:39 | `d8077c56` ordinary (parser counters, raw sample), at a window | Capture 18 (120 s, gate passed): the raw sample is NMEA 4.10 (`$GNGGA`, `$GNGLL`, four `$GNGSA` with system IDs, `$GPGSV` with signal IDs) and the parser completes the sentences (`decode=1327/2929` against `sentences=1340`; the rejected bytes are line ends and the proprietary `$PQTM` sentences), yet `fixes=0`. |
 | 2026-11-08 08:49 | `23628aa8` ordinary (sentence tally, epoch sample), at a window | Capture 19 (180 s, gate passed): epoch order GGA, GLL, GSA×4, GSV per constellation, RMC, VTG; `types=140/140/140/560/1240/140/0/15` in three minutes, 25 satellites in view with weak signals, `$GNRMC,...,V,...` (no fix), still `fixes=0`. The cause is the parser's API, not the stream: the reader fed NeoGPS through `decode()`, which parses but never stores a fix; only `handle()` does, which the old serial path reached through `available(port)`. |
+| 2026-11-08 08:59 | `3665e7f0` ordinary (parser fed through `handle()`), at a window | Capture 20 (240 s, gate passed): `types=210/210/210/840/1788/210/0/17`, `decode=3468/7299`, and `fixes=1`: the parser now stores a fix at each RMC, but it buffers only one and the next completed sentence pops an unread one; VTG follows RMC within the same 1 KB chunk, so the fix survived only when a chunk boundary fell between the two. The reader now drains fixes after every completed sentence. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -203,8 +204,11 @@ reader now does the same and rides a refused poll out as busy rather than
 absent. Capture 13 confirmed it: every stall resolved within half a second
 by a repeated request, and the stream kept up throughout. The plain 1.75
 image from the same commit boots on this unit (gate 3's boot half).
-Captures 14 to 19 then chased the missing fix to the reader itself: it fed
-the parser through `decode()`, which never stores a fix; `handle()` does.
+Captures 14 to 20 then chased the missing fix to the reader itself: it fed
+the parser through `decode()`, which never stores a fix (`handle()` does),
+and then read the stored fix only after a whole chunk, while the parser's
+one-fix buffer loses it to the next sentence; fixes are now drained after
+every completed sentence.
 
 ## Open items
 

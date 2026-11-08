@@ -215,6 +215,8 @@ void pulseReset(const char *reason) {
                 ok && released ? "issued" : "failed at the expander", reason);
 }
 
+void drainFixes();
+
 // Feeds received bytes to the checksum validator and the NMEA parser and
 // returns how many checksum-valid sentences they completed.
 uint32_t consume(const uint8_t *data, size_t len) {
@@ -236,8 +238,15 @@ uint32_t consume(const uint8_t *data, size_t len) {
     // available(port)). Captures 18 and 19 fed decode() and saw every
     // sentence parsed with no interval ever closing.
     const NMEAGPS::decode_t decoded = GPS.handle(static_cast<uint8_t>(c));
-    if (decoded == NMEAGPS::DECODE_COMPLETED)
+    if (decoded == NMEAGPS::DECODE_COMPLETED) {
       ++decodeCompleted;
+      // The parser buffers one fix and the next completed sentence pops an
+      // unread one; VTG follows RMC within the same chunk, so the fix must
+      // be read before the next sentence completes (capture 20: one fix in
+      // four minutes, whenever a chunk ended between the two). A UART
+      // reader never met this because its bytes trickle in.
+      drainFixes();
+    }
     else if (decoded == NMEAGPS::DECODE_CHR_INVALID)
       ++decodeInvalid;
 #if FIRMWARE_DIAGNOSTICS
