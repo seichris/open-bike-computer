@@ -505,7 +505,7 @@ that board once it is tested (see Decisions).
   panel header by target macro and keeps its exemption in the confinement
   test; moving that choice into `lib/board/` is open and belongs to no
   milestone yet. M5 and M6 wait for the GNSS 1.75 session.
-- **M5, 2026-11-08, in review.** The position source is one part.
+- **M5, 2026-11-08, merged as `0b51d611` (#775).** The position source is one part.
   `lib/position_source/` arbitrates between the phone's BLE positions and an
   onboard receiver (`position_source_policy.hpp`: a fitted receiver holds the
   shared position record for 3 s after each valid fix, the phone's positions
@@ -529,8 +529,11 @@ that board once it is tested (see Decisions).
   `ble_navigation.cpp`). AMOLED behaviour is unchanged by construction: no
   board declares a receiver yet, so the arbiter always accepts the phone.
   Hardware gate: none of its own; the first fitted receiver is M6's board,
-  whose boot capture also covers this part.
-- **M6, 2026-11-08, in review on M5's branch.** The first variant through the
+  whose boot capture also covers this part. Merged on the maintainer's
+  recorded risk acceptance after the plain 1.75 image built from M6 booted on
+  the GNSS bench unit with the read-only PMIC and ready gates; the
+  phone-navigation check on that image stays owed.
+- **M6, 2026-11-08, in review (#776, against `main` since M5 merged).** The first variant through the
   checklist is the 1.75 with the Quectel LC76G populated,
   `WAVESHARE_AMOLED_175_GNSS`: `boards/waveshare_amoled_175_gnss.hpp` (the
   shared 1.75 data moved to `waveshare_amoled_175_common.hpp`, the plain and
@@ -545,8 +548,9 @@ that board once it is tested (see Decisions).
   the panel, touch and RTC. The rule is now that a variant defines its base
   board's macro and its own, `board.hpp` requires the base and selects the
   most specific file, and the ratchet gained no entry (the variant macro
-  appears only in `lib/board`). No file under `src/`, `gui/`, `maps/`,
-  `storage/` or `ble_navigation/` changed. Hardware gate: owed on the bench
+  appears only in `lib/board`). No file under `src/`, `gui/`, `maps/` or
+  `storage/` changed; `ble_navigation.cpp` gained the `DSTS` position-source
+  report that the app's Developer Settings show. Hardware gate: owed on the bench
   unit (boot capture with the read-only PMIC and receiver gates, fix evidence,
   the plain 1.75 image on the same unit for M5). The first three bench
   captures ran the UART transport and passed identity, PMIC and ready while
