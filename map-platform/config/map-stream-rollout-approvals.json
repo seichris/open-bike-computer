@@ -584,10 +584,10 @@
       "iosBuild": "30",
       "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
       "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
-      "reportSha256": "81ffc7b07295823b2aefb16fe1d10bf239b05b5a654b4949c679b3e3178297fb",
+      "reportSha256": "7ff5b102e0f16fbcceccdd9063ab7db18c5f4eaafd2e426fabb0c1394d17eba0",
       "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
-      "approvedAt": "2026-11-08T15:15:51Z",
-      "approvedBy": "Claude (firmware-identity-only move to the published v0.3.4-release.15 under Chris's explicit 2026-11-08 release instructions: 'when merged then release new firmware (and map platform image ?) (and app?)', 'Skip 2.06, accept risk', 'skip the boot check. Release everything first' and 'we tested enough already'; standing CLAUDE.md permission to merge and deploy; worker, producer, iOS identity and signing key unchanged from msr-20261105-topo-production; optional hardware matrix, zero physical runs)",
+      "approvedAt": "2026-11-08T15:25:11Z",
+      "approvedBy": "Claude (firmware-identity-only record for firmware 0.3.4 build 107, tag v0.3.4-release.15 at 5f76f445, under Chris's written 2026-11-08 instructions: 'when merged then release new firmware (and map platform image ?) (and app?)', then 'skip the boot check. Release everything first' and 'we tested enough already', with the 2.06 risk accepted as 'Skip 2.06, accept risk'; worker, producer, iOS identity, targets and signing key unchanged from msr-20261105-topo-production; optional hardware matrix, zero physical runs)",
       "targets": [
         "WAVESHARE_AMOLED_175",
         "WAVESHARE_AMOLED_206"
