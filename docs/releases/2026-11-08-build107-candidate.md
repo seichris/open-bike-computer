@@ -49,11 +49,23 @@ verified with `tools/verify_firmware_boot_acceptance.py --build 107 --git-sha
 
 - The release is cut on the maintainer's request of 2026-11-08, after #776
   merged.
-- Open: whether the 2.06 gates run on a 2.06 board or are skipped on a recorded
-  acceptance of the residual risk. Release 14 shipped without them. This
-  candidate changes much more of the 2.06's code path than release 14 did: the
-  board-support milestones moved its panel, touch, startup and presentation code
-  into board files, and none of that has run on a 2.06.
+- The 2.06 gates are skipped on the maintainer's recorded acceptance of the
+  residual risk. Chris, 2026-11-08, asked whether the 2.06 should run its
+  production boot check for release 15: "Skip 2.06, accept risk".
+  - This candidate changes much more of the 2.06's code path than release 14
+    did: the board-support milestones moved its panel, touch, startup and
+    presentation code into board files, and none of that has run on a 2.06. For
+    this candidate the 2.06 has no first-boot, cold-boot, display, touch or
+    navigation result.
+  - Containment: an over-the-air install confirms its trial only after setup
+    finishes (`markRunningAppValid` in `esp32/src/main.cpp`), so a reset, crash
+    or safe mode during setup rolls back to the previous slot. A failure after
+    confirmation, such as broken touch or a blank panel on a device that
+    otherwise boots, is not rolled back; that device needs a higher build or the
+    website's signed USB rescue (see "Recovery"). Redeploying release 14's OTA
+    manifests stops further distribution.
+  - Signals: owner-exported support bundles from 2.06 devices
+    (`boot/acceptance`, `boot/confirmation_failed`) and field reports.
 
 ## Before tagging
 
@@ -62,7 +74,9 @@ verified with `tools/verify_firmware_boot_acceptance.py --build 107 --git-sha
 - [ ] 1.75 on the exact candidate: first-boot acceptance and a true cold boot
   (all power removed) with the production boot checkpoint, map display and
   phone navigation.
-- [ ] 2.06 on the exact candidate: the same, or a recorded decision to skip it.
+- [x] 2.06: skipped on the maintainer's recorded acceptance (see "Decisions
+  recorded"); its first-boot, cold-boot, display, touch and navigation checks
+  remain residual risk.
 
 ## After publication
 
