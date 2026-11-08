@@ -51,7 +51,7 @@ GnssStatus snapshot() {
 
 void printBoot(const char *probeState) {
   const GnssStatus s = snapshot();
-  char line[240] = {};
+  char line[288] = {};
   size_t used = static_cast<size_t>(snprintf(
       line, sizeof(line), "BOOT_GNSS schema=1 fitted=1 module=%s transport=%s reset=%s ",
       position_source::moduleName(), kUart ? "uart" : "i2c",
@@ -84,12 +84,21 @@ void printBoot(const char *probeState) {
     }
   }
   if (used < sizeof(line)) {
+    // fixes counts the parser's completed intervals (every interval, fix or
+    // not); sats is satellites used in the fix over satellites in view
+    // (from GSV); fixStatus is NeoGPS's status of the last interval
+    // (0 none, 2 time only, 3 standard, 4 differential).
     snprintf(line + used, sizeof(line) - used,
-             "probe=%s bytes=%lu sentences=%lu invalid=%lu resetPulses=%u",
+             "probe=%s bytes=%lu sentences=%lu invalid=%lu resetPulses=%u "
+             "fixes=%lu sats=%u/%u fixStatus=%u",
              probeState, static_cast<unsigned long>(s.bytes),
              static_cast<unsigned long>(s.validSentences),
              static_cast<unsigned long>(s.invalidSentences),
-             static_cast<unsigned>(s.resetPulses));
+             static_cast<unsigned>(s.resetPulses),
+             static_cast<unsigned long>(s.fixes),
+             static_cast<unsigned>(s.satellites),
+             static_cast<unsigned>(GPS.sat_count),
+             static_cast<unsigned>(fix.status));
   }
   Serial.println(line);
 }
