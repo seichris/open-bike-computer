@@ -53,10 +53,12 @@ and its `--require-pmic-read-only` gate.
   the transport the board data names. On this variant that is the I2C
   transport: a reader task polls the receiver's I2C slave with Quectel's
   command/answer scheme as the vendor's Raspberry Pi driver does (every
-  transaction waits 10 ms first and is retried up to ten times because the
-  slave refuses transactions it is not ready for: a one-byte dummy write to
-  the command address 0x50 checks the slave, a request is written to it,
-  and its answer is read from 0x54; register
+  transaction waits 20 ms first and is retried while the slave refuses it,
+  and a request whose answer read keeps being refused is sent again, since
+  the slave refuses the read for seconds while busy with new output and an
+  answer belongs to its request: a one-byte dummy write to the command
+  address 0x50 checks the slave, a request is written to it, and its answer
+  is read from 0x54; register
   0x0008 answers with the number of buffered bytes, register 0x2000 with
   that many bytes of the NMEA stream, drained in data requests of up to
   1024 bytes each until the announced length is read, with this variant's
@@ -89,7 +91,8 @@ and its `--require-pmic-read-only` gate.
   reset=expander i2c=0x50/0x54 present=0|1 polls=<n> errors=<n>
   backlog=<largest buffered length reported> answerMs=<longest wait for a
   length answer/a data answer> nacks=<refusals of dummy writes/request
-  writes/length reads/data reads> probe=pending|retry|ok
+  writes/length reads/data reads> repeats=<requests sent again>
+  probe=pending|retry|ok
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
@@ -178,9 +181,12 @@ announced length is read) with a longer retry budget and the longest waits
 reported. Capture 9 then showed the refusals were the overflowed buffer:
 after the module restarted, every poll was served at once and the stream
 kept up, so the reader now restarts the module when it starts. Capture 10
-confirmed that: the stream keeps up from the second poll on, and what is
-left is a stall of a few seconds every 18 s or so, which the reader now
-rides out as busy rather than absent.
+confirmed that: the stream keeps up from the second poll on. What is
+left are refusal bursts of 3.5 s (the whole read budget) every 8 to 18 s,
+in which a hundred reads of one length answer were refused in a row; the
+vendor driver sends the request again after twenty refused reads, so the
+reader now does the same and rides a refused poll out as busy rather than
+absent.
 
 ## Open items
 

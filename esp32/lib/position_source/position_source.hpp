@@ -37,6 +37,9 @@ struct GnssStatus {
   uint32_t requestNacks = 0;
   uint32_t lengthNacks = 0;
   uint32_t dataNacks = 0;
+  // I2C only: requests sent again because the receiver kept refusing the
+  // answer read (an answer belongs to its request).
+  uint32_t requestRepeats = 0;
   // Every byte read from the port, so a silent line (no bytes) and a wrong
   // rate (bytes without checksum-valid sentences) can be told apart.
   uint32_t bytes = 0;
