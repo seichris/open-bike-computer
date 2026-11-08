@@ -6980,6 +6980,57 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testDevicePositionSourceStatusParsing() {
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-gnss")
+        func apply(_ positionSource: [String: Any]?) {
+            var object: [String: Any] = ["configured": true, "enabled": false]
+            if let positionSource { object["positionSource"] = positionSource }
+            let body = try! JSONSerialization.data(withJSONObject: object)
+            let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + body
+            assert(bleManager.handleDeviceTransferStatusNotification(packet),
+                   "a position-source DSTS should be consumed")
+        }
+        apply([
+            "active": "gnss", "gnssFitted": true, "module": "lc76g",
+            "transport": "i2c", "present": true, "locked": true,
+            "fixValid": true, "satellites": 13, "fixes": 182,
+            "sentences": 2975, "invalid": 0, "lastFixAgeMs": 400,
+            "resetPulses": 1
+        ])
+        let status = bleManager.devicePositionSourceStatus
+        assertEqual(status?.active, "gnss", "the active source is parsed")
+        assertEqual(status?.activeLabel, "Device GNSS", "the active source has a label")
+        assertEqual(status?.receiverLabel, "Quectel LC76G", "the module is named")
+        assertEqual(status?.transport, "i2c", "the transport is parsed")
+        assertEqual(status?.satellites, 13, "satellites used are parsed")
+        assertEqual(status?.fixes, 182, "delivered fixes are parsed")
+        assertEqual(status?.fixLabel, "valid", "a valid fix reads as valid")
+        assertEqual(status?.sentencesLabel, "2975 valid, 0 invalid", "sentence counts are labelled")
+        assertEqual(status?.lastFixLabel, "now", "a fresh fix reads as now")
+        apply([
+            "active": "phone", "gnssFitted": true, "module": "lc76g",
+            "transport": "i2c", "present": true, "locked": true,
+            "fixValid": false, "satellites": 0, "fixes": 40,
+            "sentences": 600, "invalid": 2, "resetPulses": 1
+        ])
+        assertEqual(bleManager.devicePositionSourceStatus?.activeLabel, "iPhone",
+                    "the phone shows as the active source without a fix")
+        assertEqual(bleManager.devicePositionSourceStatus?.fixLabel, "no fix yet",
+                    "a locked receiver without a fix reads as no fix yet")
+        assertEqual(bleManager.devicePositionSourceStatus?.lastFixLabel, "never",
+                    "no fix age means never")
+        apply(["active": "phone", "gnssFitted": false])
+        assertEqual(bleManager.devicePositionSourceStatus?.receiverLabel, "not fitted",
+                    "a plain board reports no receiver")
+        apply(["active": "teleport", "gnssFitted": true])
+        assert(bleManager.devicePositionSourceStatus == nil,
+               "an unknown active source is rejected")
+        apply(nil)
+        assert(bleManager.devicePositionSourceStatus == nil,
+               "older firmware reports no position source")
+    }
+
     static func testFirmwareStorageMigrationFlow() {
         let suiteName = "FirmwareStorageMigrationTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {

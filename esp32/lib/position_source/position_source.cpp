@@ -76,4 +76,28 @@ const char *moduleName() {
   return "none";
 }
 
+const char *transportName() {
+  switch (board::gnss::transport) {
+  case board::GnssTransport::uart:
+    return "uart";
+  case board::GnssTransport::i2c:
+    return "i2c";
+  case board::GnssTransport::none:
+    break;
+  }
+  return "none";
+}
+
+const char *activeSourceName(uint32_t nowMs) {
+  switch (activeSource(nowMs)) {
+  case Source::Phone:
+    return "phone";
+  case Source::Gnss:
+    return "gnss";
+  case Source::None:
+    break;
+  }
+  return "none";
+}
+
 }  // namespace position_source

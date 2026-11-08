@@ -79,5 +79,9 @@ bool gnssFitted();
 uint8_t sourceFlags();
 uint8_t moduleCode();
 const char *moduleName();
+// "none", "uart" or "i2c": how the ESP32 reaches the receiver.
+const char *transportName();
+// "none", "phone" or "gnss": which input populates the record now.
+const char *activeSourceName(uint32_t nowMs);
 
 }  // namespace position_source

@@ -1215,6 +1215,7 @@ struct NavigationProtocolTests {
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()
         testFirmwareStorageMigrationFlow()
+        testDevicePositionSourceStatusParsing()
         testFirmwareUpdateAvailabilitySemantics()
         testFirmwareDeviceClientSendsSignedBeginRequest()
         testFirmwareDownloadBounds()

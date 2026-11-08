@@ -2173,6 +2173,19 @@ older firmware. iOS persists a warning per stable device identity when it sees
 device cannot clear that warning. It clears only after the same device reports
 `backend: "sdmmc"` and `powerCycleRequired: false` on a later boot.
 
+`DSTS` also includes a top-level `positionSource` object. `active` is `none`,
+`phone` or `gnss`: which input populates the device's position record now (a
+fitted receiver holds it for three seconds after each valid fix, the phone's
+positions apply otherwise). `gnssFitted` says whether the firmware carries an
+onboard receiver; for one, the object adds `module` (`lc76g`), `transport`
+(`uart` or `i2c`), `present` (the receiver answered its latest poll or opened
+its port), `locked` (checksum-valid sentences arrived), `fixValid`,
+`satellites` (used in the fix), `fixes` (parser intervals delivered),
+`sentences` and `invalid` (checksum-valid and invalid sentence counts),
+`lastFixAgeMs` (present only after a valid fix) and `resetPulses`. The object
+is diagnostic, carries no coordinate, and is optional for older firmware; the
+app shows it in Developer Settings and refreshes it by polling `DSTS`.
+
 The normal LAN password is never returned. The app verifies a LAN result
 against the token-authenticated, certificate-pinned `/device-debug/v1/info`
 endpoint. If association succeeded

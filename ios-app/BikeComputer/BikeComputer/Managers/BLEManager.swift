@@ -1302,6 +1302,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
     @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
+    /// The device's live position-source report (`DSTS.positionSource`);
+    /// nil until a status carried it, and for older firmware.
+    @Published private(set) var devicePositionSourceStatus: DevicePositionSourceStatus?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
@@ -7565,6 +7568,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
+        devicePositionSourceStatus = nil
         firmwareUpdateStatus = "unknown"
         firmwareOTAEligible = nil
         firmwareOTAEligibilityCode = nil
@@ -12167,6 +12171,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // native-SDMMC migration protocol extension.
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
+        }
+        if let positionSource = object["positionSource"] as? [String: Any],
+           let status = DevicePositionSourceStatus(json: positionSource) {
+            devicePositionSourceStatus = status
+        } else {
+            // Optional: firmware before the position-source report omits it.
+            devicePositionSourceStatus = nil
         }
         if let resources = object["resources"] as? [String: Any] {
             deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(
