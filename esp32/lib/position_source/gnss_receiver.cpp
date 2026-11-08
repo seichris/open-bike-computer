@@ -25,6 +25,11 @@ NmeaLineValidator validator;
 BaudProbe probe;
 bool validSentenceSinceSwitch = false;
 bool probeReported = false;
+uint32_t bytesAtRoundStart = 0;
+uint8_t firstBytes[32] = {};
+uint8_t firstByteCount = 0;
+bool firstBytesReported = false;
+constexpr uint8_t kMaxResetPulses = 3;
 bool fixReported = false;
 uint32_t lastFixLogMs = 0;
 constexpr uint32_t kFixLogIntervalMs = 30'000;
@@ -40,15 +45,18 @@ GnssStatus snapshot() {
 void printBoot(const char *probeState) {
   const GnssStatus s = snapshot();
   Serial.printf("BOOT_GNSS schema=1 fitted=1 module=%s uart=%u rx=%u tx=%u "
-                "reset=%s baud=%lu probe=%s sentences=%lu invalid=%lu\n",
+                "reset=%s baud=%lu probe=%s bytes=%lu sentences=%lu "
+                "invalid=%lu resetPulses=%u\n",
                 position_source::moduleName(),
                 static_cast<unsigned>(board::gnss::uart),
                 static_cast<unsigned>(board::gnss::rx),
                 static_cast<unsigned>(board::gnss::tx),
                 board::gnss::resetViaExpander ? "expander" : "none",
                 static_cast<unsigned long>(s.baud), probeState,
+                static_cast<unsigned long>(s.bytes),
                 static_cast<unsigned long>(s.validSentences),
-                static_cast<unsigned long>(s.invalidSentences));
+                static_cast<unsigned long>(s.invalidSentences),
+                static_cast<unsigned>(s.resetPulses));
 }
 
 void recordDiagnostic(const char *event, bool available, bool fixValid,
@@ -85,12 +93,35 @@ void releaseReset() {
                    : "not controllable (expander write failed)");
 }
 
+// Pulses the receiver's RESET (active low) through the expander: a module
+// that never produced a byte may be held by a stale reset or need a restart.
+void pulseReset() {
+  if (!board::gnss::resetViaExpander)
+    return;
+  const bool ok =
+      waveshare_board::tca9554::setPin(board::gnss::resetExpanderPin, false);
+  delay(100);
+  const bool released =
+      waveshare_board::tca9554::setPin(board::gnss::resetExpanderPin, true);
+  portENTER_CRITICAL(&mux);
+  ++state.resetPulses;
+  const uint8_t pulses = state.resetPulses;
+  portEXIT_CRITICAL(&mux);
+  Serial.printf("GNSS: reset pulse %u %s (no bytes during a probe round)\n",
+                static_cast<unsigned>(pulses),
+                ok && released ? "issued" : "failed at the expander");
+}
+
 void readerTask(void *) {
   for (;;) {
     bool readAny = false;
+    uint32_t readBytes = 0;
     while (port.available() > 0) {
       readAny = true;
+      ++readBytes;
       const char c = static_cast<char>(port.read());
+      if (firstByteCount < sizeof(firstBytes))
+        firstBytes[firstByteCount++] = static_cast<uint8_t>(c);
       const NmeaLineValidator::Event event = validator.feed(c);
       if (event == NmeaLineValidator::Event::Valid) {
         validSentenceSinceSwitch = true;
@@ -105,6 +136,21 @@ void readerTask(void *) {
       }
       GPS.decode(c);
     }
+    if (readBytes != 0) {
+      portENTER_CRITICAL(&mux);
+      state.bytes += readBytes;
+      portEXIT_CRITICAL(&mux);
+    }
+#if FIRMWARE_DIAGNOSTICS
+    if (!firstBytesReported && firstByteCount == sizeof(firstBytes)) {
+      firstBytesReported = true;
+      char hex[3 * sizeof(firstBytes) + 1] = {};
+      for (uint8_t i = 0; i < sizeof(firstBytes); ++i)
+        snprintf(hex + 3 * i, 4, "%02x ", static_cast<unsigned>(firstBytes[i]));
+      Serial.printf("GNSS: first bytes at %lu baud: %s\n",
+                    static_cast<unsigned long>(snapshot().baud), hex);
+    }
+#endif
     while (GPS.available()) {
       fix = GPS.read();
       gps.getGPSData();
@@ -142,8 +188,17 @@ void readerTask(void *) {
       port.updateBaudRate(probe.current());
       portENTER_CRITICAL(&mux);
       state.baud = probe.current();
+      const uint32_t bytesNow = state.bytes;
+      const uint8_t pulses = state.resetPulses;
       portEXIT_CRITICAL(&mux);
       printBoot("retry");
+      // Back at the first rate after a round that saw nothing at all.
+      if (probe.index == 0 && bytesNow == bytesAtRoundStart &&
+          pulses < kMaxResetPulses) {
+        pulseReset();
+      }
+      if (probe.index == 0)
+        bytesAtRoundStart = bytesNow;
     }
     if (probe.locked && !probeReported) {
       probeReported = true;

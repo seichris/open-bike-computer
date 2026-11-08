@@ -716,11 +716,13 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
 
 GNSS_PENDING_LINE = (
     "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
-    "reset=expander baud=115200 probe=pending sentences=0 invalid=0"
+    "reset=expander baud=115200 probe=pending bytes=0 sentences=0 invalid=0 "
+    "resetPulses=0"
 )
 GNSS_LOCKED_LINE = (
     "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
-    "reset=expander baud=115200 probe=ok sentences=12 invalid=1"
+    "reset=expander baud=115200 probe=ok bytes=1180 sentences=12 invalid=1 "
+    "resetPulses=0"
 )
 # The receiver opens before ready; its serial-rate probe may lock only after
 # the ready stage, once the first checksum-valid sentences have arrived.
@@ -749,7 +751,7 @@ class GnssGateTests(unittest.TestCase):
         )
         formatted = format_summary(summary)
         self.assertIn("gnssFitted=1 gnssModule=lc76g gnssProbe=ok ", formatted)
-        self.assertIn("gnssBaud=115200 gnssSentences=12 gnssInvalid=1 ", formatted)
+        self.assertIn("gnssBaud=115200 gnssBytes=1180 gnssSentences=12 gnssInvalid=1 gnssResetPulses=0 ", formatted)
 
     def test_pending_probe_and_plain_boards_fail_the_gate(self) -> None:
         pending = summarize(GNSS_CAPTURE.replace(GNSS_LOCKED_LINE + "\n", ""))

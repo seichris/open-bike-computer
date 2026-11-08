@@ -102,32 +102,36 @@ void testNmeaValidator() {
 void testBaudProbe() {
   BaudProbe probe;
   probe.begin(115200, 0);
-  assert(probe.count == 2 && probe.current() == 115200);
+  assert(probe.count == 5 && probe.current() == 115200);
   // No valid sentence within the window: move to the next rate.
   assert(!probe.poll(3999, false));
   assert(probe.poll(4000, false));
-  assert(probe.current() == 9600 && probe.switches == 1);
-  // Still nothing: back to the first rate after another window.
-  assert(probe.poll(8000, false));
-  assert(probe.current() == 115200 && probe.switches == 2);
+  assert(probe.current() == 9600 && probe.switches == 1 && probe.index == 1);
+  // Still nothing: through the remaining rates, then back to the first.
+  assert(probe.poll(8000, false) && probe.current() == 38400);
+  assert(probe.poll(12000, false) && probe.current() == 57600);
+  assert(probe.poll(16000, false) && probe.current() == 230400);
+  assert(probe.poll(20000, false) && probe.current() == 115200 && probe.index == 0);
+  assert(probe.switches == 5);
   // A valid sentence locks the probe; later polls never switch.
-  assert(!probe.poll(9000, true));
+  assert(!probe.poll(21000, true));
   assert(probe.locked);
-  assert(!probe.poll(20000, false));
+  assert(!probe.poll(40000, false));
   assert(probe.current() == 115200);
   // A board rate outside the common list is tried first; duplicates fold.
   BaudProbe custom;
   custom.begin(38400, 100);
-  assert(custom.count == 3 && custom.candidates[0] == 38400 &&
-         custom.candidates[1] == 115200 && custom.candidates[2] == 9600);
+  assert(custom.count == 5 && custom.candidates[0] == 38400 &&
+         custom.candidates[1] == 115200 && custom.candidates[2] == 9600 &&
+         custom.candidates[3] == 57600 && custom.candidates[4] == 230400);
   BaudProbe folded;
   folded.begin(9600, 0);
-  assert(folded.count == 2 && folded.candidates[0] == 9600 &&
+  assert(folded.count == 5 && folded.candidates[0] == 9600 &&
          folded.candidates[1] == 115200);
-  // No rate at all: nothing to probe, never switches.
+  // No rate at all: the common list alone.
   BaudProbe empty;
   empty.begin(0, 0);
-  assert(empty.count == 2 && empty.current() == 115200);
+  assert(empty.count == 5 && empty.current() == 115200);
 }
 
 }  // namespace

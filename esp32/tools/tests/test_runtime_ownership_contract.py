@@ -22,7 +22,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         guard = setup.rindex("if constexpr (board::wifi::prepareBeforeBle) {", 0, prepare)
         self.assertLess(guard, prepare)
         self.assertIn("constexpr bool prepareBeforeBle = true;",
-                      source("lib/board/boards/waveshare_amoled_175.hpp"))
+                      source("lib/board/boards/waveshare_amoled_175_common.hpp"))
         for other in ("waveshare_amoled_206", "waveshare_epaper_397"):
             self.assertIn("constexpr bool prepareBeforeBle = false;",
                           source(f"lib/board/boards/{other}.hpp"))

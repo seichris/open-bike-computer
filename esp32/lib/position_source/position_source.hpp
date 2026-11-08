@@ -18,8 +18,13 @@ struct GnssStatus {
   bool portOpen = false;
   bool probeLocked = false;
   uint32_t baud = 0;
+  // Every byte read from the port, so a silent line (no bytes) and a wrong
+  // rate (bytes without checksum-valid sentences) can be told apart.
+  uint32_t bytes = 0;
   uint32_t validSentences = 0;
   uint32_t invalidSentences = 0;
+  // RESET pulses issued after probe rounds that saw no bytes.
+  uint8_t resetPulses = 0;
   uint32_t fixes = 0;
   bool fixValid = false;
   uint8_t satellites = 0;

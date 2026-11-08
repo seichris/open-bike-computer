@@ -119,8 +119,8 @@ private:
 // receiver rates while no valid sentence arrives within windowMs, and locks on
 // the first valid sentence.
 struct BaudProbe {
-  static constexpr size_t kMaxCandidates = 3;
-  uint32_t candidates[kMaxCandidates] = {0, 0, 0};
+  static constexpr size_t kMaxCandidates = 6;
+  uint32_t candidates[kMaxCandidates] = {0, 0, 0, 0, 0, 0};
   size_t count = 0;
   size_t index = 0;
   uint32_t windowMs = 4000;
@@ -134,7 +134,7 @@ struct BaudProbe {
     locked = false;
     switches = 0;
     windowStartMs = nowMs;
-    const uint32_t common[] = {preferredBaud, 115200, 9600};
+    const uint32_t common[] = {preferredBaud, 115200, 9600, 38400, 57600, 230400};
     for (uint32_t candidate : common) {
       if (candidate == 0)
         continue;

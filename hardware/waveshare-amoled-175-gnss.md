@@ -43,19 +43,24 @@ and its `--require-pmic-read-only` gate.
 - `lib/position_source/gnss_receiver.cpp` releases RESET through the expander
   (drives EXIO7 high; the module keeps running), opens a private UART at the
   board rate, parses NMEA with NeoGPS into the shared position record and
-  counts checksum-valid sentences. The serial-rate probe tries the board rate
-  first, then 115200 and 9600 bps, four seconds each, until a valid sentence
-  locks it.
+  counts raw bytes and checksum-valid sentences, so a silent line (no bytes)
+  and a wrong rate (bytes without valid sentences) can be told apart. The
+  serial-rate probe tries the board rate first, then 115200, 9600, 38400,
+  57600 and 230400 bps, four seconds each, until a valid sentence locks it;
+  after a complete round without a single byte it pulses RESET through the
+  expander (at most three times) and keeps probing.
 - `position_source` lets a valid receiver fix populate the shared position for
   3 s after each fix; the phone's positions apply otherwise and keep feeding
   ride automation throughout. A fresh receiver fix counts as navigation input
   like a phone position.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18
-  tx=17 reset=expander baud=<rate> probe=pending|retry|ok sentences=<n>
-  invalid=<n>`, printed when the port opens, on each rate switch and when the
-  probe locks (possibly after the ready stage); `GNSS: fix sats=...` every
-  30 s in diagnostics profiles. Diagnostics events `gnss/probe`, `gnss/fix`
-  and `gnss/fix_checkpoint` carry the same counts.
+  tx=17 reset=expander baud=<rate> probe=pending|retry|ok bytes=<n>
+  sentences=<n> invalid=<n> resetPulses=<n>`, printed when the port opens, on
+  each rate switch and when the probe locks (possibly after the ready stage);
+  `GNSS: first bytes at <rate> baud: <hex>` once 32 bytes arrived and `GNSS:
+  fix sats=...` every 30 s in diagnostics profiles; `GNSS: reset pulse n` when
+  a probe round saw no bytes. Diagnostics events `gnss/probe`, `gnss/fix` and
+  `gnss/fix_checkpoint` carry the sentence counts.
 - CAP2 advertises the position-source record (extended bit 5, TLV type 5)
   with flags `3` and module `1`; the app shows "Position Source: Device GNSS
   (Quectel LC76G), iPhone when no fix" in its firmware section.
