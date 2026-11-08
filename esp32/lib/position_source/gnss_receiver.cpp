@@ -372,10 +372,14 @@ struct I2cTransport {
   }
 
   void begin(uint32_t nowMs) {
-    const bool present = dummyWrite();
-    portENTER_CRITICAL(&mux);
-    state.portOpen = present;
-    portEXIT_CRITICAL(&mux);
+    // The module runs from power-on and its buffer predates the reader by
+    // seconds on a cold boot and by minutes after a warm reset. On the bench
+    // a slave whose buffer had overflowed refused reads for the whole window
+    // until RESET restarted it, after which every poll was served at once
+    // (capture 9). So the reader starts the module fresh; with the RTC rail
+    // on V_BCKP that is a hot start. The reader task makes the first
+    // contact once the module is up again.
+    pulseReset("fresh start with the reader");
     silentSinceMs = nowMs;
   }
 

@@ -63,10 +63,13 @@ and its `--require-pmic-read-only` gate.
   bus timeout and lock wait lengthened to 150 ms so one read fits them),
   parses the stream with
   NeoGPS into the shared position record and counts raw bytes and
-  checksum-valid sentences. Polls run every 200 ms while idle, back to back
-  while the receiver still has buffered bytes, every 2 s while the receiver
-  does not answer and every 30 s after five misses in a row. With no byte in
-  15 s it pulses RESET through the expander (at most three times).
+  checksum-valid sentences. The reader first pulses RESET so the module
+  starts fresh with it (a hot start with the RTC rail on V_BCKP): the
+  module runs from power-on, and a slave whose buffer overflowed before the
+  reader came up refused reads until restarted. Polls run every 200 ms
+  while idle, again at once after a partial drain, every 2 s while the
+  receiver does not answer and every 30 s after five misses in a row. With
+  no byte in 15 s it pulses RESET again (at most three pulses in all).
 - The UART transport, for a receiver whose TXD reaches an ESP32 pin (no
   current board), opens a private UART and probes the board rate first, then
   115200, 9600, 38400, 57600 and 230400 bps, four seconds each, until a valid
@@ -149,6 +152,7 @@ on the maintainer's Mac.
 | 2026-11-08 06:47 | `c15ea28d` ordinary (I2C transport) | Capture 6 (`--reset`): identity, PMIC and ready pass (ready 4780 ms). The receiver acknowledges its command address 0x50 (`present=1`) and the request write, but refuses the answer read at 0x54 100 ms later on every poll (`i2c_master_receive failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK); `polls=6 errors=6`, one RESET pulse. First proof that the module is powered and on the bus. |
 | 2026-11-08 07:01 | `f6a3ff21` ordinary (I2C transport, answer-read retries) | Capture 7 (`--reset`, 6 s after the attested upload): identity, PMIC and ready pass (ready 4788 ms). The slave acknowledges the address-only probe but refuses the request write that follows it within a millisecond (`i2c_master_transmit failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK), on every poll; one RESET pulse. The answer-read retries never ran. |
 | 2026-11-08 07:12 | `66acd3fb` ordinary (I2C transport, vendor driver pattern) | **Receiver gate passed** (capture 8, `--reset` 6 s after the attested upload, exit 0): identity, PMIC and ready pass (ready 4868 ms); `BOOT_GNSS transport=i2c probe=ok bytes=1024 sentences=29 invalid=0 answerMs=10`, first bytes `$PQTMVER,1,MODULE,LC76GABNR12A05…` (the module's version report). Every write was acknowledged (`nacks=0/0/…`); reads were still refused for stretches beyond the 100 ms budget (10 refusals per failed poll, roughly every other poll), and the module reported 9202 bytes buffered at the first answered poll, so the 256-byte chunks could not drain it. |
+| 2026-11-08 07:25 | `e1c67f72` ordinary (I2C transport, chunked drain) | **Receiver gate passed** (capture 9, exit 0, 90 s): identity, PMIC and ready pass (ready 4855 ms). For the first 15 s the slave refused every length read (`nacks=…/500/…`, five failed polls); the firmware's 15-s RESET pulse restarted the module and from then on every poll was served on the first try: `polls=82 errors=5 backlog=4215 answerMs=20/20 bytes=14436 sentences=383 invalid=0`, no other bus device disturbed, 150 ms bus timeout in effect. Reading: the module's buffer, filling since power-on, had overflowed before the reader started, and the overflowed slave refuses reads until restarted; the next image restarts the module when the reader starts. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -168,7 +172,9 @@ with that pattern: the module speaks, its sentences verify, and what is
 left is draining its buffer, which the next image does the vendor driver's
 way (one length query, then data requests of up to 1024 bytes until the
 announced length is read) with a longer retry budget and the longest waits
-reported.
+reported. Capture 9 then showed the refusals were the overflowed buffer:
+after the module restarted, every poll was served at once and the stream
+kept up, so the reader now restarts the module when it starts.
 
 ## Open items
 
