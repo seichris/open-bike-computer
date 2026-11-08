@@ -4407,13 +4407,13 @@ private struct DeveloperSettingsView: View {
 private struct PositionSourceStatusSection: View {
     @EnvironmentObject private var bleManager: BLEManager
     @State private var now = Date()
-    private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     private var reportAgeLabel: String {
         guard let receivedAt = bleManager.devicePositionSourceStatusReceivedAt else {
             return "never"
         }
-        let seconds = Int(now.timeIntervalSince(receivedAt).rounded(.down))
+        // A report that arrived after the last tick is fresh, not negative.
+        let seconds = max(0, Int(now.timeIntervalSince(receivedAt).rounded(.down)))
         if seconds < 3 { return "just now" }
         return seconds < 10 ? "\(seconds) s ago" : "\(seconds) s ago, stale"
     }
@@ -4454,10 +4454,16 @@ private struct PositionSourceStatusSection: View {
                 )
             }
         }
-        .onAppear { _ = bleManager.requestDeviceTransferStatus() }
-        .onReceive(refresh) { _ in
-            now = Date()
-            _ = bleManager.requestDeviceTransferStatus()
+        .task {
+            // One polling loop per appearance of the section. A timer
+            // publisher held by the view value would be rebuilt, and its
+            // countdown restarted, whenever the parent re-renders, which
+            // Developer Settings does with every location update.
+            while !Task.isCancelled {
+                now = Date()
+                _ = bleManager.requestDeviceTransferStatus()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 }

@@ -1247,7 +1247,14 @@ struct DevicePositionSourceStatus: Equatable {
 
     var fixLabel: String {
         guard gnssFitted else { return "n/a" }
-        if fixValid == true { return "valid" }
+        if fixValid == true {
+            // The device holds the last interval's state; a fix older than
+            // the arbiter's three-second hold no longer feeds the record.
+            if let lastFixAgeMs, lastFixAgeMs > 3000 {
+                return "stale, last fix \(lastFixAgeMs / 1000) s ago"
+            }
+            return "valid"
+        }
         if locked == true { return "no fix yet" }
         return present == true ? "waiting for sentences" : "receiver not answering"
     }

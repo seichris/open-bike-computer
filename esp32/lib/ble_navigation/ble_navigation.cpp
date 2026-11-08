@@ -3741,8 +3741,10 @@ static std::string genericTransferStatusJson() {
       status_json::appendUnsignedField(body, "sentences", gnss.validSentences);
       status_json::appendUnsignedField(body, "invalid", gnss.invalidSentences);
       if (gnss.lastFixMs != 0) {
+        // A fix that lands between the clock read and the snapshot is new.
+        const int32_t ageMs = static_cast<int32_t>(nowMs - gnss.lastFixMs);
         status_json::appendUnsignedField(
-            body, "lastFixAgeMs", static_cast<uint32_t>(nowMs - gnss.lastFixMs));
+            body, "lastFixAgeMs", ageMs > 0 ? static_cast<uint32_t>(ageMs) : 0U);
       }
       status_json::appendUnsignedField(body, "resetPulses", gnss.resetPulses);
     }

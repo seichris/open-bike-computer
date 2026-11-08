@@ -7014,6 +7014,16 @@ extension NavigationProtocolTests {
         apply([
             "active": "phone", "gnssFitted": true, "module": "lc76g",
             "transport": "i2c", "present": true, "locked": true,
+            "fixValid": true, "satellites": 13, "fixes": 190,
+            "sentences": 3100, "invalid": 0, "lastFixAgeMs": 42_000,
+            "resetPulses": 2, "uptimeMs": 3_800_000
+        ])
+        assertEqual(bleManager.devicePositionSourceStatus?.fixLabel,
+                    "stale, last fix 42 s ago",
+                    "a valid fix older than the hold reads as stale")
+        apply([
+            "active": "phone", "gnssFitted": true, "module": "lc76g",
+            "transport": "i2c", "present": true, "locked": true,
             "fixValid": false, "satellites": 0, "fixes": 40,
             "sentences": 600, "invalid": 2, "resetPulses": 1
         ])

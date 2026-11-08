@@ -10,5 +10,7 @@ namespace position_source::gnss_receiver {
 void begin();
 void startTask();
 GnssStatus status();
+// Main loop only: see position_source::applyPendingGnssFix().
+bool applyPendingFix();
 
 }  // namespace position_source::gnss_receiver

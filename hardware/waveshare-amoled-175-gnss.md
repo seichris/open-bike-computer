@@ -72,8 +72,11 @@ and its `--require-pmic-read-only` gate.
   while idle, again at once after a partial drain or after a poll the
   receiver refused having answered the one before (it stalls for a few
   seconds now and then), every 2 s while the receiver keeps refusing and
-  every 30 s after five misses in a row. With no byte in 15 s it pulses
-  RESET again (at most three pulses in all).
+  every 30 s after five misses in a row. Whenever no new byte arrives for
+  15 s across at least three polls, at start or later, it pulses RESET
+  again: an overflowed slave refuses reads until restarted. The wait
+  doubles after each restart without progress, up to five minutes, and
+  returns to 15 s once bytes flow.
 - The UART transport, for a receiver whose TXD reaches an ESP32 pin (no
   current board), opens a private UART and probes the board rate first, then
   115200, 9600, 38400, 57600 and 230400 bps, four seconds each, until a valid
@@ -86,7 +89,10 @@ and its `--require-pmic-read-only` gate.
 - `position_source` lets a valid receiver fix populate the shared position for
   3 s after each fix; the phone's positions apply otherwise and keep feeding
   ride automation throughout. A fresh receiver fix counts as navigation input
-  like a phone position.
+  like a phone position. The reader task only parses: it hands each valid
+  fix, with that interval's satellite table, to the main loop, which owns
+  the position record and the display and applies it; an interval without
+  a valid position is never applied, so the phone keeps the record.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c
   reset=expander i2c=0x50/0x54 present=0|1 polls=<n> errors=<n>
   backlog=<largest buffered length reported> answerMs=<longest wait for a
@@ -106,8 +112,8 @@ and its `--require-pmic-read-only` gate.
   stage), and in diagnostics profiles again every 30 s once the probe
   locked, so a capture ends with the stream's totals; `GNSS: first bytes: <hex>` once 32 bytes arrived and `GNSS: fix
   sats=...` every 30 s in diagnostics profiles; `GNSS: reset pulse n` with
-  its reason. Diagnostics events `gnss/probe`, `gnss/fix` and
-  `gnss/fix_checkpoint` carry the sentence counts.
+  its reason. The receiver records no diagnostics events of its own; its
+  state is in this record and in the app's Developer Settings.
 - CAP2 advertises the position-source record (extended bit 5, TLV type 5)
   with flags `3` and module `1`; the app shows "Position Source: Device GNSS
   (Quectel LC76G), iPhone when no fix" in its firmware section.
@@ -138,8 +144,9 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG \
    `--require-gnss` needs `BOOT_GNSS probe=ok` with at least one
    checksum-valid sentence. It proves the module is fitted, powered, out of
    reset and answering on the bus; it does not need a position fix.
-2. Fix evidence: `GNSS: fix sats=N` on serial (or the `gnss/fix` event in a
-   diagnostics export) with the board near a window or outdoors, and the
+2. Fix evidence: `GNSS: fix sats=N` on serial, or Developer Settings,
+   Position Source, showing a valid fix, with the board near a window or
+   outdoors, and the
    device map following the receiver's position with the phone's position
    service off or the phone disconnected.
 3. The phone path unchanged: the plain `WAVESHARE_AMOLED_175` image from the
@@ -174,7 +181,7 @@ on the maintainer's Mac.
 | 2026-11-08 08:39 | `d8077c56` ordinary (parser counters, raw sample), at a window | Capture 18 (120 s, gate passed): the raw sample is NMEA 4.10 (`$GNGGA`, `$GNGLL`, four `$GNGSA` with system IDs, `$GPGSV` with signal IDs) and the parser completes the sentences (`decode=1327/2929` against `sentences=1340`; the rejected bytes are line ends and the proprietary `$PQTM` sentences), yet `fixes=0`. |
 | 2026-11-08 08:49 | `23628aa8` ordinary (sentence tally, epoch sample), at a window | Capture 19 (180 s, gate passed): epoch order GGA, GLL, GSA×4, GSV per constellation, RMC, VTG; `types=140/140/140/560/1240/140/0/15` in three minutes, 25 satellites in view with weak signals, `$GNRMC,...,V,...` (no fix), still `fixes=0`. The cause is the parser's API, not the stream: the reader fed NeoGPS through `decode()`, which parses but never stores a fix; only `handle()` does, which the old serial path reached through `available(port)`. |
 | 2026-11-08 08:59 | `3665e7f0` ordinary (parser fed through `handle()`), at a window | Capture 20 (240 s, gate passed): `types=210/210/210/840/1788/210/0/17`, `decode=3468/7299`, and `fixes=1`: the parser now stores a fix at each RMC, but it buffers only one and the next completed sentence pops an unread one; VTG follows RMC within the same 1 KB chunk, so the fix survived only when a chunk boundary fell between the two. The reader now drains fixes after every completed sentence. |
-| 2026-11-08 09:10 | `8b79e947` ordinary (fixes drained after every sentence), at a window | **Fix evidence passed** (capture 21, 240 s, every gate passed): `GNSS: fix sats=13 …` and two 30-second checkpoints with 13 to 14 satellites used, `fixStatus=3` (standard), `fixes=182` (one per epoch), the position at the window (coordinates only in the log on the maintainer's Mac); `types=182/182/182/728/1502/182/0/17`, `decode=2958/6279`, no other bus device disturbed. The diagnostics events `gnss/fix` and `gnss/fix_checkpoint` are recorded with it. |
+| 2026-11-08 09:10 | `8b79e947` ordinary (fixes drained after every sentence), at a window | **Fix evidence passed** (capture 21, 240 s, every gate passed): `GNSS: fix sats=13 …` and two 30-second checkpoints with 13 to 14 satellites used, `fixStatus=3` (standard), `fixes=182` (one per epoch), the position at the window (coordinates only in the log on the maintainer's Mac); `types=182/182/182/728/1502/182/0/17`, `decode=2958/6279`, no other bus device disturbed. (An earlier version of this row said the diagnostics events `gnss/fix` and `gnss/fix_checkpoint` were recorded; review pass 2 found that the firmware dropped them, their field names being outside the closed diagnostics vocabulary, and the events were removed.) |
 | 2026-11-08 09:44 | `50cd5d62` ordinary (position-source report in `DSTS`), at a window | Capture 22 (60 s, every gate passed): `fixes=38 sentences=486 invalid=0`, one interval per epoch, no position fix within the minute after the module's restart. The Bicino Dev app built from `1d734ae6` (Developer Settings, Position Source section) was installed on the maintainer's iPhone for the live check. |
 | 2026-11-08 12:07 | `ff4fa84c` ordinary (report carries the device's uptime), at a window | Capture 23 (60 s, every gate passed): `fixes=41 sentences=611 invalid=0`, no position fix in the first minute. The app built from the same commit (Developer Settings shows the report's age and the device's uptime) was installed on the maintainer's iPhone. Between 10:02Z and 11:18Z the earlier app had shown one unchanging report for 76 minutes without a disconnect; whether the link or the receiver's reader had stopped is open, and the report's age now tells them apart. The maintainer confirmed the section live on the phone with this image: the report's age and the device's uptime keep moving. |
 

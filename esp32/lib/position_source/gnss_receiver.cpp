@@ -12,9 +12,6 @@
 #include "../gps/gps.hpp"
 #include "../waveshare_board/i2c_bus.hpp"
 #include "../waveshare_board/tca9554.hpp"
-#if PERSISTENT_RIDE_DIAGNOSTICS
-#include "../ride_diagnostics/ride_diagnostics.hpp"
-#endif
 
 extern Gps gps;
 
@@ -163,27 +160,6 @@ void printBoot(const char *probeState) {
   Serial.println(line);
 }
 
-void recordDiagnostic(const char *event, bool available, bool fixValid,
-                      uint32_t sentences, uint32_t invalid) {
-#if PERSISTENT_RIDE_DIAGNOSTICS
-  char fields[160] = {};
-  snprintf(fields, sizeof(fields),
-           "{\"source\":\"gnss\",\"available\":%s,\"fixValid\":%s,"
-           "\"eventCount\":%lu,\"droppedCount\":%lu}",
-           available ? "true" : "false", fixValid ? "true" : "false",
-           static_cast<unsigned long>(sentences),
-           static_cast<unsigned long>(invalid));
-  ride_diagnostics::record(ride_diagnostics::Level::Info, "gnss", event,
-                           fields);
-#else
-  (void)event;
-  (void)available;
-  (void)fixValid;
-  (void)sentences;
-  (void)invalid;
-#endif
-}
-
 void releaseReset() {
   if (!board::gnss::resetViaExpander)
     return;
@@ -209,7 +185,7 @@ void pulseReset(const char *reason) {
       waveshare_board::tca9554::setPin(board::gnss::resetExpanderPin, true);
   portENTER_CRITICAL(&mux);
   ++state.resetPulses;
-  const uint8_t pulses = state.resetPulses;
+  const uint32_t pulses = state.resetPulses;
   portEXIT_CRITICAL(&mux);
   Serial.printf("GNSS: reset pulse %u %s (%s)\n", static_cast<unsigned>(pulses),
                 ok && released ? "issued" : "failed at the expander", reason);
@@ -286,35 +262,59 @@ uint32_t consume(const uint8_t *data, size_t len) {
   return valid;
 }
 
-// Applies every fix the parser completed to the shared position record.
+// A valid fix the reader parsed, with the parser's satellite table of that
+// interval, waiting for the main loop. The loop owns the shared position
+// record (gps.gpsData), the parser's `fix` global that getGPSData() reads,
+// and the LVGL objects and clock that getGPSData() sets; the reader never
+// writes any of them. A fix without a valid position is never handed over,
+// so the phone keeps the record while the receiver has none.
+portMUX_TYPE handoffMux = portMUX_INITIALIZER_UNLOCKED;
+gps_fix pendingFix;
+GpsSatelliteSnapshot pendingSatellites;
+bool pendingFixReady = false;
+
+// Takes every fix the parser completed: counts it, tells the arbiter, and
+// hands a valid one to the main loop.
 void drainFixes() {
   while (GPS.available()) {
-    fix = GPS.read();
-    gps.getGPSData();
-    const bool fixValid =
-        fix.status >= gps_fix::STATUS_STD && static_cast<bool>(fix.valid.location);
+    const gps_fix parsed = GPS.read();
+    const bool fixValid = parsed.status >= gps_fix::STATUS_STD &&
+                          static_cast<bool>(parsed.valid.location);
     const uint32_t nowMs = millis();
     portENTER_CRITICAL(&mux);
     ++state.fixes;
     state.fixValid = fixValid;
-    state.satellites = fix.satellites;
+    state.satellites = parsed.satellites;
     if (fixValid)
       state.lastFixMs = nowMs;
     portEXIT_CRITICAL(&mux);
+    if (fixValid) {
+      // The satellite table belongs to this interval until the next starts.
+      portENTER_CRITICAL(&handoffMux);
+      pendingFix = parsed;
+#ifdef NMEAGPS_PARSE_SATELLITES
+      const uint8_t count = GPS.sat_count < NMEAGPS_MAX_SATELLITES
+                                ? GPS.sat_count
+                                : static_cast<uint8_t>(NMEAGPS_MAX_SATELLITES);
+      pendingSatellites.count = count;
+      for (uint8_t i = 0; i < count; ++i)
+        pendingSatellites.views[i] = GPS.satellites[i];
+#endif
+      pendingFixReady = true;
+      portEXIT_CRITICAL(&handoffMux);
+    }
     position_source::noteGnssFix(nowMs, fixValid);
     if (fixValid && (!fixReported ||
                      static_cast<uint32_t>(nowMs - lastFixLogMs) >= kFixLogIntervalMs)) {
-      const GnssStatus s = snapshot();
 #if FIRMWARE_DIAGNOSTICS
       Serial.printf("GNSS: fix sats=%u lat=%.6f lon=%.6f speed=%u heading=%s%u\n",
-                    static_cast<unsigned>(s.satellites), gps.gpsData.latitude,
-                    gps.gpsData.longitude,
-                    static_cast<unsigned>(gps.gpsData.speed),
-                    gps.gpsData.headingValid ? "" : "invalid:",
-                    static_cast<unsigned>(gps.gpsData.heading));
+                    static_cast<unsigned>(parsed.satellites),
+                    static_cast<double>(parsed.latitude()),
+                    static_cast<double>(parsed.longitude()),
+                    static_cast<unsigned>(parsed.speed_kph()),
+                    parsed.valid.heading ? "" : "invalid:",
+                    static_cast<unsigned>(parsed.heading()));
 #endif
-      recordDiagnostic(fixReported ? "fix_checkpoint" : "fix", true, true,
-                       s.validSentences, s.invalidSentences);
       fixReported = true;
       lastFixLogMs = nowMs;
     }
@@ -332,8 +332,6 @@ void reportLocked() {
   portEXIT_CRITICAL(&mux);
   printBoot("ok");
   lastStatusMs = millis();
-  const GnssStatus s = snapshot();
-  recordDiagnostic("probe", true, false, s.validSentences, s.invalidSentences);
 }
 
 // NMEA on a UART. The receiver's rate is unknown until checksum-valid
@@ -376,7 +374,7 @@ struct UartTransport {
       portENTER_CRITICAL(&mux);
       state.baud = probe.current();
       const uint32_t bytesNow = state.bytes;
-      const uint8_t pulses = state.resetPulses;
+      const uint32_t pulses = state.resetPulses;
       portEXIT_CRITICAL(&mux);
       printBoot("retry");
       // Back at the first rate after a round that saw nothing at all.
@@ -429,10 +427,22 @@ struct I2cTransport {
   // after a few misses the polls slow down so the log stays readable.
   static constexpr uint32_t kAbsentSlowPollMs = 30'000;
   static constexpr uint8_t kAbsentPollsBeforeSlow = 5;
+  // The module is restarted when no new byte arrives for kSilentWindowMs
+  // across at least kSilentPolls attempted polls, whether it never started
+  // (absent or unpowered) or its stream stopped later: an overflowed slave
+  // refuses reads until RESET restarts it (capture 9), and a module that
+  // answers with nothing forever needs the same. After each restart without
+  // progress the window doubles, up to kMaxSilentWindowMs, so an absent
+  // module is pulsed rarely; it returns to kSilentWindowMs once bytes flow.
   static constexpr uint32_t kSilentWindowMs = 15'000;
+  static constexpr uint32_t kMaxSilentWindowMs = 300'000;
+  static constexpr uint8_t kSilentPolls = 3;
   static constexpr size_t kChunkBytes = waveshare_board::i2c::STREAM_BUFFER_BYTES;
   uint8_t chunk[kChunkBytes] = {};
-  uint32_t silentSinceMs = 0;
+  uint32_t progressBytes = 0;
+  uint32_t progressMs = 0;
+  uint32_t pollsSinceProgress = 0;
+  uint32_t silentWindowMs = kSilentWindowMs;
   uint8_t consecutiveFailures = 0;
   bool sawValidSentence = false;
 
@@ -524,7 +534,7 @@ struct I2cTransport {
     // on V_BCKP that is a hot start. The reader task makes the first
     // contact once the module is up again.
     pulseReset("fresh start with the reader");
-    silentSinceMs = nowMs;
+    progressMs = nowMs;
   }
 
   enum class Outcome : uint8_t { noAnswer, partial, complete };
@@ -578,7 +588,7 @@ struct I2cTransport {
   // One poll and its bookkeeping. Returns the delay before the next poll (0
   // while the receiver still has buffered bytes) and whether valid sentences
   // have arrived.
-  uint32_t service(uint32_t nowMs, bool &locked) {
+  uint32_t service(uint32_t /*nowMs*/, bool &locked) {
     size_t received = 0;
     const Outcome outcome = poll(received);
     const bool answered = outcome != Outcome::noAnswer;
@@ -589,7 +599,6 @@ struct I2cTransport {
     const bool wasPresent = state.portOpen;
     state.portOpen = answered;
     const uint32_t bytesNow = state.bytes;
-    const uint8_t pulses = state.resetPulses;
     portEXIT_CRITICAL(&mux);
     if (answered)
       consecutiveFailures = 0;
@@ -597,15 +606,25 @@ struct I2cTransport {
       ++consecutiveFailures;
     if (answered != wasPresent)
       printBoot(probeReported ? "ok" : answered ? "pending" : "retry");
-    // No byte for a while, answering or not: the module may be held by a
-    // stale reset or need a restart.
-    if (bytesNow == 0 &&
-        static_cast<uint32_t>(nowMs - silentSinceMs) >= kSilentWindowMs) {
-      silentSinceMs = nowMs;
-      if (pulses < kMaxResetPulses) {
-        pulseReset("no bytes in 15 s");
-        printBoot("retry");
-      }
+    // Restart the module when its stream stops (see kSilentWindowMs). The
+    // clock is read after the poll, which can take seconds.
+    const uint32_t afterMs = millis();
+    if (bytesNow != progressBytes) {
+      progressBytes = bytesNow;
+      progressMs = afterMs;
+      pollsSinceProgress = 0;
+      silentWindowMs = kSilentWindowMs;
+    } else if (++pollsSinceProgress >= kSilentPolls &&
+               static_cast<uint32_t>(afterMs - progressMs) >= silentWindowMs) {
+      pulseReset(bytesNow == 0 ? "no bytes yet" : "stream stopped");
+      printBoot(probeReported ? "ok" : "retry");
+      progressMs = millis();
+      pollsSinceProgress = 0;
+      // Poll at the normal cadence while the module comes back up.
+      consecutiveFailures = 0;
+      silentWindowMs = silentWindowMs * 2 < kMaxSilentWindowMs
+                           ? silentWindowMs * 2
+                           : kMaxSilentWindowMs;
     }
     locked = sawValidSentence;
     if (!answered) {
@@ -715,6 +734,31 @@ void startTask() {
 
 GnssStatus status() { return snapshot(); }
 
+bool applyPendingFix() {
+  GpsSatelliteSnapshot satellites;
+  gps_fix parsed;
+  bool ready = false;
+  portENTER_CRITICAL(&handoffMux);
+  if (pendingFixReady) {
+    parsed = pendingFix;
+    satellites = pendingSatellites;
+    pendingFixReady = false;
+    ready = true;
+  }
+  portEXIT_CRITICAL(&handoffMux);
+  if (ready) {
+    // getGPSData() and getLat()/getLon() read the parser's `fix` global,
+    // which only this task writes.
+    fix = parsed;
+    gps.getGPSData(satellites);
+  } else if (!snapshot().fixValid) {
+    // The receiver lost its fix: clear its indicator. The phone's positions
+    // own the record again once the arbiter's hold has passed.
+    isGpsFixed = false;
+  }
+  return ready;
+}
+
 }  // namespace position_source::gnss_receiver
 
 #else  // No receiver on this board.
@@ -724,6 +768,7 @@ namespace position_source::gnss_receiver {
 void begin() {}
 void startTask() {}
 GnssStatus status() { return GnssStatus{}; }
+bool applyPendingFix() { return false; }
 
 }  // namespace position_source::gnss_receiver
 

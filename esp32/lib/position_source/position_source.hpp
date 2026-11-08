@@ -45,8 +45,9 @@ struct GnssStatus {
   uint32_t bytes = 0;
   uint32_t validSentences = 0;
   uint32_t invalidSentences = 0;
-  // RESET pulses issued after probe rounds that saw no bytes.
-  uint8_t resetPulses = 0;
+  // RESET pulses issued: the fresh start and every restart after the stream
+  // stopped (on a UART, after probe rounds that saw no bytes).
+  uint32_t resetPulses = 0;
   uint32_t fixes = 0;
   bool fixValid = false;
   uint8_t satellites = 0;
@@ -54,9 +55,9 @@ struct GnssStatus {
   uint32_t lastFixMs = 0;
 };
 
-// Opens the receiver where one is fitted (the UART, or a presence check of
-// the I2C slave); a no-op elsewhere. Runs where the user interface starts,
-// after the I2C bus and expander are configured.
+// Opens the receiver where one is fitted (the UART, or the I2C slave after a
+// RESET pulse that starts the module fresh); a no-op elsewhere. Runs where
+// the user interface starts, after the I2C bus and expander are configured.
 void begin();
 // Starts the receiver reader task where one is fitted; a no-op elsewhere.
 void startTask();
@@ -64,11 +65,14 @@ void startTask();
 // Whether a phone position may populate the shared record right now.
 bool acceptsPhonePosition(uint32_t nowMs);
 void notePhonePosition(uint32_t nowMs);
-// Receiver side: a parsed fix was applied to the record (valid or not).
+// Receiver side: the reader parsed a fix (valid or not).
 void noteGnssFix(uint32_t nowMs, bool fixValid);
-// One-shot flag raised by a valid receiver fix and consumed by the UI task,
-// which treats the device's own fix as navigation input like a phone position.
-bool takeFreshGnssFix();
+// Main loop only: applies the receiver's latest valid fix to the shared
+// position record, which the reader task never writes, and returns whether
+// one was applied; the loop treats it as navigation input like a phone
+// position. Without a valid fix nothing is applied and the phone keeps the
+// record. A no-op without a receiver.
+bool applyPendingGnssFix();
 
 Source activeSource(uint32_t nowMs);
 GnssStatus gnssStatus();
