@@ -520,6 +520,14 @@ class ChangedComponentsTests(unittest.TestCase):
             ),
             changed_components.select_firmware_targets("397"),
         )
+        self.assertEqual(
+            (
+                "WAVESHARE_AMOLED_175_GNSS",
+                "WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG",
+                "WAVESHARE_AMOLED_175_GNSS_PRODUCTION",
+            ),
+            changed_components.select_firmware_targets("175_gnss"),
+        )
         # Release and "all" selections remain the AMOLED families.
         self.assertEqual(
             targets_175 + targets_206,

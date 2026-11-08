@@ -110,6 +110,24 @@ def is_epaper_path(path):
     return path.startswith('esp32/') and 'epaper' in path.lower()
 
 
+# The experimental GNSS 1.75 variant, in changed_components.FIRMWARE_TARGETS
+# order. Diagnostics on and off, and both partition layouts: together they
+# enter every arm of the receiver code and the plain 1.75 arms it shares.
+GNSS_PROFILE_SUFFIXES = ('', '_REMOTE_DEBUG', '_PRODUCTION')
+GNSS_SHARED_SUFFIXES = ('', '_PRODUCTION')
+
+
+def gnss_firmware_targets(suffixes=GNSS_PROFILE_SUFFIXES):
+    return tuple('WAVESHARE_AMOLED_175_GNSS' + s for s in suffixes)
+
+
+def is_gnss_variant_path(path):
+    # Only the variant's board file names it. The receiver implementation in
+    # lib/position_source compiles into every image (as stubs elsewhere), so
+    # it routes like shared firmware, not like a variant-only source.
+    return path.startswith('esp32/') and '175_gnss' in path.lower()
+
+
 def firmware_targets(paths, full_targets):
     """Automatic pull-request and merge-group firmware selection.
 
@@ -121,17 +139,27 @@ def firmware_targets(paths, full_targets):
         return full_targets
     inputs = product_inputs(paths)
     epaper = [p for p in inputs if is_epaper_path(p)]
+    gnss = [p for p in inputs if is_gnss_variant_path(p)]
+    if gnss and len(gnss) == len(inputs):
+        # The variant's own board file selects only the variant.
+        return gnss_firmware_targets()
     if epaper and len(epaper) == len(inputs):
         # Like 206-named files, e-paper-named sources select only their board.
         return epaper_firmware_targets()
-    amoled = amoled_firmware_targets([p for p in paths if p not in epaper], full_targets)
+    amoled = amoled_firmware_targets(
+        [p for p in paths if p not in epaper and p not in gnss], full_targets)
+    shared = bool(inputs) and not all(p.startswith('esp32/') and '206' in p for p in inputs)
     if epaper:
         added = epaper_firmware_targets()
-    elif inputs and not all(p.startswith('esp32/') and '206' in p for p in inputs):
+    elif shared:
         # Shared firmware, build and CI inputs; 206-named sources never reach it.
         added = epaper_firmware_targets(EPAPER_SHARED_SUFFIXES)
     else:
         added = ()
+    if gnss:
+        added += gnss_firmware_targets()
+    elif shared:
+        added += gnss_firmware_targets(GNSS_SHARED_SUFFIXES)
     return amoled + tuple(t for t in added if t not in amoled)
 
 

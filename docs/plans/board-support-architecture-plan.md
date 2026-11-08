@@ -526,6 +526,25 @@ that board once it is tested (see Decisions).
   board declares a receiver yet, so the arbiter always accepts the phone.
   Hardware gate: none of its own; the first fitted receiver is M6's board,
   whose boot capture also covers this part.
+- **M6, 2026-11-08, in review on M5's branch.** The first variant through the
+  checklist is the 1.75 with the Quectel LC76G populated,
+  `WAVESHARE_AMOLED_175_GNSS`: `boards/waveshare_amoled_175_gnss.hpp` (the
+  shared 1.75 data moved to `waveshare_amoled_175_common.hpp`, the plain and
+  variant files add identity and `gnss`), three environments on the 1.75 SDK
+  policy, `changed_components`/`ci_scopes` routing (the pair on shared
+  changes, the three profiles for the variant's board file, manual selector
+  `175_gnss`, never packaged, never in `all`), the device registry family
+  with longest-match ownership, a `capture_boot.py --require-gnss` gate
+  (`BOOT_GNSS probe=ok` with checksum-valid sentences), and the hardware
+  pages. One checklist assumption did not hold: the AMOLED whole-file gates
+  key on the board macros, so a variant that defined only its own macro lost
+  the panel, touch and RTC. The rule is now that a variant defines its base
+  board's macro and its own, `board.hpp` requires the base and selects the
+  most specific file, and the ratchet gained no entry (the variant macro
+  appears only in `lib/board`). No file under `src/`, `gui/`, `maps/`,
+  `storage/` or `ble_navigation/` changed. Hardware gate: owed on the bench
+  unit (boot capture with the read-only PMIC and receiver gates, fix evidence,
+  the plain 1.75 image on the same unit for M5).
 
 ### The confinement test
 
@@ -576,17 +595,23 @@ selects:
    kept as reference; Git history holds the removed code. Done 2026-11-06 from
    `main` at `0f2d209d`, before #442 merged, on the maintainer's instruction.
 
-Still open:
+2. **The GNSS 1.75 is a real target.** Decided 2026-11-08 with M6: a 1.75
+   with the Quectel LC76G populated on the vendor footprint is on the bench
+   (USB serial enrolled as `waveshare-175-gnss`), and the schematic routes
+   the receiver to GPIO18/17 and expander pin EXIO7, not to the header's
+   UART0 pads the plan assumed.
+3. **A variant is always its own image**, including for an optional module:
+   its own `custom_firmware_target`, OTA identity, environments, CI routing
+   and gates. Confirmed with M6.
+4. **Naming and macros.** Variant targets append the module to the base
+   board (`WAVESHARE_AMOLED_175_GNSS`). A variant defines its base board's
+   macro and its own: the base macro keeps every whole-file gate and arm of
+   the board, the variant macro selects the variant's board file in
+   `board.hpp` (which requires the base) and names the image. Board files
+   live in `esp32/lib/board/boards/`; shared board data of a family goes in a
+   `*_common.hpp` the base and variant files include.
 
-2. Whether a GNSS 1.75 is a real target. The 1.75 pads are unpopulated, so it
-   needs a fitted module and its own bench board before M5 and M6 are worth
-   doing. A 1.75 with a fitted module exists on the maintainer's bench
-   (2026-11-07); its qualification is deferred, so the decision stays open
-   until it is tested.
-3. Confirm the rule that a variant is always its own image, including for an
-   optional GNSS module.
-4. Target naming for variants (`WAVESHARE_AMOLED_175_GNSS`). Board files live
-   in `esp32/lib/board/boards/` since M1.
+Still open: none.
 
 ## Related documents
 

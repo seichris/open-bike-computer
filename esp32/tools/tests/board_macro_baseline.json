@@ -2,6 +2,7 @@
   "comment": "Target-macro conditionals per shared source file. Only lower these counts; new board differences go into lib/board/boards or a file gated as a whole. Update with --update-baseline.",
   "targets": [
     "WAVESHARE_AMOLED_175",
+    "WAVESHARE_AMOLED_175_GNSS",
     "WAVESHARE_AMOLED_206",
     "WAVESHARE_EPAPER_397"
   ],

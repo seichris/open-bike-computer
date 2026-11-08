@@ -202,6 +202,27 @@ class DeviceRegistryTests(unittest.TestCase):
                 "WAVESHARE_AMOLED_206", "WAVESHARE_AMOLED_175"
             )
         )
+        # The GNSS variant extends the 1.75 name; its images belong to it alone.
+        self.assertTrue(
+            environment_matches_family(
+                "WAVESHARE_AMOLED_175_GNSS_PRODUCTION", "WAVESHARE_AMOLED_175_GNSS"
+            )
+        )
+        self.assertFalse(
+            environment_matches_family(
+                "WAVESHARE_AMOLED_175_GNSS_PRODUCTION", "WAVESHARE_AMOLED_175"
+            )
+        )
+        self.assertFalse(
+            environment_matches_family(
+                "WAVESHARE_AMOLED_175_GNSS", "WAVESHARE_AMOLED_175"
+            )
+        )
+        self.assertFalse(
+            environment_matches_family(
+                "WAVESHARE_AMOLED_175_REMOTE_DEBUG", "WAVESHARE_AMOLED_175_GNSS"
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -83,6 +83,10 @@ class BootSummary:
     previous: dict[str, str]
     failure: dict[str, str]
     pmic: dict[str, str]
+    # The latest BOOT_GNSS record of the boot. The receiver's serial-rate probe
+    # may lock after the ready stage, so this record is read wherever it lands
+    # and never counts as a boot discontinuity.
+    gnss: dict[str, str]
     ready: bool
     stage_schema_mismatches: int
     sequence_mismatches: int
@@ -147,6 +151,7 @@ def summarize(capture: str) -> BootSummary:
         previous=_latest(latest_boot, "BOOT_PREVIOUS"),
         failure=_latest(latest_boot, "BOOT_FAILURE"),
         pmic=_latest(latest_boot, "BOOT_PMIC"),
+        gnss=_latest(latest_boot, "BOOT_GNSS"),
         ready=ready,
         stage_schema_mismatches=stage_schema_mismatches,
         sequence_mismatches=sequence_mismatches,
@@ -229,6 +234,12 @@ def format_summary(
         f"vbus={value(summary.pmic, 'vbus')} "
         f"battery={value(summary.pmic, 'battery')} "
         f"ldo={value(summary.pmic, 'ldo')} "
+        f"gnssFitted={value(summary.gnss, 'fitted')} "
+        f"gnssModule={value(summary.gnss, 'module')} "
+        f"gnssProbe={value(summary.gnss, 'probe')} "
+        f"gnssBaud={value(summary.gnss, 'baud')} "
+        f"gnssSentences={value(summary.gnss, 'sentences')} "
+        f"gnssInvalid={value(summary.gnss, 'invalid')} "
         f"ready={1 if summary.ready else 0} "
         f"stageSchemaMismatches={summary.stage_schema_mismatches} "
         f"sequenceMismatches={summary.sequence_mismatches} "
@@ -303,6 +314,7 @@ def validation_errors(
     require_ready: bool = False,
     require_pmic_read_only: bool = False,
     require_pmic_display_enable_only: bool = False,
+    require_gnss: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     gated_validation = any(
@@ -319,6 +331,7 @@ def validation_errors(
             require_ready,
             require_pmic_read_only,
             require_pmic_display_enable_only,
+            require_gnss,
         )
     )
     if gated_validation and summary.meta.get("schema") != _SUPPORTED_BOOT_SCHEMA:
@@ -441,6 +454,34 @@ def validation_errors(
                 )
     if require_pmic_read_only or require_pmic_display_enable_only:
         _validate_power_button_off_configuration(summary, errors)
+    if require_gnss:
+        # The receiver gate: the board declares a fitted receiver, its port
+        # opened, the serial-rate probe locked on checksum-valid NMEA sentences
+        # and at least one arrived. A position fix is not required here; it
+        # depends on sky view and is recorded separately.
+        if summary.gnss.get("schema") != _SUPPORTED_BOOT_SCHEMA:
+            errors.append(
+                "BOOT_GNSS schema 1 required for receiver validation "
+                f"(got {summary.gnss.get('schema', 'missing')})"
+            )
+        if summary.gnss.get("fitted") != "1":
+            errors.append(
+                f"GNSS receiver fitted marker missing (got {summary.gnss.get('fitted', 'missing')})"
+            )
+        if summary.gnss.get("probe") != "ok":
+            errors.append(
+                "GNSS serial-rate probe did not lock "
+                f"(got {summary.gnss.get('probe', 'missing')})"
+            )
+        try:
+            sentences = int(summary.gnss.get("sentences", ""))
+        except ValueError:
+            sentences = -1
+        if sentences < 1:
+            errors.append(
+                "at least one checksum-valid NMEA sentence required "
+                f"(got {summary.gnss.get('sentences', 'missing')})"
+            )
     if summary.blocked_writes:
         errors.append(f"blocked AXP2101 writes observed: {summary.blocked_writes}")
     if summary.diagnostic_errors:
@@ -526,6 +567,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--require-ready", action="store_true")
+    parser.add_argument(
+        "--require-gnss",
+        action="store_true",
+        help=(
+            "require a fitted GNSS receiver whose serial-rate probe locked on "
+            "checksum-valid NMEA sentences (BOOT_GNSS probe=ok)"
+        ),
+    )
     pmic_gate = parser.add_mutually_exclusive_group()
     pmic_gate.add_argument("--require-pmic-read-only", action="store_true")
     pmic_gate.add_argument(
@@ -609,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
         require_ready=args.require_ready,
         require_pmic_read_only=args.require_pmic_read_only,
         require_pmic_display_enable_only=args.require_pmic_display_enable_only,
+        require_gnss=args.require_gnss,
     )
     for error in errors:
         print(f"BOOT_CAPTURE_VALIDATION_ERROR {error}", file=sys.stderr)

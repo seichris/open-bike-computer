@@ -391,8 +391,8 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         # early waiting-screen frame, went with the legacy boards; nothing in
         # setup() is board-gated any more.
         self.assertNotIn("splashScreen();", setup)
-        for target in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206",
-                       "WAVESHARE_EPAPER_397"):
+        for target in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_175_GNSS",
+                       "WAVESHARE_AMOLED_206", "WAVESHARE_EPAPER_397"):
             self.assertNotIn(target, main)
         # One static frame: setup never runs LVGL timers or input callbacks,
         # and loads the waiting screen exactly once, before map recovery.

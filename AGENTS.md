@@ -75,6 +75,11 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
 pio device monitor -b 115200
 ```
 
+A 1.75 with the GNSS receiver populated is the separate target
+`WAVESHARE_AMOLED_175_GNSS`; `pio device list` cannot tell it from a plain 1.75,
+so identify the variant by its enrolled serial (`tools/device_registry.py`)
+before building or flashing it. See `hardware/waveshare-amoled-175-gnss.md`.
+
 Treat `/dev/cu.usbmodem*` and equivalent port names as transient. When more than
 one ESP32 is attached, record the hardware serial for each physical board before
 building or uploading and never infer the board from a port number. Prefer
@@ -316,8 +321,12 @@ changes qualify both 175 and 206 with all four regular profiles. Unknown librari
 retain the full selected hardware matrix. A 206-specific path cannot select only
 175. Automatic runs also build the experimental e-paper ordinary and production
 profiles for any change that can reach that image; e-paper-named sources select
-only its six profiles. Explicit manual hardware selection and release CI retain
-every regular profile, and their `all` selection stays AMOLED-only.
+only its six profiles. The experimental GNSS 1.75 variant
+(`WAVESHARE_AMOLED_175_GNSS`) rides the same way: its ordinary and production
+profiles join shared changes, its board file alone selects its three profiles,
+and the manual selector `175_gnss` builds them on demand. Explicit manual
+hardware selection and release CI retain every regular profile, and their
+`all` selection stays AMOLED-only.
 Image reserve, debug-route exclusions, factory packaging and lifecycle assertions
 remain mandatory. Zone fixtures run once with both board definitions under CI Gate.
 

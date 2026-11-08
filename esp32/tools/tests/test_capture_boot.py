@@ -714,5 +714,66 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
         self.assertIn(("open_port", "/dev/cu.test"), events)
 
 
+GNSS_PENDING_LINE = (
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
+    "reset=expander baud=115200 probe=pending sentences=0 invalid=0"
+)
+GNSS_LOCKED_LINE = (
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
+    "reset=expander baud=115200 probe=ok sentences=12 invalid=1"
+)
+# The receiver opens before ready; its serial-rate probe may lock only after
+# the ready stage, once the first checksum-valid sentences have arrived.
+GNSS_CAPTURE = HEALTHY_CAPTURE.replace(
+    "target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175",
+    "target=WAVESHARE_AMOLED_175_GNSS profile=WAVESHARE_AMOLED_175_GNSS",
+).replace(
+    READ_ONLY_PMIC_LINE, READ_ONLY_PMIC_LINE + "\n" + GNSS_PENDING_LINE
+) + GNSS_LOCKED_LINE + "\n"
+
+
+class GnssGateTests(unittest.TestCase):
+    def test_locked_probe_after_ready_satisfies_the_gate(self) -> None:
+        summary = summarize(GNSS_CAPTURE)
+        self.assertTrue(summary.ready)
+        self.assertEqual(summary.boot_discontinuities, 0)
+        self.assertEqual(
+            [],
+            validation_errors(
+                summary,
+                expected_target="WAVESHARE_AMOLED_175_GNSS",
+                require_ready=True,
+                require_pmic_read_only=True,
+                require_gnss=True,
+            ),
+        )
+        formatted = format_summary(summary)
+        self.assertIn("gnssFitted=1 gnssModule=lc76g gnssProbe=ok ", formatted)
+        self.assertIn("gnssBaud=115200 gnssSentences=12 gnssInvalid=1 ", formatted)
+
+    def test_pending_probe_and_plain_boards_fail_the_gate(self) -> None:
+        pending = summarize(GNSS_CAPTURE.replace(GNSS_LOCKED_LINE + "\n", ""))
+        errors = validation_errors(pending, require_gnss=True)
+        self.assertIn("GNSS serial-rate probe did not lock (got pending)", errors)
+        self.assertIn(
+            "at least one checksum-valid NMEA sentence required (got 0)", errors
+        )
+        plain = summarize(HEALTHY_CAPTURE)
+        errors = validation_errors(plain, require_gnss=True)
+        self.assertIn(
+            "BOOT_GNSS schema 1 required for receiver validation (got missing)",
+            errors,
+        )
+        self.assertIn("GNSS receiver fitted marker missing (got missing)", errors)
+        # Without the gate a plain board's capture is unchanged.
+        self.assertEqual([], validation_errors(plain, require_ready=True))
+        self.assertIn("gnssFitted=missing", format_summary(plain))
+        unknown = summarize(GNSS_CAPTURE.replace("BOOT_GNSS schema=1", "BOOT_GNSS schema=2"))
+        self.assertIn(
+            "BOOT_GNSS schema 1 required for receiver validation (got 2)",
+            validation_errors(unknown, require_gnss=True),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
