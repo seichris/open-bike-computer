@@ -120,16 +120,23 @@ Publication (2026-11-08):
 - Published OTA images, which are CI's build of `5f76f445`. No physical
   acceptance exists for these bytes:
 
-  | Board | Image | SHA-256 | Size (bytes) |
-  | --- | --- | --- | --- |
-  | 1.75 | `WAVESHARE_AMOLED_175.bin` | `abff373b…` | 2,593,216 |
-  | 2.06 | `WAVESHARE_AMOLED_206.bin` | `d96fd705…` | 2,581,552 |
+  | Board | Image | Size (bytes) |
+  | --- | --- | --- |
+  | 1.75 | `WAVESHARE_AMOLED_175.bin` | 2,593,216 |
+  | 2.06 | `WAVESHARE_AMOLED_206.bin` | 2,581,552 |
+
+  SHA-256, as GitHub reports for the immutable release assets and as the
+  verifier recomputed from the downloaded bytes:
+
+  - 1.75: `abff373b798492c14669bbec128c315de1166460b370503b35161fb5235513a3`
+  - 2.06: `d96fd7054c6cf0affeb984c8e88f27bdd260d5414c326d582dde5c6949de118a`
 
   Both are under the legacy limit, so devices on the legacy channel receive this
   release too.
 
-- [x] Firmware Release Candidate and Firmware Release runs pass, with the
-  publish job approved in GitHub (above).
+- [x] Firmware Release Candidate and Firmware Release runs pass. The publish job
+  was approved in GitHub by the release owner's `seichris` account, on the
+  release owner's written instructions (above).
 - [x] The GitHub release is immutable, with 24 assets, and
   `tools/verify_github_release_assets.py --require-immutable` passed.
 - [x] All four Pages channel manifests serve build 107 and are byte-identical to
@@ -137,8 +144,10 @@ Publication (2026-11-08):
   `dual4m` channels.
 - [x] `/api/firmware/identities` on bicino.com lists the release's four records
   at 15:42 UTC, each identical to its release asset.
-- [ ] An over-the-air update installs on a 1.75 or a 2.06. Not run: waived with
-  the boot checks (see "Decisions recorded").
+- [ ] An over-the-air update of the published image installs on a 1.75. Not
+  run: waived with the 1.75 boot check (see "Decisions recorded").
+- [ ] An over-the-air update of the published image installs on a 2.06. Not
+  run: waived with the 2.06 checks (see "Decisions recorded").
 - [x] The production map platform requires build 107 for non-durable maps:
   - record `msr-20261108-firmware-build107` (#781, merged as `5c8e9c13`), with
     the worker, producer, iOS identity and signing key of the previous record;
@@ -171,7 +180,16 @@ setup rolls back to the previous slot; a failure after confirmation does not.
 Do not erase NVS or SD, rotate trust keys or bypass anti-rollback to recover a
 test.
 
-To return production maps to the build-106 identity, restore the previous lock
-in a pull request: control-plane marker `bc7451eb`, anchor `sha256:3cd641df…`
-and promotion ID `msr-20261105-topo-production`. Nothing rewrites signed map
-bytes.
+To return production maps to the build-106 identity, restore the complete
+previous lock in a pull request: `map-platform/deploy/compose.yaml` as of
+`5c8e9c131e16eab769975170ee8b652cbe1d7fd8`, the first parent of the lock merge
+`b53bb680`. That lock has:
+
+- control-plane marker `bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b` and anchor
+  `sha256:3cd641df582e31e3650fac9b398fa98e1c27f6de463437930c6225b895598348`;
+- promotion ID `msr-20261105-topo-production`;
+- worker marker `8baaf9804ebba273cfce3a7397ec6db341f49260` and anchor
+  `sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00`,
+  which #782 did not change.
+
+Nothing rewrites signed map bytes.
