@@ -108,9 +108,25 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG \
 
 ## Physical evidence
 
-None yet. Record each run here with the exact Git SHA, image hash, board
-serial, the capture log and the result, as `README.md` does for the plain
-boards.
+Bench unit: USB serial `B8:1F:3F:CF:9C:D0`, enrolled as `waveshare-175-gnss`,
+no SD card fitted. Logs and the ledger live in
+`~/Library/Application Support/OpenBikeComputer/boot-captures/waveshare-175-gnss/`
+on the maintainer's Mac.
+
+| Date (UTC) | Image | Result |
+|---|---|---|
+| 2026-11-08 03:29 | `3c287530` ordinary | Attested upload. `BOOT_META target=WAVESHARE_AMOLED_175_GNSS profile=WAVESHARE_AMOLED_175_GNSS`, `BOOT_PMIC mode=read-only railState=current-preserved`, ready at 7113 ms, 0 blocked writes, 0 diagnostic errors, reset line released through the expander. Receiver gate failed: no sentence at 115200 or 9600 bps in 75 s. |
+| 2026-11-08 ~03:50 | `231f9ac4` ordinary | Identity, PMIC and ready pass (ready 4671 ms). Receiver line silent: `bytes=0` at 115200, 9600, 38400, 57600 and 230400 bps over 100 s, three RESET pulses issued. |
+| 2026-11-08 ~04:40 | `6c842f00` ordinary | `BOOT_GNSS_LINES pin18=floating:0 pin17=floating:0 pin43=floating:0 pin44=floating:0`: nothing drives the board's receive or transmit pin or the H2 header's UART0 pads. Identity, PMIC and ready pass (ready 5934 ms). |
+
+Reading: the variant image boots and passes every gate except the
+receiver's, and the receiver part behaves as designed. The receiver's TXD1
+does not reach GPIO18: on the schematic that path is the link resistor R15
+(RXD1 through R16), marked "NC/0R", so an unfitted link, an absent module or
+an unpowered module all read as floating. The physical cause is being
+confirmed on the bench; a fix is reflashed and recaptured with
+`--require-gnss`, then fix evidence and the plain 1.75 image on this unit
+follow.
 
 ## Open items
 
