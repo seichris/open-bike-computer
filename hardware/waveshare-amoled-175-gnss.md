@@ -52,11 +52,14 @@ and its `--require-pmic-read-only` gate.
   (drives EXIO7 high; the module keeps running) and reads the receiver over
   the transport the board data names. On this variant that is the I2C
   transport: a reader task polls the receiver's I2C slave with Quectel's
-  command/answer scheme as the vendor example does (a request written to
-  0x50, its answer read from 0x54 after 100 ms; register 0x0008 answers with
-  the number of buffered bytes, register 0x2000 with that many bytes of the
-  NMEA stream, read in chunks of up to 256 bytes so one read stays inside
-  the bus timeout the touch controller shares), parses the stream with
+  command/answer scheme as the vendor examples do (the slave's command
+  address 0x50 is checked for an acknowledge, a request is written to it,
+  and its answer is read from 0x54, retried every 10 ms for up to 200 ms
+  because the slave refuses the read until the answer is ready; register
+  0x0008 answers with the number of buffered bytes, register 0x2000 with
+  that many bytes of the NMEA stream, read in chunks of up to 256 bytes so
+  one read stays inside the bus timeout the touch controller shares),
+  parses the stream with
   NeoGPS into the shared position record and counts raw bytes and
   checksum-valid sentences. Polls run every 200 ms while idle, back to back
   while the receiver still has buffered bytes, every 2 s while the receiver
@@ -77,7 +80,8 @@ and its `--require-pmic-read-only` gate.
   like a phone position.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c
   reset=expander i2c=0x50/0x54 present=0|1 polls=<n> errors=<n>
-  backlog=<largest buffered length reported> probe=pending|retry|ok
+  backlog=<largest buffered length reported> answerMs=<longest wait for an
+  answer> probe=pending|retry|ok
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when

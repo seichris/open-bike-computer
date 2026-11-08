@@ -728,13 +728,13 @@ GNSS_LOCKED_LINE = (
 # presence and the poll counts.
 GNSS_I2C_PENDING_LINE = (
     "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c reset=expander "
-    "i2c=0x50/0x54 present=1 polls=0 errors=0 backlog=0 probe=pending bytes=0 "
-    "sentences=0 invalid=0 resetPulses=0"
+    "i2c=0x50/0x54 present=1 polls=0 errors=0 backlog=0 answerMs=0 "
+    "probe=pending bytes=0 sentences=0 invalid=0 resetPulses=0"
 )
 GNSS_I2C_LOCKED_LINE = (
     "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c reset=expander "
-    "i2c=0x50/0x54 present=1 polls=9 errors=0 backlog=612 probe=ok bytes=1532 "
-    "sentences=14 invalid=0 resetPulses=0"
+    "i2c=0x50/0x54 present=1 polls=9 errors=0 backlog=612 answerMs=30 "
+    "probe=ok bytes=1532 sentences=14 invalid=0 resetPulses=0"
 )
 # The receiver opens before ready; its serial-rate probe may lock only after
 # the ready stage, once the first checksum-valid sentences have arrived.
