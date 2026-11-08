@@ -76,6 +76,18 @@ def load_contract() -> dict:
         raise SystemExit("board display metadata v1 requires an eight-byte payload")
     if "board_display_metadata" not in caps["extended_features"]:
         raise SystemExit("board display metadata needs its extended capability bit")
+    position_source = contract["position_source_metadata"]
+    if position_source["tlv_type"] in (
+        1,
+        contract["screen_configuration"]["capability_tlv_type"],
+        caps["extended_feature_tlv_type"],
+        board_display["tlv_type"],
+    ):
+        raise SystemExit("position source metadata must have a distinct CAP2 TLV type")
+    if position_source["payload_bytes"] != 4 or position_source["version"] != 1:
+        raise SystemExit("position source metadata v1 requires a four-byte payload")
+    if "position_source_metadata" not in caps["extended_features"]:
+        raise SystemExit("position source metadata needs its extended capability bit")
     requests = contract["device_requests"]
     for key, value in requests.items():
         if len(value.encode("ascii")) != 4:
@@ -179,6 +191,14 @@ def render_swift(contract: dict) -> str:
             f"    static let boardDisplayTLVType: UInt8 = {board_display['tlv_type']}",
             f"    static let boardDisplayVersion: UInt8 = {board_display['version']}",
             f"    static let boardDisplayPayloadBytes: UInt8 = {board_display['payload_bytes']}",
+        ]
+    )
+    position_source = contract["position_source_metadata"]
+    lines.extend(
+        [
+            f"    static let positionSourceTLVType: UInt8 = {position_source['tlv_type']}",
+            f"    static let positionSourceVersion: UInt8 = {position_source['version']}",
+            f"    static let positionSourcePayloadBytes: UInt8 = {position_source['payload_bytes']}",
         ]
     )
     for name, entry in caps["features"].items():
@@ -312,6 +332,8 @@ def render_cpp(contract: dict) -> str:
     lines.append(f"inline constexpr uint8_t EXTENDED_FEATURE_TLV_TYPE = {caps['extended_feature_tlv_type']};")
     for name in ("tlv_type", "version", "payload_bytes"):
         lines.append(f"inline constexpr uint8_t BOARD_DISPLAY_{upper(name)} = {contract['board_display_metadata'][name]};")
+    for name in ("tlv_type", "version", "payload_bytes"):
+        lines.append(f"inline constexpr uint8_t POSITION_SOURCE_{upper(name)} = {contract['position_source_metadata'][name]};")
     for name, entry in caps["features"].items():
         lines.append(
             f"inline constexpr uint32_t {upper(name)}_FEATURE = 1UL << {entry['bit']};"

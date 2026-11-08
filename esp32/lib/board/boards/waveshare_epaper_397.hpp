@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "../board_gnss.hpp"
+
 // Waveshare ESP32-S3 3.97-inch e-paper: data only, no logic. Pin numbers are
 // GPIO numbers from the vendor schematic. The values used to live in
 // include/board_traits.hpp, which now aliases this file. The panel is a
@@ -124,10 +126,15 @@ constexpr bool prepareBeforeBle = false;
 }  // namespace wifi
 
 namespace gnss {
-// UART pads only; no module is populated on this model.
+// No receiver on this board.
 constexpr bool fitted = false;
-constexpr uint8_t tx = 43;
-constexpr uint8_t rx = 44;
+constexpr GnssModule module = GnssModule::none;
+constexpr uint8_t uart = 2;
+constexpr uint8_t rx = noPin;
+constexpr uint8_t tx = noPin;
+constexpr uint32_t baud = 0;
+constexpr bool resetViaExpander = false;
+constexpr uint8_t resetExpanderPin = 0;
 }  // namespace gnss
 
 namespace memory {
@@ -165,3 +172,8 @@ constexpr uint8_t mapToolbarFullscreenBottomMargin = 24;
 #define BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 0
 static_assert(BOARD_PMIC_DISPLAY_ENABLE_RECOVERY == board::power::displayEnableRecovery,
               "capability macro and board data disagree");
+// Whether the position-source part compiles its GNSS receiver implementation.
+// Keep it equal to board::gnss::fitted.
+#define BOARD_GNSS_FITTED 0
+static_assert((BOARD_GNSS_FITTED != 0) == board::gnss::fitted,
+              "GNSS macro and board data disagree");

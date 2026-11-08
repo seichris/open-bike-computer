@@ -17,15 +17,10 @@
 #define DEG2RAD(a) ((a) / (180 / M_PI)) // Convert degrees to radians
 #define RAD2DEG(a) ((a) * (180 / M_PI)) // Convert radians to degrees
 
-// extern uint8_t GPS_TX;
-// extern uint8_t GPS_RX;
-
 #define MAX_SATELLITES 120
 #define MAX_SATELLLITES_IN_VIEW 32
 
 #define DEBUG_PORT Serial
-#define gpsPort Serial2
-#define GPS_PORT_NAME "Serial2"
 extern gps_fix fix;
 extern NMEAGPS GPS;
 
@@ -35,15 +30,6 @@ const char *getPosixTZ(const char *name);
 
 extern bool isGpsFixed;
 extern bool isTimeFixed;
-extern long gpsBaudDetected;
-extern bool nmea_output_enable;
-
-static unsigned long GPS_BAUD[] PROGMEM = {4800, 9600, 19200, 0};
-static const char *GPS_BAUD_PCAS[] PROGMEM = {
-    "$PCAS01,0*1C\r\n", "$PCAS01,1*1D\r\n", "$PCAS01,2*1E\r\n"};
-static const char *GPS_RATE_PCAS[] PROGMEM = {
-    "$PCAS02,1000*2E\r\n", "$PCAS02,500*1A\r\n", "$PCAS02,250*18\r\n",
-    "$PCAS02,200*1D\r\n", "$PCAS02,100*1E\r\n"};
 
 /**
  * @brief Satellite Constellation Canvas Definition
@@ -58,12 +44,9 @@ static const uint8_t canvasRadius = canvasCenter_X - canvasOffset;
 class Gps {
 public:
   Gps();
-  void init();
   double getLat();
   double getLon();
   void getGPSData();
-  long detectRate(int rxPin);
-  long autoBaud();
   bool isSpeedChanged();
   bool isAltitudeChanged();
   bool hasLocationChange();

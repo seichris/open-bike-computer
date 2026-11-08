@@ -259,7 +259,8 @@ int main() {
   assert(encodeCap2(0, nullptr, false, response, 24, nullptr, 0, displayFeature,
                     metadata) == 0);
   const uint8_t screens[SCREEN_CONFIGURATION_TLV_BYTES] = {2, 14, 1};
-  static_assert(CAP2_MAX_BYTES == 46);
+  // Display record plus the position-source record after it.
+  static_assert(CAP2_MAX_BYTES == 52);
   static_assert(generated::BOARD_DISPLAY_TLV_TYPE == 4);
   static_assert(displayFeature == (1UL << 4));
   static_assert(generated::EXTENDED_BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION == 34);

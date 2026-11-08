@@ -1153,3 +1153,38 @@ struct DeviceDisplayMetadata: Equatable {
     var supportsContinuousCamera: Bool { supportedSettings & 8 != 0 }
     var supportsDisconnectedSleep: Bool { supportedSettings & 16 != 0 }
 }
+
+/// CAP2 TLV type 5: which position sources the device has (bit 0 phone
+/// positions over BLE, bit 1 an onboard GNSS receiver) and its receiver module.
+struct DevicePositionSourceMetadata: Equatable {
+    static let phoneSourceFlag: UInt8 = 1
+    static let gnssSourceFlag: UInt8 = 2
+
+    let sourceFlags: UInt8
+    let receiverModule: UInt8
+
+    init?(payload: Data) {
+        let bytes = Array(payload)
+        guard bytes.count == Int(RideBLEGeneratedProtocolV1.positionSourcePayloadBytes),
+              bytes[0] == RideBLEGeneratedProtocolV1.positionSourceVersion,
+              bytes[1] & ~3 == 0, bytes[1] & Self.phoneSourceFlag != 0,
+              bytes[2] <= 1, bytes[3] == 0 else { return nil }
+        // The GNSS flag and a receiver module come together or not at all.
+        guard (bytes[1] & Self.gnssSourceFlag != 0) == (bytes[2] != 0) else { return nil }
+        sourceFlags = bytes[1]
+        receiverModule = bytes[2]
+    }
+
+    var hasGNSSReceiver: Bool { sourceFlags & Self.gnssSourceFlag != 0 }
+    var receiverName: String? {
+        switch receiverModule {
+        case 1: return "Quectel LC76G"
+        default: return nil
+        }
+    }
+    /// Copy for the device details: the phone alone, or the receiver first.
+    var label: String {
+        if let receiverName { return "Device GNSS (\(receiverName)), iPhone when no fix" }
+        return "iPhone"
+    }
+}

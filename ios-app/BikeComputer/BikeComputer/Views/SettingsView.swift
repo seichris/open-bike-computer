@@ -2247,6 +2247,9 @@ private struct FirmwareUpdateSettingsSection: View {
                 title: "Target",
                 value: bleManager.firmwareTarget.isEmpty ? "unknown" : bleManager.firmwareTarget
             )
+            if let positionSource = bleManager.positionSourceMetadata {
+                SettingsValueRow(title: "Position Source", value: positionSource.label)
+            }
             SettingsValueRow(
                 title: "Status",
                 value: manager.statusMessage.isEmpty ? bleManager.firmwareUpdateStatus : manager.statusMessage

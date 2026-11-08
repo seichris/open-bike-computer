@@ -28,14 +28,6 @@ lv_obj_t *deviceSettingsScreen; // Device Settings Screen
 static void deviceSettingsEvent(lv_event_t *event) {
   lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(event);
   char *option = (char *)lv_event_get_user_data(event);
-  if (strcmp(option, "speed") == 0) {
-    gpsBaud = lv_dropdown_get_selected(obj);
-    saveGPSBaud(gpsBaud);
-  }
-  if (strcmp(option, "rate") == 0) {
-    gpsUpdate = lv_dropdown_get_selected(obj);
-    saveGPSUpdateRate(gpsUpdate);
-  }
 #if defined(RIDE_AUTOMATION_SHADOW)
   const auto rideConfiguration =
       ride_automation_runtime::configurationSnapshot();
@@ -154,45 +146,6 @@ void createDeviceSettingsScr() {
   lv_obj_set_width(diagnosticMarkerStatus, TFT_WIDTH - 45);
   lv_label_set_long_mode(diagnosticMarkerStatus, LV_LABEL_LONG_WRAP);
 #endif
-
-  // GPS Speed
-  list = lv_list_add_btn(deviceSettingsOptions, NULL, "GPS\nSpeed");
-  lv_obj_set_style_text_font(list, fontOptions, 0);
-  lv_obj_clear_flag(list, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_align(list, LV_ALIGN_OUT_LEFT_BOTTOM);
-  dropdown = lv_dropdown_create(list);
-  lv_dropdown_set_options(dropdown, "4800\n9600\n19200\nAUTO");
-  lv_dropdown_set_selected(dropdown, gpsBaud);
-  lv_obj_t *item = lv_dropdown_get_list(dropdown);
-  lv_obj_set_style_bg_color(item, lv_color_hex(objectColor),
-                            LV_PART_SELECTED | LV_STATE_CHECKED);
-  lv_obj_align_to(dropdown, list, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
-  lv_obj_set_width(dropdown, TFT_WIDTH / 3);
-  lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
-                      (char *)"speed");
-
-  // GPS Update rate
-  list = lv_list_add_btn(deviceSettingsOptions, NULL, "GPS\nUpdate rate");
-  lv_obj_set_style_text_font(list, fontOptions, 0);
-  lv_obj_clear_flag(list, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_align(list, LV_ALIGN_LEFT_MID);
-  dropdown = lv_dropdown_create(list);
-  lv_dropdown_set_options(dropdown, "1 Hz\n2 Hz\n4 Hz\n5 Hz\n10 Hz");
-  lv_dropdown_set_selected(dropdown, gpsUpdate);
-  item = lv_dropdown_get_list(dropdown);
-  lv_obj_set_style_bg_color(item, lv_color_hex(objectColor),
-                            LV_PART_SELECTED | LV_STATE_CHECKED);
-#ifndef AT6558D_GPS
-  lv_obj_set_style_text_color(list, lv_palette_darken(LV_PALETTE_GREY, 2), 0);
-  lv_obj_add_state(list, LV_STATE_DISABLED);
-  lv_obj_set_style_text_color(dropdown, lv_palette_darken(LV_PALETTE_GREY, 2),
-                              0);
-  lv_obj_add_state(dropdown, LV_STATE_DISABLED);
-#endif
-  lv_obj_set_width(dropdown, TFT_WIDTH / 3);
-  lv_obj_align_to(dropdown, list, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
-  lv_obj_add_event_cb(dropdown, deviceSettingsEvent, LV_EVENT_VALUE_CHANGED,
-                      (char *)"rate");
 
 #if defined(RIDE_AUTOMATION_SHADOW)
   const auto rideConfiguration =

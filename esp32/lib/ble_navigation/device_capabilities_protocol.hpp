@@ -155,7 +155,8 @@ constexpr uint32_t SUPPORTED_EXTENDED_FEATURES =
     generated::EXTENDED_GROUP_RIDERS_V1_FEATURE |
     generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE |
     generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE |
-    generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE;
+    generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE |
+    generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE;
 static_assert((UNSUPPORTED_FEATURES & SUPPORTED_FEATURES) == 0 &&
                   (UNSUPPORTED_FEATURES | SUPPORTED_FEATURES) ==
                       generated::ALL_FEATURES,
@@ -173,29 +174,34 @@ constexpr size_t SCREEN_CONFIGURATION_TLV_BYTES = 16;
 constexpr size_t EXTENDED_FEATURE_TLV_BYTES = 6;
 constexpr size_t BOARD_DISPLAY_TLV_BYTES =
     2 + ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES;
+constexpr size_t POSITION_SOURCE_TLV_BYTES =
+    2 + ride_ble_protocol_generated::POSITION_SOURCE_PAYLOAD_BYTES;
 constexpr size_t CAP2_MAX_BYTES =
     CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES +
     SCREEN_CONFIGURATION_TLV_BYTES + EXTENDED_FEATURE_TLV_BYTES +
-    BOARD_DISPLAY_TLV_BYTES;
+    BOARD_DISPLAY_TLV_BYTES + POSITION_SOURCE_TLV_BYTES;
 
-// Board display metadata is the last TLV, so responses without it keep the
-// established byte layout.
+// The board display record and, after it, the position-source record are the
+// last TLVs, so responses without them keep the established byte layout.
 inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
                          bool includePowerConfig, uint8_t *output,
                          size_t capacity, const uint8_t *additionalTLV = nullptr,
                          size_t additionalTLVLength = 0,
                          uint32_t extendedFeatureFlags = 0,
-                         const uint8_t *displayMetadata = nullptr) {
+                         const uint8_t *displayMetadata = nullptr,
+                         const uint8_t *positionSource = nullptr) {
   if (additionalTLVLength > SCREEN_CONFIGURATION_TLV_BYTES)
     return 0;
   const size_t displayBytes =
       displayMetadata != nullptr ? BOARD_DISPLAY_TLV_BYTES : 0;
+  const size_t positionBytes =
+      positionSource != nullptr ? POSITION_SOURCE_TLV_BYTES : 0;
   const size_t required = CAP2_BASE_BYTES +
                           (includePowerConfig ? 2 + POWER_BUTTON_CONFIG_BYTES
                                               : 0) +
                           additionalTLVLength +
                           (extendedFeatureFlags != 0 ? EXTENDED_FEATURE_TLV_BYTES : 0) +
-                          displayBytes;
+                          displayBytes + positionBytes;
   if (output == nullptr || capacity < required ||
       (includePowerConfig && powerConfig == nullptr) ||
       (additionalTLVLength != 0 && additionalTLV == nullptr))
@@ -222,7 +228,8 @@ inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
       output[offset + index] = additionalTLV[index];
   }
   if (extendedFeatureFlags != 0) {
-    const size_t offset = required - displayBytes - EXTENDED_FEATURE_TLV_BYTES;
+    const size_t offset =
+        required - positionBytes - displayBytes - EXTENDED_FEATURE_TLV_BYTES;
     output[offset] = ride_ble_protocol_generated::EXTENDED_FEATURE_TLV_TYPE;
     output[offset + 1] = 4;
     for (uint8_t index = 0; index < 4; ++index)
@@ -230,12 +237,22 @@ inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
           static_cast<uint8_t>(extendedFeatureFlags >> (index * 8U));
   }
   if (displayMetadata != nullptr) {
-    const size_t offset = required - BOARD_DISPLAY_TLV_BYTES;
+    const size_t offset = required - positionBytes - BOARD_DISPLAY_TLV_BYTES;
     output[offset] = ride_ble_protocol_generated::BOARD_DISPLAY_TLV_TYPE;
     output[offset + 1] = ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES;
     for (size_t index = 0;
          index < ride_ble_protocol_generated::BOARD_DISPLAY_PAYLOAD_BYTES; ++index)
       output[offset + 2 + index] = displayMetadata[index];
+  }
+  if (positionSource != nullptr) {
+    const size_t offset = required - POSITION_SOURCE_TLV_BYTES;
+    output[offset] = ride_ble_protocol_generated::POSITION_SOURCE_TLV_TYPE;
+    output[offset + 1] =
+        ride_ble_protocol_generated::POSITION_SOURCE_PAYLOAD_BYTES;
+    for (size_t index = 0;
+         index < ride_ble_protocol_generated::POSITION_SOURCE_PAYLOAD_BYTES;
+         ++index)
+      output[offset + 2 + index] = positionSource[index];
   }
   return required;
 }

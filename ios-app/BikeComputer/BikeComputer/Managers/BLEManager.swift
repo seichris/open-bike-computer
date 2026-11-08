@@ -1154,6 +1154,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
     @Published private(set) var displayMetadata: DeviceDisplayMetadata?
+    @Published private(set) var positionSourceMetadata: DevicePositionSourceMetadata?
+    var deviceHasGNSSReceiver: Bool { positionSourceMetadata?.hasGNSSReceiver == true }
     var isEPaperDevice: Bool { displayMetadata?.isEPaper == true || firmwareTarget == "WAVESHARE_EPAPER_397" }
     var supportsDisplayBrightness: Bool { displayMetadata?.supportsBrightness ?? !isEPaperDevice }
     var supportsTapToCycle: Bool { displayMetadata?.supportsTapToCycle ?? !isEPaperDevice }
@@ -7636,6 +7638,7 @@ class BLEManager: NSObject, ObservableObject {
         nextDestinationCatalogTransferID = 1
         destinationStatusSequence &+= 1
         displayMetadata = nil
+        positionSourceMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
@@ -11177,6 +11180,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         rendererDiagnosticsStatus = "invalid capabilities"
         updateWorkoutTelemetryCapability(false)
         displayMetadata = nil
+        positionSourceMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
@@ -11205,6 +11209,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let legacyExtendedFlags: UInt8
         let powerButtonConfig: Data?
         var parsedDisplay: DeviceDisplayMetadata?
+        var parsedPositionSource: DevicePositionSourceMetadata?
         var screenConfigurationCapabilities:
             DeviceScreenConfigurationCapabilities? = nil
         var extendedFeatureFlags: UInt32 = 0
@@ -11269,6 +11274,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedDisplay = metadata
+                } else if type == RideBLEGeneratedProtocolV1.positionSourceTLVType {
+                    guard let metadata = DevicePositionSourceMetadata(payload:
+                        data.subdata(in: offset..<(offset + length))) else {
+                        valid = false
+                        break
+                    }
+                    parsedPositionSource = metadata
                 } else if type == RideBLEGeneratedProtocolV1
                     .screenConfigurationCapabilityTLVType {
                     guard let parsed = DeviceScreenConfigurationCapabilities(
@@ -11296,6 +11308,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             return true
         }
         displayMetadata = parsedDisplay
+        let advertisesPositionSource = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedPositionSourceMetadataFeature != 0
+        guard advertisesPositionSource == (parsedPositionSource != nil) else {
+            rejectDeviceCapabilities("Received inconsistent position source capabilities")
+            return true
+        }
+        positionSourceMetadata = parsedPositionSource
         if parsedDisplay?.isEPaper == true { hardwareLabel = "Waveshare ePaper 3.97" }
         let legacyFlags = UInt8(truncatingIfNeeded: flags)
         let hasDeviceSounds = legacyFlags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0

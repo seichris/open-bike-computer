@@ -7,7 +7,7 @@
   ],
   "files": {
     "include/board_traits.hpp": 1,
-    "lib/ble_navigation/ble_navigation.cpp": 13,
+    "lib/ble_navigation/ble_navigation.cpp": 11,
     "lib/ble_navigation/ble_navigation.hpp": 1,
     "lib/ble_navigation/map_profile_protocol.hpp": 1,
     "lib/ble_navigation/screen_configuration.hpp": 1,

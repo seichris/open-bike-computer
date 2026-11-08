@@ -39,8 +39,6 @@ enum class PKEYS {
   KMAP_SPEED,
   KMAP_VECTOR,
   KMAP_SCALE,
-  KGPS_SPEED,
-  KGPS_RATE,
   KCOMP_X,
   KCOMP_Y,
   KCOORD_X,
@@ -53,8 +51,6 @@ enum class PKEYS {
   KSUN_Y,
   KDEF_BRIGT,
   KDEF_ZOOM,
-  KGPS_TX,
-  KGPS_RX,
   KWEB_FILE,
   KTEMP_OFFS,
   KVMAX_BATT,
@@ -131,8 +127,6 @@ extern uint8_t defBright;     // Default brightness
 extern uint8_t defaultZoom;   // Default Zoom Value
 
 extern bool showMapToolBar;   // Show Map Toolbar
-extern uint16_t gpsBaud;      // GPS Speed
-extern uint16_t gpsUpdate;    // GPS Update rate
 extern uint16_t compassPosX;  // Compass widget position X
 extern uint16_t compassPosY;  // Compass widget position Y
 extern uint16_t coordPosX;    // Coordinates widget position X
@@ -149,7 +143,5 @@ extern MapSettings mapSet;
 
 void loadPreferences();
 
-void saveGPSBaud(uint16_t gpsBaud);
-void saveGPSUpdateRate(uint16_t gpsUpdateRate);
 void saveWidgetPos(char *widget, uint16_t posX, uint16_t posY);
 void printSettings();
