@@ -7,7 +7,10 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
+#include <type_traits>
+
 #include "../gps/gps.hpp"
+#include "../waveshare_board/i2c_bus.hpp"
 #include "../waveshare_board/tca9554.hpp"
 #if PERSISTENT_RIDE_DIAGNOSTICS
 #include "../ride_diagnostics/ride_diagnostics.hpp"
@@ -18,14 +21,14 @@ extern Gps gps;
 namespace position_source::gnss_receiver {
 
 namespace {
-HardwareSerial port(board::gnss::uart);
+constexpr bool kUart = board::gnss::transport == board::GnssTransport::uart;
+constexpr bool kI2c = board::gnss::transport == board::GnssTransport::i2c;
+static_assert(kUart || kI2c, "a fitted receiver needs a transport");
+
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 GnssStatus state;
 NmeaLineValidator validator;
-BaudProbe probe;
-bool validSentenceSinceSwitch = false;
 bool probeReported = false;
-uint32_t bytesAtRoundStart = 0;
 uint8_t firstBytes[32] = {};
 uint8_t firstByteCount = 0;
 bool firstBytesReported = false;
@@ -44,19 +47,39 @@ GnssStatus snapshot() {
 
 void printBoot(const char *probeState) {
   const GnssStatus s = snapshot();
-  Serial.printf("BOOT_GNSS schema=1 fitted=1 module=%s uart=%u rx=%u tx=%u "
-                "reset=%s baud=%lu probe=%s bytes=%lu sentences=%lu "
-                "invalid=%lu resetPulses=%u\n",
-                position_source::moduleName(),
-                static_cast<unsigned>(board::gnss::uart),
-                static_cast<unsigned>(board::gnss::rx),
-                static_cast<unsigned>(board::gnss::tx),
-                board::gnss::resetViaExpander ? "expander" : "none",
-                static_cast<unsigned long>(s.baud), probeState,
-                static_cast<unsigned long>(s.bytes),
-                static_cast<unsigned long>(s.validSentences),
-                static_cast<unsigned long>(s.invalidSentences),
-                static_cast<unsigned>(s.resetPulses));
+  char line[240] = {};
+  size_t used = static_cast<size_t>(snprintf(
+      line, sizeof(line), "BOOT_GNSS schema=1 fitted=1 module=%s transport=%s reset=%s ",
+      position_source::moduleName(), kUart ? "uart" : "i2c",
+      board::gnss::resetViaExpander ? "expander" : "none"));
+  if (used < sizeof(line)) {
+    if constexpr (kUart) {
+      used += static_cast<size_t>(snprintf(
+          line + used, sizeof(line) - used, "uart=%u rx=%u tx=%u baud=%lu ",
+          static_cast<unsigned>(board::gnss::uart),
+          static_cast<unsigned>(board::gnss::rx),
+          static_cast<unsigned>(board::gnss::tx),
+          static_cast<unsigned long>(s.baud)));
+    } else {
+      used += static_cast<size_t>(snprintf(
+          line + used, sizeof(line) - used,
+          "i2c=0x%02x/0x%02x present=%u polls=%lu errors=%lu backlog=%lu ",
+          static_cast<unsigned>(board::gnss::i2cCommandAddress),
+          static_cast<unsigned>(board::gnss::i2cDataAddress),
+          s.portOpen ? 1U : 0U, static_cast<unsigned long>(s.polls),
+          static_cast<unsigned long>(s.pollErrors),
+          static_cast<unsigned long>(s.backlog)));
+    }
+  }
+  if (used < sizeof(line)) {
+    snprintf(line + used, sizeof(line) - used,
+             "probe=%s bytes=%lu sentences=%lu invalid=%lu resetPulses=%u",
+             probeState, static_cast<unsigned long>(s.bytes),
+             static_cast<unsigned long>(s.validSentences),
+             static_cast<unsigned long>(s.invalidSentences),
+             static_cast<unsigned>(s.resetPulses));
+  }
+  Serial.println(line);
 }
 
 void recordDiagnostic(const char *event, bool available, bool fixValid,
@@ -95,7 +118,7 @@ void releaseReset() {
 
 // Pulses the receiver's RESET (active low) through the expander: a module
 // that never produced a byte may be held by a stale reset or need a restart.
-void pulseReset() {
+void pulseReset(const char *reason) {
   if (!board::gnss::resetViaExpander)
     return;
   const bool ok =
@@ -107,84 +130,133 @@ void pulseReset() {
   ++state.resetPulses;
   const uint8_t pulses = state.resetPulses;
   portEXIT_CRITICAL(&mux);
-  Serial.printf("GNSS: reset pulse %u %s (no bytes during a probe round)\n",
-                static_cast<unsigned>(pulses),
-                ok && released ? "issued" : "failed at the expander");
+  Serial.printf("GNSS: reset pulse %u %s (%s)\n", static_cast<unsigned>(pulses),
+                ok && released ? "issued" : "failed at the expander", reason);
 }
 
-void readerTask(void *) {
-  for (;;) {
-    bool readAny = false;
-    uint32_t readBytes = 0;
-    while (port.available() > 0) {
-      readAny = true;
-      ++readBytes;
-      const char c = static_cast<char>(port.read());
-      if (firstByteCount < sizeof(firstBytes))
-        firstBytes[firstByteCount++] = static_cast<uint8_t>(c);
-      const NmeaLineValidator::Event event = validator.feed(c);
-      if (event == NmeaLineValidator::Event::Valid) {
-        validSentenceSinceSwitch = true;
-        portENTER_CRITICAL(&mux);
-        ++state.validSentences;
-        state.lastSentenceMs = millis();
-        portEXIT_CRITICAL(&mux);
-      } else if (event == NmeaLineValidator::Event::Invalid) {
-        portENTER_CRITICAL(&mux);
-        ++state.invalidSentences;
-        portEXIT_CRITICAL(&mux);
-      }
-      GPS.decode(c);
-    }
-    if (readBytes != 0) {
-      portENTER_CRITICAL(&mux);
-      state.bytes += readBytes;
-      portEXIT_CRITICAL(&mux);
-    }
+// Feeds received bytes to the checksum validator and the NMEA parser and
+// returns how many checksum-valid sentences they completed.
+uint32_t consume(const uint8_t *data, size_t len) {
+  uint32_t valid = 0;
+  uint32_t invalid = 0;
+  for (size_t i = 0; i < len; ++i) {
+    const char c = static_cast<char>(data[i]);
+    if (firstByteCount < sizeof(firstBytes))
+      firstBytes[firstByteCount++] = data[i];
+    const NmeaLineValidator::Event event = validator.feed(c);
+    if (event == NmeaLineValidator::Event::Valid)
+      ++valid;
+    else if (event == NmeaLineValidator::Event::Invalid)
+      ++invalid;
+    GPS.decode(c);
+  }
+  if (len == 0)
+    return 0;
+  const uint32_t nowMs = millis();
+  portENTER_CRITICAL(&mux);
+  state.bytes += len;
+  state.validSentences += valid;
+  state.invalidSentences += invalid;
+  if (valid != 0)
+    state.lastSentenceMs = nowMs;
+  portEXIT_CRITICAL(&mux);
 #if FIRMWARE_DIAGNOSTICS
-    if (!firstBytesReported && firstByteCount == sizeof(firstBytes)) {
-      firstBytesReported = true;
-      char hex[3 * sizeof(firstBytes) + 1] = {};
-      for (uint8_t i = 0; i < sizeof(firstBytes); ++i)
-        snprintf(hex + 3 * i, 4, "%02x ", static_cast<unsigned>(firstBytes[i]));
-      Serial.printf("GNSS: first bytes at %lu baud: %s\n",
-                    static_cast<unsigned long>(snapshot().baud), hex);
-    }
+  if (!firstBytesReported && firstByteCount == sizeof(firstBytes)) {
+    firstBytesReported = true;
+    char hex[3 * sizeof(firstBytes) + 1] = {};
+    for (uint8_t i = 0; i < sizeof(firstBytes); ++i)
+      snprintf(hex + 3 * i, 4, "%02x ", static_cast<unsigned>(firstBytes[i]));
+    Serial.printf("GNSS: first bytes: %s\n", hex);
+  }
 #endif
-    while (GPS.available()) {
-      fix = GPS.read();
-      gps.getGPSData();
-      const bool fixValid =
-          fix.status >= gps_fix::STATUS_STD && static_cast<bool>(fix.valid.location);
-      const uint32_t nowMs = millis();
-      portENTER_CRITICAL(&mux);
-      ++state.fixes;
-      state.fixValid = fixValid;
-      state.satellites = fix.satellites;
-      if (fixValid)
-        state.lastFixMs = nowMs;
-      portEXIT_CRITICAL(&mux);
-      position_source::noteGnssFix(nowMs, fixValid);
-      if (fixValid && (!fixReported ||
-                       static_cast<uint32_t>(nowMs - lastFixLogMs) >= kFixLogIntervalMs)) {
-        const GnssStatus s = snapshot();
-#if FIRMWARE_DIAGNOSTICS
-        Serial.printf("GNSS: fix sats=%u lat=%.6f lon=%.6f speed=%u heading=%s%u\n",
-                      static_cast<unsigned>(s.satellites), gps.gpsData.latitude,
-                      gps.gpsData.longitude,
-                      static_cast<unsigned>(gps.gpsData.speed),
-                      gps.gpsData.headingValid ? "" : "invalid:",
-                      static_cast<unsigned>(gps.gpsData.heading));
-#endif
-        recordDiagnostic(fixReported ? "fix_checkpoint" : "fix", true, true,
-                         s.validSentences, s.invalidSentences);
-        fixReported = true;
-        lastFixLogMs = nowMs;
-      }
-    }
+  return valid;
+}
+
+// Applies every fix the parser completed to the shared position record.
+void drainFixes() {
+  while (GPS.available()) {
+    fix = GPS.read();
+    gps.getGPSData();
+    const bool fixValid =
+        fix.status >= gps_fix::STATUS_STD && static_cast<bool>(fix.valid.location);
     const uint32_t nowMs = millis();
-    if (probe.poll(nowMs, validSentenceSinceSwitch)) {
-      validSentenceSinceSwitch = false;
+    portENTER_CRITICAL(&mux);
+    ++state.fixes;
+    state.fixValid = fixValid;
+    state.satellites = fix.satellites;
+    if (fixValid)
+      state.lastFixMs = nowMs;
+    portEXIT_CRITICAL(&mux);
+    position_source::noteGnssFix(nowMs, fixValid);
+    if (fixValid && (!fixReported ||
+                     static_cast<uint32_t>(nowMs - lastFixLogMs) >= kFixLogIntervalMs)) {
+      const GnssStatus s = snapshot();
+#if FIRMWARE_DIAGNOSTICS
+      Serial.printf("GNSS: fix sats=%u lat=%.6f lon=%.6f speed=%u heading=%s%u\n",
+                    static_cast<unsigned>(s.satellites), gps.gpsData.latitude,
+                    gps.gpsData.longitude,
+                    static_cast<unsigned>(gps.gpsData.speed),
+                    gps.gpsData.headingValid ? "" : "invalid:",
+                    static_cast<unsigned>(gps.gpsData.heading));
+#endif
+      recordDiagnostic(fixReported ? "fix_checkpoint" : "fix", true, true,
+                       s.validSentences, s.invalidSentences);
+      fixReported = true;
+      lastFixLogMs = nowMs;
+    }
+  }
+}
+
+// The first checksum-valid sentences arrived: the receiver is fitted,
+// powered, out of reset and reachable over its transport.
+void reportLocked() {
+  if (probeReported)
+    return;
+  probeReported = true;
+  portENTER_CRITICAL(&mux);
+  state.probeLocked = true;
+  portEXIT_CRITICAL(&mux);
+  printBoot("ok");
+  const GnssStatus s = snapshot();
+  recordDiagnostic("probe", true, false, s.validSentences, s.invalidSentences);
+}
+
+// NMEA on a UART. The receiver's rate is unknown until checksum-valid
+// sentences arrive, so a probe cycles the common rates, and a complete round
+// without a byte pulses RESET.
+struct UartTransport {
+  HardwareSerial port{board::gnss::uart};
+  BaudProbe probe;
+  bool validSinceSwitch = false;
+  uint32_t bytesAtRoundStart = 0;
+
+  void begin(uint32_t nowMs) {
+    probe.begin(board::gnss::baud, nowMs);
+    port.setRxBufferSize(1024);
+    port.begin(probe.current(), SERIAL_8N1, board::gnss::rx, board::gnss::tx);
+    portENTER_CRITICAL(&mux);
+    state.portOpen = true;
+    state.baud = probe.current();
+    portEXIT_CRITICAL(&mux);
+  }
+
+  // Drains the port and runs the rate probe. Returns the delay before the
+  // next pass (0 while bytes keep arriving) and whether the probe locked.
+  uint32_t service(uint32_t nowMs, bool &locked) {
+    bool readAny = false;
+    for (;;) {
+      uint8_t chunk[64];
+      size_t n = 0;
+      while (n < sizeof(chunk) && port.available() > 0)
+        chunk[n++] = static_cast<uint8_t>(port.read());
+      if (n == 0)
+        break;
+      readAny = true;
+      if (consume(chunk, n) != 0)
+        validSinceSwitch = true;
+    }
+    if (probe.poll(nowMs, validSinceSwitch)) {
+      validSinceSwitch = false;
       port.updateBaudRate(probe.current());
       portENTER_CRITICAL(&mux);
       state.baud = probe.current();
@@ -195,21 +267,149 @@ void readerTask(void *) {
       // Back at the first rate after a round that saw nothing at all.
       if (probe.index == 0 && bytesNow == bytesAtRoundStart &&
           pulses < kMaxResetPulses) {
-        pulseReset();
+        pulseReset("no bytes during a probe round");
       }
       if (probe.index == 0)
         bytesAtRoundStart = bytesNow;
     }
-    if (probe.locked && !probeReported) {
-      probeReported = true;
-      portENTER_CRITICAL(&mux);
-      state.probeLocked = true;
-      portEXIT_CRITICAL(&mux);
-      printBoot("ok");
-      const GnssStatus s = snapshot();
-      recordDiagnostic("probe", true, false, s.validSentences, s.invalidSentences);
+    locked = probe.locked;
+    return readAny ? 0 : 20;
+  }
+};
+
+// The receiver's I2C slave, polled with Quectel's command/answer scheme the
+// way Waveshare's LC76G example does: a request goes to the command address
+// and its answer is read from the data address after a short gap. A request
+// is a register and a length, both little endian, around the 0x51 0xAA
+// marker. Register 0x0008 answers with the number of buffered bytes,
+// register 0x2000 with that many bytes of the NMEA stream. One poll reads at
+// most STREAM_BUFFER_BYTES; a receiver with more buffered is polled again at
+// once, so the stream keeps up at roughly a kilobyte per second.
+struct I2cTransport {
+  // The gap the vendor example leaves between a request and its answer.
+  static constexpr uint32_t kAnswerDelayMs = 100;
+  static constexpr uint32_t kIdlePollMs = 200;
+  static constexpr uint32_t kAbsentPollMs = 2000;
+  // A soldered receiver that keeps failing to answer is a hardware fault;
+  // after a few misses the polls slow down so the log stays readable.
+  static constexpr uint32_t kAbsentSlowPollMs = 30'000;
+  static constexpr uint8_t kAbsentPollsBeforeSlow = 5;
+  static constexpr uint32_t kSilentWindowMs = 15'000;
+  static constexpr size_t kChunkBytes = waveshare_board::i2c::STREAM_BUFFER_BYTES;
+  uint8_t chunk[kChunkBytes] = {};
+  uint32_t silentSinceMs = 0;
+  uint8_t consecutiveFailures = 0;
+  bool sawValidSentence = false;
+
+  void begin(uint32_t nowMs) {
+    const bool present = waveshare_board::i2c::probe(
+        board::gnss::i2cCommandAddress, "GNSS", 1);
+    portENTER_CRITICAL(&mux);
+    state.portOpen = present;
+    portEXIT_CRITICAL(&mux);
+    silentSinceMs = nowMs;
+  }
+
+  // One poll. Returns false when the receiver did not answer; received is
+  // the number of stream bytes now in chunk.
+  bool poll(size_t &received) {
+    received = 0;
+    static constexpr uint8_t lengthRequest[8] = {0x08, 0x00, 0x51, 0xAA,
+                                                 0x04, 0x00, 0x00, 0x00};
+    if (!waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
+                                          lengthRequest, sizeof(lengthRequest),
+                                          "GNSS", 1))
+      return false;
+    vTaskDelay(pdMS_TO_TICKS(kAnswerDelayMs));
+    uint8_t answer[4] = {};
+    if (!waveshare_board::i2c::readBytes(board::gnss::i2cDataAddress, answer,
+                                         sizeof(answer), "GNSS", 1))
+      return false;
+    const uint32_t available = static_cast<uint32_t>(answer[0]) |
+                               (static_cast<uint32_t>(answer[1]) << 8) |
+                               (static_cast<uint32_t>(answer[2]) << 16) |
+                               (static_cast<uint32_t>(answer[3]) << 24);
+    portENTER_CRITICAL(&mux);
+    if (available > state.backlog)
+      state.backlog = available;
+    portEXIT_CRITICAL(&mux);
+    if (available == 0)
+      return true;
+    const uint32_t want =
+        available < kChunkBytes ? available : static_cast<uint32_t>(kChunkBytes);
+    const uint8_t dataRequest[8] = {0x00,
+                                    0x20,
+                                    0x51,
+                                    0xAA,
+                                    static_cast<uint8_t>(want),
+                                    static_cast<uint8_t>(want >> 8),
+                                    static_cast<uint8_t>(want >> 16),
+                                    static_cast<uint8_t>(want >> 24)};
+    if (!waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
+                                          dataRequest, sizeof(dataRequest),
+                                          "GNSS", 1))
+      return false;
+    vTaskDelay(pdMS_TO_TICKS(kAnswerDelayMs));
+    if (!waveshare_board::i2c::readStream(board::gnss::i2cDataAddress, chunk,
+                                          want, "GNSS", 1))
+      return false;
+    received = want;
+    return true;
+  }
+
+  // One poll and its bookkeeping. Returns the delay before the next poll (0
+  // while the receiver still has buffered bytes) and whether valid sentences
+  // have arrived.
+  uint32_t service(uint32_t nowMs, bool &locked) {
+    size_t received = 0;
+    const bool answered = poll(received);
+    portENTER_CRITICAL(&mux);
+    ++state.polls;
+    if (!answered)
+      ++state.pollErrors;
+    const bool wasPresent = state.portOpen;
+    state.portOpen = answered;
+    const uint32_t bytesBefore = state.bytes;
+    const uint8_t pulses = state.resetPulses;
+    portEXIT_CRITICAL(&mux);
+    if (answered)
+      consecutiveFailures = 0;
+    else if (consecutiveFailures < UINT8_MAX)
+      ++consecutiveFailures;
+    if (answered != wasPresent)
+      printBoot(probeReported ? "ok" : answered ? "pending" : "retry");
+    if (received != 0 && consume(chunk, received) != 0)
+      sawValidSentence = true;
+    // No byte for a while, answering or not: the module may be held by a
+    // stale reset or need a restart.
+    if (bytesBefore == 0 && received == 0 &&
+        static_cast<uint32_t>(nowMs - silentSinceMs) >= kSilentWindowMs) {
+      silentSinceMs = nowMs;
+      if (pulses < kMaxResetPulses) {
+        pulseReset("no bytes in 15 s");
+        printBoot("retry");
+      }
     }
-    vTaskDelay(readAny ? 1 : pdMS_TO_TICKS(20));
+    locked = sawValidSentence;
+    if (!answered) {
+      return consecutiveFailures >= kAbsentPollsBeforeSlow ? kAbsentSlowPollMs
+                                                           : kAbsentPollMs;
+    }
+    return received != 0 ? 0 : kIdlePollMs;
+  }
+};
+
+using Transport = std::conditional_t<kI2c, I2cTransport, UartTransport>;
+Transport transport;
+
+void readerTask(void *) {
+  for (;;) {
+    bool locked = false;
+    const uint32_t delayMs = transport.service(millis(), locked);
+    drainFixes();
+    if (locked)
+      reportLocked();
+    vTaskDelay(delayMs == 0 ? 1 : pdMS_TO_TICKS(delayMs));
   }
 }
 }  // namespace
@@ -221,7 +421,9 @@ void readerTask(void *) {
 // within a short window show traffic. Inputs only, nothing is driven. Besides
 // the board's rx/tx this also checks the H2 header's UART0 pads (GPIO43/44),
 // the pins an earlier hardware note called the GPS pads, so a receiver wired
-// there is found as well.
+// there is found as well. Only the UART transport runs it; on the bench the
+// 1.75 with the receiver showed every line floating, which is what sent the
+// part to the receiver's I2C slave.
 void probeLines() {
   const uint8_t candidates[] = {board::gnss::rx, board::gnss::tx, 43, 44};
   char report[160] = {};
@@ -269,15 +471,10 @@ void begin() {
   portEXIT_CRITICAL(&mux);
   releaseReset();
 #if FIRMWARE_DIAGNOSTICS
-  probeLines();
+  if constexpr (kUart)
+    probeLines();
 #endif
-  probe.begin(board::gnss::baud, millis());
-  port.setRxBufferSize(1024);
-  port.begin(probe.current(), SERIAL_8N1, board::gnss::rx, board::gnss::tx);
-  portENTER_CRITICAL(&mux);
-  state.portOpen = true;
-  state.baud = probe.current();
-  portEXIT_CRITICAL(&mux);
+  transport.begin(millis());
   printBoot("pending");
 }
 

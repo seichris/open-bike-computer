@@ -15,9 +15,17 @@ namespace position_source {
 
 struct GnssStatus {
   bool fitted = false;
+  // UART: the port opened. I2C: the receiver answered its latest poll.
   bool portOpen = false;
+  // Checksum-valid sentences arrived (on a UART, at the rate now in use).
   bool probeLocked = false;
+  // UART only: the rate in use.
   uint32_t baud = 0;
+  // I2C only: polls of the receiver, the ones it did not answer, and the
+  // largest buffered length it reported (how far the reader lags).
+  uint32_t polls = 0;
+  uint32_t pollErrors = 0;
+  uint32_t backlog = 0;
   // Every byte read from the port, so a silent line (no bytes) and a wrong
   // rate (bytes without checksum-valid sentences) can be told apart.
   uint32_t bytes = 0;
@@ -32,8 +40,9 @@ struct GnssStatus {
   uint32_t lastFixMs = 0;
 };
 
-// Opens the receiver where one is fitted; a no-op elsewhere. Runs where the
-// user interface starts, after the I2C bus and expander are configured.
+// Opens the receiver where one is fitted (the UART, or a presence check of
+// the I2C slave); a no-op elsewhere. Runs where the user interface starts,
+// after the I2C bus and expander are configured.
 void begin();
 // Starts the receiver reader task where one is fitted; a no-op elsewhere.
 void startTask();

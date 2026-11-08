@@ -303,7 +303,7 @@ A variant is complete when all of these exist:
    TLV.
 
 The GNSS 1.75 as a worked example: a board file that includes the 1.75 file and
-sets `gnss{fitted=true, uart, rx, tx, module}`; environments
+sets `gnss{fitted=true, module, transport, ...}`; environments
 `WAVESHARE_AMOLED_175_GNSS*` extending the 1.75 base with the new target; the
 position-source part compiled with both the phone and the GNSS implementation;
 a position-source TLV; routing that `175_gnss` paths select only that target;
@@ -510,12 +510,16 @@ that board once it is tested (see Decisions).
   onboard receiver (`position_source_policy.hpp`: a fitted receiver holds the
   shared position record for 3 s after each valid fix, the phone's positions
   apply otherwise and keep feeding ride automation throughout);
-  `gnss_receiver.cpp` carries the NMEA reader, the serial-rate probe and the
-  expander-driven reset release behind the board file's `BOARD_GNSS_FITTED`,
-  with no-op stubs elsewhere; the board data gained `gnss::{module, uart, rx,
-  tx, baud, resetViaExpander, resetExpanderPin}` and no longer claims the H2
+  `gnss_receiver.cpp` carries the NMEA reader behind the board file's
+  `BOARD_GNSS_FITTED` with no-op stubs elsewhere, on the transport the board
+  data names (a UART with a rate probe, or the receiver's I2C slave polled
+  with Quectel's command/answer scheme, which is what Waveshare's "-G" 1.75
+  wires) plus the expander-driven reset release; the board data gained
+  `gnss::{module, transport, i2cCommandAddress, i2cDataAddress, uart, rx, tx,
+  baud, resetViaExpander, resetExpanderPin}` and no longer claims the H2
   header's UART0 pads (GPIO43/44) as a receiver footprint, since the vendor
-  schematic routes the LC76G footprint to GPIO18/17 and EXIO7. `HAS_HARDWARE_GPS`
+  schematic routes the LC76G footprint's optional UART links to GPIO18/17
+  and its RESET to EXIO7. `HAS_HARDWARE_GPS`
   and `AT6558D_GPS` are gone with the IceNav GPS task and mutex, the baud and
   update-rate settings rows and the `GPS_TX`/`GPS_RX` globals; the TCA9554
   helpers moved out of the panel driver into `waveshare_board::tca9554`.
@@ -544,7 +548,11 @@ that board once it is tested (see Decisions).
   appears only in `lib/board`). No file under `src/`, `gui/`, `maps/`,
   `storage/` or `ble_navigation/` changed. Hardware gate: owed on the bench
   unit (boot capture with the read-only PMIC and receiver gates, fix evidence,
-  the plain 1.75 image on the same unit for M5).
+  the plain 1.75 image on the same unit for M5). The first three bench
+  captures ran the UART transport and passed identity, PMIC and ready while
+  every candidate receiver line floated; Waveshare's hardware reference and
+  LC76G example put the receiver on the I2C bus, so the part gained the I2C
+  transport and the board data a `transport` field before the fourth capture.
 
 ### The confinement test
 
@@ -596,10 +604,12 @@ selects:
    `main` at `0f2d209d`, before #442 merged, on the maintainer's instruction.
 
 2. **The GNSS 1.75 is a real target.** Decided 2026-11-08 with M6: a 1.75
-   with the Quectel LC76G populated on the vendor footprint is on the bench
-   (USB serial enrolled as `waveshare-175-gnss`), and the schematic routes
-   the receiver to GPIO18/17 and expander pin EXIO7, not to the header's
-   UART0 pads the plan assumed.
+   with the Quectel LC76G populated on the vendor footprint (Waveshare's "-G"
+   model) is on the bench (USB serial enrolled as `waveshare-175-gnss`). The
+   ESP32 reads the receiver over the shared I2C bus (0x50/0x54) and resets it
+   through expander pin EXIO7; the schematic's UART links to GPIO18/17 are
+   optional and unfitted, and the header's UART0 pads the plan assumed are
+   not involved at all.
 3. **A variant is always its own image**, including for an optional module:
    its own `custom_firmware_target`, OTA identity, environments, CI routing
    and gates. Confirmed with M6.

@@ -500,17 +500,18 @@ as closed.
 
 The `RXD`/`TXD` pads of the H2 header are the ESP32-S3 UART0 pins (GPIO43 and
 GPIO44), not a receiver footprint. The vendor schematic reserves footprint Q1
-for a Quectel LC76G (LC76GABMD) receiver:
+for a Quectel LC76G (LC76GABMD) receiver, populated together with a ceramic
+antenna on the "-G" model (`ESP32-S3-Touch-AMOLED-1.75-G`, SKU 31264):
 
 | Signal | Route |
 |---|---|
-| Receiver TXD1 | R15 (0R, unfitted on the plain model) to GPIO18 (ESP32 receive) |
-| Receiver RXD1 | R16 (0R, unfitted on the plain model) to GPIO17 (ESP32 transmit) |
+| SCL/SDA | shared I2C bus: the receiver's I2C slave answers at 0x50 (requests) and 0x54 (answers), the path Waveshare's hardware reference and `09_LC76G_I2C` example use |
+| Receiver TXD1 | R15 (0R) to GPIO18 (ESP32 receive); an optional link, unfitted on both models |
+| Receiver RXD1 | R16 (0R) to GPIO17 (ESP32 transmit); an optional link, unfitted on both models |
 | RESET (active low) | TCA9554 expander pin EXIO7 |
 | VCC | 3.3 V rail (VCC3V3); no PMIC write is involved |
 | V_BCKP | RTC rail (VCC-RTC) through R33 |
 | 1PPS, STANDBY, FORCE_ON | not connected to the ESP32 |
-| SCL/SDA | shared I2C bus (the module's reserved pins) |
 
 The plain model has no receiver and firmware treats it as no-GPS hardware
 (`board::gnss::fitted` is false). The assembled variant with the receiver is

@@ -83,9 +83,10 @@ class BootSummary:
     previous: dict[str, str]
     failure: dict[str, str]
     pmic: dict[str, str]
-    # The latest BOOT_GNSS record of the boot. The receiver's serial-rate probe
-    # may lock after the ready stage, so this record is read wherever it lands
-    # and never counts as a boot discontinuity.
+    # The latest BOOT_GNSS record of the boot. The receiver's probe (the UART
+    # rate probe, or the first answered I2C polls) may lock after the ready
+    # stage, so this record is read wherever it lands and never counts as a
+    # boot discontinuity.
     gnss: dict[str, str]
     ready: bool
     stage_schema_mismatches: int
@@ -236,6 +237,7 @@ def format_summary(
         f"ldo={value(summary.pmic, 'ldo')} "
         f"gnssFitted={value(summary.gnss, 'fitted')} "
         f"gnssModule={value(summary.gnss, 'module')} "
+        f"gnssTransport={value(summary.gnss, 'transport')} "
         f"gnssProbe={value(summary.gnss, 'probe')} "
         f"gnssBaud={value(summary.gnss, 'baud')} "
         f"gnssBytes={value(summary.gnss, 'bytes')} "
@@ -457,9 +459,10 @@ def validation_errors(
     if require_pmic_read_only or require_pmic_display_enable_only:
         _validate_power_button_off_configuration(summary, errors)
     if require_gnss:
-        # The receiver gate: the board declares a fitted receiver, its port
-        # opened, the serial-rate probe locked on checksum-valid NMEA sentences
-        # and at least one arrived. A position fix is not required here; it
+        # The receiver gate: the board declares a fitted receiver and its
+        # probe locked, which means checksum-valid NMEA sentences arrived over
+        # the transport (a UART at the probed rate, or answered I2C polls),
+        # and at least one did. A position fix is not required here; it
         # depends on sky view and is recorded separately.
         if summary.gnss.get("schema") != _SUPPORTED_BOOT_SCHEMA:
             errors.append(
@@ -472,7 +475,7 @@ def validation_errors(
             )
         if summary.gnss.get("probe") != "ok":
             errors.append(
-                "GNSS serial-rate probe did not lock "
+                "GNSS receiver probe did not lock "
                 f"(got {summary.gnss.get('probe', 'missing')})"
             )
         try:
@@ -573,8 +576,8 @@ def main(argv: list[str] | None = None) -> int:
         "--require-gnss",
         action="store_true",
         help=(
-            "require a fitted GNSS receiver whose serial-rate probe locked on "
-            "checksum-valid NMEA sentences (BOOT_GNSS probe=ok)"
+            "require a fitted GNSS receiver that delivered checksum-valid NMEA "
+            "sentences over its transport (BOOT_GNSS probe=ok)"
         ),
     )
     pmic_gate = parser.add_mutually_exclusive_group()

@@ -18,10 +18,14 @@ namespace gnss {
 // No receiver is populated on this model. The RXD/TXD pads of the H2 header
 // are the ESP32-S3 UART0 pins (GPIO43/44), not a receiver footprint; the
 // vendor schematic's Q1 footprint for a Quectel LC76G reaches GPIO18 and
-// GPIO17 through the unfitted link resistors R15 and R16, and its RESET line
-// through expander pin EXIO7. The fitted variant's board file sets these.
+// GPIO17 through the link resistors R15 and R16 (unfitted on every model),
+// its I2C slave the shared bus, and its RESET line expander pin EXIO7. The
+// fitted variant's board file (the "-G" model) sets these.
 constexpr bool fitted = false;
 constexpr GnssModule module = GnssModule::none;
+constexpr GnssTransport transport = GnssTransport::none;
+constexpr uint8_t i2cCommandAddress = 0;
+constexpr uint8_t i2cDataAddress = 0;
 // ESP32-S3 UART controller, and the pins as seen from the ESP32: rx is the
 // receiver's TXD, tx is the receiver's RXD.
 constexpr uint8_t uart = 2;
@@ -40,3 +44,6 @@ constexpr uint8_t resetExpanderPin = 0;
 #define BOARD_GNSS_FITTED 0
 static_assert((BOARD_GNSS_FITTED != 0) == board::gnss::fitted,
               "GNSS macro and board data disagree");
+static_assert(board::gnss::fitted ==
+                  (board::gnss::transport != board::GnssTransport::none),
+              "a fitted receiver needs a transport and an unfitted one none");

@@ -103,5 +103,20 @@ bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
 bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
                const char *label = nullptr, uint8_t attempts = 3);
 
+// Raw transfers for a device that answers requests instead of exposing
+// registers (the GNSS receiver's I2C slave). writeBytes sends the bytes as
+// given, with the AXP2101 write policy applied to the first byte as the
+// register; readStream reads up to STREAM_BUFFER_BYTES in one transaction,
+// the Wire receive buffer, which is enlarged on boards whose receiver streams
+// NMEA over the bus. The size keeps one read inside the bus timeout and the
+// lock wait other devices tolerate: 256 bytes take about 23 ms at 100 kHz,
+// against the 50 ms DEFAULT_TIMEOUT_MS both use.
+constexpr size_t STREAM_BUFFER_BYTES =
+    board::gnss::transport == board::GnssTransport::i2c ? 256 : 128;
+bool writeBytes(uint8_t address, const uint8_t *data, uint8_t len,
+                const char *label = nullptr, uint8_t attempts = 2);
+bool readStream(uint8_t address, uint8_t *data, size_t len,
+                const char *label = nullptr, uint8_t attempts = 3);
+
 } // namespace waveshare_board::i2c
 

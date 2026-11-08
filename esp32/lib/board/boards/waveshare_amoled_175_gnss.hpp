@@ -15,18 +15,26 @@ constexpr bool epaper = false;
 }  // namespace identity
 
 namespace gnss {
-// Quectel LC76G (LC76GABMD) populated on the vendor Q1 footprint. From the
-// 1.75 schematic: the receiver's TXD1 reaches GPIO18 through R15 and its
-// RXD1 GPIO17 through R16 (both links fitted on this variant), its RESET is
-// expander pin EXIO7 (active low), VCC is the 3.3 V rail, V_BCKP the RTC
-// rail, STANDBY and FORCE_ON are not connected. The receiver speaks NMEA
-// 0183 over UART; its default rate is 115200 bps and the position-source
-// part probes 9600 bps as well. No PMIC write is involved, so this variant
+// Quectel LC76G (LC76GABMD) populated on the vendor Q1 footprint: the "-G"
+// model (ESP32-S3-Touch-AMOLED-1.75-G, SKU 31264) with its ceramic antenna.
+// The ESP32 reaches the receiver over the shared I2C bus: Waveshare's
+// hardware reference and LC76G example poll the receiver's I2C slave at
+// 0x50 (requests) and 0x54 (answers), and the schematic's UART links from
+// the receiver's TXD1/RXD1 to GPIO18/17 (R15/R16) stay unfitted on this
+// model too; the bench unit's receive pin floats. RESET is expander pin
+// EXIO7 (active low), VCC the 3.3 V rail, V_BCKP the RTC rail; 1PPS, STANDBY
+// and FORCE_ON are not connected. No PMIC write is involved, so this variant
 // keeps the 1.75 read-only PMIC policy and gate.
 constexpr bool fitted = true;
 constexpr GnssModule module = GnssModule::quectelLc76g;
-// ESP32-S3 UART controller, and the pins as seen from the ESP32: rx is the
-// receiver's TXD, tx is the receiver's RXD.
+constexpr GnssTransport transport = GnssTransport::i2c;
+// Seven-bit addresses of the receiver's I2C slave: requests are written to
+// the command address, their answers read from the data address.
+constexpr uint8_t i2cCommandAddress = 0x50;
+constexpr uint8_t i2cDataAddress = 0x54;
+// The optional UART path, unused while R15/R16 are unfitted: the ESP32-S3
+// UART controller and the pins as seen from the ESP32 (rx is the receiver's
+// TXD, tx the receiver's RXD); 115200 bps is the receiver's default rate.
 constexpr uint8_t uart = 2;
 constexpr uint8_t rx = 18;
 constexpr uint8_t tx = 17;
@@ -42,3 +50,6 @@ constexpr uint8_t resetExpanderPin = 7;
 #define BOARD_GNSS_FITTED 1
 static_assert((BOARD_GNSS_FITTED != 0) == board::gnss::fitted,
               "GNSS macro and board data disagree");
+static_assert(board::gnss::fitted ==
+                  (board::gnss::transport != board::GnssTransport::none),
+              "a fitted receiver needs a transport and an unfitted one none");

@@ -715,14 +715,26 @@ BOOT_STAGE schema=1 sequence=3 event=enter id=1 name=startup uptimeMs=0
 
 
 GNSS_PENDING_LINE = (
-    "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
-    "reset=expander baud=115200 probe=pending bytes=0 sentences=0 invalid=0 "
-    "resetPulses=0"
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=uart reset=expander "
+    "uart=2 rx=18 tx=17 baud=115200 probe=pending bytes=0 sentences=0 "
+    "invalid=0 resetPulses=0"
 )
 GNSS_LOCKED_LINE = (
-    "BOOT_GNSS schema=1 fitted=1 module=lc76g uart=2 rx=18 tx=17 "
-    "reset=expander baud=115200 probe=ok bytes=1180 sentences=12 invalid=1 "
-    "resetPulses=0"
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=uart reset=expander "
+    "uart=2 rx=18 tx=17 baud=115200 probe=ok bytes=1180 sentences=12 "
+    "invalid=1 resetPulses=0"
+)
+# The 1.75 with the receiver reads it over I2C: no rate, but the receiver's
+# presence and the poll counts.
+GNSS_I2C_PENDING_LINE = (
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c reset=expander "
+    "i2c=0x50/0x54 present=1 polls=0 errors=0 backlog=0 probe=pending bytes=0 "
+    "sentences=0 invalid=0 resetPulses=0"
+)
+GNSS_I2C_LOCKED_LINE = (
+    "BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c reset=expander "
+    "i2c=0x50/0x54 present=1 polls=9 errors=0 backlog=612 probe=ok bytes=1532 "
+    "sentences=14 invalid=0 resetPulses=0"
 )
 # The receiver opens before ready; its serial-rate probe may lock only after
 # the ready stage, once the first checksum-valid sentences have arrived.
@@ -750,13 +762,44 @@ class GnssGateTests(unittest.TestCase):
             ),
         )
         formatted = format_summary(summary)
-        self.assertIn("gnssFitted=1 gnssModule=lc76g gnssProbe=ok ", formatted)
+        self.assertIn(
+            "gnssFitted=1 gnssModule=lc76g gnssTransport=uart gnssProbe=ok ",
+            formatted,
+        )
         self.assertIn("gnssBaud=115200 gnssBytes=1180 gnssSentences=12 gnssInvalid=1 gnssResetPulses=0 ", formatted)
+
+    def test_i2c_receiver_satisfies_the_gate_without_a_rate(self) -> None:
+        capture = GNSS_CAPTURE.replace(GNSS_PENDING_LINE, GNSS_I2C_PENDING_LINE).replace(
+            GNSS_LOCKED_LINE, GNSS_I2C_LOCKED_LINE
+        )
+        summary = summarize(capture)
+        self.assertEqual(
+            [],
+            validation_errors(
+                summary,
+                expected_target="WAVESHARE_AMOLED_175_GNSS",
+                require_ready=True,
+                require_pmic_read_only=True,
+                require_gnss=True,
+            ),
+        )
+        formatted = format_summary(summary)
+        self.assertIn(
+            "gnssFitted=1 gnssModule=lc76g gnssTransport=i2c gnssProbe=ok "
+            "gnssBaud=missing gnssBytes=1532 gnssSentences=14 ",
+            formatted,
+        )
+        # A receiver that never answered its polls stays pending.
+        pending = summarize(capture.replace(GNSS_I2C_LOCKED_LINE + "\n", ""))
+        self.assertIn(
+            "GNSS receiver probe did not lock (got pending)",
+            validation_errors(pending, require_gnss=True),
+        )
 
     def test_pending_probe_and_plain_boards_fail_the_gate(self) -> None:
         pending = summarize(GNSS_CAPTURE.replace(GNSS_LOCKED_LINE + "\n", ""))
         errors = validation_errors(pending, require_gnss=True)
-        self.assertIn("GNSS serial-rate probe did not lock (got pending)", errors)
+        self.assertIn("GNSS receiver probe did not lock (got pending)", errors)
         self.assertIn(
             "at least one checksum-valid NMEA sentence required (got 0)", errors
         )
