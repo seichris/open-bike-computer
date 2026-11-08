@@ -572,6 +572,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261108-firmware-build107",
+      "candidateGitSha": "8baaf9804ebba273cfce3a7397ec6db341f49260",
+      "producerBuildSha256": "eb2f92fad79327cea3adcf406dc83bd9b0f8fe7cf9335c49448d8c4318c3a7a2",
+      "workerImageDigest": "sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 107,
+      "firmwareGitSha": "5f76f445d4943c0984ed08eb299bba14a8b12cfd",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "81ffc7b07295823b2aefb16fe1d10bf239b05b5a654b4949c679b3e3178297fb",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-08T15:15:51Z",
+      "approvedBy": "Claude (firmware-identity-only move to the published v0.3.4-release.15 under Chris's explicit 2026-11-08 release instructions: 'when merged then release new firmware (and map platform image ?) (and app?)', 'Skip 2.06, accept risk', 'skip the boot check. Release everything first' and 'we tested enough already'; standing CLAUDE.md permission to merge and deploy; worker, producer, iOS identity and signing key unchanged from msr-20261105-topo-production; optional hardware matrix, zero physical runs)",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
