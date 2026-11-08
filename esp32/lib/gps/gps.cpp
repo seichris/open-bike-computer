@@ -16,8 +16,6 @@ extern lv_obj_t *sunriseLabel;
 bool setTime = true;
 bool isGpsFixed = false;
 bool isTimeFixed = false;
-long gpsBaudDetected = 0;
-bool nmea_output_enable = false;
 gps_fix fix;
 NMEAGPS GPS;
 static portMUX_TYPE gpsRideObservationMux = portMUX_INITIALIZER_UNLOCKED;
@@ -28,55 +26,6 @@ static RidePositionSource selectedRidePositionSource = RidePositionSource::None;
 static const char* TAG PROGMEM = "GPS";
 
 Gps::Gps() {}
-
-/**
- * @brief Init GPS and custom NMEA parsing
- *
- */
-void Gps::init()
-{
-#ifdef HAS_HARDWARE_GPS
-  gpsPort.setRxBufferSize(1024);
-
-  if (gpsBaud != 4)
-    gpsPort.begin(GPS_BAUD[gpsBaud], SERIAL_8N1, GPS_RX, GPS_TX);
-  else
-  {
-    gpsBaudDetected = autoBaud();
-
-    if (gpsBaudDetected != 0)
-      gpsPort.begin(gpsBaudDetected, SERIAL_8N1, GPS_RX, GPS_TX);
-  }
-
-#ifdef AT6558D_GPS
-  // FACTORY RESET
-  // gpsPort.println("$PCAS10,3*1F\r\n");
-  // gpsPort.flush();
-  // delay(100);
-
-  // GPS
-  // gpsPort.println("$PCAS04,1*18\r\n")
-
-  // GPS+GLONASS
-  // gpsPort.println("$PCAS04,5*1C\r\n");
-
-  // GPS+BDS+GLONASS
-  gpsPort.println("$PCAS04,7*1E\r\n");
-  gpsPort.flush();
-  delay(100);
-
-  // Update Rate
-  gpsPort.println(GPS_RATE_PCAS[gpsUpdate]);
-  gpsPort.flush();
-  delay(100);
-
-  // Set NMEA 4.1
-  gpsPort.println("$PCAS05,2*1A\r\n");
-  gpsPort.flush();
-  delay(100);
-#endif
-#endif
-}
 
 /**
  * @brief return latitude from GPS or sys env pre-built variable
@@ -278,82 +227,6 @@ GpsRideObservation currentGpsRideObservation(uint32_t nowMs,
   selectedRidePositionSource = selected.source;
   portEXIT_CRITICAL(&gpsRideObservationMux);
   return selected;
-}
-
-/**
- *  @brief return pulse rate from RX GPS pin
- * 
- *  @return pulse rate
- */
-long Gps::detectRate(int rxPin)
-{
-  long rate = 10000, x = 2000;
-  pinMode(rxPin, INPUT);     // make sure Serial in is a input pin
-  digitalWrite(rxPin, HIGH); // pull up enabled just for noise protection
-
-  for (int i = 0; i < 5; i++)
-  {
-    x = pulseIn(rxPin, LOW, 125000); // measure the next zero bit width
-    if (x < 1)
-      continue;
-    rate = x < rate ? x : rate;
-  }
-  return rate;
-}
-
-/**
- *  @brief Detect GPS Baudrate
- * 
- *  @return baudrate
- */
-long Gps::autoBaud()
-{
-#ifndef HAS_HARDWARE_GPS
-  return 0;
-#else
-  long rate = detectRate(GPS_RX) + detectRate(GPS_RX) + detectRate(GPS_RX);
-  rate = rate / 3l;
-  long baud = 0;
-  /*
-	 	 Time	Baud Rate
-		3333µs (3.3ms)300
-		833µs 	1200
-		416µs 	2400
-		208µs 	4800
-		104µs 	9600
-		69µs 	14400
-		52µs 	19200
-		34µs 	28800
-		26µs 	38400
-		17.3µs 	57600
-		8µs 	115200
-		Megas min is about 10uS? so there may be some inaccuracy
-	 */
-  if (rate < 12)
-    baud = 115200;
-  else if (rate < 20)
-    baud = 57600;
-  else if (rate < 30)
-    baud = 38400;
-  else if (rate < 40)
-    baud = 28800;
-  else if (rate < 60)
-    baud = 19200;
-  else if (rate < 80)
-    baud = 14400;
-  else if (rate < 150)
-    baud = 9600;
-  else if (rate < 300)
-    baud = 4800;
-  else if (rate < 600)
-    baud = 2400;
-  else if (rate < 1200)
-    baud = 1200;
-  else
-    baud = 0;
-
-  return baud;
-#endif
 }
 
 /**

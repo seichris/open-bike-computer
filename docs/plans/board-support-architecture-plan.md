@@ -505,6 +505,27 @@ that board once it is tested (see Decisions).
   panel header by target macro and keeps its exemption in the confinement
   test; moving that choice into `lib/board/` is open and belongs to no
   milestone yet. M5 and M6 wait for the GNSS 1.75 session.
+- **M5, 2026-11-08, in review.** The position source is one part.
+  `lib/position_source/` arbitrates between the phone's BLE positions and an
+  onboard receiver (`position_source_policy.hpp`: a fitted receiver holds the
+  shared position record for 3 s after each valid fix, the phone's positions
+  apply otherwise and keep feeding ride automation throughout);
+  `gnss_receiver.cpp` carries the NMEA reader, the serial-rate probe and the
+  expander-driven reset release behind the board file's `BOARD_GNSS_FITTED`,
+  with no-op stubs elsewhere; the board data gained `gnss::{module, uart, rx,
+  tx, baud, resetViaExpander, resetExpanderPin}` and no longer claims the H2
+  header's UART0 pads (GPIO43/44) as a receiver footprint, since the vendor
+  schematic routes the LC76G footprint to GPIO18/17 and EXIO7. `HAS_HARDWARE_GPS`
+  and `AT6558D_GPS` are gone with the IceNav GPS task and mutex, the baud and
+  update-rate settings rows and the `GPS_TX`/`GPS_RX` globals; the TCA9554
+  helpers moved out of the panel driver into `waveshare_board::tca9554`.
+  CAP2 gained extended bit `5` with the position-source record (TLV type `5`,
+  client version `35`), which the app parses and shows in its firmware
+  section. Baseline: 59 conditionals in 22 files (two always-true guards left
+  `ble_navigation.cpp`). AMOLED behaviour is unchanged by construction: no
+  board declares a receiver yet, so the arbiter always accepts the phone.
+  Hardware gate: none of its own; the first fitted receiver is M6's board,
+  whose boot capture also covers this part.
 
 ### The confinement test
 

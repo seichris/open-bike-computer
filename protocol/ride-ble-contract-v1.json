@@ -36,11 +36,19 @@
     "input_flags": {"buttons": 1, "touch": 2},
     "setting_flags": {"brightness": 1, "display_rotation": 2, "tap_to_cycle": 4, "continuous_camera": 8, "disconnected_sleep": 16}
   },
+  "position_source_metadata": {
+    "tlv_type": 5,
+    "version": 1,
+    "payload_bytes": 4,
+    "layout": "version,u8 source flags,u8 receiver module,u8 reserved",
+    "source_flags": {"phone": 1, "gnss": 2},
+    "receiver_modules": {"none": 0, "quectel_lc76g": 1}
+  },
   "capabilities": {
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 34,
+    "current_client_version": 35,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -81,7 +89,8 @@
       "friend_marker_scale_v1": {"bit": 1, "minimum_client_version": 31},
       "route_elevation_v1": {"bit": 2, "minimum_client_version": 32},
       "map_pois": {"bit": 3, "minimum_client_version": 33},
-      "board_display_metadata": {"bit": 4, "minimum_client_version": 34}
+      "board_display_metadata": {"bit": 4, "minimum_client_version": 34},
+      "position_source_metadata": {"bit": 5, "minimum_client_version": 35}
     }
   },
   "screen_types": {

@@ -1416,8 +1416,9 @@ ID `39`). Version `32` requests extended bit `2`, route elevation profiles
 Version `33` requests extended bit `3`, map POIs and Nearby. Versions `31` and
 `32` retain their released friend-marker sizing and route elevation meanings
 and cannot negotiate POIs. Version `34` requests extended bit `4`, board
-display/input metadata (TLV type `4`, below).
-The current iPhone client negotiates version `34`; older direct Watch clients
+display/input metadata (TLV type `4`, below). Version `35` requests extended
+bit `5`, the position-source record (TLV type `5`, below).
+The current iPhone client negotiates version `35`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
@@ -1454,13 +1455,35 @@ Extended bit `4` requires exactly one TLV type `4`, length `8`:
 The 3.97 board sends kind `2`, buttons `1`, dimensions `480 × 800`, settings
 `0`. AMOLED boards send kind `1`, buttons/touch `3`, their existing dimensions,
 and settings `29`. Older clients receive their existing CAPS/CAP2 shape without
-this record. Firmware appends the record after every other TLV, so responses
-without it keep their previous bytes. The encoder's maximum response is 46
-bytes including the optional PWR configuration, screen configuration, extended
-feature and display records. A record without its extended bit, a bit without
+this record. Firmware appends the record after every other TLV except the
+position-source record, so responses without it keep their previous bytes. The
+encoder's maximum response is 52 bytes including the optional PWR
+configuration, screen configuration, extended feature, display and
+position-source records. A record without its extended bit, a bit without
 its record, unknown metadata version, invalid dimensions, duplicate or
 truncated records invalidate negotiation. Unknown unrelated TLV types remain
 skippable. Existing UUIDs and route/GPS/ride payloads are unchanged.
+
+Extended bit `5` requires exactly one TLV type `5`, length `4`, the
+position-source record:
+
+| Value offset | Encoding | Meaning |
+| --- | --- | --- |
+| 0 | UInt8, `1` | Record version |
+| 1 | UInt8 bitmask | bit 0 phone positions over BLE, bit 1 an onboard GNSS receiver |
+| 2 | UInt8 | Receiver module: `0` none, `1` Quectel LC76G |
+| 3 | UInt8, `0` | Reserved |
+
+Every board sends bit 0. A board whose data declares a fitted receiver also
+sends bit 1 and its module code; on such a board a valid receiver fix
+populates the shared position for 3 s after each fix, while the phone's
+positions keep feeding ride automation and apply again once the fix is stale.
+The app keeps sending positions either way; the record lets it name the
+source. Firmware appends this record last, after the display record, so
+responses without it keep their previous bytes. A record whose version is
+not `1`, whose flags clear bit 0 or set reserved bits, or whose module is
+unknown invalidates negotiation, as does a bit without its record or a record
+without its bit.
 
 E-paper firmware normalizes or rejects unsupported brightness, touch,
 automatic sleep, course-up, bird's-eye and 3D settings even when written by an
@@ -1515,7 +1538,8 @@ Firmware includes this extension only when at least one extended feature is
 available to the negotiated client. Bit `31` of the first word remains terrain;
 it never enables social packets. Older clients skip the new TLV, and version-29
 firmware remains usable without group riders. TLV type `4` carries the
-eight-byte display/input metadata described above. Types are unique;
+eight-byte display/input metadata described above, and TLV type `5` the
+four-byte position-source record. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1590,6 +1614,12 @@ Route elevation profiles, CAP2 schema 1, extended feature bit 2 (TLV type 3):
 Map POIs and Nearby, CAP2 schema 1, extended feature bit 3 (TLV type 3):
 43 41 50 32 01 00 00 00 00 03 04 08 00 00 00
 This isolates the feature bit; usable POIs also require the map prerequisites.
+
+Position source, phone and Quectel LC76G receiver, extended bit 5 and TLV type 5:
+43 41 50 32 01 00 00 00 00 03 04 20 00 00 00 05 04 01 03 01 00
+
+Position source, phone only (every board without a receiver), extended bit 5:
+43 41 50 32 01 00 00 00 00 03 04 20 00 00 00 05 04 01 01 00 00
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

@@ -34,15 +34,12 @@
 
 // Hardware includes
 #include "gps.hpp"
+#include "position_source.hpp"
 #include "hal.hpp"
 #include "board_startup.hpp"
 #include "storage.hpp"
 #include "usb_recovery_status.hpp"
 #include "tft.hpp"
-
-#ifdef HAS_HARDWARE_GPS
-extern xSemaphoreHandle gpsMutex;
-#endif
 
 #include "battery.hpp"
 #include "device_ownership.hpp"
@@ -1418,9 +1415,7 @@ static void startUserInterface() {
   mapView.initMap(gui_layout::mapViewportHeight(TFT_HEIGHT), TFT_WIDTH,
                   TFT_HEIGHT);
   loadPreferences();
-#ifdef HAS_HARDWARE_GPS
-  gps.init();
-#endif
+  position_source::begin();
   initLVGL();
   prepareShutdownDeferredNotice();
   log_i("Checkpoint A: LVGL Init Done");
@@ -1457,9 +1452,6 @@ void setup() {
                (uint64_t{activation.sequence & 0xffffU} << 32) |
                mapTransferHttp.storageProgressSequence();
       });
-#ifdef HAS_HARDWARE_GPS
-  gpsMutex = xSemaphoreCreateMutex();
-#endif
 #if FIRMWARE_DIAGNOSTICS
   esp_log_level_set("*", ESP_LOG_DEBUG);
   esp_log_level_set("storage", ESP_LOG_DEBUG);
@@ -1912,10 +1904,8 @@ void setup() {
   gps.gpsData.longitude = gps.getLon();
   log_i("Checkpoint B: Position Data Initialized");
 
-#ifdef HAS_HARDWARE_GPS
-  initGpsTask();
-  log_i("Checkpoint C: GPS Task Init Done");
-#endif
+  position_source::startTask();
+  log_i("Checkpoint C: Position source started");
 
   if (WiFi.getMode() == WIFI_OFF)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -2335,6 +2325,9 @@ void loop() {
           lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {
     lastBleHousekeepingMs = now;
     bleNavServer.process();
+    if (position_source::takeFreshGnssFix() && noteNavigationInputForMapEntry()) {
+      Serial.println("GNSS: Fresh device fix received, transitioning to map...");
+    }
   }
 
 #if FIRMWARE_DIAGNOSTICS

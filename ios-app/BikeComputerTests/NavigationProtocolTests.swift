@@ -977,6 +977,7 @@ struct NavigationProtocolTests {
         testWorkoutDeviceTelemetryMapping()
         testWorkoutDeviceRelayScheduling()
         testWorkoutDeviceRelayPublicationIntegration()
+        testPositionSourceCapabilityRecord()
         testWorkoutDeviceRelayMotionDeduplicationIntegration()
         testWorkoutDeviceRelayRegularRetryIntegration()
         testWorkoutTelemetryBLETransport()

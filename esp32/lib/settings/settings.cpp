@@ -37,8 +37,6 @@ static const float scale = 0.75f;
  */
 uint8_t defaultZoom = 0;     // Default Zoom Value
 uint8_t defBright = 255;     // Default Brightness
-uint16_t gpsBaud = 0;        // GPS Speed
-uint16_t gpsUpdate = 0;      // GPS Update rate
 uint16_t compassPosX = 0;    // Compass widget position X
 uint16_t compassPosY = 0;    // Compass widget position Y
 uint16_t coordPosX = 0;      // Coordinates widget position X
@@ -97,8 +95,6 @@ void loadPreferences() {
   mapSet.showMapSpeed = cfg.getBool(PKEYS::KMAP_SPEED, true);
   mapSet.vectorMap = cfg.getBool(PKEYS::KMAP_VECTOR, true);
   mapSet.showMapScale = cfg.getBool(PKEYS::KMAP_SCALE, true);
-  gpsBaud = cfg.getShort(PKEYS::KGPS_SPEED, 4);
-  gpsUpdate = cfg.getShort(PKEYS::KGPS_RATE, 3);
   compassPosX = cfg.getInt(PKEYS::KCOMP_X, defaultCompassX());
   compassPosY = cfg.getInt(PKEYS::KCOMP_Y, defaultCompassY());
   coordPosX = cfg.getInt(PKEYS::KCOORD_X, defaultCoordX());
@@ -120,75 +116,12 @@ void loadPreferences() {
     defaultZoom = cfg.getUInt(PKEYS::KDEF_ZOOM, defZoomRender);
   }
   zoom = defaultZoom;
-  GPS_TX = cfg.getUInt(PKEYS::KGPS_TX, GPS_TX);
-  GPS_RX = cfg.getUInt(PKEYS::KGPS_RX, GPS_RX);
 
 // Default Widgets positions
 
   battery.setBatteryLevels(cfg.getFloat(PKEYS::KVMAX_BATT, 4.2),
                            cfg.getFloat(PKEYS::KVMIN_BATT, 3.6));
   printSettings();
-}
-
-/**
- * @brief Save GPS speed
- *
- * @param gpsBaud
- */
-void saveGPSBaud(uint16_t gpsBaud) {
-#ifdef HAS_HARDWARE_GPS
-  cfg.saveShort(PKEYS::KGPS_SPEED, gpsBaud);
-  if (gpsBaud != 4) {
-#ifdef AT6558D_GPS
-    gpsPort.flush();
-    gpsPort.println(GPS_BAUD_PCAS[gpsBaud]);
-    gpsPort.flush();
-    gpsPort.println("$PCAS00*01\r\n");
-    gpsPort.flush();
-    delay(500);
-#endif
-    gpsPort.flush();
-    gpsPort.end();
-    delay(500);
-    gpsPort.setRxBufferSize(1024);
-    gpsPort.begin(GPS_BAUD[gpsBaud], SERIAL_8N1, GPS_RX, GPS_TX);
-    delay(500);
-  } else {
-    gpsBaudDetected = gps.autoBaud();
-
-    if (gpsBaudDetected != 0) {
-      gpsPort.flush();
-      gpsPort.end();
-      delay(500);
-      gpsPort.setRxBufferSize(1024);
-      gpsPort.begin(gpsBaudDetected, SERIAL_8N1, GPS_RX, GPS_TX);
-      delay(500);
-    }
-  }
-#else
-  (void)gpsBaud;
-#endif
-}
-
-/**
- * @brief Save GPS Update rate
- *
- * @param gpsUpdateRate
- */
-void saveGPSUpdateRate(uint16_t gpsUpdateRate) {
-#ifdef HAS_HARDWARE_GPS
-  cfg.saveShort(PKEYS::KGPS_RATE, gpsUpdateRate);
-#ifdef AT6558D_GPS
-  gpsPort.flush();
-  gpsPort.println(GPS_RATE_PCAS[gpsUpdateRate]);
-  gpsPort.flush();
-  gpsPort.println("$PCAS00*01\r\n");
-  gpsPort.flush();
-  delay(500);
-#endif
-#else
-  (void)gpsUpdateRate;
-#endif
 }
 
 /**

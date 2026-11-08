@@ -415,7 +415,7 @@
       "name": "Render-ahead map architecture host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "for test in \\\n  test_map_render_job \\\n  test_map_probe_diagnostics \\\n  test_map_presentation \\\n  test_map_camera \\\n  test_map_pose_input_policy \\\n  test_gps_input_freshness \\\n  test_map_building_admission \\\n  test_map_route_geometry \\\n  test_map_building_workspace \\\n  test_renderer_diagnostics \\\n  test_renderer_delivery_timing \\\n  test_renderer_diagnostics_ble_protocol \\\n  test_renderer_diagnostics_request; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" \\\n    -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone",
+      "command": "for test in \\\n  test_map_render_job \\\n  test_map_probe_diagnostics \\\n  test_map_presentation \\\n  test_map_camera \\\n  test_map_pose_input_policy \\\n  test_gps_input_freshness \\\n  test_position_source_policy \\\n  test_map_building_admission \\\n  test_map_route_geometry \\\n  test_map_building_workspace \\\n  test_renderer_diagnostics \\\n  test_renderer_delivery_timing \\\n  test_renderer_diagnostics_ble_protocol \\\n  test_renderer_diagnostics_request; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" \\\n    -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone",
       "tools": [
         "python3",
         "g++"

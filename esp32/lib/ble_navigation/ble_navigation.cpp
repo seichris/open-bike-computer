@@ -32,6 +32,7 @@ extern Power power;
 #include "device_screen_protocol.hpp"
 #include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
+#include "../position_source/position_source.hpp"
 #include "map_setting_packet.hpp"
 #include "map_setting_redraw_policy.hpp"
 #include "map_profile_persistence.hpp"
@@ -5010,6 +5011,15 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     if (includeDisplay)
       extendedFeatureFlags |=
           ride_ble_protocol_generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE;
+    const bool includePositionSource = clientVersion >=
+        ride_ble_protocol_generated::
+            EXTENDED_POSITION_SOURCE_METADATA_MINIMUM_CLIENT_VERSION;
+    const uint8_t positionSourceMetadata[] = {
+        ride_ble_protocol_generated::POSITION_SOURCE_VERSION,
+        position_source::sourceFlags(), position_source::moduleCode(), 0};
+    if (includePositionSource)
+      extendedFeatureFlags |= ride_ble_protocol_generated::
+          EXTENDED_POSITION_SOURCE_METADATA_FEATURE;
     if (board_traits::epaper) {
       // Last, so no feature computed above can reach the one-bit renderer.
       featureFlags &=
@@ -5022,7 +5032,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
         sizeof(response), screenConfigurationTLV,
         screenConfigurationTLVLength, extendedFeatureFlags,
-        includeDisplay ? displayMetadata : nullptr);
+        includeDisplay ? displayMetadata : nullptr,
+        includePositionSource ? positionSourceMetadata : nullptr);
     if (responseSize == 0) {
       Serial.println("BLE Capabilities: CAP2 encoding failed");
       return;
@@ -5799,15 +5810,20 @@ static void handleGpsPayload(
     const uint8_t *data, size_t len, const char *source,
     const gps_input_freshness::ArrivalBatch &arrivals) {
   gps_position_protocol::Packet packet{};
-  if (!gps_position_protocol::decodeAndApply(data, len, gps.gpsData,
-                                             &packet)) {
+  // While the board's own receiver holds a valid fix, the phone's position
+  // still feeds ride automation and diagnostics but not the shared position
+  // record (position_source decides; every board without a receiver accepts).
+  const bool appliesToPosition =
+      position_source::acceptsPhonePosition(millis());
+  Gps::GPSDATA discarded{};
+  if (!gps_position_protocol::decodeAndApply(
+          data, len, appliesToPosition ? gps.gpsData : discarded, &packet)) {
     Serial.printf("BLE: Rejected malformed %s GPS position (%u bytes)\n",
                   source == nullptr ? "unknown" : source,
                   static_cast<unsigned>(len));
     return;
   }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   bool rtcTimestampSynced = false;
   if (packet.hasUnixTime) {
     const uint32_t now = millis();
@@ -5823,11 +5839,13 @@ static void handleGpsPayload(
       }
     }
   }
-#endif
 
   gpsFreshnessState.accept(arrivals);
   const auto sourceSample = gps_input_freshness::sourceSampleFrom(packet, arrivals.lastPacketMs);
-  gps.presentationSample = sourceSample;
+  if (appliesToPosition) {
+    position_source::notePhonePosition(millis());
+    gps.presentationSample = sourceSample;
+  }
   bleDebugStats.update([&](BLEDebugStats &stats) {
     stats.gpsSource = sourceSample;
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
@@ -5892,11 +5910,7 @@ static void handleGpsPayload(
                 "gapMs=%lu maxGapMs=%lu\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
                 rtcTimestampSynced,
-#else
-                0,
-#endif
                 (unsigned long)bleDebugStats.read().lastGpsPacketGapMs,
                 (unsigned long)bleDebugStats.read().maximumGpsPacketGapMs
   );

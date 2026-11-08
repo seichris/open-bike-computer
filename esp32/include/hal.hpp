@@ -14,10 +14,6 @@
 #define I2C_SDA_PIN (static_cast<gpio_num_t>(board::i2c::sda))
 #define I2C_SCL_PIN (static_cast<gpio_num_t>(board::i2c::scl))
 
-// GPS UART pads; the values are defined beside the panel driver.
-extern uint8_t GPS_TX;
-extern uint8_t GPS_RX;
-
 constexpr uint8_t BOARD_BOOT_PIN = board::buttons::boot;
 
 // Display pins (CO5300 QSPI driver).

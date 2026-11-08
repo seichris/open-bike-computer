@@ -9942,3 +9942,56 @@ extension NavigationProtocolTests {
         assertEqual(offline.diagnosticCode, "transport_metrics_unavailable", "missing metrics cannot prove an unstarted network load")
     }
 }
+
+extension NavigationProtocolTests {
+    /// CAP2 TLV type 5 behind extended bit 5: the manager keeps a consistent
+    /// position-source record and rejects a record or bit on its own.
+    @MainActor
+    static func testPositionSourceCapabilityRecord() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let bit = RideBLEGeneratedProtocolV1.extendedPositionSourceMetadataFeature
+        let header = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0])
+        let extended = Data([3, 4, UInt8(bit & 0xFF), UInt8((bit >> 8) & 0xFF),
+                             UInt8((bit >> 16) & 0xFF), UInt8((bit >> 24) & 0xFF)])
+        let receiverRecord = Data([5, 4, 1, 3, 1, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + receiverRecord),
+               "CAP2 with the position-source record is handled")
+        assert(manager.hasReceivedDeviceCapabilities, "a consistent record keeps the capabilities")
+        assertEqual(manager.positionSourceMetadata?.hasGNSSReceiver, true,
+                    "the manager keeps the parsed receiver record")
+        assert(manager.deviceHasGNSSReceiver, "the manager reports the receiver")
+        assertEqual(manager.positionSourceMetadata?.receiverName, "Quectel LC76G",
+                    "the receiver module is named for the device details")
+
+        let phoneOnly = Data([5, 4, 1, 1, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + phoneOnly),
+               "a phone-only record is handled")
+        assertEqual(manager.positionSourceMetadata?.hasGNSSReceiver, false,
+                    "a phone-only board replaces the previous record")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + receiverRecord),
+               "a record without its extended bit is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "a record without its extended bit is rejected and clears the record")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "an inconsistent record rejects the whole capability response")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended),
+               "the extended bit without its record is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "the extended bit without its record is rejected")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + Data([5, 4, 1, 3, 2, 0])),
+               "an unknown receiver module is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "an unknown receiver module invalidates the record")
+
+        // Older firmware without the record still negotiates.
+        assert(manager.handleDeviceCapabilitiesNotification(header),
+               "a response without the record is handled")
+        assert(manager.hasReceivedDeviceCapabilities && manager.positionSourceMetadata == nil,
+               "firmware without the record keeps its capabilities and no record")
+    }
+}
