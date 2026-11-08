@@ -305,9 +305,11 @@ struct UartTransport {
 struct I2cTransport {
   // Every transaction with the slave waits kStepGapMs first and is tried up
   // to kStepAttempts times; the longest waits are reported so the budget can
-  // be tightened from evidence.
+  // be tightened from evidence. On the bench the slave, once in step with
+  // the reader, served every poll at once except for a stall of more than
+  // two seconds roughly every eighteen seconds (capture 10).
   static constexpr uint32_t kStepGapMs = 20;
-  static constexpr uint8_t kStepAttempts = 100;
+  static constexpr uint8_t kStepAttempts = 200;
   static constexpr uint32_t kIdlePollMs = 200;
   static constexpr uint32_t kAbsentPollMs = 2000;
   // A soldered receiver that keeps failing to answer is a hardware fault;
@@ -481,6 +483,11 @@ struct I2cTransport {
     }
     locked = sawValidSentence;
     if (!answered) {
+      // A slave that answered the previous poll and now refuses beyond the
+      // step budget is busy, not gone: poll again at once. Only a slave
+      // that keeps refusing is polled slowly.
+      if (wasPresent)
+        return 0;
       return consecutiveFailures >= kAbsentPollsBeforeSlow ? kAbsentSlowPollMs
                                                            : kAbsentPollMs;
     }
