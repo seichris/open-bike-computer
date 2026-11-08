@@ -36,6 +36,10 @@ constexpr uint8_t kMaxResetPulses = 3;
 bool fixReported = false;
 uint32_t lastFixLogMs = 0;
 constexpr uint32_t kFixLogIntervalMs = 30'000;
+// Diagnostics profiles repeat the BOOT_GNSS record with its counters at this
+// interval once the probe locked, so a capture ends with the stream's totals.
+uint32_t lastStatusMs = 0;
+constexpr uint32_t kStatusIntervalMs = 30'000;
 constexpr uint32_t kTaskStackBytes = 8192;
 
 GnssStatus snapshot() {
@@ -225,6 +229,7 @@ void reportLocked() {
   state.probeLocked = true;
   portEXIT_CRITICAL(&mux);
   printBoot("ok");
+  lastStatusMs = millis();
   const GnssStatus s = snapshot();
   recordDiagnostic("probe", true, false, s.validSentences, s.invalidSentences);
 }
@@ -525,6 +530,13 @@ void readerTask(void *) {
     drainFixes();
     if (locked)
       reportLocked();
+#if FIRMWARE_DIAGNOSTICS
+    if (probeReported &&
+        static_cast<uint32_t>(millis() - lastStatusMs) >= kStatusIntervalMs) {
+      lastStatusMs = millis();
+      printBoot("ok");
+    }
+#endif
     vTaskDelay(delayMs == 0 ? 1 : pdMS_TO_TICKS(delayMs));
   }
 }
