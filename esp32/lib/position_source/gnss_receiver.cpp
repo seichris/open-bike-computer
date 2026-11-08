@@ -230,7 +230,12 @@ uint32_t consume(const uint8_t *data, size_t len) {
     else if (event == NmeaLineValidator::Event::Invalid)
       ++invalid;
     tallySentenceType(c);
-    const NMEAGPS::decode_t decoded = GPS.decode(c);
+    // handle(), not decode(): decode() parses a sentence, and only handle()
+    // stores the completed fix into the parser's buffer where available()
+    // and read() find it (the old serial path reached it through
+    // available(port)). Captures 18 and 19 fed decode() and saw every
+    // sentence parsed with no interval ever closing.
+    const NMEAGPS::decode_t decoded = GPS.handle(static_cast<uint8_t>(c));
     if (decoded == NMEAGPS::DECODE_COMPLETED)
       ++decodeCompleted;
     else if (decoded == NMEAGPS::DECODE_CHR_INVALID)
