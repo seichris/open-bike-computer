@@ -92,7 +92,9 @@ and its `--require-pmic-read-only` gate.
   backlog=<largest buffered length reported> answerMs=<longest wait for a
   length answer/a data answer> nacks=<refusals of dummy writes/request
   writes/length reads/data reads> repeats=<requests sent again>
-  probe=pending|retry|ok
+  probe=pending|retry|ok ... fixes=<parser intervals completed>
+  sats=<used in the fix>/<in view> fixStatus=<NeoGPS status of the last
+  interval: 0 none, 3 standard>
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
