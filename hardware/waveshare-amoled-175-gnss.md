@@ -176,6 +176,7 @@ on the maintainer's Mac.
 | 2026-11-08 08:59 | `3665e7f0` ordinary (parser fed through `handle()`), at a window | Capture 20 (240 s, gate passed): `types=210/210/210/840/1788/210/0/17`, `decode=3468/7299`, and `fixes=1`: the parser now stores a fix at each RMC, but it buffers only one and the next completed sentence pops an unread one; VTG follows RMC within the same 1 KB chunk, so the fix survived only when a chunk boundary fell between the two. The reader now drains fixes after every completed sentence. |
 | 2026-11-08 09:10 | `8b79e947` ordinary (fixes drained after every sentence), at a window | **Fix evidence passed** (capture 21, 240 s, every gate passed): `GNSS: fix sats=13 …` and two 30-second checkpoints with 13 to 14 satellites used, `fixStatus=3` (standard), `fixes=182` (one per epoch), the position at the window (coordinates only in the log on the maintainer's Mac); `types=182/182/182/728/1502/182/0/17`, `decode=2958/6279`, no other bus device disturbed. The diagnostics events `gnss/fix` and `gnss/fix_checkpoint` are recorded with it. |
 | 2026-11-08 09:44 | `50cd5d62` ordinary (position-source report in `DSTS`), at a window | Capture 22 (60 s, every gate passed): `fixes=38 sentences=486 invalid=0`, one interval per epoch, no position fix within the minute after the module's restart. The Bicino Dev app built from `1d734ae6` (Developer Settings, Position Source section) was installed on the maintainer's iPhone for the live check. |
+| 2026-11-08 12:07 | `ff4fa84c` ordinary (report carries the device's uptime), at a window | Capture 23 (60 s, every gate passed): `fixes=41 sentences=611 invalid=0`, no position fix in the first minute. The app built from the same commit (Developer Settings shows the report's age and the device's uptime) was installed on the maintainer's iPhone. Between 10:02Z and 11:18Z the earlier app had shown one unchanging report for 76 minutes without a disconnect; whether the link or the receiver's reader had stopped is open, and the report's age now tells them apart. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -228,3 +229,8 @@ to 14 satellites at the window, one per epoch, which closes gate 2.
   the receiver with the phone off (Developer Settings, Position Source, now
   shows the device's live report), and the phone-navigation check on the
   plain image.
+- A report that stood still for 76 minutes in the app on 2026-11-08 (no
+  disconnect, counters frozen at 354 fix intervals about six minutes after
+  the restart): a stale link or a stopped reader task. The report's age and
+  the device's uptime in the section tell them apart on the next occurrence;
+  a stopped reader then needs a serial capture of that state.
