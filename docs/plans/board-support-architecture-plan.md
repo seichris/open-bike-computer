@@ -563,8 +563,13 @@ that board once it is tested (see Decisions).
   resolved within half a second and the stream kept up. The plain 1.75
   image from the same commit (`7c92f6c8`) boots on this unit with the
   read-only PMIC and ready gates (the M5 gate's boot half; the phone
-  navigation check is the maintainer's). Fix evidence with sky view remains
-  owed.
+  navigation check is the maintainer's). Fix evidence passed at a window on
+  2026-11-08 09:10Z (capture 21, `8b79e947`): standard fixes with 13 to 14
+  satellites, one per epoch, once the reader fed the parser through
+  NeoGPS's `handle()` (only it stores a fix) and read each fix before the
+  next sentence (the one-fix buffer loses it otherwise; a UART reader never
+  met either). Still the maintainer's: the device following the receiver
+  with the phone off, and the phone-navigation check on the plain image.
 
 ### The confinement test
 

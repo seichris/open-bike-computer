@@ -174,6 +174,7 @@ on the maintainer's Mac.
 | 2026-11-08 08:39 | `d8077c56` ordinary (parser counters, raw sample), at a window | Capture 18 (120 s, gate passed): the raw sample is NMEA 4.10 (`$GNGGA`, `$GNGLL`, four `$GNGSA` with system IDs, `$GPGSV` with signal IDs) and the parser completes the sentences (`decode=1327/2929` against `sentences=1340`; the rejected bytes are line ends and the proprietary `$PQTM` sentences), yet `fixes=0`. |
 | 2026-11-08 08:49 | `23628aa8` ordinary (sentence tally, epoch sample), at a window | Capture 19 (180 s, gate passed): epoch order GGA, GLL, GSA×4, GSV per constellation, RMC, VTG; `types=140/140/140/560/1240/140/0/15` in three minutes, 25 satellites in view with weak signals, `$GNRMC,...,V,...` (no fix), still `fixes=0`. The cause is the parser's API, not the stream: the reader fed NeoGPS through `decode()`, which parses but never stores a fix; only `handle()` does, which the old serial path reached through `available(port)`. |
 | 2026-11-08 08:59 | `3665e7f0` ordinary (parser fed through `handle()`), at a window | Capture 20 (240 s, gate passed): `types=210/210/210/840/1788/210/0/17`, `decode=3468/7299`, and `fixes=1`: the parser now stores a fix at each RMC, but it buffers only one and the next completed sentence pops an unread one; VTG follows RMC within the same 1 KB chunk, so the fix survived only when a chunk boundary fell between the two. The reader now drains fixes after every completed sentence. |
+| 2026-11-08 09:10 | `8b79e947` ordinary (fixes drained after every sentence), at a window | **Fix evidence passed** (capture 21, 240 s, every gate passed): `GNSS: fix sats=13 …` and two 30-second checkpoints with 13 to 14 satellites used, `fixStatus=3` (standard), `fixes=182` (one per epoch), the position at the window (coordinates only in the log on the maintainer's Mac); `types=182/182/182/728/1502/182/0/17`, `decode=2958/6279`, no other bus device disturbed. The diagnostics events `gnss/fix` and `gnss/fix_checkpoint` are recorded with it. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -208,7 +209,8 @@ Captures 14 to 20 then chased the missing fix to the reader itself: it fed
 the parser through `decode()`, which never stores a fix (`handle()` does),
 and then read the stored fix only after a whole chunk, while the parser's
 one-fix buffer loses it to the next sentence; fixes are now drained after
-every completed sentence.
+every completed sentence. Capture 21 then delivered standard fixes with 13
+to 14 satellites at the window, one per epoch, which closes gate 2.
 
 ## Open items
 
@@ -217,3 +219,10 @@ every completed sentence.
   not wired into the configurable screens.
 - No command is sent to the receiver (rate, constellations, PAIR/PQTM); it
   runs its defaults.
+- The record's satellites-in-view count reads the parser's satellite table,
+  which holds only the last constellation's GSV set and resets at each
+  interval, so it reads 0 beside a used count of 13; counting across the
+  constellations' sets is a diagnostics improvement, not a gate.
+- The maintainer's visual checks: the device map or coordinates following
+  the receiver with the phone off, and the phone-navigation check on the
+  plain image.
