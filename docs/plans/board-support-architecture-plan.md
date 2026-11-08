@@ -533,7 +533,7 @@ that board once it is tested (see Decisions).
   recorded risk acceptance after the plain 1.75 image built from M6 booted on
   the GNSS bench unit with the read-only PMIC and ready gates; the
   phone-navigation check on that image stays owed.
-- **M6, 2026-11-08, in review (#776, against `main` since M5 merged).** The first variant through the
+- **M6, 2026-11-08, merged as `58f6c92f` (#776).** The first variant through the
   checklist is the 1.75 with the Quectel LC76G populated,
   `WAVESHARE_AMOLED_175_GNSS`: `boards/waveshare_amoled_175_gnss.hpp` (the
   shared 1.75 data moved to `waveshare_amoled_175_common.hpp`, the plain and
@@ -550,9 +550,11 @@ that board once it is tested (see Decisions).
   most specific file, and the ratchet gained no entry (the variant macro
   appears only in `lib/board`). No file under `src/`, `gui/`, `maps/` or
   `storage/` changed; `ble_navigation.cpp` gained the `DSTS` position-source
-  report that the app's Developer Settings show. Hardware gate: owed on the bench
-  unit (boot capture with the read-only PMIC and receiver gates, fix evidence,
-  the plain 1.75 image on the same unit for M5). The first three bench
+  report that the app's Developer Settings show. Hardware gate: passed on the
+  bench unit on 2026-11-08 (boot capture with the read-only PMIC and receiver
+  gates, fix evidence on serial and on the device through the app's Position
+  Source report); the plain 1.75 image boots on the same unit, and its
+  phone-navigation check stays owed under #775's accepted risk. The first three bench
   captures ran the UART transport and passed identity, PMIC and ready while
   every candidate receiver line floated; Waveshare's hardware reference and
   LC76G example put the receiver on the I2C bus, so the part gained the I2C
