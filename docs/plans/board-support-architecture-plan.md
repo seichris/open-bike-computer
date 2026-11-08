@@ -303,7 +303,7 @@ A variant is complete when all of these exist:
    TLV.
 
 The GNSS 1.75 as a worked example: a board file that includes the 1.75 file and
-sets `gnss{fitted=true, uart, rx, tx, module}`; environments
+sets `gnss{fitted=true, module, transport, ...}`; environments
 `WAVESHARE_AMOLED_175_GNSS*` extending the 1.75 base with the new target; the
 position-source part compiled with both the phone and the GNSS implementation;
 a position-source TLV; routing that `175_gnss` paths select only that target;
@@ -505,17 +505,21 @@ that board once it is tested (see Decisions).
   panel header by target macro and keeps its exemption in the confinement
   test; moving that choice into `lib/board/` is open and belongs to no
   milestone yet. M5 and M6 wait for the GNSS 1.75 session.
-- **M5, 2026-11-08, in review.** The position source is one part.
+- **M5, 2026-11-08, merged as `0b51d611` (#775).** The position source is one part.
   `lib/position_source/` arbitrates between the phone's BLE positions and an
   onboard receiver (`position_source_policy.hpp`: a fitted receiver holds the
   shared position record for 3 s after each valid fix, the phone's positions
   apply otherwise and keep feeding ride automation throughout);
-  `gnss_receiver.cpp` carries the NMEA reader, the serial-rate probe and the
-  expander-driven reset release behind the board file's `BOARD_GNSS_FITTED`,
-  with no-op stubs elsewhere; the board data gained `gnss::{module, uart, rx,
-  tx, baud, resetViaExpander, resetExpanderPin}` and no longer claims the H2
+  `gnss_receiver.cpp` carries the NMEA reader behind the board file's
+  `BOARD_GNSS_FITTED` with no-op stubs elsewhere, on the transport the board
+  data names (a UART with a rate probe, or the receiver's I2C slave polled
+  with Quectel's command/answer scheme, which is what Waveshare's "-G" 1.75
+  wires) plus the expander-driven reset release; the board data gained
+  `gnss::{module, transport, i2cCommandAddress, i2cDataAddress, uart, rx, tx,
+  baud, resetViaExpander, resetExpanderPin}` and no longer claims the H2
   header's UART0 pads (GPIO43/44) as a receiver footprint, since the vendor
-  schematic routes the LC76G footprint to GPIO18/17 and EXIO7. `HAS_HARDWARE_GPS`
+  schematic routes the LC76G footprint's optional UART links to GPIO18/17
+  and its RESET to EXIO7. `HAS_HARDWARE_GPS`
   and `AT6558D_GPS` are gone with the IceNav GPS task and mutex, the baud and
   update-rate settings rows and the `GPS_TX`/`GPS_RX` globals; the TCA9554
   helpers moved out of the panel driver into `waveshare_board::tca9554`.
@@ -525,7 +529,51 @@ that board once it is tested (see Decisions).
   `ble_navigation.cpp`). AMOLED behaviour is unchanged by construction: no
   board declares a receiver yet, so the arbiter always accepts the phone.
   Hardware gate: none of its own; the first fitted receiver is M6's board,
-  whose boot capture also covers this part.
+  whose boot capture also covers this part. Merged on the maintainer's
+  recorded risk acceptance after the plain 1.75 image built from M6 booted on
+  the GNSS bench unit with the read-only PMIC and ready gates; the
+  phone-navigation check on that image stays owed.
+- **M6, 2026-11-08, in review (#776, against `main` since M5 merged).** The first variant through the
+  checklist is the 1.75 with the Quectel LC76G populated,
+  `WAVESHARE_AMOLED_175_GNSS`: `boards/waveshare_amoled_175_gnss.hpp` (the
+  shared 1.75 data moved to `waveshare_amoled_175_common.hpp`, the plain and
+  variant files add identity and `gnss`), three environments on the 1.75 SDK
+  policy, `changed_components`/`ci_scopes` routing (the pair on shared
+  changes, the three profiles for the variant's board file, manual selector
+  `175_gnss`, never packaged, never in `all`), the device registry family
+  with longest-match ownership, a `capture_boot.py --require-gnss` gate
+  (`BOOT_GNSS probe=ok` with checksum-valid sentences), and the hardware
+  pages. One checklist assumption did not hold: the AMOLED whole-file gates
+  key on the board macros, so a variant that defined only its own macro lost
+  the panel, touch and RTC. The rule is now that a variant defines its base
+  board's macro and its own, `board.hpp` requires the base and selects the
+  most specific file, and the ratchet gained no entry (the variant macro
+  appears only in `lib/board`). No file under `src/`, `gui/`, `maps/` or
+  `storage/` changed; `ble_navigation.cpp` gained the `DSTS` position-source
+  report that the app's Developer Settings show. Hardware gate: owed on the bench
+  unit (boot capture with the read-only PMIC and receiver gates, fix evidence,
+  the plain 1.75 image on the same unit for M5). The first three bench
+  captures ran the UART transport and passed identity, PMIC and ready while
+  every candidate receiver line floated; Waveshare's hardware reference and
+  LC76G example put the receiver on the I2C bus, so the part gained the I2C
+  transport and the board data a `transport` field before the fourth capture.
+  Capture 8 (`66acd3fb`, 2026-11-08 07:12Z) passed the receiver gate over
+  I2C once the transport followed the vendor driver's transaction pattern
+  (`$PQTMVER` first, 29 checksum-valid sentences, no other bus device
+  disturbed). Captures 9 to 13 then settled the stream: the reader restarts
+  the module when it starts (an overflowed slave refuses reads until
+  restarted), drains the announced length in 1 KB chunks and sends a request
+  again when its answer keeps being refused, after which every stall
+  resolved within half a second and the stream kept up. The plain 1.75
+  image from the same commit (`7c92f6c8`) boots on this unit with the
+  read-only PMIC and ready gates (the M5 gate's boot half; the phone
+  navigation check is the maintainer's). Fix evidence passed at a window on
+  2026-11-08 09:10Z (capture 21, `8b79e947`): standard fixes with 13 to 14
+  satellites, one per epoch, once the reader fed the parser through
+  NeoGPS's `handle()` (only it stores a fix) and read each fix before the
+  next sentence (the one-fix buffer loses it otherwise; a UART reader never
+  met either). Still the maintainer's: the device following the receiver
+  with the phone off, and the phone-navigation check on the plain image.
 
 ### The confinement test
 
@@ -576,17 +624,25 @@ selects:
    kept as reference; Git history holds the removed code. Done 2026-11-06 from
    `main` at `0f2d209d`, before #442 merged, on the maintainer's instruction.
 
-Still open:
+2. **The GNSS 1.75 is a real target.** Decided 2026-11-08 with M6: a 1.75
+   with the Quectel LC76G populated on the vendor footprint (Waveshare's "-G"
+   model) is on the bench (USB serial enrolled as `waveshare-175-gnss`). The
+   ESP32 reads the receiver over the shared I2C bus (0x50/0x54) and resets it
+   through expander pin EXIO7; the schematic's UART links to GPIO18/17 are
+   optional and unfitted, and the header's UART0 pads the plan assumed are
+   not involved at all.
+3. **A variant is always its own image**, including for an optional module:
+   its own `custom_firmware_target`, OTA identity, environments, CI routing
+   and gates. Confirmed with M6.
+4. **Naming and macros.** Variant targets append the module to the base
+   board (`WAVESHARE_AMOLED_175_GNSS`). A variant defines its base board's
+   macro and its own: the base macro keeps every whole-file gate and arm of
+   the board, the variant macro selects the variant's board file in
+   `board.hpp` (which requires the base) and names the image. Board files
+   live in `esp32/lib/board/boards/`; shared board data of a family goes in a
+   `*_common.hpp` the base and variant files include.
 
-2. Whether a GNSS 1.75 is a real target. The 1.75 pads are unpopulated, so it
-   needs a fitted module and its own bench board before M5 and M6 are worth
-   doing. A 1.75 with a fitted module exists on the maintainer's bench
-   (2026-11-07); its qualification is deferred, so the decision stays open
-   until it is tested.
-3. Confirm the rule that a variant is always its own image, including for an
-   optional GNSS module.
-4. Target naming for variants (`WAVESHARE_AMOLED_175_GNSS`). Board files live
-   in `esp32/lib/board/boards/` since M1.
+Still open: none.
 
 ## Related documents
 

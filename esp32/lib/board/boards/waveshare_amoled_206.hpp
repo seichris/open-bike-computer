@@ -117,6 +117,9 @@ namespace gnss {
 // UART0 pins (GPIO43/44).
 constexpr bool fitted = false;
 constexpr GnssModule module = GnssModule::none;
+constexpr GnssTransport transport = GnssTransport::none;
+constexpr uint8_t i2cCommandAddress = 0;
+constexpr uint8_t i2cDataAddress = 0;
 constexpr uint8_t uart = 2;
 constexpr uint8_t rx = noPin;
 constexpr uint8_t tx = noPin;
@@ -165,3 +168,6 @@ static_assert(BOARD_PMIC_DISPLAY_ENABLE_RECOVERY == board::power::displayEnableR
 #define BOARD_GNSS_FITTED 0
 static_assert((BOARD_GNSS_FITTED != 0) == board::gnss::fitted,
               "GNSS macro and board data disagree");
+static_assert(board::gnss::fitted ==
+                  (board::gnss::transport != board::GnssTransport::none),
+              "a fitted receiver needs a transport and an unfitted one none");

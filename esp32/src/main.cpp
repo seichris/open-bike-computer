@@ -2325,7 +2325,7 @@ void loop() {
           lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {
     lastBleHousekeepingMs = now;
     bleNavServer.process();
-    if (position_source::takeFreshGnssFix() && noteNavigationInputForMapEntry()) {
+    if (position_source::applyPendingGnssFix() && noteNavigationInputForMapEntry()) {
       Serial.println("GNSS: Fresh device fix received, transitioning to map...");
     }
   }

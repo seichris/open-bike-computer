@@ -43,6 +43,7 @@ on:
           - "175"
           - "206"
           - "397"
+          - "175_gnss"
           - all
 
 permissions:
@@ -202,7 +203,7 @@ jobs:
           factory_args=()
           # E-paper production is a compile/size qualification profile only;
           # factory and release packaging remain AMOLED-only.
-          if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION ]]; then
+          if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION && "${BUILD_ENVIRONMENT}" != *_GNSS_PRODUCTION ]]; then
             factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
             factory_args=(
               --factory-output-dir
@@ -283,7 +284,7 @@ jobs:
           fi
           "${nm_bin}" --print-size --size-sort --radix=d "${elf}" | tail -n 120
       - name: Verify production factory bundle packaging
-        if: endsWith(matrix.target, '_PRODUCTION') && startsWith(matrix.target, 'WAVESHARE_AMOLED_')
+        if: endsWith(matrix.target, '_PRODUCTION') && startsWith(matrix.target, 'WAVESHARE_AMOLED_') && !contains(matrix.target, '_GNSS')
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
         run: |

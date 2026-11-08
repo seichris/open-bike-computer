@@ -1188,3 +1188,90 @@ struct DevicePositionSourceMetadata: Equatable {
         return "iPhone"
     }
 }
+
+/// The device's live position-source report from its `DSTS` status: which
+/// input populates its position record now and, where a receiver is fitted,
+/// the receiver's state. Diagnostic; it carries no coordinate.
+struct DevicePositionSourceStatus: Equatable {
+    let active: String
+    let uptimeMs: Int?
+    let gnssFitted: Bool
+    let module: String?
+    let transport: String?
+    let present: Bool?
+    let locked: Bool?
+    let fixValid: Bool?
+    let satellites: Int?
+    let fixes: Int?
+    let sentences: Int?
+    let invalid: Int?
+    let lastFixAgeMs: Int?
+    let resetPulses: Int?
+
+    init?(json: [String: Any]) {
+        guard let active = json["active"] as? String,
+              ["none", "phone", "gnss"].contains(active),
+              let gnssFitted = json["gnssFitted"] as? Bool else { return nil }
+        self.active = active
+        self.gnssFitted = gnssFitted
+        uptimeMs = (json["uptimeMs"] as? NSNumber)?.intValue
+        module = json["module"] as? String
+        transport = json["transport"] as? String
+        present = json["present"] as? Bool
+        locked = json["locked"] as? Bool
+        fixValid = json["fixValid"] as? Bool
+        satellites = (json["satellites"] as? NSNumber)?.intValue
+        fixes = (json["fixes"] as? NSNumber)?.intValue
+        sentences = (json["sentences"] as? NSNumber)?.intValue
+        invalid = (json["invalid"] as? NSNumber)?.intValue
+        lastFixAgeMs = (json["lastFixAgeMs"] as? NSNumber)?.intValue
+        resetPulses = (json["resetPulses"] as? NSNumber)?.intValue
+    }
+
+    var activeLabel: String {
+        switch active {
+        case "gnss": return "Device GNSS"
+        case "phone": return "iPhone"
+        default: return "none yet"
+        }
+    }
+
+    var receiverLabel: String {
+        guard gnssFitted else { return "not fitted" }
+        switch module {
+        case "lc76g": return "Quectel LC76G"
+        case let name?: return name
+        default: return "fitted"
+        }
+    }
+
+    var fixLabel: String {
+        guard gnssFitted else { return "n/a" }
+        if fixValid == true {
+            // The device holds the last interval's state; a fix older than
+            // the arbiter's three-second hold no longer feeds the record.
+            if let lastFixAgeMs, lastFixAgeMs > 3000 {
+                return "stale, last fix \(lastFixAgeMs / 1000) s ago"
+            }
+            return "valid"
+        }
+        if locked == true { return "no fix yet" }
+        return present == true ? "waiting for sentences" : "receiver not answering"
+    }
+
+    var sentencesLabel: String {
+        guard let sentences else { return "unknown" }
+        return "\(sentences) valid, \(invalid ?? 0) invalid"
+    }
+
+    var lastFixLabel: String {
+        guard let lastFixAgeMs else { return "never" }
+        return lastFixAgeMs < 1000 ? "now" : "\(lastFixAgeMs / 1000) s ago"
+    }
+
+    var uptimeLabel: String {
+        guard let uptimeMs else { return "unknown" }
+        let seconds = uptimeMs / 1000
+        return String(format: "%d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+}

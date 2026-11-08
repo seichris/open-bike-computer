@@ -135,7 +135,7 @@ int main() {
         )
         self.assertIn("WAVESHARE_LEGACY_SD_CLK = board::sd::legacySpiClk", hal_pins)
         for board_file, legacy_cs in (
-            ("waveshare_amoled_175.hpp", 41),
+            ("waveshare_amoled_175_common.hpp", 41),
             ("waveshare_amoled_206.hpp", 17),
         ):
             sd = (

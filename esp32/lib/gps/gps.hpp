@@ -41,12 +41,28 @@ static const uint8_t canvasCenter_X = canvasSize / 2;
 static const uint8_t canvasCenter_Y = canvasSize / 2;
 static const uint8_t canvasRadius = canvasCenter_X - canvasOffset;
 
+/**
+ * @brief The parser's satellite table as of one completed interval
+ *
+ * Copied by the task that parses NMEA, so the task that owns gpsData can
+ * apply it without reading the parser while it runs.
+ */
+struct GpsSatelliteSnapshot {
+#ifdef NMEAGPS_PARSE_SATELLITES
+  uint8_t count = 0;
+  NMEAGPS::satellite_view_t views[NMEAGPS_MAX_SATELLITES];
+#endif
+};
+
 class Gps {
 public:
   Gps();
   double getLat();
   double getLon();
-  void getGPSData();
+  // Applies the parser's `fix` global and an interval's satellite table to
+  // gpsData. Call it only from the task that owns gpsData and the LVGL
+  // objects (the main loop): it also sets the clock and sends an LVGL event.
+  void getGPSData(const GpsSatelliteSnapshot &satellites);
   bool isSpeedChanged();
   bool isAltitudeChanged();
   bool hasLocationChange();

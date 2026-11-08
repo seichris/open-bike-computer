@@ -72,10 +72,10 @@ double Gps::getLon()
 }
 
 /**
- * @brief Get GPS parsed data
+ * @brief Apply the parsed fix and an interval's satellite table to gpsData
  *
  */
-void Gps::getGPSData()
+void Gps::getGPSData(const GpsSatelliteSnapshot &satellites)
 {
   const uint32_t capturedAtMs = millis();
   GpsRideObservation ride;
@@ -168,15 +168,15 @@ void Gps::getGPSData()
 
   // Satellite info
 #ifdef NMEAGPS_PARSE_SATELLITES
-  gpsData.satInView = (uint8_t)GPS.sat_count;
+  gpsData.satInView = satellites.count;
   for (uint8_t i = 0; i < gpsData.satInView; i++)
   {
-    satTracker[i].satNum = (uint8_t)GPS.satellites[i].id;
-    satTracker[i].elev = (uint8_t)GPS.satellites[i].elevation;
-    satTracker[i].azim = (uint16_t)GPS.satellites[i].azimuth;
-    satTracker[i].snr = (uint8_t)GPS.satellites[i].snr;
-    satTracker[i].active = GPS.satellites[i].tracked;
-    strncpy(satTracker[i].talker_id, GPS.satellites[i].talker_id, 3);
+    satTracker[i].satNum = (uint8_t)satellites.views[i].id;
+    satTracker[i].elev = (uint8_t)satellites.views[i].elevation;
+    satTracker[i].azim = (uint16_t)satellites.views[i].azimuth;
+    satTracker[i].snr = (uint8_t)satellites.views[i].snr;
+    satTracker[i].active = satellites.views[i].tracked;
+    strncpy(satTracker[i].talker_id, satellites.views[i].talker_id, 3);
     int H = canvasRadius * (90 - satTracker[i].elev) / 90;
     satTracker[i].posX = canvasCenter_X + H * sin(DEG2RAD(satTracker[i].azim));
     satTracker[i].posY = canvasCenter_Y - H * cos(DEG2RAD(satTracker[i].azim));

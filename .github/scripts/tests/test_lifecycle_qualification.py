@@ -61,8 +61,9 @@ class LifecycleQualificationTests(unittest.TestCase):
         self.assertIn("fresh durable admission and operation identity required", ci)
         self.assertIn("durable OTA acceptance could not be confirmed", ci)
         self.assertIn('python3 tools/build_firmware.py', ci)
-        # Lifecycle suffixes never match the AMOLED-only factory packaging gate.
-        self.assertIn('if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION ]]; then', ci)
+        # Lifecycle suffixes never match the AMOLED-only factory packaging gate,
+        # and the experimental GNSS variant's production image is excluded from it.
+        self.assertIn('if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION && "${BUILD_ENVIRONMENT}" != *_GNSS_PRODUCTION ]]; then', ci)
         self.assertNotRegex(ci, r"build_firmware\.py[^\n]*(?:--upload|--device-serial)")
         for workflow in ("firmware-release.yml", "firmware-release-candidate.yml"):
             self.assertNotIn("LIFECYCLE_QUALIFICATION", (ROOT / ".github/workflows" / workflow).read_text())

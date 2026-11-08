@@ -26,6 +26,8 @@ CORE_FIRMWARE_TARGETS = {
 REMOTE_DEBUG_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
     "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
+    # The experimental GNSS 1.75 variant's remote-debug profile.
+    "WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG",
 }
 DIAGNOSTIC_FIRMWARE_TARGETS = {
     *REMOTE_DEBUG_FIRMWARE_TARGETS,
@@ -784,6 +786,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('"${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION', general_ci)
         self.assertIn("startsWith(matrix.target, 'WAVESHARE_AMOLED_')", general_ci)
         self.assertIn('          - "397"', general_ci)
+        self.assertIn('          - "175_gnss"', general_ci)
+        # The experimental GNSS variant is never packaged as a factory bundle.
+        self.assertIn('"${BUILD_ENVIRONMENT}" != *_GNSS_PRODUCTION', general_ci)
+        self.assertIn("!contains(matrix.target, '_GNSS')", general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
         agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")

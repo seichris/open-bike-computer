@@ -60,7 +60,7 @@ def check_condition_inputs(source):
     # E-paper profiles define their board macro; each board's coverage below
     # evaluates only that board's profiles.
     known = {re.match(r'-D([A-Za-z_][A-Za-z_0-9]*)', flag)[1]
-             for hardware in ('all', '397')
+             for hardware in ('all', '397', '175_gnss')
              for profile in changed_components.select_firmware_targets(hardware)
              for flag in flags(profile)}
     known |= {d.split('=')[0] for d in PLATFORM_DEFINES} | UNDEFINED_IN_REGULAR_PROFILES

@@ -3714,6 +3714,42 @@ static std::string genericTransferStatusJson() {
                         storage.storagePowerCycleRequired());
     body += "}";
   }
+  {
+    // The position source: which input populates the shared position record
+    // now and, where a receiver is fitted, the receiver's state. A diagnostic
+    // reading for the app's developer settings; it never carries a
+    // coordinate.
+    const uint32_t nowMs = millis();
+    status_json::appendFieldPrefix(body, "positionSource");
+    body += "{\"active\":\"";
+    body += position_source::activeSourceName(nowMs);
+    body += "\"";
+    // The device's uptime lets the app tell a frozen report from a frozen
+    // reader: counters that stop while uptime advances are the reader's.
+    status_json::appendUnsignedField(body, "uptimeMs", nowMs);
+    status_json::appendBoolField(body, "gnssFitted", position_source::gnssFitted());
+    if (position_source::gnssFitted()) {
+      const position_source::GnssStatus gnss = position_source::gnssStatus();
+      status_json::appendStringField(body, "module", position_source::moduleName());
+      status_json::appendStringField(body, "transport",
+                                     position_source::transportName());
+      status_json::appendBoolField(body, "present", gnss.portOpen);
+      status_json::appendBoolField(body, "locked", gnss.probeLocked);
+      status_json::appendBoolField(body, "fixValid", gnss.fixValid);
+      status_json::appendUnsignedField(body, "satellites", gnss.satellites);
+      status_json::appendUnsignedField(body, "fixes", gnss.fixes);
+      status_json::appendUnsignedField(body, "sentences", gnss.validSentences);
+      status_json::appendUnsignedField(body, "invalid", gnss.invalidSentences);
+      if (gnss.lastFixMs != 0) {
+        // A fix that lands between the clock read and the snapshot is new.
+        const int32_t ageMs = static_cast<int32_t>(nowMs - gnss.lastFixMs);
+        status_json::appendUnsignedField(
+            body, "lastFixAgeMs", ageMs > 0 ? static_cast<uint32_t>(ageMs) : 0U);
+      }
+      status_json::appendUnsignedField(body, "resetPulses", gnss.resetPulses);
+    }
+    body += "}";
+  }
   status_json::appendFieldPrefix(body, "maintenance");
   body += "{\"supported\":";
   body += kFirmwareMaintenanceSupported ? "true" : "false";

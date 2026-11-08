@@ -142,6 +142,11 @@ namespace waveshare_board { int recoveries = 0; void recoverI2CBus() { ++recover
 #define I2C_SDA_PIN 15
 #define I2C_SCL_PIN 14
 constexpr uint16_t DEFAULT_TIMEOUT_MS = 50;
+#define I2C_BUFFER_LENGTH 128
+constexpr size_t STREAM_BUFFER_BYTES =
+    board::gnss::transport == board::GnssTransport::i2c ? 1024 : 128;
+constexpr uint16_t TRANSACTION_TIMEOUT_MS =
+    board::gnss::transport == board::GnssTransport::i2c ? 150 : DEFAULT_TIMEOUT_MS;
 struct Stats { uint32_t recoveryAttempts = 0, failedTransactions = 0, recoveredTransactions = 0, missingDevices = 0; };
 struct Counters {
   std::atomic<uint32_t> recoveryAttempts{0}, failedTransactions{0}, recoveredTransactions{0}, missingDevices{0};
@@ -163,9 +168,12 @@ struct SerialMock {
 // frees the buffers on failure; beginTransmission() takes the mutex;
 // endTransmission() returns 4 on a missing buffer without releasing it. A take
 // while the mutex is held is the deadlock the production code must avoid.
+// setBufferSize() only records the size the next begin() allocates.
 struct WireMock {
   bool lockCreated = false, taken = false, hasBuffer = false, ack = true;
   int failNextBegins = 0, begins = 0, ends = 0, transactions = 0, deadlocks = 0, clocks = 0, timeouts = 0;
+  size_t bufferBytes = I2C_BUFFER_LENGTH;
+  size_t setBufferSize(size_t bytes) { bufferBytes = bytes; return bytes; }
   bool begin(int, int) {
     lockCreated = true;
     if (taken) { ++deadlocks; return false; }

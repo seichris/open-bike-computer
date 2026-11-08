@@ -10,7 +10,6 @@ namespace position_source {
 namespace {
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 Arbiter arbiter;
-bool freshFixPending = false;
 }  // namespace
 
 void begin() {
@@ -36,18 +35,10 @@ void notePhonePosition(uint32_t nowMs) {
 void noteGnssFix(uint32_t nowMs, bool fixValid) {
   portENTER_CRITICAL(&mux);
   arbiter.noteGnss(nowMs, fixValid);
-  if (fixValid)
-    freshFixPending = true;
   portEXIT_CRITICAL(&mux);
 }
 
-bool takeFreshGnssFix() {
-  portENTER_CRITICAL(&mux);
-  const bool pending = freshFixPending;
-  freshFixPending = false;
-  portEXIT_CRITICAL(&mux);
-  return pending;
-}
+bool applyPendingGnssFix() { return gnss_receiver::applyPendingFix(); }
 
 Source activeSource(uint32_t nowMs) {
   portENTER_CRITICAL(&mux);
@@ -71,6 +62,30 @@ const char *moduleName() {
   case board::GnssModule::quectelLc76g:
     return "lc76g";
   case board::GnssModule::none:
+    break;
+  }
+  return "none";
+}
+
+const char *transportName() {
+  switch (board::gnss::transport) {
+  case board::GnssTransport::uart:
+    return "uart";
+  case board::GnssTransport::i2c:
+    return "i2c";
+  case board::GnssTransport::none:
+    break;
+  }
+  return "none";
+}
+
+const char *activeSourceName(uint32_t nowMs) {
+  switch (activeSource(nowMs)) {
+  case Source::Phone:
+    return "phone";
+  case Source::Gnss:
+    return "gnss";
+  case Source::None:
     break;
   }
   return "none";

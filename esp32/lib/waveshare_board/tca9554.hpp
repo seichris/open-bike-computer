@@ -5,6 +5,8 @@
 // TCA9554 I/O expander on the board I2C bus (waveshare_board::TCA9554_ADDR).
 // Output levels and pin directions are shadowed here so every user of the
 // expander (touch reset, GNSS receiver reset) works on one register image.
+// Each update and its register write happen under one lock, so users on
+// different tasks cannot write over each other's pins.
 namespace waveshare_board::tca9554 {
 
 constexpr uint8_t OUTPUT_REG = 0x01;

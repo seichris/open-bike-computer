@@ -362,6 +362,33 @@ assert "-DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT" not in config.get(
     "env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags"
 )
 assert "-DARDUINO_USB_CDC_ON_BOOT=0" in config.get("env:WAVESHARE_EPAPER_397_PRODUCTION", "build_flags")
+# The GNSS 1.75 variant shares the 1.75 electrical and SDK policy under its
+# own target: it defines the 1.75 board macro (every 1.75 gate applies) and
+# its own variant macro, which selects its board file.
+gnss_base = "waveshare_amoled_175_gnss_base"
+assert config.get(gnss_base, "extends") == "waveshare_amoled_common"
+assert config.get(gnss_base, "custom_firmware_target") == "WAVESHARE_AMOLED_175_GNSS"
+assert "${waveshare_amoled_175_base.custom_sdkconfig}" in config.get(gnss_base, "custom_sdkconfig")
+gnss_flags = config.get(gnss_base, "build_flags")
+assert "-DWAVESHARE_AMOLED_175_GNSS" in gnss_flags
+assert "-DWAVESHARE_AMOLED_175\n" in gnss_flags
+assert "waveshare_amoled_175_base.build_flags" not in gnss_flags
+assert "-DPERSISTENT_RIDE_DIAGNOSTICS=1" in gnss_flags
+for suffix in ("", "_REMOTE_DEBUG", "_PRODUCTION"):
+    environment = "env:WAVESHARE_AMOLED_175_GNSS" + suffix
+    assert inherited_option(environment, "custom_firmware_target") == "WAVESHARE_AMOLED_175_GNSS"
+    expected_partition = "partitions.csv" if suffix == "_PRODUCTION" else "partitions_remote_debug.csv"
+    assert inherited_option(environment, "board_build.partitions") == expected_partition
+    flags = config.get(environment, "build_flags")
+    assert "waveshare_amoled_175_base.build_flags" not in flags
+    assert "gnss_base.build_flags" in flags or "WAVESHARE_AMOLED_175_GNSS.build_flags" in flags
+gnss_remote_debug = config.get("env:WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG", "build_flags")
+assert "-DDEVICE_REMOTE_DEBUG=1" in gnss_remote_debug
+assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in gnss_remote_debug
+gnss_production = config.get("env:WAVESHARE_AMOLED_175_GNSS_PRODUCTION", "build_flags")
+assert "-DARDUINO_USB_CDC_ON_BOOT=0" in gnss_production
+assert "-DFIRMWARE_DIAGNOSTICS=0" in gnss_production
+assert "-DDEVICE_REMOTE_DEBUG" not in gnss_production
 for environment, (base, board_define) in diagnostic_profiles.items():
     assert config.get(environment, "extends") == base
     assert inherited_option(environment, "custom_firmware_target") == board_define
@@ -433,6 +460,10 @@ remote_debug_profiles = {
     "env:WAVESHARE_AMOLED_206_REMOTE_DEBUG": (
         "env:WAVESHARE_AMOLED_206",
         "WAVESHARE_AMOLED_206",
+    ),
+    "env:WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG": (
+        "env:WAVESHARE_AMOLED_175_GNSS",
+        "WAVESHARE_AMOLED_175_GNSS",
     ),
 }
 for environment, (base, target) in remote_debug_profiles.items():
@@ -595,7 +626,13 @@ assert "CONFIG_GPIO_CTRL_FUNC_IN_IRAM=y" in config.get(
 # BUILD_PROFILE remains the distinct PIO environment identity in boot logs.
 for section in config.sections():
     profile = section.removeprefix("env:")
-    if profile.startswith("WAVESHARE_AMOLED_175"):
+    if profile.startswith("WAVESHARE_AMOLED_175_GNSS"):
+        # The variant is its own image and OTA identity.
+        assert (
+            inherited_option(section, "custom_firmware_target")
+            == "WAVESHARE_AMOLED_175_GNSS"
+        )
+    elif profile.startswith("WAVESHARE_AMOLED_175"):
         assert (
             inherited_option(section, "custom_firmware_target")
             == "WAVESHARE_AMOLED_175"

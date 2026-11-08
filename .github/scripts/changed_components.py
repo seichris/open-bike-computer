@@ -39,6 +39,13 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
         "WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION",
     ),
+    # The experimental 1.75 variant with the GNSS receiver: its own target and
+    # image, excluded from "all", release and factory flows until its gates pass.
+    "175_gnss": (
+        "WAVESHARE_AMOLED_175_GNSS",
+        "WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG",
+        "WAVESHARE_AMOLED_175_GNSS_PRODUCTION",
+    ),
 }
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
@@ -501,7 +508,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--firmware-hardware",
-        choices=("175", "206", "397", "all"),
+        choices=("175", "206", "397", "175_gnss", "all"),
         default="175",
     )
     args = parser.parse_args()

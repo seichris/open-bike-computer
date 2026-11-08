@@ -15,11 +15,39 @@ namespace position_source {
 
 struct GnssStatus {
   bool fitted = false;
+  // UART: the port opened. I2C: the receiver answered its latest poll.
   bool portOpen = false;
+  // Checksum-valid sentences arrived (on a UART, at the rate now in use).
   bool probeLocked = false;
+  // UART only: the rate in use.
   uint32_t baud = 0;
+  // I2C only: polls of the receiver, the ones it did not answer, and the
+  // largest buffered length it reported (how far the reader lags).
+  uint32_t polls = 0;
+  uint32_t pollErrors = 0;
+  uint32_t backlog = 0;
+  // I2C only: the longest wait before the receiver acknowledged the read of
+  // a length answer and of a data answer, in milliseconds (it refuses reads
+  // until the answer is ready), and the refusals (NACKs) per step: the
+  // dummy write that checks the slave, request writes, length reads, data
+  // reads.
+  uint16_t lengthWaitMs = 0;
+  uint16_t dataWaitMs = 0;
+  uint32_t dummyNacks = 0;
+  uint32_t requestNacks = 0;
+  uint32_t lengthNacks = 0;
+  uint32_t dataNacks = 0;
+  // I2C only: requests sent again because the receiver kept refusing the
+  // answer read (an answer belongs to its request).
+  uint32_t requestRepeats = 0;
+  // Every byte read from the port, so a silent line (no bytes) and a wrong
+  // rate (bytes without checksum-valid sentences) can be told apart.
+  uint32_t bytes = 0;
   uint32_t validSentences = 0;
   uint32_t invalidSentences = 0;
+  // RESET pulses issued: the fresh start and every restart after the stream
+  // stopped (on a UART, after probe rounds that saw no bytes).
+  uint32_t resetPulses = 0;
   uint32_t fixes = 0;
   bool fixValid = false;
   uint8_t satellites = 0;
@@ -27,8 +55,9 @@ struct GnssStatus {
   uint32_t lastFixMs = 0;
 };
 
-// Opens the receiver where one is fitted; a no-op elsewhere. Runs where the
-// user interface starts, after the I2C bus and expander are configured.
+// Opens the receiver where one is fitted (the UART, or the I2C slave after a
+// RESET pulse that starts the module fresh); a no-op elsewhere. Runs where
+// the user interface starts, after the I2C bus and expander are configured.
 void begin();
 // Starts the receiver reader task where one is fitted; a no-op elsewhere.
 void startTask();
@@ -36,11 +65,14 @@ void startTask();
 // Whether a phone position may populate the shared record right now.
 bool acceptsPhonePosition(uint32_t nowMs);
 void notePhonePosition(uint32_t nowMs);
-// Receiver side: a parsed fix was applied to the record (valid or not).
+// Receiver side: the reader parsed a fix (valid or not).
 void noteGnssFix(uint32_t nowMs, bool fixValid);
-// One-shot flag raised by a valid receiver fix and consumed by the UI task,
-// which treats the device's own fix as navigation input like a phone position.
-bool takeFreshGnssFix();
+// Main loop only: applies the receiver's latest valid fix to the shared
+// position record, which the reader task never writes, and returns whether
+// one was applied; the loop treats it as navigation input like a phone
+// position. Without a valid fix nothing is applied and the phone keeps the
+// record. A no-op without a receiver.
+bool applyPendingGnssFix();
 
 Source activeSource(uint32_t nowMs);
 GnssStatus gnssStatus();
@@ -51,5 +83,9 @@ bool gnssFitted();
 uint8_t sourceFlags();
 uint8_t moduleCode();
 const char *moduleName();
+// "none", "uart" or "i2c": how the ESP32 reaches the receiver.
+const char *transportName();
+// "none", "phone" or "gnss": which input populates the record now.
+const char *activeSourceName(uint32_t nowMs);
 
 }  // namespace position_source

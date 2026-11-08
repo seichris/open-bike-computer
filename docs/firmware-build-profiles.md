@@ -105,3 +105,19 @@ six when e-paper-named sources change. Manual CI hardware selector `397` builds
 all six on demand; `all` and release CI remain AMOLED-only. See
 [e-paper board notes](../hardware/waveshare-epaper-397.md) for diagnostic
 controls, disabled peripherals, candidate refresh limits and physical gates.
+
+## Experimental GNSS 1.75 variant
+
+`WAVESHARE_AMOLED_175_GNSS`, `WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG` and
+`WAVESHARE_AMOLED_175_GNSS_PRODUCTION` are the 1.75 with the Quectel LC76G
+receiver populated. They share the 1.75 runtime, SDK configuration and
+electrical policy: the variant defines the 1.75 board macro so every 1.75
+gate applies, plus its own macro, which selects its board file, and it
+retains `WAVESHARE_AMOLED_175_GNSS` as its canonical target and OTA identity.
+The ordinary and remote-debug profiles use the 8 MiB developer layout; the
+production profile is a compile and size qualification on the dual 4 MiB
+slots and is never packaged. Automatic CI builds the ordinary and production
+profiles whenever a firmware, build or CI change can reach the image, and all
+three when the variant's board file changes; manual selector `175_gnss` builds
+all three on demand; `all`, release and core-warm requests stay AMOLED-only.
+See [the variant's board notes](../hardware/waveshare-amoled-175-gnss.md).

@@ -5,6 +5,7 @@
 //  Settings view for runtime map configuration via BLE
 //
 
+import Combine
 import SwiftUI
 import UIKit
 import CoreLocation
@@ -4200,6 +4201,8 @@ private struct DeveloperSettingsView: View {
                 }
             }
 
+            PositionSourceStatusSection()
+
 #if DEBUG
             RemoteDeviceDebugSettingsSection()
             RendererBenchmarkReplaySettingsSection(
@@ -4394,6 +4397,73 @@ private struct DeveloperSettingsView: View {
             return build
         case (nil, nil):
             return "Unknown"
+        }
+    }
+}
+
+/// Live position-source report of the connected device (`DSTS.positionSource`):
+/// which input feeds its position now and the onboard receiver's state. The
+/// section polls the status while it is visible and shows no coordinate.
+private struct PositionSourceStatusSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @State private var now = Date()
+
+    private var reportAgeLabel: String {
+        guard let receivedAt = bleManager.devicePositionSourceStatusReceivedAt else {
+            return "never"
+        }
+        // A report that arrived after the last tick is fresh, not negative.
+        let seconds = max(0, Int(now.timeIntervalSince(receivedAt).rounded(.down)))
+        if seconds < 3 { return "just now" }
+        return seconds < 10 ? "\(seconds) s ago" : "\(seconds) s ago, stale"
+    }
+
+    var body: some View {
+        Section(
+            header: Text("Position Source"),
+            footer: Text("Live from the device's status, refreshed every two seconds while this screen is open. Coordinates are not shown.")
+        ) {
+            if let status = bleManager.devicePositionSourceStatus {
+                SettingsValueRow(title: "Report", value: reportAgeLabel)
+                SettingsValueRow(title: "Device uptime", value: status.uptimeLabel)
+                SettingsValueRow(title: "Active source", value: status.activeLabel)
+                SettingsValueRow(title: "Receiver", value: status.receiverLabel)
+                if status.gnssFitted {
+                    SettingsValueRow(title: "Transport", value: status.transport ?? "unknown")
+                    SettingsValueRow(title: "Answering", value: status.present == true ? "yes" : "no")
+                    SettingsValueRow(title: "Sentences", value: status.sentencesLabel)
+                    SettingsValueRow(title: "Fix", value: status.fixLabel)
+                    SettingsValueRow(
+                        title: "Satellites used",
+                        value: status.satellites.map(String.init) ?? "unknown"
+                    )
+                    SettingsValueRow(
+                        title: "Fixes delivered",
+                        value: status.fixes.map(String.init) ?? "unknown"
+                    )
+                    SettingsValueRow(title: "Last fix", value: status.lastFixLabel)
+                    SettingsValueRow(
+                        title: "Reset pulses",
+                        value: status.resetPulses.map(String.init) ?? "0"
+                    )
+                }
+            } else {
+                SettingsValueRow(
+                    title: "Status",
+                    value: "not reported (no device, or older firmware)"
+                )
+            }
+        }
+        .task {
+            // One polling loop per appearance of the section. A timer
+            // publisher held by the view value would be rebuilt, and its
+            // countdown restarted, whenever the parent re-renders, which
+            // Developer Settings does with every location update.
+            while !Task.isCancelled {
+                now = Date()
+                _ = bleManager.requestDeviceTransferStatus()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 }

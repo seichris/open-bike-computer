@@ -75,7 +75,7 @@ public:
   BusLock() {
     ensureMutex();
     locked = busMutex != nullptr &&
-             xSemaphoreTake(busMutex, pdMS_TO_TICKS(DEFAULT_TIMEOUT_MS)) ==
+             xSemaphoreTake(busMutex, pdMS_TO_TICKS(TRANSACTION_TIMEOUT_MS)) ==
                  pdTRUE;
   }
 
@@ -111,10 +111,15 @@ void logFailure(const char *label, const char *operation, uint8_t address) {
 // returns before releasing the bus mutex, and the next begin() or end()
 // would wait on that mutex forever.
 void beginBus() {
+  // The receive buffer must hold the longest readStream; Wire keeps the size
+  // it was given across end()/begin() cycles.
+  if constexpr (STREAM_BUFFER_BYTES != I2C_BUFFER_LENGTH) {
+    Wire.setBufferSize(STREAM_BUFFER_BYTES);
+  }
   busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   if (busConfigured) {
     Wire.setClock(activeClockHz);
-    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
+    Wire.setTimeOut(TRANSACTION_TIMEOUT_MS);
   }
 }
 
@@ -257,7 +262,8 @@ void configureBus(uint32_t clockHz) {
   Serial.printf("Waveshare I2C: %s SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
                 busConfigured ? "configured" : "configuration failed",
                 I2C_SDA_PIN, I2C_SCL_PIN,
-                static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
+                static_cast<unsigned long>(activeClockHz),
+                static_cast<unsigned>(TRANSACTION_TIMEOUT_MS));
 }
 
 Stats stats() {
@@ -757,6 +763,42 @@ bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
                        }
                        for (uint8_t i = 0; i < len; ++i) {
                          data[i] = Wire.read();
+                       }
+                       return true;
+                     });
+}
+
+bool writeBytes(uint8_t address, const uint8_t *data, uint8_t len,
+                const char *label, uint8_t attempts) {
+  if (data == nullptr || len == 0) {
+    return false;
+  }
+  if (!writeAllowed(address, data[0], 1, static_cast<std::size_t>(len) - 1,
+                    "writeBytes")) {
+    return false;
+  }
+  return withRetries(address, data[0], label, "writeBytes", attempts,
+                     [address, data, len]() {
+                       Wire.beginTransmission(address);
+                       for (uint8_t i = 0; i < len; i++) {
+                         Wire.write(data[i]);
+                       }
+                       return Wire.endTransmission() == 0;
+                     });
+}
+
+bool readStream(uint8_t address, uint8_t *data, size_t len, const char *label,
+                uint8_t attempts) {
+  if (data == nullptr || len == 0 || len > STREAM_BUFFER_BYTES) {
+    return false;
+  }
+  return withRetries(address, UINT16_MAX, label, "readStream", attempts,
+                     [address, data, len]() {
+                       if (Wire.requestFrom(address, len, true) != len) {
+                         return false;
+                       }
+                       for (size_t i = 0; i < len; ++i) {
+                         data[i] = static_cast<uint8_t>(Wire.read());
                        }
                        return true;
                      });
