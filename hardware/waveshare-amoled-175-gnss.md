@@ -7,8 +7,11 @@ is in [README.md](README.md); this page records what the receiver adds.
 
 This is Waveshare's "-G" model (`ESP32-S3-Touch-AMOLED-1.75-G`, SKU 31264):
 the plain board with the Quectel LC76G populated on footprint Q1 and a
-ceramic antenna. Vendor material: the product wiki, its hardware reference and
-the `09_LC76G_I2C` Arduino example, which polls the receiver over I2C.
+ceramic antenna. Vendor material (the product wiki, the board repository's
+hardware reference and `09_LC76G_I2C` Arduino example, the LC76G protocol
+specification and module manual, and the vendor I2C driver sources) is
+collected with provenance in
+[reference/boards/waveshare-amoled-175-gnss/](reference/boards/waveshare-amoled-175-gnss/README.md).
 
 ## Identity
 

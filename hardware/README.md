@@ -28,6 +28,16 @@ link different revisions.
 - [1.75-B dimension drawing](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-b-dimensions.pdf),
   extracted from the official [1.75-B design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-B-3D.zip)
 
+### ESP32-S3-Touch-AMOLED-1.75-G (GNSS variant)
+
+- [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31264)
+- [LC76G module wiki](https://www.waveshare.com/wiki/LC76G_GNSS_Module)
+- [Collected references](reference/boards/waveshare-amoled-175-gnss/README.md):
+  the LC76G protocol specification and module manual, the board repository's
+  hardware reference and `09_LC76G_I2C` example, and the vendor I2C and UART
+  driver sources, with provenance; the schematic is the 1.75's above
+- Firmware page: [waveshare-amoled-175-gnss.md](waveshare-amoled-175-gnss.md)
+
 ### ESP32-S3-Touch-AMOLED-2.06
 
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm)
