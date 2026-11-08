@@ -58,8 +58,9 @@ and its `--require-pmic-read-only` gate.
   the command address 0x50 checks the slave, a request is written to it,
   and its answer is read from 0x54; register
   0x0008 answers with the number of buffered bytes, register 0x2000 with
-  that many bytes of the NMEA stream, read in chunks of up to 256 bytes so
-  one read stays inside the bus timeout the touch controller shares),
+  that many bytes of the NMEA stream, drained in data requests of up to
+  1024 bytes each until the announced length is read, with this variant's
+  bus timeout and lock wait lengthened to 150 ms so one read fits them),
   parses the stream with
   NeoGPS into the shared position record and counts raw bytes and
   checksum-valid sentences. Polls run every 200 ms while idle, back to back
@@ -81,9 +82,9 @@ and its `--require-pmic-read-only` gate.
   like a phone position.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c
   reset=expander i2c=0x50/0x54 present=0|1 polls=<n> errors=<n>
-  backlog=<largest buffered length reported> answerMs=<longest wait for an
-  answer> nacks=<refusals of dummy writes/request writes/answer reads>
-  probe=pending|retry|ok
+  backlog=<largest buffered length reported> answerMs=<longest wait for a
+  length answer/a data answer> nacks=<refusals of dummy writes/request
+  writes/length reads/data reads> probe=pending|retry|ok
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
@@ -147,6 +148,7 @@ on the maintainer's Mac.
 | 2026-11-08 06:08 | `c15ea28d` ordinary (I2C transport) | Attested upload. Capture 4 opened the port while the board's USB was still re-enumerating after esptool's reset and read nothing in 60 s (a stale handle, not a silent board); the board then switched itself off at its two-minute no-app window and capture 5 found no device. Lesson: capture after a power-on or with `--reset` on a settled port, not seconds after an upload. |
 | 2026-11-08 06:47 | `c15ea28d` ordinary (I2C transport) | Capture 6 (`--reset`): identity, PMIC and ready pass (ready 4780 ms). The receiver acknowledges its command address 0x50 (`present=1`) and the request write, but refuses the answer read at 0x54 100 ms later on every poll (`i2c_master_receive failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK); `polls=6 errors=6`, one RESET pulse. First proof that the module is powered and on the bus. |
 | 2026-11-08 07:01 | `f6a3ff21` ordinary (I2C transport, answer-read retries) | Capture 7 (`--reset`, 6 s after the attested upload): identity, PMIC and ready pass (ready 4788 ms). The slave acknowledges the address-only probe but refuses the request write that follows it within a millisecond (`i2c_master_transmit failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK), on every poll; one RESET pulse. The answer-read retries never ran. |
+| 2026-11-08 07:12 | `66acd3fb` ordinary (I2C transport, vendor driver pattern) | **Receiver gate passed** (capture 8, `--reset` 6 s after the attested upload, exit 0): identity, PMIC and ready pass (ready 4868 ms); `BOOT_GNSS transport=i2c probe=ok bytes=1024 sentences=29 invalid=0 answerMs=10`, first bytes `$PQTMVER,1,MODULE,LC76GABNR12A05…` (the module's version report). Every write was acknowledged (`nacks=0/0/…`); reads were still refused for stretches beyond the 100 ms budget (10 refusals per failed poll, roughly every other poll), and the module reported 9202 bytes buffered at the first answered poll, so the 256-byte chunks could not drain it. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -161,7 +163,12 @@ those retries the slave refused the request write right after an
 acknowledged probe instead. The driver also waits 10 ms before every
 transaction and starts with a one-byte dummy write rather than an
 address-only probe, so the transport now follows it step for step and
-counts refusals per step (`nacks=`). Its capture follows.
+counts refusals per step (`nacks=`). Capture 8 passed the receiver gate
+with that pattern: the module speaks, its sentences verify, and what is
+left is draining its buffer, which the next image does the vendor driver's
+way (one length query, then data requests of up to 1024 bytes until the
+announced length is read) with a longer retry budget and the longest waits
+reported.
 
 ## Open items
 

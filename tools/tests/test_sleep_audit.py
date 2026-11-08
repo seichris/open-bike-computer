@@ -144,7 +144,9 @@ namespace waveshare_board { int recoveries = 0; void recoverI2CBus() { ++recover
 constexpr uint16_t DEFAULT_TIMEOUT_MS = 50;
 #define I2C_BUFFER_LENGTH 128
 constexpr size_t STREAM_BUFFER_BYTES =
-    board::gnss::transport == board::GnssTransport::i2c ? 256 : 128;
+    board::gnss::transport == board::GnssTransport::i2c ? 1024 : 128;
+constexpr uint16_t TRANSACTION_TIMEOUT_MS =
+    board::gnss::transport == board::GnssTransport::i2c ? 150 : DEFAULT_TIMEOUT_MS;
 struct Stats { uint32_t recoveryAttempts = 0, failedTransactions = 0, recoveredTransactions = 0, missingDevices = 0; };
 struct Counters {
   std::atomic<uint32_t> recoveryAttempts{0}, failedTransactions{0}, recoveredTransactions{0}, missingDevices{0};

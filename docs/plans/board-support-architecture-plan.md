@@ -553,6 +553,11 @@ that board once it is tested (see Decisions).
   every candidate receiver line floated; Waveshare's hardware reference and
   LC76G example put the receiver on the I2C bus, so the part gained the I2C
   transport and the board data a `transport` field before the fourth capture.
+  Capture 8 (`66acd3fb`, 2026-11-08 07:12Z) passed the receiver gate over
+  I2C once the transport followed the vendor driver's transaction pattern
+  (`$PQTMVER` first, 29 checksum-valid sentences, no other bus device
+  disturbed); draining the module's buffer, fix evidence and the plain 1.75
+  image on the same unit remain owed.
 
 ### The confinement test
 

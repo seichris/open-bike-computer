@@ -108,11 +108,15 @@ bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
 // given, with the AXP2101 write policy applied to the first byte as the
 // register; readStream reads up to STREAM_BUFFER_BYTES in one transaction,
 // the Wire receive buffer, which is enlarged on boards whose receiver streams
-// NMEA over the bus. The size keeps one read inside the bus timeout and the
-// lock wait other devices tolerate: 256 bytes take about 23 ms at 100 kHz,
-// against the 50 ms DEFAULT_TIMEOUT_MS both use.
+// NMEA over the bus. One read must fit the transaction timeout and the lock
+// wait other devices tolerate, so such boards also lengthen both: 1024 bytes
+// take about 92 ms at 100 kHz, inside TRANSACTION_TIMEOUT_MS, and a device
+// waiting for the bus (the touch controller) waits that long at most.
 constexpr size_t STREAM_BUFFER_BYTES =
-    board::gnss::transport == board::GnssTransport::i2c ? 256 : 128;
+    board::gnss::transport == board::GnssTransport::i2c ? 1024 : 128;
+constexpr uint16_t TRANSACTION_TIMEOUT_MS =
+    board::gnss::transport == board::GnssTransport::i2c ? 150
+                                                        : DEFAULT_TIMEOUT_MS;
 bool writeBytes(uint8_t address, const uint8_t *data, uint8_t len,
                 const char *label = nullptr, uint8_t attempts = 2);
 bool readStream(uint8_t address, uint8_t *data, size_t len,

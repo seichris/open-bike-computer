@@ -75,7 +75,7 @@ public:
   BusLock() {
     ensureMutex();
     locked = busMutex != nullptr &&
-             xSemaphoreTake(busMutex, pdMS_TO_TICKS(DEFAULT_TIMEOUT_MS)) ==
+             xSemaphoreTake(busMutex, pdMS_TO_TICKS(TRANSACTION_TIMEOUT_MS)) ==
                  pdTRUE;
   }
 
@@ -119,7 +119,7 @@ void beginBus() {
   busConfigured = Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   if (busConfigured) {
     Wire.setClock(activeClockHz);
-    Wire.setTimeOut(DEFAULT_TIMEOUT_MS);
+    Wire.setTimeOut(TRANSACTION_TIMEOUT_MS);
   }
 }
 
@@ -262,7 +262,8 @@ void configureBus(uint32_t clockHz) {
   Serial.printf("Waveshare I2C: %s SDA=%u SCL=%u clock=%lu Hz timeout=%u ms\n",
                 busConfigured ? "configured" : "configuration failed",
                 I2C_SDA_PIN, I2C_SCL_PIN,
-                static_cast<unsigned long>(activeClockHz), DEFAULT_TIMEOUT_MS);
+                static_cast<unsigned long>(activeClockHz),
+                static_cast<unsigned>(TRANSACTION_TIMEOUT_MS));
 }
 
 Stats stats() {
