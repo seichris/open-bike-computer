@@ -32,6 +32,17 @@ bool probeReported = false;
 uint8_t firstBytes[32] = {};
 uint8_t firstByteCount = 0;
 bool firstBytesReported = false;
+// Parser outcomes per byte: sentences the NMEA parser completed and bytes it
+// rejected, so a capture tells a stream the parser accepts from one it
+// does not (capture 17: thousands of checksum-valid sentences, nothing
+// parsed). Diagnostics profiles also print one raw sample of the stream.
+uint32_t decodeCompleted = 0;
+uint32_t decodeInvalid = 0;
+#if FIRMWARE_DIAGNOSTICS
+char sample[321] = {};
+uint16_t sampleLength = 0;
+bool sampleReported = false;
+#endif
 constexpr uint8_t kMaxResetPulses = 3;
 bool fixReported = false;
 uint32_t lastFixLogMs = 0;
@@ -87,10 +98,11 @@ void printBoot(const char *probeState) {
     // fixes counts the parser's completed intervals (every interval, fix or
     // not); sats is satellites used in the fix over satellites in view
     // (from GSV); fixStatus is NeoGPS's status of the last interval
-    // (0 none, 2 time only, 3 standard, 4 differential).
+    // (0 none, 2 time only, 3 standard, 4 differential); decode is the
+    // parser's completed sentences over rejected bytes.
     snprintf(line + used, sizeof(line) - used,
              "probe=%s bytes=%lu sentences=%lu invalid=%lu resetPulses=%u "
-             "fixes=%lu sats=%u/%u fixStatus=%u",
+             "fixes=%lu sats=%u/%u fixStatus=%u decode=%lu/%lu",
              probeState, static_cast<unsigned long>(s.bytes),
              static_cast<unsigned long>(s.validSentences),
              static_cast<unsigned long>(s.invalidSentences),
@@ -98,7 +110,9 @@ void printBoot(const char *probeState) {
              static_cast<unsigned long>(s.fixes),
              static_cast<unsigned>(s.satellites),
              static_cast<unsigned>(GPS.sat_count),
-             static_cast<unsigned>(fix.status));
+             static_cast<unsigned>(fix.status),
+             static_cast<unsigned long>(decodeCompleted),
+             static_cast<unsigned long>(decodeInvalid));
   }
   Serial.println(line);
 }
@@ -169,7 +183,18 @@ uint32_t consume(const uint8_t *data, size_t len) {
       ++valid;
     else if (event == NmeaLineValidator::Event::Invalid)
       ++invalid;
-    GPS.decode(c);
+    const NMEAGPS::decode_t decoded = GPS.decode(c);
+    if (decoded == NMEAGPS::DECODE_COMPLETED)
+      ++decodeCompleted;
+    else if (decoded == NMEAGPS::DECODE_CHR_INVALID)
+      ++decodeInvalid;
+#if FIRMWARE_DIAGNOSTICS
+    if (!sampleReported && probeReported && sampleLength < sizeof(sample) - 1) {
+      const bool lineEnd = c == '\r' || c == '\n';
+      const bool printable = c >= ' ' && c <= '~';
+      sample[sampleLength++] = lineEnd ? '|' : printable ? c : '.';
+    }
+#endif
   }
   if (len == 0)
     return 0;
@@ -182,6 +207,10 @@ uint32_t consume(const uint8_t *data, size_t len) {
     state.lastSentenceMs = nowMs;
   portEXIT_CRITICAL(&mux);
 #if FIRMWARE_DIAGNOSTICS
+  if (!sampleReported && sampleLength == sizeof(sample) - 1) {
+    sampleReported = true;
+    Serial.printf("GNSS: sample: %s\n", sample);
+  }
   if (!firstBytesReported && firstByteCount == sizeof(firstBytes)) {
     firstBytesReported = true;
     char hex[3 * sizeof(firstBytes) + 1] = {};

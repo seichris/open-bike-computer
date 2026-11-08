@@ -94,7 +94,9 @@ and its `--require-pmic-read-only` gate.
   writes/length reads/data reads> repeats=<requests sent again>
   probe=pending|retry|ok ... fixes=<parser intervals completed>
   sats=<used in the fix>/<in view> fixStatus=<NeoGPS status of the last
-  interval: 0 none, 3 standard>
+  interval: 0 none, 3 standard> decode=<sentences the parser completed>/<bytes
+  it rejected>`; diagnostics profiles also print `GNSS: sample: <320 bytes
+  of the stream as text>` once after the probe locked.
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
@@ -165,6 +167,9 @@ on the maintainer's Mac.
 | 2026-11-08 07:46 | `ee595811` ordinary (I2C transport, requests re-sent) | Captures 11 and 12: after the attested upload the boot stalled inside the storage stage (second legacy SPI mount attempt of the absent SD card, 2.5 s uptime), before the receiver starts in the user-interface stage, and the board went USB-dead while enumerated (a warm reset read nothing, the two-minute auto-off never fired). A board fault seen before on the plain 1.75, cleared by full power removal; not the receiver code. |
 | 2026-11-08 07:51 | `ee595811` ordinary (I2C transport, requests re-sent) | **Receiver gate passed** (capture 13, after a full power removal, exit 0, 90 s): identity, PMIC and ready pass (ready 4946 ms). First contact at the second poll (3119-byte startup burst, 93 sentences, 19 repeats while the module came up). With requests re-sent, the refusal stalls shrank from 3.5 s to 0.14 to 0.54 s: sixteen bursts in 90 s, each resolved by one to three repeated requests; no other bus device disturbed. |
 | 2026-11-08 07:56 | `7c92f6c8` plain `WAVESHARE_AMOLED_175` (gate 3, M5) | Attested upload of the plain image from the same commit onto this unit, then a warm-reset capture with the PMIC and ready gates (exit 0): `BOOT_META target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175`, `BOOT_PMIC mode=read-only railState=current-preserved`, ready at 4898 ms, no receiver lines (none expected). The phone-position navigation check on this image is the maintainer's. |
+| 2026-11-08 08:03 | `d754777f` ordinary (I2C transport, periodic record) | **Receiver gate passed** (capture 14, exit 0, 100 s): identity, PMIC and ready pass (ready 5013 ms). Totals: `polls=64 errors=4 backlog=3119 answerMs=160/40 nacks=0/0/410/0 repeats=78 bytes=15860 sentences=465 invalid=0`; the stream keeps up with the backlog never above the startup burst; four stalls outlasted the 20-round budget, the rest resolved by repeated requests; no fix indoors. |
+| 2026-11-08 08:07, 08:12 | `d754777f` ordinary, at a window | Captures 15 (180 s) and 16 (300 s), both passing the gate with the strongest streams so far (`sentences=1925 invalid=0` and `sentences=4760 invalid=0 bytes=255720`), no `GNSS: fix` line in either. |
+| 2026-11-08 08:23 | `aae0348f` ordinary (record with fix, satellite and status fields), at a window | Capture 17 (300 s, gate passed): `sentences=4822 invalid=0 bytes=266014` but `fixes=0 sats=0/0 fixStatus=0` for the whole window: the NMEA parser completes no interval and sees no satellite although every sentence passes the checksum validator. A parsing problem, not a sky problem; the next image counts the parser's outcomes and prints a raw sample of the stream. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
