@@ -556,8 +556,15 @@ that board once it is tested (see Decisions).
   Capture 8 (`66acd3fb`, 2026-11-08 07:12Z) passed the receiver gate over
   I2C once the transport followed the vendor driver's transaction pattern
   (`$PQTMVER` first, 29 checksum-valid sentences, no other bus device
-  disturbed); draining the module's buffer, fix evidence and the plain 1.75
-  image on the same unit remain owed.
+  disturbed). Captures 9 to 13 then settled the stream: the reader restarts
+  the module when it starts (an overflowed slave refuses reads until
+  restarted), drains the announced length in 1 KB chunks and sends a request
+  again when its answer keeps being refused, after which every stall
+  resolved within half a second and the stream kept up. The plain 1.75
+  image from the same commit (`7c92f6c8`) boots on this unit with the
+  read-only PMIC and ready gates (the M5 gate's boot half; the phone
+  navigation check is the maintainer's). Fix evidence with sky view remains
+  owed.
 
 ### The confinement test
 

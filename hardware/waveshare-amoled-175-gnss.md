@@ -98,7 +98,8 @@ and its `--require-pmic-read-only` gate.
   in place of the I2C fields), printed when the receiver part starts, when
   the receiver starts or stops answering, after a RESET pulse and when the
   first checksum-valid sentences lock the probe (possibly after the ready
-  stage); `GNSS: first bytes: <hex>` once 32 bytes arrived and `GNSS: fix
+  stage), and in diagnostics profiles again every 30 s once the probe
+  locked, so a capture ends with the stream's totals; `GNSS: first bytes: <hex>` once 32 bytes arrived and `GNSS: fix
   sats=...` every 30 s in diagnostics profiles; `GNSS: reset pulse n` with
   its reason. Diagnostics events `gnss/probe`, `gnss/fix` and
   `gnss/fix_checkpoint` carry the sentence counts.
@@ -159,6 +160,9 @@ on the maintainer's Mac.
 | 2026-11-08 07:12 | `66acd3fb` ordinary (I2C transport, vendor driver pattern) | **Receiver gate passed** (capture 8, `--reset` 6 s after the attested upload, exit 0): identity, PMIC and ready pass (ready 4868 ms); `BOOT_GNSS transport=i2c probe=ok bytes=1024 sentences=29 invalid=0 answerMs=10`, first bytes `$PQTMVER,1,MODULE,LC76GABNR12A05…` (the module's version report). Every write was acknowledged (`nacks=0/0/…`); reads were still refused for stretches beyond the 100 ms budget (10 refusals per failed poll, roughly every other poll), and the module reported 9202 bytes buffered at the first answered poll, so the 256-byte chunks could not drain it. |
 | 2026-11-08 07:25 | `e1c67f72` ordinary (I2C transport, chunked drain) | **Receiver gate passed** (capture 9, exit 0, 90 s): identity, PMIC and ready pass (ready 4855 ms). For the first 15 s the slave refused every length read (`nacks=…/500/…`, five failed polls); the firmware's 15-s RESET pulse restarted the module and from then on every poll was served on the first try: `polls=82 errors=5 backlog=4215 answerMs=20/20 bytes=14436 sentences=383 invalid=0`, no other bus device disturbed, 150 ms bus timeout in effect. Reading: the module's buffer, filling since power-on, had overflowed before the reader started, and the overflowed slave refuses reads until restarted; the next image restarts the module when the reader starts. |
 | 2026-11-08 07:34 | `7c92f6c8` ordinary (I2C transport, start reset) | **Receiver gate passed** (capture 10, exit 0, 90 s): identity, PMIC and ready pass (ready 4936 ms). The reader's RESET pulse at start put the module's buffer in step with it: first contact at the second poll with the 3507-byte startup burst, then `polls=87 errors=5 backlog=3507 answerMs=20/20 nacks=0/0/500/0 bytes=22255 sentences=603 invalid=0`, no other bus device disturbed. Every served poll answered on the first try; five polls hit a stall of more than 2 s (the step budget) about every 18 s and each then waited another 2 s as if the module were absent. |
+| 2026-11-08 07:46 | `ee595811` ordinary (I2C transport, requests re-sent) | Captures 11 and 12: after the attested upload the boot stalled inside the storage stage (second legacy SPI mount attempt of the absent SD card, 2.5 s uptime), before the receiver starts in the user-interface stage, and the board went USB-dead while enumerated (a warm reset read nothing, the two-minute auto-off never fired). A board fault seen before on the plain 1.75, cleared by full power removal; not the receiver code. |
+| 2026-11-08 07:51 | `ee595811` ordinary (I2C transport, requests re-sent) | **Receiver gate passed** (capture 13, after a full power removal, exit 0, 90 s): identity, PMIC and ready pass (ready 4946 ms). First contact at the second poll (3119-byte startup burst, 93 sentences, 19 repeats while the module came up). With requests re-sent, the refusal stalls shrank from 3.5 s to 0.14 to 0.54 s: sixteen bursts in 90 s, each resolved by one to three repeated requests; no other bus device disturbed. |
+| 2026-11-08 07:56 | `7c92f6c8` plain `WAVESHARE_AMOLED_175` (gate 3, M5) | Attested upload of the plain image from the same commit onto this unit, then a warm-reset capture with the PMIC and ready gates (exit 0): `BOOT_META target=WAVESHARE_AMOLED_175 profile=WAVESHARE_AMOLED_175`, `BOOT_PMIC mode=read-only railState=current-preserved`, ready at 4898 ms, no receiver lines (none expected). The phone-position navigation check on this image is the maintainer's. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -186,7 +190,9 @@ left are refusal bursts of 3.5 s (the whole read budget) every 8 to 18 s,
 in which a hundred reads of one length answer were refused in a row; the
 vendor driver sends the request again after twenty refused reads, so the
 reader now does the same and rides a refused poll out as busy rather than
-absent.
+absent. Capture 13 confirmed it: every stall resolved within half a second
+by a repeated request, and the stream kept up throughout. The plain 1.75
+image from the same commit boots on this unit (gate 3's boot half).
 
 ## Open items
 
