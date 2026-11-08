@@ -185,6 +185,7 @@ on the maintainer's Mac.
 | 2026-11-08 09:44 | `50cd5d62` ordinary (position-source report in `DSTS`), at a window | Capture 22 (60 s, every gate passed): `fixes=38 sentences=486 invalid=0`, one interval per epoch, no position fix within the minute after the module's restart. The Bicino Dev app built from `1d734ae6` (Developer Settings, Position Source section) was installed on the maintainer's iPhone for the live check. |
 | 2026-11-08 12:07 | `ff4fa84c` ordinary (report carries the device's uptime), at a window | Capture 23 (60 s, every gate passed): `fixes=41 sentences=611 invalid=0`, no position fix in the first minute. The app built from the same commit (Developer Settings shows the report's age and the device's uptime) was installed on the maintainer's iPhone. Between 10:02Z and 11:18Z the earlier app had shown one unchanging report for 76 minutes without a disconnect; whether the link or the receiver's reader had stopped is open, and the report's age now tells them apart. The maintainer confirmed the section live on the phone with this image: the report's age and the device's uptime keep moving. |
 | 2026-11-08 14:05 | `14e537c2` ordinary (review pass 2: fixes handed to the main loop, stream-based restarts, expander lock) | Capture 24 (120 s, every gate passed): `probe=ok sentences=899 invalid=0 fixes=71 resetPulses=1`, so a healthy stream is not restarted; the touch reset through the now-locked expander succeeded; no I2C failure on any other device; no position fix in the window. Ready came at 11.9 s because an SD card is now fitted (storage 52 ms instead of 2.6 s of retries, map recovery 9.5 s, the same as `ff4fa84c`). |
+| 2026-11-08 14:22 | `14e537c2` ordinary, at a window, phone connected over BLE | **Gate 2's on-device check passed** (maintainer): Developer Settings, Position Source, showed "Active source: Device GNSS", so the receiver's fixes held the device's position record and the arbiter rejected the phone's positions. The variant merged with #776 as `58f6c92f`. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -233,10 +234,8 @@ to 14 satellites at the window, one per epoch, which closes gate 2.
   which holds only the last constellation's GSV set and resets at each
   interval, so it reads 0 beside a used count of 13; counting across the
   constellations' sets is a diagnostics improvement, not a gate.
-- The maintainer's visual checks: the device map or coordinates following
-  the receiver with the phone off (Developer Settings, Position Source, now
-  shows the device's live report), and the phone-navigation check on the
-  plain image.
+- The phone-navigation check of the plain 1.75 image on this unit, owed under
+  the risk the maintainer accepted for #775.
 - A report that stood still for 76 minutes in the app on 2026-11-08 (no
   disconnect, counters frozen at 354 fix intervals about six minutes after
   the restart): a stale link or a stopped reader task. The report's age and
