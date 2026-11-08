@@ -52,10 +52,11 @@ and its `--require-pmic-read-only` gate.
   (drives EXIO7 high; the module keeps running) and reads the receiver over
   the transport the board data names. On this variant that is the I2C
   transport: a reader task polls the receiver's I2C slave with Quectel's
-  command/answer scheme as the vendor examples do (the slave's command
-  address 0x50 is checked for an acknowledge, a request is written to it,
-  and its answer is read from 0x54, retried every 10 ms for up to 200 ms
-  because the slave refuses the read until the answer is ready; register
+  command/answer scheme as the vendor's Raspberry Pi driver does (every
+  transaction waits 10 ms first and is retried up to ten times because the
+  slave refuses transactions it is not ready for: a one-byte dummy write to
+  the command address 0x50 checks the slave, a request is written to it,
+  and its answer is read from 0x54; register
   0x0008 answers with the number of buffered bytes, register 0x2000 with
   that many bytes of the NMEA stream, read in chunks of up to 256 bytes so
   one read stays inside the bus timeout the touch controller shares),
@@ -81,7 +82,8 @@ and its `--require-pmic-read-only` gate.
 - Serial evidence: `BOOT_GNSS schema=1 fitted=1 module=lc76g transport=i2c
   reset=expander i2c=0x50/0x54 present=0|1 polls=<n> errors=<n>
   backlog=<largest buffered length reported> answerMs=<longest wait for an
-  answer> probe=pending|retry|ok
+  answer> nacks=<refusals of dummy writes/request writes/answer reads>
+  probe=pending|retry|ok
   bytes=<n> sentences=<n> invalid=<n> resetPulses=<n>`
   (the UART transport prints `transport=uart uart=2 rx=18 tx=17 baud=<rate>`
   in place of the I2C fields), printed when the receiver part starts, when
@@ -142,6 +144,9 @@ on the maintainer's Mac.
 | 2026-11-08 03:29 | `3c287530` ordinary (UART transport) | Attested upload. `BOOT_META target=WAVESHARE_AMOLED_175_GNSS profile=WAVESHARE_AMOLED_175_GNSS`, `BOOT_PMIC mode=read-only railState=current-preserved`, ready at 7113 ms, 0 blocked writes, 0 diagnostic errors, reset line released through the expander. Receiver gate failed: no sentence at 115200 or 9600 bps in 75 s. |
 | 2026-11-08 ~03:50 | `231f9ac4` ordinary (UART transport) | Identity, PMIC and ready pass (ready 4671 ms). Receiver line silent: `bytes=0` at 115200, 9600, 38400, 57600 and 230400 bps over 100 s, three RESET pulses issued. |
 | 2026-11-08 ~04:40 | `6c842f00` ordinary (UART transport) | `BOOT_GNSS_LINES pin18=floating:0 pin17=floating:0 pin43=floating:0 pin44=floating:0`: nothing drives the board's receive or transmit pin or the H2 header's UART0 pads. Identity, PMIC and ready pass (ready 5934 ms). |
+| 2026-11-08 06:08 | `c15ea28d` ordinary (I2C transport) | Attested upload. Capture 4 opened the port while the board's USB was still re-enumerating after esptool's reset and read nothing in 60 s (a stale handle, not a silent board); the board then switched itself off at its two-minute no-app window and capture 5 found no device. Lesson: capture after a power-on or with `--reset` on a settled port, not seconds after an upload. |
+| 2026-11-08 06:47 | `c15ea28d` ordinary (I2C transport) | Capture 6 (`--reset`): identity, PMIC and ready pass (ready 4780 ms). The receiver acknowledges its command address 0x50 (`present=1`) and the request write, but refuses the answer read at 0x54 100 ms later on every poll (`i2c_master_receive failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK); `polls=6 errors=6`, one RESET pulse. First proof that the module is powered and on the bus. |
+| 2026-11-08 07:01 | `f6a3ff21` ordinary (I2C transport, answer-read retries) | Capture 7 (`--reset`, 6 s after the attested upload): identity, PMIC and ready pass (ready 4788 ms). The slave acknowledges the address-only probe but refuses the request write that follows it within a millisecond (`i2c_master_transmit failed: [259] ESP_ERR_INVALID_STATE`, the driver's code for a NACK), on every poll; one RESET pulse. The answer-read retries never ran. |
 
 Reading: captures 1 to 3 ran the UART transport. The variant image boots and
 passes every gate except the receiver's, and every candidate receiver line
@@ -149,7 +154,14 @@ floats, which matches the schematic's "NC/0R" link resistors R15/R16 between
 the receiver's UART and GPIO18/17. Waveshare's hardware reference and LC76G
 example then showed that this model reads the receiver over I2C (0x50/0x54)
 and leaves the UART links unfitted, so the part gained the I2C transport,
-written against that example. Its capture follows.
+written against that example. Capture 6 then showed the slave alive on the
+bus but refusing the answer read 100 ms after a request; the vendor's
+Raspberry Pi driver retries that read every 10 ms up to 20 times; with
+those retries the slave refused the request write right after an
+acknowledged probe instead. The driver also waits 10 ms before every
+transaction and starts with a one-byte dummy write rather than an
+address-only probe, so the transport now follows it step for step and
+counts refusals per step (`nacks=`). Its capture follows.
 
 ## Open items
 

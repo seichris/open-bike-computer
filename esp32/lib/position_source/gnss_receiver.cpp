@@ -64,13 +64,16 @@ void printBoot(const char *probeState) {
       used += static_cast<size_t>(snprintf(
           line + used, sizeof(line) - used,
           "i2c=0x%02x/0x%02x present=%u polls=%lu errors=%lu backlog=%lu "
-          "answerMs=%u ",
+          "answerMs=%u nacks=%lu/%lu/%lu ",
           static_cast<unsigned>(board::gnss::i2cCommandAddress),
           static_cast<unsigned>(board::gnss::i2cDataAddress),
           s.portOpen ? 1U : 0U, static_cast<unsigned long>(s.polls),
           static_cast<unsigned long>(s.pollErrors),
           static_cast<unsigned long>(s.backlog),
-          static_cast<unsigned>(s.answerWaitMs)));
+          static_cast<unsigned>(s.answerWaitMs),
+          static_cast<unsigned long>(s.dummyNacks),
+          static_cast<unsigned long>(s.requestNacks),
+          static_cast<unsigned long>(s.answerNacks)));
     }
   }
   if (used < sizeof(line)) {
@@ -284,20 +287,22 @@ struct UartTransport {
 // and its answer is read from the data address. A request is a register and
 // a length, both little endian, around the 0x51 0xAA marker. Register 0x0008
 // answers with the number of buffered bytes, register 0x2000 with that many
-// bytes of the NMEA stream. The slave refuses (NACKs) the answer read until
-// the answer is ready, so the read is retried at a short interval the way
-// the vendor's Raspberry Pi driver does; on the bench the slave still
-// refused 100 ms after the request, the gap the vendor's ESP32 example
-// leaves. One poll reads at most STREAM_BUFFER_BYTES; a receiver with more
-// buffered is polled again at once, so the stream keeps up at roughly a
-// kilobyte per second.
+// bytes of the NMEA stream. The slave refuses (NACKs) transactions it is
+// not ready for: on the bench it refused an answer read 100 ms after the
+// request (the gap the vendor's ESP32 example leaves) and a request write
+// that followed an acknowledged probe within a millisecond. The vendor's
+// Raspberry Pi driver therefore precedes every transaction with a 10 ms
+// gap, retries each step on refusal and starts each poll with a one-byte
+// dummy write that checks the slave; this transport does the same and
+// counts the refusals per step. One poll reads at most STREAM_BUFFER_BYTES;
+// a receiver with more buffered is polled again at once, so the stream
+// keeps up at roughly a kilobyte per second.
 struct I2cTransport {
-  // The first answer read comes kAnswerFirstWaitMs after the request, then
-  // every kAnswerRetryMs for up to kAnswerAttempts tries (the vendor driver
-  // retries 20 times, 10 ms apart).
-  static constexpr uint32_t kAnswerFirstWaitMs = 20;
-  static constexpr uint32_t kAnswerRetryMs = 10;
-  static constexpr uint8_t kAnswerAttempts = 20;
+  // Every transaction with the slave waits kStepGapMs first and is tried up
+  // to kStepAttempts times (the vendor driver: 10 ms, 20 tries; fewer here
+  // because every refusal costs two driver log lines in diagnostics builds).
+  static constexpr uint32_t kStepGapMs = 10;
+  static constexpr uint8_t kStepAttempts = 10;
   static constexpr uint32_t kIdlePollMs = 200;
   static constexpr uint32_t kAbsentPollMs = 2000;
   // A soldered receiver that keeps failing to answer is a hardware fault;
@@ -311,56 +316,87 @@ struct I2cTransport {
   uint8_t consecutiveFailures = 0;
   bool sawValidSentence = false;
 
+  enum class Step : uint8_t { dummy, request, answer };
+
+  // One transaction with the slave, the vendor driver's way: a gap, a try,
+  // and more tries while the slave refuses. Counts refusals per step and
+  // records the longest wait an answer read needed.
+  template <typename Fn>
+  bool step(Step which, Fn &&transaction) {
+    uint32_t waitedMs = 0;
+    for (uint8_t attempt = 0; attempt < kStepAttempts; ++attempt) {
+      vTaskDelay(pdMS_TO_TICKS(kStepGapMs));
+      waitedMs += kStepGapMs;
+      if (transaction()) {
+        if (which == Step::answer) {
+          portENTER_CRITICAL(&mux);
+          if (waitedMs > state.answerWaitMs)
+            state.answerWaitMs = static_cast<uint16_t>(waitedMs);
+          portEXIT_CRITICAL(&mux);
+        }
+        return true;
+      }
+      portENTER_CRITICAL(&mux);
+      if (which == Step::dummy)
+        ++state.dummyNacks;
+      else if (which == Step::request)
+        ++state.requestNacks;
+      else
+        ++state.answerNacks;
+      portEXIT_CRITICAL(&mux);
+    }
+    return false;
+  }
+
+  // The one-byte write the vendor driver uses to check that the slave is
+  // alive before a request (an address-only probe is not what it does).
+  bool dummyWrite() {
+    static constexpr uint8_t dummy[1] = {0x00};
+    return step(Step::dummy, [] {
+      return waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
+                                              dummy, sizeof(dummy), "GNSS", 1);
+    });
+  }
+
   void begin(uint32_t nowMs) {
-    const bool present = waveshare_board::i2c::probe(
-        board::gnss::i2cCommandAddress, "GNSS", 1);
+    const bool present = dummyWrite();
     portENTER_CRITICAL(&mux);
     state.portOpen = present;
     portEXIT_CRITICAL(&mux);
     silentSinceMs = nowMs;
   }
 
-  // Reads a request's answer from the data address, retrying while the
-  // slave refuses the read. Records the longest wait it needed.
-  bool readAnswer(uint8_t *data, size_t len) {
-    uint32_t waitedMs = 0;
-    for (uint8_t attempt = 0; attempt < kAnswerAttempts; ++attempt) {
-      const uint32_t gapMs = attempt == 0 ? kAnswerFirstWaitMs : kAnswerRetryMs;
-      vTaskDelay(pdMS_TO_TICKS(gapMs));
-      waitedMs += gapMs;
-      if (waveshare_board::i2c::readStream(board::gnss::i2cDataAddress, data,
-                                           len, "GNSS", 1)) {
-        portENTER_CRITICAL(&mux);
-        if (waitedMs > state.answerWaitMs)
-          state.answerWaitMs = static_cast<uint16_t>(waitedMs);
-        portEXIT_CRITICAL(&mux);
-        return true;
-      }
-    }
-    return false;
+  bool request(const uint8_t (&bytes)[8]) {
+    return step(Step::request, [&bytes] {
+      return waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
+                                              bytes, sizeof(bytes), "GNSS", 1);
+    });
+  }
+
+  bool answer(uint8_t *data, size_t len) {
+    return step(Step::answer, [data, len] {
+      return waveshare_board::i2c::readStream(board::gnss::i2cDataAddress,
+                                              data, len, "GNSS", 1);
+    });
   }
 
   // One poll. Returns false when the receiver did not answer; received is
   // the number of stream bytes now in chunk.
   bool poll(size_t &received) {
     received = 0;
-    // The vendor driver checks that the slave acknowledges its command
-    // address before each request.
-    if (!waveshare_board::i2c::probe(board::gnss::i2cCommandAddress, "GNSS", 1))
+    if (!dummyWrite())
       return false;
     static constexpr uint8_t lengthRequest[8] = {0x08, 0x00, 0x51, 0xAA,
                                                  0x04, 0x00, 0x00, 0x00};
-    if (!waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
-                                          lengthRequest, sizeof(lengthRequest),
-                                          "GNSS", 1))
+    if (!request(lengthRequest))
       return false;
-    uint8_t answer[4] = {};
-    if (!readAnswer(answer, sizeof(answer)))
+    uint8_t answerBytes[4] = {};
+    if (!answer(answerBytes, sizeof(answerBytes)))
       return false;
-    const uint32_t available = static_cast<uint32_t>(answer[0]) |
-                               (static_cast<uint32_t>(answer[1]) << 8) |
-                               (static_cast<uint32_t>(answer[2]) << 16) |
-                               (static_cast<uint32_t>(answer[3]) << 24);
+    const uint32_t available = static_cast<uint32_t>(answerBytes[0]) |
+                               (static_cast<uint32_t>(answerBytes[1]) << 8) |
+                               (static_cast<uint32_t>(answerBytes[2]) << 16) |
+                               (static_cast<uint32_t>(answerBytes[3]) << 24);
     portENTER_CRITICAL(&mux);
     if (available > state.backlog)
       state.backlog = available;
@@ -377,11 +413,9 @@ struct I2cTransport {
                                     static_cast<uint8_t>(want >> 8),
                                     static_cast<uint8_t>(want >> 16),
                                     static_cast<uint8_t>(want >> 24)};
-    if (!waveshare_board::i2c::writeBytes(board::gnss::i2cCommandAddress,
-                                          dataRequest, sizeof(dataRequest),
-                                          "GNSS", 1))
+    if (!request(dataRequest))
       return false;
-    if (!readAnswer(chunk, want))
+    if (!answer(chunk, want))
       return false;
     received = want;
     return true;

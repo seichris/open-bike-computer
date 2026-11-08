@@ -27,8 +27,13 @@ struct GnssStatus {
   uint32_t pollErrors = 0;
   uint32_t backlog = 0;
   // I2C only: the longest wait before the receiver acknowledged an answer
-  // read, in milliseconds (it refuses the read until the answer is ready).
+  // read, in milliseconds (it refuses the read until the answer is ready),
+  // and the refusals (NACKs) per step: the dummy write that checks the
+  // slave, request writes, answer reads.
   uint16_t answerWaitMs = 0;
+  uint32_t dummyNacks = 0;
+  uint32_t requestNacks = 0;
+  uint32_t answerNacks = 0;
   // Every byte read from the port, so a silent line (no bytes) and a wrong
   // rate (bytes without checksum-valid sentences) can be told apart.
   uint32_t bytes = 0;
