@@ -1194,6 +1194,7 @@ struct DevicePositionSourceMetadata: Equatable {
 /// the receiver's state. Diagnostic; it carries no coordinate.
 struct DevicePositionSourceStatus: Equatable {
     let active: String
+    let uptimeMs: Int?
     let gnssFitted: Bool
     let module: String?
     let transport: String?
@@ -1213,6 +1214,7 @@ struct DevicePositionSourceStatus: Equatable {
               let gnssFitted = json["gnssFitted"] as? Bool else { return nil }
         self.active = active
         self.gnssFitted = gnssFitted
+        uptimeMs = (json["uptimeMs"] as? NSNumber)?.intValue
         module = json["module"] as? String
         transport = json["transport"] as? String
         present = json["present"] as? Bool
@@ -1258,5 +1260,11 @@ struct DevicePositionSourceStatus: Equatable {
     var lastFixLabel: String {
         guard let lastFixAgeMs else { return "never" }
         return lastFixAgeMs < 1000 ? "now" : "\(lastFixAgeMs / 1000) s ago"
+    }
+
+    var uptimeLabel: String {
+        guard let uptimeMs else { return "unknown" }
+        let seconds = uptimeMs / 1000
+        return String(format: "%d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
     }
 }

@@ -1305,6 +1305,9 @@ class BLEManager: NSObject, ObservableObject {
     /// The device's live position-source report (`DSTS.positionSource`);
     /// nil until a status carried it, and for older firmware.
     @Published private(set) var devicePositionSourceStatus: DevicePositionSourceStatus?
+    /// When the latest position-source report arrived, so the app can show
+    /// a stale report as stale even when its values did not change.
+    @Published private(set) var devicePositionSourceStatusReceivedAt: Date?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
@@ -7569,6 +7572,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
         devicePositionSourceStatus = nil
+        devicePositionSourceStatusReceivedAt = nil
         firmwareUpdateStatus = "unknown"
         firmwareOTAEligible = nil
         firmwareOTAEligibilityCode = nil
@@ -12175,9 +12179,11 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if let positionSource = object["positionSource"] as? [String: Any],
            let status = DevicePositionSourceStatus(json: positionSource) {
             devicePositionSourceStatus = status
+            devicePositionSourceStatusReceivedAt = Date()
         } else {
             // Optional: firmware before the position-source report omits it.
             devicePositionSourceStatus = nil
+            devicePositionSourceStatusReceivedAt = nil
         }
         if let resources = object["resources"] as? [String: Any] {
             deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(

@@ -6996,10 +6996,13 @@ extension NavigationProtocolTests {
             "transport": "i2c", "present": true, "locked": true,
             "fixValid": true, "satellites": 13, "fixes": 182,
             "sentences": 2975, "invalid": 0, "lastFixAgeMs": 400,
-            "resetPulses": 1
+            "resetPulses": 1, "uptimeMs": 3_725_000
         ])
         let status = bleManager.devicePositionSourceStatus
         assertEqual(status?.active, "gnss", "the active source is parsed")
+        assertEqual(status?.uptimeLabel, "1:02:05", "the uptime is formatted")
+        assert(bleManager.devicePositionSourceStatusReceivedAt != nil,
+               "the report's arrival time is recorded")
         assertEqual(status?.activeLabel, "Device GNSS", "the active source has a label")
         assertEqual(status?.receiverLabel, "Quectel LC76G", "the module is named")
         assertEqual(status?.transport, "i2c", "the transport is parsed")

@@ -2176,7 +2176,8 @@ device cannot clear that warning. It clears only after the same device reports
 `DSTS` also includes a top-level `positionSource` object. `active` is `none`,
 `phone` or `gnss`: which input populates the device's position record now (a
 fitted receiver holds it for three seconds after each valid fix, the phone's
-positions apply otherwise). `gnssFitted` says whether the firmware carries an
+positions apply otherwise); `uptimeMs` is the device's uptime when the report
+was built. `gnssFitted` says whether the firmware carries an
 onboard receiver; for one, the object adds `module` (`lc76g`), `transport`
 (`uart` or `i2c`), `present` (the receiver answered its latest poll or opened
 its port), `locked` (checksum-valid sentences arrived), `fixValid`,

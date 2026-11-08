@@ -3724,6 +3724,9 @@ static std::string genericTransferStatusJson() {
     body += "{\"active\":\"";
     body += position_source::activeSourceName(nowMs);
     body += "\"";
+    // The device's uptime lets the app tell a frozen report from a frozen
+    // reader: counters that stop while uptime advances are the reader's.
+    status_json::appendUnsignedField(body, "uptimeMs", nowMs);
     status_json::appendBoolField(body, "gnssFitted", position_source::gnssFitted());
     if (position_source::gnssFitted()) {
       const position_source::GnssStatus gnss = position_source::gnssStatus();

@@ -4406,7 +4406,17 @@ private struct DeveloperSettingsView: View {
 /// section polls the status while it is visible and shows no coordinate.
 private struct PositionSourceStatusSection: View {
     @EnvironmentObject private var bleManager: BLEManager
+    @State private var now = Date()
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    private var reportAgeLabel: String {
+        guard let receivedAt = bleManager.devicePositionSourceStatusReceivedAt else {
+            return "never"
+        }
+        let seconds = Int(now.timeIntervalSince(receivedAt).rounded(.down))
+        if seconds < 3 { return "just now" }
+        return seconds < 10 ? "\(seconds) s ago" : "\(seconds) s ago, stale"
+    }
 
     var body: some View {
         Section(
@@ -4414,6 +4424,8 @@ private struct PositionSourceStatusSection: View {
             footer: Text("Live from the device's status, refreshed every two seconds while this screen is open. Coordinates are not shown.")
         ) {
             if let status = bleManager.devicePositionSourceStatus {
+                SettingsValueRow(title: "Report", value: reportAgeLabel)
+                SettingsValueRow(title: "Device uptime", value: status.uptimeLabel)
                 SettingsValueRow(title: "Active source", value: status.activeLabel)
                 SettingsValueRow(title: "Receiver", value: status.receiverLabel)
                 if status.gnssFitted {
@@ -4443,7 +4455,10 @@ private struct PositionSourceStatusSection: View {
             }
         }
         .onAppear { _ = bleManager.requestDeviceTransferStatus() }
-        .onReceive(refresh) { _ in _ = bleManager.requestDeviceTransferStatus() }
+        .onReceive(refresh) { _ in
+            now = Date()
+            _ = bleManager.requestDeviceTransferStatus()
+        }
     }
 }
 
