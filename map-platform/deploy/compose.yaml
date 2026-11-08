@@ -1,4 +1,4 @@
-# control-plane-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
+# control-plane-source-commit: 5c8e9c131e16eab769975170ee8b652cbe1d7fd8
 # worker-source-commit: 8baaf9804ebba273cfce3a7397ec6db341f49260
 # promotion-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
@@ -11,7 +11,7 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:3cd641df582e31e3650fac9b398fa98e1c27f6de463437930c6225b895598348
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:f415ab9321774b33a076fb5b11499f43668eda30cc2f1448443b3eb4d49ae8d9
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00
 
 services:
@@ -143,7 +143,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       # Keep the approval identity atomic with the image pins in this lock.
-      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261105-topo-production
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261108-firmware-build107
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
