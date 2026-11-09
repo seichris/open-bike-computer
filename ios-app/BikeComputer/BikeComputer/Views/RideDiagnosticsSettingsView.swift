@@ -199,9 +199,10 @@ struct RideDiagnosticsSettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if let manifest = collection.manifest {
-                    LabeledContent("Saved cutoff", value: manifest.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Collection requested", value: manifest.createdAt.formatted(date: .abbreviated, time: .shortened))
                     LabeledContent("Verified chunks", value: "\(manifest.verified.count) / \(manifest.expected.count)")
-                    LabeledContent("Delivery", value: manifest.deliveryComplete ? "Complete at saved cutoff" : "Incomplete")
+                    LabeledContent("Delivery", value: manifest.deliveryComplete ? "Complete" : "Incomplete")
+                    firmwareEvidenceRows(manifest)
                     Text("Recording coverage is evaluated separately by the host validator.")
                         .font(.footnote)
                     if !collection.isRunning && !manifest.deliveryComplete {
@@ -223,7 +224,7 @@ struct RideDiagnosticsSettingsView: View {
                     }
                 }
                 .disabled(isExporting)
-                Text("Collection exports contain the saved cutoff. Export recorder history separately for newer iPhone events.")
+                Text("Collection exports contain the saved inventory. Export recorder history separately for newer iPhone events.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Export Recorder History") { exportSupportBundle(recorderHistoryOnly: true) }
@@ -330,6 +331,38 @@ struct RideDiagnosticsSettingsView: View {
         case .pending: return "Pending"
         case .sent: return "Sent to Bicino"
         case .notDelivered: return "Not delivered"
+        }
+    }
+
+    @ViewBuilder
+    private func firmwareEvidenceRows(_ manifest: DiagnosticsAcquisitionManifest) -> some View {
+        LabeledContent("Firmware storage") {
+            switch manifest.firmwareStorage {
+            case .sdCard: Text("SD card")
+            case .internalFlash: Text("Internal flash (FFat)")
+            case nil: Text("Unknown")
+            }
+        }
+        if !manifest.deliveryComplete {
+            LabeledContent("Firmware log dates", value: "Download incomplete")
+        } else if manifest.expected.isEmpty {
+            LabeledContent("Firmware log dates", value: "No retained firmware logs")
+        } else if let dates = manifest.firmwareLogDates {
+            if let oldest = dates.oldest, let newest = dates.newest {
+                LabeledContent("Oldest dated firmware event",
+                    value: oldest.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Newest dated firmware event",
+                    value: newest.formatted(date: .abbreviated, time: .shortened))
+                Text(dates.hasUndatedEvents
+                    ? "Dates come from the device clock. Some firmware events have no date."
+                    : "Dates come from the device clock.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                LabeledContent("Firmware log dates", value: "No dated firmware events")
+            }
+        } else {
+            LabeledContent("Firmware log dates", value: "Unavailable for this collection")
         }
     }
 

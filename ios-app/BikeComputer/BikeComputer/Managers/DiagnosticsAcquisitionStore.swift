@@ -53,6 +53,39 @@ nonisolated struct DiagnosticsAppChunkReceipt: Codable, Equatable, Sendable {
     }
 }
 
+nonisolated enum DiagnosticsFirmwareStorage: String, Codable, Sendable {
+    case sdCard, internalFlash
+
+    init?(backend: String?) {
+        switch backend {
+        case "sdmmc", "spi", "legacy_spi_migration": self = .sdCard
+        case "ffat": self = .internalFlash
+        default: return nil
+        }
+    }
+}
+
+nonisolated struct DiagnosticsFirmwareLogDates: Codable, Equatable, Sendable {
+    private(set) var oldest: Date?
+    private(set) var newest: Date?
+    private(set) var hasUndatedEvents = false
+
+    mutating func include(_ date: Date?) {
+        guard let date else {
+            hasUndatedEvents = true
+            return
+        }
+        oldest = min(oldest ?? date, date)
+        newest = max(newest ?? date, date)
+    }
+
+    mutating func merge(_ chunk: Self) {
+        if let oldest = chunk.oldest { include(oldest) }
+        if let newest = chunk.newest { include(newest) }
+        hasUndatedEvents = hasUndatedEvents || chunk.hasUndatedEvents
+    }
+}
+
 /// A collection is an immutable inventory plus mutable, replayable receipts.
 /// It is intentionally outside the v1 recorder root: v1 archives remain unchanged.
 nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable {
@@ -84,6 +117,17 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
     // Absent in old receipts. These are original-capture bytes, never events
     // recorded later and relabelled to satisfy an older request.
     var appEvidence: [DiagnosticsAppChunkReceipt]? = nil
+    // Presentation metadata belongs to the local collection. Portable v2
+    // readers require the existing closed receipt shape.
+    var firmwareStorage: DiagnosticsFirmwareStorage? = nil
+    var firmwareLogDates: DiagnosticsFirmwareLogDates? = nil
+
+    var portableReceipt: Self {
+        var receipt = self
+        receipt.firmwareStorage = nil
+        receipt.firmwareLogDates = nil
+        return receipt
+    }
 
     func canResumeAutomatically(postRideEnabled: Bool) -> Bool {
         // Persisted transport failures require an explicit retry, including
@@ -261,16 +305,19 @@ actor DiagnosticsAcquisitionStore {
     }
 
     func inventory(_ id: UUID, deviceDigest: String, index: Data,
-                   chunks: [DiagnosticsChunkReceipt]) throws -> DiagnosticsAcquisitionManifest {
+                   chunks: [DiagnosticsChunkReceipt],
+                   firmwareStorage: DiagnosticsFirmwareStorage? = nil) throws -> DiagnosticsAcquisitionManifest {
         var value = try load(id)
         guard value.deviceDigest == deviceDigest else { throw Failure.inventoryChanged }
         if value.indexData == nil {
             value.indexData = index
             value.expected = chunks
+            value.firmwareStorage = firmwareStorage
         }
         // A retry always revalidates local bytes; previous receipts alone are
         // not proof that retention or a damaged file did not remove evidence.
         value.verified = []
+        value.firmwareLogDates = nil
         value.updatedAt = Date()
         value.phase = .collecting
         value.failureCode = nil
@@ -488,7 +535,7 @@ actor DiagnosticsAcquisitionStore {
         try save(value)
     }
 
-    func finish(_ id: UUID) throws {
+    func finish(_ id: UUID, firmwareLogDates: DiagnosticsFirmwareLogDates? = nil) throws {
         var value = try load(id)
         guard value.indexData != nil, Set(value.verified) == Set(value.expected.map(\.key)) else {
             throw Failure.inventoryChanged
@@ -499,6 +546,7 @@ actor DiagnosticsAcquisitionStore {
             }
         }
         value.phase = .complete
+        value.firmwareLogDates = firmwareLogDates
         value.evidenceRetained = true
         value.updatedAt = Date()
         value.failureCode = nil

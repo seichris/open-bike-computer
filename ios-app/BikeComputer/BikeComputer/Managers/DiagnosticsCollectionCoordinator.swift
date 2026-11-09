@@ -353,7 +353,8 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 ("evidence-v1.zip", evidence),
             ]
             for acquisition in acquisitions {
-                entries.append(("acquisitions/\(acquisition.id.uuidString.lowercased()).json", try encoder.encode(acquisition)))
+                entries.append(("acquisitions/\(acquisition.id.uuidString.lowercased()).json",
+                    try encoder.encode(acquisition.portableReceipt)))
             }
             let checksums = entries.map { path, data in
                 "\(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())  \(path)\n"

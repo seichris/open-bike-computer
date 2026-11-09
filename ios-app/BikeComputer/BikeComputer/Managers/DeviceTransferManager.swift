@@ -22,6 +22,7 @@ struct DeviceTransferSession: Equatable {
     }
 
     var operationLeaseID: UUID? = nil
+    var diagnosticsStorageBackend: String? = nil
     let mode: Mode
     let baseURL: URL
     let accessPointSSID: String?
@@ -2438,7 +2439,8 @@ final class DeviceTransferManager {
                 guard bleManager.deviceTransferStatusRevision != initialRevision else {
                     return nil
                 }
-                if let session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                if var session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                    session.diagnosticsStorageBackend = bleManager.deviceStorageBackend
                     return session
                 }
                 // A fresh entry rejection is authoritative. Do not spend the
