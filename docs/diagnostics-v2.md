@@ -275,7 +275,10 @@ checks original device/boot/chunk paths; export does not restore bodies into
 ordinary recorder retention. Small current/referenced app process manifests
 remain in the archive so required sidecars and available historical loss
 counters stay valid. Export Recorder History provides newer retained phone
-events separately; the collection export labels its saved cutoff.
+events separately. In the app, the request date and delivery status are separate
+from the storage source and the earliest and latest dated events in the
+verified firmware chunks. The dates come from the firmware clock. Older saved
+collections may lack these display fields.
 Export Partial Evidence preserves an incomplete
 cutoff; Release Incomplete Collection makes that job eligible for later cache
 reclamation without deleting other incomplete jobs. Receipts

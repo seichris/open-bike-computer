@@ -171,6 +171,7 @@ final class DeviceDiagnosticsTransferManager {
         let bootSequence: UInt32
         let firmwareFingerprint: String
         let truncatedTail: Bool
+        let logDates: DiagnosticsFirmwareLogDates
     }
 
     private struct ChunkInspection: Sendable {
@@ -231,7 +232,9 @@ final class DeviceDiagnosticsTransferManager {
                     chunks: freshIndex.chunks.map {
                         DiagnosticsChunkReceipt(bootSequence: $0.bootSequence,
                             chunk: $0.chunk, bytes: $0.bytes, sha256: $0.sha256.lowercased())
-                    })
+                    },
+                    firmwareStorage: DiagnosticsFirmwareStorage(backend: session.diagnosticsStorageBackend)
+                )
                 guard let frozenIndex = manifest.indexData else {
                     throw DeviceDiagnosticsTransferError.invalidIndex
                 }
@@ -255,6 +258,7 @@ final class DeviceDiagnosticsTransferManager {
             var previousSequenceByBoot: [UInt32: UInt64] = [:]
             var firmwareFingerprintByBoot: [UInt32: String] = [:]
             var bootsWithTruncatedTail: Set<UInt32> = []
+            var firmwareLogDates = DiagnosticsFirmwareLogDates()
             let chunks = index.chunks.sorted {
                 ($0.bootSequence, $0.chunk) < ($1.bootSequence, $1.chunk)
             }
@@ -351,10 +355,11 @@ final class DeviceDiagnosticsTransferManager {
                 if let acquisitionStore, let acquisitionID {
                     try await acquisitionStore.verified(acquisitionID,
                         receipt: receipt, data: data)
+                    firmwareLogDates.merge(validation.logDates)
                 }
             }
             if let acquisitionStore, let acquisitionID {
-                try await acquisitionStore.finish(acquisitionID)
+                try await acquisitionStore.finish(acquisitionID, firmwareLogDates: firmwareLogDates)
             }
             try await recorder.enforceRetentionAsync()
 
@@ -553,9 +558,9 @@ final class DeviceDiagnosticsTransferManager {
 
     static func validateJSONLForTesting(
         _ data: Data
-    ) -> (first: UInt64, last: UInt64)? {
+    ) -> (first: UInt64, last: UInt64, dates: DiagnosticsFirmwareLogDates)? {
         guard let result = validateJSONL(data) else { return nil }
-        return (result.firstSequence, result.lastSequence)
+        return (result.firstSequence, result.lastSequence, result.logDates)
     }
 
     static func cachedChunkIsReusableForTesting(
@@ -711,6 +716,7 @@ final class DeviceDiagnosticsTransferManager {
         var firstSequence: UInt64?
         var streamBootSequence: UInt32?
         var streamFirmwareFingerprint: String?
+        var logDates = DiagnosticsFirmwareLogDates()
         for rawLine in lines {
             guard !rawLine.isEmpty,
                   rawLine.count <= 8 * 1024,
@@ -741,10 +747,13 @@ final class DeviceDiagnosticsTransferManager {
             }
             if let wallTime = object["wallTime"] {
                 guard let value = wallTime as? String,
-                      fractionalTimeFormatter.date(from: value) != nil ||
-                        secondTimeFormatter.date(from: value) != nil else {
+                      let date = fractionalTimeFormatter.date(from: value) ??
+                        secondTimeFormatter.date(from: value) else {
                     return nil
                 }
+                logDates.include(date)
+            } else {
+                logDates.include(nil)
             }
             if let uptime = object["uptimeMs"] {
                 guard !isJSONBoolean(uptime),
@@ -794,7 +803,8 @@ final class DeviceDiagnosticsTransferManager {
             lastSequence: previousSequence,
             bootSequence: streamBootSequence,
             firmwareFingerprint: streamFirmwareFingerprint,
-            truncatedTail: truncatedTail
+            truncatedTail: truncatedTail,
+            logDates: logDates
         )
     }
 
