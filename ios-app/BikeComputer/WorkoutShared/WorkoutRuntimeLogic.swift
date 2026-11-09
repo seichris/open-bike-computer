@@ -30,6 +30,9 @@ nonisolated enum WorkoutLifecycleEvent: Equatable, Sendable {
     case sessionRunning
     case sessionPaused
     case requestEnd(WorkoutFinishDisposition)
+    /// HealthKit stopped, ended or interrupted the session before the rider
+    /// chose to save or discard. The choice may follow as `.requestEnd`.
+    case sessionStopped
     case sessionEnded
     case fail
     case reset
@@ -59,9 +62,21 @@ nonisolated struct WorkoutLifecycleReducer: Equatable, Sendable {
             guard [.running, .paused].contains(state) else { return false }
             state = .paused
         case .requestEnd(let disposition):
+            if state == .ending, finishDisposition == nil {
+                // The session already stopped without a choice; the rider's
+                // choice completes this ending and cannot be replaced later.
+                finishDisposition = disposition
+                finalizationClaimed = false
+                return true
+            }
             guard [.starting, .running, .paused].contains(state) else { return false }
             state = .ending
             finishDisposition = disposition
+            finalizationClaimed = false
+        case .sessionStopped:
+            guard [.starting, .running, .paused].contains(state) else { return false }
+            state = .ending
+            finishDisposition = nil
             finalizationClaimed = false
         case .sessionEnded:
             guard state == .ending else { return false }
