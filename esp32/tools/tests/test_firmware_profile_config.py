@@ -489,11 +489,22 @@ for environment, production_profile in personal_profiles.items():
     assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
     assert inherited_option(environment, "board_build.partitions") == "partitions.csv"
 
+simulator_profile = "env:WAVESHARE_AMOLED_175_SIMULATOR"
+assert config.get(simulator_profile, "extends") == "env:WAVESHARE_AMOLED_175"
+assert inherited_option(simulator_profile, "custom_firmware_target") == "WAVESHARE_AMOLED_175"
+simulator_flags = inherited_option(simulator_profile, "build_flags")
+assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in simulator_flags
+assert "-DDEVICE_REMOTE_DEBUG=1" not in simulator_flags
 for environment in config.sections():
+    if environment.startswith("env:"):
+        assert ("-DBICINO_SIMULATOR_MAP_LAN=1" in inherited_option(
+            environment, "build_flags"
+        )) == (environment == simulator_profile)
     if (
         not environment.startswith("env:")
         or environment in remote_debug_profiles
         or environment in personal_profiles
+        or environment == simulator_profile
     ):
         continue
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
