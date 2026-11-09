@@ -84,7 +84,13 @@ manifest receipts, and file sizes, or existing verified archive installations.
 Prepared and uncommitted roots are excluded. A selected or previous map whose
 consumed-marker write failed is completed all the same: boot, uploads, and each
 library selection or refresh retry the missing marker, which returns it to the
-inventory. Completed versions with missing or
+inventory. While the previous map's cleanup keeps failing, a selection of any
+other map fails with `stream_settle_previous` without moving the pointer and an
+upload is refused with 503 `stream_settle_previous`; either would push that map
+out of the pointer, where its marker counts as pending work. Selecting the
+selected map or switching back to the previous one keeps both in the pointer
+and is allowed, and switching back lets uploads resume. Refresh still lists the
+library. Completed versions with missing or
 truncated payloads remain visible as **Files need repair**; they can be removed
 but cannot authorize reuse or automatic selection. Cancelled
 retransmissions preserve a previously completed version even after it has aged

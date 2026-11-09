@@ -173,6 +173,10 @@ struct BaudProbe {
 // an absent module is pulsed rarely; it returns to kSilentWindowMs once bytes
 // flow. A restart also clears the failure count, so the module is polled at
 // the kAbsentPollMs cadence while it comes back rather than the slow one.
+// The result of one poll of the I2C receiver: no answer at all, an answer
+// whose announced bytes were only partly drained, or a complete drain.
+enum class I2cPollOutcome : uint8_t { noAnswer = 0, partial = 1, complete = 2 };
+
 struct I2cReceiverPolicy {
   static constexpr uint32_t kSilentWindowMs = 15'000;
   static constexpr uint32_t kMaxSilentWindowMs = 300'000;
@@ -193,11 +197,11 @@ struct I2cReceiverPolicy {
   // The reader started the module fresh at nowMs.
   void begin(uint32_t nowMs) { progressMs = nowMs; }
 
-  // Records one poll: whether the receiver answered, and the stream's byte
-  // total read at nowMs after the poll, which can take seconds. Returns true
-  // when the module must be restarted; call restarted() once it has been.
-  bool notePoll(bool answered, uint32_t streamBytes, uint32_t nowMs) {
-    if (answered)
+  // Records one poll: its outcome, and the stream's byte total read at nowMs
+  // after the poll, which can take seconds. Returns true when the module must
+  // be restarted; call restarted() once it has been.
+  bool notePoll(I2cPollOutcome outcome, uint32_t streamBytes, uint32_t nowMs) {
+    if (outcome != I2cPollOutcome::noAnswer)
       consecutiveFailures = 0;
     else if (consecutiveFailures < UINT8_MAX)
       ++consecutiveFailures;
@@ -226,15 +230,19 @@ struct I2cReceiverPolicy {
   // now refuses beyond the step budget is busy, not gone, so it is polled
   // again at once; only a slave that keeps refusing is polled slowly. A
   // partial drain left bytes behind, so the next query follows at once too.
-  uint32_t nextPollDelayMs(bool answered, bool partial,
-                           bool answeredBefore) const {
-    if (!answered) {
+  uint32_t nextPollDelayMs(I2cPollOutcome outcome, bool answeredBefore) const {
+    switch (outcome) {
+    case I2cPollOutcome::noAnswer:
       if (answeredBefore)
         return 0;
       return consecutiveFailures >= kAbsentPollsBeforeSlow ? kAbsentSlowPollMs
                                                            : kAbsentPollMs;
+    case I2cPollOutcome::partial:
+      return 0;
+    case I2cPollOutcome::complete:
+      break;
     }
-    return partial ? 0 : kIdlePollMs;
+    return kIdlePollMs;
   }
 };
 

@@ -8,10 +8,9 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-#include "WAVESHARE_AMOLED_175.hpp"
-#elif defined(WAVESHARE_EPAPER_397)
-#include "WAVESHARE_EPAPER_397.hpp"
-#else
-#error "No Panel defined!"
-#endif
+// The board layer chooses the panel header: lib/board/panel_select.hpp
+// includes the header of the panel that the board definition names. Shared
+// code keeps including this file because PlatformIO's dependency finder gives
+// each includer lib/panel and its dependencies' include paths for it; an
+// include of lib/board alone would not, since that library is header-only.
+#include "../board/panel_select.hpp"

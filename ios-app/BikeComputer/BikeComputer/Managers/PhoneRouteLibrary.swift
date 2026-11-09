@@ -212,14 +212,15 @@ final class PhoneRouteLibrary: ObservableObject {
     /// Saves a route received through Bicino social: a friend's or linked route,
     /// its duplicate, or a Group Ride snapshot. Each copy records its owner in a
     /// phone-side sidecar so it cannot later be published as the saver's own.
-    /// Navigation hashes retain their original meaning.
+    /// Navigation hashes retain their original meaning. A duplicate copies the
+    /// stored route, so it keeps the original's geometry fingerprint.
     @discardableResult
     func importSocialArchive(_ data: Data, source: SocialRouteSource, duplicate: Bool) throws -> PlannedRouteSummaryV1 {
         let original = try NavigationRouteArchiveV1.decode(data, purpose: .offlineNavigation, now: now())
         guard RouteProviderPolicyV1.allowsSocialSharing(original.route.provider) else {
             throw NavigationRouteArchiveError.durableStorageNotAllowed(providerID: original.providerID)
         }
-        let r = original.route
+        let r = original.storedRoute
         let archive: NavigationRouteArchiveV1
         if duplicate {
             let route = NavigationRouteV1(id: UUID(), revision: 1, provider: r.provider,
@@ -232,7 +233,7 @@ final class PhoneRouteLibrary: ObservableObject {
         } else { archive = original }
         let provenance = SocialRouteProvenance(source: source, sourceRouteID: original.routeID.uuidString,
             sourceRevision: Int(original.revision), sourceHash: original.contentHash,
-            geometry: Self.socialGeometry(original.route))
+            geometry: Self.socialGeometry(original))
         try FileManager.default.createDirectory(at: socialProvenanceDirectory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -257,7 +258,7 @@ final class PhoneRouteLibrary: ObservableObject {
         }
         let records = allSocialProvenance()
         guard !records.isEmpty, let archive = try? offlineArchive(for: summary) else { return [] }
-        let geometry = Self.socialGeometry(archive.route)
+        let geometry = Self.socialGeometry(archive)
         return records.filter { $0.geometry == geometry }
     }
 
@@ -280,8 +281,10 @@ final class PhoneRouteLibrary: ObservableObject {
         }
     }
 
-    static func socialGeometry(_ route: NavigationRouteV1) -> String {
-        SocialRouteGeometry.fingerprint(route.points.map { (latitude: $0.latitude, longitude: $0.longitude) })
+    /// The backend fingerprints the points an archive stores, which a reread
+    /// version-1 Apple Maps route keeps.
+    static func socialGeometry(_ archive: NavigationRouteArchiveV1) -> String {
+        SocialRouteGeometry.fingerprint(archive.storedRoute.points.map { (latitude: $0.latitude, longitude: $0.longitude) })
     }
 
     @discardableResult
@@ -386,7 +389,12 @@ final class PhoneRouteLibrary: ObservableObject {
             ),
             now: now()
         ), RouteProviderPolicyV1.allowsDurableStorage(record.archive.route.provider) else { return }
-        let existing = elevationSidecars.load(binding)
+        // A sidecar without GPX heights holds only the service profile, so it
+        // follows the profile's geometry. A version-1 Apple Maps route read
+        // with version 2 keeps its binding but not its old geometry.
+        let existing = elevationSidecars.load(binding).flatMap {
+            $0.gpxVertexElevationsDecimeters == nil && $0.geometryDigest != profile.geometry.digest ? nil : $0
+        }
         let sidecar = existing?.replacingServiceProfile(profile) ?? RouteElevationSidecarV1(
             binding: binding,
             geometryDigest: profile.geometry.digest,

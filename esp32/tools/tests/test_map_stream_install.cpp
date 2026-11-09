@@ -181,6 +181,26 @@ private:
   mutable bool corrupted_ = false;
 };
 
+// Refuses the consumed-marker write of the named roots, as a failing card
+// would, so the selection settle cannot finish their cleanup.
+class ConsumedMarkerFailingInstaller final : public MapTransferInstaller {
+public:
+  using MapTransferInstaller::MapTransferInstaller;
+  std::vector<std::string> failingSessions;
+
+protected:
+  bool writeTextFileAtomic(const std::string &path,
+                           const std::string &text) const override {
+    for (const auto &session : failingSessions) {
+      const std::string marker = "/VECTMAP/.maps/" + session + "/.activation-consumed";
+      if (path.size() >= marker.size() &&
+          path.compare(path.size() - marker.size(), marker.size(), marker) == 0)
+        return false;
+    }
+    return MapTransferInstaller::writeTextFileAtomic(path, text);
+  }
+};
+
 std::string tempRoot() {
   std::string pattern = "/tmp/open-bike-map-stream-install-XXXXXX";
   char *created = ::mkdtemp(pattern.data());
@@ -1148,6 +1168,67 @@ void testPreviousReadyMarkerIsSettledNotPending() {
   assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
   assert(installer.readActiveMap(selected).ok && selected.sessionId == "current");
   assert(installer.readMapLibrary(maps).ok && maps.size() == 3);
+  std::filesystem::remove_all(root);
+}
+
+// A Use or an upload's activation pushes the previous map out of the pointer,
+// where a marker that its failed cleanup left turns into pending work. So that
+// failure has its own code, which those callers refuse on, and it takes
+// precedence over the selected map's: the selected map only becomes the
+// previous one and stays protected.
+void testPreviousCleanupFailureHasItsOwnCode() {
+  const std::string root = tempRoot();
+  ConsumedMarkerFailingInstaller installer(root);
+  prepareReadyRoot(root, "previous");
+  assert(installer.activateReadyStreamMap("previous").ok);
+  prepareReadyRoot(root, "selected");
+  assert(installer.activateReadyStreamMap("selected").ok);
+  const std::string maps = root + "/VECTMAP/.maps/";
+  const auto consumed = [&](const char *session) {
+    return exists(maps + session + "/.activation-consumed");
+  };
+  const auto unsettle = [&](const char *session) {
+    assert(::unlink((maps + session + "/.activation-consumed").c_str()) == 0);
+  };
+  // The settle never moves the pointer, whatever it returns.
+  const auto pointerKept = [&] {
+    ActiveMapSelection active;
+    return installer.readActiveMap(active).ok && active.sessionId == "selected" &&
+           active.previousSessionId == "previous";
+  };
+  assert(pointerKept());
+
+  // Only the previous map fails; the selected map still settles.
+  unsettle("selected");
+  unsettle("previous");
+  installer.failingSessions = {"previous"};
+  auto settled = installer.settleSelectionStreamMaps();
+  assert(!settled.ok && settled.code == "stream_settle_previous" &&
+         settled.message == "previous map cleanup will retry");
+  assert(consumed("selected") && !consumed("previous") && pointerKept());
+
+  // Only the selected map fails; the previous map settles in the same pass
+  // without hiding that failure.
+  unsettle("selected");
+  installer.failingSessions = {"selected"};
+  settled = installer.settleSelectionStreamMaps();
+  assert(!settled.ok && settled.code == "stream_settle_cleanup" &&
+         settled.message == "installed map cleanup will retry");
+  assert(!consumed("selected") && consumed("previous") && pointerKept());
+
+  // Both fail: the previous map's code wins.
+  unsettle("previous");
+  installer.failingSessions = {"selected", "previous"};
+  settled = installer.settleSelectionStreamMaps();
+  assert(!settled.ok && settled.code == "stream_settle_previous");
+  assert(!consumed("selected") && !consumed("previous") && pointerKept());
+
+  // The next attempt that succeeds settles both.
+  installer.failingSessions.clear();
+  settled = installer.settleSelectionStreamMaps();
+  assert(settled.ok && settled.code == "stream_installed");
+  assert(consumed("selected") && consumed("previous") && pointerKept());
+  assert(installer.settleSelectionStreamMaps().code == "stream_settle_none");
   std::filesystem::remove_all(root);
 }
 
@@ -2771,6 +2852,7 @@ int main() {
   testConsumedReadyRootsAreNotReactivatedAndRemainInLibrary();
   testSelectedReadyMarkerIsSettledNotPending();
   testPreviousReadyMarkerIsSettledNotPending();
+  testPreviousCleanupFailureHasItsOwnCode();
   testFrozenMapIdEdgesInstallAndActivate();
   testCrashBoundariesRemainRetryableWithMonotonicFinalization();
   testEveryInstallerMutationAndInterruptedRecovery();

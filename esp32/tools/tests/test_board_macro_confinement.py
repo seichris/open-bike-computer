@@ -26,9 +26,10 @@ ROOT = Path(__file__).resolve().parents[2]
 BASELINE_PATH = Path(__file__).resolve().with_name("board_macro_baseline.json")
 SCAN_DIRS = ("src", "lib", "include")
 SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp", ".inc", ".ino"}
-# Board definitions and the panel selector are where target macros belong.
+# The board layer is where target macros belong: board.hpp selects the board
+# definition, whose data also names the panel header that
+# lib/board/panel_select.hpp includes.
 EXEMPT_PREFIXES = ("lib/board/",)
-EXEMPT_FILES = {"lib/panel/panelSelect.hpp"}
 # Macros of the removed IceNav-era boards and of the feature flags every
 # Waveshare profile used to set (plan milestone M0). None may come back: a
 # surviving `#ifndef DISABLE_*` would compile code in without any error.
@@ -162,8 +163,8 @@ def scan(targets: list[str]) -> tuple[dict[str, int], dict[str, str], list[str]]
             hits = target_directive_lines(lines, macro)
             if not hits:
                 continue
-            if relative.startswith(EXEMPT_PREFIXES) or relative in EXEMPT_FILES:
-                exempt[relative] = "board definition or panel selector"
+            if relative.startswith(EXEMPT_PREFIXES):
+                exempt[relative] = "board layer"
             elif gates_whole_file(lines, hits, negated):
                 exempt[relative] = "gated as a whole file"
             else:
