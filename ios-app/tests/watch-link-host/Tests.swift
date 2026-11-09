@@ -241,6 +241,26 @@ enum Tests {
                    "no disconnect callback exists to consume a busy marker")
         }
 
+        await run("a busy iPhone names what keeps the Bicino") {
+            let cases: [(WatchDirectRidePhoneActivityV1?, String)] = [
+                (.recording, "Bicino is recording a ride on iPhone"),
+                (.navigation, "Bicino is controlled by iPhone navigation"),
+                // An earlier iPhone build names nothing: today's message.
+                (nil, "Bicino is controlled by iPhone navigation"),
+            ]
+            for (activity, message) in cases {
+                let f = Fixture(); defer { f.close() }
+                f.link.testStartPendingPreparationWithoutPeripheral()
+                let request = prepare(f.id)
+                f.link.directRidePreparationDidRespond(request: request,
+                    response: .init(requestID: request.requestID, accepted: false,
+                                    errorCode: "phone_navigation_active",
+                                    phoneActivity: activity))
+                expect(f.link.state == .busy && f.link.lastError == message,
+                       "\(activity?.rawValue ?? "an unnamed activity") reads \(message)")
+            }
+        }
+
         await run("unchanged route suppression preserves replacement and reconnect") {
             let f = Fixture(); defer { f.close() }
             for _ in 0..<20 {
@@ -907,6 +927,37 @@ enum Tests {
                    "the rejected successor handoff is retired")
             expect(f.link.state == .busy && f.link.testCentral.connections.count == 1,
                    "the ride defers to phone navigation again")
+        }
+        await run("a held ride treats an iPhone recording like navigation") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            f.link.setDemand(navigation: false, workout: true)
+            handBack(f)
+            expect(f.link.lastError == "Bicino is controlled by iPhone navigation",
+                   "the handback itself is for iPhone navigation")
+            guard let successorID = f.prepares.first else {
+                expect(false, "the retained ride requests a successor preparation")
+                return
+            }
+            let successor = prepare(successorID)
+            f.link.directRidePreparationSubmissionDidFail(request: successor)
+            await settle(); f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            expect(f.link.state.isReady, "the ride reconnected while the phone was silent")
+            f.link.directRidePreparationDidRespond(request: successor,
+                response: .init(requestID: successor.requestID, accepted: false,
+                                errorCode: "phone_navigation_active",
+                                phoneActivity: .recording))
+            expect(f.link.transportPhase == .stopping,
+                   "an iPhone that now records its own ride also gets the link back")
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            f.link.testDrop(f.peer)
+            expect(f.releases == [f.id, successorID],
+                   "the rejected successor handoff is retired")
+            expect(f.link.state == .busy && f.link.testCentral.connections.count == 1,
+                   "the ride keeps holding for the recording iPhone")
+            expect(f.link.lastError == "Bicino is recording a ride on iPhone",
+                   "the hold names the iPhone recording")
         }
         await run("a ride withdrawn while deferred does not defer the next ride") {
             let f = Fixture(); defer { f.close() }

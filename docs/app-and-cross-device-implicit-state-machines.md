@@ -838,7 +838,8 @@ PrepareRejectedBusy / PrepareAccepted / ReleasePending (persisted, must drain) /
 RestoredUndecided × Handback None / Deferring (30 s backoff) / Suspended. Smell: six bools
 + two persisted records + one enum for one handoff; `phonePreparationAccepted=false`
 written in six places; `.busy` is a value of the published link state but decided by the
-preparation machine.
+preparation machine. Since 2026-11-10 `phoneBusyActivity` remembers what the phone's
+latest busy answer named (navigation or recording), for the busy message only.
 
 **W-5 Published link state vs transport reducer** — `WatchDeviceLink.swift:31`
 `@Published state` (12 cases) written at 27 sites alongside the explicit
@@ -1002,13 +1003,22 @@ Failure modes: Watch relaunch mid-ride → restoration gate waits for navigation
 demand, else releases; phone kill → yield persists and reconnect stays suppressed until
 release or 24 h; firmware reboot → lease gone, Watch reclaims; WC unreachable → Watch
 suspends the hold.
-Divergences: three persisted half-states with no shared epoch beyond the preparation ID;
-the phone's 24 h expiry and the Watch's suspended hold can leave phone auto-reconnect off
-while the Watch is not scanning (both waiting) until the next backoff tick;
-`phone_navigation_active` also means "my recording blocks you", so the Watch cannot tell a
-handback from a permanent refusal; the firmware's owner-reclaim-on-first-write means a phone
-reconnecting during a Watch heartbeat gap silently steals the lease with no Watch signal
-besides `leaseLost`.
+Divergences: the stable preparation ID is the shared handoff token: prepare, release and
+both reconciliation purposes carry it, the Watch persists it in its intent and pending
+reconciliation, and the phone persists its yield under it and ends that yield only on the
+Watch's exact release (`WatchDirectRidePreparationPolicyV1.releaseMatches`), so the 24 h
+expiry is only the fallback for a Watch that never answers. (The first survey called this
+"no shared epoch beyond the preparation ID"; checked on 2026-11-10, the preparation ID is
+that epoch.) The Watch's persisted handback flag is not keyed by it, by design: it describes
+the current ride and clears when the phone accepts, demand ends or the selection changes;
+the firmware lease is per BLE session in RAM. Remaining: after phone navigation ends,
+nobody holds the Bicino until the Watch's next preparation retry (1 s doubling to 30 s);
+`phone_navigation_active` also covered "my recording blocks you", and since 2026-11-10 the
+rejection names which in an optional `phoneActivity` (`navigation` | `recording`) that
+earlier Watch builds ignore, so the Watch's message is no longer wrong while the phone
+records (the hold itself already treated both alike); the firmware's
+owner-reclaim-on-first-write means a phone reconnecting during a Watch heartbeat gap
+silently steals the lease with no Watch signal besides `leaseLost`.
 
 ### X-3 Firmware update: prepare → maintenance reboot → upload → finalize → reboot → verify → receipt ack → exit
 Parties: firmware TR-4, TR-5, TR-6; phone D-4, D-5, A-18.
@@ -1317,9 +1327,11 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
 2. **X-3 / D-4** firmware update: guard `updatePending(stage:)` with the same transition
    table on both reconcile and error paths, drop the status string, and bind the post-update
    boot to the pending record by correlation, not build number.
-3. **X-2 / A-8 / W-4** Watch-direct handoff: a single preparation record with one epoch
-   shared by Watch, phone and lease, replacing six Watch bools, two persisted Watch records
-   and the phone's 24 h timer.
+3. **X-2 / A-8 / W-4** Watch-direct handoff: the preparation ID already binds Watch and
+   phone end to end, with the 24 h timer only as a fallback, and since 2026-11-10 the phone's
+   busy answer names navigation versus recording. What remains is the Watch's six bools and
+   two persisted records for one handoff (W-4), which one explicit Watch-side state would
+   replace.
 4. **A-1 / A-2 / A-6** BLE manager: one `clearSession()`, an explicit reconnect-intent
    enum in place of the `autoReconnect` mode flag, and a scan-purpose reconcile that takes a
    typed reason.

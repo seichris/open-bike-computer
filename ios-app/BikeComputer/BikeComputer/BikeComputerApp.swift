@@ -330,8 +330,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             }
             return bleManager.handleWatchDirectRidePreparationRequest(
                 request,
-                phoneNavigationActive: self.coordinator.isNavigating
-                    || self.workoutSessionCoordinator.blocksBikeComputerHandoff
+                phoneNavigationActive: self.coordinator.isNavigating,
+                phoneRecordingBlocksHandoff:
+                    self.workoutSessionCoordinator.blocksBikeComputerHandoff
             )
         }
         watchConnectivityCoordinator.$state

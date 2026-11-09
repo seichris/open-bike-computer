@@ -194,6 +194,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
     private let phoneNavigationHandbackKey =
         "watchDeviceLink.phoneNavigationHandback.v1"
+    // What the phone's latest busy answer said keeps the Bicino, for the
+    // message only. Earlier iPhone builds name nothing, which reads as
+    // navigation, as before.
+    private var phoneBusyActivity: WatchDirectRidePhoneActivityV1?
+    private var phoneBusyMessage: String {
+        phoneBusyActivity == .recording
+            ? "Bicino is recording a ride on iPhone"
+            : "Bicino is controlled by iPhone navigation"
+    }
     // While deferring, only the retry backoff may ask the phone again. Each
     // workout snapshot would otherwise resubmit about once a second.
     private var deferredPreparationRetryDue = false
@@ -420,6 +429,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationAttempt = 0
             phonePreparationRetryTask?.cancel()
             phonePreparationRetryTask = nil
+            phoneBusyActivity = nil
             // Phone navigation ended and the phone yielded the Bicino.
             let wasDeferring = phoneNavigationHandback == .deferring
             phoneNavigationHandback = nil
@@ -430,12 +440,17 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             return
         }
         phonePreparationAccepted = false
+        if response.errorCode == WatchDirectRidePreparationResponseV1.phoneBusyCode {
+            phoneBusyActivity = response.phoneActivity
+        }
         if phoneNavigationHandback != nil,
-           response.errorCode == "phone_navigation_active" {
-            // The phone still navigates after it stopped answering. Restore
-            // the hold, and return a link this ride won in the meantime.
-            // Before ride restoration a relaunched Watch keeps its link: the
-            // phone may be answering for its own workout recovery.
+           response.errorCode == WatchDirectRidePreparationResponseV1.phoneBusyCode {
+            // The phone still keeps the Bicino after it stopped answering,
+            // for navigation or for its own recording (`phoneActivity`; earlier
+            // iPhone builds leave it out). Either way restore the hold, and
+            // return a link this ride won in the meantime. Before ride
+            // restoration a relaunched Watch keeps its link: the phone may be
+            // answering for its own workout recovery.
             if !transportStateMachine.isReady {
                 phoneNavigationHandback = .deferring
             } else if initialDemandRestorationCompleted {
@@ -443,14 +458,14 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 return
             }
         }
-        // Outside a handback the phone also reports `phone_navigation_active`
-        // while its own workout recording or recovery blocks a handoff, so a
-        // rejection alone is no reason to drop an established link.
+        // Outside a handback the phone reports the same code while its own
+        // workout recording or recovery blocks a handoff, so a rejection
+        // alone is no reason to drop an established link.
         guard !transportStateMachine.isReady else { return }
         let message: String
         switch response.errorCode {
-        case "phone_navigation_active":
-            message = "Bicino is controlled by iPhone navigation"
+        case WatchDirectRidePreparationResponseV1.phoneBusyCode:
+            message = phoneBusyMessage
         case "device_transfer_active":
             message = "Bicino is busy transferring data from iPhone"
         case "device_admin_active":
@@ -724,7 +739,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         guard phoneNavigationHandback != .deferring else {
             // The phone's answer to the retried preparation, not a scan,
             // decides when this ride may take the Bicino back.
-            lastError = "Bicino is controlled by iPhone navigation"
+            lastError = phoneBusyMessage
             state = .busy
             return
         }
@@ -881,6 +896,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             return
         }
         if request.purpose == .phoneNavigation, hasDemand {
+            phoneBusyActivity = .navigation
             deferToPhoneNavigation()
             return
         }
