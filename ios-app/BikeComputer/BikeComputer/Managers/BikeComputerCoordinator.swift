@@ -884,6 +884,22 @@ class BikeComputerCoordinator: ObservableObject {
 
     // MARK: - Public API: Navigation
 
+    /// The active route's WGS-84 geometry and the rider's distance along it,
+    /// for Siri place searches. Nil when not navigating or off the route,
+    /// where "ahead" would be measured from a point the rider has left.
+    func routeAheadForPlaceSearch() -> (points: [RouteCoordinateV1], distanceAlongMeters: Double)? {
+        guard isNavigating, let active = navEngine.elevationRoute else { return nil }
+        let progress = navEngine.elevationProgress
+        if progress?.navigationGeneration == active.navigationGeneration,
+           progress?.onRoute == false {
+            return nil
+        }
+        let distanceAlong = progress?.navigationGeneration == active.navigationGeneration
+            ? progress?.distanceAlongGeometryMeters ?? 0
+            : 0
+        return (active.route.points, distanceAlong)
+    }
+
     func startNavigation(
         from source: RouteEndpoint,
         to destination: RouteEndpoint,

@@ -97,3 +97,7 @@ void togglePreviousNavigationScreen();
 void showConfiguredDefaultMainScreen();
 void applyDeviceScreenSettings();
 void applyDeviceScreenConfiguration();
+// Runs on the UI task. Reports the screen visible afterwards.
+screen_configuration_protocol::ScreenActivationResult activateMainScreen(
+    const screen_configuration_protocol::ActivationRequest &request,
+    uint32_t &activeInstanceID, uint8_t &activeType);

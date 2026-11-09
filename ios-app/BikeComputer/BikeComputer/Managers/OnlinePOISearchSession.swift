@@ -73,11 +73,26 @@ final class MapKitOnlinePOISearchProvider: OnlinePOISearchProviding {
 
     func search(categories: Set<OnlinePOICategory>, center: CLLocationCoordinate2D,
                 radius: CLLocationDistance) async throws -> OnlinePOISearchResponse {
+        let selected = OnlinePOICategory.allCases.filter { categories.contains($0) }
+        // At most seven sequential text queries for an explicit all-category
+        // selection, after one structured request; no grid crawling/prefetch.
+        return try await search(
+            pointOfInterestCategories: selected.flatMap(\.mapKitCategories),
+            fallbackQueries: selected.filter { $0 != .bicycles }.flatMap(\.searchQueries),
+            textQueries: categories.contains(.bicycles) ? OnlinePOICategory.bicycles.searchQueries : [],
+            center: center, radius: radius)
+    }
+
+    /// One structured request for `pointOfInterestCategories`. Only where that
+    /// endpoint has no coverage are `fallbackQueries` searched as text;
+    /// `textQueries` cover kinds MapKit has no category for.
+    func search(pointOfInterestCategories filters: [MKPointOfInterestCategory],
+                fallbackQueries: [String], textQueries: [String],
+                center: CLLocationCoordinate2D,
+                radius: CLLocationDistance) async throws -> OnlinePOISearchResponse {
         var items: [MKMapItem] = []
         var usedCategoryTextFallback = false
         var queries: [String] = []
-        let filters = OnlinePOICategory.allCases.filter { categories.contains($0) }
-            .flatMap(\.mapKitCategories)
         if !filters.isEmpty {
             let request = MKLocalPointsOfInterestRequest(center: center, radius: radius)
             request.pointOfInterestFilter = MKPointOfInterestFilter(including: filters)
@@ -92,18 +107,12 @@ final class MapKitOnlinePOISearchProvider: OnlinePOISearchProviding {
                 guard failure.domain == MKErrorDomain,
                       failure.code == Int(MKError.Code.directionsNotFound.rawValue) else { throw error }
                 usedCategoryTextFallback = true
-                queries += OnlinePOICategory.allCases
-                    .filter { categories.contains($0) && $0 != .bicycles }
-                    .flatMap(\.searchQueries)
+                queries += fallbackQueries
             }
         }
-        if categories.contains(.bicycles) {
-            // Text search is approximate, and deliberately doesn't restrict to
-            // .store: standalone repair services may have another category.
-            queries += OnlinePOICategory.bicycles.searchQueries
-        }
-        // At most seven sequential text queries for an explicit all-category
-        // selection, after one structured request; no grid crawling/prefetch.
+        // Text search is approximate, and deliberately doesn't restrict to
+        // .store: standalone bicycle repair services may have another category.
+        queries += textQueries
         for query in queries {
             try Task.checkCancellation()
             let request = MKLocalSearch.Request()
