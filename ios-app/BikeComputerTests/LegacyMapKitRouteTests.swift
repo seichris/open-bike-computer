@@ -6,6 +6,7 @@ import Foundation
 extension RideSharedTests {
     static func testLegacyMapKitRoutes() throws {
         let createdAt = Date(timeIntervalSince1970: 1_790_000_000)
+        try testInvalidVersion1ArchiveIsRejectedUnread(createdAt: createdAt)
 
         // Outside mainland China, Apple Maps coordinates are WGS-84 and the
         // road itself. Version 1 shifted them anyway.
@@ -140,6 +141,39 @@ extension RideSharedTests {
     }
 
     /// Version 1's normalization exactly as the app ran it before version 2.
+    /// Decoding reads a version-1 route before it validates the stored one. An
+    /// archive that validation rejects, here a shared Hong Kong route with one
+    /// latitude of 1e300, is never read again and still fails to decode.
+    private static func testInvalidVersion1ArchiveIsRejectedUnread(createdAt: Date) throws {
+        let stored = line(from: (22.2810, 114.1600), to: (22.2990, 114.1720), count: 30).map(version1)
+        let saved = try NavigationRouteArchiveV1.create(
+            route: route(stored, version: 1), createdAt: createdAt, purpose: .offlineNavigation)
+        let data = try saved.encoded(purpose: .offlineNavigation, now: createdAt)
+        guard var archive = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var routeObject = archive["route"] as? [String: Any],
+              var points = routeObject["points"] as? [[String: Any]] else {
+            require(false, "the encoded archive has a route with points")
+            return
+        }
+        points[15]["latitude"] = 1e300
+        routeObject["points"] = points
+        archive["route"] = routeObject
+        let corrupt = try JSONSerialization.data(withJSONObject: archive)
+        let decodedRoute = try JSONDecoder().decode(
+            NavigationRouteV1.self,
+            from: JSONSerialization.data(withJSONObject: routeObject)
+        )
+        require(RouteCoordinateNormalizationV1.rereadVersion1(decodedRoute) == decodedRoute,
+            "a version-1 route with an invalid coordinate is returned as stored")
+        var rejected = false
+        do {
+            _ = try NavigationRouteArchiveV1.decode(corrupt, purpose: .offlineNavigation, now: createdAt)
+        } catch {
+            rejected = true
+        }
+        require(rejected, "a version-1 archive with an invalid coordinate fails to decode")
+    }
+
     private static func version1(_ coordinate: RouteCoordinateV1) -> RouteCoordinateV1 {
         func inRectangle(_ latitude: Double, _ longitude: Double) -> Bool {
             latitude >= 0.8293 && latitude <= 55.8271 && longitude >= 72.004 && longitude <= 135.5

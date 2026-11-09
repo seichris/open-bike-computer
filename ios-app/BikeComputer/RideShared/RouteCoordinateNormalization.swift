@@ -106,6 +106,11 @@ nonisolated extension RouteCoordinateNormalizationV1 {
     static func rereadVersion1(_ route: NavigationRouteV1) -> NavigationRouteV1 {
         guard route.provider.providerID == RouteProviderPolicyV1.mapKit.providerID,
               route.normalizationVersion == rectangleVersion,
+              // Decoding builds this reading before it validates the stored
+              // route, so a route that validation must reject (an invalid
+              // coordinate or too many points) is returned as stored for it.
+              route.points.count <= NavigationRouteLimitsV1.production.maximumPoints,
+              route.points.allSatisfy(\.isValid),
               route.points.contains(where: { isInVersion1Rectangle($0) }),
               let extent = RouteBoundsV1.enclosing(route.points) else {
             return route
