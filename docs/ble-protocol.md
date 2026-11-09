@@ -2582,7 +2582,15 @@ with `stream_ready_pending`. Boot, each upload, and each library selection or
 refresh retry that cleanup for both maps, including a pending-activation file
 that still names one of them. Settling returns the map to Saved Maps before a
 selection can push it out of the pointer, where an unsettled marker would
-count as pending work again. The internal operation
+count as pending work again. While the previous map's cleanup keeps failing, a
+library selection of any other map fails with `stream_settle_previous` and
+leaves the pointer as it was, and a new upload gets 503
+`stream_settle_previous` ahead of the pending-upload checks; each later attempt
+retries the cleanup. A selection of the selected map or of the previous map
+keeps both in the pointer and goes ahead; switching back lets uploads resume. A failed cleanup
+of the selected map refuses neither, because that map stays in the pointer as
+the previous map. Boot has no request to refuse, so a pending upload that it
+resumes can still push an unsettled previous map out of the pointer. The internal operation
 owner waits for map work in ten-minute slices while that work reports verified
 storage progress; only a slice without progress is a timeout that poisons the
 owner for the rest of the boot. A rejected renderer root restores the previous valid selection
