@@ -147,7 +147,11 @@ uint32_t currentEpaperBaseCameraSequence() {
 }  // namespace
 
 void request(map_render_policy::Reason reason) {
-  epaperNavigationScheduler.request(epaperReasonForMapReason(reason));
+  const epaper_navigation_policy::Reason epaperReason =
+      epaperReasonForMapReason(reason);
+  if (epaper_navigation_policy::resetsHeading(epaperReason))
+    epaperHeadingFilter.reset();
+  epaperNavigationScheduler.request(epaperReason);
 }
 
 FixProvenance fixProvenance() {
@@ -229,25 +233,18 @@ Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp) {
 }
 
 void markSubmitted(uint32_t nowMs, CourseFix) {
-  const epaper_navigation_policy::Fix submittedFix = currentEpaperFix(nowMs);
-  epaperNavigationScheduler.markSubmitted(nowMs, submittedFix,
-                                          epaperArmedRenderReasons);
+  epaperNavigationScheduler.markSubmitted(nowMs, epaperArmedRenderReasons);
   epaperArmedRenderReasons = 0;
 }
 
 void markSubmittedForRenderAhead(uint32_t nowMs, CourseFix) {
-  const epaper_navigation_policy::Fix submittedFix = currentEpaperFix(nowMs);
   epaperNavigationScheduler.markSubmitted(
-      nowMs, submittedFix,
-      epaper_navigation_policy::reasonMask(
-          epaper_navigation_policy::Reason::Screen));
+      nowMs, epaper_navigation_policy::reasonMask(
+                 epaper_navigation_policy::Reason::Screen));
   epaperArmedRenderReasons = 0;
 }
 
-void markRendered(uint32_t nowMs, CourseFix) {
-  epaperNavigationScheduler.markPublished(nowMs, currentEpaperFix(nowMs));
-  epaperArmedRenderReasons = 0;
-}
+void markRendered(uint32_t, CourseFix) { epaperArmedRenderReasons = 0; }
 
 uint32_t markInterrupted() {
   epaperNavigationScheduler.markInterrupted();
@@ -255,17 +252,9 @@ uint32_t markInterrupted() {
       epaperNavigationScheduler.pendingForcedReasons());
 }
 
-void markFramePublished(uint32_t nowMs, CourseFix) {
+void markFramePublished(uint32_t, CourseFix) {
   Maps::FramePublication publication;
   if (mapView.takeFramePublication(publication)) {
-    const epaper_navigation_policy::Fix captured{
-        publication.capturedFixSequence,
-        publication.capturedFixAtMs,
-        publication.capturedSpeedKmh,
-        publication.capturedHeadingDegrees,
-        publication.capturedHeadingValid,
-    };
-    epaperNavigationScheduler.markPublished(nowMs, captured);
     logDisposition(
         epaperDispositionLedger.base(publication.capturedFixSequence));
   }

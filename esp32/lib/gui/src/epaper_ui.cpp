@@ -221,7 +221,7 @@ void process() {
       mapActive && camera.hasBase &&
       (!camera.baseCompatible || !camera.riderProjected ||
        !camera.riderInsideViewport);
-  const char *message = panel.fault ? "Display fault - reconnect power" :
+  const char *message = panel.fault ? "Display fault - retrying" :
       bleNavServer.hasOwnershipPairingCode() ? "Center: confirm   Hold up/down: cancel" :
       !ble.connected ? "Disconnected - image may be old" :
       !ble.authenticated ? "Waiting for phone registration" :
