@@ -425,7 +425,8 @@ MT-5 runs.
 `operationQuery_`, `operationStatus_`. Idle / TerminalPending / Submitted / CleanupFailing
 (5 s report throttle) / Done, sharing one worker and one gate with status queries and
 commit recovery (`:795-921`). A permanently failing `finalizeOperation` never terminates
-and keeps refusing uploads.
+and keeps refusing uploads; that is deliberate, since an ambiguous accepted write must not
+race a new upload, and the next boot resumes it.
 
 **MT-6 Commit recovery (`CommitRecovery`)** — `identity`, `armed`, `responseCompleted`,
 `failures`, `retryAfterMs`, `waiting`, `waitingProgress`, `waitingSinceMs` (`map_transfer_http.hpp:166-178`; constants at
@@ -443,7 +444,13 @@ predicates (`:262`, `:307`, `:361`, `:407`, `:1557`).
 
 **MT-8 Deferred activation + commit grant** — `deferredActivation_` (pending iff session
 non-empty), `pendingCommitGrant_` (0 = none), `activationState_.running`. The grant has no
-timeout; `releaseCommitGrant` (`:709`) is called from five sites under different conditions.
+deadline of its own, but it is held together with `CommitRecovery` (MT-6), which bounds the
+accepted work to three attempts with backoff and fails an attempt whose storage progress
+stalls for 10 min; recovery then releases the grant. It stays held only while a failed
+receipt write leaves an accepted write ambiguous (MT-5) or the device's own renderer has
+not acknowledged an activation, which is fail-closed by design: accepted work cannot be
+revoked. `releaseCommitGrant` (`:709`) is called from five sites under different conditions.
+(The first survey said the grant had no timeout; corrected on 2026-11-09.)
 
 **MT-9 `MapActivationState` status string** — `running` + `status` ∈ idle/activating/
 installed/failed/recovering/prepared (`map_transfer.cpp:1142-1218`). "prepared" exists only
