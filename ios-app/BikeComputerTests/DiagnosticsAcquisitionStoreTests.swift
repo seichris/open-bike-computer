@@ -351,7 +351,8 @@ import Foundation
         }
         let first = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: firstData.count, sha256: digest(firstData))
         let second = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 2, bytes: secondData.count, sha256: digest(secondData))
-        _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data("original".utf8), chunks: [first, second])
+        _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest,
+            index: Data("original".utf8), chunks: [first, second], firmwareStorage: .sdCard)
         try await store.verified(job.id, receipt: first, data: firstData)
         do { try await store.finish(job.id); fatalError("partial collection completed") }
         catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
@@ -374,9 +375,10 @@ import Foundation
             precondition(eligibility.canResumeAutomatically(postRideEnabled: false) == (origin == .manual))
         }
         let retry = try await restored.inventory(job.id, deviceDigest: job.deviceDigest,
-            index: Data("newer".utf8), chunks: [second])
+            index: Data("newer".utf8), chunks: [second], firmwareStorage: .internalFlash)
         precondition(retry.expected == [first, second])
         precondition(retry.indexData == Data("original".utf8))
+        precondition(retry.firmwareStorage == .sdCard, "retry must keep the original inventory's storage")
         precondition(retry.verified.isEmpty)
         do {
             _ = try await restored.inventory(job.id, deviceDigest: "fedcba9876543210", index: Data(), chunks: [])
@@ -391,10 +393,26 @@ import Foundation
         try await restored.verified(job.id, receipt: first, data: firstData)
         try await restored.verified(job.id, receipt: first, data: firstData)
         try await restored.verified(job.id, receipt: second, data: secondData)
-        try await restored.finish(job.id)
+        var dates = DiagnosticsFirmwareLogDates()
+        let oldest = Date(timeIntervalSince1970: 2)
+        let newest = Date(timeIntervalSince1970: 4)
+        dates.include(newest)
+        var earlierChunk = DiagnosticsFirmwareLogDates()
+        earlierChunk.include(oldest)
+        earlierChunk.include(nil)
+        dates.merge(earlierChunk)
+        try await restored.finish(job.id, firmwareLogDates: dates)
         try await restored.interrupt(job.id, code: "cleanup_failed")
         let complete = try await restored.load(job.id)
         precondition(complete.deliveryComplete && complete.verified.count == 2)
+        precondition(complete.firmwareLogDates?.oldest == oldest &&
+            complete.firmwareLogDates?.newest == newest &&
+            complete.firmwareLogDates?.hasUndatedEvents == true,
+            "persist the bounds of the verified evidence, including undated-event status")
+        let receipt = try JSONEncoder().encode(complete.portableReceipt)
+        let portable = try JSONDecoder().decode(DiagnosticsAcquisitionManifest.self, from: receipt)
+        precondition(portable.deliveryComplete && portable.firmwareStorage == nil && portable.firmwareLogDates == nil,
+            "portable archives and older receipts keep the existing v2 shape")
         let bad = DiagnosticsChunkReceipt(bootSequence: 0, chunk: 1, bytes: 10, sha256: String(repeating: "a", count: 64))
         let invalid = try await restored.create(deviceDigest: job.deviceDigest, captureID: nil)
         do {

@@ -5235,7 +5235,7 @@ extension NavigationProtocolTests {
         )
 
         let validStream = Data("""
-        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","wallTime":"1970-01-01T00:00:02.250Z","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
         {"schema":1,"source":"firmware","sequence":8,"level":"info","category":"storage","event":"mounted","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4","available":true}}
         """.utf8)
         let validation =
@@ -5246,6 +5246,10 @@ extension NavigationProtocolTests {
                     "diagnostics validator retains first sequence")
         assertEqual(validation?.last, 8,
                     "diagnostics validator retains last sequence")
+        let datedEvent = Date(timeIntervalSince1970: 2.25)
+        assertEqual(validation?.dates.oldest, datedEvent, "firmware dates come from verified wall time")
+        assertEqual(validation?.dates.newest, datedEvent, "undated events do not extend the date range")
+        assertEqual(validation?.dates.hasUndatedEvents, true, "coverage reports undated firmware events")
         let validHash = SHA256.hash(data: validStream).map {
             String(format: "%02x", $0)
         }.joined()
@@ -5421,7 +5425,7 @@ extension NavigationProtocolTests {
     }
 
     static let diagnosticsReadyStatus = """
-    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true}}
+    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true},"storage":{"backend":"ffat"}}
     """
 
     /// Runs the diagnostics readiness wait on a simulated clock. `device`
@@ -5482,6 +5486,8 @@ extension NavigationProtocolTests {
             assertEqual(session.mode, .diagnostics, "delayed diagnostics readiness opens a diagnostics session")
             assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
                         "delayed diagnostics readiness returns the fresh token")
+            assertEqual(session.diagnosticsStorageBackend, "ffat",
+                        "the storage source comes from the accepted diagnostics status")
         } else {
             assert(false, "diagnostics readiness after 12 s must not time out: \(delayed.result)")
         }
