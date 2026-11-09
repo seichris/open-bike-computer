@@ -11900,6 +11900,15 @@ extension NavigationProtocolTests {
         }
         assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
             "{\"error\":{\"code\":\"stream_ready_pending\"}}")), "a pending installation is not an SD-library action")
+        let settlePrevious = OfflineMapPlatformError.serverStatus(503,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_settle_previous\",\"message\":\"previous map cleanup will retry\"}}")
+        assert(settlePrevious.localizedDescription.contains("cleaning up the map it used before") &&
+               !settlePrevious.localizedDescription.contains("{"),
+               "an unsettled previous map explains the cleanup retry instead of raw JSON")
+        assert(!DeviceMapLibrary.requiresLibraryAction(settlePrevious),
+               "an unsettled previous map is retried by Resume, not an SD-library action")
+        assert(DeviceMapLibrary.errorDescription("stream_settle_previous").contains("earlier map"),
+               "a refused selection names the earlier map as the way out")
         assert(DeviceMapLibrary.errorDescription("library_owner").contains("restart the Bike Computer"),
                "an owner refusal says the device retries and how to clear it")
         assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,

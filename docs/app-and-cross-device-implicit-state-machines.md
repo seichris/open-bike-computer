@@ -536,24 +536,27 @@ each with its own attempt UUID; the confirmation timeout starts at submission, s
 stuck behind a barrier has no bound; terminal timeout and deadline task race to retire the
 same barrier (`:697`).
 
-**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-73`
-explicit `state` written at 17 sites with no guard (`:135`, `:198`, `:258`, `:285`, `:346`,
-`:352`, `:353`, `:355`, `:358`, `:462`, `:557`, `:572`, `:909`, `:973`, `:991`, `:1001`,
-`:1014`; the shared `WorkoutLifecycleReducer` in `WorkoutShared/WorkoutRuntimeLogic.swift:42`
-is still unused here), four finalization bools (collection started/ended, finish attempted,
+**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-76`
+`state`, which since 2026-11-09 is a read-only view of a private `WorkoutLifecycleReducer`
+(`:41`), the reducer the Watch drives; the 17 former unguarded assignments are events
+(`applyLifecycle` `:573`, `confirmNativeState` `:586`), HealthKit stops without a rider
+choice use the reducer's `.sessionStopped`, and recovery rebuilds the reducer from idle along
+the legal path to the adopted state (`adoptLifecycle` `:595`), as the Watch does. A
+"stopped" callback for a recording that already ended no longer re-enters finalization
+(`:1061`). Still implicit: four finalization bools (collection started/ended, finish attempted,
 save confirmed), three write-failure flags (route, distance and, since #793, cycling
 metrics), recovered route, attach pending, generation UUID, native transition
 task/ID/generation, transition origins, control timeout, flush task. #793 adds a
 speed-capture flag latched from HealthKit authorization when the data source is configured
-at start or recovery (`PhoneWorkoutRecorder.swift:598`), and a GPS speed buffer and
+at start or recovery (`PhoneWorkoutRecorder.swift:667`), and a GPS speed buffer and
 elevation-gain accumulator that live only in RAM and are exported once, after collection
-ends and only on save (`:513-519`; no elevation after recovery, `:717`). Idle → Starting →
+ends and only on save (`:518-524`; no elevation after recovery, `:786`). Idle → Starting →
 Running/Paused (+TransitionRequested, 10 s) → Ending{open | collectionEnded |
 finishAttempted | saveConfirmed} → Ended; recovery AttachPending → Attached → Reconciled. The
-share set requested at start depends on the app being in the foreground (`:139`,
-`startShareTypes` `:927-931`), so a background start never asks for Cycling Speed.
-`resetFinished` (`:564`) resets 36 fields plus the location queue and two store values; the
-discard branch resets only the two metric accumulators (`:491-492`).
+share set requested at start depends on the app being in the foreground (`:142`,
+`startShareTypes` `:996-1000`), so a background start never asks for Cycling Speed.
+`resetFinished` (`:633`) resets 36 fields plus the location queue and two store values; the
+discard branch resets only the two metric accumulators (`:496-497`).
 
 **E-4 Session coordinator recovery / ownership arbitration** —
 `BikeComputer/Managers/WorkoutSessionCoordinator.swift:51-66` record, recovery complete,
@@ -971,17 +974,19 @@ changes by status word, and the firmware mixes two counters in one field (MT-9),
 power cut the phone can only wait for a terminal it may never see on legacy firmware;
 (b) a stale or mismatched renderer ACK is silently ignored (MT-3) and a permanently failing
 receipt write never terminates (MT-5), so the phone polls until its own deadline and reports
-unknown; (c) the legacy grant has no timeout (MT-8), so a stuck device-side terminal answers
-409 `activation_busy` to every new upload with no phone command to clear it short of reboot;
+unknown; (c) while accepted work is unresolved the device answers 409 `activation_busy` to
+every new upload with no phone command to clear it; commit recovery bounds that work to three
+attempts and a 10-minute progress stall (MT-6, MT-8), and only an ambiguous receipt write or
+a missing renderer acknowledgement keeps it, by design, until it resolves or the next boot;
 (d) four firmware "busy" predicates (MT-7) vs the phone's pending/paused predicates derive
 from different fields; (e) the selection intent (MT-12) settles only on the next library
 task, so phone inventory can show manual for the length of a retry loop; (f) since #791 the
 device refuses an upload or a Use with `stream_settle_previous` while the previous map's
-cleanup is unsettled (MT-13), and the app has no case for that code: an upload refusal
-shows the generic 503 text (`BikeComputer/Models/OfflineMapPlatform.swift:1447-1480`), a
-library failure falls back to "Could not update the device maps" (`:1825-1836`), and
-`requiresLibraryAction` (`:1840-1846`) omits it, although the cure is a successful cleanup
-retry or switching back to the previous map; boot resume does not refuse, so after a
+cleanup is unsettled (MT-13); since 2026-11-09 the app explains it on both paths
+(`BikeComputer/Models/OfflineMapPlatform.swift:1468-1472`, `:1840-1841`) and keeps Resume
+available, because a later attempt retries the cleanup, but the device has no status that
+tells the phone when the cleanup succeeded, so the rider retries blind; boot resume does
+not refuse, so after a
 reboot that resumes an upload the same SD state can surface as 409 `stream_ready_pending`
 (`esp32/lib/map_transfer_http/map_transfer_http.cpp:1608-1612`; read from code, not
 exercised).
@@ -1031,8 +1036,11 @@ reboots, so the phone marks cancelled and the device installs; a receipt persist
 failure on the valid path is ignored (TR-5), so `requiresOperationReceipt` can wait on a
 receipt that never appears. The e-paper family has no maintenance mode: BLE refuses the
 request with `firmware_maintenance_unsupported`
-(`esp32/lib/ble_navigation/ble_navigation.cpp:4604-4607`; SYS-10), and the app has no case
-for that code.
+(`esp32/lib/ble_navigation/ble_navigation.cpp:4604-4607`; SYS-10), but the app never sends
+it, because the board advertises `firmwareMaintenanceV1: false` and the app checks that
+flag first (`BikeComputer/Managers/DeviceTransferManager.swift:2128-2130`). The app then
+says the update needs firmware with maintenance mode, which on the e-paper reads as if a
+newer firmware would help.
 
 ### X-4 Ride automation: decision → ack → prompt → response → confirmation / cancellation
 Parties: firmware RA-1, RA-2, RA-10, RA-13; phone E-6; Watch W-12 plus the mirror (E-1, W-3).
@@ -1259,9 +1267,10 @@ come from reading the code, not from hardware.
 5. **Status strings as the contract.** `activation.status`, `networkTransport`,
    `maintenance.stage`, `libraryAction` and selection health are switched on by the phone's
    reconcilers, so every firmware string-state smell is also a cross-device one.
-   `positionSource.active` joins them as a display-only string (X-12), and two new device
-   codes have no phone case at all: `stream_settle_previous` (X-1) and
-   `firmware_maintenance_unsupported` (X-3).
+   `positionSource.active` joins them as a display-only string (X-12). Of the two device
+   codes added since late October, `stream_settle_previous` now has a phone case (X-1 f)
+   and `firmware_maintenance_unsupported` is never reached, because the app checks the
+   capability flag first (X-3).
 6. **Payloads gated as one unit.** A GPS packet carries position and ride totals together,
    and until 2026-11-09 a receiver board accepted or discarded the whole packet by position
    ownership, freezing the totals while GNSS owned the record (X-12 a, now fixed). The
@@ -1289,7 +1298,7 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
    frames), G-22 resolver, W-4 (two IDs), W-11 (two record pairs), G-24, D-6
    `firmwareLogDates`, E-15 `WorkoutCyclingElevationGain.meters`.
 5. **Explicit enum shadowed, derived or unguarded** — A-4 auth flow, B-4 sync state (14
-   writes), D-4 stage (any-to-any), E-3 recorder state (17 writes, shared reducer unused), W-18 setup state (27 writes),
+   writes), D-4 stage (any-to-any), W-18 setup state (27 writes),
    E-10 Strava activity, G-1 Watch sync state (derived and also assigned), W-1 cleanup
    state (derived from ~10 bools), W-5 link state (mirror), `WorkoutMirrorStateReducer`
    connection state (23 writes).
@@ -1317,8 +1326,8 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
 4. **A-1 / A-2 / A-6** BLE manager: one `clearSession()`, an explicit reconnect-intent
    enum in place of the `autoReconnect` mode flag, and a scan-purpose reconcile that takes a
    typed reason.
-5. **E-3** phone recorder: drive `state` through the existing `WorkoutLifecycleReducer`
-   like the Watch does. Since #793 it has 17 unguarded writes and a 36-field reset.
+5. **E-3** phone recorder: its `state` goes through the shared `WorkoutLifecycleReducer`
+   since 2026-11-09. The four finalization bools and the 36-field reset remain.
 6. **X-4 / E-6 / RA-1** ride automation: one decision enum with a single `settle(reason)`
    on both sides and one shared deadline origin.
 7. **W-1 / W-5** Watch: make `terminalCleanupState` the stored state instead of a
@@ -1338,7 +1347,7 @@ reconnect-and-confirm loop in the maintenance handshake (D-5).
 ## Explicit machines passed over (app side)
 
 Clean, single-owner, guarded: `RideBLETransportStateMachineV1` (shared, generation-fenced
-reducer; the one real reducer on phone and Watch); `WorkoutLifecycleReducer`;
+reducer; the one real reducer on phone and Watch); `WorkoutLifecycleReducer` (the Watch and, since 2026-11-09, the phone recorder);
 `WorkoutFinalizationPhase` ladder (save path); `BLEOwnershipLifecycle`;
 `WorkoutLatestEnvelopeBuffer`; `WorkoutControlEnvelopeSequencer` /
 `WorkoutRemoteControlSequenceGate`; `WorkoutDeviceForwardingStateV1`;
@@ -1354,7 +1363,7 @@ fence; `DeviceOperationCoordinator.Failure`; `DeviceTransferLinkRebindPolicy.Dec
 Explicit but shadowed, derived, mirrored or unguarded (also counted above): `AuthFlowState`
 (A-4), `PendingWatchControllerOperation` (A-12), `BLEScanPurpose` (derived, A-6/B-7),
 `DeviceScreenConfigurationSyncState` (B-4), `FirmwareUpdateTransactionStage` (D-4),
-`DiagnosticsAcquisitionManifest.Phase` (D-6), `PhoneWorkoutRecorder.state` (E-3),
+`DiagnosticsAcquisitionManifest.Phase` (D-6),
 `WorkoutRecordingRecord.Phase` (E-5), `WorkoutMirrorStateReducer.connectionState`,
 `StravaIntegrationActivityV1` (E-10), `PhoneRouteWatchSyncStateV1` (G-1),
 `WorldRadioPlaybackState` (G-5), `OnlinePOISearchSession.State` (G-21),

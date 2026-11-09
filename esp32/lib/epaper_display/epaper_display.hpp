@@ -25,6 +25,9 @@ struct Status {
   bool lastPresentationHadWaveform = false;
   bool lastWaveformFull = false;
   bool busy = false, fault = false, sleeping = false;
+  // Explicit (diagnostic) sleep waits for an explicit wake; idle sleep wakes
+  // for changed content.
+  bool explicitSleep = false;
 };
 void begin();
 bool submit(const uint16_t *rgb);

@@ -40,7 +40,7 @@ int main() {
   auto first = scheduler.evaluate(1000, camera, true, true);
   assert(first.updateForeground && first.submitBase);
   assert((first.reasons & reasonMask(Reason::Position)) != 0);
-  scheduler.markSubmitted(1000, fix, first.reasons);
+  scheduler.markSubmitted(1000, first.reasons);
 
   camera.hasBase = true;
   camera.baseCompatible = true;
@@ -50,7 +50,6 @@ int main() {
   camera.baseAcceptedAtMs = 1200;
   camera.baseFixSequence = 10;
   camera.baseCameraSequence = 1;
-  scheduler.markPublished(1200, fix);
 
   // Foreground movement is always serviced, but sub-deadband drift does not
   // schedule geometry or hide a compatible base.
@@ -66,7 +65,7 @@ int main() {
   auto recenter = scheduler.evaluate(2000, camera, true, true);
   assert(recenter.submitBase);
   assert((recenter.reasons & reasonMask(Reason::Position)) != 0);
-  scheduler.markSubmitted(2000, fix, recenter.reasons);
+  scheduler.markSubmitted(2000, recenter.reasons);
 
   // A compatible running job finishes. Exactly one latest successor is
   // retained, and a newer fix replaces that pending successor at cadence.
@@ -76,7 +75,7 @@ int main() {
   scheduler.observe(fix);
   auto queued = scheduler.evaluate(3000, camera, true, true);
   assert(queued.keepRunning && queued.submitBase && !queued.replacePending);
-  scheduler.markSubmitted(3000, fix, queued.reasons);
+  scheduler.markSubmitted(3000, queued.reasons);
   camera.successorPending = true;
   camera.latestRequestedFixSequence = 12;
   assert(!scheduler.evaluate(3500, camera, true, true).submitBase);
@@ -139,7 +138,7 @@ int main() {
       state.latestRequestedFixSequence = pendingSequence;
       const auto decision = replay.evaluate(now, state, true, false);
       if (decision.submitBase) {
-        replay.markSubmitted(now, moving, decision.reasons);
+        replay.markSubmitted(now, decision.reasons);
         if (state.renderRunning)
           pendingSequence = moving.sequence;
         else
@@ -168,6 +167,24 @@ int main() {
   const auto counters = ledger.counters();
   assert(counters.accepted == 3 && counters.coalesced == 1 &&
          counters.foreground == 1 && counters.ignored == 1);
+
+  // A route session starts a new camera history: only RouteSession resets the
+  // heading, so a stationary rider is not oriented by the previous session.
+  static_assert(resetsHeading(Reason::RouteSession));
+  static_assert(!resetsHeading(Reason::Position) &&
+                !resetsHeading(Reason::Heading) &&
+                !resetsHeading(Reason::MaximumDeferral) &&
+                !resetsHeading(Reason::Screen) &&
+                !resetsHeading(Reason::MapContext) &&
+                !resetsHeading(Reason::Recovery));
+  HeadingFilter held;
+  held.observe({1, 1000, 20.0, 90.0, true});
+  held.observe({2, 2000, 0.0, 180.0, true});
+  assert(headingDeltaDegrees(held.current().degrees, 90.0) < 0.01);
+  held.reset();
+  const auto reoriented = held.observe({3, 3000, 0.0, 180.0, true});
+  assert(reoriented.valid &&
+         headingDeltaDegrees(reoriented.degrees, 180.0) < 0.01);
 
   return 0;
 }
