@@ -7,7 +7,6 @@ on:
     paths:
       - ".dockerignore"
       - ".github/workflows/map-platform-image.yml"
-      - ".github/workflows/map-platform-ci.yml"
       - "map-platform/backend/**"
       - "tools/OSM_Extract/conf/**"
       - "tools/OSM_Extract/scripts/**"
@@ -19,6 +18,8 @@ on:
       - "map-platform/config/generation-profile-policy-v2.json"
       - "map-platform/config/generation-profile-policy-v3.json"
       - "map-platform/config/generation-profile-policy-v4.json"
+      - "map-platform/config/generation-profile-policy-v5.json"
+      - "map-platform/config/topography-source-policy-v2.json"
       - "map-platform/deploy/detect_worker_change.py"
       - "map-platform/deploy/export_pending_compose.py"
       - "map-platform/deploy/select_worker_promotion.py"
@@ -71,7 +72,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

@@ -38,6 +38,9 @@ bool readExact(int file, void *buffer, size_t size) {
 }
 
 constexpr size_t kValidationBufferBytes = 16U * 1024U;
+constexpr size_t kGlyphRecordBytes = 32U;
+static_assert(kValidationBufferBytes % kGlyphRecordBytes == 0,
+              "glyph record batches must fill the validation buffer exactly");
 
 uint8_t *allocateValidationBuffer() {
 #if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
@@ -200,27 +203,37 @@ bool Asset::open(const std::string &path) {
     return false;
   }
 
+  // The validated index is a contiguous run of 32-byte records. Read it in
+  // validation-buffer batches; one descriptor read per record made a large
+  // label font cost tens of thousands of FAT calls on every map activation.
   records_.reserve(recordCount);
-  std::array<uint8_t, 32> bytes{};
-  for (uint32_t index = 0; index < recordCount; ++index) {
-    if (!readExact(candidate.get(), bytes.data(), bytes.size())) {
+  for (uint32_t first = 0; first < recordCount;) {
+    const uint32_t count = std::min<uint32_t>(
+        recordCount - first, kValidationBufferBytes / kGlyphRecordBytes);
+    uint8_t *batch = validationBuffer.get();
+    if (!readExact(candidate.get(), batch,
+                   static_cast<size_t>(count) * kGlyphRecordBytes)) {
       candidate.reset();
       close();
       return false;
     }
-    GlyphRecord record;
-    record.glyphId = le16(bytes.data());
-    record.sizeId = bytes[3];
-    record.bearingX = sle16(bytes.data() + 4);
-    record.bearingY = sle16(bytes.data() + 6);
-    record.advance26_6 = sle16(bytes.data() + 8);
-    record.width = le16(bytes.data() + 10);
-    record.height = le16(bytes.data() + 12);
-    record.fillOffset = le32(bytes.data() + 16);
-    record.fillLength = le32(bytes.data() + 20);
-    record.distanceOffset = le32(bytes.data() + 24);
-    record.distanceLength = le32(bytes.data() + 28);
-    records_.push_back(record);
+    for (uint32_t index = 0; index < count; ++index) {
+      const uint8_t *bytes = batch + static_cast<size_t>(index) * kGlyphRecordBytes;
+      GlyphRecord record;
+      record.glyphId = le16(bytes);
+      record.sizeId = bytes[3];
+      record.bearingX = sle16(bytes + 4);
+      record.bearingY = sle16(bytes + 6);
+      record.advance26_6 = sle16(bytes + 8);
+      record.width = le16(bytes + 10);
+      record.height = le16(bytes + 12);
+      record.fillOffset = le32(bytes + 16);
+      record.fillLength = le32(bytes + 20);
+      record.distanceOffset = le32(bytes + 24);
+      record.distanceLength = le32(bytes + 28);
+      records_.push_back(record);
+    }
+    first += count;
   }
   payloadOffset_ = 32U + languageBytes + faceBytes + indexBytes;
   file_ = candidate.release();

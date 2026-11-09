@@ -40,7 +40,7 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             "map_transfer_status_protocol::chunkPayloadBytes(peerMtu)",
             notify,
         )
-        self.assertIn("pendingDeviceTransferStatusChunks.begin(", notify)
+        self.assertIn("pendingDeviceTransferStatusChunks.beginStable(", notify)
         self.assertIn(
             "pendingDeviceTransferStatusContinuation.store(true", notify
         )

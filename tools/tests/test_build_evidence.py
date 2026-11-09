@@ -43,7 +43,15 @@ class BuildEvidenceTests(unittest.TestCase):
         self.assertEqual(changed['previousPhaseTimingsMs'], {'total':120})
 
     def test_firmware_requires_matching_actual_image_and_map(self):
-        project = self.root / 'esp32'; env = 'WAVESHARE_AMOLED_175'
+        for env in ('WAVESHARE_AMOLED_175', 'WAVESHARE_EPAPER_397_DISPLAY_TEST'):
+            with self.subTest(environment=env):
+                self.assert_firmware_evidence(env)
+        for env in ('WAVESHARE_EPAPER_398', 'WAVESHARE_TEST', '../WAVESHARE_AMOLED_175'):
+            with self.subTest(rejected=env), self.assertRaisesRegex(ValueError, 'invalid firmware environment'):
+                evidence.firmware(self.root / 'esp32', env, self.root / 'records')
+
+    def assert_firmware_evidence(self, env):
+        project = self.root / 'esp32'
         build = project / '.pio/build' / env; build.mkdir(parents=True)
         (build / 'firmware.elf').write_bytes(b'ELF'); (build / 'firmware.bin').write_bytes(b'BIN')
         (build / 'firmware.map').write_text('final map')

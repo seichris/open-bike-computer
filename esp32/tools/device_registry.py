@@ -18,7 +18,12 @@ from typing import Sequence
 
 SCHEMA = 1
 BOARD_FAMILIES = frozenset(
-    {"WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"}
+    {
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_175_GNSS",
+        "WAVESHARE_AMOLED_206",
+        "WAVESHARE_EPAPER_397",
+    }
 )
 NICKNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")
@@ -317,7 +322,21 @@ def resolve_device_name(name: str, path: Path | None = None) -> DeviceEntry:
 
 
 def environment_matches_family(environment: str, family: str) -> bool:
-    return environment == family or environment.startswith(family + "_")
+    """True when the environment is the family or one of its profiles.
+
+    A variant family's name extends its base family's name, so the longest
+    family that names the environment owns it: a WAVESHARE_AMOLED_175_GNSS
+    image never matches a plain WAVESHARE_AMOLED_175 board.
+    """
+
+    def names(candidate: str) -> bool:
+        return environment == candidate or environment.startswith(candidate + "_")
+
+    if not names(family):
+        return False
+    return not any(
+        names(other) and len(other) > len(family) for other in BOARD_FAMILIES
+    )
 
 
 def _print_entry(entry: DeviceEntry, path: Path) -> None:

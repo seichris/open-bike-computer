@@ -7,7 +7,10 @@ struct SavedRoutesSettingsSection: View {
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
     @ObservedObject var destinationStore: SavedDestinationStore
     @Environment(\.savedRouteMapAction) private var mapAction
+    /// Plans a route to a favorite on the main map (the single-destination flow).
     let onSaveOnlineRoute: (SavedDestination?) -> Void
+    /// Opens the multi-stop route creator; only Create a Route uses it.
+    let onCreateRoute: () -> Void
     let onImportFromStrava: () -> Void
     let onConfirmGPX: (OfflineRouteSaveDraft) -> Void
     let importFeedback: String?
@@ -42,11 +45,12 @@ struct SavedRoutesSettingsSection: View {
             Button {
                 finishRenaming()
                 focusedRouteID = nil
-                onSaveOnlineRoute(nil)
+                onCreateRoute()
             } label: {
                 Label("Create a Route", systemImage: "magnifyingglass")
             }
             .accessibilityIdentifier("saveOnlineRoute")
+            .accessibilityHint("Plans a route through a start, stops and a destination, then saves it on this iPhone")
 
             Button {
                 finishRenaming()
@@ -267,13 +271,7 @@ struct SavedRoutesSettingsSection: View {
                 destinationStore.removeFavorite(favorite)
             } else {
                 destinationStore.addFavorite(
-                    SavedDestination(
-                        name: route.destination.label,
-                        coordinate: CLLocationCoordinate2D(
-                            latitude: route.destination.coordinate.latitude,
-                            longitude: route.destination.coordinate.longitude
-                        )
-                    ),
+                    SavedRouteFavoritePolicy.favorite(for: route),
                     savedRouteID: route.id
                 )
             }

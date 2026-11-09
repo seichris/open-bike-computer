@@ -15,9 +15,6 @@
 
 #include "buttonBar.hpp"
 #include "batteryStatusScr.hpp"
-#ifdef ENABLE_COMPASS
-#include "compass.hpp"
-#endif
 #include "globalGuiDef.h"
 #include "navScr.hpp"
 #include "rideTelemetryScr.hpp"
@@ -92,9 +89,7 @@ bool shouldInterruptMapRenderForScreenCycle();
 bool mapPinchOwnsInput();
 bool mapPinchBlocksMapRender();
 bool mapMultiTouchSuppressesPrimary();
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 extern volatile bool waveshareBootScreenCyclePending;
-#endif
 
 void createMainScr();
 void toggleNavigationScreen();

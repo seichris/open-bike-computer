@@ -160,13 +160,13 @@ class TopographySourcePolicy:
             raise ValueError("topography sources must be ordered by descending priority")
         return cls(tuple(sources), hashlib.sha256(raw).hexdigest(), version)
 
-    def public_summary(self) -> dict[str, Any]:
-        return {"access": "free", "generationEnabled": False, "policyVersion": self.version,
+    def public_summary(self, *, generation_enabled: bool = False) -> dict[str, Any]:
+        return {"access": "free", "generationEnabled": generation_enabled, "policyVersion": self.version,
                 "sourcePolicySha256": self.sha256, "acquisitionSourceCount": len(self.sources)}
 
 
 def load_topography_source_policy(repo_root: Path) -> TopographySourcePolicy:
-    return TopographySourcePolicy.load(repo_root / "map-platform/config/topography-source-policy-v1.json")
+    return TopographySourcePolicy.load(repo_root / "map-platform/config/topography-source-policy-v2.json")
 
 
 def require_production_topography_approval(
@@ -182,6 +182,23 @@ def require_production_topography_approval(
         for profile in generation_policy.available_profiles("production")
     ) and not all(source.production_approved for source in source_policy.sources):
         raise ValueError("production topography sources have not been approved")
+
+
+def topography_generation_enabled(
+    generation_policy: Any,
+    source_policy: TopographySourcePolicy,
+    deployment_channel: str,
+) -> bool:
+    """Whether this deployment offers renderer format 4 to every installation.
+
+    Production additionally requires every pinned source to be approved; a
+    canary-only offer does not count as enabled.
+    """
+    offered = any(profile.renderer_format_version == 4
+                  for profile in generation_policy.available_profiles(deployment_channel))
+    approved = deployment_channel != "production" or all(
+        source.production_approved for source in source_policy.sources)
+    return offered and approved
 
 
 def parse_tile_index(source: ElevationSource, raw: bytes) -> frozenset[tuple[int, int]]:

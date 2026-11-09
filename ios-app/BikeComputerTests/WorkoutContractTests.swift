@@ -115,6 +115,7 @@ private struct WorkoutContractTestSuite {
         testPausedRouteContinuityBreaksOnlyStationaryPauses()
         testRouteSegmentAndQueueBounds()
         testRouteRecoveryDistanceAndAssociatedFinalizationPolicies()
+        testCyclingGPSMetricsRejectNoiseAndBreaks()
         testRecoverySequenceLeasesNeverReuseReservedValues()
         testRecoveryStorePersistsIdentityAndLeases()
         testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery()
@@ -4715,6 +4716,47 @@ private struct WorkoutContractTestSuite {
         expect(wrappingGeneration.advance() == 1, "generation rollover must avoid zero reuse")
     }
 
+    private mutating func testCyclingGPSMetricsRejectNoiseAndBreaks() {
+        let start = Date(timeIntervalSinceReferenceDate: 800_036_900)
+        let zero = WorkoutCyclingSpeedObservation(metersPerSecond: 0, timestamp: start)
+        expect(zero?.metersPerSecond == 0 && zero?.timestamp == start, "stationary speed remains a timestamped sample")
+        for invalid in [-1.0, 51.0, .infinity, .nan] {
+            expect(WorkoutCyclingSpeedObservation(metersPerSecond: invalid, timestamp: start) == nil,
+                   "unavailable or implausible GPS speed must not be exported")
+        }
+
+        var speeds = WorkoutCyclingSpeedBuffer()
+        for index in 0...9_000 {
+            let timestamp = start.addingTimeInterval(Double(index) * 5)
+            if let speed = WorkoutCyclingSpeedObservation(metersPerSecond: 3, timestamp: timestamp) {
+                speeds.record(speed)
+            }
+        }
+        let capturedSpeeds = speeds.take()
+        expect(capturedSpeeds.count < 8_640 && capturedSpeeds.first?.timestamp == start
+               && capturedSpeeds.last?.timestamp == start.addingTimeInterval(45_000),
+               "long rides retain timestamped speed over the full ride while bounding memory")
+        expect(speeds.take().isEmpty, "save consumes the GPS fallback only once")
+
+        var gain = WorkoutCyclingElevationGain()
+        gain.record(altitude: 100, accuracy: 4, at: start)
+        expect(gain.meters == nil, "one altitude fix cannot determine elevation gain")
+        gain.record(altitude: 103, accuracy: 4, at: start.addingTimeInterval(2))
+        expect(gain.meters == 0, "small altitude drift must not become climb")
+        gain.record(altitude: 106, accuracy: 4, at: start.addingTimeInterval(4))
+        gain.record(altitude: 100, accuracy: 4, at: start.addingTimeInterval(6))
+        expect(gain.meters == 6, "count the sustained climb and exclude descent")
+
+        gain.breakSegment()
+        gain.record(altitude: 110, accuracy: 4, at: start.addingTimeInterval(8))
+        gain.record(altitude: 116, accuracy: 4, at: start.addingTimeInterval(10))
+        gain.record(altitude: 125, accuracy: 40, at: start.addingTimeInterval(12))
+        gain.record(altitude: 130, accuracy: 4, at: start.addingTimeInterval(14))
+        gain.record(altitude: 136, accuracy: 4, at: start.addingTimeInterval(35))
+        gain.record(altitude: 250, accuracy: 4, at: start.addingTimeInterval(36))
+        expect(gain.meters == 12, "pause, inaccurate fixes, long gaps and altitude spikes do not add climb")
+    }
+
     private mutating func testRouteRecoveryDistanceAndAssociatedFinalizationPolicies() {
         expect(
             WorkoutRouteFallbackPolicy.canProvideTotal(
@@ -4778,10 +4820,10 @@ private struct WorkoutContractTestSuite {
                 routeSavingFailed: true,
                 mayContainExistingRouteData: false
             ) == WorkoutAssociatedRouteDecision(
-                keepBuilderForWorkout: false,
-                routeStatus: .unavailable
+                keepBuilderForWorkout: true,
+                routeStatus: .unknown
             ),
-            "a failed new route must be discarded and reported unavailable"
+            "a failed new route must preserve earlier successful batches without claiming final presence"
         )
 
         var distance = WorkoutRouteDistanceAccumulator(
@@ -8361,6 +8403,17 @@ private struct WorkoutContractTestSuite {
                 ),
             "expanded destination search must own the keyboard-safe layout ahead of supporting map chrome"
         )
+        var startRowFitsScreenWidth = false
+        if let rowStart = compactContent.range(
+            of: "privatefuncrouteAndWorkoutStartRow(maxHeight:CGFloat)->someView{"
+        )?.upperBound,
+           let rowEnd = compactContent.range(
+            of: "privatevarrouteAlternativesPanel:someView{",
+            range: rowStart..<compactContent.endIndex
+           )?.lowerBound {
+            startRowFitsScreenWidth =
+                !compactContent[rowStart..<rowEnd].contains("fixedSize(")
+        }
         expect(
             compactContent.contains(
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
@@ -8372,12 +8425,19 @@ private struct WorkoutContractTestSuite {
                     "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
                 )
                 && compactContent.contains(
-                    "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
+                    "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
-                ),
-            "the collapsed destination row must keep the full blue Start Workout label visible and honor recording ownership"
+                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
+                )
+                && startRowFitsScreenWidth,
+            "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
+        )
+        expect(
+            compactContent.contains(
+                ".frame(maxWidth:proxy.size.width).ignoresSafeArea(.container,edges:.bottom)"
+            ),
+            "a child wider than the screen must not push the map control rail off screen"
         )
         expect(
             compactContent.contains(

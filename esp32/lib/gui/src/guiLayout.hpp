@@ -7,41 +7,25 @@
 
 #include <stdint.h>
 
+#include "../../board/board.hpp"
+
 namespace gui_layout {
 
-#if defined(WAVESHARE_AMOLED_206)
-constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 72;
-constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;
-constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 50;
-constexpr uint8_t MAP_TOOLBAR_OFFSET = 92;
-constexpr uint8_t MAP_TOOLBAR_SPACE = 54;
-constexpr uint8_t MAP_TOOLBAR_INSET = 12;
-constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN = 30;
-#elif defined(LARGE_SCREEN)
-constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 100;
-constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;
-constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 50;
-constexpr uint8_t MAP_TOOLBAR_OFFSET = 100;
-constexpr uint8_t MAP_TOOLBAR_SPACE = 60;
-constexpr uint8_t MAP_TOOLBAR_INSET = 10;
-constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN = 24;
-#else
-constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT = 100;
-constexpr uint8_t MAP_ANCHOR_X_PERCENT = 50;
-constexpr uint8_t MAP_ANCHOR_Y_PERCENT = 50;
-constexpr uint8_t MAP_TOOLBAR_OFFSET = 80;
-constexpr uint8_t MAP_TOOLBAR_SPACE = 50;
-constexpr uint8_t MAP_TOOLBAR_INSET = 10;
-constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN = 24;
-#endif
+// Map screen geometry comes from the board definition (board::layout).
+constexpr uint16_t MAP_NONFULLSCREEN_RESERVED_HEIGHT =
+    board::layout::mapNonFullscreenReservedHeight;
+constexpr uint8_t MAP_ANCHOR_X_PERCENT = board::layout::mapAnchorXPercent;
+constexpr uint8_t MAP_ANCHOR_Y_PERCENT = board::layout::mapAnchorYPercent;
+constexpr uint8_t MAP_TOOLBAR_OFFSET = board::layout::mapToolbarOffset;
+constexpr uint8_t MAP_TOOLBAR_SPACE = board::layout::mapToolbarSpace;
+constexpr uint8_t MAP_TOOLBAR_INSET = board::layout::mapToolbarInset;
+constexpr uint8_t MAP_TOOLBAR_FULLSCREEN_BOTTOM_MARGIN =
+    board::layout::mapToolbarFullscreenBottomMargin;
 
-// Drag preview shifts the map canvas by the inverse of mapDragDelta(). The
-// 1.75 CST9217 now reports display-calibrated coordinates, like the 2.06.
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-constexpr int8_t MAP_DRAG_DELTA_SIGN = -1;
-#else
-constexpr int8_t MAP_DRAG_DELTA_SIGN = 1;
-#endif
+// Drag preview shifts the map canvas by the inverse of mapDragDelta(). Both
+// touch controllers report display-calibrated coordinates; a board without
+// touch never drags.
+constexpr int8_t MAP_DRAG_DELTA_SIGN = board::display::touch ? -1 : 1;
 
 inline uint16_t mapViewportHeight(uint16_t screenHeight) {
   if (screenHeight <= MAP_NONFULLSCREEN_RESERVED_HEIGHT) {

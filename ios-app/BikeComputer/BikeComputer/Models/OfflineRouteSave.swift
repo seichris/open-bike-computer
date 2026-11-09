@@ -76,7 +76,7 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
                 .contains(archive.route.provider) else {
             throw OfflineRouteSaveError.sourceNotApproved
         }
-        let route = archive.route
+        let route = archive.storedRoute
         return try NavigationRouteArchiveV1.create(
             route: NavigationRouteV1(
                 id: route.id, revision: route.revision, provider: route.provider,

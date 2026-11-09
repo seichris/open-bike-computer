@@ -26,7 +26,7 @@ constexpr uint8_t CST9217_ACK = 0xAB;
 constexpr uint8_t CST9217_DATA_LENGTH =
     static_cast<uint8_t>(CST9217_FRAME_LENGTH);
 
-#ifdef WAVESHARE_AMOLED_206
+// FT3168 (2.06) register map; the panel driver picks the controller.
 constexpr uint8_t FT3168_INT_PIN = TCH_I2C_INT;
 constexpr uint8_t FT3168_RST_PIN = TCH_I2C_RST;
 constexpr uint8_t FT3168_FINGER_REG = 0x02;
@@ -34,12 +34,8 @@ constexpr uint8_t FT3168_TOUCH_DATA_LENGTH = 5;
 constexpr uint8_t FT3168_POWER_MODE_REG = 0xA5;
 constexpr uint8_t FT3168_MONITOR_MODE = 0x01;
 constexpr uint8_t FT3168_DEVICE_ID_REG = 0xA0;
-constexpr uint16_t ACTIVE_WIDTH = 410;
-constexpr uint16_t ACTIVE_HEIGHT = 502;
-#else
-constexpr uint16_t ACTIVE_WIDTH = 466;
-constexpr uint16_t ACTIVE_HEIGHT = 466;
-#endif
+constexpr uint16_t ACTIVE_WIDTH = board::display::width;
+constexpr uint16_t ACTIVE_HEIGHT = board::display::height;
 constexpr uint16_t MAX_X = ACTIVE_WIDTH - 1;
 constexpr uint16_t MAX_Y = ACTIVE_HEIGHT - 1;
 

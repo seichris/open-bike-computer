@@ -36,6 +36,13 @@ inline double normalizeDegrees(double degrees) {
   return degrees;
 }
 
+// Shortest angular distance of two headings, in [0, 180] degrees.
+inline double headingDeltaDegrees(double first, double second) {
+  const double direct =
+      std::fabs(normalizeDegrees(first) - normalizeDegrees(second));
+  return direct > 180.0 ? 360.0 - direct : direct;
+}
+
 inline double signedHeadingDelta(double from, double to) {
   double delta = normalizeDegrees(to) - normalizeDegrees(from);
   if (delta > 180.0)

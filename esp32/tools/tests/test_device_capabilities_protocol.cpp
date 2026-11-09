@@ -129,7 +129,12 @@ int main() {
       ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE,
       extendedPower, true, output, sizeof(output), screens, sizeof(screens),
       ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE);
-  assert(extendedSize == 36 && extendedSize == sizeof(output));
+  // The optional display and position-source records are the only TLVs
+  // after the extended word.
+  assert(extendedSize == 36 &&
+         extendedSize + device_capabilities_protocol::BOARD_DISPLAY_TLV_BYTES +
+                 device_capabilities_protocol::POSITION_SOURCE_TLV_BYTES ==
+             sizeof(output));
   assert(output[8] == 0x80); // Terrain keeps its shipped first-word allocation.
   assert(output[9] == 1 && output[14] == 2); // Power and screen TLVs survive.
   const uint8_t extendedGolden[] = {3, 4, 1, 0, 0, 0};
@@ -141,7 +146,7 @@ int main() {
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 33);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 35);
   // The friend-marker size flag shares the extended word with group riders.
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
@@ -163,9 +168,14 @@ int main() {
       0x00003fff, power, true, output, sizeof(output));
   const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x3f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
+  static_assert(sizeof(expected) == 14); // Legacy response is byte-for-byte stable.
+  static_assert(sizeof(expected) <= device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));
   for (size_t index = 0; index < size; ++index)
     assert(output[index] == expected[index]);
+  uint8_t legacyBuffer[14]{};
+  assert(device_capabilities_protocol::encodeCap2(
+      0x00003fff, power, true, legacyBuffer, sizeof(legacyBuffer)) == 14);
   assert(device_capabilities_protocol::encodeCap2(0, nullptr, false, output,
                                                    8) == 0);
   assert(device_capabilities_protocol::encodeCap2(0, nullptr, false, output,
@@ -314,6 +324,49 @@ int main() {
   assert(watchMotionSize == sizeof(expectedWatchMotion));
   for (size_t index = 0; index < watchMotionSize; ++index)
     assert(output[index] == expectedWatchMotion[index]);
+  // The position-source record follows the display record as the last TLV.
+  static_assert(ride_ble_protocol_generated::POSITION_SOURCE_TLV_TYPE == 5);
+  static_assert(ride_ble_protocol_generated::POSITION_SOURCE_VERSION == 1);
+  static_assert(ride_ble_protocol_generated::POSITION_SOURCE_PAYLOAD_BYTES == 4);
+  static_assert(ride_ble_protocol_generated::
+                    EXTENDED_POSITION_SOURCE_METADATA_FEATURE == (1UL << 5));
+  static_assert(ride_ble_protocol_generated::
+                    EXTENDED_POSITION_SOURCE_METADATA_MINIMUM_CLIENT_VERSION == 35);
+  static_assert(device_capabilities_protocol::POSITION_SOURCE_TLV_BYTES == 6);
+  const uint8_t positionSource[] = {1, 3, 1, 0};  // v1, phone + GNSS, LC76G
+  const size_t positionSize = device_capabilities_protocol::encodeCap2(
+      0, nullptr, false, output, sizeof(output), nullptr, 0,
+      ride_ble_protocol_generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE,
+      nullptr, positionSource);
+  const uint8_t expectedPositionSource[] = {
+      'C', 'A', 'P', '2', 1, 0, 0, 0, 0, 3, 4, 0x20, 0, 0, 0, 5, 4, 1, 3, 1, 0};
+  assert(positionSize == sizeof(expectedPositionSource));
+  for (size_t index = 0; index < positionSize; ++index)
+    assert(output[index] == expectedPositionSource[index]);
+  // With a display record present the position record still comes last.
+  const uint8_t display[] = {1, 1, 3, 0xd2, 0x01, 0xd2, 0x01, 29};
+  const size_t bothSize = device_capabilities_protocol::encodeCap2(
+      0, nullptr, false, output, sizeof(output), nullptr, 0,
+      ride_ble_protocol_generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE |
+          ride_ble_protocol_generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE,
+      display, positionSource);
+  assert(bothSize == 9 + 6 + 10 + 6);
+  assert(output[11] == 0x30 && output[15] == 4 && output[16] == 8 &&
+         output[25] == 5 && output[26] == 4 && output[27] == 1 &&
+         output[28] == 3 && output[29] == 1 && output[30] == 0);
+  // A phone-only board reports flags 1 and module 0.
+  const uint8_t phoneOnly[] = {1, 1, 0, 0};
+  assert(device_capabilities_protocol::encodeCap2(
+             0, nullptr, false, output, sizeof(output), nullptr, 0,
+             ride_ble_protocol_generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE,
+             nullptr, phoneOnly) == sizeof(expectedPositionSource));
+  assert(output[18] == 1 && output[19] == 0);
+  // Capacity one byte short of the record fails closed.
+  assert(device_capabilities_protocol::encodeCap2(
+             0, nullptr, false, output, sizeof(expectedPositionSource) - 1,
+             nullptr, 0,
+             ride_ble_protocol_generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE,
+             nullptr, phoneOnly) == 0);
   std::cout << "device capabilities protocol tests passed\n";
   return 0;
 }

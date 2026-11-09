@@ -51,6 +51,15 @@ struct Result {
   uint32_t elapsedMs = 0;
   uint32_t visitedEntries = 0;
   uint8_t formatVersion = 0;
+  // Storage-owner time attribution for one activation. elapsedMs also covers
+  // render-worker handoff when the activation started on the UI task.
+  uint32_t blockLookupMs = 0;
+  uint32_t blockLoadMs = 0;
+  uint32_t fontValidationMs = 0;
+  uint32_t rootSwitchMs = 0;
+  // The root switch adopted the probe's validated label font instead of
+  // validating the same file a second time.
+  bool fontValidationReused = false;
 
   constexpr bool loaded() const { return code == Code::Ok; }
 };

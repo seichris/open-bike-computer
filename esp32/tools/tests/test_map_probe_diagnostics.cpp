@@ -48,6 +48,10 @@ int main() {
   assert(loaded.elapsedMs == 17);
   assert(loaded.visitedEntries == 5);
   assert(loaded.formatVersion == 1);
+  // Positional results keep zero timing attribution and no reuse claim.
+  assert(loaded.blockLookupMs == 0 && loaded.blockLoadMs == 0);
+  assert(loaded.fontValidationMs == 0 && loaded.rootSwitchMs == 0);
+  assert(!loaded.fontValidationReused);
   assert(std::strcmp(name(static_cast<Code>(255)), "unknown") == 0);
   return 0;
 }

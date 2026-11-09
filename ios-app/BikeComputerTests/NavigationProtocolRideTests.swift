@@ -769,16 +769,20 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceSoundProtocol() {
-        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 5], "the picker omits the retired rotating-bell sound ID")
-        assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1], "the picker offers only the bell ding; the horn and rotating-bell IDs are retired")
+        assertEqual(DeviceSound.defaultSelection, .bellDing, "bell ding is the default sound")
+        assertEqual(DeviceSound.selectable(.bellDing), .bellDing, "the offered sound stays selectable")
+        assertEqual(DeviceSound.selectable(.plasticBicycleHorn), .bellDing, "the retired bicycle horn falls back to the default")
+        assertEqual(DeviceSound.selectable(.squeezeHorn), .bellDing, "the retired squeeze horn falls back to the default")
+        assertEqual(DeviceSound.selectable(.rotatingBicycleBell), .bellDing, "the retired rotating bell falls back to the default")
         assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
 
-        let defaultPacket = DeviceSound.plasticBicycleHorn.playPacket(volumePercent: .nan)
+        let defaultPacket = DeviceSound.bellDing.playPacket(volumePercent: .nan)
         assertEqual(String(data: defaultPacket.prefix(4), encoding: .utf8), "SNDP", "sound packet uses SNDP prefix")
-        assertEqual(defaultPacket[4], DeviceSound.plasticBicycleHorn.rawValue, "sound packet contains sound ID")
+        assertEqual(defaultPacket[4], DeviceSound.bellDing.rawValue, "sound packet contains sound ID")
         assertEqual(defaultPacket[5], 70, "non-finite volume falls back to the default")
         assertEqual(DeviceSound.bellDing.playPacket(volumePercent: -1)[5], 0, "sound volume clamps below zero")
-        assertEqual(DeviceSound.squeezeHorn.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
+        assertEqual(DeviceSound.bellDing.playPacket(volumePercent: 101)[5], 100, "sound volume clamps above 100")
 
         let honkPacket = DeviceSound.rotatingBicycleBell.powerButtonHonkPacket(
             enabled: true,
@@ -791,7 +795,7 @@ extension NavigationProtocolTests {
         assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[4], 0, "PWR honk packet contains disabled state")
         assertEqual(DeviceSound.bellDing.powerButtonHonkPacket(enabled: false, volumePercent: 200)[6], 100, "PWR honk volume clamps above 100")
 
-        let trackedHonkPacket = DeviceSound.squeezeHorn.powerButtonHonkPacket(
+        let trackedHonkPacket = DeviceSound.bellDing.powerButtonHonkPacket(
             enabled: true,
             volumePercent: 80,
             requestID: 0xA1B2C3D4
@@ -800,7 +804,7 @@ extension NavigationProtocolTests {
         assertEqual(readUInt32LE(trackedHonkPacket, offset: 4), 0xA1B2C3D4,
                     "tracked PWR honk packet stores the request ID little-endian")
         assertEqual(trackedHonkPacket[8], 1, "tracked PWR honk packet contains enabled state")
-        assertEqual(trackedHonkPacket[9], DeviceSound.squeezeHorn.rawValue,
+        assertEqual(trackedHonkPacket[9], DeviceSound.bellDing.rawValue,
                     "tracked PWR honk packet contains sound ID")
         assertEqual(trackedHonkPacket[10], 80, "tracked PWR honk packet contains volume")
     }
@@ -1102,8 +1106,8 @@ extension NavigationProtocolTests {
                "versioned CAPS configuration should be consumed")
         assert(manager.isPowerButtonHonkEnabled,
                "versioned CAPS restores the device-persisted PWR state")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
-                    "versioned CAPS restores the device-persisted sound")
+        assertEqual(manager.selectedDeviceSound, .bellDing,
+                    "a device-persisted retired sound falls back to the bell ding, which the app then re-applies")
         assertEqual(manager.deviceSoundVolumePercent, 65,
                     "versioned CAPS restores the device-persisted volume")
 
@@ -1233,6 +1237,75 @@ extension NavigationProtocolTests {
         assert(manager.supportsMapPois && manager.supportsFriendMarkerScale &&
                manager.supportsRouteElevation,
                "combined capabilities enable every independent feature")
+
+        // Board display metadata is extended bit 4 plus its own TLV type 4.
+        // E-paper still reads target-3 building maps (bits 8 and 12) but has
+        // no continuous camera, so 3D and perspective controls stay hidden.
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0x11, 0, 0])
+        let epaperFeature = Data([3, 4, 0x10, 0, 0, 0])
+        let epaperMetadata = Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
+        let epaperCapabilities = epaperHeader + epaperFeature + epaperMetadata
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
+               "e-paper metadata is consumed")
+        assert(manager.hasReceivedDeviceCapabilities && manager.isEPaperDevice,
+               "valid monochrome metadata identifies e-paper")
+        assertEqual(manager.displayMetadata?.width, 480, "portrait width")
+        assertEqual(manager.displayMetadata?.height, 800, "portrait height")
+        assert(!manager.supportsDisplayBrightness && !manager.supportsTapToCycle &&
+               !manager.supportsContinuousCamera && !manager.supportsDisconnectedSleep,
+               "unsupported e-paper settings stay hidden")
+        assert(manager.supports3DBuildings && !manager.supportsBirdsEyeMapNavigation,
+               "the target-3 building reader never implies a 3D navigation view")
+        assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities + Data([90, 2, 1, 2])),
+               "future unknown TLVs are consumed")
+        assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
+        let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0x11, 0, 4])
+        let tlvOrders: [Data] = [
+            screenMetadata + epaperFeature + epaperMetadata,
+            epaperMetadata + screenMetadata + epaperFeature,
+            epaperFeature + epaperMetadata + screenMetadata,
+        ]
+        for records in tlvOrders {
+            assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + records),
+                   "screen configuration and e-paper metadata coexist in any TLV order")
+            assert(manager.hasReceivedDeviceCapabilities && manager.supportsScreenConfiguration &&
+                   manager.isEPaperDevice && !manager.supportsContinuousCamera,
+                   "screen capabilities retain the independent display restrictions")
+        }
+        // Small typed parts keep the Swift type checker linear.
+        let displayPrefix: Data = epaperHeader + epaperFeature
+        // Retired experimental encoding: bit 31 is terrain and TLV 3 is the extended word.
+        let retiredEncoding: Data = Data("CAP2".utf8) +
+            Data([1, 0, 0, 0, 0x80, 3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let wrongVersion: Data = displayPrefix +
+            Data([4, 8, 2, 2, 1, 0xE0, 1, 0x20, 3, 0] as [UInt8])
+        let zeroWidth: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0, 0, 0x20, 3, 0] as [UInt8])
+        let brightness: Data = displayPrefix +
+            Data([4, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 1] as [UInt8])
+        let recordWithoutFeature: Data = cap2 + epaperMetadata
+        let truncated = Data(epaperCapabilities.dropLast())
+        let duplicate: Data = epaperCapabilities + epaperMetadata
+        let malformedDisplays: [Data] = [
+            retiredEncoding,
+            displayPrefix, // Feature requires its record.
+            recordWithoutFeature,
+            truncated,
+            duplicate,
+            wrongVersion,
+            zeroWidth,
+            brightness,
+        ]
+        for packet in malformedDisplays {
+            assert(manager.handleDeviceCapabilitiesNotification(packet), "bad display record is consumed")
+            assert(!manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil,
+                   "bad display record resets negotiation for retry")
+        }
+        assert(manager.handleDeviceCapabilitiesNotification(cap2), "legacy CAP2 remains supported")
+        assert(manager.hasReceivedDeviceCapabilities && manager.displayMetadata == nil &&
+               manager.supportsDisplayBrightness && manager.supportsTapToCycle,
+               "old AMOLED metadata retains its existing controls")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
@@ -1596,7 +1669,7 @@ extension NavigationProtocolTests {
         manager.isConnected = true
         manager.isNavigationReady = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 55
 
         var sentPackets: [Data] = []
@@ -1629,7 +1702,7 @@ extension NavigationProtocolTests {
                "versioned capability response should be consumed during an in-flight update")
         assert(manager.isPowerButtonHonkEnabled,
                "an in-flight local update wins over an older device snapshot")
-        assertEqual(manager.selectedDeviceSound, .squeezeHorn,
+        assertEqual(manager.selectedDeviceSound, .bellDing,
                     "an older device snapshot does not replace the pending sound")
         assertEqual(manager.deviceSoundVolumePercent, 55,
                     "an older device snapshot does not replace the pending volume")
@@ -1657,8 +1730,8 @@ extension NavigationProtocolTests {
                     "device-authoritative capability state is not written back")
         assert(manager.isPowerButtonHonkEnabled,
                "device-authoritative capability state remains enabled")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
-                    "device-authoritative capability state selects the device sound")
+        assertEqual(manager.selectedDeviceSound, .bellDing,
+                    "device-authoritative capability state with a retired sound falls back to the bell ding")
 
         let disabledDeviceConfig = Data(DeviceBLEProtocol.deviceCapabilitiesPrefix.utf8) +
             Data([flags, 0, DeviceSound.bellDing.rawValue, 20])
@@ -1666,7 +1739,7 @@ extension NavigationProtocolTests {
                "disabled device configuration should still restore the toggle")
         assert(!manager.isPowerButtonHonkEnabled,
                "disabled device configuration restores the disabled PWR state")
-        assertEqual(manager.selectedDeviceSound, .rotatingBicycleBell,
+        assertEqual(manager.selectedDeviceSound, .bellDing,
                     "dormant PWR configuration does not replace the map-button sound")
         assertEqual(manager.deviceSoundVolumePercent, 60,
                     "dormant PWR configuration does not replace the map-button volume")
@@ -4077,16 +4150,16 @@ extension NavigationProtocolTests {
             write: { sentPackets.append($0) }
         ))
 
-        assert(!manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+        assert(!manager.playDeviceSound(.bellDing, volumePercent: 62),
                "sound playback rejects devices without the negotiated capability")
         assertEqual(sentPackets.count, 0, "unsupported devices receive no sound packet")
 
         manager.supportsDeviceSounds = true
-        assert(manager.playDeviceSound(.squeezeHorn, volumePercent: 62),
+        assert(manager.playDeviceSound(.bellDing, volumePercent: 62),
                "sound playback queues when BLE is ready and capability is present")
         assertEqual(sentPackets.count, 1, "sound playback sends one route-equivalent fallback packet")
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDP", "fallback packet uses SNDP prefix")
-        assertEqual(sentPackets[0][4], DeviceSound.squeezeHorn.rawValue, "fallback packet includes selected sound")
+        assertEqual(sentPackets[0][4], DeviceSound.bellDing.rawValue, "fallback packet includes selected sound")
         assertEqual(sentPackets[0][5], 62, "fallback packet includes selected volume")
     }
 
@@ -4132,21 +4205,21 @@ extension NavigationProtocolTests {
 
         manager.supportsPowerButtonHonk = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .plasticBicycleHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(),
                "PWR honk configuration queues when BLE is ready and capability is present")
         assertEqual(sentPackets.count, 1, "PWR honk configuration sends one fallback packet")
         assertEqual(String(data: sentPackets[0].prefix(4), encoding: .utf8), "SNDH", "PWR honk fallback uses SNDH prefix")
         assertEqual(sentPackets[0][4], 1, "PWR honk fallback includes enabled state")
-        assertEqual(sentPackets[0][5], DeviceSound.plasticBicycleHorn.rawValue, "PWR honk fallback includes selected sound")
+        assertEqual(sentPackets[0][5], DeviceSound.bellDing.rawValue, "PWR honk fallback includes selected sound")
         assertEqual(sentPackets[0][6], 75, "PWR honk fallback includes selected volume")
 
         var legacyFailedStatus = Data(DeviceBLEProtocol.powerButtonHonkStatusPrefix.utf8)
         legacyFailedStatus.append(contentsOf: [
             0,
             1,
-            DeviceSound.plasticBicycleHorn.rawValue,
+            DeviceSound.bellDing.rawValue,
             75
         ])
         assert(manager.handlePowerButtonHonkStatusNotification(legacyFailedStatus),
@@ -4221,11 +4294,12 @@ extension NavigationProtocolTests {
 
         sentPackets.removeAll()
         manager.selectedDeviceSound = .bellDing
+        manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(), "first A configuration should send")
         let firstA = sentPackets.last!
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.deviceSoundVolumePercent = 40
         assert(manager.sendPowerButtonHonkConfiguration(), "intervening B configuration should send")
-        manager.selectedDeviceSound = .bellDing
+        manager.deviceSoundVolumePercent = 75
         assert(manager.sendPowerButtonHonkConfiguration(), "second A configuration should send")
         let secondA = sentPackets.last!
         assert(readUInt32LE(firstA, offset: 4) != readUInt32LE(secondA, offset: 4),
@@ -4266,7 +4340,7 @@ extension NavigationProtocolTests {
         manager.supportsPowerButtonHonk = true
         manager.supportsPowerButtonHonkAcknowledgement = true
         manager.isPowerButtonHonkEnabled = true
-        manager.selectedDeviceSound = .squeezeHorn
+        manager.selectedDeviceSound = .bellDing
         manager.deviceSoundVolumePercent = 65
         manager.installPowerButtonHonkRetryTiming(
             ackTimeout: 0.02,
@@ -5161,7 +5235,7 @@ extension NavigationProtocolTests {
         )
 
         let validStream = Data("""
-        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
+        {"schema":1,"source":"firmware","sequence":7,"level":"info","category":"boot","event":"ready","wallTime":"1970-01-01T00:00:02.250Z","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4"}}
         {"schema":1,"source":"firmware","sequence":8,"level":"info","category":"storage","event":"mounted","fields":{"bootSequence":1,"firmwareFingerprint":"A1B2C3D4","available":true}}
         """.utf8)
         let validation =
@@ -5172,6 +5246,10 @@ extension NavigationProtocolTests {
                     "diagnostics validator retains first sequence")
         assertEqual(validation?.last, 8,
                     "diagnostics validator retains last sequence")
+        let datedEvent = Date(timeIntervalSince1970: 2.25)
+        assertEqual(validation?.dates.oldest, datedEvent, "firmware dates come from verified wall time")
+        assertEqual(validation?.dates.newest, datedEvent, "undated events do not extend the date range")
+        assertEqual(validation?.dates.hasUndatedEvents, true, "coverage reports undated firmware events")
         let validHash = SHA256.hash(data: validStream).map {
             String(format: "%02x", $0)
         }.joined()
@@ -5347,7 +5425,7 @@ extension NavigationProtocolTests {
     }
 
     static let diagnosticsReadyStatus = """
-    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true}}
+    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true},"storage":{"backend":"ffat"}}
     """
 
     /// Runs the diagnostics readiness wait on a simulated clock. `device`
@@ -5408,6 +5486,8 @@ extension NavigationProtocolTests {
             assertEqual(session.mode, .diagnostics, "delayed diagnostics readiness opens a diagnostics session")
             assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
                         "delayed diagnostics readiness returns the fresh token")
+            assertEqual(session.diagnosticsStorageBackend, "ffat",
+                        "the storage source comes from the accepted diagnostics status")
         } else {
             assert(false, "diagnostics readiness after 12 s must not time out: \(delayed.result)")
         }
@@ -8342,31 +8422,33 @@ extension NavigationProtocolTests {
 
         let freshManager = BLEManager()
         assert(!freshManager.deviceSoundsEnabled, "fresh installs leave device sounds disabled")
-        assertEqual(freshManager.selectedDeviceSound, .plasticBicycleHorn, "fresh installs use the bicycle horn")
+        assertEqual(freshManager.selectedDeviceSound, .bellDing, "fresh installs use the bell ding")
         assertEqual(freshManager.deviceSoundVolumePercent, 70, "fresh installs use 70 percent sound volume")
         assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
         freshManager.deviceSoundsEnabled = true
-        freshManager.selectedDeviceSound = .squeezeHorn
+        freshManager.selectedDeviceSound = .bellDing
         freshManager.deviceSoundVolumePercent = 65
         freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
         assert(reloaded.deviceSoundsEnabled, "device sounds enabled state persists")
-        assertEqual(reloaded.selectedDeviceSound, .squeezeHorn, "selected sound persists")
+        assertEqual(reloaded.selectedDeviceSound, .bellDing, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
         assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
 
-        defaults.set(3, forKey: soundKey)
-        let retiredValue = BLEManager()
-        assertEqual(retiredValue.selectedDeviceSound, .plasticBicycleHorn,
-                    "the retired rotating-bell ID migrates to the default horn")
+        for retiredSoundID in [2, 3, 5] {
+            defaults.set(retiredSoundID, forKey: soundKey)
+            let retiredValue = BLEManager()
+            assertEqual(retiredValue.selectedDeviceSound, .bellDing,
+                        "the retired sound ID \(retiredSoundID) migrates to the bell ding")
+        }
 
         defaults.set(4, forKey: soundKey)
         defaults.set(Double.nan, forKey: volumeKey)
         let invalidValues = BLEManager()
-        assertEqual(invalidValues.selectedDeviceSound, .plasticBicycleHorn, "unknown sound IDs fall back safely")
+        assertEqual(invalidValues.selectedDeviceSound, .bellDing, "unknown sound IDs fall back safely")
         assertEqual(invalidValues.deviceSoundVolumePercent, 70, "non-finite persisted volume falls back safely")
 
         defaults.removeObject(forKey: deviceSoundsEnabledKey)
@@ -9214,6 +9296,26 @@ extension NavigationProtocolTests {
         )
         assertEqual(
             MapTrackingPolicy.desiredMode(
+                isNavigating: true,
+                isSimulationMode: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "test navigation leaves the camera to the simulated position and course"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
+                isNavigating: false,
+                isSimulationMode: true,
+                isOfflineMapSelectionActive: false,
+                isDestinationSelectionActive: false
+            ),
+            .none,
+            "a simulation never falls back to MapKit tracking"
+        )
+        assertEqual(
+            MapTrackingPolicy.desiredMode(
                 isNavigating: false,
                 isOfflineMapSelectionActive: true,
                 isDestinationSelectionActive: false
@@ -9844,5 +9946,58 @@ extension NavigationProtocolTests {
         assertEqual(absent["metricsAvailable"], "false", "missing URL metrics are explicitly unknown")
         assert(absent["connectStarted"] == nil && absent["tlsStarted"] == nil, "unknown metrics cannot masquerade as no TCP/TLS")
         assertEqual(offline.diagnosticCode, "transport_metrics_unavailable", "missing metrics cannot prove an unstarted network load")
+    }
+}
+
+extension NavigationProtocolTests {
+    /// CAP2 TLV type 5 behind extended bit 5: the manager keeps a consistent
+    /// position-source record and rejects a record or bit on its own.
+    @MainActor
+    static func testPositionSourceCapabilityRecord() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let bit = RideBLEGeneratedProtocolV1.extendedPositionSourceMetadataFeature
+        let header = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0])
+        let extended = Data([3, 4, UInt8(bit & 0xFF), UInt8((bit >> 8) & 0xFF),
+                             UInt8((bit >> 16) & 0xFF), UInt8((bit >> 24) & 0xFF)])
+        let receiverRecord = Data([5, 4, 1, 3, 1, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + receiverRecord),
+               "CAP2 with the position-source record is handled")
+        assert(manager.hasReceivedDeviceCapabilities, "a consistent record keeps the capabilities")
+        assertEqual(manager.positionSourceMetadata?.hasGNSSReceiver, true,
+                    "the manager keeps the parsed receiver record")
+        assert(manager.deviceHasGNSSReceiver, "the manager reports the receiver")
+        assertEqual(manager.positionSourceMetadata?.receiverName, "Quectel LC76G",
+                    "the receiver module is named for the device details")
+
+        let phoneOnly = Data([5, 4, 1, 1, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + phoneOnly),
+               "a phone-only record is handled")
+        assertEqual(manager.positionSourceMetadata?.hasGNSSReceiver, false,
+                    "a phone-only board replaces the previous record")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + receiverRecord),
+               "a record without its extended bit is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "a record without its extended bit is rejected and clears the record")
+        assert(!manager.hasReceivedDeviceCapabilities,
+               "an inconsistent record rejects the whole capability response")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended),
+               "the extended bit without its record is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "the extended bit without its record is rejected")
+
+        assert(manager.handleDeviceCapabilitiesNotification(header + extended + Data([5, 4, 1, 3, 2, 0])),
+               "an unknown receiver module is handled")
+        assert(manager.positionSourceMetadata == nil,
+               "an unknown receiver module invalidates the record")
+
+        // Older firmware without the record still negotiates.
+        assert(manager.handleDeviceCapabilitiesNotification(header),
+               "a response without the record is handled")
+        assert(manager.hasReceivedDeviceCapabilities && manager.positionSourceMetadata == nil,
+               "firmware without the record keeps its capabilities and no record")
     }
 }

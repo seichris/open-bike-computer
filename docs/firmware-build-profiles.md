@@ -1,7 +1,7 @@
 # Firmware build profiles
 
-The Waveshare firmware has five intentional profile classes for each display
-target:
+The AMOLED firmware has five intentional profile classes for each display
+target. The experimental e-paper profiles are described below.
 
 - `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206` are developer/diagnostic
   builds. They keep USB CDC active, emit low-rate diagnostics, and pause for up
@@ -57,10 +57,10 @@ current image onto a board with the older 3 MiB/6 MiB generation does move FFat;
 see [partition layouts](partition-layout-migration.md) before doing so. OTA
 release artifacts continue to use only the production layout. Production builds
 must retain at least 64 KiB in each application slot; the locked build helper
-rejects an image that merely fits but leaves less reserve. The two embedded horn recordings are
-stored as mono PCM and expanded to their original identical-channel stereo
-streams during playback. The unused rotating-bell recording was removed; sound
-ID `3` remains reserved so older clients and persisted settings fail closed.
+rejects an image that merely fits but leaves less reserve. The embedded horn
+recordings were removed in November 2026, after the unused rotating-bell
+recording; sound IDs `2`, `3` and `5` remain reserved so older clients and
+persisted settings fail closed.
 
 Each production profile keeps the canonical hardware target in firmware
 metadata (`WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206`). The profile suffix
@@ -82,3 +82,42 @@ currently tested firmware is required. Build and flash the profile matching the
 physical panel through `esp32/tools/build_firmware.py`; the debug service is
 compiled into that complete firmware image rather than installed alongside an
 unmodified image.
+
+## Experimental e-paper 3.97
+
+`WAVESHARE_EPAPER_397`, `WAVESHARE_EPAPER_397_DISPLAY_TEST`,
+`WAVESHARE_EPAPER_397_POWER_METRICS`,
+`WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS`,
+`WAVESHARE_EPAPER_397_LIGHT_SLEEP`, and
+`WAVESHARE_EPAPER_397_PRODUCTION` share the locked S3 runtime and retain
+`WAVESHARE_EPAPER_397` as their canonical target. All diagnostic profiles use
+the 6 MiB layout; production uses the existing two 3 MiB OTA slots and disables
+USB logging. `POWER_METRICS` records waveform/sleep and system metrics,
+`IMU_DIAGNOSTICS` adds bounded QMI8658/SHTC3 sampling, and `LIGHT_SLEEP` enables
+tickless automatic light sleep with BOOT and all three contacts as wake sources.
+These opt-in features are excluded from ordinary and production firmware.
+Production is a compile/size qualification profile, not a publishable release.
+Factory/release allowlists deliberately exclude this board.
+
+Automatic pull-request and merge-group CI builds the ordinary and production
+profiles whenever a firmware, build or CI change can reach this image, and all
+six when e-paper-named sources change. Manual CI hardware selector `397` builds
+all six on demand; `all` and release CI remain AMOLED-only. See
+[e-paper board notes](../hardware/waveshare-epaper-397.md) for diagnostic
+controls, disabled peripherals, candidate refresh limits and physical gates.
+
+## Experimental GNSS 1.75 variant
+
+`WAVESHARE_AMOLED_175_GNSS`, `WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG` and
+`WAVESHARE_AMOLED_175_GNSS_PRODUCTION` are the 1.75 with the Quectel LC76G
+receiver populated. They share the 1.75 runtime, SDK configuration and
+electrical policy: the variant defines the 1.75 board macro so every 1.75
+gate applies, plus its own macro, which selects its board file, and it
+retains `WAVESHARE_AMOLED_175_GNSS` as its canonical target and OTA identity.
+The ordinary and remote-debug profiles use the 8 MiB developer layout; the
+production profile is a compile and size qualification on the dual 4 MiB
+slots and is never packaged. Automatic CI builds the ordinary and production
+profiles whenever a firmware, build or CI change can reach the image, and all
+three when the variant's board file changes; manual selector `175_gnss` builds
+all three on demand; `all`, release and core-warm requests stay AMOLED-only.
+See [the variant's board notes](../hardware/waveshare-amoled-175-gnss.md).

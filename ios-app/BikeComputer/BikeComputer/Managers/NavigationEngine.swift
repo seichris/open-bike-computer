@@ -193,9 +193,11 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Start navigation with a given route
     func startNavigation(with route: MKRoute, isTestMode: Bool = false, initialLocation: CLLocation? = nil) {
-        let normalizedInitialLocation = initialLocation.map(
-            MapKitRouteAdapter.normalizedLocation
-        )
+        // A start taken from GPS comes back to the same fix, even where a
+        // mainland-China border makes its MapKit coordinate ambiguous.
+        let normalizedInitialLocation = initialLocation.map {
+            MapKitRouteAdapter.normalizedLocation($0, near: latestExternalGpsLocation)
+        }
         let sharedRoute: NavigationRouteV1
         do {
             sharedRoute = try MapKitRouteAdapter.route(
@@ -340,7 +342,8 @@ class NavigationEngine: NSObject, ObservableObject {
         guard isNavigating, !isSimulationMode, !usesOfflineArchive else { return }
 
         let normalizedCurrentLocation = MapKitRouteAdapter.normalizedLocation(
-            currentLocation
+            currentLocation,
+            near: latestExternalGpsLocation
         )
         let sharedRoute: NavigationRouteV1
         do {
@@ -403,7 +406,10 @@ class NavigationEngine: NSObject, ObservableObject {
     func distanceToCurrentStep(from location: CLLocation) -> CLLocationDistance? {
         guard let route = currentRoute,
               route.steps.indices.contains(currentStepIndex) else { return nil }
-        let normalized = MapKitRouteAdapter.normalizedLocation(location)
+        let normalized = MapKitRouteAdapter.normalizedLocation(
+            location,
+            near: latestExternalGpsLocation
+        )
         let step = route.steps[currentStepIndex]
         let stepPoints = Array(
             route.points[step.geometryStartIndex...step.geometryEndIndex]
@@ -492,6 +498,18 @@ class NavigationEngine: NSObject, ObservableObject {
     }
 
     #if HOST_TESTING
+#if HOST_TESTING
+    struct DeviceCourseResolutionForTesting {
+        let segmentIndex: Int?
+        let fraction: Double?
+        let routeBearing: Double?
+        let measuredCourse: Double
+        let heading: Double?
+        let cacheCount: Int
+    }
+    private(set) var lastDeviceCourseForTesting: DeviceCourseResolutionForTesting?
+#endif
+
     func updateSimulationForTesting(timeInterval: TimeInterval) {
         guard isSimulationMode else { return }
         lastSimulationUpdate = Date().addingTimeInterval(-timeInterval)
@@ -745,7 +763,8 @@ class NavigationEngine: NSObject, ObservableObject {
         if let lastDeviceGpsLocation {
             if lastDeviceGpsLocation.convertFromMapKitRoute {
                 return MapKitRouteAdapter.normalizedLocation(
-                    lastDeviceGpsLocation.location
+                    lastDeviceGpsLocation.location,
+                    near: latestExternalGpsLocation
                 )
             }
             return lastDeviceGpsLocation.location
@@ -915,6 +934,16 @@ class NavigationEngine: NSObject, ObservableObject {
             routeBearing: routeBearing,
             navigationActive: isNavigating
         )
+#if HOST_TESTING
+        lastDeviceCourseForTesting = DeviceCourseResolutionForTesting(
+            segmentIndex: routeProjection?.segmentIndex,
+            fraction: routeProjection?.fraction,
+            routeBearing: routeBearing,
+            measuredCourse: location.course,
+            heading: heading,
+            cacheCount: routeCoordinatesCache.count
+        )
+#endif
         bleManager?.sendGPSPosition(lat: wgsCoordinate.latitude,
                                     lon: wgsCoordinate.longitude,
                                     heading: heading,

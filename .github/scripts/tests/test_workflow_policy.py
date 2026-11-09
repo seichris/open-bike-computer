@@ -26,6 +26,8 @@ CORE_FIRMWARE_TARGETS = {
 REMOTE_DEBUG_FIRMWARE_TARGETS = {
     "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
     "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
+    # The experimental GNSS 1.75 variant's remote-debug profile.
+    "WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG",
 }
 DIAGNOSTIC_FIRMWARE_TARGETS = {
     *REMOTE_DEBUG_FIRMWARE_TARGETS,
@@ -780,6 +782,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/package_factory_firmware.py", general_ci)
         self.assertIn("tar -xzf", general_ci)
         self.assertIn("sha256sum --check SHA256SUMS", general_ci)
+        # E-paper production is compile/size qualification only; never package it.
+        self.assertIn('"${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION', general_ci)
+        self.assertIn("startsWith(matrix.target, 'WAVESHARE_AMOLED_')", general_ci)
+        self.assertIn('          - "397"', general_ci)
+        self.assertIn('          - "175_gnss"', general_ci)
+        # The experimental GNSS variant is never packaged as a factory bundle.
+        self.assertIn('"${BUILD_ENVIRONMENT}" != *_GNSS_PRODUCTION', general_ci)
+        self.assertIn("!contains(matrix.target, '_GNSS')", general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
         agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -1228,7 +1238,27 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         self.assertIn('      - ".github/actions/firmware-build-cache/**"\n', push)
         self.assertIn("uses: ./.github/workflows/ci.yml", warm)
         self.assertIn("scope: firmware\n", warm)
-        self.assertIn("firmware_hardware: ${{ inputs.firmware_hardware || '175' }}", warm)
+        # Every family is warmed, not only the 1.75: "all" is the AMOLED pair.
+        self.assertIn("firmware_hardware: ${{ matrix.hardware }}", warm)
+        self.assertIn("'[\"all\",\"175_gnss\",\"397\"]'", warm)
+        self.assertIn("format('[\"{0}\"]', inputs.firmware_hardware)", warm)
+        self.assertIn("max-parallel: 2", warm)
+        self.assertIn("fail-fast: false", warm)
+        dispatch = mapping_block(warm, "workflow_dispatch", indent=2)
+        for family in ("every", '"175"', '"206"', '"397"', '"175_gnss"'):
+            self.assertIn(f"          - {family}\n", dispatch)
+        # Each warm leg must be a selector that CI routing accepts, so a leg can
+        # never finish green while it builds and publishes nothing.
+        import changed_components
+        selectors = set(changed_components.FIRMWARE_TARGETS) | {"all"}
+        legs = json.loads(re.search(r"'(\[\"all\"[^']*\])'", warm).group(1))
+        self.assertTrue(set(legs) <= selectors, legs)
+        self.assertEqual(set(changed_components.FIRMWARE_TARGETS) - {"175", "206"}, set(legs) - {"all"})
+        # The legs share one run, so each leg's host evidence needs its own name.
+        self.assertIn(
+            "name: firmware-host-evidence${{ inputs.firmware_hardware && format('-{0}', inputs.firmware_hardware) || '' }}",
+            workflow_source("ci.yml"),
+        )
         permissions = mapping_block(warm, "permissions", indent=0)
         self.assertIn("  actions: read", permissions)
         self.assertIn("  contents: read", permissions)
@@ -1251,6 +1281,29 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         self.assertIn("format('Partial CI Gate ({0})', inputs.scope)", gate)
         promotion = (WORKFLOW_SCRIPTS_ROOT / "dispatch_promotion_ci.py").read_text(encoding="utf-8")
         self.assertIn("run.get('event') in ('pull_request', 'workflow_dispatch')", promotion)
+
+    def test_firmware_core_builds_free_the_runner_disk_first(self) -> None:
+        # A cold core key keeps the 6.4 GB verified store, a 5.8 GB entry and a
+        # 1.9 GB transport copy side by side; every Linux job that builds a core
+        # removes the image's unused SDKs before it restores anything.
+        for workflow, job in (
+            ("ci.yml", "esp32"),
+            ("firmware-diagnostics.yml", "esp32-diagnostics"),
+            ("speaker-firmware.yml", "esp32-speaker"),
+            ("firmware-runtime-refresh.yml", "firmware-build-validation"),
+        ):
+            with self.subTest(workflow=workflow):
+                block = mapping_block(workflow_source(workflow), job, indent=2)
+                steps = sequence_mapping_blocks(block, "steps", indent=4)
+                free = [index for index, step in enumerate(steps) if "uses: ./.github/actions/free-runner-disk" in step]
+                restore = [index for index, step in enumerate(steps) if "uses: ./.github/actions/firmware-build-cache" in step]
+                builds = [index for index, step in enumerate(steps) if "tools/build_firmware.py" in step]
+                self.assertEqual(1, len(free), workflow)
+                self.assertTrue(builds, workflow)
+                self.assertLess(free[0], min(restore + builds), workflow)
+        action = (REPO_ROOT / ".github/actions/free-runner-disk/action.yml").read_text(encoding="utf-8")
+        self.assertIn("FIRMWARE_RUNNER_DISK schema=1 status=freed", action)
+        self.assertIn('if [[ "${RUNNER_OS:-}" != "Linux" ]]', action)
 
     def test_core_entries_publish_only_from_main_and_restore_read_only(self) -> None:
         esp32 = mapping_block(workflow_source("ci.yml"), "esp32", indent=2)

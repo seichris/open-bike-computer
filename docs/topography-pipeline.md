@@ -63,11 +63,15 @@ companion pairs. No provider has thereby gained production approval.
   purges its bounded encoded-tile cache on memory pressure. Replacement/removal
   does not change routes or camera state. Saved-map details expose contour
   quality, intervals, source releases, surface model, datum, and attribution.
-  For selections wholly inside the app's mainland-China coordinate region, the
-  iPhone resamples the WGS-84 companion tiles into MapKit's GCJ-02 pixel space
-  on demand. The signed companion and ESP32 map remain WGS-84. A selection
-  crossing that region's boundary suppresses the iPhone overlay until regional
-  alignment is qualified; no uniform geographic offset is applied.
+  For selections that reach the app's mainland-China coordinate region
+  ([details](mapkit-china-coordinates.md)), the iPhone resamples the WGS-84
+  companion tiles on demand: each MapKit pixel that Apple Maps draws in
+  GCJ-02 reads its WGS-84 source pixel, pixels inside the region that the
+  offset left without terrain stay transparent, and every other pixel keeps
+  its position. A selection across the border, such as most selections of
+  Shenzhen or Xiamen, therefore lines up on both sides. No uniform
+  geographic offset is applied. The signed companion and ESP32 map remain
+  WGS-84.
 - CAP2 bit 30/client version 28, visibility bit 13, independent Map/Map +
   Navigation preferences, configurable-screen persistence, and active-map
   health gate the device toggle. Contours default off.
@@ -341,6 +345,25 @@ signing, image-size, simulator, or physical-device evidence. Full production-
 image, GitHub CI, and hardware gates remain separate.
 
 ## Remaining release gates
+
+**Production decision, 2026-11-05.** The maintainer approved the pinned 2021
+Copernicus GLO-30 Public and GLO-90 sources for production and accepted the
+quality of topographic maps from development use. That decision waives the
+evidence gates listed below that were not completed: regional-boundary,
+water/no-data and high-latitude samples, and device resource measurements.
+Device qualification covers the 1.75-inch board only; the 2.06-inch residual
+risk is accepted. `map-platform/config/topography-source-policy-v2.json` records
+the approval. The same day `tools/check_topography_terms.py --upstream` found
+both retained licences unchanged upstream. `generation-profile-policy-v5.json`
+is the newest generation policy, with topographic contours available in
+production; map POIs stay disabled there. Production and development select it
+with the next signed-worker promotion, which moves the worker because the source
+policy is a worker identity input. The catalog's `TOPOGRAPHY_PROMOTION_ENABLED`
+switch is on in staging and production from the catalog deployment that
+follows the production lock. Setting it back to `0` and redeploying the catalog
+is the topographic incident control: Standard promotion and delivery continue. The list
+below remains as the record of what was not done before release.
+
 
 On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
 Copernicus DEM sources is acceptable. This resolves the source-use decision for

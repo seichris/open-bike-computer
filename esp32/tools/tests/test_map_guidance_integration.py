@@ -9,8 +9,26 @@ MAIN_SCREEN_SOURCE = (
 MAP_RENDERER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.cpp"
 ).read_text(encoding="utf-8")
+MAP_SCHEDULER_AMOLED_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "mapSchedulerAmoled.cpp"
+).read_text(encoding="utf-8")
+MAP_SCHEDULER_EPAPER_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "mapSchedulerEpaper.cpp"
+).read_text(encoding="utf-8")
+MAP_CAMERA_AMOLED_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapCameraAmoled.cpp"
+).read_text(encoding="utf-8")
+MAP_CAMERA_EPAPER_SOURCE = (
+    ESP32_ROOT / "lib" / "maps" / "src" / "mapCameraEpaper.cpp"
+).read_text(encoding="utf-8")
 MAP_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
+).read_text(encoding="utf-8")
+EPAPER_UI_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "epaper_ui.cpp"
+).read_text(encoding="utf-8")
+EPAPER_DISPLAY_SOURCE = (
+    ESP32_ROOT / "lib" / "epaper_display" / "epaper_display.cpp"
 ).read_text(encoding="utf-8")
 MAP_PRESENTATION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapPresentation.hpp"
@@ -71,6 +89,15 @@ def function_body(source: str, signature: str) -> str:
 class MapGuidanceIntegrationTests(unittest.TestCase):
     """Supplemental wiring guards; behavioral contracts live in C++ tests."""
 
+    def test_buttons_and_touch_share_one_screen_cycling_implementation(self):
+        for direction in ("Next", "Previous"):
+            signature = f"void show{direction}MainScreen() {{"
+            self.assertEqual(MAIN_SCREEN_SOURCE.count(signature), 1)
+        previous = function_body(MAIN_SCREEN_SOURCE, "void showPreviousMainScreen()")
+        self.assertIn("previousEnabledInstanceIndex", previous)
+        self.assertIn("previousEnabledTile", previous)
+        self.assertIn("showPreviousMainScreen();", EPAPER_UI_SOURCE)
+
     def test_pois_share_the_stable_camera_visible_crop_with_labels(self):
         raster = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap(")
         self.assertIn("poiGutter = context.labelGutter", raster)
@@ -128,7 +155,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", stable)
         self.assertNotIn("lv_obj_add_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", stable)
         self.assertNotIn("desiredRotation", stable)
-        presenter = function_body(MAP_RENDERER_SOURCE, "void Maps::serviceStableCamera")
+        presenter = function_body(MAP_CAMERA_AMOLED_SOURCE, "void Maps::serviceStableCamera")
         self.assertIn("cameraLag.observe(required, nowMs)", presenter)
         self.assertIn("sample.hidden = false", presenter)
         self.assertIn("visibleRenderResult.labelOrientation", presenter)
@@ -137,6 +164,63 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         marker = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePositionOverlay")
         self.assertIn("map_camera::markerAngle(visibleProjection, rider", marker)
         self.assertIn("visibleProjection.projectWorld(rider)", marker)
+
+    def test_epaper_services_publication_and_foreground_without_blanket_gate(self):
+        prepare = function_body(
+            MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate"
+        )
+        self.assertNotIn("lastPresentationMs", prepare)
+        self.assertNotIn("nowMs - lastPresentationMs < 4000", prepare)
+        # The family scheduler is evaluated after the pipeline and the overlay.
+        self.assertLess(
+            prepare.index("mapView.serviceRenderPipeline(nowMs)"),
+            prepare.index("map_scheduler::evaluate"),
+        )
+        self.assertLess(
+            prepare.index("mapView.updatePositionOverlay()"),
+            prepare.index("map_scheduler::evaluate"),
+        )
+        evaluate = function_body(MAP_SCHEDULER_EPAPER_SOURCE,
+                                 "Decision evaluate(uint32_t nowMs, bool followPosition, bool courseUp)")
+        self.assertIn("epaperNavigationScheduler.evaluate", evaluate)
+        self.assertIn("mapView.takeFramePublication(publication)", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertIn("publication.capturedFixSequence", MAP_SCHEDULER_EPAPER_SOURCE)
+
+    def test_epaper_camera_keeps_compatible_base_and_has_one_submitter(self):
+        epaper_branch = function_body(MAP_CAMERA_EPAPER_SOURCE, "void Maps::serviceStableCamera")
+        self.assertNotIn("cameraLag.expired", epaper_branch)
+        self.assertNotIn("submitRenderRequest", epaper_branch)
+        self.assertNotIn("lv_label_set_text", epaper_branch)
+        self.assertNotIn('"Recentering - current map remains visible"', EPAPER_UI_SOURCE)
+        self.assertIn("baseCompatible", epaper_branch)
+        self.assertIn("epaperArmedRenderReasons", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertNotIn("epaperNavigationScheduler", MAIN_SCREEN_SOURCE)
+
+    def test_epaper_route_windows_are_soft_and_hard_invalidations_recompose(self):
+        process = function_body(EPAPER_UI_SOURCE, "void process()")
+        self.assertNotIn("routeOverlay.revision()", process)
+        self.assertIn("routeActive != lastRouteActive", process)
+        self.assertIn("maneuverChanged", process)
+        invalidate = function_body(EPAPER_DISPLAY_SOURCE, "void invalidateContext()")
+        poll = function_body(EPAPER_DISPLAY_SOURCE, "void poll()")
+        self.assertIn("contextCompositionPending.store", invalidate)
+        self.assertIn("contextCompositionPending.exchange", poll)
+        self.assertIn("lv_obj_invalidate(screen)", poll)
+
+    def test_epaper_provenance_reaches_successful_panel_completion(self):
+        worker = function_body(EPAPER_DISPLAY_SOURCE, "void displayWorker(void *)")
+        submit = function_body(EPAPER_DISPLAY_SOURCE, "bool submit(const uint16_t *rgb)")
+        self.assertIn("frame.provenance", worker)
+        self.assertIn("snapshot.acceptedGpsSequence", worker)
+        self.assertIn("currentAcceptedGpsSequence.load", submit)
+        self.assertIn("currentBaseCameraSequence.load", submit)
+        self.assertIn("epaper::setFrameProvenance(", MAP_SCHEDULER_EPAPER_SOURCE)
+        self.assertIn("map_scheduler::captureFrameProvenance()", MAIN_SCREEN_SOURCE)
+        self.assertNotIn('#include "mainScr.hpp"', EPAPER_DISPLAY_SOURCE)
+        self.assertLess(
+            worker.index("mailbox.finish(true)"),
+            worker.index("snapshot.acceptedGpsSequence"),
+        )
 
     def test_frame_capture_uses_narrow_gui_owner_interface(self):
         capture = (ESP32_ROOT / "lib/device_debug/device_debug_frame_store.cpp").read_text()
@@ -172,7 +256,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         request = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
         )
-        self.assertIn("MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64", MAP_HEADER_SOURCE)
+        # The round 1.75 panel keeps the 64-pixel floor; rectangular panels render
+        # the full overscan. Both read the board definition.
+        self.assertIn("MAP_RENDER_ROUND_VIEWPORT = board::display::round", MAP_HEADER_SOURCE)
+        self.assertIn("board::display::round ? 64 : MAP_RENDER_OVERSCAN_PIXELS", MAP_HEADER_SOURCE)
         self.assertIn("MAP_RENDER_ROUND_VIEWPORT", request)
         self.assertIn("map_presentation::refreshLeadPixels", request)
         self.assertIn("MAP_RENDER_SAFETY_PIXELS + 8U", request)
@@ -180,11 +267,9 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("request.viewportWidth + request.overscanPixels * 2U", request)
 
     def test_amoled_lvgl_pool_uses_psram_to_preserve_wifi_headroom(self):
-        gate = (
-            "#if defined(BOARD_HAS_PSRAM) && "
-            "(defined(WAVESHARE_AMOLED_175) || "
-            "defined(WAVESHARE_AMOLED_206))"
-        )
+        # Every board has PSRAM; host builds without the flag keep the
+        # internal-RAM fallback.
+        gate = "#if defined(BOARD_HAS_PSRAM)"
         allocator = (
             "heap_caps_aligned_alloc(16, (size), "
             "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
@@ -228,10 +313,16 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("std::swap(bufMapScreenSize, bufMapTempSize)", publish)
         self.assertIn("lv_canvas_set_buffer(canvasMap, bufMapScreen", publish)
         self.assertIn("lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN)", publish)
+        # The coverage rule is the family's (readyFrameCovered); both keep the
+        # viewport-coverage proof ahead of the buffer swap.
         self.assertLess(
-            publish.index("frameCoversViewport"),
+            publish.index("readyFrameCovered("),
             publish.index("std::swap(bufMapScreen, bufMapTemp)"),
         )
+        for family in (MAP_CAMERA_AMOLED_SOURCE, MAP_CAMERA_EPAPER_SOURCE):
+            covered = function_body(family, "bool Maps::readyFrameCovered")
+            self.assertIn("map_camera::cropCovered", covered)
+            self.assertIn("map_presentation::frameCoversViewport", covered)
 
     def test_live_route_and_marker_share_presented_frame_transform(self):
         foreground = function_body(MAP_RENDERER_SOURCE, "void Maps::renderLiveForeground")
@@ -410,8 +501,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn(
             "uiChangeTracker.take(ui_update_policy::Source::Route)", prepare
         )
-        self.assertIn("if (gpsChanged || routeChanged)", prepare)
-        self.assertIn("mapRenderScheduler.observe(currentMapFix())", prepare)
+        self.assertIn("map_scheduler::observe(nowMs, gpsChanged, routeChanged, currentMapFix)", prepare)
+        observe = function_body(MAP_SCHEDULER_AMOLED_SOURCE, "void observe(uint32_t, bool gpsChanged, bool routeChanged")
+        self.assertIn("if (gpsChanged || routeChanged)", observe)
+        self.assertIn("mapRenderScheduler.observe(course())", observe)
 
     def test_idle_guidance_screen_keeps_birdseye_3d_enabled(self):
         capture = function_body(
@@ -542,9 +635,27 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             MAP_RENDERER_SOURCE,
             "bool Maps::processPendingVectorMapActivation",
         )
-        self.assertIn("probeVectorMapFolderOnStorageOwner", control)
-        self.assertIn("switchVectorMapFolderOnStorageOwner", control)
+        self.assertIn("activateVectorMapFolderOnStorageOwner(request.folder)",
+                      control)
         self.assertIn("map_probe_diagnostics::Code::RootSwitchFailed", control)
+        # Boot and runtime share one probe-then-switch path that validates the
+        # label font once and keeps the old root when the switch fails.
+        activate = function_body(
+            MAP_RENDERER_SOURCE,
+            "Maps::activateVectorMapFolderOnStorageOwner",
+        )
+        probe = activate.index(
+            "probeVectorMapFolderOnStorageOwner(folder, &validatedFont)")
+        switch = activate.index(
+            "switchVectorMapFolderOnStorageOwner(folder, &validatedFont)")
+        self.assertLess(probe, switch)
+        self.assertLess(activate.index("if (result.loaded())"), switch)
+        self.assertIn("map_probe_diagnostics::Code::RootSwitchFailed", activate)
+        boot = function_body(
+            MAP_RENDERER_SOURCE, "Maps::activateVectorMapFolderDetailed"
+        )
+        self.assertIn("activateVectorMapFolderOnStorageOwner(folder)", boot)
+        self.assertIn("finalizeVectorMapFolderSwitchOnUi()", boot)
         self.assertIn("gMapRenderControlOperation.store(true", control)
         self.assertIn("gMapRenderControlOperation.store(false", control)
         self.assertIn("WakeReason::Transfer", control)
@@ -584,7 +695,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             '"boot_selection_final"',
         ):
             self.assertIn(event, setup)
-        self.assertIn("probeVectorMapFolderDetailed", setup)
+        self.assertIn("activateVectorMapFolderDetailed", setup)
         self.assertIn('recordHealth("ready")', setup)
         self.assertIn("takeMapAvailabilityTransition", loop)
         self.assertIn("bleNavServer.noteMapAvailabilityChanged()", loop)

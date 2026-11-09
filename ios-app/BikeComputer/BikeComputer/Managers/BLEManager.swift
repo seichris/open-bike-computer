@@ -647,22 +647,29 @@ enum DeviceTransferPacketRoutingPolicy {
 
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
+    // The horn and rotating-bell recordings were removed from the firmware.
+    // Their raw values stay decodable so legacy device state and persisted
+    // settings parse, but they are never offered or sent: firmware keeps raw
+    // values 2, 3 and 5 reserved and rejects them.
     case plasticBicycleHorn = 2
-    // Decode legacy device state without offering the removed recording in
-    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
 
+    /// The sounds the current firmware plays; the picker offers exactly these.
     static let allCases: [DeviceSound] = [
         .bellDing,
-        .plasticBicycleHorn,
-        .squeezeHorn,
     ]
 
-    static let defaultSelection: DeviceSound = .plasticBicycleHorn
+    static let defaultSelection: DeviceSound = .bellDing
     static let defaultVolumePercent: Double = 70
+
+    /// A legacy or persisted value that the current firmware no longer plays
+    /// falls back to the default instead of selecting a rejected ID.
+    static func selectable(_ sound: DeviceSound) -> DeviceSound {
+        allCases.contains(sound) ? sound : defaultSelection
+    }
 
     static func normalizedVolumePercent(_ volumePercent: Double) -> Double {
         guard volumePercent.isFinite else { return defaultVolumePercent }
@@ -701,11 +708,11 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .bellDing:
             return "Bell Ding"
         case .plasticBicycleHorn:
-            return "Bicycle Horn"
+            return "Bicycle Horn (Legacy)"
         case .rotatingBicycleBell:
             return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
-            return "Squeeze Horn"
+            return "Squeeze Horn (Legacy)"
         }
     }
 
@@ -1146,6 +1153,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var powerButtonHonkConfigurationError: String?
     @Published private(set) var hasReceivedDeviceCapabilities: Bool = false
     @Published var peripheralName: String = ""
+    @Published private(set) var displayMetadata: DeviceDisplayMetadata?
+    @Published private(set) var positionSourceMetadata: DevicePositionSourceMetadata?
+    var deviceHasGNSSReceiver: Bool { positionSourceMetadata?.hasGNSSReceiver == true }
+    var isEPaperDevice: Bool { displayMetadata?.isEPaper == true || firmwareTarget == "WAVESHARE_EPAPER_397" }
+    var supportsDisplayBrightness: Bool { displayMetadata?.supportsBrightness ?? !isEPaperDevice }
+    var supportsTapToCycle: Bool { displayMetadata?.supportsTapToCycle ?? !isEPaperDevice }
+    var supportsContinuousCamera: Bool { displayMetadata?.supportsContinuousCamera ?? !isEPaperDevice }
+    var supportsDisconnectedSleep: Bool { displayMetadata?.supportsDisconnectedSleep ?? !isEPaperDevice }
     @Published var hardwareLabel: String = ""
     @Published var signalStrength: Int = 0
     @Published var centralStateDescription: String = "unknown"
@@ -1224,8 +1239,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapContourNoDataMillionths: Int?
     @Published private(set) var activeMapContainsContours = false
     @Published private(set) var activeMapTopographySourcePolicyReceiptPrefix = ""
+    /// E-paper firmware reads contour maps but never draws contour lines.
     var topographicContoursAvailable: Bool {
-        supportsTopographicContours &&
+        supportsTopographicContours && !isEPaperDevice &&
             (activeMapRendererFormat == 4 ||
              (activeMapRendererFormat == 5 && activeMapContourLayerIncluded)) &&
             activeMapTopographyProfileVersion == 1 &&
@@ -1286,6 +1302,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
     @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
+    /// The device's live position-source report (`DSTS.positionSource`);
+    /// nil until a status carried it, and for older firmware.
+    @Published private(set) var devicePositionSourceStatus: DevicePositionSourceStatus?
+    /// When the latest position-source report arrived, so the app can show
+    /// a stale report as stale even when its values did not change.
+    @Published private(set) var devicePositionSourceStatusReceivedAt: Date?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
     @Published var firmwareVersion: String = ""
@@ -1538,6 +1560,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
+    private var isPhoneNavigationActive = false
     private var lastConnectedPeripheralIdentifier: UUID?
     
     // MARK: - Reconnection with Exponential Backoff (Optimization #14)
@@ -1604,6 +1627,10 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
     var transferConnectionEpoch: UInt64 { rideDeliveryConnectionGeneration }
+    /// System uptime of the last transport disconnect and connect, for the
+    /// transfer manager's link-loss window (which mirrors the firmware's).
+    private(set) var transportLinkLostUptime: TimeInterval?
+    private(set) var transportLinkConnectedUptime: TimeInterval?
 
     private var rideDeliveryConnectionGeneration: UInt64 = 0
     private var rideTransportStateMachine = RideBLETransportStateMachineV1(
@@ -2015,9 +2042,7 @@ class BLEManager: NSObject, ObservableObject {
         let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
-        selectedDeviceSound = restoredSound == .rotatingBicycleBell
-            ? .defaultSelection
-            : restoredSound
+        selectedDeviceSound = DeviceSound.selectable(restoredSound)
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
@@ -2930,6 +2955,16 @@ class BLEManager: NSObject, ObservableObject {
         log("Disconnecting from peripheral")
     }
 
+    /// Phone navigation needs the single Bicino link. Starting it after this
+    /// phone yielded to a Watch-direct ride asks that ride to hand the link
+    /// back; the yield stays until the Watch's exact release arrives.
+    func setPhoneNavigationActive(_ active: Bool) {
+        guard isPhoneNavigationActive != active else { return }
+        isPhoneNavigationActive = active
+        guard active else { return }
+        _ = requestWatchDirectRideReconciliation(forExplicitDiscovery: false)
+    }
+
     func handleWatchDirectRidePreparationRequest(
         _ request: WatchDirectRidePreparationRequestV1,
         phoneNavigationActive: Bool
@@ -3156,10 +3191,14 @@ class BLEManager: NSObject, ObservableObject {
               let preparationID = watchDirectRidePreparationID else {
             return false
         }
+        // Whatever prompted the request, active phone navigation needs the
+        // link back now rather than when the Watch ride ends.
         guard let request = try?
                 WatchDirectRideReconciliationRequestV1(
                     preparationID: preparationID,
-                    deviceID: deviceID
+                    deviceID: deviceID,
+                    purpose: isPhoneNavigationActive
+                        ? .phoneNavigation : .releaseWhenIdle
                 ) else {
             pairingStatusMessage = nil
             pairingError =
@@ -3195,11 +3234,20 @@ class BLEManager: NSObject, ObservableObject {
                     )
                 }
         }
-        log(
-            forExplicitDiscovery
-                ? "Requested Apple Watch direct ride reconciliation for discovery"
-                : "Requested Apple Watch direct ride reconciliation on foreground"
-        )
+        if request.purpose == .phoneNavigation {
+            log("Requested Apple Watch direct ride handback for iPhone navigation")
+            diagnosticsRecorder?.record(
+                category: .ble,
+                event: "watch_direct_handback_requested",
+                fields: ["reason": "phone_navigation"]
+            )
+        } else {
+            log(
+                forExplicitDiscovery
+                    ? "Requested Apple Watch direct ride reconciliation for discovery"
+                    : "Requested Apple Watch direct ride reconciliation on foreground"
+            )
+        }
         return true
     }
 
@@ -5398,6 +5446,13 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func sendSetting(id: UInt8, value: Int32,
                      synchronizeLegacyProfile: Bool = true) -> Bool {
+        if (id == 12 && !supportsDisplayBrightness) ||
+           (id == 11 && !supportsTapToCycle) ||
+           ((id == 6 || id == 37) && !supportsContinuousCamera) ||
+           (id == 15 && !supportsDisconnectedSleep) {
+            return false
+        }
+
         if id == DeviceBLEProtocol.brightnessSettingID {
             deviceBrightnessPercent = DeviceBLEProtocol.normalizedBrightnessPercent(
                 Double(value)
@@ -7516,6 +7571,8 @@ class BLEManager: NSObject, ObservableObject {
         firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
+        devicePositionSourceStatus = nil
+        devicePositionSourceStatusReceivedAt = nil
         firmwareUpdateStatus = "unknown"
         firmwareOTAEligible = nil
         firmwareOTAEligibilityCode = nil
@@ -7588,6 +7645,8 @@ class BLEManager: NSObject, ObservableObject {
         powerButtonHonkConfigurationError = nil
         nextDestinationCatalogTransferID = 1
         destinationStatusSequence &+= 1
+        displayMetadata = nil
+        positionSourceMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
@@ -10484,6 +10543,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 )
         )
         log("Connected to: \(peripheral.name ?? "Unknown")")
+        transportLinkConnectedUptime = ProcessInfo.processInfo.systemUptime
         diagnosticsRecorder?.record(
             category: .ble,
             event: "transport_connected",
@@ -10520,6 +10580,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         locallyForgottenPeripheralIdentifiers.remove(peripheral.identifier)
         log("Disconnected from: \(peripheral.name ?? "Unknown")")
+        transportLinkLostUptime = ProcessInfo.processInfo.systemUptime
         
         if let error = error {
             log("Disconnect error: \(error.localizedDescription)")
@@ -11126,6 +11187,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         rendererDiagnosticsSnapshotJSON = nil
         rendererDiagnosticsStatus = "invalid capabilities"
         updateWorkoutTelemetryCapability(false)
+        displayMetadata = nil
+        positionSourceMetadata = nil
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
@@ -11153,6 +11216,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let flags: UInt32
         let legacyExtendedFlags: UInt8
         let powerButtonConfig: Data?
+        var parsedDisplay: DeviceDisplayMetadata?
+        var parsedPositionSource: DevicePositionSourceMetadata?
         var screenConfigurationCapabilities:
             DeviceScreenConfigurationCapabilities? = nil
         var extendedFeatureFlags: UInt32 = 0
@@ -11210,6 +11275,20 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         (UInt32(data[offset + 1]) << 8) |
                         (UInt32(data[offset + 2]) << 16) |
                         (UInt32(data[offset + 3]) << 24)
+                } else if type == RideBLEGeneratedProtocolV1.boardDisplayTLVType {
+                    guard let metadata = DeviceDisplayMetadata(payload:
+                        data.subdata(in: offset..<(offset + length))) else {
+                        valid = false
+                        break
+                    }
+                    parsedDisplay = metadata
+                } else if type == RideBLEGeneratedProtocolV1.positionSourceTLVType {
+                    guard let metadata = DevicePositionSourceMetadata(payload:
+                        data.subdata(in: offset..<(offset + length))) else {
+                        valid = false
+                        break
+                    }
+                    parsedPositionSource = metadata
                 } else if type == RideBLEGeneratedProtocolV1
                     .screenConfigurationCapabilityTLVType {
                     guard let parsed = DeviceScreenConfigurationCapabilities(
@@ -11230,6 +11309,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             powerButtonConfig = parsedPowerConfig
         }
 
+        let advertisesDisplay = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedBoardDisplayMetadataFeature != 0
+        guard advertisesDisplay == (parsedDisplay != nil) else {
+            rejectDeviceCapabilities("Received inconsistent display capabilities")
+            return true
+        }
+        displayMetadata = parsedDisplay
+        let advertisesPositionSource = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedPositionSourceMetadataFeature != 0
+        guard advertisesPositionSource == (parsedPositionSource != nil) else {
+            rejectDeviceCapabilities("Received inconsistent position source capabilities")
+            return true
+        }
+        positionSourceMetadata = parsedPositionSource
+        if parsedDisplay?.isEPaper == true { hardwareLabel = "Waveshare ePaper 3.97" }
         let legacyFlags = UInt8(truncatingIfNeeded: flags)
         let hasDeviceSounds = legacyFlags & DeviceBLEProtocol.deviceSoundsCapabilityMask != 0
         let hasPowerButtonHonk = hasDeviceSounds &&
@@ -11342,7 +11436,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 let deviceHonkEnabled = powerButtonConfig[0] == 1
                 isPowerButtonHonkEnabled = deviceHonkEnabled
                 if deviceHonkEnabled {
-                    selectedDeviceSound = deviceSound
+                    selectedDeviceSound = DeviceSound.selectable(deviceSound)
                     deviceSoundVolumePercent = Double(powerButtonConfig[2])
                 }
                 saveSettings()
@@ -12081,6 +12175,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // native-SDMMC migration protocol extension.
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
+        }
+        if let positionSource = object["positionSource"] as? [String: Any],
+           let status = DevicePositionSourceStatus(json: positionSource) {
+            devicePositionSourceStatus = status
+            devicePositionSourceStatusReceivedAt = Date()
+        } else {
+            // Optional: firmware before the position-source report omits it.
+            devicePositionSourceStatus = nil
+            devicePositionSourceStatusReceivedAt = nil
         }
         if let resources = object["resources"] as? [String: Any] {
             deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(

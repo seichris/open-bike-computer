@@ -24,7 +24,6 @@ private:
   bool cachedBatteryCharging;
   bool cachedBatteryPercentageValid;
 
-  float readLegacyBattery();
 
 public:
   Battery();

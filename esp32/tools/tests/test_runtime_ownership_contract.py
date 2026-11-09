@@ -17,9 +17,15 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         prepare = setup.index("operationOwner()->prepareWiFi()")
         self.assertLess(setup.index("Network.begin()"), prepare)
         self.assertLess(prepare, setup.index("bleNavServer.init("))
-        # 1.75-only and outside maintenance; 2.06 startup order is unchanged.
-        guard = setup.rindex("#if", 0, prepare)
-        self.assertTrue(setup.startswith("#if defined(WAVESHARE_AMOLED_175)\n", guard))
+        # 1.75-only by board data and outside maintenance; the 2.06 startup
+        # order is unchanged.
+        guard = setup.rindex("if constexpr (board::wifi::prepareBeforeBle) {", 0, prepare)
+        self.assertLess(guard, prepare)
+        self.assertIn("constexpr bool prepareBeforeBle = true;",
+                      source("lib/board/boards/waveshare_amoled_175_common.hpp"))
+        for other in ("waveshare_amoled_206", "waveshare_epaper_397"):
+            self.assertIn("constexpr bool prepareBeforeBle = false;",
+                          source(f"lib/board/boards/{other}.hpp"))
         self.assertLess(setup.rindex("if (!firmware_maintenance::active()) {", 0, prepare), prepare)
         # A crash or hang in early preparation must not repeat toward safe mode.
         deferral = setup.index("consecutiveEarlyFailures != 0")
@@ -336,6 +342,63 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn('"MAP_RESOURCE_REJECTED: preserving prior frame"', maps)
         self.assertIn("std::unique_ptr<MapBlock> blockOwner", maps)
         self.assertIn("result.folder = std::move(completedVectorMapActivation.folder)", maps)
+
+    def test_waiting_screen_precedes_map_recovery_without_moving_acceptance(self):
+        main = source("src/main.cpp")
+        setup = main[main.index("void setup()") : main.index("void loop()")]
+        storage_done = setup.index(
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);")
+        waveshare = setup[storage_done:]
+        # The real waiting screen is on the panel before any map recovery work.
+        # Recovery still precedes the diagnostics writer, Wi-Fi preparation,
+        # BLE and acceptance, so a map failure keeps OTA rollback and safe mode.
+        steps = (
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::Storage);",
+            "boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);",
+            "startUserInterface();",
+            "lv_screen_load(waitingScreen);",
+            "lv_refr_now(display);",
+            '"waiting_screen"',
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::UserInterface);",
+            "boot_diagnostics::enterStage(boot_diagnostics::Stage::MapRecovery);",
+            "mapInstaller.recoverInterruptedActivation()",
+            "mapView.activateVectorMapFolderDetailed(root)",
+            "ride_diagnostics::startWriter();",
+            "boot_diagnostics::completeStage(boot_diagnostics::Stage::MapRecovery);",
+            "Network.begin()",
+            "operationOwner()->prepareWiFi()",
+            'bleNavServer.init("BikeComputer")',
+            "!firmwareUpdateHttp.markRunningAppValid()",
+            "boot_diagnostics::markReady()",
+        )
+        positions = [waveshare.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        # That frame precedes BLE's ownership load, so the screen starts from
+        # the fail-closed claimed state, never the add-device Welcome.
+        waiting = source("lib/gui/src/waitingScr.cpp")
+        create = waiting[waiting.index("void createWaitingScr()"):
+                         waiting.index("void updateWaitingOwnershipStatus(")]
+        self.assertIn("ownershipUnknownSnapshot()", create)
+        self.assertNotIn("applyPhase(Phase::Welcome", create)
+        # BLE forwards every pending ownership snapshot, so an unclaimed
+        # device still moves to Welcome on the first loop() pass.
+        ble = source("lib/ble_navigation/ble_navigation.cpp")
+        apply_update = ble[ble.index("static void applyPendingOwnershipUiUpdate()"):]
+        apply_update = apply_update[:apply_update.index("\n}\n")]
+        self.assertIn("if (pending) {", apply_update)
+        self.assertIn("updateWaitingOwnershipStatus(nextSnapshot);", apply_update)
+        # The legacy splash, which drew outside LVGL and would overwrite the
+        # early waiting-screen frame, went with the legacy boards; nothing in
+        # setup() is board-gated any more.
+        self.assertNotIn("splashScreen();", setup)
+        for target in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_175_GNSS",
+                       "WAVESHARE_AMOLED_206", "WAVESHARE_EPAPER_397"):
+            self.assertNotIn(target, main)
+        # One static frame: setup never runs LVGL timers or input callbacks,
+        # and loads the waiting screen exactly once, before map recovery.
+        self.assertNotIn("lv_timer_handler", setup)
+        self.assertEqual(setup.count("startUserInterface();"), 1)
+        self.assertEqual(setup.count("lv_screen_load(waitingScreen);"), 1)
 
     def test_ready_reporting_follows_boot_confirmation(self):
         main = source("src/main.cpp")

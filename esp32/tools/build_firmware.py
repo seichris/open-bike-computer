@@ -25,9 +25,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
+from firmware_compile_cache import (
+    verify_no_exception_objects,
+    verify_stack_protector_scope,
+)
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
+    SIMULATOR_ENVIRONMENT,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_ARCHIVE_SIZE,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -269,6 +274,50 @@ def _require_dynamic_tls_link(project_dir: Path, environment: str) -> None:
     raise BuildError(
         "dynamic TLS configuration did not reach the linked firmware: missing "
         + ", ".join(sorted(missing))
+    )
+
+
+def _require_no_exception_library_objects(project_dir: Path, environment: str) -> None:
+    """Prove the per-library -fno-exceptions override reached the built objects.
+
+    The override in the compile-cache middleware silently does nothing when a
+    library resolves under another directory name or the framework delivers
+    -fexceptions through a flag list it does not rewrite. Every Waveshare
+    environment links Arduino_GFX, so the caller runs this unconditionally for
+    them: a build without any GFX object, or with one that still carries
+    unwind tables, fails closed instead of producing an upload-eligible image.
+    """
+    build_dir = project_dir / ".pio" / "build" / environment
+    try:
+        inspected = verify_no_exception_objects(build_dir)
+    except (RuntimeError, ValueError, OSError) as error:
+        raise BuildError(f"no-exception library verification failed: {error}") from error
+    print(
+        "FIRMWARE_NO_EXCEPTION_OBJECTS schema=1 "
+        f"environment={environment} objects={inspected}",
+        flush=True,
+    )
+
+
+def _require_stack_protector_scope(project_dir: Path, environment: str) -> None:
+    """Prove the stack protector is on the input-parsing libraries and nowhere else.
+
+    The compile-cache middleware drops -fstack-protector from every application
+    object outside STACK_PROTECTED_LIBRARIES. Inspect the built objects in both
+    directions, so neither a silent loss of the canary on a transfer, HTTPS or
+    BLE library nor a silent return of it elsewhere can produce an
+    upload-eligible image.
+    """
+    build_dir = project_dir / ".pio" / "build" / environment
+    try:
+        counts = verify_stack_protector_scope(build_dir)
+    except (RuntimeError, ValueError, OSError) as error:
+        raise BuildError(f"stack protector scope verification failed: {error}") from error
+    print(
+        "FIRMWARE_STACK_PROTECTOR_SCOPE schema=1 "
+        f"environment={environment} "
+        + " ".join(f"{name}={value}" for name, value in counts.items()),
+        flush=True,
     )
 
 
@@ -887,7 +936,7 @@ def _custom_core_project_text(source_text: str) -> str:
         if section_match is not None:
             section = section_match.group(1)
         if (
-            section.startswith("env:WAVESHARE_AMOLED_")
+            section.startswith(("env:WAVESHARE_AMOLED_", "env:WAVESHARE_EPAPER_397"))
             and re.fullmatch(r"build_src_filter\s*=\s*\r?\n?", line)
             is not None
         ):
@@ -1301,7 +1350,7 @@ def _print_provenance(
 
     print(
         f"{marker} schema=2 environment={environment} git={source_identity} "
-        f"uploadEligible={1 if manifest else 0} "
+        f"uploadEligible={1 if manifest and manifest.get('uploadEligible', True) else 0} "
         f"coreCache={value('coreCache')} "
         f"coreInputKey={value('coreInputKey')} "
         f"runtimeLockSetId={runtime_value('lockSetId')} "
@@ -1488,7 +1537,7 @@ def _pioarduino_toolchain_bootstrap_ready(
     retry when the expected replacement package and compiler are positively
     present; an arbitrary failed build must still fail closed.
     """
-    if not environment.startswith("WAVESHARE_AMOLED_"):
+    if not environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         return False
     package = (
         project_dir
@@ -1516,9 +1565,21 @@ def _pioarduino_toolchain_bootstrap_ready(
     )
 
 
+# Every value publish_shared_core can report; the build manifest keeps it so a
+# skipped transport copy stays visible in the evidence. Anything else is a
+# programming error, not a publication outcome, and fails the build.
+SHARED_CORE_TRANSPORT_STATUSES = frozenset(
+    {"ineligible", "present", "published", "skipped"}
+)
+
+
 def _record_build_phase_timings(
-    manifest_path: Path, timings: dict[str, int]
+    manifest_path: Path, timings: dict[str, int], shared_core_transport: str
 ) -> dict[str, object]:
+    if shared_core_transport not in SHARED_CORE_TRANSPORT_STATUSES:
+        raise BuildError(
+            f"shared core transport status is invalid: {shared_core_transport!r}"
+        )
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise BuildError("recorded build manifest is missing or unsafe")
     try:
@@ -1531,6 +1592,7 @@ def _record_build_phase_timings(
     ):
         raise BuildError("recorded build provenance or phase timings are invalid")
     manifest["phaseTimingsMs"] = timings
+    manifest["sharedCoreTransport"] = shared_core_transport
     temporary_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1864,8 +1926,10 @@ def build_firmware(
                     raise BuildError(
                         "firmware source identity changed during the deterministic build"
                     )
-                if environment.startswith("WAVESHARE_AMOLED_"):
+                if environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
                     _require_dynamic_tls_link(project_dir, environment)
+                    _require_no_exception_library_objects(project_dir, environment)
+                    _require_stack_protector_scope(project_dir, environment)
 
                 attestation_started = time.monotonic()
                 try:
@@ -1886,7 +1950,9 @@ def build_firmware(
                 )
                 manifest = None
                 if manifest_path is not None:
-                    publish_shared_core(project_dir, environment)
+                    shared_core_transport = publish_shared_core(
+                        project_dir, environment
+                    )
                     manifest = _record_build_phase_timings(
                         manifest_path,
                         {
@@ -1901,9 +1967,10 @@ def build_firmware(
                             "attestation": attestation_ms,
                             "total": round((time.monotonic() - build_started) * 1000),
                         },
+                        shared_core_transport,
                     )
                 if (
-                    environment.startswith("WAVESHARE_AMOLED_")
+                    environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397"))
                     and FULL_GIT_SHA.fullmatch(expected_identity) is not None
                     and manifest is None
                 ):
@@ -1964,10 +2031,12 @@ def upload_firmware(
     resolver_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     """Upload the exact verified images without asking PlatformIO to rebuild."""
+    if environment == SIMULATOR_ENVIRONMENT:
+        raise BuildError("the simulator profile is build-only")
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
-    if not environment.startswith("WAVESHARE_AMOLED_"):
+    if not environment.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         raise BuildError(
             "verified upload is limited to attested WAVESHARE_AMOLED profiles"
         )
@@ -2127,6 +2196,14 @@ def main(
     raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = _parse_args(raw_arguments)
     try:
+        if args.environment == SIMULATOR_ENVIRONMENT and (
+            args.upload_only
+            or args.upload_port is not None
+            or args.device_serial is not None
+            or args.device_name is not None
+            or args.factory_output_dir is not None
+        ):
+            raise BuildError("the simulator profile is build-only")
         try:
             runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
         except FirmwareRuntimeError as error:

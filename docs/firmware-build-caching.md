@@ -47,6 +47,18 @@ runtime trust contract.
 Shared core transport is gzip compressed to bound storage and CI transfer cost;
 its compressed digest and original member inventory are both verified. Private
 core archives retain the existing format.
+Publishing the transport copy is best-effort with respect to disk space. The
+private entry is written only after its size was checked against the free
+space below the cache root (`FIRMWARE_CORE_CACHE schema=1 status=publishing
+… archiveBytes=… freeBytes=…`), but the gzip copy that follows is not
+reserved: when its write fails with `ENOSPC` or `EDQUOT`, the build keeps its
+attested private entry and firmware, prints `FIRMWARE_SHARED_CORE_CACHE
+schema=1 status=skipped reason=enospc environment=… archiveBytes=…
+freeBytes=…`, records `"sharedCoreTransport": "skipped"` in the build manifest
+(`"published"` or `"present"` otherwise), and the next clean build of the same
+core input key publishes the copy from the private entry. Until then other
+worktrees and CI runners miss and build cold; `pack` on `main` still fails when
+the transport is missing, so a skipped copy never looks published.
 
 Compiler objects stay private to the worktree and profile. Their namespace
 uses the exact core input key rather than the entire application Git identity.
@@ -93,7 +105,9 @@ The Actions cache is scoped to a branch and capped per repository, so cores
 built on one pull request never warm another and the regular 1.75-inch cores
 do not fit the cap together. **Firmware core warm** therefore runs the normal
 `firmware` CI scope on every `main` push that touches `esp32/` or the cache
-tooling, plus a weekly schedule, and that run publishes each verified core
+tooling, plus a weekly schedule, for every board family: CI's `all` selector
+(the 1.75 and 2.06 regular profiles), then `175_gnss` and `397`, two families
+at a time. Each run publishes each verified core
 entry as a workflow artifact named after its environment and content key
 (`firmware_core_artifact.py pack`, 14-day retention, re-uploaded once older
 than a week). Shared entries are named by the request key, which a new

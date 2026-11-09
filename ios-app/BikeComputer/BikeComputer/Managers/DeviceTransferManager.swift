@@ -22,6 +22,7 @@ struct DeviceTransferSession: Equatable {
     }
 
     var operationLeaseID: UUID? = nil
+    var diagnosticsStorageBackend: String? = nil
     let mode: Mode
     let baseURL: URL
     let accessPointSSID: String?
@@ -471,7 +472,8 @@ enum DeviceTransferServerProbePolicy {
         clock: () -> TimeInterval,
         sleep: (UInt64) async throws -> Void,
         probe: (TimeInterval) async throws -> DeviceTransferServerProbeResult,
-        observe: (Int, TimeInterval, TimeInterval, DeviceTransferServerProbeResult) -> Void
+        observe: (Int, TimeInterval, TimeInterval, DeviceTransferServerProbeResult) -> Void,
+        abandon: (Int, TimeInterval, DeviceTransferServerProbeResult) -> Bool = { _, _, _ in false }
     ) async throws -> DeviceTransferServerProbeResult {
         let started = clock()
         let deadline = started + timeout
@@ -495,6 +497,9 @@ enum DeviceTransferServerProbePolicy {
             last = try await probe(min(requestTimeout, remaining))
             observe(attempt, max(0, clock() - started), max(0, deadline - clock()), last)
             if last.isReady || !last.shouldRetry { return last }
+            // The caller can end the window early when the probes show that
+            // the association itself is stale and a fresh join comes next.
+            if abandon(attempt, max(0, clock() - started), last) { return last }
         }
         return last
     }
@@ -552,6 +557,19 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 
     var isReady: Bool {
         outcome == .ready
+    }
+
+    /// The request failed before any connection was attempted: the phone has
+    /// no route to the accessory address, as when it holds a stale
+    /// association with an AP the device has since restarted.
+    var indicatesNoRoute: Bool {
+        guard case .transportError(let domain, let code) = outcome else {
+            return false
+        }
+        return domain == NSURLErrorDomain &&
+            code == NSURLErrorNotConnectedToInternet &&
+            !diagnostics.connectStarted &&
+            !diagnostics.tlsStarted
     }
 
     var shouldRetry: Bool {
@@ -649,9 +667,111 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
     }
 }
 
+/// The firmware keeps a map or diagnostics session through a loss of the
+/// owner BLE link for a bounded window (15 s from the loss, moved to 15 s from
+/// each returning link, never past 45 s after the loss) and adopts the same
+/// owner's next authenticated link. An operation lease bound to the lost link
+/// is rebound to the replacing link once that link's fresh transfer status
+/// shows the very session the lease authorized (mode, token and generation),
+/// so the session exit and any later request go to the device over the new
+/// link instead of stranding the cleanup as a stale owner.
+enum DeviceTransferLinkRebindPolicy {
+    /// The firmware's window: 15 s from the loss, moved to 15 s from each BLE
+    /// link that appears while it is open, never later than 45 s after the
+    /// loss. A link that has not shown the session by then will not, because
+    /// the device has torn it down.
+    static let linkWindow: TimeInterval = 15
+    static let windowCap: TimeInterval = 45
+    static let statusRequestInterval: TimeInterval = 2
+    static let observationIntervalNanoseconds: UInt64 = 250_000_000
+
+    enum Decision: String, Equatable {
+        case keep
+        case wait
+        case rebind
+        case stale
+    }
+
+    struct Link: Equatable {
+        let navigationReady: Bool
+        let deviceID: String?
+        let connectionEpoch: UInt64
+        /// 0 until the first transfer status arrived on this link.
+        let statusRevision: UInt64
+        let mode: String
+        let sessionToken: String?
+        let transferGeneration: UInt32
+    }
+
+    static func decision(
+        leaseDeviceID: String,
+        leaseMode: String,
+        leaseEpoch: UInt64,
+        authorizedToken: String?,
+        authorizedGeneration: UInt32?,
+        link: Link
+    ) -> Decision {
+        if link.connectionEpoch == leaseEpoch { return .keep }
+        // A session that never authorized a token has nothing to carry over.
+        guard let authorizedToken, let authorizedGeneration else { return .stale }
+        if let deviceID = link.deviceID, deviceID != leaseDeviceID { return .stale }
+        guard link.navigationReady, link.deviceID == leaseDeviceID,
+              link.statusRevision != 0 else { return .wait }
+        let sameSession = link.mode == leaseMode &&
+            link.sessionToken == authorizedToken &&
+            link.transferGeneration == authorizedGeneration
+        return sameSession ? .rebind : .stale
+    }
+
+    /// The moment the firmware gives the kept session up, mirrored from the
+    /// loss and the last link that came back since; a connect before the loss
+    /// is the lost link itself and does not extend anything.
+    static func deadline(
+        lossUptime: TimeInterval,
+        lastConnectUptime: TimeInterval?
+    ) -> TimeInterval {
+        var deadline = lossUptime + linkWindow
+        if let lastConnectUptime, lastConnectUptime > lossUptime {
+            deadline = max(deadline, lastConnectUptime + linkWindow)
+        }
+        return min(deadline, lossUptime + windowCap)
+    }
+
+    static func expired(
+        now: TimeInterval,
+        lossUptime: TimeInterval,
+        lastConnectUptime: TimeInterval?
+    ) -> Bool {
+        now >= deadline(lossUptime: lossUptime, lastConnectUptime: lastConnectUptime)
+    }
+
+    /// The replacing link is the same device and its fresh transfer status
+    /// shows no session at all: the session was already ended (the HTTP exit
+    /// of a completed download runs before the BLE cleanup), so there is
+    /// nothing left to exit and the cleanup is complete on the remote side.
+    static func remoteCleared(leaseDeviceID: String, link: Link) -> Bool {
+        link.navigationReady && link.deviceID == leaseDeviceID &&
+            link.statusRevision != 0 && link.mode.isEmpty &&
+            link.sessionToken?.isEmpty != false
+    }
+
+    static func shouldRequestStatus(
+        now: TimeInterval,
+        lastRequest: TimeInterval?
+    ) -> Bool {
+        guard let lastRequest else { return true }
+        return now - lastRequest >= statusRequestInterval
+    }
+}
+
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
+    // iOS can accept a persistent configuration for a network it will not
+    // auto-join (a no-internet accessory AP it has seen often). A retry after
+    // such an accepted-but-unassociated attempt joins once explicitly, after a
+    // longer settle so the removal of the previous configuration is complete.
+    static let unassociatedRetrySettleDelayNanoseconds: UInt64 = 2_000_000_000
     // iOS can leave its accessory Wi-Fi confirmation visible while an XCTest
     // screen capture is stalled. Give the foreground user time to answer while
     // retaining a bounded window below firmware's 90-second inactivity limit.
@@ -659,6 +779,7 @@ enum DeviceNetworkJoinPolicy {
     static let currentNetworkFetchTimeout: TimeInterval = 2
     static let associationObservationTimeout: TimeInterval = 12
     static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
+    static let applyObservationIntervalNanoseconds: UInt64 = 2_000_000_000
     static let hotspotErrorDomain = "NEHotspotConfigurationErrorDomain"
     static let joinErrorDomain = "Bicino.DeviceNetworkJoin"
     static let configurationApplyTimeoutCode = 1
@@ -709,6 +830,122 @@ enum DeviceNetworkJoinPolicy {
         )
     }
 
+    static func acceptedWithoutAssociation(
+        applyAccepted: Bool,
+        observation: DeviceTransferNetworkObservation
+    ) -> Bool {
+        applyAccepted && observation != .target
+    }
+
+    static func retryJoinsOnce(
+        afterAcceptedWithoutAssociation previous: Bool,
+        afterStaleAssociation stale: Bool = false
+    ) -> Bool {
+        previous || stale
+    }
+
+    static func retrySettleDelayNanoseconds(
+        afterAcceptedWithoutAssociation previous: Bool,
+        afterStaleAssociation stale: Bool = false
+    ) -> UInt64 {
+        (previous || stale) ? unassociatedRetrySettleDelayNanoseconds
+                            : configurationSettleDelayNanoseconds
+    }
+
+    // iOS can keep reporting the accessory SSID as the current network after
+    // the device restarted its AP for a new session: the phone holds the old
+    // association, the new AP never sees it join, and every pinned probe fails
+    // before a connection starts. A healthy association answers by the third
+    // probe, about four seconds in. A confirmed association still without a
+    // route after this many consecutive no-route probes and this much time is
+    // stale: it gets one explicit re-join per join (configuration removed,
+    // then one join-once application) instead of the rest of the probe window.
+    static let staleAssociationProbeCount = 4
+    static let staleAssociationMinimumElapsed: TimeInterval = 6
+    static let staleAssociationRejoinLimit = 1
+
+    static func consecutiveNoRouteProbes(
+        after previous: Int,
+        probe: DeviceTransferServerProbeResult
+    ) -> Int {
+        probe.indicatesNoRoute ? previous + 1 : 0
+    }
+
+    static func staleAssociationSuspected(
+        observation: DeviceTransferNetworkObservation,
+        consecutiveNoRouteProbes: Int,
+        elapsed: TimeInterval
+    ) -> Bool {
+        observation == .target &&
+            consecutiveNoRouteProbes >= staleAssociationProbeCount &&
+            elapsed >= staleAssociationMinimumElapsed
+    }
+
+    static func rejoinsAfterStaleAssociation(rejoinsUsed: Int) -> Bool {
+        rejoinsUsed < staleAssociationRejoinLimit
+    }
+
+    /// Fields of the `wifi_apply` record written when a confirmed association
+    /// is abandoned as stale before the explicit re-join.
+    static func staleRejoinFields(
+        consecutiveNoRouteProbes: Int,
+        elapsed: TimeInterval
+    ) -> [String: String] {
+        [
+            "phase": "stale_rejoin",
+            "result": "stale_association",
+            "kind": "join_once",
+            "consecutiveEarlyFailures": String(consecutiveNoRouteProbes),
+            "durationMs": String(Int(elapsed * 1_000)),
+        ]
+    }
+
+    enum ApplyResolution: String, Equatable, CaseIterable {
+        case callback
+        case associated
+        case timeout
+        /// No system apply was issued: the operation lease was gone or an
+        /// earlier apply is still outstanding under the no-overlap rule.
+        case refused
+    }
+
+    enum ApplyWaitDecision: String, Equatable {
+        case continueWaiting
+        case associated
+        case timedOut
+    }
+
+    /// iOS can leave an accepted configuration unconfirmed for longer than the
+    /// association itself takes. Observing the active network while the system
+    /// completes the apply lets a confirmed association proceed to the pinned
+    /// probe without waiting for that late callback.
+    static func applyWaitDecision(
+        elapsed: TimeInterval,
+        observation: DeviceTransferNetworkObservation
+    ) -> ApplyWaitDecision {
+        if observation == .target { return .associated }
+        if elapsed >= configurationApplyTimeout { return .timedOut }
+        return .continueWaiting
+    }
+
+    /// Fields of the `wifi_apply` record written when the system callback
+    /// arrives after the wait already ended by timeout or by observation.
+    static func lateCallbackFields(
+        error: NSError?,
+        elapsed: TimeInterval
+    ) -> [String: String] {
+        var fields = [
+            "phase": "late_callback",
+            "applyResult": error == nil ? "accepted" : "error",
+            "durationMs": String(Int(elapsed * 1_000)),
+        ]
+        if let error {
+            fields["applyErrorDomain"] = error.domain
+            fields["applyErrorCode"] = String(error.code)
+        }
+        return fields
+    }
+
     static func makeHotspotConfiguration<Configuration>(
         ssid: String,
         passphrase: String?,
@@ -740,18 +977,35 @@ enum DeviceNetworkJoinPolicy {
 
 #if os(iOS)
 private final class DeviceNetworkApplyGate: @unchecked Sendable {
+    enum Resolution: Equatable {
+        case pending
+        case callback
+        case timeout
+        case observation
+    }
+
     private let lock = NSLock()
     private var continuation: CheckedContinuation<NSError?, Never>?
-    private var isResolved = false
-    private var didTimeOut = false
+    private var state = Resolution.pending
     private var callbackReceived = false
     private var callbackSucceeded = false
     private var isAbandoned = false
     private var cleanupIssued = false
     private let cleanup: @Sendable () -> Void
+    private let lateCallback: @Sendable (NSError?) -> Void
 
-    init(cleanup: @escaping @Sendable () -> Void) {
+    init(
+        cleanup: @escaping @Sendable () -> Void,
+        lateCallback: @escaping @Sendable (NSError?) -> Void = { _ in }
+    ) {
         self.cleanup = cleanup
+        self.lateCallback = lateCallback
+    }
+
+    var resolution: Resolution {
+        lock.lock()
+        defer { lock.unlock() }
+        return state
     }
 
     func install(_ continuation: CheckedContinuation<NSError?, Never>) {
@@ -763,44 +1017,62 @@ private final class DeviceNetworkApplyGate: @unchecked Sendable {
     func receiveCallback(_ error: NSError?) {
         var continuationToResume: CheckedContinuation<NSError?, Never>?
         var shouldCleanUp = false
+        var isLate = false
         lock.lock()
         callbackReceived = true
         callbackSucceeded = error == nil
-        if !isResolved {
-            isResolved = true
+        if state == .pending {
+            state = .callback
             continuationToResume = continuation
             continuation = nil
-        } else if didTimeOut && isAbandoned && error == nil && !cleanupIssued {
-            cleanupIssued = true
-            shouldCleanUp = true
+        } else {
+            isLate = true
+            if state == .timeout && isAbandoned && error == nil && !cleanupIssued {
+                cleanupIssued = true
+                shouldCleanUp = true
+            }
         }
         lock.unlock()
         continuationToResume?.resume(returning: error)
+        if isLate {
+            lateCallback(error)
+        }
         if shouldCleanUp {
             cleanup()
         }
     }
 
     func timeOut() {
+        resolve(
+            .timeout,
+            returning: DeviceNetworkJoinPolicy.configurationApplyTimeoutError
+        )
+    }
+
+    /// The active network already is the accessory AP: proceed without the
+    /// system's late confirmation; that callback is still recorded.
+    func resolveAssociated() {
+        resolve(.observation, returning: nil)
+    }
+
+    private func resolve(_ resolution: Resolution, returning error: NSError?) {
         var continuationToResume: CheckedContinuation<NSError?, Never>?
         lock.lock()
-        if !isResolved {
-            isResolved = true
-            didTimeOut = true
+        if state == .pending {
+            state = resolution
             continuationToResume = continuation
             continuation = nil
         }
         lock.unlock()
-        continuationToResume?.resume(
-            returning: DeviceNetworkJoinPolicy.configurationApplyTimeoutError
-        )
+        continuationToResume?.resume(returning: error)
     }
 
     func abandon() {
         var shouldCleanUp = false
         lock.lock()
         isAbandoned = true
-        if didTimeOut && callbackReceived && callbackSucceeded && !cleanupIssued {
+        if state == .timeout && callbackReceived && callbackSucceeded &&
+            !cleanupIssued {
             cleanupIssued = true
             shouldCleanUp = true
         }
@@ -973,6 +1245,126 @@ final class DeviceTransferManager {
             bleManager.transferConnectionEpoch == lease.connectionEpoch
     }
 
+    /// Rebinds the operation lease to the link that replaced a lost one, once
+    /// that link shows the same device and the same authorized session. Waits
+    /// only as long as the firmware keeps the session, counted from the link
+    /// loss itself (not from this call, which may come long after it); a
+    /// different device, a different session or the window passing leaves
+    /// the lease as it is, so the caller's stale-owner handling runs unchanged.
+    private static func linkObservation(
+        _ bleManager: BLEManager
+    ) -> DeviceTransferLinkRebindPolicy.Link {
+        DeviceTransferLinkRebindPolicy.Link(
+            navigationReady: bleManager.isNavigationReady,
+            deviceID: bleManager.connectedDeviceID,
+            connectionEpoch: bleManager.transferConnectionEpoch,
+            statusRevision: bleManager.deviceTransferStatusRevision,
+            mode: bleManager.deviceTransferMode,
+            sessionToken: bleManager.deviceTransferSessionToken,
+            transferGeneration: bleManager.deviceTransferGeneration
+        )
+    }
+
+    private enum LinkRebindOutcome {
+        case owned
+        case rebound
+        /// The replacing link does not carry the lease's session. `remoteCleared`
+        /// is true only when a status that this wait itself requested on the
+        /// replacing link came back showing no session at all: the device has
+        /// ended the session (a completed download exits over HTTP before the
+        /// BLE cleanup), so there is nothing left to exit. A status that was
+        /// already there, or that belongs to another link, never counts.
+        case stale(remoteCleared: Bool)
+        case expired
+    }
+
+    private func rebindAfterLinkLoss(bleManager: BLEManager) async -> LinkRebindOutcome {
+        guard let lease = operationLease, coordinator.owns(lease),
+              lease.connectionEpoch != bleManager.transferConnectionEpoch else {
+            return ownsConnection(bleManager) ? .owned : .stale(remoteCleared: false)
+        }
+        let mode = DeviceTransferSession.Mode(rawValue: lease.mode) ?? .diagnostics
+        let started = ProcessInfo.processInfo.systemUptime
+        // The loss is the manager's only anchor; without one observed, this
+        // call is the earliest it can have happened.
+        let lossUptime = bleManager.transportLinkLostUptime ?? started
+        var lastStatusRequest: TimeInterval?
+        // The link and status revision at which this wait asked for a status:
+        // only a status that advanced past it on that same link is an answer.
+        var statusRequest: (epoch: UInt64, revision: UInt64)?
+        while true {
+            let link = Self.linkObservation(bleManager)
+            let now = ProcessInfo.processInfo.systemUptime
+            let elapsedMs = String(Int((now - lossUptime) * 1_000))
+            if let request = statusRequest, request.epoch != link.connectionEpoch {
+                statusRequest = nil
+            }
+            let answeredOwnRequest = statusRequest.map {
+                link.statusRevision != $0.revision
+            } ?? false
+            switch DeviceTransferLinkRebindPolicy.decision(
+                leaseDeviceID: lease.deviceID,
+                leaseMode: lease.mode,
+                leaseEpoch: lease.connectionEpoch,
+                authorizedToken: authorizationToken,
+                authorizedGeneration: authorizationGeneration,
+                link: link
+            ) {
+            case .keep:
+                return ownsConnection(bleManager) ? .owned : .stale(remoteCleared: false)
+            case .rebind:
+                do {
+                    operationLease = try coordinator.rebindAfterLinkLoss(
+                        lease,
+                        epoch: link.connectionEpoch
+                    )
+                } catch {
+                    record(mode: mode, event: "ble_link_grace",
+                           fields: ["phase": "stale", "durationMs": elapsedMs])
+                    return .stale(remoteCleared: false)
+                }
+                record(mode: mode, event: "ble_link_grace",
+                       fields: ["phase": "rebound", "durationMs": elapsedMs])
+                return .rebound
+            case .stale:
+                let remoteCleared = answeredOwnRequest &&
+                    DeviceTransferLinkRebindPolicy.remoteCleared(
+                        leaseDeviceID: lease.deviceID,
+                        link: link
+                    )
+                record(mode: mode, event: "ble_link_grace",
+                       fields: ["phase": remoteCleared ? "cleared" : "stale",
+                                "durationMs": elapsedMs])
+                return .stale(remoteCleared: remoteCleared)
+            case .wait:
+                if DeviceTransferLinkRebindPolicy.expired(
+                    now: now,
+                    lossUptime: lossUptime,
+                    lastConnectUptime: bleManager.transportLinkConnectedUptime
+                ) {
+                    record(mode: mode, event: "ble_link_grace",
+                           fields: ["phase": "expired", "durationMs": elapsedMs])
+                    return .expired
+                }
+                // The replacing link starts without a status; ask for one.
+                if link.navigationReady, link.deviceID == lease.deviceID,
+                   link.statusRevision == 0,
+                   DeviceTransferLinkRebindPolicy.shouldRequestStatus(
+                       now: now, lastRequest: lastStatusRequest
+                   ) {
+                    if bleManager.requestDeviceTransferStatus() {
+                        statusRequest = (link.connectionEpoch, link.statusRevision)
+                    }
+                    lastStatusRequest = now
+                }
+                try? await Task.sleep(
+                    nanoseconds:
+                        DeviceTransferLinkRebindPolicy.observationIntervalNanoseconds
+                )
+            }
+        }
+    }
+
     private func cleanupOperation(bleManager: BLEManager) async -> Bool {
         if let cleanupTask { return await cleanupTask.value }
         guard let lease = operationLease else { return coordinator.isCleanupComplete }
@@ -986,6 +1378,25 @@ final class DeviceTransferManager {
         // root claim until the bounded remote-clear attempt has completed.
         let cleanup = DeviceOperationCleanupTask.start {
             var clear = false
+            // The link that authorized this session may have been replaced
+            // since: the firmware keeps the session through a bounded link
+            // loss and adopts the owner's next link. Send the exit over that
+            // link when it shows the same session instead of stranding the
+            // cleanup as a stale owner.
+            if !self.ownsConnection(bleManager) {
+                // A completed download exits over HTTP before this BLE
+                // cleanup runs; when the link was replaced meanwhile and a
+                // status the rebind itself requested on the new link shows no
+                // session, the device has ended it and the cleanup is complete
+                // without an exit over the new link. A status that merely sat
+                // there does not count: a successor must confirm fresh idle
+                // status through the recovery path.
+                if case .stale(remoteCleared: true) =
+                    await self.rebindAfterLinkLoss(bleManager: bleManager) {
+                    clear = true
+                }
+            }
+            let lease = self.operationLease ?? lease
             let alreadyClear = self.authorizationToken != nil &&
                 bleManager.deviceTransferMode.isEmpty &&
                 bleManager.deviceTransferSessionToken?.isEmpty != false
@@ -2028,7 +2439,8 @@ final class DeviceTransferManager {
                 guard bleManager.deviceTransferStatusRevision != initialRevision else {
                     return nil
                 }
-                if let session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                if var session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                    session.diagnosticsStorageBackend = bleManager.deviceStorageBackend
                     return session
                 }
                 // A fresh entry rejection is authoritative. Do not spend the
@@ -2319,26 +2731,42 @@ final class DeviceTransferManager {
         let initialNetworkObservation = await currentNetworkObservation(
             expectedSSID: ssid
         )
+        // A stale association (the phone still reports the accessory SSID
+        // after the device restarted its AP) is re-joined once per join: the
+        // configuration is removed, then applied once as a join-once network.
+        var staleRejoinsUsed = 0
+        var rejoinAfterStaleAssociation = false
         if initialNetworkObservation == .target {
             joinedAccessPointSSID = ssid
             status("checking device transfer server")
-            let result = try await waitForTransferServer(
+            let probe = try await waitForTransferServerOrStaleAssociation(
                 session: session,
                 statusPath: statusPath,
-                networkObservation: initialNetworkObservation
+                networkObservation: initialNetworkObservation,
+                attempt: 0,
+                rejoinAvailable:
+                    DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(
+                        rejoinsUsed: staleRejoinsUsed
+                    )
             )
-            if result.isReady {
+            if probe.result.isReady {
                 return
             }
-            throw OfflineMapPlatformError.transferServerProbeFailed(
-                ssid,
-                result.diagnosticMessage(
-                    networkObservation: initialNetworkObservation
+            guard probe.staleAssociation else {
+                throw OfflineMapPlatformError.transferServerProbeFailed(
+                    ssid,
+                    probe.result.diagnosticMessage(
+                        networkObservation: initialNetworkObservation
+                    )
                 )
-            )
+            }
+            staleRejoinsUsed += 1
+            rejoinAfterStaleAssociation = true
+            joinedAccessPointSSID = nil
+            status("rejoining device Wi-Fi")
+        } else {
+            status("joining device Wi-Fi")
         }
-
-        status("joining device Wi-Fi")
         var lastApplyError: NSError?
         var lastDiagnostic: String?
         var lastFailureWasServerProbe = false
@@ -2346,13 +2774,19 @@ final class DeviceTransferManager {
         // Clear a saved configuration before the first bounded association
         // attempt. An accepted configuration gets a complete association and
         // pinned-probe window before one fresh application is allowed. Never
-        // re-prompt after user, policy, or validation denial.
+        // re-prompt after user, policy, or validation denial. After a stale
+        // association the removal also drops the phone's old link, so the
+        // longer settle applies before the explicit join.
         coordinator.removeForRetry(lease)
         try await Task.sleep(
             nanoseconds:
-                DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+                DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                    afterAcceptedWithoutAssociation: false,
+                    afterStaleAssociation: rejoinAfterStaleAssociation
+                )
         )
 
+        var previousAcceptedWithoutAssociation = false
         for attempt in 0..<DeviceNetworkJoinPolicy.applyAttemptCount {
             lastFailureWasServerProbe = false
             let configuration = DeviceNetworkJoinPolicy.hotspotConfiguration(
@@ -2362,18 +2796,29 @@ final class DeviceTransferManager {
             // A join-once network is disconnected by iOS when the screen sleeps
             // or the app remains backgrounded for 15 seconds. Keep this
             // accessory AP configured for the background URLSession upload and
-            // remove it explicitly when transfer mode exits.
-            configuration.joinOnce = false
-            configuration.lifeTimeInDays = 1
+            // remove it explicitly when transfer mode exits. After iOS accepted
+            // that persistent configuration without joining it, the retry
+            // joins once explicitly instead.
+            let joinOnce = DeviceNetworkJoinPolicy.retryJoinsOnce(
+                afterAcceptedWithoutAssociation: previousAcceptedWithoutAssociation,
+                afterStaleAssociation: rejoinAfterStaleAssociation
+            )
+            configuration.joinOnce = joinOnce
+            if !joinOnce {
+                configuration.lifeTimeInDays = 1
+            }
 
             let applyStarted = ProcessInfo.processInfo.systemUptime
             record(mode: session.mode, event: "wifi_apply", fields: [
                 "attempt": String(attempt + 1), "phase": "requested",
                 "generation": String(session.transferGeneration),
+                "kind": joinOnce ? "join_once" : "persistent",
             ])
             let applyResult = await apply(
                 configuration: configuration,
-                ssid: ssid
+                ssid: ssid,
+                session: session,
+                attempt: attempt
             )
             let applyError = applyResult.error
             var applyFields = [
@@ -2381,6 +2826,7 @@ final class DeviceTransferManager {
                 "generation": String(session.transferGeneration),
                 "durationMs": String(Int((ProcessInfo.processInfo.systemUptime - applyStarted) * 1_000)),
                 "applyResult": applyError == nil ? "accepted" : "error",
+                "result": applyResult.resolution.rawValue,
             ]
             if let applyError {
                 applyFields["applyErrorDomain"] = applyError.domain
@@ -2449,6 +2895,11 @@ final class DeviceTransferManager {
                 fields: observationFields
             )
 
+            previousAcceptedWithoutAssociation =
+                DeviceNetworkJoinPolicy.acceptedWithoutAssociation(
+                    applyAccepted: applyError == nil,
+                    observation: networkObservation
+                )
             if networkObservation == .other {
                 if let applyError,
                    !DeviceNetworkJoinPolicy.shouldRetry(
@@ -2466,11 +2917,20 @@ final class DeviceTransferManager {
             } else if associationAccepted || networkObservation == .target {
                 joinedAccessPointSSID = ssid
                 status("waiting for device transfer server")
-                let result = try await waitForTransferServer(
+                let probe = try await waitForTransferServerOrStaleAssociation(
                     session: session,
                     statusPath: statusPath,
-                    networkObservation: networkObservation
+                    networkObservation: networkObservation,
+                    attempt: attempt,
+                    rejoinAvailable:
+                        DeviceNetworkJoinPolicy.rejoinsAfterStaleAssociation(
+                            rejoinsUsed: staleRejoinsUsed
+                        ) &&
+                        DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
+                            after: attempt
+                        )
                 )
+                let result = probe.result
                 if result.isReady {
                     keepAppliedConfiguration = true
                     print("Device Wi-Fi ready: pinned endpoint verified")
@@ -2481,7 +2941,10 @@ final class DeviceTransferManager {
                     networkObservation: networkObservation
                 )
                 lastFailureWasServerProbe = true
-                if !result.shouldRetry || networkObservation == .target {
+                if probe.staleAssociation {
+                    staleRejoinsUsed += 1
+                    rejoinAfterStaleAssociation = true
+                } else if !result.shouldRetry || networkObservation == .target {
                     break
                 }
             } else if let applyError,
@@ -2495,12 +2958,20 @@ final class DeviceTransferManager {
             if DeviceNetworkJoinPolicy.hasAnotherAssociationAttempt(
                 after: attempt
             ) {
-                status("retrying device Wi-Fi")
+                status(
+                    rejoinAfterStaleAssociation
+                        ? "rejoining device Wi-Fi"
+                        : "retrying device Wi-Fi"
+                )
                 coordinator.removeForRetry(lease)
                 joinedAccessPointSSID = nil
                 try await Task.sleep(
                     nanoseconds:
-                        DeviceNetworkJoinPolicy.configurationSettleDelayNanoseconds
+                        DeviceNetworkJoinPolicy.retrySettleDelayNanoseconds(
+                            afterAcceptedWithoutAssociation:
+                                previousAcceptedWithoutAssociation,
+                            afterStaleAssociation: rejoinAfterStaleAssociation
+                        )
                 )
             }
         }
@@ -2529,14 +3000,41 @@ final class DeviceTransferManager {
 #if os(iOS)
     private func apply(
         configuration: NEHotspotConfiguration,
-        ssid: String
-    ) async -> (error: NSError?, gate: DeviceNetworkApplyGate) {
+        ssid: String,
+        session: DeviceTransferSession,
+        attempt: Int
+    ) async -> (
+        error: NSError?,
+        gate: DeviceNetworkApplyGate,
+        resolution: DeviceNetworkJoinPolicy.ApplyResolution
+    ) {
         guard let lease = operationLease,
               let applyID = try? coordinator.beginApply(lease) else {
             let gate = DeviceNetworkApplyGate(cleanup: {})
-            return (DeviceNetworkJoinPolicy.configurationApplyTimeoutError, gate)
+            return (
+                DeviceNetworkJoinPolicy.configurationApplyTimeoutError,
+                gate,
+                .refused
+            )
         }
-        let gate = DeviceNetworkApplyGate(cleanup: {})
+        let applyStarted = ProcessInfo.processInfo.systemUptime
+        let mode = session.mode
+        let generation = session.transferGeneration
+        let gate = DeviceNetworkApplyGate(
+            cleanup: {},
+            lateCallback: { [weak self] error in
+                Task { @MainActor in
+                    var fields = DeviceNetworkJoinPolicy.lateCallbackFields(
+                        error: error,
+                        elapsed: ProcessInfo.processInfo.systemUptime - applyStarted
+                    )
+                    fields["attempt"] = String(attempt + 1)
+                    fields["generation"] = String(generation)
+                    self?.record(mode: mode, event: "wifi_apply", fields: fields)
+                }
+            }
+        )
+        var observer: Task<Void, Never>?
         let error = await withCheckedContinuation { continuation in
             gate.install(continuation)
             NEHotspotConfigurationManager.shared.apply(configuration) { error in
@@ -2551,8 +3049,40 @@ final class DeviceTransferManager {
             ) {
                 gate.timeOut()
             }
+            // iOS can hold an accepted configuration unconfirmed long after the
+            // phone associated. Watch the active network meanwhile and proceed
+            // on the accessory AP instead of waiting for that late callback.
+            observer = Task { @MainActor [weak self] in
+                while gate.resolution == .pending {
+                    try? await Task.sleep(
+                        nanoseconds:
+                            DeviceNetworkJoinPolicy
+                                .applyObservationIntervalNanoseconds
+                    )
+                    guard let self, gate.resolution == .pending else { return }
+                    let observation = await self.currentNetworkObservation(
+                        expectedSSID: ssid
+                    )
+                    if DeviceNetworkJoinPolicy.applyWaitDecision(
+                        elapsed: ProcessInfo.processInfo.systemUptime - applyStarted,
+                        observation: observation
+                    ) == .associated {
+                        gate.resolveAssociated()
+                    }
+                }
+            }
         }
-        return (error, gate)
+        observer?.cancel()
+        let resolution: DeviceNetworkJoinPolicy.ApplyResolution
+        switch gate.resolution {
+        case .observation:
+            resolution = .associated
+        case .timeout:
+            resolution = .timeout
+        case .callback, .pending:
+            resolution = .callback
+        }
+        return (error, gate, resolution)
     }
 
     private func currentNetworkObservation(
@@ -2599,11 +3129,65 @@ final class DeviceTransferManager {
     }
 #endif
 
+    /// Probes the pinned endpoint on a confirmed association and ends the
+    /// window early when that association proves stale (every probe fails
+    /// before a connection starts), so the caller can re-join once.
+    private func waitForTransferServerOrStaleAssociation(
+        session: DeviceTransferSession,
+        statusPath: String,
+        networkObservation: DeviceTransferNetworkObservation,
+        attempt: Int,
+        rejoinAvailable: Bool
+    ) async throws -> (
+        result: DeviceTransferServerProbeResult,
+        staleAssociation: Bool
+    ) {
+        var consecutiveNoRouteProbes = 0
+        var staleAssociation = false
+        var staleElapsed: TimeInterval = 0
+        let result = try await waitForTransferServer(
+            session: session,
+            statusPath: statusPath,
+            networkObservation: networkObservation,
+            abandon: { _, elapsed, probe in
+                consecutiveNoRouteProbes =
+                    DeviceNetworkJoinPolicy.consecutiveNoRouteProbes(
+                        after: consecutiveNoRouteProbes,
+                        probe: probe
+                    )
+                guard rejoinAvailable,
+                      DeviceNetworkJoinPolicy.staleAssociationSuspected(
+                        observation: networkObservation,
+                        consecutiveNoRouteProbes: consecutiveNoRouteProbes,
+                        elapsed: elapsed
+                      ) else { return false }
+                staleAssociation = true
+                staleElapsed = elapsed
+                return true
+            }
+        )
+        if staleAssociation {
+            var fields = DeviceNetworkJoinPolicy.staleRejoinFields(
+                consecutiveNoRouteProbes: consecutiveNoRouteProbes,
+                elapsed: staleElapsed
+            )
+            fields["attempt"] = String(attempt + 1)
+            fields["generation"] = String(session.transferGeneration)
+            record(mode: session.mode, event: "wifi_apply", fields: fields)
+            print(
+                "Device Wi-Fi association stale after " +
+                "\(consecutiveNoRouteProbes) no-route probes; rejoining once"
+            )
+        }
+        return (result, staleAssociation)
+    }
+
     private func waitForTransferServer(
         session: DeviceTransferSession,
         statusPath: String,
         timeout: TimeInterval? = nil,
-        networkObservation: DeviceTransferNetworkObservation = .unavailable
+        networkObservation: DeviceTransferNetworkObservation = .unavailable,
+        abandon: (Int, TimeInterval, DeviceTransferServerProbeResult) -> Bool = { _, _, _ in false }
     ) async throws -> DeviceTransferServerProbeResult {
         let absoluteTimeout = max(
             1,
@@ -2656,7 +3240,8 @@ final class DeviceTransferManager {
                     networkObservation: networkObservation, result: result,
                     elapsed: elapsed, remaining: remaining
                 )
-            }
+            },
+            abandon: abandon
         )
     }
 

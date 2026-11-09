@@ -24,9 +24,6 @@ struct MapSettings {
   bool showMapScale;    // Scale in map screen
 };
 
-#ifndef USE_ARDUINO_GFX
-#include <EasyPreferences.hpp>
-#else
 // Dummy enums and constants for Arduino_GFX compatibility
 enum class PKEYS {
   KCOMP_OFFSET_X,
@@ -42,8 +39,6 @@ enum class PKEYS {
   KMAP_SPEED,
   KMAP_VECTOR,
   KMAP_SCALE,
-  KGPS_SPEED,
-  KGPS_RATE,
   KCOMP_X,
   KCOMP_Y,
   KCOORD_X,
@@ -56,8 +51,6 @@ enum class PKEYS {
   KSUN_Y,
   KDEF_BRIGT,
   KDEF_ZOOM,
-  KGPS_TX,
-  KGPS_RX,
   KWEB_FILE,
   KTEMP_OFFS,
   KVMAX_BATT,
@@ -118,16 +111,12 @@ public:
 };
 
 extern EasyPreferencesDummy cfg;
-#endif
 // These headers participate in gps/settings/GUI dependency cycles. Resolve
 // direct dependencies explicitly, not via LDF's traversal-dependent -I set.
 #include "../battery/battery.hpp"
 #include "../gps/gps.hpp"
 #include "../tft/tft.hpp"
 #include <NMEAGPS.h>
-#ifndef DISABLE_COMPASS
-#include "compass.hpp"
-#endif
 
 extern uint8_t minZoom;       // Min Zoom Level
 extern uint8_t maxZoom;       // Max Zoom Level
@@ -138,8 +127,6 @@ extern uint8_t defBright;     // Default brightness
 extern uint8_t defaultZoom;   // Default Zoom Value
 
 extern bool showMapToolBar;   // Show Map Toolbar
-extern uint16_t gpsBaud;      // GPS Speed
-extern uint16_t gpsUpdate;    // GPS Update rate
 extern uint16_t compassPosX;  // Compass widget position X
 extern uint16_t compassPosY;  // Compass widget position Y
 extern uint16_t coordPosX;    // Coordinates widget position X
@@ -150,15 +137,11 @@ extern uint16_t speedPosX;    // Speed widget position X
 extern uint16_t speedPosY;    // Speed widget position Y
 extern uint16_t sunPosX;      // Sunrise/sunset position X
 extern uint16_t sunPosY;      // Sunrise/sunset position Y
-extern bool enableWeb;        // Enable/disable web file server
-extern int8_t tempOffset;     // BME Temperature offset
 extern bool calculateDST;     // Calculate DST flag
 
 extern MapSettings mapSet;
 
 void loadPreferences();
 
-void saveGPSBaud(uint16_t gpsBaud);
-void saveGPSUpdateRate(uint16_t gpsUpdateRate);
 void saveWidgetPos(char *widget, uint16_t posX, uint16_t posY);
 void printSettings();

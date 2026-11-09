@@ -44,10 +44,12 @@ class CIWorkflowSplitTests(unittest.TestCase):
         self.assertNotIn("github.event_name != 'workflow_call'", map_ci)
         self.assertEqual(map_ci.count("        default: true\n"), 12)
 
-    def test_image_promotion_watches_and_dispatches_dedicated_ci(self) -> None:
+    def test_image_promotion_dispatches_ci_without_rebuilding_for_ci_edits(self) -> None:
         image_workflow = workflow_source("map-platform-image.yml")
 
-        self.assertIn('      - ".github/workflows/map-platform-ci.yml"', image_workflow)
+        # CI-only edits (for example Dependabot action bumps) change nothing in
+        # the image, so they must not publish a rebuild and open promotions.
+        self.assertNotIn('      - ".github/workflows/map-platform-ci.yml"', image_workflow)
         self.assertNotIn('      - ".github/workflows/ci.yml"', image_workflow)
         self.assertIn(
             "python3 map-platform/deploy/export_pending_compose.py",

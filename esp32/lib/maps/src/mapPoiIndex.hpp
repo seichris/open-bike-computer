@@ -103,6 +103,20 @@ inline bool blockFromPath(const std::string &mapId, const std::string &path,
   return true;
 }
 
+// One byte of the reflected IEEE CRC-32 (polynomial 0xedb88320), processed a
+// nibble per table step: the same value as the bitwise form in two steps
+// instead of eight, without a 1 KiB byte table.
+inline uint32_t crc32Update(uint32_t crc, uint8_t byte) {
+  static constexpr uint32_t kNibble[16] = {
+      0x00000000U, 0x1db71064U, 0x3b6e20c8U, 0x26d930acU,
+      0x76dc4190U, 0x6b6b51f4U, 0x4db26158U, 0x5005713cU,
+      0xedb88320U, 0xf00f9344U, 0xd6d6a3e8U, 0xcb61b38cU,
+      0x9b64c2b0U, 0x86d3d2d4U, 0xa00ae278U, 0xbdbdf21cU};
+  crc ^= byte;
+  crc = (crc >> 4U) ^ kNibble[crc & 0x0fU];
+  return (crc >> 4U) ^ kNibble[crc & 0x0fU];
+}
+
 inline uint16_t u16(const uint8_t *data) {
   return uint16_t(data[0]) | (uint16_t(data[1]) << 8U);
 }
@@ -160,9 +174,7 @@ public:
       }
       if (entries_ >= declaredEntries_) return reject();
       ++bytes_;
-      crc_ ^= byte;
-      for (unsigned bit = 0; bit < 8; ++bit)
-        crc_ = (crc_ >> 1U) ^ (0xedb88320U & (0U - (crc_ & 1U)));
+      crc_ = crc32Update(crc_, byte);
       record_[recordBytes_++] = byte;
       if (recordBytes_ == kEntryBytes) {
         Entry entry;

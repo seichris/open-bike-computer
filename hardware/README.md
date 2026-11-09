@@ -1,7 +1,8 @@
-# Waveshare ESP32-S3 Touch AMOLED Hardware Reference
+# Waveshare ESP32-S3 Hardware Reference
 
 This document contains hardware pinouts and bring-up notes for the Waveshare
-ESP32-S3 Touch AMOLED boards supported by this repo.
+ESP32-S3 Touch AMOLED boards supported by this repo, plus reference material
+for the experimental ESP32-S3-ePaper-3.97 firmware port.
 
 The 1.75" notes are the most thoroughly app-verified path and were extracted
 from the official schematic. The 2.06" notes combine Waveshare's public
@@ -27,6 +28,16 @@ link different revisions.
 - [1.75-B dimension drawing](reference/boards/waveshare-amoled-175/esp32-s3-touch-amoled-1.75-b-dimensions.pdf),
   extracted from the official [1.75-B design archive](https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75/ESP32-S3-Touch-AMOLED-1.75-B-3D.zip)
 
+### ESP32-S3-Touch-AMOLED-1.75-G (GNSS variant)
+
+- [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-1.75.htm?sku=31264)
+- [LC76G module wiki](https://www.waveshare.com/wiki/LC76G_GNSS_Module)
+- [Collected references](reference/boards/waveshare-amoled-175-gnss/README.md):
+  the LC76G protocol specification and module manual, the board repository's
+  hardware reference and `09_LC76G_I2C` example, and the vendor I2C and UART
+  driver sources, with provenance; the schematic is the 1.75's above
+- Firmware page: [waveshare-amoled-175-gnss.md](waveshare-amoled-175-gnss.md)
+
 ### ESP32-S3-Touch-AMOLED-2.06
 
 - [Product page](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm)
@@ -34,6 +45,26 @@ link different revisions.
 - [Official demo repository](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.06)
 - [Schematic](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-schematic.pdf)
 - [Dimension drawing](reference/boards/waveshare-amoled-206/esp32-s3-touch-amoled-2.06-dimensions.pdf)
+
+### ESP32-S3-ePaper-3.97
+
+Status: experimental firmware and companion support. Earlier images proved the
+core panel, BLE, SD map and button paths on one unit; the current source,
+including the 2026-10-29 merge with `main`, has not been flashed. Refresh,
+sensor, sleep, long-run and production publication qualification remain gated.
+See the [board implementation and qualification notes](waveshare-epaper-397.md).
+
+- [Implementation plan](../docs/plans/waveshare-epaper-397-firmware-implementation-plan.md)
+- [Official board documentation](https://docs.waveshare.com/ESP32-S3-ePaper-3.97)
+- [Official resource page](https://docs.waveshare.com/ESP32-S3-ePaper-3.97/Resources-And-Documents)
+- [Local reference index](reference/boards/waveshare-epaper-397/README.md):
+  schematic, panel and component datasheets, Chinese/English ESP32-S3 manuals,
+  and the complete pinned vendor example source tree.
+- [Download and file hashes](reference/boards/waveshare-epaper-397/SOURCES.json)
+
+The resource snapshot retains the vendor's exact PDF versions in the board
+folder, including component documents that also have existing shared copies.
+General installers and flash tools are excluded from this collection.
 
 ### ESP32-S3 Manuals
 
@@ -242,17 +273,17 @@ The implementation is in `esp32/lib/speaker/`, with codec sources in
 `esp32/lib/esp_codec_dev/`. It uses the shared mutex-protected I2C bus,
 initializes the codec on first playback, and processes requests through a
 four-entry FreeRTOS queue outside the BLE callback. It powers the codec and PA
-down when the queue drains. PCM recordings are embedded
-with PlatformIO `board_build.embed_files`.
+down when the queue drains. The bell ding is generated at playback; the
+embedded horn recordings were removed in November 2026.
 
 #### Sounds And BLE
 
 | Sound ID | App label | Implementation |
 |---:|---|---|
 | `1` | Bell Ding | Generated PCM |
-| `2` | Plastic Bicycle Horn | Embedded PCM recording |
-| `3` | Rotating Bicycle Bell | Embedded PCM recording |
-| `5` | Squeeze Horn | Embedded PCM recording |
+| `2` | Plastic Bicycle Horn (legacy) | Reserved; recording removed, firmware rejects it |
+| `3` | Rotating Bicycle Bell (legacy) | Reserved; recording removed, firmware rejects it |
+| `5` | Squeeze Horn (legacy) | Reserved; recording removed, firmware rejects it |
 
 Authenticated playback uses:
 
@@ -475,16 +506,29 @@ as closed.
 > **IMPORTANT:** There is no pin conflict between native SDMMC and touch I2C.
 > They use completely separate GPIO sets.
 
-### GPS (UART Pads / Not Populated On This Model)
+### GNSS (Quectel LC76G Footprint / Not Populated On The Plain Model)
 
-| Signal | GPIO |
+The `RXD`/`TXD` pads of the H2 header are the ESP32-S3 UART0 pins (GPIO43 and
+GPIO44), not a receiver footprint. The vendor schematic reserves footprint Q1
+for a Quectel LC76G (LC76GABMD) receiver, populated together with a ceramic
+antenna on the "-G" model (`ESP32-S3-Touch-AMOLED-1.75-G`, SKU 31264):
+
+| Signal | Route |
 |---|---|
-| TXD | GPIO 43 |
-| RXD | GPIO 44 |
+| SCL/SDA | shared I2C bus: the receiver's I2C slave answers at 0x50 (requests) and 0x54 (answers), the path Waveshare's hardware reference and `09_LC76G_I2C` example use |
+| Receiver TXD1 | R15 (0R) to GPIO18 (ESP32 receive); an optional link, unfitted on both models |
+| Receiver RXD1 | R16 (0R) to GPIO17 (ESP32 transmit); an optional link, unfitted on both models |
+| RESET (active low) | TCA9554 expander pin EXIO7 |
+| VCC | 3.3 V rail (VCC3V3); no PMIC write is involved |
+| V_BCKP | RTC rail (VCC-RTC) through R33 |
+| 1PPS, STANDBY, FORCE_ON | not connected to the ESP32 |
 
-This Waveshare model should be treated as no-GPS hardware. Do not add or debug
-a UART GPS feature for this target unless a different assembled variant is
-confirmed.
+The plain model has no receiver and firmware treats it as no-GPS hardware
+(`board::gnss::fitted` is false). The assembled variant with the receiver is
+the separate firmware target `WAVESHARE_AMOLED_175_GNSS`, documented in
+[waveshare-amoled-175-gnss.md](waveshare-amoled-175-gnss.md) with its data,
+gates and physical evidence. Do not add or debug a receiver feature on the
+plain target.
 
 ### Audio (I2S) - VERIFIED WORKING
 
@@ -498,9 +542,10 @@ confirmed.
 | PA_CTRL | GPIO 46 | Active-high NS4150B amplifier enable |
 
 The production path uses the ES8311 codec and NS4150B amplifier with signed
-16-bit stereo PCM at 16 kHz. Embedded horn and bell assets are available in
-both the production `WAVESHARE_AMOLED_175` image and the standalone
-`WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image.
+16-bit stereo PCM at 16 kHz. The generated bell ding is available in both the
+production `WAVESHARE_AMOLED_175` image and the standalone
+`WAVESHARE_AMOLED_175_SPEAKER_HONK` smoke-test image; the embedded horn
+recordings were removed in November 2026 and their sound IDs stay reserved.
 
 This verified status supersedes older bring-up notes that described the 1.75"
 audio path as TBD/untested or reported that the ES8311 was not detected. The
@@ -892,7 +937,7 @@ When scanning the I2C bus, you should find:
 | IMU | ✅ Diagnostic | QMI8658 @ 0x6B primary / 0x6A fallback; low-rate diagnostic accel/gyro sampling only |
 | I/O Expander | ✅ Working | TCA9554 @ 0x20 controls touch reset; can be missed early but recovered by shared I2C retry/recovery |
 | Audio | ⚠️ Working / calibration pending | ES8311 + NS4150B playback and BLE-triggered honk verified; the external `F3` speaker's rating and final volume calibration remain unknown |
-| GPS | ❌ Not populated | This board model should be treated as no-GPS hardware despite UART pads |
+| GNSS | ❌ Not populated on the plain model | The LC76G footprint is unpopulated and the header UART pads are UART0; the assembled variant is target `WAVESHARE_AMOLED_175_GNSS` with its own gates ([waveshare-amoled-175-gnss.md](waveshare-amoled-175-gnss.md)) |
 
 ## Known Issue: I2C Bus Instability
 

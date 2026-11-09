@@ -57,6 +57,15 @@ creates; run checks with `tools/dev-env tools/dev-check` (see Worktree
 environment below). Firmware continues to hand off to its exact
 repository-locked runtime.
 
+The actual e-paper workout replay is the full-level `epaper-workout-lvgl` check.
+Set `EPAPER_LVGL_SOURCE` to LVGL commit
+`7f07a129e8d77f4984fff8e623fd5be18ff42e74`, then run
+`tools/dev-check --check epaper-workout-lvgl`. The generator verifies both the
+commit and the locked source-tree digest before compiling. CI fetches that exact
+commit into runner temporary storage and executes the same registered check.
+No firmware runtime or connected board is needed. AMOLED preview regeneration
+also runs this replay before emitting its existing assets.
+
 Host checks receive their own temporary directories and compiler module caches.
 Local app-container checks keep Debug/Release DerivedData under this worktree's
 ignored `ios-app/DerivedData/development-checks/`, with an exclusive lease spanning
@@ -152,9 +161,11 @@ needed. Empty diffs run full coverage. Deletions and renames retain old/new path
 | iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
 | iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
 | Production firmware libraries | Production, lifecycle and the POI lifecycle budget image, with extra ordinary/debug profiles for their conditional features |
-| BLE navigation or map-transfer libraries | Production, remote-debug and the POI lifecycle budget image (3 builds per selected board); the plain lifecycle and ordinary profiles add no branch there. A preprocessor coverage test checks all five regular profiles on both boards and rejects uncovered ordinary/lifecycle-only branches. Remote-debug also compiles nearby-POI code, but only the POI image builds it diagnostics-off in the 3 MiB production slot |
+| BLE navigation or map-transfer libraries | Production, remote-debug and the POI lifecycle budget image (3 builds per selected board, plus the e-paper pair); the plain lifecycle and ordinary profiles add no branch there. A preprocessor coverage test checks all five regular profiles on both boards and rejects uncovered ordinary/lifecycle-only branches. Remote-debug also compiles nearby-POI code, but only the POI image builds it diagnostics-off in the 3 MiB production slot |
 | Firmware board/runtime/build configuration | Every regular profile for both boards; board-specific 206 files retain 206 selection |
 | CI/shared-runner configuration | Every regular profile for the requested board family (175 by default); full manual/release requests still select both families |
+| Experimental e-paper board (automatic runs only) | Any firmware, build or CI input that can reach its image adds `WAVESHARE_EPAPER_397` and `_PRODUCTION`: diagnostics on and off, and both partition layouts including the 3 MiB production slot. E-paper-named sources alone select all six e-paper profiles and no AMOLED image; 206-named sources alone add none. A coverage test checks this pair against all six e-paper profiles in the BLE and map-transfer libraries, and keeps every e-paper-named translation unit and include behind its board guard. Manual, core-warm and release requests keep exactly their matrix, so `all` and release CI stay AMOLED-only |
+| Experimental GNSS 1.75 variant (automatic runs only) | Any firmware, build or CI input that can reach its image adds `WAVESHARE_AMOLED_175_GNSS` and `_PRODUCTION`, diagnostics on and off in both partition layouts; the variant's board file alone selects its three profiles and no other image; 206-named sources alone add none. The receiver implementation in `lib/position_source` compiles into every image (as stubs where no receiver is fitted), so it routes like shared firmware. Manual selector `175_gnss` builds all three; `all`, release and core-warm requests stay AMOLED-only |
 
 Ordinary source-only PRs no longer prove Release compilation. Before release, use
 full CI; the release candidate always requests all components and both board families.
@@ -170,6 +181,67 @@ relaxed. Unknown product sources keep their component fallback; unmapped shared 
 
 The host job validates its nonempty check-ID selection before executing named registry steps. A missing/failed selected job still fails the aggregate gate. The rider-badge renderer runs for potentially rendering-related changes; BLE/transfer-only edits skip that unrelated benchmark. Documentation and CI unit-test edits accompanying firmware do not expand the hardware matrix. Lifecycle adapters under `firmware_update` and `map_transfer_http`, shared board/build inputs, and explicit manual/release scopes retain broader qualification. The preprocessor guard establishes source-branch coverage, not linking, runtime equivalence or physical acceptance.
 
-Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. Tighten routing if a
+Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. The e-paper pair adds two parallel builds to firmware PRs; cold e-paper builds took 11–17 minutes, like cold AMOLED builds. Tighten routing if a
 full/manual/release lane finds an omitted relevant failure. Revert the selector and
 workflow changes to restore the broad policy; do not raise runner resource limits.
+
+## Library include paths
+
+`esp32/tools/tests/test_ldf_include_paths.py` replays how PlatformIO's
+dependency finder (`lib_ldf_mode = deep`) compiles each firmware library: a
+library receives its own include directories, the complete include-path set
+of each library it depends on directly, only the own directories of a
+dependency that closes a cycle, and the `-I` directories of the shared build
+flags (`-I include`); nothing else of the project reaches a library's compile
+line. Dependencies are discovered from the library's own source files, with
+each file's includes taken in SCons' order (the include token with its quote
+characters, compared as text, so quoted names come before angled ones and
+upper case before lower case), which decides which edge of a cycle breaks; a
+header-only library carries nothing, and the headers of other libraries are
+not scanned on the including library's behalf. A header that includes another
+library's header by bare name therefore compiles only while some non-circular
+dependency happens to carry that directory, which an unrelated include change
+elsewhere can remove; the `-fsyntax-only` cross-check cannot see this because
+it adds every directory. The test walks `esp32/lib` and `esp32/src` and fails
+on any include that a library's compile would not find, naming the library,
+the file and the header's owner. Include other libraries' headers by relative
+path (`../storage/storage.hpp`) instead of relying on propagation. The Arduino
+framework libraries and the `lib_deps` packages are outside the repository;
+`esp32/tools/tests/ldf_external_libraries.json` records, from the locked
+runtime's package store, each one's headers and the other external libraries
+whose directories its compile receives, so a repository library that reaches
+`WiFi.h` only through another library's header is reported the same way (the
+#766 case). The data is tied to the runtime lock and the platform pin and must
+be regenerated when they change:
+`python3 tools/tests/test_ldf_include_paths.py --update-externals .pio/open-bike-build/platformio/<env>`
+after a finished build. `--list` prints every library's dependencies and
+`--root DIR` checks another `esp32` tree (which needs its `platformio.ini` for
+the `-I` build flags); it runs inside the host check that every `esp32/`
+change selects.
+
+## Board-macro confinement
+
+`esp32/tools/tests/test_board_macro_confinement.py` keeps firmware-target
+macros (`WAVESHARE_AMOLED_175`, `WAVESHARE_AMOLED_206` and any later
+`custom_firmware_target` in `platformio.ini`) out of shared firmware sources.
+It scans `esp32/src`, `esp32/lib` and `esp32/include` for preprocessor
+conditionals that name a target and compares the per-file counts with
+`esp32/tools/tests/board_macro_baseline.json`. `esp32/lib/board/` may test
+targets freely: its `board.hpp` selects the board definition, whose data also
+names the panel header that `lib/board/panel_select.hpp` includes, so
+`esp32/lib/panel/panelSelect.hpp` only forwards there and has no exemption. So
+may a file whose single target conditional is a positive gate around all of
+its code with no else branch, because that is how a translation unit stays out
+of the other boards' images; a file holding two implementations under one
+conditional is shared code and is counted. Every other file must
+match its baseline exactly: a higher count fails, and so does a lower one until
+`--update-baseline` records it, so a count cannot grow back. Board differences
+belong in `esp32/lib/board/boards/<target>.hpp` as data, or in a file gated as
+a whole. The same scan rejects every use of the retired IceNav-era board and
+feature macros (`USE_ARDUINO_GFX`, the `DISABLE_*` flags and the rest listed
+in the test) in those trees and in `platformio.ini`, because a surviving
+`#ifndef DISABLE_*` would compile code in without any error. The test runs
+inside the display power and redraw policy host check,
+which every `esp32/` change selects; `--list` prints the current counts and
+exemptions. See `docs/plans/board-support-architecture-plan.md` for the layout
+it protects.

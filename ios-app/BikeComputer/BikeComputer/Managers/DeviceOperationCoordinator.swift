@@ -226,6 +226,12 @@ final class DeviceOperationCoordinator {
         persist()
         return rebound
     }
+    /// The same owner's link came back inside the firmware's link-loss grace
+    /// window and the fresh status shows the lease's own session: the lease
+    /// follows the session onto the new link, under the maintenance rules.
+    func rebindAfterLinkLoss(_ value: Lease, epoch: UInt64) throws -> Lease {
+        try rebindAfterMaintenance(value, epoch: epoch)
+    }
     func owns(_ value: Lease) -> Bool { lease == value }
     func retain(operationID: UUID) -> UUID? {
         guard lease?.id == operationID else { return nil }

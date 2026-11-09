@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -120,12 +121,12 @@ class PreparationEstimateTests(unittest.TestCase):
             validated_confidence_cap="high",
         )
 
-    def estimator(self, history=None):
+    def estimator(self, history=None, clock=lambda: 1_786_330_000.0):
         return PreparationEstimator(
             self.profile,
             self.config,
             history,
-            clock=lambda: 1_786_330_000.0,
+            clock=clock,
         )
 
     def context(self, estimator, job):
@@ -871,7 +872,11 @@ class PreparationEstimateTests(unittest.TestCase):
             root = Path(temporary)
             store = JobStore(root / "jobs")
             monitoring = MapMonitoringStore(root / "monitoring.sqlite3")
-            estimator = self.estimator(monitoring)
+            # The worker stamps the job's run with the wall clock and the
+            # store windows both runs and revisions by it (bounded by its
+            # retention), so the estimator stamps its revisions by the wall
+            # clock here too; a fixed clock drifts out of the window.
+            estimator = self.estimator(monitoring, clock=time.time)
             coordinator = PreparationEstimateCoordinator(
                 store,
                 estimator,

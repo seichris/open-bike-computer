@@ -4,6 +4,7 @@
 
 #include "../../route_elevation/route_elevation_runtime.hpp"
 #include "../../tft/tft.hpp"
+#include "../../utils/src/startup_constructed.hpp"
 
 #include <cstring>
 #include <esp_heap_caps.h>
@@ -43,7 +44,10 @@ Metric ascentRemaining;
 ep::Layout layout{};
 ep::Chart chart{};
 // Copies of the published snapshot; the LVGL task owns these exclusively.
-route_elevation_runtime::Snapshot current{};
+// The snapshot's non-zero defaults would otherwise place its whole image in
+// .data; StartupConstructed keeps it in .bss with the same values.
+StartupConstructed<route_elevation_runtime::Snapshot> currentStorage;
+route_elevation_runtime::Snapshot &current = currentStorage.value;
 uint32_t renderedRevision = UINT32_MAX;
 uint32_t chartRouteToken = 0;
 uint16_t chartRevision = 0;

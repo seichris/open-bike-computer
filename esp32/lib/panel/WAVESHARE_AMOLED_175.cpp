@@ -1,3 +1,4 @@
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "full_frame_allocation.hpp"
 #include <cstdlib>
 /**
@@ -20,14 +21,11 @@
 #include "../power_management/power_management.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
-#ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
-#endif
 #include "../../utils/src/touchInterruptGate.hpp"
 
-#ifdef USE_ARDUINO_GFX
 
 #include <cstring>
 #if AUTOMATIC_LIGHT_SLEEP_EXPERIMENT && defined(WAVESHARE_AMOLED_206)
@@ -41,15 +39,12 @@
 #include "power_metrics.hpp"
 #include "cst9217_touch_frame.hpp"
 #include "touch.hpp"
+#include "tca9554.hpp"
 #include "touch_sampling_policy.hpp"
 #include "waveshare_board.hpp"
 
 extern void appDisplayFlushCompleted();
 extern void appRemoteDebugPointerActivity();
-
-// Define Global Variables declared extern in hal.hpp
-uint8_t GPS_TX = GPIO_NUM_43;
-uint8_t GPS_RX = GPIO_NUM_44;
 
 // ============================================================================
 // DISPLAY CONFIGURATION (Arduino_GFX)
@@ -648,8 +643,6 @@ static uint32_t lastValidTouchMs = 0;
 static uint32_t lastTouchHintActiveMs = 0;
 static uint32_t lastTouchHintChangeMs = 0;
 static uint8_t consecutiveTouchReadFailures = 0;
-static uint8_t tca9554OutputShadow = 0xFF;
-static uint8_t tca9554ConfigShadow = 0xFF;
 static bool lastTouchHintActive = false;
 static bool touchHintStateKnown = false;
 static waveshare_board::touch::TouchFrame previousRawTouchFrame;
@@ -940,27 +933,6 @@ static void noteTouchReadFailure(const char *reason, uint32_t now) {
   }
 }
 
-// TCA9554 helper functions
-static bool tca9554SetPin(uint8_t pin, bool level) {
-  if (level) {
-    tca9554OutputShadow |= (1 << pin);
-  } else {
-    tca9554OutputShadow &= ~(1 << pin);
-  }
-
-  return waveshare_board::i2c::writeRegister8(
-      waveshare_board::TCA9554_ADDR, waveshare_board::touch::TCA9554_OUTPUT_REG,
-      tca9554OutputShadow, "TCA9554");
-}
-
-static bool tca9554ConfigureOutput(uint8_t pin) {
-  tca9554ConfigShadow &= ~(1 << pin); // Clear bit = Output
-
-  return waveshare_board::i2c::writeRegister8(
-      waveshare_board::TCA9554_ADDR, waveshare_board::touch::TCA9554_CONFIG_REG,
-      tca9554ConfigShadow, "TCA9554");
-}
-
 void initTouchController() {
   if (touchInitialized)
     return;
@@ -973,16 +945,16 @@ void initTouchController() {
   configureTouchWakeInterrupt();
 
   // Check for TCA9554 and reset touch controller
-  if (waveshare_board::i2c::probe(waveshare_board::TCA9554_ADDR, "TCA9554")) {
+  if (waveshare_board::tca9554::present()) {
     Serial.println("✓ TCA9554 found - resetting touch controller");
     bool resetOk =
-        tca9554ConfigureOutput(waveshare_board::touch::TCA9554_TOUCH_RST_BIT);
+        waveshare_board::tca9554::configureOutput(waveshare_board::touch::TCA9554_TOUCH_RST_BIT);
     resetOk =
-        tca9554SetPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, false) &&
+        waveshare_board::tca9554::setPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, false) &&
         resetOk; // RST low
     delay(20);
     resetOk =
-        tca9554SetPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, true) &&
+        waveshare_board::tca9554::setPin(waveshare_board::touch::TCA9554_TOUCH_RST_BIT, true) &&
         resetOk; // RST high
     delay(100); // Wait for touch controller to boot
     touchInitialized = resetOk;
@@ -1335,18 +1307,13 @@ void setupLVGLforArduinoGFX() {
 
   Serial.println("✓ LVGL 9 Display registered");
 
-#ifndef DISABLE_TOUCH
   // Initialize touch driver using LVGL 9 API
   lv_indev_t *indev_drv = lv_indev_create();
   lv_indev_set_type(indev_drv, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev_drv, my_touchpad_read);
 
   Serial.println("✓ LVGL 9 Touch driver registered");
-#else
-  Serial.println(
-      "! TOUCH DISABLED via DISABLE_TOUCH flag (Required for SD Card usage)");
-#endif
   Serial.println("LVGL 9 initialized with Arduino_GFX");
 }
 
-#endif // USE_ARDUINO_GFX
+#endif  // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

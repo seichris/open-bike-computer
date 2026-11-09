@@ -10,6 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import changed_components as components
 import ci_scopes as scopes
 
+# Experimental e-paper builds that automatic selection adds to shared changes.
+EPAPER_PAIR = ('WAVESHARE_EPAPER_397', 'WAVESHARE_EPAPER_397_PRODUCTION')
+# Experimental GNSS 1.75 builds that ride with the e-paper pair on shared changes.
+GNSS_PAIR = ('WAVESHARE_AMOLED_175_GNSS', 'WAVESHARE_AMOLED_175_GNSS_PRODUCTION')
+EXPERIMENTAL = EPAPER_PAIR + GNSS_PAIR
+
 
 class CiCostBudgetTests(unittest.TestCase):
     def test_shared_fixture_has_only_its_swift_and_wire_consumers(self):
@@ -29,7 +35,7 @@ class CiCostBudgetTests(unittest.TestCase):
             self.assertEqual(scopes.firmware_host_checks([path], selected=True), ['esp32-host-firmware-manifest-tests'])
             self.assertFalse(scopes.zone_contracts_required([path], ios=False, firmware_host=True))
 
-    def test_routine_firmware_changes_keep_three_builds_per_requested_board(self):
+    def test_routine_firmware_changes_keep_three_builds_per_requested_board_and_the_epaper_pair(self):
         for board in ('175', '206'):
             full = components.select_firmware_targets(board)
             for library in ('ble_navigation', 'map_transfer'):
@@ -37,21 +43,47 @@ class CiCostBudgetTests(unittest.TestCase):
                 targets = scopes.firmware_targets(paths, full)
                 # Ordinary and plain lifecycle builds add no conditional arm here.
                 self.assertEqual(set(targets), {f'WAVESHARE_AMOLED_{board}_PRODUCTION', f'WAVESHARE_AMOLED_{board}_REMOTE_DEBUG',
-                                                f'WAVESHARE_AMOLED_{board}_POI_LIFECYCLE_QUALIFICATION'})
+                                                f'WAVESHARE_AMOLED_{board}_POI_LIFECYCLE_QUALIFICATION', *EXPERIMENTAL})
                 self.assertFalse(scopes.firmware_renderer_required(paths))
 
     def test_ci_recipe_edits_do_not_double_the_selected_hardware_matrix(self):
         for board in ('175', '206', 'all'):
             full = components.select_firmware_targets(board)
-            self.assertEqual(scopes.firmware_targets(['.github/workflows/ci.yml', 'tools/dev_check.py'], full), full)
+            self.assertEqual(scopes.firmware_targets(['.github/workflows/ci.yml', 'tools/dev_check.py'], full), full + EXPERIMENTAL)
         both_boards = scopes.board_firmware_targets(('175', '206'))
-        self.assertEqual(scopes.firmware_targets(['esp32/platformio.ini'], components.select_firmware_targets('175')), both_boards)
+        self.assertEqual(scopes.firmware_targets(['esp32/platformio.ini'], components.select_firmware_targets('175')), both_boards + EXPERIMENTAL)
         for other in ('.github/workflows/ci.yml', 'tools/dev_check.py', 'ios-app/BikeComputer/App.swift'):
             targets = scopes.firmware_targets(['esp32/platformio.ini', other], components.select_firmware_targets('175'))
-            self.assertEqual(targets, both_boards)
+            self.assertEqual(targets, both_boards + EXPERIMENTAL)
             targets = scopes.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp', other], components.select_firmware_targets('175'))
-            self.assertTrue(targets)
-            self.assertTrue(all('206' in target for target in targets))
+            self.assertEqual(targets[-4:], EXPERIMENTAL)
+            self.assertTrue(targets[:-4])
+            self.assertTrue(all('206' in target for target in targets[:-4]))
+
+    def test_epaper_adds_two_builds_unless_its_own_sources_change(self):
+        full = components.select_firmware_targets('175')
+        for path in ('esp32/lib/ble_navigation/example.cpp', 'esp32/lib/storage/storage.cpp',
+                     'esp32/platformio.ini', '.github/workflows/ci.yml'):
+            targets = scopes.firmware_targets([path], full)
+            self.assertEqual(sum('EPAPER' in t for t in targets), 2, path)
+        # Its own sources build its whole matrix and no AMOLED image.
+        self.assertEqual(scopes.firmware_targets(['esp32/lib/epaper_display/epaper_display.cpp'], full),
+                         components.select_firmware_targets('397'))
+
+    def test_gnss_variant_adds_two_builds_unless_its_board_file_changes(self):
+        full = components.select_firmware_targets('175')
+        for path in ('esp32/lib/ble_navigation/example.cpp', 'esp32/lib/position_source/gnss_receiver.cpp',
+                     'esp32/platformio.ini', '.github/workflows/ci.yml'):
+            targets = scopes.firmware_targets([path], full)
+            self.assertEqual(tuple(t for t in targets if 'GNSS' in t), GNSS_PAIR, path)
+        # Its board file builds its whole matrix and no other image.
+        self.assertEqual(scopes.firmware_targets(['esp32/lib/board/boards/waveshare_amoled_175_gnss.hpp'], full),
+                         components.select_firmware_targets('175_gnss'))
+        # 206-named sources alone add neither experimental pair.
+        self.assertFalse(any('GNSS' in t or 'EPAPER' in t
+                             for t in scopes.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'], full)))
+        # Manual, release and core-warm requests keep exactly their matrix.
+        self.assertNotIn('WAVESHARE_AMOLED_175_GNSS', components.select_firmware_targets('all'))
 
     def test_unmapped_input_stops_cli_without_product_selection_outputs(self):
         output, errors = io.StringIO(), io.StringIO()

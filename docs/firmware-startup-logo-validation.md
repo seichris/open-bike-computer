@@ -11,6 +11,9 @@ stack row buffer avoids another framebuffer allocation. PMIC settings, panel
 delays, and the full-screen LVGL refresh strategy are unchanged. The 2.06-inch
 path and display test/probe patterns do not draw this logo.
 
+The real waiting screen now replaces this logo before map recovery starts;
+see `docs/firmware-startup-sequence.md`.
+
 ## Hardware observation
 
 On 2026-10-26, the owner confirmed the connected round 1.75-inch board and

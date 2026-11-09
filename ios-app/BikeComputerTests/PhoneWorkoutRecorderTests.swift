@@ -139,4 +139,28 @@ final class PhoneWorkoutRecorderTests: XCTestCase {
         try await recorder.recover(expected: record)
         XCTAssertEqual(writes, 3, "A completed attachment is idempotent")
     }
+
+    func testBackgroundStartDoesNotAskForLaterOptionalHealthAccess() async throws {
+        let released: Set<HKSampleType> = [
+            HKObjectType.workoutType(), HKSeriesType.workoutRoute(), HKQuantityType(.distanceCycling)
+        ]
+        let speed = HKQuantityType(.cyclingSpeed)
+        for applicationIsActive in [false, true] {
+            var requested: Set<HKSampleType>?
+            let recorder = PhoneWorkoutRecorder(
+                persistence: PhoneRecordingPersistenceProbe(),
+                locations: Empty().eraseToAnyPublisher(),
+                // Stop right after authorization; this test starts no session.
+                canStartAfterAuthorization: { false },
+                isApplicationActive: { applicationIsActive },
+                requestHealthAuthorization: { share, _ in requested = share }
+            )
+            await recorder.start(WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: Date()))
+            let share = try XCTUnwrap(requested)
+            XCTAssertTrue(released.isSubset(of: share))
+            XCTAssertEqual(share.contains(speed), applicationIsActive,
+                           "A start from the bike computer must not wait on a new Health prompt")
+            XCTAssertNil(recorder.record)
+        }
+    }
 }

@@ -5,10 +5,10 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 
 #include <Arduino.h>
 #include "i2c_transaction_trace.hpp"
+#include "../board/board.hpp"
 
 namespace waveshare_board::i2c {
 
@@ -23,7 +23,8 @@ struct Stats {
 };
 
 void configureBus(uint32_t clockHz = DEFAULT_CLOCK_HZ);
-const Stats &stats();
+// A snapshot of the counters, safe to read from any task.
+Stats stats();
 void debugScan(Stream &out = Serial, uint8_t firstAddress = 0x08,
                uint8_t lastAddress = 0x77);
 
@@ -37,6 +38,11 @@ bool writeRegisterBlock8(uint8_t address, uint8_t reg, const uint8_t *data,
 bool writeRegister16(uint8_t address, uint16_t reg, uint8_t value,
                      const char *label = nullptr, uint8_t attempts = 2,
                      TransactionTrace *trace = nullptr);
+// Command-oriented sensors such as SHTC3 use a two-byte command followed by a
+// separate response with no register address. AXP2101 command writes remain
+// blocked on the e-paper board by the same write-policy boundary.
+bool writeCommand16(uint8_t address, uint16_t command,
+                    const char *label = nullptr, uint8_t attempts = 2);
 
 struct Axp2101PowerButtonOffLevelResult {
   uint8_t before = 0;
@@ -51,7 +57,7 @@ bool ensureAxp2101PowerButtonOffLevel(
     uint8_t level, Axp2101PowerButtonOffLevelResult &result,
     uint8_t attempts = 3);
 
-#ifdef WAVESHARE_AMOLED_206
+#if BOARD_PMIC_DISPLAY_ENABLE_RECOVERY
 struct Axp2101DisplayEnableResult {
   uint8_t before = 0;
   uint8_t after = 0;
@@ -64,6 +70,22 @@ struct Axp2101DisplayEnableResult {
 // to this register remain blocked.
 bool ensureAxp2101DisplayEnabled(Axp2101DisplayEnableResult &result,
                                 uint8_t attempts = 3);
+#endif
+#ifdef WAVESHARE_EPAPER_397
+struct Axp2101EpaperPowerResult {
+  uint8_t enableBefore = 0;
+  uint8_t enableAfter = 0;
+  uint8_t voltageBefore = 0;
+  uint8_t voltageAfter = 0;
+  bool enableChanged = false;
+  bool voltageChanged = false;
+};
+
+// Configure only the schematic-defined e-paper supply: ALDO3 at 3.3 V and
+// its enable bit. Both register updates preserve every unrelated field and
+// are verified by readback; generic AXP2101 rail writes remain blocked.
+bool ensureAxp2101EpaperPower(Axp2101EpaperPowerResult &result,
+                             uint8_t attempts = 3);
 #endif
 bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
                    const char *label = nullptr, uint8_t attempts = 3);
@@ -78,7 +100,27 @@ bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                     const char *label = nullptr, uint8_t attempts = 3,
                     TransactionTrace *trace = nullptr);
+bool readBytes(uint8_t address, uint8_t *data, uint8_t len,
+               const char *label = nullptr, uint8_t attempts = 3);
+
+// Raw transfers for a device that answers requests instead of exposing
+// registers (the GNSS receiver's I2C slave). writeBytes sends the bytes as
+// given, with the AXP2101 write policy applied to the first byte as the
+// register; readStream reads up to STREAM_BUFFER_BYTES in one transaction,
+// the Wire receive buffer, which is enlarged on boards whose receiver streams
+// NMEA over the bus. One read must fit the transaction timeout and the lock
+// wait other devices tolerate, so such boards also lengthen both: 1024 bytes
+// take about 92 ms at 100 kHz, inside TRANSACTION_TIMEOUT_MS, and a device
+// waiting for the bus (the touch controller) waits that long at most.
+constexpr size_t STREAM_BUFFER_BYTES =
+    board::gnss::transport == board::GnssTransport::i2c ? 1024 : 128;
+constexpr uint16_t TRANSACTION_TIMEOUT_MS =
+    board::gnss::transport == board::GnssTransport::i2c ? 150
+                                                        : DEFAULT_TIMEOUT_MS;
+bool writeBytes(uint8_t address, const uint8_t *data, uint8_t len,
+                const char *label = nullptr, uint8_t attempts = 2);
+bool readStream(uint8_t address, uint8_t *data, size_t len,
+                const char *label = nullptr, uint8_t attempts = 3);
 
 } // namespace waveshare_board::i2c
 
-#endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206

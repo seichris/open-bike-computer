@@ -65,6 +65,29 @@ def load_contract() -> dict:
         raise SystemExit("main-word names must not collide with generated extended-word names")
     if caps["extended_feature_tlv_type"] in (1, contract["screen_configuration"]["capability_tlv_type"]):
         raise SystemExit("extended features must have a distinct TLV type")
+    board_display = contract["board_display_metadata"]
+    if board_display["tlv_type"] in (
+        1,
+        contract["screen_configuration"]["capability_tlv_type"],
+        caps["extended_feature_tlv_type"],
+    ):
+        raise SystemExit("board display metadata must have a distinct CAP2 TLV type")
+    if board_display["payload_bytes"] != 8 or board_display["version"] != 1:
+        raise SystemExit("board display metadata v1 requires an eight-byte payload")
+    if "board_display_metadata" not in caps["extended_features"]:
+        raise SystemExit("board display metadata needs its extended capability bit")
+    position_source = contract["position_source_metadata"]
+    if position_source["tlv_type"] in (
+        1,
+        contract["screen_configuration"]["capability_tlv_type"],
+        caps["extended_feature_tlv_type"],
+        board_display["tlv_type"],
+    ):
+        raise SystemExit("position source metadata must have a distinct CAP2 TLV type")
+    if position_source["payload_bytes"] != 4 or position_source["version"] != 1:
+        raise SystemExit("position source metadata v1 requires a four-byte payload")
+    if "position_source_metadata" not in caps["extended_features"]:
+        raise SystemExit("position source metadata needs its extended capability bit")
     requests = contract["device_requests"]
     for key, value in requests.items():
         if len(value.encode("ascii")) != 4:
@@ -162,6 +185,22 @@ def render_swift(contract: dict) -> str:
         ]
     )
     lines.append(f"    static let extendedFeatureTLVType: UInt8 = {caps['extended_feature_tlv_type']}")
+    board_display = contract["board_display_metadata"]
+    lines.extend(
+        [
+            f"    static let boardDisplayTLVType: UInt8 = {board_display['tlv_type']}",
+            f"    static let boardDisplayVersion: UInt8 = {board_display['version']}",
+            f"    static let boardDisplayPayloadBytes: UInt8 = {board_display['payload_bytes']}",
+        ]
+    )
+    position_source = contract["position_source_metadata"]
+    lines.extend(
+        [
+            f"    static let positionSourceTLVType: UInt8 = {position_source['tlv_type']}",
+            f"    static let positionSourceVersion: UInt8 = {position_source['version']}",
+            f"    static let positionSourcePayloadBytes: UInt8 = {position_source['payload_bytes']}",
+        ]
+    )
     for name, entry in caps["features"].items():
         lines.append(
             f"    static let {camel(name)}Feature: UInt32 = 1 << {entry['bit']}"
@@ -291,6 +330,10 @@ def render_cpp(contract: dict) -> str:
         ]
     )
     lines.append(f"inline constexpr uint8_t EXTENDED_FEATURE_TLV_TYPE = {caps['extended_feature_tlv_type']};")
+    for name in ("tlv_type", "version", "payload_bytes"):
+        lines.append(f"inline constexpr uint8_t BOARD_DISPLAY_{upper(name)} = {contract['board_display_metadata'][name]};")
+    for name in ("tlv_type", "version", "payload_bytes"):
+        lines.append(f"inline constexpr uint8_t POSITION_SOURCE_{upper(name)} = {contract['position_source_metadata'][name]};")
     for name, entry in caps["features"].items():
         lines.append(
             f"inline constexpr uint32_t {upper(name)}_FEATURE = 1UL << {entry['bit']};"
@@ -309,6 +352,11 @@ def render_cpp(contract: dict) -> str:
             f"inline constexpr uint8_t EXTENDED_{upper(name)}_MINIMUM_CLIENT_VERSION = "
             f"{entry['minimum_client_version']};"
         )
+    # Every allocated bit, so board policies must classify each new feature.
+    all_features = " | ".join(f"{upper(name)}_FEATURE" for name in caps["features"])
+    all_extended = " | ".join(f"EXTENDED_{upper(name)}_FEATURE" for name in caps["extended_features"])
+    lines.append(f"inline constexpr uint32_t ALL_FEATURES = {all_features};")
+    lines.append(f"inline constexpr uint32_t ALL_EXTENDED_FEATURES = {all_extended};")
     requests = contract["device_requests"]
     lines.extend(
         [

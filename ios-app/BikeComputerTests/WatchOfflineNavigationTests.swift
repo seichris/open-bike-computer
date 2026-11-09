@@ -256,7 +256,7 @@ enum WatchOfflineNavigationTests {
         let compatible = try archive(revision: 2, now: createdAt)
         let futureArchive = NavigationRouteArchiveV1(
             schemaVersion: NavigationRouteArchiveV1.schemaVersion + 1,
-            route: compatible.route,
+            storedRoute: compatible.storedRoute,
             createdAt: compatible.createdAt,
             deleteAfter: compatible.deleteAfter,
             contentHash: compatible.contentHash

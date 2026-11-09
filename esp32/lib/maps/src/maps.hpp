@@ -43,6 +43,7 @@
 #include "mapTerrain.hpp"
 #include "mapTransform.hpp"
 #include "mapVars.h"
+#include "../../board/board.hpp"
 #include "map_projection.hpp"
 #include <Arduino.h>
 
@@ -55,6 +56,36 @@ public:
     bool available = false;
     uint32_t renderDurationMs = 0;
     uint32_t blockLoadMs = 0;
+  };
+
+  // The visible base frame against the presented rider, for the family
+  // presentation (the e-paper scheduler and status line read it).
+  struct CameraState {
+    bool hasBase = false;
+    bool baseCompatible = false;
+    bool mapCoverageAvailable = false;
+    bool riderProjected = false;
+    bool riderInsideViewport = false;
+    double riderOffsetPixels = 0.0;
+    double headingDeltaDegrees = 0.0;
+    uint32_t baseAcceptedAtMs = 0;
+    uint32_t baseFixSequence = 0;
+    uint32_t baseCameraSequence = 0;
+    bool renderRunning = false;
+    bool successorPending = false;
+    uint32_t latestRequestedFixSequence = 0;
+    bool recoveryPending = false;
+  };
+
+  // Provenance of the last published worker frame: the fix it was rendered
+  // for, as captured when the request was built.
+  struct FramePublication {
+    uint32_t cameraSequence = 0;
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
   };
 
 private:
@@ -184,14 +215,12 @@ private:
 
   static constexpr uint16_t MAP_RENDER_OVERSCAN_PIXELS = 96;
   static constexpr uint16_t MAP_RENDER_SAFETY_PIXELS = 16;
-#if defined(WAVESHARE_AMOLED_175)
-  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = true;
-  static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS = 64;
-#else
-  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = false;
+  // A round panel keeps a 64-pixel overscan floor (see
+  // docs/firmware-map-render-scheduler.md); a rectangular one renders the
+  // full overscan.
+  static constexpr bool MAP_RENDER_ROUND_VIEWPORT = board::display::round;
   static constexpr uint16_t MAP_RENDER_MINIMUM_OVERSCAN_PIXELS =
-      MAP_RENDER_OVERSCAN_PIXELS;
-#endif
+      board::display::round ? 64 : MAP_RENDER_OVERSCAN_PIXELS;
   static constexpr uint32_t MAP_RENDER_WORKER_STACK_BYTES = 24576;
   static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
 
@@ -246,6 +275,12 @@ private:
     double rotationRad = 0.0;
     uint32_t cancellationGeneration = 0;
     bool birdsEye = false;
+    // Fix provenance, filled by the family's captureRequestProvenance().
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
   };
 
   struct RenderResult {
@@ -280,6 +315,11 @@ private:
     bool mapFound = false;
     bool followPosition = true;
     RasterDiagnostics raster{};
+    uint32_t capturedFixSequence = 0;
+    uint32_t capturedFixAtMs = 0;
+    double capturedSpeedKmh = 0.0;
+    double capturedHeadingDegrees = 0.0;
+    bool capturedHeadingValid = false;
   };
 
   MemCache memCache;               // Worker-owned memory cache
@@ -450,9 +490,16 @@ private:
 #endif
   void (*pendingStorageControl_)(void *) = nullptr;
   void *pendingStorageControlContext_ = nullptr;
+  // A probe that passes its block/font contract may hand the validated label
+  // font to the immediately following root switch on the same storage owner.
   map_probe_diagnostics::Result
-  probeVectorMapFolderOnStorageOwner(const std::string &folder);
-  bool switchVectorMapFolderOnStorageOwner(const std::string &folder);
+  probeVectorMapFolderOnStorageOwner(const std::string &folder,
+                                     map_font_asset::Asset *validatedFont = nullptr);
+  bool switchVectorMapFolderOnStorageOwner(
+      const std::string &folder, map_font_asset::Asset *validatedFont = nullptr);
+  // Probe, then switch when loadable, validating the label font once.
+  map_probe_diagnostics::Result
+  activateVectorMapFolderOnStorageOwner(const std::string &folder);
   void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
   bool stopRenderWorker();
@@ -474,7 +521,14 @@ private:
   void updatePresentedPoseForScreen(uint32_t nowMs, bool mapVisible);
   void updatePresentedFrameTransform();
   void renderLiveForeground();
+  // Defined per display family in mapCameraAmoled.cpp / mapCameraEpaper.cpp:
+  // the stable-camera service, the coverage rule a ready frame must meet
+  // before publication, and the fix provenance captured into a request.
   void serviceStableCamera(uint32_t nowMs);
+  bool readyFrameCovered(const RenderResult &ready, bool projectedValid,
+                         double projectedX, double projectedY,
+                         double rotationDelta) const;
+  void captureRequestProvenance(RenderRequest &request) const;
   bool prepareMapScene(const RenderRequest &request, RenderResult &result);
   void invalidateRenderSemantics(uint32_t nowMs);
   void invalidateRenderSemanticsForScreen(uint32_t nowMs, uint8_t zoom,
@@ -554,6 +608,13 @@ private:
   map_camera::Lag cameraLag;
   uint32_t lastCameraRequestMs = 0;
   renderer_diagnostics::CameraSample cameraEvidence{};
+  // Filtered camera heading set by the family scheduler (the e-paper); never
+  // valid where the family does not set it.
+  double cameraHeadingDegrees_ = 0.0;
+  bool cameraHeadingValid_ = false;
+  uint32_t visibleFrameAcceptedAtMs_ = 0;
+  FramePublication framePublication_{};
+  bool recoveryPending_ = false;
   std::atomic<bool> shutdownAdmissionClosed_{false};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
@@ -713,10 +774,10 @@ public:
   // Called once by setup() with Storage::mapStorageRoot(), before any render.
   // Sets the legacy default folder without touching storage.
   void bindMapStorageRoot(const char *root);
-  bool setVectorMapFolder(const std::string &folder);
-  bool probeVectorMapFolder(const std::string &folder);
+  // Boot-time activation on the UI task before the render worker owns storage.
+  // Returns the probe result; RootSwitchFailed means the old root remains.
   map_probe_diagnostics::Result
-  probeVectorMapFolderDetailed(const std::string &folder);
+  activateVectorMapFolderDetailed(const std::string &folder);
   bool requestVectorMapFolderActivation(const std::string &folder);
   // Bounded command admission; callback/context must live through completion.
   // Runs between jobs on the sole map storage owner, never on the UI task.
@@ -757,6 +818,12 @@ public:
   bool serviceRenderPipeline(uint32_t nowMs);
   bool hasPendingRenderForCurrentScreen() const;
   bool takeFramePublication();
+  bool takeFramePublication(FramePublication &publication);
+  CameraState captureCameraState() const;
+  void setCameraHeading(double degrees, bool valid);
+  uint32_t visibleCameraSequence() const {
+    return publishedMapFrame ? visibleRenderResult.version.sequence : 0;
+  }
   bool takeRenderFailure();
   bool takeMapAvailabilityTransition(MapAvailabilityTransition &transition);
   bool hasPublishedMapFrame() const { return publishedMapFrame; }

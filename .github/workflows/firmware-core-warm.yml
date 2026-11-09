@@ -2,8 +2,9 @@ name: Firmware core warm
 
 # Pull requests can only restore Actions caches that their base branch created,
 # and main never ran CI after a merge. This run builds the regular profiles of
-# the requested family through the normal firmware scope, so main publishes
-# the verified core entries that every later pull request restores.
+# every board family through the normal firmware scope, so main publishes the
+# verified core entries that every later pull request restores. Without it the
+# 2.06, e-paper and GNSS builds of every pull request compile their cores cold.
 on:
   push:
     branches:
@@ -11,6 +12,7 @@ on:
     paths:
       - "esp32/**"
       - ".github/actions/firmware-build-cache/**"
+      - ".github/actions/free-runner-disk/**"
       - ".github/scripts/firmware_core_artifact.py"
       - ".github/workflows/ci.yml"
       - ".github/workflows/firmware-core-warm.yml"
@@ -22,12 +24,14 @@ on:
       firmware_hardware:
         description: Firmware hardware families to warm
         required: true
-        default: "175"
+        default: every
         type: choice
         options:
+          - every
           - "175"
           - "206"
-          - all
+          - "397"
+          - "175_gnss"
 
 # Read-only. Nested ci.yml jobs declare these even when the firmware scope skips them.
 permissions:
@@ -37,13 +41,23 @@ permissions:
   packages: read
 
 concurrency:
-  group: firmware-core-warm-${{ github.ref }}-${{ inputs.firmware_hardware || '175' }}
+  group: firmware-core-warm-${{ github.ref }}-${{ inputs.firmware_hardware || 'every' }}
   cancel-in-progress: true
 
 jobs:
   warm:
-    name: Warm verified cores
+    name: Warm verified cores (${{ matrix.hardware }})
+    # "every" warms each family through CI's own selectors: "all" is the 1.75
+    # and 2.06 regular profiles, then the GNSS variant and the e-paper. Two
+    # families at a time keep the run inside the runner pool that pull
+    # requests share; the AMOLED pair starts first because most pull requests
+    # build it.
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        hardware: ${{ fromJSON((!inputs.firmware_hardware || inputs.firmware_hardware == 'every') && '["all","175_gnss","397"]' || format('["{0}"]', inputs.firmware_hardware)) }}
     uses: ./.github/workflows/ci.yml
     with:
       scope: firmware
-      firmware_hardware: ${{ inputs.firmware_hardware || '175' }}
+      firmware_hardware: ${{ matrix.hardware }}

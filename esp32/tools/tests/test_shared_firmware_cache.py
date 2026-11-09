@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -70,6 +71,91 @@ class SharedCoreCacheTests(unittest.TestCase):
             binary = installed / "packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/libcore.a"
             self.assertEqual(binary.read_bytes(), b"\x00" + os.fsencode(str(origin)))
             self.assertTrue(core.prepare_generated_sdkconfigs(target, self.environment))
+
+    def test_restores_into_the_worktree_that_published_the_entry(self):
+        # Another profile's build replaced the generated sdkconfig files, so the
+        # private-cache path is unavailable although this worktree still holds
+        # the private entry the transport was published from. The import must
+        # not relocate launchers onto their own path: that rewrite is not
+        # idempotent, and the result no longer matched the private attestation.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
+
+    def test_same_path_import_keeps_launchers_byte_identical(self):
+        # Without a private entry the transport is imported; a transport from
+        # this very path needs no relocation.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            key = core.core_input_key(origin, self.environment)
+            entry = core._core_cache_entry_dir(origin, self.environment, key)
+            self.assertTrue(entry.is_dir())
+            core._quarantine_core_cache_entry(origin, self.environment, key, "unit test")
+            self.assertFalse(entry.exists())
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(entry.is_dir())
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
+
+    def test_identity_mismatch_after_import_publishes_no_private_entry(self):
+        # The identity check runs before an import becomes a private entry:
+        # later restores prefer a valid private entry over the transport, so
+        # a mismatched import must leave nothing behind.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin):
+            self.publish(origin)
+        transport_manifest = next((self.root / "transport").rglob("manifest.json"))
+        key = json.loads(transport_manifest.read_text())["coreInputKey"]
+        target = self.project("consumer")
+        with self.fixture.fake_core(target):
+            (target / "sdkconfig.defaults").unlink()
+            with patch.object(core, "core_input_key", return_value="0" * 64):
+                with self.assertRaisesRegex(core.GeneratedSdkconfigError, "identity changed"):
+                    restore_shared_core(target, self.environment)
+            self.assertFalse(os.path.lexists(core._core_cache_entry_dir(target, self.environment, key)))
+            environment_root = target / ".pio/open-bike-build/core-cache" / self.environment
+            self.assertEqual([path.name for path in environment_root.iterdir()] if environment_root.exists() else [], [])
+
+    def test_invalid_private_entry_is_quarantined_before_import(self):
+        # A private entry that no longer validates must not be preferred over
+        # the transport: it is quarantined and the transport imported instead.
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin) as installed:
+            launcher = installed / "penv/bin/esptool"
+            launcher.write_text(f"#!{installed}/penv/bin/python\norigin={origin}\n")
+            self.publish(origin)
+            before = launcher.read_bytes()
+            key = core.core_input_key(origin, self.environment)
+            entry = core._core_cache_entry_dir(origin, self.environment, key)
+            archive = entry / core.CORE_ARCHIVE_FILENAME
+            entry.chmod(0o755)
+            archive.chmod(0o644)
+            archive.write_bytes(b"corrupt")
+            archive.chmod(0o444)
+            entry.chmod(0o555)
+            with self.assertRaisesRegex(core.GeneratedSdkconfigError, "digest"):
+                core._validate_core_cache_entry(origin, self.environment, key)
+            (origin / "sdkconfig.defaults").unlink()
+            self.assertTrue(restore_shared_core(origin, self.environment))
+            quarantined = list((entry.parent / "quarantine").iterdir())
+            self.assertEqual(len(quarantined), 1)
+            self.assertTrue(quarantined[0].name.startswith(key))
+            self.assertEqual((quarantined[0] / core.CORE_ARCHIVE_FILENAME).read_bytes(), b"corrupt")
+            core._validate_core_cache_entry(origin, self.environment, key)
+            self.assertEqual(launcher.read_bytes(), before)
+            self.assertTrue(core.prepare_generated_sdkconfigs(origin, self.environment))
 
     def test_ci_artifact_restores_on_a_runner_without_the_producer_cache(self):
         def ci(*arguments):
@@ -153,6 +239,50 @@ class SharedCoreCacheTests(unittest.TestCase):
             with patch("generated_sdkconfig.current_source_identity", return_value="dirty-" + "a" * 40):
                 publish_shared_core(origin, self.environment)
         self.assertFalse((self.root / "transport").exists())
+
+    def test_full_disk_skips_the_transport_and_the_next_clean_build_publishes_it(self):
+        origin = self.project("producer")
+        transport_root = self.root / "transport" / "cores-v1" / self.environment
+        with self.fixture.fake_core(origin):
+            core.record_generated_sdkconfig_defaults(origin, self.environment)
+            output = io.StringIO()
+            with (
+                patch(
+                    "shared_firmware_cache.shutil.copyfileobj",
+                    side_effect=OSError(errno.ENOSPC, "No space left on device"),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(publish_shared_core(origin, self.environment), "skipped")
+            # The skip leaves no temporary entry behind and names its numbers.
+            self.assertEqual(sorted(path.name for path in transport_root.iterdir()), [".lock"])
+            status = [
+                line for line in output.getvalue().splitlines()
+                if line.startswith("FIRMWARE_SHARED_CORE_CACHE ")
+            ]
+            self.assertEqual(len(status), 1)
+            self.assertRegex(
+                status[0],
+                r"^FIRMWARE_SHARED_CORE_CACHE schema=1 status=skipped reason=enospc "
+                rf"environment={self.environment} archiveBytes=[1-9][0-9]* freeBytes=[0-9]+$",
+            )
+            # The private entry is intact, so the next clean build publishes.
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(publish_shared_core(origin, self.environment), "published")
+                self.assertEqual(publish_shared_core(origin, self.environment), "present")
+            self.assertEqual(len(list(transport_root.rglob("transport.json"))), 1)
+
+    def test_other_transport_write_errors_still_fail_publication(self):
+        origin = self.project("producer")
+        with self.fixture.fake_core(origin):
+            core.record_generated_sdkconfig_defaults(origin, self.environment)
+            with patch(
+                "shared_firmware_cache.shutil.copyfileobj",
+                side_effect=OSError(errno.EACCES, "Permission denied"),
+            ):
+                with self.assertRaises(OSError):
+                    publish_shared_core(origin, self.environment)
+        self.assertEqual(list((self.root / "transport").rglob("transport.json")), [])
 
     def test_symlinked_shared_root_is_rejected(self):
         target = self.project("consumer")

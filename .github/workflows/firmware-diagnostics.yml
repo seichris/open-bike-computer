@@ -56,6 +56,7 @@ jobs:
           - WAVESHARE_AMOLED_175_DISPLAY_TEST
           - WAVESHARE_AMOLED_175_POWER_METRICS
           - WAVESHARE_AMOLED_175_LIGHT_SLEEP
+          - WAVESHARE_AMOLED_175_GNSS_REMOTE_DEBUG
           - WAVESHARE_AMOLED_206_REMOTE_DEBUG
           - WAVESHARE_AMOLED_206_MAPIO_DIAGNOSTICS
           - WAVESHARE_AMOLED_206_DISPLAY_TEST
@@ -66,6 +67,8 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Free runner disk for the core cache archive
+        uses: ./.github/actions/free-runner-disk
       - name: Restore pinned PlatformIO downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:

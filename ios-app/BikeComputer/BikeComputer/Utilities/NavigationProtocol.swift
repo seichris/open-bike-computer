@@ -708,7 +708,13 @@ enum NavigationHeading {
         let x = cos(lat1) * sin(lat2) -
             sin(lat1) * cos(lat2) * cos(deltaLongitude)
         guard abs(x) > 1e-12 || abs(y) > 1e-12 else { return nil }
-        return normalized(atan2(y, x) * 180 / .pi)
+        // atan2 yields (-180, 180]; `normalized` treats a negative value as
+        // Core Location's invalid-course sentinel, so bring every westward
+        // bearing into [0, 360) first or a leg heading west, or due north
+        // with the slightest westward skew, would be dropped and the last
+        // valid course would stick.
+        let degrees = atan2(y, x) * 180 / .pi
+        return normalized(degrees < 0 ? degrees + 360 : degrees)
     }
 }
 
@@ -1112,5 +1118,160 @@ struct FirmwareOperationReceipt: Codable, Equatable, Sendable {
     func matches(operationID: String?, image: String?) -> Bool {
         protocolVersion == 1 && operationID != nil && image != nil &&
         operationId == operationID && imageSha256 == image
+    }
+}
+
+/// CAP2 board display TLV (`boardDisplayTLVType`), negotiated by extended
+/// feature bit 4. Absent metadata preserves old firmware behavior; an advertised
+/// but malformed record is rejected by the capability transaction as a whole.
+struct DeviceDisplayMetadata: Equatable {
+    let displayKind: UInt8
+    let inputFlags: UInt8
+    let width: UInt16
+    let height: UInt16
+    let supportedSettings: UInt8
+
+    init?(payload: Data) {
+        let bytes = Array(payload)
+        guard bytes.count == Int(RideBLEGeneratedProtocolV1.boardDisplayPayloadBytes),
+              bytes[0] == RideBLEGeneratedProtocolV1.boardDisplayVersion,
+              bytes[1] == 1 || bytes[1] == 2,
+              bytes[2] & ~3 == 0, bytes[2] != 0,
+              bytes[7] & ~31 == 0 else { return nil }
+        displayKind = bytes[1]
+        inputFlags = bytes[2]
+        width = UInt16(bytes[3]) | UInt16(bytes[4]) << 8
+        height = UInt16(bytes[5]) | UInt16(bytes[6]) << 8
+        supportedSettings = bytes[7]
+        guard width > 0, height > 0, width <= 2048, height <= 2048 else { return nil }
+        if displayKind == 2 && supportedSettings & 1 != 0 { return nil }
+    }
+
+    var isEPaper: Bool { displayKind == 2 }
+    var supportsBrightness: Bool { supportedSettings & 1 != 0 }
+    var supportsTapToCycle: Bool { inputFlags & 2 != 0 && supportedSettings & 4 != 0 }
+    var supportsContinuousCamera: Bool { supportedSettings & 8 != 0 }
+    var supportsDisconnectedSleep: Bool { supportedSettings & 16 != 0 }
+}
+
+/// CAP2 TLV type 5: which position sources the device has (bit 0 phone
+/// positions over BLE, bit 1 an onboard GNSS receiver) and its receiver module.
+struct DevicePositionSourceMetadata: Equatable {
+    static let phoneSourceFlag: UInt8 = 1
+    static let gnssSourceFlag: UInt8 = 2
+
+    let sourceFlags: UInt8
+    let receiverModule: UInt8
+
+    init?(payload: Data) {
+        let bytes = Array(payload)
+        guard bytes.count == Int(RideBLEGeneratedProtocolV1.positionSourcePayloadBytes),
+              bytes[0] == RideBLEGeneratedProtocolV1.positionSourceVersion,
+              bytes[1] & ~3 == 0, bytes[1] & Self.phoneSourceFlag != 0,
+              bytes[2] <= 1, bytes[3] == 0 else { return nil }
+        // The GNSS flag and a receiver module come together or not at all.
+        guard (bytes[1] & Self.gnssSourceFlag != 0) == (bytes[2] != 0) else { return nil }
+        sourceFlags = bytes[1]
+        receiverModule = bytes[2]
+    }
+
+    var hasGNSSReceiver: Bool { sourceFlags & Self.gnssSourceFlag != 0 }
+    var receiverName: String? {
+        switch receiverModule {
+        case 1: return "Quectel LC76G"
+        default: return nil
+        }
+    }
+    /// Copy for the device details: the phone alone, or the receiver first.
+    var label: String {
+        if let receiverName { return "Device GNSS (\(receiverName)), iPhone when no fix" }
+        return "iPhone"
+    }
+}
+
+/// The device's live position-source report from its `DSTS` status: which
+/// input populates its position record now and, where a receiver is fitted,
+/// the receiver's state. Diagnostic; it carries no coordinate.
+struct DevicePositionSourceStatus: Equatable {
+    let active: String
+    let uptimeMs: Int?
+    let gnssFitted: Bool
+    let module: String?
+    let transport: String?
+    let present: Bool?
+    let locked: Bool?
+    let fixValid: Bool?
+    let satellites: Int?
+    let fixes: Int?
+    let sentences: Int?
+    let invalid: Int?
+    let lastFixAgeMs: Int?
+    let resetPulses: Int?
+
+    init?(json: [String: Any]) {
+        guard let active = json["active"] as? String,
+              ["none", "phone", "gnss"].contains(active),
+              let gnssFitted = json["gnssFitted"] as? Bool else { return nil }
+        self.active = active
+        self.gnssFitted = gnssFitted
+        uptimeMs = (json["uptimeMs"] as? NSNumber)?.intValue
+        module = json["module"] as? String
+        transport = json["transport"] as? String
+        present = json["present"] as? Bool
+        locked = json["locked"] as? Bool
+        fixValid = json["fixValid"] as? Bool
+        satellites = (json["satellites"] as? NSNumber)?.intValue
+        fixes = (json["fixes"] as? NSNumber)?.intValue
+        sentences = (json["sentences"] as? NSNumber)?.intValue
+        invalid = (json["invalid"] as? NSNumber)?.intValue
+        lastFixAgeMs = (json["lastFixAgeMs"] as? NSNumber)?.intValue
+        resetPulses = (json["resetPulses"] as? NSNumber)?.intValue
+    }
+
+    var activeLabel: String {
+        switch active {
+        case "gnss": return "Device GNSS"
+        case "phone": return "iPhone"
+        default: return "none yet"
+        }
+    }
+
+    var receiverLabel: String {
+        guard gnssFitted else { return "not fitted" }
+        switch module {
+        case "lc76g": return "Quectel LC76G"
+        case let name?: return name
+        default: return "fitted"
+        }
+    }
+
+    var fixLabel: String {
+        guard gnssFitted else { return "n/a" }
+        if fixValid == true {
+            // The device holds the last interval's state; a fix older than
+            // the arbiter's three-second hold no longer feeds the record.
+            if let lastFixAgeMs, lastFixAgeMs > 3000 {
+                return "stale, last fix \(lastFixAgeMs / 1000) s ago"
+            }
+            return "valid"
+        }
+        if locked == true { return "no fix yet" }
+        return present == true ? "waiting for sentences" : "receiver not answering"
+    }
+
+    var sentencesLabel: String {
+        guard let sentences else { return "unknown" }
+        return "\(sentences) valid, \(invalid ?? 0) invalid"
+    }
+
+    var lastFixLabel: String {
+        guard let lastFixAgeMs else { return "never" }
+        return lastFixAgeMs < 1000 ? "now" : "\(lastFixAgeMs / 1000) s ago"
+    }
+
+    var uptimeLabel: String {
+        guard let uptimeMs else { return "unknown" }
+        let seconds = uptimeMs / 1000
+        return String(format: "%d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
     }
 }

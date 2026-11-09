@@ -57,6 +57,24 @@ commands and live toolchain; every mismatch runs hosted tests. See
 `docs/local-ci-results.md` for trust, setup and fallback behavior. Do not use these
 receipts to replace firmware, app-build symbols, release or physical acceptance.
 
+### 1.75-inch firmware simulator
+
+For on-demand boot, UI, and navigation debugging, load an ordinary
+`WAVESHARE_AMOLED_175` build into the sibling `seichris/esp32sim` checkout.
+[Simulator quickstart](https://github.com/seichris/esp32sim/blob/main/examples/bicino175/README.md)
+
+- The browser shows the live display and serial logs and provides touch and
+  BOOT controls.
+- Scripted replay exercises pairing, route, and GPS inputs without a phone.
+- Bicino Dev sends real routes and GPS through the macOS BLE bridge.
+
+Use a preloaded virtual microSD image for repeatable map rendering. To test
+map installs from Bicino Dev, build `WAVESHARE_AMOLED_175_SIMULATOR` and launch
+with `--map-lan-ip` and `--sd-image-rw`. Reuse the card image
+to retain installed maps across restarts. Use a physical board to validate
+hotspot joining, radio and sensor behavior, power and sleep, and real display,
+touch, and SD timing.
+
 ### ESP32 firmware
 
 Before the first build/upload/device-debug action in a task, identify which
@@ -74,6 +92,11 @@ python3 tools/build_firmware.py WAVESHARE_AMOLED_206 \
   --device-serial SERIAL_FROM_PIO_DEVICE_LIST
 pio device monitor -b 115200
 ```
+
+A 1.75 with the GNSS receiver populated is the separate target
+`WAVESHARE_AMOLED_175_GNSS`; `pio device list` cannot tell it from a plain 1.75,
+so identify the variant by its enrolled serial (`tools/device_registry.py`)
+before building or flashing it. See `hardware/waveshare-amoled-175-gnss.md`.
 
 Treat `/dev/cu.usbmodem*` and equivalent port names as transient. When more than
 one ESP32 is attached, record the hardware serial for each physical board before
@@ -314,7 +337,14 @@ libraries retain production and lifecycle qualification; renderer/debug/radio
 inputs also select their distinct profiles. Common board, runtime and configuration
 changes qualify both 175 and 206 with all four regular profiles. Unknown libraries
 retain the full selected hardware matrix. A 206-specific path cannot select only
-175. Explicit manual hardware selection and release CI retain every regular profile.
+175. Automatic runs also build the experimental e-paper ordinary and production
+profiles for any change that can reach that image; e-paper-named sources select
+only its six profiles. The experimental GNSS 1.75 variant
+(`WAVESHARE_AMOLED_175_GNSS`) rides the same way: its ordinary and production
+profiles join shared changes, its board file alone selects its three profiles,
+and the manual selector `175_gnss` builds them on demand. Explicit manual
+hardware selection and release CI retain every regular profile, and their
+`all` selection stays AMOLED-only.
 Image reserve, debug-route exclusions, factory packaging and lifecycle assertions
 remain mandatory. Zone fixtures run once with both board definitions under CI Gate.
 

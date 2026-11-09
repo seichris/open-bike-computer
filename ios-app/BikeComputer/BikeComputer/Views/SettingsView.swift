@@ -5,6 +5,7 @@
 //  Settings view for runtime map configuration via BLE
 //
 
+import Combine
 import SwiftUI
 import UIKit
 import CoreLocation
@@ -15,6 +16,7 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
     case gpxRouteImport(OfflineRouteSaveDraft)
+    case routeCreator
     case savedMapShare(URL)
 
     var id: String {
@@ -25,6 +27,8 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "strava-route-import"
         case .gpxRouteImport(let draft):
             return "gpx-route-import:\(draft.id.uuidString)"
+        case .routeCreator:
+            return "route-creator"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -229,6 +233,10 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     destinationStore: destinationStore,
                     onSaveOnlineRoute: onSaveOnlineRoute,
+                    onCreateRoute: {
+                        routeImportFeedback = nil
+                        presentedSheet = .routeCreator
+                    },
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
                     },
@@ -374,6 +382,15 @@ struct SettingsView: View {
             )
         case .gpxRouteImport(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                routeImportFeedback = result.message
+                presentedSheet = nil
+            }
+        case .routeCreator:
+            RouteCreatorView(
+                library: routeLibrary,
+                destinationStore: destinationStore,
+                currentLocation: currentLocation
+            ) { result in
                 routeImportFeedback = result.message
                 presentedSheet = nil
             }
@@ -2231,6 +2248,9 @@ private struct FirmwareUpdateSettingsSection: View {
                 title: "Target",
                 value: bleManager.firmwareTarget.isEmpty ? "unknown" : bleManager.firmwareTarget
             )
+            if let positionSource = bleManager.positionSourceMetadata {
+                SettingsValueRow(title: "Position Source", value: positionSource.label)
+            }
             SettingsValueRow(
                 title: "Status",
                 value: manager.statusMessage.isEmpty ? bleManager.firmwareUpdateStatus : manager.statusMessage
@@ -2708,6 +2728,9 @@ private struct MapStyleSettingsView: View {
         if !bleManager.supportsTopographicContours {
             return "Update the Bike Computer firmware to render topographic contours."
         }
+        if bleManager.isEPaperDevice {
+            return "This e-paper display installs topographic maps but does not draw contour lines."
+        }
         if !bleManager.topographicContoursAvailable {
             return "Download and install a topographic map before enabling contours."
         }
@@ -2760,7 +2783,7 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
-            if screen == .map {
+            if screen == .map && bleManager.supportsContinuousCamera {
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
                         Text("North Up").tag(0)
@@ -2773,7 +2796,7 @@ private struct MapStyleSettingsView: View {
                 }
             }
 
-            if screen == .mapPlusNavigation {
+            if screen == .mapPlusNavigation && !bleManager.isEPaperDevice {
                 Section(header: Text("Map Mode"), footer: Text(
                     bleManager.supportsMapNavigationOrientation
                         ? "Course Up follows your direction of travel. North Up keeps the map bearing fixed. Label orientation is configured separately."
@@ -3116,86 +3139,97 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(
-                header: Text("Device Brightness"),
-                footer: Text(displayInactivityFooter)
-            ) {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Brightness")
-                        Spacer()
-                        Text("\(Int(bleManager.deviceBrightnessPercent))%")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
-                        .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
-                            bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+            if bleManager.supportsDisplayBrightness {
+                Section(
+                    header: Text("Device Brightness"),
+                    footer: Text(displayInactivityFooter)
+                ) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Brightness")
+                            Spacer()
+                            Text("\(Int(bleManager.deviceBrightnessPercent))%")
+                                .foregroundColor(.secondary)
                         }
-                }
+                        Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
+                            .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
+                                bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+                            }
+                    }
 
-                Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
-                    .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                    Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
+                        .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+                                value: newValue ? 1 : 0
+                            )
+                        }
+                        .disabled(!bleManager.supportsAutomaticDisplayOff)
+                    if bleManager.supportsDisplayInactivityTimeouts {
+                        Picker("Dim After", selection: $bleManager.displayDimTimeout) {
+                            ForEach(DisplayDimTimeout.allCases.filter {
+                                $0.rawValue < bleManager.displayOffTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayDimTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+
+                        Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
+                            ForEach(DisplayOffTimeout.allCases.filter {
+                                $0.rawValue > bleManager.displayDimTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayOffTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+            }
+            if bleManager.supportsDisconnectedSleep {
+                Section(
+                    header: Text("Power"),
+                    footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
+                ) {
+                    Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
+                        ForEach(DisconnectedSleepTimeout.allCases) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
                         bleManager.sendSetting(
-                            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
-                            value: newValue ? 1 : 0
+                            id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                            value: newValue.settingValue
                         )
                     }
-                    .disabled(!bleManager.supportsAutomaticDisplayOff)
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
 
-                if bleManager.supportsDisplayInactivityTimeouts {
-                    Picker("Dim After", selection: $bleManager.displayDimTimeout) {
-                        ForEach(DisplayDimTimeout.allCases.filter {
-                            $0.rawValue < bleManager.displayOffTimeout.rawValue
-                        }) { timeout in
-                            Text(timeout.title).tag(timeout)
+            }
+            if bleManager.supportsTapToCycle {
+                Section(header: Text("Screen Navigation")) {
+                    Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                        .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                            bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
                         }
-                    }
-                    .onChange(of: bleManager.displayDimTimeout) { _ in
-                        bleManager.sendDisplayInactivityTimeouts()
-                    }
-                    .disabled(!bleManager.automaticDisplayOffEnabled)
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
 
-                    Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
-                        ForEach(DisplayOffTimeout.allCases.filter {
-                            $0.rawValue > bleManager.displayDimTimeout.rawValue
-                        }) { timeout in
-                            Text(timeout.title).tag(timeout)
-                        }
-                    }
-                    .onChange(of: bleManager.displayOffTimeout) { _ in
-                        bleManager.sendDisplayInactivityTimeouts()
-                    }
-                    .disabled(!bleManager.automaticDisplayOffEnabled)
+            }
+            if bleManager.isEPaperDevice {
+                Section("E-paper controls") {
+                    Text("Up and down change screens. Press the center key for actions; hold it to return from screen controls.")
+                    Text("The display keeps its image without power. Check the connection and GPS status before relying on displayed guidance.")
                 }
             }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(
-                header: Text("Power"),
-                footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
-            ) {
-                Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
-                    ForEach(DisconnectedSleepTimeout.allCases) { timeout in
-                        Text(timeout.title).tag(timeout)
-                    }
-                }
-                .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
-                    bleManager.sendSetting(
-                        id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
-                        value: newValue.settingValue
-                    )
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Screen Navigation")) {
-                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                    }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             DeviceSoundsSettingsSection()
         }
         .navigationTitle("Hardware Customization")
@@ -4167,6 +4201,8 @@ private struct DeveloperSettingsView: View {
                 }
             }
 
+            PositionSourceStatusSection()
+
 #if DEBUG
             RemoteDeviceDebugSettingsSection()
             RendererBenchmarkReplaySettingsSection(
@@ -4361,6 +4397,73 @@ private struct DeveloperSettingsView: View {
             return build
         case (nil, nil):
             return "Unknown"
+        }
+    }
+}
+
+/// Live position-source report of the connected device (`DSTS.positionSource`):
+/// which input feeds its position now and the onboard receiver's state. The
+/// section polls the status while it is visible and shows no coordinate.
+private struct PositionSourceStatusSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @State private var now = Date()
+
+    private var reportAgeLabel: String {
+        guard let receivedAt = bleManager.devicePositionSourceStatusReceivedAt else {
+            return "never"
+        }
+        // A report that arrived after the last tick is fresh, not negative.
+        let seconds = max(0, Int(now.timeIntervalSince(receivedAt).rounded(.down)))
+        if seconds < 3 { return "just now" }
+        return seconds < 10 ? "\(seconds) s ago" : "\(seconds) s ago, stale"
+    }
+
+    var body: some View {
+        Section(
+            header: Text("Position Source"),
+            footer: Text("Live from the device's status, refreshed every two seconds while this screen is open. Coordinates are not shown.")
+        ) {
+            if let status = bleManager.devicePositionSourceStatus {
+                SettingsValueRow(title: "Report", value: reportAgeLabel)
+                SettingsValueRow(title: "Device uptime", value: status.uptimeLabel)
+                SettingsValueRow(title: "Active source", value: status.activeLabel)
+                SettingsValueRow(title: "Receiver", value: status.receiverLabel)
+                if status.gnssFitted {
+                    SettingsValueRow(title: "Transport", value: status.transport ?? "unknown")
+                    SettingsValueRow(title: "Answering", value: status.present == true ? "yes" : "no")
+                    SettingsValueRow(title: "Sentences", value: status.sentencesLabel)
+                    SettingsValueRow(title: "Fix", value: status.fixLabel)
+                    SettingsValueRow(
+                        title: "Satellites used",
+                        value: status.satellites.map(String.init) ?? "unknown"
+                    )
+                    SettingsValueRow(
+                        title: "Fixes delivered",
+                        value: status.fixes.map(String.init) ?? "unknown"
+                    )
+                    SettingsValueRow(title: "Last fix", value: status.lastFixLabel)
+                    SettingsValueRow(
+                        title: "Reset pulses",
+                        value: status.resetPulses.map(String.init) ?? "0"
+                    )
+                }
+            } else {
+                SettingsValueRow(
+                    title: "Status",
+                    value: "not reported (no device, or older firmware)"
+                )
+            }
+        }
+        .task {
+            // One polling loop per appearance of the section. A timer
+            // publisher held by the view value would be rebuilt, and its
+            // countdown restarted, whenever the parent re-renders, which
+            // Developer Settings does with every location update.
+            while !Task.isCancelled {
+                now = Date()
+                _ = bleManager.requestDeviceTransferStatus()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
     }
 }

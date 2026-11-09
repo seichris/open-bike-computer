@@ -796,6 +796,15 @@ static void drawCurrentPositionMarker(lv_event_t *event) {
   const int16_t size = lv_obj_get_width(marker);
   const lv_color_t color =
       lv_color_hex(navigation_visual_style::ROUTE_BLUE_RGB888);
+  if constexpr (board::display::monochrome) {
+    // A white backing keeps the black marker distinguishable over black roads.
+    lv_draw_rect_dsc_t backing;
+    lv_draw_rect_dsc_init(&backing);
+    backing.bg_color = lv_color_white();
+    backing.bg_opa = LV_OPA_COVER;
+    backing.radius = LV_RADIUS_CIRCLE;
+    lv_draw_rect(layer, &backing, &bounds);
+  }
 
   if (routeOverlay.hasRoute() || hasCurrentNavigationData()) {
     drawNavigationMarker(layer, bounds, size, color,
@@ -961,9 +970,9 @@ Maps::Maps() {}
 #ifndef TFT_LIGHTGREY
 #define TFT_LIGHTGREY 0xC618
 #endif
-#ifndef BACKGROUND_COLOR
-#define BACKGROUND_COLOR 0x0000
-#endif
+// Map canvas background: white on a monochrome panel, black elsewhere.
+static constexpr uint16_t kMapBackgroundColor =
+    board::display::monochrome ? 0xFFFF : 0x0000;
 
 // Stubbed out render map functions for now to focus on vector maps
 uint16_t Maps::lon2posx(float f_lon, uint8_t zoom, uint16_t tileSize) {
@@ -1961,7 +1970,13 @@ bool Maps::fillPolygon(
           std::min<int32_t>(surface.width, scanlineNodes[index + 1]);
       if (startX >= endX)
         continue;
-      std::fill(row + startX, row + endX, p.color);
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal hatching instead of a fill.
+        for (int32_t x = startX; x < endX; ++x)
+          row[x] = ((x + pixelY) % 16 == 0) ? 0x0000 : 0xFFFF;
+      } else {
+        std::fill(row + startX, row + endX, p.color);
+      }
     }
   }
   return true;
@@ -2870,7 +2885,7 @@ bool Maps::readVectorMap(
   const ScreenMapRenderSettings &style = context.style;
   const bool mapNavigationActive = context.guidanceScreenActive;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
-  surface.clear(BACKGROUND_COLOR);
+  surface.clear(kMapBackgroundColor);
   poiReservedRegions.clear();
   poiLayoutSignature = 1469598103934665603ULL;
 
@@ -3068,6 +3083,10 @@ bool Maps::readVectorMap(
       projectedPolygon.points.clear();
       projectedPolygon.points.reserve(projectedGround->size() + 1U);
       projectedPolygon.color = polygon.color;
+      if constexpr (board::display::monochrome) {
+        // Sparse diagonal area hatching is distinct from roads and route weight.
+        projectedPolygon.color = 0xFFFF;
+      }
       int16_t minX = 32767;
       int16_t minY = 32767;
       int16_t maxX = -32768;
@@ -3102,6 +3121,7 @@ bool Maps::readVectorMap(
           area < static_cast<int32_t>(minimumSize) * minimumSize) {
         return true;
       }
+      projectedPolygon.typeId = polygon.typeId;
       return fillPolygon(projectedPolygon, surface, polygonScanlineNodes);
     };
 
@@ -3212,8 +3232,11 @@ bool Maps::readVectorMap(
           !isLineVisible(line.typeId, line.color, line.width, blockStyle)) {
         continue;
       }
-      const uint16_t displayColor = map_line_style::displayColor(
-          line.typeId, line.color, line.width, mapNavigationActive);
+      const uint16_t displayColor =
+          board::display::monochrome
+              ? 0x0000
+              : map_line_style::displayColor(line.typeId, line.color,
+                                             line.width, mapNavigationActive);
       const uint8_t baseWidth =
           shouldBoostLineWidth(line.typeId, line.width)
               ? blockStyle.streetLineWidth
@@ -4106,11 +4129,7 @@ bool Maps::readVectorMap(
     const map_poi_layout::Viewport poiViewport{
         static_cast<float>(poiSurface.width),
         static_cast<float>(poiSurface.height),
-#if defined(WAVESHARE_AMOLED_175)
-        TFT_WIDTH * 0.5F
-#else
-        0.0F
-#endif
+        board::display::round ? TFT_WIDTH * 0.5F : 0.0F,
     };
     poiCandidates.reserve(map_poi_layout::kMaximumCandidates);
     MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReserved;
@@ -4736,6 +4755,7 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
       mapRenderSettings.mapNavigationBirdsEyeEnabled);
   request.context = captureRenderContextForScreen(
       nowMs, mapVisible, guidanceScreenActive);
+  captureRequestProvenance(request);
   request.styleSignature = styleSignature(request.context.style);
   request.navigationSignature =
       navigationSignatureForScreen(guidanceScreenActive);
@@ -4804,7 +4824,11 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
 
   request.rotationRad = 0.0;
   if (rotationMode == ROT_COURSE_UP) {
-    if (hasPresentedPose && presentedPose.headingValid) {
+    if (cameraHeadingValid_) {
+      // The family's filtered camera heading wins where it is set.
+      request.rotationRad =
+          -cameraHeadingDegrees_ * 3.14159265358979323846 / 180.0;
+    } else if (hasPresentedPose && presentedPose.headingValid) {
       request.rotationRad =
           -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
     } else if (publishedMapFrame &&
@@ -5239,6 +5263,11 @@ void Maps::renderWorkerLoop() {
       result.renderStridePixels = request.renderStridePixels;
       result.rotationRad = request.rotationRad;
       result.followPosition = request.context.followPosition;
+      result.capturedFixSequence = request.capturedFixSequence;
+      result.capturedFixAtMs = request.capturedFixAtMs;
+      result.capturedSpeedKmh = request.capturedSpeedKmh;
+      result.capturedHeadingDegrees = request.capturedHeadingDegrees;
+      result.capturedHeadingValid = request.capturedHeadingValid;
       result.projection = makeRequestProjection(request);
       result.viewport.zoom = request.zoom;
       result.viewport.rasterOriginX = request.center.x;
@@ -5507,8 +5536,13 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
     const auto projected = readyRenderResult.projection.projectWorld(current);
     double desiredRotation = readyRenderResult.rotationRad;
     if (rotationMode == ROT_COURSE_UP && presentedPose.headingValid) {
-      desiredRotation =
-          -presentedPose.headingDegrees * 3.14159265358979323846 / 180.0;
+      if (cameraHeadingValid_) {
+        desiredRotation =
+            -cameraHeadingDegrees_ * 3.14159265358979323846 / 180.0;
+      } else {
+        desiredRotation = -presentedPose.headingDegrees *
+                          3.14159265358979323846 / 180.0;
+      }
     } else if (rotationMode == ROT_NORTH_UP) {
       desiredRotation = 0.0;
     }
@@ -5516,22 +5550,9 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
         readyRenderResult.rotationRad * 180.0 / 3.14159265358979323846,
         desiredRotation * 180.0 / 3.14159265358979323846) *
         3.14159265358979323846 / 180.0;
-    const bool covered = map_profile_protocol::STABLE_CAMERA_ENABLED
-        ? map_camera::cropCovered(
-            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
-            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
-            readyRenderResult.overscanPixels, MAP_RENDER_SAFETY_PIXELS,
-            MAP_RENDER_ROUND_VIEWPORT)
-        : projected.valid && map_presentation::frameCoversViewport(
-            readyRenderResult.renderWidth, readyRenderResult.renderHeight,
-            readyRenderResult.viewportWidth, readyRenderResult.viewportHeight,
-            {projected.x, projected.y},
-            {readyRenderResult.projection.anchorX() -
-                 readyRenderResult.overscanPixels,
-             readyRenderResult.projection.anchorY() -
-                 readyRenderResult.overscanPixels},
-            rotationDelta, MAP_RENDER_SAFETY_PIXELS,
-            MAP_RENDER_ROUND_VIEWPORT);
+    const bool covered = readyFrameCovered(readyRenderResult, projected.valid,
+                                           projected.x, projected.y,
+                                           rotationDelta);
     if (!covered) {
 #if FIRMWARE_DIAGNOSTICS
       renderer_diagnostics::noteJobForWindow(
@@ -5617,6 +5638,16 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
   visibleRenderResult = result;
   cameraLag.reflected(result.requestedAtMs);
+  recoveryPending_ = false;
+  visibleFrameAcceptedAtMs_ = nowMs;
+  framePublication_ = {
+      result.version.sequence,
+      result.capturedFixSequence,
+      result.capturedFixAtMs,
+      result.capturedSpeedKmh,
+      result.capturedHeadingDegrees,
+      result.capturedHeadingValid,
+  };
   lastCompletedRenderDurationMs = std::max<uint32_t>(250U, result.durationMs);
   visibleProjection = result.projection;
   hasVisibleProjection = true;
@@ -5997,59 +6028,6 @@ bool Maps::presentationGestureOwnsTransforms() const {
          pinchPresentation.active || pinchPresentation.settlementPending;
 }
 
-void Maps::serviceStableCamera(uint32_t nowMs) {
-  if (!map_profile_protocol::STABLE_CAMERA_ENABLED ||
-      !publishedMapFrame || !hasVisibleProjection)
-    return;
-  const bool current = renderResultStillCurrent(visibleRenderResult);
-  const auto target = visibleRenderResult.followPosition && hasPresentedPose
-      ? map_transform::WorldPoint{presentedPose.position.x, presentedPose.position.y}
-      : visibleRenderResult.center;
-  double bearing = visibleRenderResult.rotationRad;
-  if (rotationMode == ROT_NORTH_UP)
-    bearing = 0;
-  else if (hasPresentedPose && presentedPose.headingValid)
-    bearing = -presentedPose.headingDegrees * map_presentation::kPi / 180.0;
-  const bool required = !current ||
-      map_camera::needsRefresh(visibleProjection, target, bearing);
-  cameraLag.observe(required, nowMs);
-  renderer_diagnostics::CameraSample sample;
-  sample.enabled = true;
-  sample.hidden = false;
-  sample.updateRequired = required;
-  sample.frameSequence = visibleRenderResult.version.sequence;
-  sample.sceneGeneration = visibleRenderResult.sceneGeneration;
-  sample.sceneReused = visibleRenderResult.sceneReused;
-  sample.requestedAtMs = visibleRenderResult.requestedAtMs;
-  sample.observedAtMs = nowMs;
-  sample.lagMs = cameraLag.age(nowMs);
-  sample.displayedBearingTenths = static_cast<int16_t>(std::lround(
-      visibleRenderResult.rotationRad * 1800 / map_presentation::kPi));
-  sample.targetBearingTenths = static_cast<int16_t>(std::lround(
-      bearing * 1800 / map_presentation::kPi));
-  sample.markerAngleTenths = hasPresentedPose && presentedPose.headingValid
-      ? static_cast<uint16_t>(std::lround(map_camera::markerAngle(
-            visibleProjection, {presentedPose.position.x, presentedPose.position.y},
-            presentedPose.headingDegrees) * 10)) % 3600
-      : 0;
-  sample.effectiveTopScalePermille = visibleProjection.isBirdsEye()
-      ? static_cast<uint16_t>(std::lround(visibleProjection.config().topEdgeScale * 1000))
-      : 1000;
-  sample.requestedMode = isMapGuidanceScreenActive()
-      ? mapRenderSettings.mapNavigationRotationMode : mapRenderSettings.mapRotationMode;
-  sample.effectiveMode = visibleRenderResult.effectiveRotationMode;
-  sample.labelDensity = visibleRenderResult.labelDensity;
-  sample.labelOrientation = visibleRenderResult.labelOrientation;
-  renderer_diagnostics::noteCameraForWindow(
-      visibleRenderResult.version.diagnosticsWindowId, sample);
-  cameraEvidence = sample;
-  if (required && uint32_t(nowMs - lastCameraRequestMs) >= map_camera::kRefreshIntervalMs) {
-    RenderRequest request;
-    if (buildRenderRequest(zoom, nowMs, request) && submitRenderRequest(request))
-      lastCameraRequestMs = nowMs;
-  }
-}
-
 renderer_diagnostics::CameraSample Maps::captureCameraMetadata() const {
   // Called only by the UI task at the completed full-panel flush boundary.
   // A gesture or another screen does not inherit stale map evidence.
@@ -6115,6 +6093,79 @@ bool Maps::takeFramePublication() {
   return pending;
 }
 
+bool Maps::takeFramePublication(FramePublication &publication) {
+  const bool pending = framePublicationPending;
+  if (pending)
+    publication = framePublication_;
+  framePublicationPending = false;
+  return pending;
+}
+
+void Maps::setCameraHeading(double degrees, bool valid) {
+  cameraHeadingDegrees_ = map_presentation::normalizeDegrees(degrees);
+  cameraHeadingValid_ = valid;
+}
+
+Maps::CameraState Maps::captureCameraState() const {
+  CameraState state;
+  state.hasBase = publishedMapFrame && hasVisibleProjection;
+  state.baseCompatible =
+      state.hasBase && renderResultStillCurrent(visibleRenderResult);
+  state.mapCoverageAvailable = state.hasBase && publishedMapFound;
+  state.baseAcceptedAtMs = visibleFrameAcceptedAtMs_;
+  if (state.hasBase) {
+    state.baseFixSequence = visibleRenderResult.capturedFixSequence;
+    state.baseCameraSequence = visibleRenderResult.version.sequence;
+  }
+
+  if (state.hasBase && hasPresentedPose) {
+    const map_transform::WorldPoint rider{presentedPose.position.x,
+                                          presentedPose.position.y};
+    const auto projected = visibleProjection.projectWorld(rider);
+    state.riderProjected = projected.valid;
+    if (projected.valid) {
+      const double x = projected.x - visibleRenderResult.overscanPixels;
+      const double y = projected.y - visibleRenderResult.overscanPixels;
+      const double anchorX = visibleProjection.anchorX() -
+                             visibleRenderResult.overscanPixels;
+      const double anchorY = visibleProjection.anchorY() -
+                             visibleRenderResult.overscanPixels;
+      state.riderOffsetPixels = std::hypot(x - anchorX, y - anchorY);
+      state.riderInsideViewport =
+          x >= MAP_RENDER_SAFETY_PIXELS &&
+          y >= MAP_RENDER_SAFETY_PIXELS &&
+          x < visibleRenderResult.viewportWidth - MAP_RENDER_SAFETY_PIXELS &&
+          y < visibleRenderResult.viewportHeight - MAP_RENDER_SAFETY_PIXELS;
+    }
+  }
+  if (state.hasBase && cameraHeadingValid_ &&
+      rotationMode == ROT_COURSE_UP) {
+    const double renderedDegrees =
+        -visibleRenderResult.rotationRad * 180.0 /
+        map_presentation::kPi;
+    state.headingDeltaDegrees = map_presentation::headingDeltaDegrees(
+        renderedDegrees, cameraHeadingDegrees_);
+  }
+
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) == pdTRUE) {
+    const map_render_job::State jobState = renderJobs.state();
+    state.renderRunning = jobState == map_render_job::State::Rendering;
+    const uint32_t activeSequence =
+        state.renderRunning ? renderJobs.active().sequence : 0;
+    state.successorPending =
+        state.renderRunning && latestRenderRequestValid &&
+        latestRenderRequest.version.sequence > activeSequence;
+    if (latestRenderRequestValid) {
+      state.latestRequestedFixSequence =
+          latestRenderRequest.capturedFixSequence;
+    }
+    xSemaphoreGive(renderStateMutex);
+  }
+  state.recoveryPending = recoveryPending_;
+  return state;
+}
+
 bool Maps::takeRenderFailure() {
   if (renderStateMutex == nullptr)
     return false;
@@ -6122,6 +6173,8 @@ bool Maps::takeRenderFailure() {
     return false;
   const bool pending = renderFailurePending;
   renderFailurePending = false;
+  if (pending)
+    recoveryPending_ = true;
   xSemaphoreGive(renderStateMutex);
   return pending;
 }
@@ -6222,122 +6275,14 @@ void Maps::coords2map(double lat, double lon, tileBounds bound,
  * @brief Load No Map Image
  *
  */
-#ifndef USE_ARDUINO_GFX
-void Maps::showNoMap(TFT_eSprite &map) {
-  map.drawPngFile(noMapFile, (Maps::mapScrWidth / 2) - 50,
-                  (Maps::mapScrHeight / 2) - 50);
-  map.drawCenterString("NO MAP FOUND", (Maps::mapScrWidth / 2),
-                       (Maps::mapScrHeight >> 1) + 65, &fonts::DejaVu18);
-}
-#else
 // Removed duplicate showNoMap
 // void Maps::showNoMap(lv_obj_t *canvas) { ... }
-#endif
 
 /**
  * @brief Draw map widgets
  *
  */
 void Maps::drawMapWidgets(const MapSettings &mapSettings) {
-  // Simplified widgets - commenting out unsupported TFT calls
-  /*
-  Maps::mapSprite.setTextColor(TFT_WHITE, TFT_WHITE);
-
-  uint16_t mapHeading = 0;
-#ifdef ENABLE_COMPASS
-  if (mapSettings.mapRotationComp)
-    mapHeading = compass.getHeading();
-  else
-    mapHeading = gps.gpsData.heading;
-#else
-  mapHeading = gps.gpsData.heading;
-#endif
-
-  if (mapSettings.showMapCompass)
-  {
-    Maps::mapSprite.fillRectAlpha(Maps::mapScrWidth - 48, 0, 48, 48, 95,
-TFT_BLACK);
-    if (mapSettings.compassRotation)
-      Maps::mapSprite.pushImageRotateZoom(Maps::mapScrWidth - 24, 24, 24, 24,
-360 - mapHeading, 1, 1, 48, 48, (uint16_t *)mini_compass, TFT_BLACK);
-    else
-      Maps::mapSprite.pushImage(Maps::mapScrWidth - 48, 0, 48, 48, (uint16_t
-*)mini_compass, TFT_BLACK);
-  }
-
-  uint16_t mapHeight = 0;
-  if (mapSettings.mapFullScreen)
-    mapHeight = Maps::mapScrFull;
-  else
-    mapHeight = Maps::mapScrHeight;
-
-  uint8_t toolBarOffset = 0;
-  uint8_t toolBarSpace = 0;
-#ifdef LARGE_SCREEN
-  toolBarOffset = 100;
-  toolBarSpace = 60;
-#endif
-#ifndef LARGE_SCREEN
-  toolBarOffset = 80;
-  toolBarSpace = 50;
-#endif
-
-  if (showMapToolBar)
-  {
-    if (mapSettings.mapFullScreen)
-      Maps::mapSprite.pushImage(10, mapHeight - toolBarOffset, 48, 48, (uint16_t
-*)collapse, TFT_BLACK);
-    else
-      Maps::mapSprite.pushImage(10, mapHeight - toolBarOffset, 48, 48, (uint16_t
-*)expand, TFT_BLACK);
-
-      // Maps::mapSprite.fillRectAlpha(10, mapHeight - toolBarOffset, 48, 48,
-50, TFT_BLACK);
-
-    Maps::mapSprite.pushImage(10, mapHeight - (toolBarOffset + toolBarSpace),
-48, 48, (uint16_t *)zoomout, TFT_BLACK);
-    // Maps::mapSprite.fillRectAlpha(10, mapHeight - (toolBarOffset +
-toolBarSpace), 48, 48, 50, TFT_BLACK);
-
-    Maps::mapSprite.pushImage(10, mapHeight - (toolBarOffset + (2 *
-toolBarSpace)), 48, 48, (uint16_t *)zoomin, TFT_BLACK);
-    // Maps::mapSprite.fillRectAlpha(10, mapHeight - (toolBarOffset + (2 *
-toolBarSpace)), 48, 48, 50, TFT_BLACK);
-
-    // if (!mapSettings.vectorMap)
-    // {
-    //   Maps::mapSprite.pushImage(tft.width() - 58, mapHeight - toolBarOffset,
-48, 48, (uint16_t *)move, TFT_BLACK);
-    // }
-  }
-
-  Maps::mapSprite.fillRectAlpha(0, 0, 50, 32, 95, TFT_BLACK);
-  Maps::mapSprite.pushImage(0, 4, 24, 24, (uint16_t *)zoom_ico, TFT_BLACK);
-  Maps::mapSprite.drawNumber(zoom, 26, 8, &fonts::FreeSansBold9pt7b);
-
-  if (mapSettings.showMapSpeed)
-  {
-    Maps::mapSprite.fillRectAlpha(0, mapHeight - 32, 70, 32, 95, TFT_BLACK);
-    Maps::mapSprite.pushImage(0, mapHeight - 28, 24, 24, (uint16_t *)speed_ico,
-TFT_BLACK); Maps::mapSprite.drawNumber(gps.gpsData.speed, 26, mapHeight - 24,
-&fonts::FreeSansBold9pt7b);
-  }
-
-  if (!mapSettings.vectorMap)
-    if (mapSettings.showMapScale)
-    {
-      Maps::mapSprite.fillRectAlpha(Maps::mapScrWidth - 70, mapHeight - 32, 70,
-Maps::mapScrWidth - 75, 95, TFT_BLACK); Maps::mapSprite.setTextSize(1);
-      // Maps::mapSprite.drawFastHLine(Maps::mapScrWidth - 65, mapHeight - 14,
-60);
-      // Maps::mapSprite.drawFastVLine(Maps::mapScrWidth - 65, mapHeight - 19,
-10);
-      // Maps::mapSprite.drawFastVLine(Maps::mapScrWidth - 5, mapHeight - 19,
-10);
-      // Maps::mapSprite.drawCenterString(map_scale[zoom], Maps::mapScrWidth -
-35, mapHeight - 24);
-    }
-  */
   // ... reimplement widgets as LVGL objects calling createMapWidgets() or
   // similar
 }
@@ -6418,32 +6363,53 @@ void Maps::bindMapStorageRoot(const char *root) {
   vectorMapFolder = String(root) + "/VECTMAP/";
 }
 
-bool Maps::setVectorMapFolder(const std::string &folder) {
-  String normalized(folder.c_str());
-  if (!normalized.endsWith("/"))
-    normalized += "/";
-  if (normalized == vectorMapFolder)
-    return true;
-
+map_probe_diagnostics::Result
+Maps::activateVectorMapFolderDetailed(const std::string &folder) {
+  const uint32_t startedMs = millis();
   const bool restartWorker = renderWorkerTaskHandle != nullptr;
   if (restartWorker && !stopRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map root switch deferred: render worker is busy");
-    return false;
+    ESP_LOGE(TAG, "Vector map activation deferred: render worker is busy");
+    return {map_probe_diagnostics::Code::WorkerStopFailed,
+            millis() - startedMs};
   }
 
-  const bool switched = switchVectorMapFolderOnStorageOwner(folder);
-  if (switched)
+  map_probe_diagnostics::Result result =
+      activateVectorMapFolderOnStorageOwner(folder);
+  if (result.loaded())
     finalizeVectorMapFolderSwitchOnUi();
+
   if (restartWorker && !startRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map root switched but render worker restart failed");
-    return false;
+    ESP_LOGE(TAG, "Vector map activation completed but worker restart failed");
+    result.code = map_probe_diagnostics::Code::WorkerRestartFailed;
   }
-  if (switched)
-    ESP_LOGI(TAG, "Vector map root switched to %s", vectorMapFolder.c_str());
-  return switched;
+  result.elapsedMs = millis() - startedMs;
+  return result;
 }
 
-bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
+map_probe_diagnostics::Result
+Maps::activateVectorMapFolderOnStorageOwner(const std::string &folder) {
+  const uint32_t startedMs = millis();
+  map_font_asset::Asset validatedFont;
+  map_probe_diagnostics::Result result =
+      probeVectorMapFolderOnStorageOwner(folder, &validatedFont);
+  if (result.loaded()) {
+    const bool reusable = validatedFont.isOpen();
+    const uint32_t switchStartedMs = millis();
+    const bool switched =
+        switchVectorMapFolderOnStorageOwner(folder, &validatedFont);
+    result.rootSwitchMs = millis() - switchStartedMs;
+    // A moved-from asset is closed: the switch consumed the validated font.
+    result.fontValidationReused =
+        switched && reusable && !validatedFont.isOpen();
+    if (!switched)
+      result.code = map_probe_diagnostics::Code::RootSwitchFailed;
+  }
+  result.elapsedMs = millis() - startedMs;
+  return result;
+}
+
+bool Maps::switchVectorMapFolderOnStorageOwner(
+    const std::string &folder, map_font_asset::Asset *validatedFont) {
   if (!mapFilesAvailable()) {
     ESP_LOGE(TAG, "Vector map root switch refused: no map storage");
     return false;
@@ -6462,13 +6428,19 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   }
 
   map_font_asset::Asset candidateFont;
-  const std::string fontPath =
-      std::string(normalized.c_str()) + "assets/street-labels.fma";
-  struct stat fontMetadata = {};
-  if (::stat(fontPath.c_str(), &fontMetadata) == 0 &&
-      (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath))) {
-    ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
-    return false;
+  if (validatedFont != nullptr && validatedFont->isOpen()) {
+    // The probe just validated this descriptor and its block contract on the
+    // same storage owner; reopening would revalidate every byte again.
+    candidateFont = std::move(*validatedFont);
+  } else {
+    const std::string fontPath =
+        std::string(normalized.c_str()) + "assets/street-labels.fma";
+    struct stat fontMetadata = {};
+    if (::stat(fontPath.c_str(), &fontMetadata) == 0 &&
+        (!S_ISREG(fontMetadata.st_mode) || !candidateFont.open(fontPath))) {
+      ESP_LOGE(TAG, "Street-label font asset is invalid: %s", fontPath.c_str());
+      return false;
+    }
   }
 
   power_management::ScopedLock powerLock(
@@ -6479,11 +6451,12 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
       map_nearby_storage::Status::Unavailable;
   std::vector<map_nearby_coverage::Block> candidateCoverage;
   try {
-    MapNearbyVector<map_poi_index::Entry> entries;
     std::string root(normalized.c_str());
     while (!root.empty() && root.back() == '/') root.pop_back();
-    poiIndexReady = map_nearby_storage::readIndex(
-        root, entries, nullptr, nullptr, poiActivationStatus);
+    // Activation needs only the index's health. Queries stream the file
+    // themselves, so validate it without materializing its entries.
+    poiIndexReady = map_nearby_storage::validateIndex(
+        root, nullptr, nullptr, poiActivationStatus);
     if (poiIndexReady) {
       poiIndexReady = map_nearby_storage::readCoverage(
           root, candidateCoverage, poiActivationStatus);
@@ -6545,33 +6518,9 @@ bool Maps::takeStreetLabelRuntimeFailure(std::string &code) {
   return true;
 }
 
-bool Maps::probeVectorMapFolder(const std::string &folder) {
-  return probeVectorMapFolderDetailed(folder).loaded();
-}
-
 map_probe_diagnostics::Result
-Maps::probeVectorMapFolderDetailed(const std::string &folder) {
-  const uint32_t startedMs = millis();
-  const bool restartWorker = renderWorkerTaskHandle != nullptr;
-  if (restartWorker && !stopRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map probe deferred: render worker is busy");
-    return {map_probe_diagnostics::Code::WorkerStopFailed,
-            millis() - startedMs};
-  }
-
-  map_probe_diagnostics::Result result =
-      probeVectorMapFolderOnStorageOwner(folder);
-
-  if (restartWorker && !startRenderWorker()) {
-    ESP_LOGE(TAG, "Vector map probe completed but worker restart failed");
-    result.code = map_probe_diagnostics::Code::WorkerRestartFailed;
-  }
-  result.elapsedMs = millis() - startedMs;
-  return result;
-}
-
-map_probe_diagnostics::Result
-Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
+Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder,
+                                         map_font_asset::Asset *validatedFont) {
   const uint32_t startedMs = millis();
   map_probe_diagnostics::Result result;
   if (!mapFilesAvailable()) {
@@ -6595,7 +6544,10 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
       power_management::LockDomain::Storage);
   size_t visited = 0;
   std::string blockBase;
-  if (!findMapBlock(normalized, blockBase, visited, 0)) {
+  const uint32_t lookupStartedMs = millis();
+  const bool blockFound = findMapBlock(normalized, blockBase, visited, 0);
+  result.blockLookupMs = millis() - lookupStartedMs;
+  if (!blockFound) {
     ESP_LOGE(TAG, "No map block found under %s", normalized.c_str());
     result.code = map_probe_diagnostics::Code::BlockNotFound;
     result.elapsedMs = millis() - startedMs;
@@ -6606,7 +6558,9 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 
   const bool previousMapFound = isMapFound.load();
   isMapFound = false;
+  const uint32_t blockStartedMs = millis();
   std::unique_ptr<MapBlock> blockOwner(readMapBlock(String(blockBase.c_str())));
+  result.blockLoadMs = millis() - blockStartedMs;
   MapBlock *block = blockOwner.get();
   loaded = block != nullptr && isMapFound.load();
   if (!loaded)
@@ -6615,7 +6569,10 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
     result.formatVersion = block->formatVersion;
     map_font_asset::Asset candidateFont;
     const std::string fontPath = normalized + "/assets/street-labels.fma";
-    if (!candidateFont.open(fontPath)) {
+    const uint32_t fontStartedMs = millis();
+    const bool fontOpened = candidateFont.open(fontPath);
+    result.fontValidationMs = millis() - fontStartedMs;
+    if (!fontOpened) {
       loaded = false;
       result.code = map_probe_diagnostics::Code::FontOpenFailed;
     } else if (candidateFont.profileFingerprint() !=
@@ -6631,6 +6588,8 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
     if (!loaded) {
       ESP_LOGE(TAG, "Street-label block/font contract failed under %s",
                normalized.c_str());
+    } else if (validatedFont != nullptr) {
+      *validatedFont = std::move(candidateFont);
     }
   } else if (loaded) {
     result.formatVersion = block->formatVersion;
@@ -6938,12 +6897,10 @@ bool Maps::processPendingVectorMapActivation() {
   map_probe_diagnostics::Result probe;
   bool loaded = false;
   try {
-    probe = probeVectorMapFolderOnStorageOwner(request.folder);
+    // Probe and root switch share one label-font validation; a failed switch
+    // reports RootSwitchFailed and keeps the old root.
+    probe = activateVectorMapFolderOnStorageOwner(request.folder);
     loaded = probe.loaded();
-    if (loaded && !switchVectorMapFolderOnStorageOwner(request.folder)) {
-      loaded = false;
-      probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
-    }
   } catch (const std::bad_alloc &) {
     loaded = false;
     probe.code = map_probe_diagnostics::Code::RootSwitchFailed;
@@ -7054,6 +7011,9 @@ void Maps::deleteMapScrSprites() {
   lastCameraRequestMs = 0;
   publishedMapFound = false;
   framePublicationPending = false;
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  recoveryPending_ = false;
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
@@ -7131,6 +7091,9 @@ void Maps::createMapScrSprites() {
   publishedMapFound = false;
   framePublicationPending = false;
   hasVisibleProjection = false;
+  visibleFrameAcceptedAtMs_ = 0;
+  framePublication_ = {};
+  recoveryPending_ = false;
   lastFramePresentationSignature = 0;
   lastForegroundPresentationSignature = 0;
   ++projectionEpoch;
@@ -8281,7 +8244,7 @@ bool Maps::beginPinchPreview(int16_t midpointX, int16_t midpointY,
   }
 
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-  lv_obj_set_style_bg_color(mapTile, lv_color_hex(BACKGROUND_COLOR), 0);
+  lv_obj_set_style_bg_color(mapTile, lv_color_hex(kMapBackgroundColor), 0);
   lv_obj_set_style_bg_opa(mapTile, LV_OPA_COVER, 0);
   lv_image_set_pivot(Maps::canvasMap, pinchPresentation.pivotLocalX,
                      pinchPresentation.pivotLocalY);
@@ -8538,106 +8501,9 @@ void Maps::updateArrowColor() {
  *
  * @param zoom -> Zoom Level
  */
-#ifndef USE_ARDUINO_GFX
-void Maps::generateRenderMap(uint8_t zoom) {
-  Maps::mapTileSize = Maps::renderMapTileSize;
-  Maps::zoomLevel = zoom;
-
-  bool foundRoundMap = false;
-  bool missingMap = false;
-
-  if (Maps::followGps)
-    Maps::currentMapTile = Maps::getMapTile(
-        gps.gpsData.longitude, gps.gpsData.latitude, Maps::zoomLevel, 0, 0);
-  else
-    Maps::currentMapTile =
-        Maps::getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                         Maps::zoomLevel, 0, 0);
-
-  // Detects if tile changes from actual GPS position
-  if (strcmp(Maps::currentMapTile.file, Maps::oldMapTile.file) != 0 ||
-      Maps::currentMapTile.zoom != Maps::oldMapTile.zoom ||
-      Maps::currentMapTile.tilex != Maps::oldMapTile.tilex ||
-      Maps::currentMapTile.tiley != Maps::oldMapTile.tiley) {
-    Maps::isMapFound = Maps::mapTempSprite.drawPngFile(
-        Maps::currentMapTile.file, Maps::mapTileSize, Maps::mapTileSize);
-
-  } else {
-    Maps::oldMapTile = Maps::currentMapTile;
-    strcpy(Maps::oldMapTile.file, Maps::currentMapTile.file);
-
-    // Maps::mapTempSprite.fillScreen(TFT_BLACK);
-    // Maps::showNoMap(Maps::mapTempSprite);
-    ESP_LOGW(TAG, "Render Map not found (render map disabled)");
-  }
-  else {
-    Maps::oldMapTile = Maps::currentMapTile;
-    strcpy(Maps::oldMapTile.file, Maps::currentMapTile.file);
-
-    Maps::totalBounds =
-        Maps::getTileBounds(Maps::currentMapTile.tilex,
-                            Maps::currentMapTile.tiley, Maps::zoomLevel);
-
-    int8_t startX = -1;
-    int8_t startY = -1;
-
-    for (int8_t y = startX; y <= startX + 2; y++) {
-      for (int8_t x = startY; x <= startY + 2; x++) {
-
-        if (x == 0 && y == 0)
-          continue; // Skip Center Tile
-
-        Maps::roundMapTile =
-            getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                       Maps::zoomLevel, x, y);
-
-        foundRoundMap = Maps::mapTempSprite.drawPngFile(
-            Maps::roundMapTile.file, (x - startX) * Maps::mapTileSize,
-            (y - startY) * Maps::mapTileSize);
-        if (!foundRoundMap) {
-          Maps::mapTempSprite.fillRect((x - startX) * Maps::mapTileSize,
-                                       (y - startY) * Maps::mapTileSize,
-                                       Maps::mapTileSize, Maps::mapTileSize,
-                                       TFT_BLACK);
-          Maps::mapTempSprite.drawPngFile(noMapFile,
-                                          ((x - startX) * Maps::mapTileSize) +
-                                              (Maps::mapTileSize / 2) - 50,
-                                          ((y - startY) * Maps::mapTileSize) +
-                                              (Maps::mapTileSize / 2) - 50);
-          missingMap = true;
-        } else {
-          tileBounds currentBounds =
-              Maps::getTileBounds(Maps::roundMapTile.tilex,
-                                  Maps::roundMapTile.tiley, Maps::zoomLevel);
-
-          if (currentBounds.lat_min < Maps::totalBounds.lat_min)
-            Maps::totalBounds.lat_min = currentBounds.lat_min;
-          if (currentBounds.lat_max > Maps::totalBounds.lat_max)
-            Maps::totalBounds.lat_max = currentBounds.lat_max;
-          if (currentBounds.lon_min < Maps::totalBounds.lon_min)
-            Maps::totalBounds.lon_min = currentBounds.lon_min;
-          if (currentBounds.lon_max > Maps::totalBounds.lon_max)
-            Maps::totalBounds.lon_max = currentBounds.lon_max;
-        }
-      }
-    }
-
-    if (!missingMap) {
-      if (Maps::isCoordInBounds(Maps::destLat, Maps::destLon,
-                                Maps::totalBounds))
-        Maps::coords2map(Maps::destLat, Maps::destLon, Maps::totalBounds,
-                         &(Maps::wptPosX), &(Maps::wptPosY));
-    } else {
-      Maps::wptPosX = -1;
-    }
-  }
-}
-}
-#else
 void Maps::generateRenderMap(uint8_t zoom) {
   // Render Map not supported in Arduino_GFX mode
 }
-#endif
 
 /**
  * @brief Display Map (Stub for Vector Maps/Arduino_GFX)
@@ -8661,11 +8527,7 @@ void Maps::updateSocialOverlay() {
   const bool courseUp=rotationMode==ROT_COURSE_UP && hasPresentedPose &&
       presentedPose.headingValid && std::isfinite(presentedPose.headingDegrees);
   const double w=lv_obj_get_width(mapTile),h=lv_obj_get_height(mapTile);
-#ifdef WAVESHARE_AMOLED_175
-  const bool round=true;
-#else
-  const bool round=false;
-#endif
+  const bool round=board::display::round;
   // One persisted size for every map screen; footprint, edge placement and
   // grouping all use the same scaled badge.
   const uint16_t scale=social_riders::clampMarkerScale(mapRenderSettings.friendMarkerScalePercent);
@@ -9079,54 +8941,7 @@ void Maps::scrollMap(int16_t dx, int16_t dy) {
  * @param dirY
  */
 void Maps::preloadTiles(int8_t dirX, int8_t dirY) {
-#ifndef USE_ARDUINO_GFX
-  int16_t preloadWidth =
-      (dirX != 0) ? renderMapTileSize : renderMapTileSize * 2;
-  int16_t preloadHeight =
-      (dirY != 0) ? renderMapTileSize : renderMapTileSize * 2;
-
-  TFT_eSprite preloadSprite = TFT_eSprite(&tft);
-  preloadSprite.createSprite(preloadWidth, preloadHeight);
-
-  int16_t startX = tileX + dirX;
-  int16_t startY = tileY + dirY;
-
-  for (int8_t i = 0; i < 2; ++i) {
-    int16_t tileToLoadX = startX + ((dirX == 0) ? i - 1 : 0);
-    int16_t tileToLoadY = startY + ((dirY == 0) ? i - 1 : 0);
-
-    Maps::roundMapTile =
-        Maps::getMapTile(Maps::currentMapTile.lon, Maps::currentMapTile.lat,
-                         Maps::zoomLevel, tileToLoadX, tileToLoadY);
-
-    bool foundTile = preloadSprite.drawPngFile(
-        Maps::roundMapTile.file, (dirX != 0) ? i * renderMapTileSize : 0,
-        (dirY != 0) ? i * renderMapTileSize : 0);
-
-    if (!foundTile) {
-      preloadSprite.fillRect((dirX != 0) ? i * renderMapTileSize : 0,
-                             (dirY != 0) ? i * renderMapTileSize : 0,
-                             renderMapTileSize, renderMapTileSize,
-                             TFT_LIGHTGREY);
-    }
-  }
-
-  if (dirX != 0) {
-    mapTempSprite.scroll(dirX * renderMapTileSize, 0);
-    mapTempSprite.pushImage((dirX > 0 ? renderMapTileSize * 2 : 0), 0,
-                            preloadWidth, preloadHeight,
-                            preloadSprite.frameBuffer(0));
-  } else if (dirY != 0) {
-    mapTempSprite.scroll(0, dirY * renderMapTileSize);
-    mapTempSprite.pushImage(0, (dirY > 0 ? renderMapTileSize * 2 : 0),
-                            preloadWidth, preloadHeight,
-                            preloadSprite.frameBuffer(0));
-  }
-
-  preloadSprite.deleteSprite();
-#else
   // Preloading not implemented for LVGL/Arduino_GFX yet
   (void)dirX;
   (void)dirY;
-#endif
 }

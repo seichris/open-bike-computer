@@ -246,6 +246,7 @@ struct OfflineRouteSaveTests {
         try corruptionDeletionAndReplacement()
         try stravaRetention()
         try boundedArchiveReads()
+        try savedRouteFavoriteCoordinates()
         try automaticWatchTransfer()
         try watchTransferExpiryRecovery()
         try pendingDeletionAdmission()
@@ -253,6 +254,8 @@ struct OfflineRouteSaveTests {
         try offlineNavigationAndLateDirections()
         try mapKitPlanningRegression()
         try selectedMapKitSaving()
+        try legacyMapKitArchives()
+        try multiStopRouteTests()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
     }
@@ -275,7 +278,7 @@ struct OfflineRouteSaveTests {
         check(metadata["sourceHash"] as? String == original.contentHash, "Copy retains original hash provenance outside navigation archive")
         check(metadata["socialRevision"] as? Int == 3, "Social revision is retained")
         check(metadata["owner"] as? String == "rider" && metadata["kind"] as? String == "content", "Copy records its owner and source kind")
-        check(metadata["geometry"] as? String == PhoneRouteLibrary.socialGeometry(original.route), "Copy records its route geometry")
+        check(metadata["geometry"] as? String == PhoneRouteLibrary.socialGeometry(original), "Copy records its route geometry")
 
         // A friend's route, including an ID-changed duplicate, stays the owner's to share.
         for summary in [saved, copy] {
@@ -789,6 +792,17 @@ struct OfflineRouteSaveTests {
         let chinaDraft = try OfflineRouteSaveDraft.plannedMapKit(china, createdAt: f.now)
         check(chinaDraft.archive.route.points == china.points && chinaDraft.archive.route.normalizationVersion == china.normalizationVersion,
             "China coordinates are not normalized a second time when saved")
+        let hongKongPoints = [CLLocationCoordinate2D(latitude: 22.2810, longitude: 114.1600),
+                              CLLocationCoordinate2D(latitude: 22.2820, longitude: 114.1610)]
+        let hongKong = try MapKitRouteAdapter.route(from: TestRoute(instructions: "Continue", coordinates: hongKongPoints))
+        // MKPolyline stores map points, so coordinates come back within millimetres.
+        func shift(_ route: NavigationRouteV1, _ input: CLLocationCoordinate2D) -> Double {
+            NavigationGeometryV1.distance(from: route.points[0],
+                to: RouteCoordinateV1(latitude: input.latitude, longitude: input.longitude))
+        }
+        check(hongKong.points.count == 2 && shift(hongKong, hongKongPoints[0]) < 0.01 && shift(china, chinaPoints[0]) > 100 &&
+            hongKong.normalizationVersion == 2 && china.normalizationVersion == 2,
+            "Apple Maps routes are WGS-84 in Hong Kong and stay unshifted; only mainland China is normalized, as version 2")
     }
 
     static func boundedArchiveReads() throws {
@@ -1067,6 +1081,162 @@ struct OfflineRouteSaveTests {
                 operation: .acknowledge, identity: identity, status: status, errorCode: nil))
             check(f.library.isAvailableOffline(summary), "Unrequested Watch removal does not delete the iPhone copy")
         }
+    }
+
+    /// Version 1's normalization exactly as the app ran it before version 2.
+    private static func version1(_ coordinate: RouteCoordinateV1) -> RouteCoordinateV1 {
+        func inRectangle(_ latitude: Double, _ longitude: Double) -> Bool {
+            latitude >= 0.8293 && latitude <= 55.8271 && longitude >= 72.004 && longitude <= 135.5
+        }
+        guard inRectangle(coordinate.latitude, coordinate.longitude) else { return coordinate }
+        var latitude = coordinate.latitude
+        var longitude = coordinate.longitude
+        for _ in 0..<3 {
+            let projected = inRectangle(latitude, longitude)
+                ? GCJ02.fromWGS84(latitude: latitude, longitude: longitude)
+                : (latitude: latitude, longitude: longitude)
+            latitude += coordinate.latitude - projected.latitude
+            longitude += coordinate.longitude - projected.longitude
+        }
+        return RouteCoordinateV1(latitude: latitude, longitude: longitude)
+    }
+
+    /// A Hong Kong route saved by version 1 lies about 600 m off the road. Every
+    /// saved-route path reads it on the road, while the saved revision keeps its
+    /// bytes, hash and identity.
+    static func legacyMapKitArchives() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let before = checks
+        let road = (0..<20).map {
+            RouteCoordinateV1(latitude: 22.2810 + Double($0) * 0.0005, longitude: 114.1600 + Double($0) * 0.0003)
+        }
+        let stored = road.map(version1)
+        func near(_ point: RouteCoordinateV1, _ target: RouteCoordinateV1, _ meters: Double = 0.01) -> Bool {
+            NavigationGeometryV1.distance(from: point, to: target) < meters
+        }
+        func onRoad(_ points: [RouteCoordinateV1], _ meters: Double = 0.01) -> Bool {
+            points.count == road.count && zip(points, road).allSatisfy { near($0, $1, meters) }
+        }
+        check(zip(stored, road).allSatisfy { !near($0, $1, 500) }, "Version 1 saved this Hong Kong route off the road")
+        let saved = try NavigationRouteArchiveV1.create(route: NavigationRouteV1(
+            id: UUID(), revision: 1, provider: RouteProviderPolicyV1.mapKitSavedOnPhone,
+            localeIdentifier: "en_HK", transportType: .cycling,
+            source: RouteEndpointV1(coordinate: stored[0], label: "Central"),
+            destination: RouteEndpointV1(coordinate: stored[19], label: "Causeway Bay"),
+            bounds: RouteBoundsV1.enclosing(stored)!, distanceMeters: 1_300, expectedTravelTimeSeconds: 360,
+            name: "Harbour ride", points: stored,
+            steps: [NavigationRouteStepV1(id: 1, geometryStartIndex: 0, geometryEndIndex: 19,
+                instruction: "Ride to Causeway Bay", maneuver: .straight, distanceMeters: 1_300)],
+            normalizationVersion: 1), createdAt: f.now, purpose: .offlineNavigation)
+        let data = try saved.encoded(purpose: .offlineNavigation, now: f.now)
+        let summary = try f.library.importArchive(data)
+        let file = f.root.appendingPathComponent(
+            "\(saved.routeID.uuidString.lowercased())-r1-\(saved.contentHash).routev1")
+
+        // The library row keeps its identity and shows where the route goes.
+        check(summary.id == saved.routeID && summary.revision == 1 && summary.contentHash == saved.contentHash,
+              "Loading a version-1 route keeps its library identity")
+        check(near(summary.source.coordinate, road[0]) && near(summary.destination.coordinate, road[19]),
+              "The library row shows the route's start and destination on the road")
+        let relaunched = f.makeLibrary()
+        let loaded = try relaunched.offlineArchive(for: summary)
+        let reencoded = try loaded.encoded(purpose: .offlineNavigation, now: f.now)
+        let onDisk = try Data(contentsOf: file)
+        check(loaded.storedRoute == saved.storedRoute && loaded.contentHash == saved.contentHash &&
+              reencoded == data && onDisk == data && onRoad(loaded.route.points),
+              "After a relaunch the saved bytes and hash are unchanged and the route is read on the road")
+
+        // The saved-route map and offline navigation draw and follow the road.
+        let selection = try relaunched.mapSelection(for: summary)
+        check(selection.identity == WatchRouteIdentityV1(archive: saved) && onRoad(selection.route.points),
+              "The saved-route map draws the route on the road")
+        let coordinator = BikeComputerCoordinator(destinationStore: SavedDestinationStore(defaults: f.defaults),
+            directionsFactory: TestNavigationDirectionsFactory().makeTask, startServices: false, now: { f.now })
+        defer { coordinator.stopNavigation() }
+        try coordinator.startOfflineNavigation(loaded)
+        let polyline = coordinator.offlineRoutePolyline
+        var drawn = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: polyline?.pointCount ?? 0)
+        polyline?.getCoordinates(&drawn, range: NSRange(location: 0, length: drawn.count))
+        check(coordinator.offlineRouteSummary == summary &&
+              onRoad(drawn.map { RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude) }),
+              "Offline navigation draws the route on the road in Apple Maps")
+        coordinator.stopNavigation()
+        let engine = NavigationEngine(now: { f.now })
+        try engine.startOfflineNavigation(archive: loaded,
+            initialLocation: fix(f, latitude: road[0].latitude, longitude: road[0].longitude))
+        defer { engine.stopNavigation() }
+        let snapshot = engine.offlineSnapshotForTesting
+        var window: [RouteCoordinateV1] = []
+        if let bytes = snapshot.map({ [UInt8]($0.routeWindow) }), bytes.count >= 8 {
+            func integer<T: FixedWidthInteger>(_ offset: Int, _: T.Type) -> T {
+                (0..<MemoryLayout<T>.size).reduce(T.zero) { $0 | T(truncatingIfNeeded: bytes[offset + $1]) << ($1 * 8) }
+            }
+            var latitude = Int64(integer(0, Int32.self))
+            var longitude = Int64(integer(4, Int32.self))
+            window.append(RouteCoordinateV1(latitude: Double(latitude) / 1e6, longitude: Double(longitude) / 1e6))
+            for offset in stride(from: 8, to: bytes.count, by: 4) {
+                latitude += Int64(integer(offset, Int16.self))
+                longitude += Int64(integer(offset + 2, Int16.self))
+                window.append(RouteCoordinateV1(latitude: Double(latitude) / 1e6, longitude: Double(longitude) / 1e6))
+            }
+        }
+        check(snapshot?.contentHash == saved.contentHash && snapshot?.offRouteDistanceMeters == nil &&
+              onRoad(window, 0.2),
+              "A rider on the road is on the route, and the Bicino receives the road under the original hash")
+
+        // Its elevation profile is measured along the road and kept offline.
+        let binding = PhoneRouteLibrary.elevationBinding(for: loaded)
+        check(binding == RouteElevationArchiveBindingV1(routeID: saved.routeID, revision: 1, contentHash: saved.contentHash) &&
+              relaunched.elevationSubject(for: binding).map { onRoad($0.route.points) } == true,
+              "The elevation profile keeps the route's binding and follows the road")
+        func profile(_ points: [RouteCoordinateV1]) throws -> RouteElevationProfileV1 {
+            let geometry = try RouteElevationProcessorV1.geometry(points: points)
+            let plan = RouteElevationProcessorV1.plan(length: geometry.lengthMeters)
+            return RouteElevationProcessorV1.process(geometry: geometry, plan: plan,
+                rawElevations: plan.distancesMeters.map { Optional(20 + $0 * 0.01) },
+                source: RouteElevationProfileV1.Source(kind: "internal-dem", id: "fixture-terrain", version: nil,
+                    verticalDatum: nil, nativeResolutionM: nil, surfaceModel: nil, interpolation: "fixture",
+                    attribution: [], retrievedAt: nil, qualification: "fixture"))!
+        }
+        let offRoad = try profile(stored)
+        relaunched.storeElevationProfile(offRoad, for: binding)
+        check(relaunched.elevationSidecar(for: binding)?.geometryDigest == offRoad.geometry.digest,
+              "A profile cached before the update describes the stored line")
+        let alongRoad = try profile(loaded.route.points)
+        relaunched.storeElevationProfile(alongRoad, for: binding)
+        check(relaunched.elevationSidecar(for: binding)?.geometryDigest == alongRoad.geometry.digest &&
+              relaunched.elevationSidecar(for: binding)?.serviceProfile == alongRoad,
+              "The profile measured along the road replaces it under the same binding")
+
+        // Starring the route favorites its real destination.
+        let favorite = SavedRouteFavoritePolicy.favorite(for: summary)
+        check(favorite.coordinate.map { near(RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude), road[19]) } == true,
+              "A favorite starred from the route is its destination on the road")
+
+        // Sharing uploads the stored bytes; copies keep the stored route and
+        // its geometry fingerprint, so the owner's rights hold.
+        let sharedPayload = try loaded.socialHashPayload()
+        let savedPayload = try saved.socialHashPayload()
+        check(PhoneRouteLibrary.socialGeometry(loaded) ==
+              SocialRouteGeometry.fingerprint(stored.map { (latitude: $0.latitude, longitude: $0.longitude) }) &&
+              reencoded == data && sharedPayload == savedPayload,
+              "Sharing sends the stored route, which the backend fingerprints")
+        let recipient = Fixture(); defer { recipient.cleanup() }
+        let source = SocialRouteSource(kind: .content, socialID: "harbour", owner: "organizer", revision: 1)
+        let received = try recipient.library.importSocialArchive(data, source: source, duplicate: false)
+        let duplicate = try recipient.library.importSocialArchive(data, source: source, duplicate: true)
+        let copy = try recipient.library.offlineArchive(for: duplicate)
+        let receivedBytes = try recipient.library.offlineArchive(for: received)
+            .encoded(purpose: .offlineNavigation, now: f.now)
+        check(received.contentHash == saved.contentHash && receivedBytes == data,
+              "A received copy keeps the original bytes and hash")
+        check(copy.storedRoute.points == stored && copy.storedRoute.normalizationVersion == 1 && onRoad(copy.route.points),
+              "A duplicate keeps the stored route and is read on the road like the original")
+        try FileManager.default.removeItem(at: recipient.root
+            .appendingPathComponent("social-provenance").appendingPathComponent(duplicate.id.uuidString + ".json"))
+        check(recipient.library.socialPublication(for: duplicate, currentProfileID: "member") == .restricted(owner: "organizer"),
+              "A duplicate that lost its sidecar is still matched to its owner by stored geometry")
+        print("Version-1 Apple Maps archives: \(checks - before) checks passed")
     }
 
     static func uiWiring() throws {

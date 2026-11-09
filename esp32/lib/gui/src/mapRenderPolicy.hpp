@@ -5,6 +5,8 @@
 
 namespace map_render_policy {
 
+// Cadence of the AMOLED scheduler below; the e-paper runs
+// epaper_navigation_policy::Scheduler with its own cadence instead.
 constexpr uint32_t kMinimumRenderIntervalMs = 750;
 constexpr double kMovementThresholdMeters = 8.0;
 constexpr uint16_t kHeadingThresholdDegrees = 12;

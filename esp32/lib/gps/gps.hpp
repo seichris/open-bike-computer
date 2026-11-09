@@ -17,15 +17,10 @@
 #define DEG2RAD(a) ((a) / (180 / M_PI)) // Convert degrees to radians
 #define RAD2DEG(a) ((a) * (180 / M_PI)) // Convert radians to degrees
 
-// extern uint8_t GPS_TX;
-// extern uint8_t GPS_RX;
-
 #define MAX_SATELLITES 120
 #define MAX_SATELLLITES_IN_VIEW 32
 
 #define DEBUG_PORT Serial
-#define gpsPort Serial2
-#define GPS_PORT_NAME "Serial2"
 extern gps_fix fix;
 extern NMEAGPS GPS;
 
@@ -35,15 +30,6 @@ const char *getPosixTZ(const char *name);
 
 extern bool isGpsFixed;
 extern bool isTimeFixed;
-extern long gpsBaudDetected;
-extern bool nmea_output_enable;
-
-static unsigned long GPS_BAUD[] PROGMEM = {4800, 9600, 19200, 0};
-static const char *GPS_BAUD_PCAS[] PROGMEM = {
-    "$PCAS01,0*1C\r\n", "$PCAS01,1*1D\r\n", "$PCAS01,2*1E\r\n"};
-static const char *GPS_RATE_PCAS[] PROGMEM = {
-    "$PCAS02,1000*2E\r\n", "$PCAS02,500*1A\r\n", "$PCAS02,250*18\r\n",
-    "$PCAS02,200*1D\r\n", "$PCAS02,100*1E\r\n"};
 
 /**
  * @brief Satellite Constellation Canvas Definition
@@ -55,15 +41,28 @@ static const uint8_t canvasCenter_X = canvasSize / 2;
 static const uint8_t canvasCenter_Y = canvasSize / 2;
 static const uint8_t canvasRadius = canvasCenter_X - canvasOffset;
 
+/**
+ * @brief The parser's satellite table as of one completed interval
+ *
+ * Copied by the task that parses NMEA, so the task that owns gpsData can
+ * apply it without reading the parser while it runs.
+ */
+struct GpsSatelliteSnapshot {
+#ifdef NMEAGPS_PARSE_SATELLITES
+  uint8_t count = 0;
+  NMEAGPS::satellite_view_t views[NMEAGPS_MAX_SATELLITES];
+#endif
+};
+
 class Gps {
 public:
   Gps();
-  void init();
   double getLat();
   double getLon();
-  void getGPSData();
-  long detectRate(int rxPin);
-  long autoBaud();
+  // Applies the parser's `fix` global and an interval's satellite table to
+  // gpsData. Call it only from the task that owns gpsData and the LVGL
+  // objects (the main loop): it also sets the clock and sends an LVGL event.
+  void getGPSData(const GpsSatelliteSnapshot &satellites);
   bool isSpeedChanged();
   bool isAltitudeChanged();
   bool hasLocationChange();
