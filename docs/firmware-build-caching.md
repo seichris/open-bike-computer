@@ -105,7 +105,9 @@ The Actions cache is scoped to a branch and capped per repository, so cores
 built on one pull request never warm another and the regular 1.75-inch cores
 do not fit the cap together. **Firmware core warm** therefore runs the normal
 `firmware` CI scope on every `main` push that touches `esp32/` or the cache
-tooling, plus a weekly schedule, and that run publishes each verified core
+tooling, plus a weekly schedule, for every board family: CI's `all` selector
+(the 1.75 and 2.06 regular profiles), then `175_gnss` and `397`, two families
+at a time. Each run publishes each verified core
 entry as a workflow artifact named after its environment and content key
 (`firmware_core_artifact.py pack`, 14-day retention, re-uploaded once older
 than a week). Shared entries are named by the request key, which a new
