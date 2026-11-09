@@ -198,7 +198,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 catch { message = "Workout setup failed and its recovery record could not be cleared. Reopen Bicino before starting again." }
             }
             message = message ?? "iPhone workout could not start. Allow Workouts in Settings › Health › Apps › Bicino, then try again."
-            applyLifecycle(.fail)
+            // As before the reducer, a failed start always ends failed, even if a
+            // discard during startup already ended the recording.
+            if !applyLifecycle(.fail) { adoptLifecycle(.failed) }
             store.failSession(error: Self.safeError(error))
             store.recordingMessage = message
         }

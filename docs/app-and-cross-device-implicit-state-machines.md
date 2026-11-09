@@ -539,24 +539,24 @@ same barrier (`:697`).
 **E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-76`
 `state`, which since 2026-11-09 is a read-only view of a private `WorkoutLifecycleReducer`
 (`:41`), the reducer the Watch drives; the 17 former unguarded assignments are events
-(`applyLifecycle` `:571`, `confirmNativeState` `:584`), HealthKit stops without a rider
+(`applyLifecycle` `:573`, `confirmNativeState` `:586`), HealthKit stops without a rider
 choice use the reducer's `.sessionStopped`, and recovery rebuilds the reducer from idle along
-the legal path to the adopted state (`adoptLifecycle` `:593`), as the Watch does. A
+the legal path to the adopted state (`adoptLifecycle` `:595`), as the Watch does. A
 "stopped" callback for a recording that already ended no longer re-enters finalization
-(`:1059`). Still implicit: four finalization bools (collection started/ended, finish attempted,
+(`:1061`). Still implicit: four finalization bools (collection started/ended, finish attempted,
 save confirmed), three write-failure flags (route, distance and, since #793, cycling
 metrics), recovered route, attach pending, generation UUID, native transition
 task/ID/generation, transition origins, control timeout, flush task. #793 adds a
 speed-capture flag latched from HealthKit authorization when the data source is configured
-at start or recovery (`PhoneWorkoutRecorder.swift:665`), and a GPS speed buffer and
+at start or recovery (`PhoneWorkoutRecorder.swift:667`), and a GPS speed buffer and
 elevation-gain accumulator that live only in RAM and are exported once, after collection
-ends and only on save (`:516-522`; no elevation after recovery, `:784`). Idle → Starting →
+ends and only on save (`:518-524`; no elevation after recovery, `:786`). Idle → Starting →
 Running/Paused (+TransitionRequested, 10 s) → Ending{open | collectionEnded |
 finishAttempted | saveConfirmed} → Ended; recovery AttachPending → Attached → Reconciled. The
 share set requested at start depends on the app being in the foreground (`:142`,
-`startShareTypes` `:994-998`), so a background start never asks for Cycling Speed.
-`resetFinished` (`:631`) resets 36 fields plus the location queue and two store values; the
-discard branch resets only the two metric accumulators (`:494-495`).
+`startShareTypes` `:996-1000`), so a background start never asks for Cycling Speed.
+`resetFinished` (`:633`) resets 36 fields plus the location queue and two store values; the
+discard branch resets only the two metric accumulators (`:496-497`).
 
 **E-4 Session coordinator recovery / ownership arbitration** —
 `BikeComputer/Managers/WorkoutSessionCoordinator.swift:51-66` record, recovery complete,
