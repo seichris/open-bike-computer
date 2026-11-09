@@ -176,13 +176,16 @@ and transfer tokens out of reports.
 
 ### Run the 1.75-inch firmware in the simulator
 
-Load a `WAVESHARE_AMOLED_175` build into the `codex/bicino-175-prototype`
-branch of `seichris/esp32sim` to debug boot, UI, and navigation without
-flashing a board. Use the browser for the display and controls, scripted replay
+Load a `WAVESHARE_AMOLED_175` build into `seichris/esp32sim` to debug boot,
+UI, and navigation. Use the browser for display and controls, scripted replay
 for repeatable route and GPS tests, or Bicino Dev with the macOS BLE bridge for
-real phone input. The simulator renders maps from a preloaded microSD image.
-Test map uploads over Wi-Fi on a physical board.
-[Simulator quickstart](https://github.com/seichris/esp32sim/blob/216fc3638a65231ceda3819287c529f81c3449ab/examples/bicino175/README.md)
+real phone input.
+
+For map installs from Bicino Dev, build `WAVESHARE_AMOLED_175_SIMULATOR` and
+start the simulator with `--map-lan-ip` and `--sd-image-rw`. Reuse the same
+virtual card to keep installed maps across restarts. Use a physical board to
+validate hotspot joining and hardware behavior.
+[Simulator quickstart](https://github.com/seichris/esp32sim/blob/main/examples/bicino175/README.md)
 
 ![Bicino 1.75-inch simulator in a browser showing Golden Gate turn guidance](docs/images/bicino175-simulator.jpg)
 

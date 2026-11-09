@@ -55,6 +55,7 @@ ESP_PARTITION_TYPE_APP = 0x00
 ESP_PARTITION_SUBTYPE_FACTORY = 0x00
 ESP_PARTITION_SUBTYPE_OTA_0 = 0x10
 WAVESHARE_MCU = "esp32s3"
+SIMULATOR_ENVIRONMENT = "WAVESHARE_AMOLED_175_SIMULATOR"
 WAVESHARE_MEMORY_TYPE = "qio_opi"
 WAVESHARE_PLATFORM_URL = (
     "https://github.com/pioarduino/platform-espressif32/releases/download/"
@@ -2590,7 +2591,7 @@ def record_generated_sdkconfig_defaults(
         "sourceIdentity": source_identity,
         "sourceDateEpoch": source_date_epoch,
         "buildTimestamp": build_timestamp,
-        "uploadEligible": True,
+        "uploadEligible": environment != SIMULATOR_ENVIRONMENT,
         "coreCache": core_cache_status,
         **firmware_artifacts,
     }

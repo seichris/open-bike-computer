@@ -32,6 +32,7 @@ from firmware_compile_cache import (
 from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     GeneratedSdkconfigError,
+    SIMULATOR_ENVIRONMENT,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_ARCHIVE_SIZE,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -1349,7 +1350,7 @@ def _print_provenance(
 
     print(
         f"{marker} schema=2 environment={environment} git={source_identity} "
-        f"uploadEligible={1 if manifest else 0} "
+        f"uploadEligible={1 if manifest and manifest.get('uploadEligible', True) else 0} "
         f"coreCache={value('coreCache')} "
         f"coreInputKey={value('coreInputKey')} "
         f"runtimeLockSetId={runtime_value('lockSetId')} "
@@ -2030,6 +2031,8 @@ def upload_firmware(
     resolver_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> None:
     """Upload the exact verified images without asking PlatformIO to rebuild."""
+    if environment == SIMULATOR_ENVIRONMENT:
+        raise BuildError("the simulator profile is build-only")
     project_dir = project_dir.resolve()
     _validate_environment(project_dir, environment)
     _reject_source_affecting_environment()
@@ -2193,6 +2196,14 @@ def main(
     raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = _parse_args(raw_arguments)
     try:
+        if args.environment == SIMULATOR_ENVIRONMENT and (
+            args.upload_only
+            or args.upload_port is not None
+            or args.device_serial is not None
+            or args.device_name is not None
+            or args.factory_output_dir is not None
+        ):
+            raise BuildError("the simulator profile is build-only")
         try:
             runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
         except FirmwareRuntimeError as error:

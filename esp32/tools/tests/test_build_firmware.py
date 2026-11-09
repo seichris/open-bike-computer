@@ -50,6 +50,7 @@ from generated_sdkconfig import (
     GeneratedSdkconfigError,
     PRODUCTION_APPLICATION_RESERVE_BYTES,
     PRODUCTION_LAYOUT_SUFFIXES,
+    SIMULATOR_ENVIRONMENT,
     _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -2579,6 +2580,19 @@ build_src_filter =
             patch("build_firmware.publish_shared_core", return_value="present"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
+
+    def test_simulator_profile_is_attested_but_cannot_upload(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_provenance(
+                "FIRMWARE_BUILD_PROVENANCE",
+                SIMULATOR_ENVIRONMENT,
+                "a" * 40,
+                {"uploadEligible": False},
+            )
+        self.assertIn("uploadEligible=0", output.getvalue())
+        with self.assertRaisesRegex(BuildError, "simulator profile is build-only"):
+            upload_firmware(self.project_dir, SIMULATOR_ENVIRONMENT, "/dev/test")
 
     def test_provenance_emits_canonical_core_attestation_digest(self):
         output = StringIO()
