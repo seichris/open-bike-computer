@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "../board_gnss.hpp"
+#include "../board_panel.hpp"
 
 // Waveshare ESP32-S3-Touch-AMOLED-2.06: data only, no logic. Pin numbers are
 // GPIO numbers from the vendor schematic; hardware/README.md is the source.
@@ -27,6 +28,8 @@ constexpr uint16_t height = 502;
 constexpr bool round = false;
 constexpr bool touch = true;
 constexpr bool brightness = true;
+// The panel, which selects its lib/panel header (BOARD_PANEL below).
+constexpr Panel panel = Panel::co5300Amoled;
 // CO5300 over QSPI.
 constexpr uint8_t cs = 12;
 constexpr uint8_t clk = 11;
@@ -163,6 +166,11 @@ constexpr uint8_t mapToolbarFullscreenBottomMargin = 30;
 #define BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 1
 static_assert(BOARD_PMIC_DISPLAY_ENABLE_RECOVERY == board::power::displayEnableRecovery,
               "capability macro and board data disagree");
+// The panel whose header lib/board/panel_select.hpp includes. Keep it equal
+// to board::display::panel.
+#define BOARD_PANEL BOARD_PANEL_CO5300_AMOLED
+static_assert(BOARD_PANEL == static_cast<int>(board::display::panel),
+              "panel macro and board data disagree");
 // Whether the position-source part compiles its GNSS receiver implementation.
 // Keep it equal to board::gnss::fitted.
 #define BOARD_GNSS_FITTED 0

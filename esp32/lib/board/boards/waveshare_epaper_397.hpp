@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "../board_gnss.hpp"
+#include "../board_panel.hpp"
 
 // Waveshare ESP32-S3 3.97-inch e-paper: data only, no logic. Pin numbers are
 // GPIO numbers from the vendor schematic. The values used to live in
@@ -36,6 +37,8 @@ constexpr uint16_t height = 800;
 constexpr bool round = false;
 constexpr bool touch = false;
 constexpr bool brightness = false;
+// The panel, which selects its lib/panel header (BOARD_PANEL below).
+constexpr Panel panel = Panel::ssd1677Epaper;
 // The shared pin names expect the CO5300 QSPI set; only the SPI subset exists
 // here, and the AMOLED panel driver is never compiled for this target.
 constexpr uint8_t cs = epd::cs;
@@ -175,6 +178,11 @@ constexpr uint8_t mapToolbarFullscreenBottomMargin = 24;
 #define BOARD_PMIC_DISPLAY_ENABLE_RECOVERY 0
 static_assert(BOARD_PMIC_DISPLAY_ENABLE_RECOVERY == board::power::displayEnableRecovery,
               "capability macro and board data disagree");
+// The panel whose header lib/board/panel_select.hpp includes. Keep it equal
+// to board::display::panel.
+#define BOARD_PANEL BOARD_PANEL_SSD1677_EPAPER
+static_assert(BOARD_PANEL == static_cast<int>(board::display::panel),
+              "panel macro and board data disagree");
 // Whether the position-source part compiles its GNSS receiver implementation.
 // Keep it equal to board::gnss::fitted.
 #define BOARD_GNSS_FITTED 0
