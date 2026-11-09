@@ -8,12 +8,15 @@ description: Collect and investigate Bicino ride, Bluetooth, map, storage, power
 ## Start in the iPhone app
 
 If you already have a support ZIP, verify it locally. Otherwise, for a retained
-ride start in **Settings → Diagnostics** on the iPhone. Mac broker enrollment is
-optional.
+ride start in **Settings → Developer Settings → Diagnostics** on the iPhone.
+Mac broker enrollment is optional.
 
 1. To collect firmware logs, authenticate with the intended Bicino and tap
    **Download Device Logs**. Keep the app active, the owner BLE session connected,
-   and navigation and workout stopped. The app may switch Wi-Fi for the transfer.
+   and navigation and workout stopped. BLE authenticates the board and Wi-Fi
+   carries the logs. A USB cable to the Bicino is unnecessary. Tap **Join** on
+   the unlocked iPhone if iOS prompts to join the device network. If the join
+   times out, retry **Download Device Logs** to resume the saved collection.
    **Collect Device Logs After Rides** can queue future collections for the
    original device.
 2. Use **Export Selected Collection** (or **Export Support Bundle** when no
@@ -66,6 +69,16 @@ Do not let other rides' logs satisfy source coverage, or unrelated failed jobs
 stand in for the selected acquisition. Preserve the returned scope in findings.
 Incident IDs correlate matching-registry phone/device markers; a queued marker
 is not proof of durable storage or retention pinning.
+
+For a fresh pull to investigate an older ride, keep the original iPhone recorder
+history. A manual collection saves the current phone capture and the firmware
+inventory returned by the device index. The displayed collection date is the
+request time and can precede the firmware snapshot. Compare the original capture
+UUIDs with the device's retained events and pass `--since` and `--until` to
+`diag query` for the original time window. A shared UUID may continue through a
+later reconnect. Report matches outside the original window and time overlap
+without a shared ID separately. Use boot and build identities when comparing
+inventories that may come from different storage mounts or firmware runs.
 
 Narrow `diag query BUNDLE` by source, category, level, capture, operation, incident
 or time. Keep returned raw-reference member/line/hash identities in findings.
