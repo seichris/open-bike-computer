@@ -57,6 +57,22 @@ commands and live toolchain; every mismatch runs hosted tests. See
 `docs/local-ci-results.md` for trust, setup and fallback behavior. Do not use these
 receipts to replace firmware, app-build symbols, release or physical acceptance.
 
+### 1.75-inch firmware simulator
+
+For on-demand boot, UI, and navigation debugging, load an ordinary
+`WAVESHARE_AMOLED_175` build into the sibling `seichris/esp32sim` checkout
+on its `codex/bicino-175-prototype` branch.
+[Simulator quickstart](https://github.com/seichris/esp32sim/blob/216fc3638a65231ceda3819287c529f81c3449ab/examples/bicino175/README.md)
+
+- The browser shows the live display and serial logs and provides touch and
+  BOOT controls.
+- Scripted replay exercises pairing, route, and GPS inputs without a phone.
+- Bicino Dev sends real routes and GPS through the macOS BLE bridge.
+
+Use a preloaded virtual microSD image for map rendering. Use a physical board
+to validate Wi-Fi map installs, radio and sensor behavior, power and sleep,
+and real display, touch, and SD timing.
+
 ### ESP32 firmware
 
 Before the first build/upload/device-debug action in a task, identify which
