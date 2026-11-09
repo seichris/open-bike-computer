@@ -1164,10 +1164,10 @@ Parties: phone A-9, A-10, A-14, B-12; Watch B-14, W-6; firmware BLE-15, POS-1 an
 map-setting redraw policy.
 Joint phases per connection: Unsent → ProfilesNegotiated (six one-shot flags) → route /
 maneuver / GPS replaceable latest-wins → ClearIntent (RCM1) → ClearAcked | Superseded;
-firmware Empty → Staged(gen) → Applied on the UI task into the shared position record only
-while `position_source` accepts phone positions; otherwise a GPS packet is decoded into a
-discarded record that still syncs the RTC, feeds ride automation and counts toward GPS
-freshness (`esp32/lib/ble_navigation/ble_navigation.cpp:5852-5885`; X-12).
+firmware Empty → Staged(gen) → Applied on the UI task; a GPS packet's position reaches the
+shared record only while `position_source` accepts phone positions, while its ride totals
+always do, and the packet still syncs the RTC, feeds ride automation and counts toward GPS
+freshness (`esp32/lib/ble_navigation/ble_navigation.cpp:5853-5885`; X-12).
 Divergences: six per-connection "already sent" bools instead of a negotiation phase;
 firmware rejects stale by command/state generation but replaceable writes carry no
 generation, so an old connection's late ATT write on a restored link is fenced only by the
@@ -1215,8 +1215,8 @@ Parties: firmware POS-1, POS-2, POS-3, POS-4, UI-5 and the BLE GPS intake
 (`BikeComputer/Managers/NavigationEngine.swift:958`), Watch-direct sender
 (`BikeComputerWatch/Managers/WatchDeviceLink.swift:1610-1630`), A-21. Added by #775 and #776.
 Joint phases on a receiver board: PhoneOwns (no fix; `active=phone`) → GnssOwns (valid fix
-under 3 s old; phone packets are decoded into a discarded record but still sync the RTC and
-feed ride automation and diagnostics; `active=gnss`) → Handover (invalid interval or 3 s
+under 3 s old; phone packets apply only their ride totals to the record, and still sync the
+RTC and feed ride automation and diagnostics; `active=gnss`) → Handover (invalid interval or 3 s
 without a valid fix; `active=none` until the next phone packet applies) → PhoneOwns. Boards
 without a receiver stay in PhoneOwns. The phone does not take part: it streams at its own
 cadence, learns the static capability from CAP2 TLV 5 and the live state only from
@@ -1226,13 +1226,13 @@ Failure modes: receiver stream stops → the phone owns after 3 s and the module
 after at least 15 s of silence (doubling to 300 s); phone disconnect while GNSS owns → the
 record keeps updating standalone; reboot → the reader starts the module fresh with a RESET
 pulse.
-Divergences: (a) phone and Watch GPS packets bundle position with ride totals (distance,
-elapsed and, from the phone during navigation, route remaining;
-`esp32/lib/ble_navigation/gps_position_protocol.hpp:142-189`) and the device gates the bundle
-as a unit (`ble_navigation.cpp:5852-5856`), so while GNSS owns the record the ride-stats route
+Divergences: (a) fixed on 2026-11-09: phone and Watch GPS packets bundle position with ride
+totals (distance, elapsed and, from the phone during navigation, route remaining), and the
+device used to gate the bundle as a unit, so while GNSS owned the record the ride-stats route
 remaining, `hasActiveNavigation` (`esp32/lib/gui/src/rideTelemetryPresenter.hpp:97-101`) and
-the legacy distance and elapsed values (`:140-141`) freeze at the last applied phone value,
-including after the phone ends navigation; (b) fix validity has three copies with different
+the legacy distance and elapsed values (`:140-141`) froze at the last applied phone value.
+`gps_position_protocol::apply` (`esp32/lib/ble_navigation/gps_position_protocol.hpp:179-186`)
+now gates only the position fields and always applies the totals; (b) fix validity has three copies with different
 expiry: the arbiter (3 s, time-expired), `GnssStatus.fixValid` reported in `DSTS` (last
 interval, never expires) and `isGpsFixed` (cleared only by a later invalid interval); (c) the
 app mirrors the 3 s hold (`BikeComputer/Utilities/NavigationProtocol.swift:1253`); (d) the
@@ -1269,9 +1269,10 @@ come from reading the code, not from hardware.
    and `firmware_maintenance_unsupported` is never reached, because the app checks the
    capability flag first (X-3).
 6. **Payloads gated as one unit.** A GPS packet carries position and ride totals together,
-   and a receiver board accepts or discards the whole packet by position ownership, so the
-   totals freeze while GNSS owns the record (X-12 a). The e-paper's effective map profile is
-   the same shape: the stored document and the applied profile diverge silently (X-10).
+   and until 2026-11-09 a receiver board accepted or discarded the whole packet by position
+   ownership, freezing the totals while GNSS owned the record (X-12 a, now fixed). The
+   e-paper's effective map profile is the same shape: the stored document and the applied
+   profile diverge silently (X-10).
 
 ---
 
@@ -1331,8 +1332,8 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
 8. **X-6 / D-2** rebind: have the firmware advertise its grace deadline in DSTS and let the
    rebind policy accept retained OS claims so map uploads can rebind.
 9. **X-12 / POS-1..3 / A-21** position source: report the hold and fix validity from one
-   firmware owner, gate GPS packets only on their position fields, and let the app read the
-   active source instead of mirroring the 3 s hold.
+   firmware owner and let the app read the active source instead of mirroring the 3 s hold.
+   GPS packets are already gated only on their position fields (X-12 a).
 
 Dead or vestigial on the app side: the power-button honk retry (A-16, feature removed on
 firmware), the second copy of the route search panel (G-9), and the duplicated

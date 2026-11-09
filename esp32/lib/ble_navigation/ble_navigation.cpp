@@ -5849,16 +5849,16 @@ static void handleGpsPayload(
   // While the board's own receiver holds a valid fix, the phone's position
   // still feeds ride automation and diagnostics but not the shared position
   // record (position_source decides; every board without a receiver accepts).
+  // The packet's ride totals always apply: only the phone or Watch has them.
   const bool appliesToPosition =
       position_source::acceptsPhonePosition(millis());
-  Gps::GPSDATA discarded{};
-  if (!gps_position_protocol::decodeAndApply(
-          data, len, appliesToPosition ? gps.gpsData : discarded, &packet)) {
+  if (!gps_position_protocol::decode(data, len, packet)) {
     Serial.printf("BLE: Rejected malformed %s GPS position (%u bytes)\n",
                   source == nullptr ? "unknown" : source,
                   static_cast<unsigned>(len));
     return;
   }
+  gps_position_protocol::apply(packet, appliesToPosition, gps.gpsData);
 
   bool rtcTimestampSynced = false;
   if (packet.hasUnixTime) {
