@@ -103,6 +103,7 @@ private struct WorkoutContractTestSuite {
         testEndedSessionReplacesOnlyOlderPlaceholders()
         testNewerTerminalSessionReplacesOlderTerminalSession()
         testWatchLifecycleRequiresHealthKitConfirmationAndFinalizesOnce()
+        testLifecycleStopWithoutChoiceWaitsForTheRiderChoice()
         testWorkoutLifecycleFailureAndLateRunningPolicies()
         await testWorkoutFinalizationOrchestratorOrderAndFailures()
         testWorkoutFinishAndRecoveryPolicies()
@@ -3642,6 +3643,36 @@ private struct WorkoutContractTestSuite {
         )
         expect(discardReducer.apply(.sessionEnded), "discard should finish as ended")
         expect(discardReducer.apply(.reset), "summary dismissal should return to idle")
+    }
+
+    private mutating func testLifecycleStopWithoutChoiceWaitsForTheRiderChoice() {
+        var reducer = WorkoutLifecycleReducer()
+        expect(reducer.apply(.requestStart) && reducer.apply(.sessionRunning),
+               "fixture should reach running")
+        expect(reducer.apply(.sessionStopped), "HealthKit can stop a running session on its own")
+        expect(reducer.state == .ending, "a stopped session is ending")
+        expect(reducer.finishDisposition == nil, "a stop without a choice records no disposition")
+        expect(reducer.claimFinalization() == nil, "finalization waits for the rider's choice")
+        expect(!reducer.apply(.sessionStopped), "a repeated stop is not a new transition")
+        expect(reducer.apply(.requestEnd(.discard)), "the rider's later choice completes the ending")
+        expect(reducer.state == .ending && reducer.finishDisposition == .discard,
+               "the later choice is recorded without leaving ending")
+        expect(!reducer.apply(.requestEnd(.save)), "a recorded choice cannot be replaced")
+        expect(reducer.claimFinalization() == .discard, "the recorded choice is claimable once")
+        expect(reducer.apply(.sessionEnded), "finalization ends the recording")
+        expect(!reducer.apply(.sessionStopped), "an ended recording never re-enters ending")
+
+        var starting = WorkoutLifecycleReducer()
+        expect(starting.apply(.requestStart), "fixture should start")
+        expect(starting.apply(.sessionStopped), "a session can stop before it runs")
+        var idle = WorkoutLifecycleReducer()
+        expect(!idle.apply(.sessionStopped), "idle has no session to stop")
+
+        var chosen = WorkoutLifecycleReducer()
+        expect(chosen.apply(.requestStart) && chosen.apply(.sessionRunning) &&
+               chosen.apply(.requestEnd(.save)), "fixture should end with a save choice")
+        expect(!chosen.apply(.sessionStopped), "HealthKit's stop after End keeps the save choice")
+        expect(chosen.finishDisposition == .save, "the save choice survives the stop callback")
     }
 
     private mutating func testWorkoutLifecycleFailureAndLateRunningPolicies() {

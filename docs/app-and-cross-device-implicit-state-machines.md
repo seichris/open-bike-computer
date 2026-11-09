@@ -536,24 +536,27 @@ each with its own attempt UUID; the confirmation timeout starts at submission, s
 stuck behind a barrier has no bound; terminal timeout and deadline task race to retire the
 same barrier (`:697`).
 
-**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-73`
-explicit `state` written at 17 sites with no guard (`:135`, `:198`, `:258`, `:285`, `:346`,
-`:352`, `:353`, `:355`, `:358`, `:462`, `:557`, `:572`, `:909`, `:973`, `:991`, `:1001`,
-`:1014`; the shared `WorkoutLifecycleReducer` in `WorkoutShared/WorkoutRuntimeLogic.swift:42`
-is still unused here), four finalization bools (collection started/ended, finish attempted,
+**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-76`
+`state`, which since 2026-11-09 is a read-only view of a private `WorkoutLifecycleReducer`
+(`:41`), the reducer the Watch drives; the 17 former unguarded assignments are events
+(`applyLifecycle` `:573`, `confirmNativeState` `:586`), HealthKit stops without a rider
+choice use the reducer's `.sessionStopped`, and recovery rebuilds the reducer from idle along
+the legal path to the adopted state (`adoptLifecycle` `:595`), as the Watch does. A
+"stopped" callback for a recording that already ended no longer re-enters finalization
+(`:1061`). Still implicit: four finalization bools (collection started/ended, finish attempted,
 save confirmed), three write-failure flags (route, distance and, since #793, cycling
 metrics), recovered route, attach pending, generation UUID, native transition
 task/ID/generation, transition origins, control timeout, flush task. #793 adds a
 speed-capture flag latched from HealthKit authorization when the data source is configured
-at start or recovery (`PhoneWorkoutRecorder.swift:598`), and a GPS speed buffer and
+at start or recovery (`PhoneWorkoutRecorder.swift:667`), and a GPS speed buffer and
 elevation-gain accumulator that live only in RAM and are exported once, after collection
-ends and only on save (`:513-519`; no elevation after recovery, `:717`). Idle → Starting →
+ends and only on save (`:518-524`; no elevation after recovery, `:786`). Idle → Starting →
 Running/Paused (+TransitionRequested, 10 s) → Ending{open | collectionEnded |
 finishAttempted | saveConfirmed} → Ended; recovery AttachPending → Attached → Reconciled. The
-share set requested at start depends on the app being in the foreground (`:139`,
-`startShareTypes` `:927-931`), so a background start never asks for Cycling Speed.
-`resetFinished` (`:564`) resets 36 fields plus the location queue and two store values; the
-discard branch resets only the two metric accumulators (`:491-492`).
+share set requested at start depends on the app being in the foreground (`:142`,
+`startShareTypes` `:996-1000`), so a background start never asks for Cycling Speed.
+`resetFinished` (`:633`) resets 36 fields plus the location queue and two store values; the
+discard branch resets only the two metric accumulators (`:496-497`).
 
 **E-4 Session coordinator recovery / ownership arbitration** —
 `BikeComputer/Managers/WorkoutSessionCoordinator.swift:51-66` record, recovery complete,
@@ -1305,7 +1308,7 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
    frames), G-22 resolver, W-4 (two IDs), W-11 (two record pairs), G-24, D-6
    `firmwareLogDates`, E-15 `WorkoutCyclingElevationGain.meters`.
 5. **Explicit enum shadowed, derived or unguarded** — A-4 auth flow, B-4 sync state (14
-   writes), D-4 stage (any-to-any), E-3 recorder state (17 writes, shared reducer unused), W-18 setup state (27 writes),
+   writes), D-4 stage (any-to-any), W-18 setup state (27 writes),
    E-10 Strava activity, G-1 Watch sync state (derived and also assigned), W-1 cleanup
    state (derived from ~10 bools), W-5 link state (mirror), `WorkoutMirrorStateReducer`
    connection state (23 writes).
@@ -1335,8 +1338,8 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
 4. **A-1 / A-2 / A-6** BLE manager: one `clearSession()`, an explicit reconnect-intent
    enum in place of the `autoReconnect` mode flag, and a scan-purpose reconcile that takes a
    typed reason.
-5. **E-3** phone recorder: drive `state` through the existing `WorkoutLifecycleReducer`
-   like the Watch does. Since #793 it has 17 unguarded writes and a 36-field reset.
+5. **E-3** phone recorder: its `state` goes through the shared `WorkoutLifecycleReducer`
+   since 2026-11-09. The four finalization bools and the 36-field reset remain.
 6. **X-4 / E-6 / RA-1** ride automation: one decision enum with a single `settle(reason)`
    on both sides and one shared deadline origin.
 7. **W-1 / W-5** Watch: make `terminalCleanupState` the stored state instead of a
@@ -1356,7 +1359,7 @@ reconnect-and-confirm loop in the maintenance handshake (D-5).
 ## Explicit machines passed over (app side)
 
 Clean, single-owner, guarded: `RideBLETransportStateMachineV1` (shared, generation-fenced
-reducer; the one real reducer on phone and Watch); `WorkoutLifecycleReducer`;
+reducer; the one real reducer on phone and Watch); `WorkoutLifecycleReducer` (the Watch and, since 2026-11-09, the phone recorder);
 `WorkoutFinalizationPhase` ladder (save path); `BLEOwnershipLifecycle`;
 `WorkoutLatestEnvelopeBuffer`; `WorkoutControlEnvelopeSequencer` /
 `WorkoutRemoteControlSequenceGate`; `WorkoutDeviceForwardingStateV1`;
@@ -1372,7 +1375,7 @@ fence; `DeviceOperationCoordinator.Failure`; `DeviceTransferLinkRebindPolicy.Dec
 Explicit but shadowed, derived, mirrored or unguarded (also counted above): `AuthFlowState`
 (A-4), `PendingWatchControllerOperation` (A-12), `BLEScanPurpose` (derived, A-6/B-7),
 `DeviceScreenConfigurationSyncState` (B-4), `FirmwareUpdateTransactionStage` (D-4),
-`DiagnosticsAcquisitionManifest.Phase` (D-6), `PhoneWorkoutRecorder.state` (E-3),
+`DiagnosticsAcquisitionManifest.Phase` (D-6),
 `WorkoutRecordingRecord.Phase` (E-5), `WorkoutMirrorStateReducer.connectionState`,
 `StravaIntegrationActivityV1` (E-10), `PhoneRouteWatchSyncStateV1` (G-1),
 `WorldRadioPlaybackState` (G-5), `OnlinePOISearchSession.State` (G-21),
