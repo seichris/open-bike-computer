@@ -55,7 +55,10 @@ Inspect `missingRequiredSources` even on exit 0. `--require` names the expected
 sources. With `--require-complete`, exit 3 means the archive passed integrity
 checks, but a required source is missing or complete delivery could not be
 verified. Use that flag for inventoried acquisitions. Recorder-history and
-legacy bundles may have valid hashes and no acquisition inventory.
+legacy bundles may have valid hashes and no acquisition inventory. A hash-valid
+bundle with no acquisition inventory does not prove full delivery. After exit 3,
+label any analysis as partial and name what is missing. When the issue involves
+firmware and only phone evidence is available, leave the firmware conclusion open.
 
 When the user identifies a ride, use `--capture CAPTURE_UUID` and the exact
 `--device DIGEST` with verify/analyze/query, or `--acquisition COLLECTION_UUID`.
@@ -74,8 +77,9 @@ Report retrieval completeness separately from recording coverage. Check missing
 sources and inventoried chunks, leading history lost to retention, sequence
 gaps, dropped counters, crash tails, unsupported providers, and running build
 identities. A complete delivery covers the frozen inventory. Recording can still
-have gaps or an unknown unwritten tail. Match native symbols to the exact build
-and distinguish host or simulator evidence from physical tests.
+have gaps or an unknown unwritten tail. No detected errors does not rule out
+failures in missing data. Match native symbols to the exact build and distinguish
+host or simulator evidence from physical tests.
 
 ## Choose another source when needed
 
