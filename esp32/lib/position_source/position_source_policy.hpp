@@ -163,4 +163,79 @@ struct BaudProbe {
   }
 };
 
+// Restart and poll-cadence bookkeeping of the I2C receiver reader in
+// gnss_receiver.cpp. The module is restarted when no new stream byte arrives
+// for silentWindowMs across at least kSilentPolls attempted polls, whether it
+// never started (absent or unpowered) or its stream stopped later: an
+// overflowed slave refuses reads until RESET restarts it (bench capture 9),
+// and a module that answers with nothing forever needs the same. After each
+// restart without progress the window doubles, up to kMaxSilentWindowMs, so
+// an absent module is pulsed rarely; it returns to kSilentWindowMs once bytes
+// flow. A restart also clears the failure count, so the module is polled at
+// the kAbsentPollMs cadence while it comes back rather than the slow one.
+struct I2cReceiverPolicy {
+  static constexpr uint32_t kSilentWindowMs = 15'000;
+  static constexpr uint32_t kMaxSilentWindowMs = 300'000;
+  static constexpr uint8_t kSilentPolls = 3;
+  static constexpr uint32_t kIdlePollMs = 200;
+  static constexpr uint32_t kAbsentPollMs = 2000;
+  // A soldered receiver that keeps failing to answer is a hardware fault;
+  // after a few misses the polls slow down so the log stays readable.
+  static constexpr uint32_t kAbsentSlowPollMs = 30'000;
+  static constexpr uint8_t kAbsentPollsBeforeSlow = 5;
+
+  uint32_t progressBytes = 0;
+  uint32_t progressMs = 0;
+  uint32_t pollsSinceProgress = 0;
+  uint32_t silentWindowMs = kSilentWindowMs;
+  uint8_t consecutiveFailures = 0;
+
+  // The reader started the module fresh at nowMs.
+  void begin(uint32_t nowMs) { progressMs = nowMs; }
+
+  // Records one poll: whether the receiver answered, and the stream's byte
+  // total read at nowMs after the poll, which can take seconds. Returns true
+  // when the module must be restarted; call restarted() once it has been.
+  bool notePoll(bool answered, uint32_t streamBytes, uint32_t nowMs) {
+    if (answered)
+      consecutiveFailures = 0;
+    else if (consecutiveFailures < UINT8_MAX)
+      ++consecutiveFailures;
+    if (streamBytes != progressBytes) {
+      progressBytes = streamBytes;
+      progressMs = nowMs;
+      pollsSinceProgress = 0;
+      silentWindowMs = kSilentWindowMs;
+      return false;
+    }
+    return ++pollsSinceProgress >= kSilentPolls &&
+           static_cast<uint32_t>(nowMs - progressMs) >= silentWindowMs;
+  }
+
+  // Records a restart that finished at nowMs.
+  void restarted(uint32_t nowMs) {
+    progressMs = nowMs;
+    pollsSinceProgress = 0;
+    consecutiveFailures = 0;
+    silentWindowMs = silentWindowMs * 2 < kMaxSilentWindowMs
+                         ? silentWindowMs * 2
+                         : kMaxSilentWindowMs;
+  }
+
+  // Delay before the next poll. A slave that answered the previous poll and
+  // now refuses beyond the step budget is busy, not gone, so it is polled
+  // again at once; only a slave that keeps refusing is polled slowly. A
+  // partial drain left bytes behind, so the next query follows at once too.
+  uint32_t nextPollDelayMs(bool answered, bool partial,
+                           bool answeredBefore) const {
+    if (!answered) {
+      if (answeredBefore)
+        return 0;
+      return consecutiveFailures >= kAbsentPollsBeforeSlow ? kAbsentSlowPollMs
+                                                           : kAbsentPollMs;
+    }
+    return partial ? 0 : kIdlePollMs;
+  }
+};
+
 }  // namespace position_source

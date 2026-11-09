@@ -421,29 +421,11 @@ struct I2cTransport {
   static constexpr uint8_t kWriteAttempts = 10;
   static constexpr uint8_t kReadsPerRequest = 5;
   static constexpr uint8_t kRequestRounds = 20;
-  static constexpr uint32_t kIdlePollMs = 200;
-  static constexpr uint32_t kAbsentPollMs = 2000;
-  // A soldered receiver that keeps failing to answer is a hardware fault;
-  // after a few misses the polls slow down so the log stays readable.
-  static constexpr uint32_t kAbsentSlowPollMs = 30'000;
-  static constexpr uint8_t kAbsentPollsBeforeSlow = 5;
-  // The module is restarted when no new byte arrives for kSilentWindowMs
-  // across at least kSilentPolls attempted polls, whether it never started
-  // (absent or unpowered) or its stream stopped later: an overflowed slave
-  // refuses reads until RESET restarts it (capture 9), and a module that
-  // answers with nothing forever needs the same. After each restart without
-  // progress the window doubles, up to kMaxSilentWindowMs, so an absent
-  // module is pulsed rarely; it returns to kSilentWindowMs once bytes flow.
-  static constexpr uint32_t kSilentWindowMs = 15'000;
-  static constexpr uint32_t kMaxSilentWindowMs = 300'000;
-  static constexpr uint8_t kSilentPolls = 3;
   static constexpr size_t kChunkBytes = waveshare_board::i2c::STREAM_BUFFER_BYTES;
   uint8_t chunk[kChunkBytes] = {};
-  uint32_t progressBytes = 0;
-  uint32_t progressMs = 0;
-  uint32_t pollsSinceProgress = 0;
-  uint32_t silentWindowMs = kSilentWindowMs;
-  uint8_t consecutiveFailures = 0;
+  // When to restart the module and how long to wait between polls; see
+  // I2cReceiverPolicy in position_source_policy.hpp.
+  I2cReceiverPolicy policy;
   bool sawValidSentence = false;
 
   enum class Step : uint8_t { dummy, request, length, data };
@@ -534,7 +516,7 @@ struct I2cTransport {
     // on V_BCKP that is a hot start. The reader task makes the first
     // contact once the module is up again.
     pulseReset("fresh start with the reader");
-    progressMs = nowMs;
+    policy.begin(nowMs);
   }
 
   enum class Outcome : uint8_t { noAnswer, partial, complete };
@@ -600,44 +582,18 @@ struct I2cTransport {
     state.portOpen = answered;
     const uint32_t bytesNow = state.bytes;
     portEXIT_CRITICAL(&mux);
-    if (answered)
-      consecutiveFailures = 0;
-    else if (consecutiveFailures < UINT8_MAX)
-      ++consecutiveFailures;
     if (answered != wasPresent)
       printBoot(probeReported ? "ok" : answered ? "pending" : "retry");
-    // Restart the module when its stream stops (see kSilentWindowMs). The
-    // clock is read after the poll, which can take seconds.
-    const uint32_t afterMs = millis();
-    if (bytesNow != progressBytes) {
-      progressBytes = bytesNow;
-      progressMs = afterMs;
-      pollsSinceProgress = 0;
-      silentWindowMs = kSilentWindowMs;
-    } else if (++pollsSinceProgress >= kSilentPolls &&
-               static_cast<uint32_t>(afterMs - progressMs) >= silentWindowMs) {
+    // Restart the module when its stream stops. The clock is read after the
+    // poll, which can take seconds, and again after the reset pulse.
+    if (policy.notePoll(answered, bytesNow, millis())) {
       pulseReset(bytesNow == 0 ? "no bytes yet" : "stream stopped");
       printBoot(probeReported ? "ok" : "retry");
-      progressMs = millis();
-      pollsSinceProgress = 0;
-      // Poll at the normal cadence while the module comes back up.
-      consecutiveFailures = 0;
-      silentWindowMs = silentWindowMs * 2 < kMaxSilentWindowMs
-                           ? silentWindowMs * 2
-                           : kMaxSilentWindowMs;
+      policy.restarted(millis());
     }
     locked = sawValidSentence;
-    if (!answered) {
-      // A slave that answered the previous poll and now refuses beyond the
-      // step budget is busy, not gone: poll again at once. Only a slave
-      // that keeps refusing is polled slowly.
-      if (wasPresent)
-        return 0;
-      return consecutiveFailures >= kAbsentPollsBeforeSlow ? kAbsentSlowPollMs
-                                                           : kAbsentPollMs;
-    }
-    // A partial drain left bytes behind: query again soon.
-    return outcome == Outcome::partial ? 0 : kIdlePollMs;
+    return policy.nextPollDelayMs(answered, outcome == Outcome::partial,
+                                  wasPresent);
   }
 };
 
