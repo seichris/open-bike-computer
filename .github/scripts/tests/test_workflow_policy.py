@@ -1238,7 +1238,27 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         self.assertIn('      - ".github/actions/firmware-build-cache/**"\n', push)
         self.assertIn("uses: ./.github/workflows/ci.yml", warm)
         self.assertIn("scope: firmware\n", warm)
-        self.assertIn("firmware_hardware: ${{ inputs.firmware_hardware || '175' }}", warm)
+        # Every family is warmed, not only the 1.75: "all" is the AMOLED pair.
+        self.assertIn("firmware_hardware: ${{ matrix.hardware }}", warm)
+        self.assertIn("'[\"all\",\"175_gnss\",\"397\"]'", warm)
+        self.assertIn("format('[\"{0}\"]', inputs.firmware_hardware)", warm)
+        self.assertIn("max-parallel: 2", warm)
+        self.assertIn("fail-fast: false", warm)
+        dispatch = mapping_block(warm, "workflow_dispatch", indent=2)
+        for family in ("every", '"175"', '"206"', '"397"', '"175_gnss"'):
+            self.assertIn(f"          - {family}\n", dispatch)
+        # Each warm leg must be a selector that CI routing accepts, so a leg can
+        # never finish green while it builds and publishes nothing.
+        import changed_components
+        selectors = set(changed_components.FIRMWARE_TARGETS) | {"all"}
+        legs = json.loads(re.search(r"'(\[\"all\"[^']*\])'", warm).group(1))
+        self.assertTrue(set(legs) <= selectors, legs)
+        self.assertEqual(set(changed_components.FIRMWARE_TARGETS) - {"175", "206"}, set(legs) - {"all"})
+        # The legs share one run, so each leg's host evidence needs its own name.
+        self.assertIn(
+            "name: firmware-host-evidence${{ inputs.firmware_hardware && format('-{0}', inputs.firmware_hardware) || '' }}",
+            workflow_source("ci.yml"),
+        )
         permissions = mapping_block(warm, "permissions", indent=0)
         self.assertIn("  actions: read", permissions)
         self.assertIn("  contents: read", permissions)

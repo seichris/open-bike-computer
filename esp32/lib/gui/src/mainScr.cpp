@@ -83,7 +83,6 @@ lv_obj_t *btnZoomOut;
 static lv_obj_t *mapGuidanceOverlay;
 static lv_obj_t *mapGuidanceArrow;
 static lv_obj_t *mapGuidanceDistance;
-static lv_obj_t *mapGuidanceCycleStrip;
 static map_tile_transition::State mapTileTransition;
 static uint32_t mapTileTransitionStartedMs = 0;
 static bool mapTileTransitionUsedRenderAhead = false;
@@ -2040,21 +2039,6 @@ static void createMapGuidanceOverlay() {
   lv_obj_set_style_pad_all(mapGuidanceOverlay, 8, 0);
   lv_obj_add_event_cb(mapGuidanceOverlay, mapGuidanceOverlayTapEvent,
                       LV_EVENT_CLICKED, NULL);
-
-  mapGuidanceCycleStrip = lv_btn_create(mapGuidanceOverlay);
-  lv_obj_set_size(mapGuidanceCycleStrip, 28, overlayHeight - 16);
-  lv_obj_align(mapGuidanceCycleStrip, LV_ALIGN_RIGHT_MID, 0, 0);
-  lv_obj_set_style_radius(mapGuidanceCycleStrip, 8, 0);
-  lv_obj_set_style_bg_color(mapGuidanceCycleStrip, lv_color_hex(0x181818), 0);
-  lv_obj_set_style_bg_opa(mapGuidanceCycleStrip, LV_OPA_COVER, 0);
-  lv_obj_clear_flag(mapGuidanceCycleStrip, LV_OBJ_FLAG_EVENT_BUBBLE);
-  lv_obj_add_event_cb(mapGuidanceCycleStrip, tapCycleScreenEvent,
-                      LV_EVENT_CLICKED, NULL);
-  lv_obj_t *cycleLabel = lv_label_create(mapGuidanceCycleStrip);
-  lv_obj_set_style_text_color(cycleLabel, lv_color_white(), 0);
-  lv_obj_set_style_text_font(cycleLabel, &lv_font_montserrat_18, 0);
-  lv_label_set_text_static(cycleLabel, LV_SYMBOL_RIGHT);
-  lv_obj_center(cycleLabel);
 
   mapGuidanceArrow = lv_img_create(mapGuidanceOverlay);
   LV_IMG_DECLARE(navup);
