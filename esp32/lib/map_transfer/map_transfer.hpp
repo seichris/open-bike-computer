@@ -268,7 +268,9 @@ public:
       ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   // A legacy root whose consumed marker failed after its pointer switch is
   // installed, not pending, as selected map and later as previous map.
-  // Finishes that cleanup for both; never activates anything.
+  // Finishes that cleanup for both; never activates anything. A failure on
+  // the previous map returns stream_settle_previous, ahead of the selected
+  // map's stream_settle_cleanup: moving the pointer would push that root out.
   InstallStatus settleSelectionStreamMaps() const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;

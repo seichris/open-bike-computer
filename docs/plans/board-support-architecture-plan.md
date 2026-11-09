@@ -160,6 +160,7 @@ These are decisions, with the reasons they were made.
 ```
 esp32/lib/board/
   board.hpp                 includes exactly one definition from the target macro; #error otherwise
+  panel_select.hpp          includes the lib/panel header of the panel that definition names
   boards/
     waveshare_amoled_175.hpp
     waveshare_amoled_206.hpp
@@ -198,19 +199,22 @@ namespace gnss { constexpr bool fitted = false; constexpr uint8_t tx = 43, rx = 
 An optional pin a board does not route is `board::noPin`. `include/hal.hpp`
 keeps the old pin names (`TFT_QSPI_CLK`, `TCH_I2C_INT`, `WAVESHARE_SDMMC_CLK`
 and the rest) as aliases of this data until their users read `board::`
-directly. A board file may also define a few `BOARD_*` capability macros for
-the places only the preprocessor can gate (PMIC write paths that must not
-exist on a board without the capability, C configuration headers); each one
-is `static_assert`ed equal to its `board::` value. The first is
-`BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`.
+directly. A board file may also define a few `BOARD_*` macros for the places
+only the preprocessor can decide (PMIC write paths that must not exist on a
+board without the capability, the choice of a header, C configuration
+headers); each one is `static_assert`ed equal to its `board::` value. The
+first is `BOARD_PMIC_DISPLAY_ENABLE_RECOVERY`; `BOARD_PANEL` repeats
+`board::display::panel`.
 
 The AMOLED definitions take their values from `hardware/README.md`, which stays
-the authoritative pinout. `board.hpp` replaces `board_traits.hpp` and absorbs
-`panelSelect.hpp`'s role; the target macros keep their names, because
-`custom_firmware_target`, `BOOT_META`, OTA compatibility and the release
-tooling already depend on them. A target macro may appear only in
-`platformio.ini`, `lib/board/`, a file whose single conditional gates all of
-it, `panelSelect.hpp` until it is absorbed, CI routing and tests.
+the authoritative pinout. `board.hpp` replaces `board_traits.hpp`, and the
+board layer has absorbed `panelSelect.hpp`'s role: the selected definition
+names its panel, `lib/board/panel_select.hpp` includes that panel's header,
+and `lib/panel/panelSelect.hpp` only forwards there. The target macros keep
+their names, because `custom_firmware_target`, `BOOT_META`, OTA compatibility
+and the release tooling already depend on them. A target macro may appear only
+in `platformio.ini`, `lib/board/`, a file whose single conditional gates all of
+it, CI routing and tests.
 
 A variant file includes its base and overrides the parts that differ. The
 variant is still its own target (`WAVESHARE_AMOLED_175_GNSS`), with its own
@@ -220,7 +224,8 @@ environments, `BOOT_META target`, partition layout reference and gate.
 
 Each part has one header with a small interface and one implementation per
 fitted device, chosen at build time from the board definition the way
-`panelSelect.hpp` chooses the panel today.
+`lib/board/panel_select.hpp` chooses the panel header from the definition's
+`BOARD_PANEL`.
 
 | Part | Interface | Implementations | Today |
 | --- | --- | --- | --- |
@@ -362,10 +367,12 @@ that board once it is tested (see Decisions).
   selects `boards/waveshare_amoled_175.hpp` or `boards/waveshare_amoled_206.hpp`
   and rejects any other target set; `include/hal.hpp` keeps the old pin names
   as aliases of that data. The confinement test froze 189 conditionals in 29
-  shared files; 11 more files are exempt as whole-file gates. `panelSelect.hpp` keeps
-  its role until M3 and M4 move the panel choice. #442's `board_traits.hpp` is
-  not on `main`; the e-paper branch adds `boards/waveshare_epaper_397.hpp` when
-  it merges. Merged as #766 on 2026-11-06.
+  shared files; 11 more files are exempt as whole-file gates. `panelSelect.hpp` kept
+  its role; neither M3 nor M4 moved the panel choice, which moved into
+  `lib/board/` later (see "Panel selection in the board layer" below).
+  #442's `board_traits.hpp` is not on `main`; the e-paper branch adds
+  `boards/waveshare_epaper_397.hpp` when it merges. Merged as #766 on
+  2026-11-06.
 - **M3, done 2026-11-06, merged as #767 on 2026-11-07.** `storage.cpp`, `ride_diagnostics.cpp`,
   `axp2101.cpp`, `i2c_bus.cpp`/`.hpp`, `settings.cpp`, `display.hpp`,
   `touch.hpp`, `lv_conf.h`, `task_data_placement.hpp`,
@@ -501,10 +508,11 @@ that board once it is tested (see Decisions).
   with the display-enable-only gate plus its SD-mount and navigation and
   workout smoke, which cover M2, M3 and M4 together; the e-paper panel
   checks (second panel, generation-2 layout, base-render admission, Ride
-  Stats cells, pairing copy). `lib/panel/panelSelect.hpp` still selects the
-  panel header by target macro and keeps its exemption in the confinement
-  test; moving that choice into `lib/board/` is open and belongs to no
-  milestone yet. M5 and M6 wait for the GNSS 1.75 session.
+  Stats cells, pairing copy). `lib/panel/panelSelect.hpp` still selected the
+  panel header by target macro then and kept its exemption in the confinement
+  test; moving that choice into `lib/board/` was open and belonged to no
+  milestone (since done: see "Panel selection in the board layer" below).
+  M5 and M6 wait for the GNSS 1.75 session.
 - **M5, 2026-11-08, merged as `0b51d611` (#775).** The position source is one part.
   `lib/position_source/` arbitrates between the phone's BLE positions and an
   onboard receiver (`position_source_policy.hpp`: a fitted receiver holds the
@@ -576,6 +584,31 @@ that board once it is tested (see Decisions).
   next sentence (the one-fix buffer loses it otherwise; a UART reader never
   met either). Still the maintainer's: the device following the receiver
   with the phone off, and the phone-navigation check on the plain image.
+- **Panel selection in the board layer.** Not a milestone; it closes the last
+  per-file exemption of the confinement test. Each board definition names its
+  panel as data: `board::display::panel`, a `board::Panel` from
+  `lib/board/board_panel.hpp` (`co5300Amoled` for the 1.75, shared with its
+  GNSS variant through the common file, and the 2.06; `ssd1677Epaper` for the
+  3.97), repeated by the `BOARD_PANEL` macro and `static_assert`ed equal to
+  it. `lib/board/panel_select.hpp` includes `board.hpp` and then the panel's
+  header from `lib/panel` through one explicit relative include per panel, and
+  fails the build for a definition that names no known panel. The data makes
+  the choice; the e-paper header also stays behind `WAVESHARE_EPAPER_397`,
+  because CI builds a change to an e-paper-named file for the e-paper images
+  only and `test_firmware_profile_coverage.py` holds every include of one to
+  that guard, so another board naming that panel fails the build until its
+  routing exists. Every target includes the same panel header as before:
+  `WAVESHARE_AMOLED_175.hpp` for the 1.75, its GNSS variant and the 2.06,
+  `WAVESHARE_EPAPER_397.hpp` for the 3.97. `lib/panel/panelSelect.hpp` now
+  only forwards to the selector, so its four includers (`main.cpp`,
+  `display_power.cpp`, `mainScr.cpp`, `tft.hpp`) stay unchanged and still
+  reach `lib/panel`: the dependency finder gives every library the same
+  dependencies as before (`test_ldf_include_paths.py --list` prints the same
+  graph), while including `lib/board/panel_select.hpp` directly would have
+  dropped `lib/panel` from the direct dependencies of the project,
+  `display_power`, `gui` and `tft`, because the header-only `lib/board`
+  carries no dependencies of its own. The confinement test's `EXEMPT_FILES` is
+  gone; its counts did not change.
 
 ### The confinement test
 
@@ -587,13 +620,14 @@ selects:
   conditionals naming a target macro; the targets are the
   `custom_firmware_target` values in `platformio.ini`, so a new board is
   covered as soon as it has an environment.
-- Allows them without limit in `lib/board/**`, `lib/panel/panelSelect.hpp`
-  (still exempt after M4; the panel header choice has not moved into
-  `lib/board/`) and in any file whose single target conditional
-  is a positive gate around all of its code with no else branch. That
-  whole-file gate is how a translation unit stays
-  out of the other boards' images, and it is what keeps #442's e-paper-named
-  sources out of AMOLED builds.
+- Allows them without limit in `lib/board/**`, where `board.hpp` selects the
+  definition and `panel_select.hpp` keeps the e-paper panel header behind its
+  board macro (`lib/panel/panelSelect.hpp` lost its exemption when the panel
+  header choice moved into `lib/board/`), and in any file whose single target
+  conditional is a positive gate around all of its code with no else branch.
+  That whole-file gate is how a translation unit stays out of the other
+  boards' images, and it is what keeps #442's e-paper-named sources out of
+  AMOLED builds.
 - Holds `board_macro_baseline.json` mapping every other file to its exact
   count. A count above or below the baseline fails; `--update-baseline`
   records a lower count so it cannot grow back, and reaching zero removes the

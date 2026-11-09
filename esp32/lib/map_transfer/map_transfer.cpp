@@ -2725,7 +2725,10 @@ InstallStatus MapTransferInstaller::settleSelectionStreamMaps() const try {
   InstallStatus result{true, "stream_settle_none", ""};
   // The previous map was selected before, so it is just as installed. Once
   // another map is chosen it leaves the pointer, and an unsettled marker would
-  // then turn back into pending work that boot activates again.
+  // then turn back into pending work that boot activates again. Its failure
+  // therefore has its own code, on which a Use or an upload is refused. A
+  // selected map whose cleanup fails only becomes the previous one, which the
+  // pointer still protects.
   for (const bool previous : {false, true}) {
     const auto &sessionId = previous ? active.previousSessionId : active.sessionId;
     const auto &selectedRoot = previous ? active.previousRoot : active.root;
@@ -2749,12 +2752,14 @@ InstallStatus MapTransferInstaller::settleSelectionStreamMaps() const try {
             (previous ? active.previousSignedManifestReceipt : active.signedManifestReceipt) ||
         preparationBlocksActivation(ready))
       continue;
-    // The same cleanup as an activation of the already selected root.
+    // The same cleanup as an activation of the already selected root. The
+    // previous root runs last, so its failure takes precedence.
     if ((!consumed && !markStreamActivationConsumed(ready)) ||
         (pendingNamesRoot && !clearPendingStreamActivation(sessionId)) ||
         !removeTree(joinPath(root, kStreamCheckpointFile)) ||
         !removeTree(joinPath(root, kStreamInstallingFile)))
-      result = fail("stream_settle_cleanup", "installed map cleanup will retry");
+      result = previous ? fail("stream_settle_previous", "previous map cleanup will retry")
+                        : fail("stream_settle_cleanup", "installed map cleanup will retry");
     else if (result.ok)
       result = {true, "stream_installed", ""};
   }
