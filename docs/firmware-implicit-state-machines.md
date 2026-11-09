@@ -925,26 +925,29 @@ profiles (`epaper_policy.hpp:6`). The board creates no LVGL input device (the on
 `lv_indev_create` is in the AMOLED panel driver, `WAVESHARE_AMOLED_175.cpp:1311`), so the
 touch-driven machines UI-1, UI-9, UI-11, MAP-9 and MAP-10 are unreachable there.
 
-**EP-1 E-paper presentation worker and refresh policy** — `epaper_policy.hpp:89-94`
-`history_`, `busy_`, `fault_`, `sleeping_`, `lastFull_`, `baseReason_`, `failures_`,
-`partials_`, `startedAt_`, `finishedAt_`; `epaper_display.cpp:35-36` `urgent`,
-`sleepRequested`, `wakeRequested`; worker-local `wakeForChangedContent` (`:134`); `Status`
-mirror `busy`/`fault`/`sleeping` (`epaper_display.hpp:27`). NoHistory(Startup | Wake |
-Recovery) → Busy → History(n partials) → CleaningDue (n ≥ 160) → IdleSleep after 60 s (wakes
-for changed pixels) | ExplicitSleep (wakes only on request) → Fault (latched on the second
-consecutive failure). Worker loop `epaper_display.cpp:139-303`; policy transitions
-`epaper_policy.hpp:59-82`; requests `sleep()`/`wake()` (`epaper_display.cpp:389-400`).
-**Smell:** the explicit `RefreshReason` is derived from `history_`/`baseReason_`/`partials_`
-(`epaper_policy.hpp:46-49`); the snapshot repeats `busy`, `fault` and `sleeping` and writes
-each at three sites (`epaper_display.cpp:172`, `:204`, `:246`; `:136`, `:157`, `:247`;
-`:157`, `:190`, `:214`); explicit versus idle sleep is a worker-local bool that neither the
-policy nor the status sees; `sleepFailed()` (`epaper_policy.hpp:78`) reuses the
-waveform-finished stamp as the 60 s sleep retry timer. The fault latch clears only in
-`wake()`, and `epaper::sleep()`/`wake()` are called only from the `EPAPER_DISPLAY_TEST`
-branch (`board_input.cpp:33-41`), so in ordinary builds a latched fault lasts until reboot
-and the status line reads "Display fault - reconnect power" (`epaper_ui.cpp:224`). The
-status is published in the transfer status JSON (`ble_navigation.cpp:3536-3549`) but has no
-reader in `ios-app/`. Host-tested (`tools/tests/test_epaper_display.cpp`).
+**EP-1 E-paper presentation worker and refresh policy** — `epaper_policy.hpp:154-159`
+`history_`, `busy_`, `fault_`, `sleeping_`, `explicitSleep_`, `lastFull_`,
+`sleepRetryPending_`, `baseReason_`, `failures_`, `faultRetries_`, `partials_`, `startedAt_`,
+`finishedAt_`, `faultedAt_`, `sleepFailedAt_`; `epaper_display.cpp:35-36` `urgent`,
+`sleepRequested`, `wakeRequested`; `Status` mirror `busy`/`fault`/`sleeping`/`explicitSleep`
+(`epaper_display.hpp:27-30`). NoHistory(Startup | Wake | Recovery) → Busy → History(n
+partials) → CleaningDue (n ≥ 160) → IdleSleep after 60 s (wakes for changed pixels) |
+ExplicitSleep (wakes only on request) → Fault (latched on the second consecutive failure) →
+FaultRetry (one full refresh, which resets and reinitializes the controller, after 5 s,
+doubling to 5 min) → Recovered | Fault. Worker loop `epaper_display.cpp:138-320`; policy
+transitions `epaper_policy.hpp:69-147`; requests `sleep()`/`wake()`
+(`epaper_display.cpp:405-416`). Since 2026-11-10 explicit sleep is a policy state
+(`explicitSleep()`, `epaper_policy.hpp:150`, also in the status) instead of a worker-local
+bool; a failed sleep command retries on its own timer (`sleepFailed`, `:138-141`) instead of
+posing as a finished waveform; and a latched fault retries with backoff (`faultRetryDue`,
+`:77-85`) instead of lasting until reboot, with the worker asking the UI once per retry window
+for a fresh frame to retry with (`epaper_display.cpp:174-181`). A success clears the fault;
+until then the status line reads "Display fault - retrying" (`epaper_ui.cpp:224`).
+**Smell:** the explicit `RefreshReason` is still derived from
+`history_`/`baseReason_`/`partials_` (`epaper_policy.hpp:86-89`); the snapshot repeats
+`busy`, `fault`, `sleeping` and `explicitSleep` and writes them at several sites; the status
+is published in the transfer status JSON (`ble_navigation.cpp:3536-3549`) but has no reader
+in `ios-app/`. Host-tested (`tools/tests/test_epaper_display.cpp`).
 
 **EP-2 Frame mailbox and semantic-context revocation** — `frame_mailbox.hpp:57-60`
 desired/flight/shown buffers, `generation_`, `pairing_`, `context_`, `provenance_`,
@@ -967,21 +970,25 @@ screen-instance change bumps the context twice (`mainScr.cpp:2895` through
 **EP-3 Pairing comparison on glass** — the BLE side requests the gate and sets the display
 pairing generation (`ble_navigation.cpp:1054-1056`, `:1062-1064`). The display tags a frame
 only if the waiting screen shows the comparison when it is packed
-(`epaper_display.cpp:327`), attests presentation only when pairing and context are still
-current (`:256-257`) and clears the attestation on explicit sleep, failure and `sleep()`
-(`:191`, `:283`, `:392`). `pairingPresented()` (`:380-388`) requires not busy, no fault, a
-pairing match and a context match. `poll()` forwards completion (`:468-469`) to
-`ComparisonRenderGate::displayGenerationCompleted`, and the loop's
+(`epaper_display.cpp:343`). The worker owns one stored attestation, the pairing and context
+of the comparison on glass (`snapshot.pairingGeneration` and `snapshot.context`): it
+publishes it when such a frame completes while still current (`:272-273`) and withdraws it
+before any waveform that could flash or replace the code (`keepsComparisonOnGlass`,
+`epaper_policy.hpp:47-54`; `epaper_display.cpp:234-238`), on a failed waveform (`:253`) and
+on explicit sleep (`:197`, `:408`). `pairingPresented()` (`:396-404`) compares that one value
+with the current pairing and context (`comparisonOnGlass`, `epaper_policy.hpp:57-61`), and the
+side-key re-block (`board_input.cpp:25-28`), the BOOT gate re-arm
+(`board_startup/epaper.cpp:75-77`), the confirm guard (`ble_navigation.cpp:8626`) and the
+`poll()` notification (`epaper_display.cpp:484-485`) all read it. `poll()` forwards
+completion to `ComparisonRenderGate::displayGenerationCompleted`, and the loop's
 `armOwnershipPairingAfterRenderedComparison` (`main.cpp:312-338`) arms `DeviceOwnership`.
 NoCode → CodeRequested(gen, context bumped) → TaggedFrameQueued → InFlight → OnGlass(gen) →
-Armed (gate consumed) → Confirmed | CancelledOnDevice | Expired. OnGlass is withdrawn whenever
-a later frame is in flight, the context changes or a waveform fails. **Smell:** "on glass" is
-recomputed from five fields per read and read independently in four places: the side-key
-re-block (`board_input.cpp:25-28`), the BOOT gate re-arm (`board_startup/epaper.cpp:75-77`),
-the confirm guard (`ble_navigation.cpp:8626`) and the `poll()` notification. Because `busy`
-counts, any frame in flight during pairing withdraws visibility and forces fresh releases on
-every key. The AMOLED family feeds the same gate synchronously from a flush
-(`main.cpp:182-186`), so one gate class carries two meanings.
+Armed (gate consumed) → Confirmed | CancelledOnDevice | Expired. Since 2026-11-10 a
+same-code partial waveform, such as a status-line update, keeps OnGlass, so the keys are no
+longer re-blocked on every frame; a full waveform, another frame, a context change or a
+failed waveform still withdraws it. **Smell:** the AMOLED family feeds the same
+`ComparisonRenderGate` synchronously from a flush (`main.cpp:182-186`), so one gate class
+carries two meanings.
 
 **EP-4 Side keys and context menu** — per key `button_policy.hpp:41-42` `raw_`, `stable_`,
 `held_`, `blocked_`, `changedAt_`, `pressedAt_`, `repeatedAt_`, `releasedAt_` (0 = no release
@@ -999,22 +1006,23 @@ a focused control (`epaper_ui.cpp:130-134`).
 
 **EP-5 E-paper navigation scheduler, heading filter and disposition ledger (e-paper
 counterpart of UI-8)** — `mapSchedulerEpaper.cpp:25-28` scheduler, filter, ledger,
-`epaperArmedRenderReasons`; `epaperNavigationPolicy.hpp:139-143` filter `x_/y_`,
+`epaperArmedRenderReasons`; `epaperNavigationPolicy.hpp:147-151` filter `x_/y_`,
 `lastCapturedAtMs_` (0 = none), `initialized_`, `courseDriven_` (hold below 4 km/h, resume
-above 6 km/h); `:292-298` scheduler `latestFix_`, `latestSubmittedFix_`, `publishedFix_`,
-`lastSubmissionMs_` (0 = never; `markSubmitted` stores 1 for 0, `:273`), `lastPublishedMs_`,
-`forcedReasons_`, `hasFix_`; `:383-384` ledger `pendingSequence_`, `terminalSequence_`.
-Scheduler: Idle → Armed(reasons) → Submitted → Published, with a 1 s base cadence and
-successor-pending suppression (`:253-264`). Heading: Uninitialized → Held ↔ CourseDriven.
+above 6 km/h); `:292-295` scheduler `latestFix_`, `lastSubmissionMs_` (0 = never;
+`markSubmitted` stores 1 for 0, `:280-283`), `forcedReasons_`, `hasFix_`; `:380-381` ledger
+`pendingSequence_`, `terminalSequence_`. Scheduler: Idle → Armed(reasons) → Submitted, with
+a 1 s base cadence and successor-pending suppression (`:261-272`). Heading: Uninitialized →
+Held ↔ CourseDriven, reset when a route session starts or ends (`resetsHeading`, `:44-46`;
+`mapSchedulerEpaper.cpp:149-155`) since 2026-11-10, so a heading held from the previous
+session no longer orients a stationary rider's new one. The write-only `latestSubmittedFix_`,
+`publishedFix_` and `lastPublishedMs_` were removed with `markPublished` on the same date.
 Per fix sequence: Pending → Foreground | Base | Coalesced. **Smell:** a non-zero armed mask
-suppresses `evaluate` entirely (`mapSchedulerEpaper.cpp:191`); it clears only on a submit or
-a synchronous render (`:235`, `:244`, `:249`), not in `markInterrupted` (`:252-256`), and
-relies on `isPosMoved` to resubmit; the heading filter is never reset (no caller of
-`reset()`), so a held heading survives disconnects and route changes;
-`latestSubmittedFix_`, `publishedFix_` and `lastPublishedMs_` are written but never read in
-firmware; `DispositionLedger::ignore()` and four of the eight `Disposition` values (Invalid,
-Stale, Deadband, Incompatible) occur only in the host test. Host-tested
-(`test_epaper_navigation_policy.cpp`).
+suppresses `evaluate` entirely (`mapSchedulerEpaper.cpp:195`) and clears only on a submit or
+a synchronous render (`:237`, `:244`, `:247`), not in `markInterrupted` (`:249-253`); that is
+not a stuck state, because a render failure is reported after `markSubmitted` already cleared
+the mask, and the one overlap resubmits through `isPosMoved`; `DispositionLedger::ignore()`
+and four of the eight `Disposition` values (Invalid, Stale, Deadband, Incompatible) occur only
+in the host test. Host-tested (`test_epaper_navigation_policy.cpp`).
 
 ---
 
@@ -1093,11 +1101,10 @@ Ranked by blast radius and by how many of the smells above a single enum would r
    which `isGpsFixed` and the reported `fixValid` derive. Phone packets are already gated
    only on their position fields (X-12 a in the app document). Small blast radius: only the
    GNSS 1.75 variant fits a receiver.
-10. **EP-3** comparison on glass: one stored value owned by the display worker, published
-    with its pairing generation, so the BOOT gate, side keys and confirm guard read one
-    value. Experimental board.
-11. **EP-1** e-paper presentation: make explicit sleep a policy state and give the fault
-    latch an ordinary recovery path instead of a reboot. Experimental board.
+10. **EP-3** comparison on glass: done on 2026-11-10. The display worker owns one stored
+    attestation that a same-code partial waveform keeps. Experimental board.
+11. **EP-1** e-paper presentation: done on 2026-11-10. Explicit sleep is a policy state and a
+    latched fault retries with backoff instead of waiting for a reboot. Experimental board.
 
 Dead or vestigial state worth deleting outright: GPS `setTime`/`isTimeFixed` (SYS-9),
 speaker PWR-honk retry (SYS-7), `mountGeneration_` (SYS-3), pinch zoom-out backdrop
@@ -1105,10 +1112,11 @@ fields (MAP-9), legacy GPX option flow (UI-10). The GNSS work adds unreachable c
 its own: the UART receiver transport with `BaudProbe`, `probeLines` and
 `kMaxResetPulses` (POS-2; no profile selects UART), and the redundant
 `Arbiter::gnssFixSeen` (POS-1). #775 deleted the never-built legacy UART GPS path
-(`Gps::init`, `autoBaud`, `gpsTask`, the GPS baud and rate settings). The e-paper work adds
-write-only scheduler fields (`latestSubmittedFix_`, `publishedFix_`, `lastPublishedMs_`),
-a test-only `DispositionLedger::ignore()` with four test-only `Disposition` values and an
-uncalled `HeadingFilter::reset()` (EP-5). Per family: on the e-paper
+(`Gps::init`, `autoBaud`, `gpsTask`, the GPS baud and rate settings). The e-paper work left
+a test-only `DispositionLedger::ignore()` with four test-only `Disposition` values (EP-5);
+its write-only scheduler fields were removed and `HeadingFilter::reset()` gained a caller on
+2026-11-10, which leaves `Maps::FramePublication`'s captured-fix fields other than the
+sequence without a reader. Per family: on the e-paper
 `wavesharePowerPairingGate` is armed but never fed (SYS-4), MAP-14 is unused, the
 `DisplayPowerManager` panel paths are stubs and explicit `epaper::sleep()`/`wake()` exist
 only in diagnostic builds (EP-1); on AMOLED `cameraHeadingDegrees_/Valid_` are never set

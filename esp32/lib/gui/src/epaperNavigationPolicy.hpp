@@ -37,6 +37,14 @@ constexpr uint32_t kHardReasonMask =
     reasonMask(Reason::Screen) | reasonMask(Reason::MapContext) |
     reasonMask(Reason::RouteSession) | reasonMask(Reason::Recovery);
 
+// Entering or leaving a route session starts a new camera history: a heading
+// held from the previous session (a stationary rider never resumes the course
+// filter) must not orient the new one. Sliding route-window updates are not
+// session changes and never reach the scheduler as RouteSession.
+constexpr bool resetsHeading(Reason reason) {
+  return reason == Reason::RouteSession;
+}
+
 inline double normalizeDegrees(double value) {
   while (value < 0.0)
     value += 360.0;
@@ -269,15 +277,9 @@ public:
     return decision;
   }
 
-  void markSubmitted(uint32_t nowMs, const Fix &fix, uint32_t reasons) {
+  void markSubmitted(uint32_t nowMs, uint32_t reasons) {
     lastSubmissionMs_ = nowMs == 0 ? 1 : nowMs;
-    latestSubmittedFix_ = fix;
     forcedReasons_ &= ~reasons;
-  }
-
-  void markPublished(uint32_t nowMs, const Fix &capturedFix) {
-    lastPublishedMs_ = nowMs;
-    publishedFix_ = capturedFix;
   }
 
   void markInterrupted() { request(Reason::Recovery); }
@@ -285,15 +287,10 @@ public:
   uint32_t pendingForcedReasons() const { return forcedReasons_; }
   bool hasPendingWork() const { return hasFix_ || forcedReasons_ != 0; }
   const Fix &latestFix() const { return latestFix_; }
-  const Fix &publishedFix() const { return publishedFix_; }
-  uint32_t lastPublishedMs() const { return lastPublishedMs_; }
 
 private:
   Fix latestFix_{};
-  Fix latestSubmittedFix_{};
-  Fix publishedFix_{};
   uint32_t lastSubmissionMs_ = 0;
-  uint32_t lastPublishedMs_ = 0;
   uint32_t forcedReasons_ = 0;
   bool hasFix_ = false;
 };
