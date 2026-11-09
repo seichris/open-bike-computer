@@ -138,15 +138,13 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
   return true;
 }
 
+// A phone or Watch packet carries two kinds of data. The position fields are
+// what a board's own receiver also measures, so position_source may keep them
+// from the receiver. The ride totals exist only on the phone or Watch, so they
+// apply whichever source owns the position; otherwise a receiver fix would
+// freeze distance, elapsed time and route remaining at the last phone value.
 template <typename RideData>
-inline bool decodeAndApply(const uint8_t *bytes, std::size_t length,
-                           RideData &rideData,
-                           Packet *decodedPacket = nullptr) {
-  Packet packet{};
-  if (!decode(bytes, length, packet)) {
-    return false;
-  }
-
+inline void applyPosition(const Packet &packet, RideData &rideData) {
   rideData.latitude =
       static_cast<double>(packet.latitudeMicrodegrees) / 1000000.0;
   rideData.longitude =
@@ -155,11 +153,6 @@ inline bool decodeAndApply(const uint8_t *bytes, std::size_t length,
   rideData.satellites = 10;
   rideData.speed = 0;
   rideData.altitude = 0;
-  rideData.distanceTraveled = 0;
-  rideData.elapsedSeconds = 0;
-  rideData.routeRemaining = 0;
-  rideData.hasRouteRemaining = false;
-
   rideData.headingValid = packet.hasHeading;
   if (packet.hasHeading) {
     rideData.heading = packet.headingDegrees;
@@ -171,16 +164,36 @@ inline bool decodeAndApply(const uint8_t *bytes, std::size_t length,
   if (packet.hasAltitude) {
     rideData.altitude = packet.altitudeMeters;
   }
-  if (packet.hasDistance) {
-    rideData.distanceTraveled = packet.distanceMeters;
+}
+
+template <typename RideData>
+inline void applyRideTotals(const Packet &packet, RideData &rideData) {
+  rideData.distanceTraveled = packet.hasDistance ? packet.distanceMeters : 0U;
+  rideData.elapsedSeconds = packet.hasElapsed ? packet.elapsedSeconds : 0U;
+  rideData.hasRouteRemaining = packet.hasRouteRemaining;
+  rideData.routeRemaining =
+      packet.hasRouteRemaining ? packet.routeRemainingMeters : 0U;
+}
+
+// appliesToPosition is false while the board's own receiver owns the position.
+template <typename RideData>
+inline void apply(const Packet &packet, bool appliesToPosition,
+                  RideData &rideData) {
+  if (appliesToPosition) {
+    applyPosition(packet, rideData);
   }
-  if (packet.hasElapsed) {
-    rideData.elapsedSeconds = packet.elapsedSeconds;
+  applyRideTotals(packet, rideData);
+}
+
+template <typename RideData>
+inline bool decodeAndApply(const uint8_t *bytes, std::size_t length,
+                           RideData &rideData,
+                           Packet *decodedPacket = nullptr) {
+  Packet packet{};
+  if (!decode(bytes, length, packet)) {
+    return false;
   }
-  if (packet.hasRouteRemaining) {
-    rideData.hasRouteRemaining = true;
-    rideData.routeRemaining = packet.routeRemainingMeters;
-  }
+  apply(packet, true, rideData);
   if (decodedPacket != nullptr) {
     *decodedPacket = packet;
   }

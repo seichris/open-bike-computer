@@ -846,7 +846,7 @@ every other profile keeps the phone as the only position source.
 owns) / GnssHolds (valid fix under 3 s old) / HoldLapsed (phone owns again) / None (no
 input within 5 s). Moved by `noteGnssFix` for every parsed interval
 (`gnss_receiver.cpp:306`), `acceptsPhonePosition` per phone packet
-(`ble_navigation.cpp:5852-5853`) and `notePhonePosition` only for packets that were applied
+(`ble_navigation.cpp:5853-5854`) and `notePhonePosition` only for packets that were applied
 (`:5881-5882`). **Smell:** the hold expires lazily inside `gnssHolds()`; one invalid
 interval drops the hold at once while an older valid fix may still be pending (POS-3);
 `lastPhoneMs` counts only accepted packets, so after a GNSS hold `active()` (and the `DSTS`
@@ -1083,9 +1083,9 @@ Ranked by blast radius and by how many of the smells above a single enum would r
 8. **TR-1** transfer server: an explicit transport/listener enum replacing the
    `networkTransport_` string and the three-flag network triple.
 9. **POS-1 + POS-2 + POS-3** position source: one expiring owner of fix validity, from
-   which `isGpsFixed` and the reported `fixValid` derive, and phone packets gated only on
-   their position fields (X-12 in the app document). Small blast radius: only the GNSS
-   1.75 variant fits a receiver.
+   which `isGpsFixed` and the reported `fixValid` derive. Phone packets are already gated
+   only on their position fields (X-12 a in the app document). Small blast radius: only the
+   GNSS 1.75 variant fits a receiver.
 10. **EP-3** comparison on glass: one stored value owned by the display worker, published
     with its pairing generation, so the BOOT gate, side keys and confirm guard read one
     value. Experimental board.

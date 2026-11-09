@@ -1357,5 +1357,61 @@ int main() {
   assert(gps_position_protocol::decode(gpsPacket, 10, decoded));
   assert(!decoded.hasHeading);
 
+  // Accepting the phone's position applies exactly what decodeAndApply did.
+  writeUInt16LE(gpsPacket, 8, 270);
+  assert(gps_position_protocol::decode(gpsPacket, 30, decoded));
+  const auto sameRide = [](const TestRideData &a, const TestRideData &b) {
+    return a.satellites == b.satellites && a.fixMode == b.fixMode &&
+           a.altitude == b.altitude && a.speed == b.speed &&
+           a.distanceTraveled == b.distanceTraveled &&
+           a.elapsedSeconds == b.elapsedSeconds &&
+           a.routeRemaining == b.routeRemaining &&
+           a.hasRouteRemaining == b.hasRouteRemaining &&
+           a.latitude == b.latitude && a.longitude == b.longitude &&
+           a.heading == b.heading && a.headingValid == b.headingValid;
+  };
+  for (std::size_t length : legacyPacketLengths) {
+    TestRideData viaDecode{};
+    TestRideData viaApply{};
+    gps_position_protocol::Packet lengthPacket{};
+    assert(gps_position_protocol::decodeAndApply(gpsPacket, length, viaDecode));
+    assert(gps_position_protocol::decode(gpsPacket, length, lengthPacket));
+    gps_position_protocol::apply(lengthPacket, true, viaApply);
+    assert(sameRide(viaDecode, viaApply));
+  }
+
+  // While a board's own receiver owns the position, the phone's position is
+  // not applied but its ride totals are: only the phone or Watch has them.
+  TestRideData receiverOwned{};
+  receiverOwned.latitude = 1.305;
+  receiverOwned.longitude = 103.855;
+  receiverOwned.fixMode = 2;
+  receiverOwned.satellites = 7;
+  receiverOwned.speed = 18;
+  receiverOwned.altitude = 40;
+  receiverOwned.heading = 90;
+  receiverOwned.headingValid = true;
+  receiverOwned.distanceTraveled = 100;
+  receiverOwned.elapsedSeconds = 60;
+  receiverOwned.routeRemaining = 9999;
+  receiverOwned.hasRouteRemaining = true;
+  gps_position_protocol::apply(decoded, false, receiverOwned);
+  assert(receiverOwned.latitude == 1.305 && receiverOwned.longitude == 103.855);
+  assert(receiverOwned.fixMode == 2 && receiverOwned.satellites == 7);
+  assert(receiverOwned.speed == 18 && receiverOwned.altitude == 40);
+  assert(receiverOwned.heading == 90 && receiverOwned.headingValid);
+  assert(receiverOwned.distanceTraveled == 12345);
+  assert(receiverOwned.elapsedSeconds == 3661);
+  assert(receiverOwned.hasRouteRemaining && receiverOwned.routeRemaining == 4321);
+
+  // Ending navigation on the phone clears the route on a receiver board too.
+  writeUInt32LE(gpsPacket, 26, UINT32_MAX);
+  assert(gps_position_protocol::decode(gpsPacket, 30, decoded));
+  gps_position_protocol::apply(decoded, false, receiverOwned);
+  assert(!receiverOwned.hasRouteRemaining && receiverOwned.routeRemaining == 0);
+  assert(receiverOwned.distanceTraveled == 12345);
+  assert(receiverOwned.latitude == 1.305 && receiverOwned.headingValid);
+  writeUInt32LE(gpsPacket, 26, 4321);
+
   return 0;
 }
