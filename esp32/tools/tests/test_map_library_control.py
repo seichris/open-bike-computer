@@ -518,6 +518,20 @@ int main(){using namespace map_transfer;
     assert(use.libraryCommandError_==(refused?code:"")&&use.libraryError_==(refused?code:""));
     if(refused)assert(use.storageWriteCodes.empty()&&!use.librarySelectionStarted_&&use.libraryRetryAfterMs_==0);
   }
+  // A Use of the map the pointer already names writes nothing, and a switch
+  // back to the previous map keeps both maps in the pointer: neither pushes
+  // the unsettled map out, so neither is refused. Switching back is also what
+  // lets uploads resume.
+  for(const bool switchBack:{false,true}){
+    reset();MapTransferHttpServer keep;liveHome(keep);
+    if(switchBack){keep.installer_.active.previousRoot=city().root;keep.installer_.active.previousSessionId="city";}
+    keep.installer_.settleResult={false,"stream_settle_previous","previous map cleanup will retry"};
+    assert(keep.requestMapLibrary("select",switchBack?"city":"home",std::string(64,'b'),std::string(32,'2')));
+    keep.executeLibraryTask();
+    assert(keep.installer_.calls=="SU"&&keep.installer_.selected==1);
+    assert(keep.installer_.active.root==(switchBack?city().root:home().root));
+    assert(keep.libraryCommandError_.empty()&&keep.libraryError_.empty());
+  }
   {
     // An automatic switch is refused the same way and retries later; the
     // covering map is not rejected as a bad candidate.

@@ -562,16 +562,23 @@ void MapTransferHttpServer::executeLibraryTask() try {
   // so a finished map whose consumed marker failed is listed again and is
   // settled before a Use can push it out of the pointer. Outside the pointer
   // its marker is pending work that refuses uploads and that boot selects, so
-  // while the previous map's cleanup keeps failing, a switch moves nothing and
-  // fails with stream_settle_previous; the next attempt retries the cleanup.
-  // A failed selected map stays in the pointer as the previous map, and
-  // Refresh lists the library whatever the result. A selection retried after
-  // allocation failure may already have moved the pointer, so it still hands
-  // that map to the renderer.
+  // while the previous map's cleanup keeps failing, a switch to any other map
+  // moves nothing and fails with stream_settle_previous; the next attempt
+  // retries the cleanup. A Use of the selected map writes nothing, and a
+  // switch back to the previous map keeps both maps in the pointer, so neither
+  // is refused; switching back also lets uploads resume. A failed selected map
+  // stays in the pointer as the previous map, and Refresh lists the library
+  // whatever the result. A selection retried after allocation failure may
+  // already have moved the pointer, so it still hands that map to the renderer.
   if (result.ok && (selecting || action == "refresh")) {
     auto settled = installer_.settleSelectionStreamMaps();
-    if (selecting && !librarySelectionStarted_ && settled.code == "stream_settle_previous")
-      result = std::move(settled);
+    if (selecting && !librarySelectionStarted_ && settled.code == "stream_settle_previous") {
+      ActiveMapSelection current;
+      const std::string targetRoot = std::string("/VECTMAP/.maps/") + session;
+      const bool keepsPointerMaps = installer_.readActiveMap(current).ok &&
+          (current.root == targetRoot || current.previousRoot == targetRoot);
+      if (!keepsPointerMaps) result = std::move(settled);
+    }
   }
   if (result.ok && selecting) {
     // Persist the chosen identity in RAM before any pointer write. A retry
