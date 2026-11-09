@@ -1,11 +1,11 @@
 # Implicit state machines in the iOS app, the Watch app, and across devices
 
 Companion to [firmware-implicit-state-machines.md](firmware-implicit-state-machines.md).
-Inventory taken on 2026-11-07 at `fd0689c8`. Read-only survey of
-`ios-app/BikeComputer/` (iPhone app, Watch app, shared contracts; about 135k lines
-including tests) plus a cross-device pass over the protocols whose lifecycle is split
+Inventory taken on 2026-11-07 at `fd0689c8` and refreshed on 2026-11-09 at `dd610395`
+(main after #797). Read-only survey of `ios-app/BikeComputer/` (iPhone app, Watch app,
+shared contracts; about 145k lines of Swift including tests) plus a cross-device pass over the protocols whose lifecycle is split
 between firmware, phone and Watch. Firmware halves are cited by the IDs in the firmware
-document (BLE-n, MAP-n, MT-n, TR-n, RA-n, SYS-n).
+document (BLE-n, MAP-n, MT-n, TR-n, RA-n, SYS-n, POS-n, EP-n).
 
 The definition of "implicit" is the same as in the firmware document: lifecycle or
 phase state not held in one enum with one guarded transition function. In Swift the
@@ -14,137 +14,170 @@ the phase, attempt UUIDs and generation counters used as cancellation tokens, fr
 status strings compared by literal, lazy expiry inside getters, and persisted records
 (UserDefaults, Keychain, files) shadowed by RAM flags.
 
-Counts: **131 implicit machines** on the app side (114 iPhone, 17 Watch) and **11
-distributed protocols**; about 60 explicit enums were passed, of which roughly 15 are
+Counts: **132 implicit machines** on the app side (114 iPhone, 18 Watch; the G-12 / G-13 line
+only points at D-9 and D-10) and **12 distributed protocols**; about 63 explicit enums were passed, of which roughly 16 are
 published labels or derived views rather than drivers.
 
-Paths are relative to `ios-app/BikeComputer/`; line numbers are anchors into the files
-at the SHA above.
+**Refresh 2026-11-09.** Re-checked against `dd610395` after the HealthKit route and cycling
+metrics (#793), GCJ-02 v1 route archives (#794), diagnostics firmware coverage (#795, #796)
+and the app halves of the e-paper (#442) and GNSS position-source (#775, #776) work.
+- New: A-21, G-25, W-18, protocol X-12, app pattern 8 and cross-device divergence 6.
+- Rewritten: E-3, E-15, W-13.
+- Amended: A-1, D-6, D-11, G-1, G-15, X-1, X-3, X-5, X-7, X-8, X-9, X-10.
+- Corrected from the first survey: it counted the G-12 / G-13 alias line as two machines and
+  stated 131 for 129 distinct ones; E-3 has 17 state writes at both commits, not 14, and its
+  reset clears 36 fields, not 12; C-1 and C-10 name `SavedMapArtifactMetadata`, not
+  `SavedMapLocalRecord`; G-1, G-15 and D-6 pointed at the wrong lines.
+- Every other anchor was carried through the diff hunks mechanically; anchors next to a
+  named identifier were re-checked against the new code. Behavioural claims come from
+  reading code; none were exercised on a device or simulator.
+
+Paths are relative to `ios-app/BikeComputer/` (firmware paths in the cross-device section
+are repository-relative or bare file names); line numbers are anchors into the files at
+`dd610395`.
 
 ---
 
 ## 1. iPhone: BLE manager (`BikeComputer/Managers/BLEManager.swift`)
 
-**A-1 Connection lifecycle (phone half of BLE-1)** — `:1437-1448` central, peripheral
-and eight characteristic optionals; `:1468` `isConnecting`; `:1095-1096` `isConnected`,
+**A-1 Connection lifecycle (phone half of BLE-1)** — `:1452-1463` central, peripheral
+and eight characteristic optionals; `:1483` `isConnecting`; `:1095-1096` `isConnected`,
 `isNavigationReady`; `:1154` capabilities received; `:1170-1171` active/connected device
-IDs; `:1653-1656` connection (8 s) and auth (12 s) timers; `:1614-1616` link-lost/connected
+IDs; `:1653-1656` connection (8 s) and auth (12 s) timers; `:1615-1617` link-lost/connected
 uptimes. NoLink → Connecting → LinkUpUnauthenticated → Authenticated (`isConnected` is
-only ever true after auth) → CapabilitiesKnown → teardown. Smell: the ~35-line session
-reset is written three times (`adoptConnectionContext` `:7316`, `clearConnectionState`
-`:7395`, `didDisconnect` `:10580`) with different subsets; the "device operation
-interrupted" block is duplicated at `:7453` and `:10625`.
+only ever true after auth) → CapabilitiesKnown → teardown. Since #442 `:1156` `displayMetadata` (the board display
+TLV in CAP2) joins CapabilitiesKnown; it is cleared with the capabilities flag (`:7648`,
+`:11190`) and set at `:11318`. While it is nil, `isEPaperDevice` (`:1159`) falls back to
+the `DSTS` `firmwareTarget` string (`:1312`, set `:12265`, cleared `:7588`), and four
+`supports*` predicates (`:1160-1163`) gate `sendSetting` (`:5449-5454`). Smell: the ~35-line session
+reset is written three times (`adoptConnectionContext` `:7338`, `clearConnectionState`
+`:7417`, `didDisconnect` `:10575`) with different subsets; the "device operation
+interrupted" block is duplicated at `:7475` and `:10651`.
 
-**A-2 Reconnect policy** — `:1549` `autoReconnect` (37 assignment sites), `:1683`
-`suppressNextReconnect`, `:1552-1555` attempts/timer (1 s to 60 s, 30 attempts), `:1510-1511`
-pending handoff IDs + timer, `:1550` last peripheral. Evaluated as an if-chain in
-`didDisconnect` (`:10620-10670`): HandoffPending / WaitForAdvertisement / ResumeExplicit /
+**A-2 Reconnect policy** — `:1552` `autoReconnect` (37 assignment sites), `:1698`
+`suppressNextReconnect`, `:1567-1570` attempts/timer (1 s to 60 s, 30 attempts), `:1525-1526`
+pending handoff IDs + timer, `:1565` last peripheral. Evaluated as an if-chain in
+`didDisconnect` (`:10646-10696`): HandoffPending / WaitForAdvertisement / ResumeExplicit /
 PairingInterrupted / SuppressedOnce / Backoff / Idle. Smell: `autoReconnect` is a mode
 flag mutated by pairing, deregistration, watch-direct, discovery, lifecycle and auth
 failure, so its value at disconnect is whichever path ran last; `suppressNextReconnect`
 can stay armed if the disconnect callback for that link never arrives.
 
-**A-3 CoreBluetooth state restoration** — `:1438-1440` `pendingBluetoothRestoration`
+**A-3 CoreBluetooth state restoration** — `:1453-1455` `pendingBluetoothRestoration`
 closure, restored identifiers, `restoredSessionAwaitingAdvertisement`. NoRestore /
-DeferredUntilPoweredOn / AdoptedConnected→Retiring (`:7364`) / AdoptedConnecting /
-AwaitingAdvertisement (`:10270`). Smell: the awaiting-advertisement optional also means
-"wait before connecting after a local cancel" (`:10636`).
+DeferredUntilPoweredOn / AdoptedConnected→Retiring (`:7386`) / AdoptedConnecting /
+AwaitingAdvertisement (`:10296`). Smell: the awaiting-advertisement optional also means
+"wait before connecting after a local cancel" (`:10662`).
 
-**A-4 Authentication flow** — explicit `AuthFlowState` (`:1471`, seven cases) shadowed by
-`:1470` `pendingAuthNonce`, `:1480` `authenticatedWriteSession` (non-nil = authenticated
-transport), `:1481` queued messages, `:1483-1484` INFO fallback timer/attempts, `:1490`
-`ownerAuthenticationUsesProvisionalKey`, `:1469` `isPairingMode` (14 writes), `:1294`
+**A-4 Authentication flow** — explicit `AuthFlowState` (`:1486`, seven cases) shadowed by
+`:1485` `pendingAuthNonce`, `:1495` `authenticatedWriteSession` (non-nil = authenticated
+transport), `:1496` queued messages, `:1498-1499` INFO fallback timer/attempts, `:1505`
+`ownerAuthenticationUsesProvisionalKey`, `:1484` `isPairingMode` (14 writes), `:1303`
 `firmwareMaintenanceReconnectExpected`. Five `.idle` resets. Smell: `authTimeoutTimer`
-serves both the 12 s auth deadline and the 115 s pairing-code deadline (`:7854`, `:7869`),
+serves both the 12 s auth deadline and the 115 s pairing-code deadline (`:7880`, `:7895`),
 so starting one cancels the other.
 
-**A-5 Pairing session** — `:1487-1489` pending session/material/candidate; `:1172-1176`
-prompt, submitting, completed generation, status, error; `:1490` explicit
-`BLEOwnershipLifecycle`; `:1534` discovery origin. None → SessionCreated → ConnectingForPairing
-→ PairingSent → MaterialStaged+PromptShown (`:7999`) → ConfirmationSubmitting → PAIRED →
-owner auth with provisional key → Completed (`:8899`) | Cancelled | Interrupted | Failed.
+**A-5 Pairing session** — `:1502-1504` pending session/material/candidate; `:1180-1184`
+prompt, submitting, completed generation, status, error; `:1505` explicit
+`BLEOwnershipLifecycle`; `:1504` discovery origin. None → SessionCreated → ConnectingForPairing
+→ PairingSent → MaterialStaged+PromptShown (`:8025`) → ConfirmationSubmitting → PAIRED →
+owner auth with provisional key → Completed (`:8925`) | Cancelled | Interrupted | Failed.
 Smell: three teardown functions clear overlapping but non-identical sets.
 
-**A-6 Scan purpose / discovery** — `:1164` explicit `currentScanPurpose`, `:1094` `isScanning`,
-`:1163` `isDiscoveringDevices` (hand-maintained copy), `:1515-1516` start work item and last
-stop, `:1526-1527` discovery generations, `:1514` freshness timer, `:1531-1533` explicit-
-discovery flags, `:1167-1168` opportunistic suppression, `:1166` app active. Desired purpose
+**A-6 Scan purpose / discovery** — `:1172` explicit `currentScanPurpose`, `:1094` `isScanning`,
+`:1171` `isDiscoveringDevices` (hand-maintained copy), `:1530-1531` start work item and last
+stop, `:1541-1542` discovery generations, `:1529` freshness timer, `:1546-1548` explicit-
+discovery flags, `:1175-1176` opportunistic suppression, `:1174` app active. Desired purpose
 is recomputed from ~10 bools; physical state is NotScanning / DrainingCallbacks / Scanning /
-Stale. `reconcileScanning` (`:2795`) is called from ~40 sites with a free-text reason.
+Stale. `reconcileScanning` (`:2802`) is called from ~40 sites with a free-text reason.
 Smell: `explicitDiscoveryRequested` (17 writes) and `isOpportunisticDiscoverySuppressed`
 (16 writes) are both inputs and outputs of the same reconcile.
 
-**A-7 Opportunistic nearby candidate** — `:1165` candidate, `:1530` presented, `:1524-1525`
-1 s seal timer + expiry timer, `:1528` observations, `:1519` gate. Observing → SealPending
+**A-7 Opportunistic nearby candidate** — `:1173` candidate, `:1545` presented, `:1539-1540`
+1 s seal timer + expiry timer, `:1543` observations, `:1534` gate. Observing → SealPending
 → SealedUnpresented → Presented → Dismissed | Expired | ConsumedByPairing. Cleared at six
 sites; survival across a connection decided by a policy call evaluated in three places.
 
-**A-8 Watch-direct ride handoff (phone half of W-4)** — `:1540-1547` prepared device/
+**A-8 Watch-direct ride handoff (phone half of W-4)** — `:1555-1562` prepared device/
 preparation IDs, previous auto-reconnect, handoff disconnect peripheral, 24 h expiry timer,
-reconciliation timeout; `:1803` release tombstones; persisted in UserDefaults (`:3072-3135`).
+reconciliation timeout; `:1818` release tombstones; persisted in UserDefaults (`:3087-3150`).
 NotPrepared → Prepared (auto-reconnect forced off, link cancelled) → Released | Expired |
 RestoredFromDefaults. Smell: "prepared" is two nullable IDs that must both match; the
 previous auto-reconnect value is captured only on the first prepare.
 
-**A-9 ATT write-with-response wait** — `:1584-1613` `PendingATTWrite` (owner, write ID,
+**A-9 ATT write-with-response wait** — `:1599-1628` `PendingATTWrite` (owner, write ID,
 generation, stage), handlers, 5 s timeout, response generation, backpressure start;
-`:1557` 50 ms flush retry. Idle / InFlight / TimedOutFenced × NoBackpressure / Backpressure /
-Recovering. Completion sequence written twice (`:9705`, `:9732`).
+`:1572` 50 ms flush retry. Idle / InFlight / TimedOutFenced × NoBackpressure / Backpressure /
+Recovering. Completion sequence written twice (`:9731`, `:9758`).
 
 **A-10 Ride application delivery (RCM1 acked commands)** — `:209-224` per-command
 `writes`, dispatched members, completed uptime, retry count, 5 s ack timer, `isFinished`;
-`:1620-1632` delivery connection generation, state generation, `pendingNavigationClear`
+`:1635-1647` delivery connection generation, state generation, `pendingNavigationClear`
 intent. Queued → PartiallyDispatched → AllDispatched → Acknowledged | Dropped |
 TransportFailure | TimedOut→Retry | Reconnect. Smell: `isFinished`, dictionary membership
 and generation equality are three validity checks every callback repeats; the clear
-intent survives reconnect but is superseded silently by new route state (`:4309-4338`).
+intent survives reconnect but is superseded silently by new route state (`:4324-4353`).
 
 **A-11 Ride transport reducer + recovery deadline** — explicit
-`RideBLETransportStateMachineV1` (`:1621`) invoked from ~25 sites with the generation read
-immediately before; `:1650-1651` recovery cancellation timer whose expiry is explicitly
+`RideBLETransportStateMachineV1` (`:1636`) invoked from ~25 sites with the generation read
+immediately before; `:1665-1666` recovery cancellation timer whose expiry is explicitly
 non-terminal ("does not prove disconnection").
 
-**A-12 Watch controller enrollment** — explicit `PendingWatchControllerOperation` (`:1493`)
-plus `:1504-1505` status received / promotion in flight. Idle → Staging → RequestingProof →
+**A-12 Watch controller enrollment** — explicit `PendingWatchControllerOperation` (`:1508`)
+plus `:1519-1520` status received / promotion in flight. Idle → Staging → RequestingProof →
 Committing → Promoting → Done; Revoking. Smell: the two Watch round-trips are tracked by a
-bool and by "enum still equals `.committing`" captured in a closure (`:8297`); promotion in
+bool and by "enum still equals `.committing`" captured in a closure (`:8323`); promotion in
 flight is reset on disconnect but not on the WC failure path.
 
-**A-13 Device operation (rename / deregister)** — `:1506-1508` pending IDs + 12 s timer;
-`:1177-1178` operation/feedback device IDs. Idle → RenamePending | DeregisterPending →
+**A-13 Device operation (rename / deregister)** — `:1521-1523` pending IDs + 12 s timer;
+`:1185-1186` operation/feedback device IDs. Idle → RenamePending | DeregisterPending →
 Confirmed | TimedOut | DisconnectedBeforeConfirm. Four clear sites reset the same five
 fields; `pendingDeregistrationDeviceID` is cleared at seven sites in total.
 
-**A-14 Per-connection "already sent" latches** — `:1671-1679` six `hasSent*ForConnection`
-bools + `isSendingNegotiatedMapProfiles` + last phone battery. Cleared wholesale at `:7625`
-and `:11164`; re-armed by six separate capability-diff ifs at `:11400-11431`.
+**A-14 Per-connection "already sent" latches** — `:1686-1694` six `hasSent*ForConnection`
+bools + `isSendingNegotiatedMapProfiles` + last phone battery. Cleared wholesale at `:7651`
+and `:11192`; re-armed by six separate capability-diff ifs at `:11459-11490`.
 
-**A-15 Status chunk reassembly (phone half of BLE-14)** — `:1558-1565` map, device-transfer
+**A-15 Status chunk reassembly (phone half of BLE-14)** — `:1573-1580` map, device-transfer
 and renderer chunk sets. Idle → Collecting(ID, count) → Complete. Two hand-copied
 implementations plus one encapsulated reassembler.
 
-**A-16 Power-button honk retry** — `:1657-1668` packet, attempt, retry work item, 1 s ack
+**A-16 Power-button honk retry** — `:1672-1683` packet, attempt, retry work item, 1 s ack
 timeout. None → Sent → Acked | RetryScheduled | Failed. Targets a feature the firmware
 forces off (SYS-7), so it never reaches Acked on current firmware.
 
-**A-17 Diagnostics capture binding** — `:1663-1665` desired binding, retry work item,
-retry pending; `:1191` generation; `:1192` explicit marker delivery state. NoDesire /
+**A-17 Diagnostics capture binding** — `:1678-1680` desired binding, retry work item,
+retry pending; `:1199` generation; `:1200` explicit marker delivery state. NoDesire /
 DesiredUnsent / Queued / RetryPending. `retryPending` survives disconnects; the generation is
 bumped but not read in this file.
 
-**A-18 Firmware maintenance reconnect expectation** — `:1290-1294` active/stage/
+**A-18 Firmware maintenance reconnect expectation** — `:1299-1303` active/stage/
 correlation/expected. A two-state flag that changes the meaning of A-4, A-17 and map
-transfer mode (`:8847`, `:8921`, `:6391`).
+transfer mode (`:8873`, `:8947`, `:6413`).
 
-**A-19 Published mirrors of firmware map state** — `:1209-1215` library pages, pending
-library command ID (`defer`-cleared), selection health projection + epoch; `:1241-1259`
+**A-19 Published mirrors of firmware map state** — `:1217-1223` library pages, pending
+library command ID (`defer`-cleared), selection health projection + epoch; `:1250-1268`
 activation status string (mirror of MT-9), fresh-status flag, operation status +
 observation generation + epoch. Receive-side projections keyed by connection epoch.
 
-**A-20 Smaller latches** — GPS override token (`:1566`, cleared at four sites); setting
-write generations (`:1201-1202`); destination status sequence and catalog transfer ID;
-locally forgotten peripherals (`:1535`); `isLoadingSettings` one-shot; transfer-failure
+**A-20 Smaller latches** — GPS override token (`:1581`, cleared at four sites); setting
+write generations (`:1209-1210`); destination status sequence and catalog transfer ID;
+locally forgotten peripherals (`:1550`); `isLoadingSettings` one-shot; transfer-failure
 dedupe key.
+
+**A-21 Position-source report mirror (phone half of POS-1, POS-2)** — `:1157-1158` CAP2 TLV
+`positionSourceMetadata` (+ `deviceHasGNSSReceiver`, read only by tests), `:1307-1310`
+`devicePositionSourceStatus` + `...ReceivedAt`. Added by #775/#776. NotAdvertised /
+Advertised(phone | phone+LC76G) × NotReported / Reported(at). Set at `:11325`,
+`:12181-12182`; cleared at `:7574-7575`, `:7649`, `:11191` and by any `DSTS` without the
+object (`:12185-12186`). `BikeComputer/Views/SettingsView.swift:4407-4469`
+`PositionSourceStatusSection` polls `DSTS` every 2 s from a `.task` while visible and
+derives Fresh / Aging / Stale (10 s) from a view-local `now`;
+`BikeComputer/Utilities/NavigationProtocol.swift:1248-1260` `fixLabel` derives the receiver
+phase from `fixValid`, `lastFixAgeMs > 3000` (a copy of the firmware hold, `:1253`),
+`locked` and `present`. **Smell:** because `locked` never clears on the device (POS-2),
+`fixLabel` can no longer say "receiver not answering" after the first lock; the hold is
+mirrored rather than reported (X-12).
 
 ## 2. iPhone: ownership, coordinator, navigation protocol, app shell
 
@@ -192,7 +225,7 @@ re-prompt; `isRecoveryDeferred` cleared in three places.
 by the registry triple: Keychain provisional key, defaults `provisionalConfirmed`,
 `provisionalReplacementAuthorized` (`:1247-1480`). NoCredential / Provisional /
 ProvisionalConfirmed / +ReplacementAuthorized / Promoted / PartiallyRemoved (Keychain has no
-transaction). Only `hasConfirmedReplacementCredential` (`:1364`) reads all three stores.
+transaction). Only `hasConfirmedReplacementCredential` (`:1376`) reads all three stores.
 
 **B-7 Scan purpose context** — `:273-313` ten-input context → derived `BLEScanPurpose`;
 `:245-266` unknown-scan gate (generation + seen-once set); `:167-205` order stabilizer
@@ -240,7 +273,7 @@ rewritten whenever the known-device count changes.
 **B-17 Workout segment toast / ride-metrics sheet sync** — `:114-115`, `:608`, `:713`,
 `:1120-1130`. Small; a `.task(id:)` auto-dismiss keyed on the segment index.
 
-**B-18 Application-active fan-out** — `BikeComputer/BikeComputerApp.swift:396-445` and
+**B-18 Application-active fan-out** — `BikeComputer/BikeComputerApp.swift:397-446` and
 `ContentView.swift:578-597`: UIKit delegate and SwiftUI `scenePhase` both drive ~8
 consumers; ordering between the two sources is implicit.
 
@@ -252,7 +285,7 @@ consumers; ordering between the two sources is implicit.
 **C-1 Last-transfer outcome string (phone view of a device install)** — `:2289-2294`
 `lastTransferOutcome` (literals `""`, uploading, activating, unconfirmed, installed, failed,
 cancelled, unknown), map ID, idle-on-another-map, connection epoch (RAM only); ten
-UserDefaults keys (`:7817-7832`); per-pack mirror in `SavedMapLocalRecord` (`:1602-1613`).
+UserDefaults keys (`:7817-7832`); per-pack mirror in `SavedMapArtifactMetadata` (`:1602-1613`).
 `hasPendingDeviceActivation` is literally `== "unconfirmed"` (`:2338`). Transitions:
 `recordTransfer` (`:7661`), `updateLastTransferOutcome` (`:7754`, re-derives from the
 journal), `reconcileLastTransfer` (`:4819`), `confirmActivatedMap` (`:7257`),
@@ -316,7 +349,7 @@ pending aliases (pending / conflict), request tokens (`OfflineMapManager.swift:2
 Token and alias dictionaries kept in step by two helpers (`:3825-3840`); conflict is terminal
 with no resolution path except re-rename.
 
-**C-10 Saved-map catalog sync state** — `SavedMapLocalRecord.catalogSyncState` (`:1621`,
+**C-10 Saved-map catalog sync state** — `SavedMapArtifactMetadata.catalogSyncState` (`:1621`,
 `pending` / `synced` / nil), entry/receipt IDs, non-durable copies (`:2387`), two
 single-flight tasks (`:2390-2391`). nil and "pending" treated alike in one guard (`:5347`)
 and differently in another (`:5516`).
@@ -349,7 +382,7 @@ of a legacy key; no record of a partial migration.
 ## 4. iPhone: transfer, OTA, diagnostics, benchmarks
 
 **D-1 Transfer operation lease lifecycle (phone half of TR-1)** —
-`BikeComputer/Managers/DeviceTransferManager.swift:1142-1161` joined SSID, lease, cleanup
+`BikeComputer/Managers/DeviceTransferManager.swift:1143-1162` joined SSID, lease, cleanup
 task, static passive cleanup task and starting set, passive attempts (epoch, count),
 `remoteAcceptancePossible`, `firmwareMaintenancePrepared`, authorization token/generation;
 `BikeComputer/Managers/DeviceOperationCoordinator.swift:33-41` lease, claims, pending
@@ -363,8 +396,8 @@ indistinguishable from the manager's own fields; `restoreClaim` sets `claims = [
 `lease != nil`, a state no other path produces.
 
 **D-2 BLE link-loss rebind continuation (phone half of TR-2; PRs 746/749)** — pure
-`DeviceTransferLinkRebindPolicy` (`:661-760`, 15 s per link, 45 s cap, `remoteCleared`) plus
-loop locals in `rebindAfterLinkLoss` (`:1272-1359`): loss uptime, last status request,
+`DeviceTransferLinkRebindPolicy` (`:662-761`, 15 s per link, 45 s cap, `remoteCleared`) plus
+loop locals in `rebindAfterLinkLoss` (`:1273-1360`): loss uptime, last status request,
 (epoch, revision). Owned → Waiting → Rebound | Stale(remoteCleared false|true) | Expired,
 polled every 250 ms inside the cleanup task. Smell: `lossUptime` falls back to the cleanup
 start when BLEManager never observed the loss; rebind refuses whenever an OS background
@@ -372,9 +405,9 @@ claim is retained (`DeviceOperationCoordinator.swift:140`, `:222` require
 `claims == [lease.id]`), which is exactly the map-upload case, so a map transfer cannot
 rebind.
 
-**D-3 Accessory Wi-Fi join loop** — `joinDeviceNetworkIfNeeded` (`:2694-2991`) locals
+**D-3 Accessory Wi-Fi join loop** — `joinDeviceNetworkIfNeeded` (`:2696-2993`) locals
 (stale rejoins, last apply error, last diagnostic, probe failure flag, accepted-without-
-association, keep-applied, association accepted); `DeviceNetworkApplyGate` (`:980-1083`,
+association, keep-applied, association accepted); `DeviceNetworkApplyGate` (`:981-1084`,
 explicit resolution enum + four bools); observation gate; coordinator pending applies.
 AlreadyOnTarget / StaleAssociation / ApplyRequested / ApplyCallback / ApplyTimeout(60 s) /
 Observing(12 s) / ProbeWindow(20 s) / Ready / Retry / Terminal. Smell: `keepAppliedConfiguration`
@@ -393,8 +426,8 @@ decide rolled-back vs unresolved differ between the reconcile path (`:1066-1072`
 finalizing, rebooting, unresolved) and the error path (`:1220-1224`: also
 maintenanceRequested); `finalized = true` is set before `client.finalize()` returns.
 
-**D-5 Firmware maintenance handshake** — `prepareFirmwareMaintenance` (`:2180-2260`) and
-`performEnterFirmwareTransfer` (`:1979-2110`) locals: expected correlation, saw disconnect,
+**D-5 Firmware maintenance handshake** — `prepareFirmwareMaintenance` (`:2181-2261`) and
+`performEnterFirmwareTransfer` (`:1980-2111`) locals: expected correlation, saw disconnect,
 enter queued; BLE maintenance stage string. Requested → RebootPending → Disconnected →
 ReconnectedUnconfirmed → MaintenanceReady → EnterQueued. The reconnect-and-confirm loop is
 written twice; `firmwareMaintenancePrepared` is a silently consumed one-shot.
@@ -404,9 +437,17 @@ running, status, manifest, task, automatic retry allowed, user cancelled, restor
 started/finished/failed, selection task, operation generation, last block reason, ride
 active, deleting, ride contexts (≤8), journal task + generation; persisted manifest phase
 (requested/collecting/partial/complete/cancelled) + failure code + origin. Smell: "resumable"
-is a store-side predicate (`:86-92`) AND a RAM flag written at eight sites, and the two can
+is a store-side predicate (`Managers/DiagnosticsAcquisitionStore.swift:132-136`,
+`canResumeAutomatically`) AND a RAM flag written at eight sites, and the two can
 disagree; the operation generation is bumped from four places; `start`'s `defer` calls
-`resumeIfPossible`, so completion can immediately restart a job.
+`resumeIfPossible`, so completion can immediately restart a job. Since #796 the store
+carries two presentation fields whose validity follows the manifest phase without type
+support: `firmwareStorage` is frozen at the first inventory (`:315`, only while
+`indexData == nil`), and `firmwareLogDates` is cleared on every inventory or retry (`:320`)
+and set by `finish` (`:549`), so nil means collecting, retried, legacy or unknown. Both are
+stripped from exported receipts (`portableReceipt`, `:125-130`); the settings view tells the
+cases apart with `deliveryComplete` and `expected.isEmpty`
+(`Views/RideDiagnosticsSettingsView.swift:338-367`).
 
 **D-7 iOS diagnostics recorder** — `BikeComputer/Utilities/RideDiagnostics.swift:616-668`
 capture binding snapshot, sequence, chunk number/URL/bytes, pre-detailed context, standard
@@ -440,21 +481,23 @@ running, status string (the de-facto phase: `stop` compares `status == "Running 
 fixture, GPS override token, idle-timer flags, repeat number; scheduler task + generation.
 `start` calls `stop` first, so failure branches release the override by hand (three sites).
 
-**D-11 Device diagnostics download** — `BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift:195-400`
+**D-11 Device diagnostics download** — `BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift:196-405`
 locals: opened session, imported, per-boot sequences/fingerprints, truncated boots; store
 receipts expected/verified. NotEntered → Entered → IndexFrozen → Reserved → ChunkLoop →
-Verified. Clean apart from the entered bool standing in for phase.
+Verified. Clean apart from the entered bool standing in for phase. Since #796 it merges a
+dated-event range for every verified chunk, cached or fresh (`:261`, `:358`), and passes it
+to `finish` (`:362`); no new phase.
 
-**D-12 Diagnostics session entry with LAN→hotspot fallback** — `:2271-2416` locals
+**D-12 Diagnostics session entry with LAN→hotspot fallback** — `:2272-2417` locals
 (enter queued, rejected before session), `networkTransport` string (mirror of TR-1), fallback
 attempts. The compensating `stopDiagnostics` between attempts exists for old builds and is
 unconditional.
 
-**D-13 Remote-debug session observer** — `:2660-2696` observer, 2 s poll, lease mode
+**D-13 Remote-debug session observer** — `:2662-2698` observer, 2 s poll, lease mode
 "debug", BLE mode/token emptiness. Stop called from four sites; a late empty status after
 cleanup re-enters `recover` once.
 
-**D-14 Remote-debug settings UI** — `BikeComputer/Views/SettingsView.swift:3538-3890`
+**D-14 Remote-debug settings UI** — `BikeComputer/Views/SettingsView.swift:3556-3908`
 `isWorking`, status/error strings ("Idle" / "Requesting session" / "Failed" / "Ending
 session" / "Session ended"), passphrase reveal/copied, loaded LAN credentials. UI level.
 
@@ -464,12 +507,12 @@ challenge expiry, attestation), `rotationRequired`; explicit `ReconciledKeyState
 NoKey → PendingChallenge → PendingAttested → Active; Active+RotationRequired. Pending
 validity is a five-term predicate; `markRotationRequired` is set inside a query.
 
-**D-16 Server-probe readiness window** — `:468-520`, `:3127-3178` attempt, last error,
+**D-16 Server-probe readiness window** — `:469-521`, `:3134-3204` attempt, last error,
 consecutive no-route probes, stale association. Probing → Ready | NonRetryable |
 StaleSuspected | Deadline. Contained.
 
-**D-17 Small ones** — `MapTransferStartupPolicy.waitForSession` (`:414-440`, 30 s, never
-renewed); fresh-failure policy (`:1125`, "fresh" = error sequence advanced past the link's
+**D-17 Small ones** — `MapTransferStartupPolicy.waitForSession` (`:415-441`, 30 s, never
+renewed); fresh-failure policy (`:1126`, "fresh" = error sequence advanced past the link's
 first revision); observation gate one-shot; unreadable cleanup record poison bit;
 once-per-device automatic check latch; benchmark window cooldown; rejected handoff count.
 
@@ -493,14 +536,24 @@ each with its own attempt UUID; the confirmation timeout starts at submission, s
 stuck behind a barrier has no bound; terminal timeout and deadline task race to retire the
 same barrier (`:697`).
 
-**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-67`
-explicit `state` written at 14 sites with no guard (the shared `WorkoutLifecycleReducer`
-exists in `WorkoutShared/WorkoutRuntimeLogic.swift:38` and is not used here), four
-finalization bools (collection started/ended, finish attempted, save confirmed), recovered
-route, attach pending, generation UUID, native transition task/ID/generation, transition
-origins, control timeout, flush task. Idle → Starting → Running/Paused (+TransitionRequested,
-10 s) → Ending{open | collectionEnded | finishAttempted | saveConfirmed} → Ended; recovery
-AttachPending → Attached → Reconciled. `resetFinished` (`:542`) is a 12-field reset.
+**E-3 Phone recorder lifecycle (HealthKit-confirmed)** — `BikeComputer/Managers/PhoneWorkoutRecorder.swift:24-73`
+explicit `state` written at 17 sites with no guard (`:135`, `:198`, `:258`, `:285`, `:346`,
+`:352`, `:353`, `:355`, `:358`, `:462`, `:557`, `:572`, `:909`, `:973`, `:991`, `:1001`,
+`:1014`; the shared `WorkoutLifecycleReducer` in `WorkoutShared/WorkoutRuntimeLogic.swift:42`
+is still unused here), four finalization bools (collection started/ended, finish attempted,
+save confirmed), three write-failure flags (route, distance and, since #793, cycling
+metrics), recovered route, attach pending, generation UUID, native transition
+task/ID/generation, transition origins, control timeout, flush task. #793 adds a
+speed-capture flag latched from HealthKit authorization when the data source is configured
+at start or recovery (`PhoneWorkoutRecorder.swift:598`), and a GPS speed buffer and
+elevation-gain accumulator that live only in RAM and are exported once, after collection
+ends and only on save (`:513-519`; no elevation after recovery, `:717`). Idle → Starting →
+Running/Paused (+TransitionRequested, 10 s) → Ending{open | collectionEnded |
+finishAttempted | saveConfirmed} → Ended; recovery AttachPending → Attached → Reconciled. The
+share set requested at start depends on the app being in the foreground (`:139`,
+`startShareTypes` `:927-931`), so a background start never asks for Cycling Speed.
+`resetFinished` (`:564`) resets 36 fields plus the location queue and two store values; the
+discard branch resets only the two metric accumulators (`:491-492`).
 
 **E-4 Session coordinator recovery / ownership arbitration** —
 `BikeComputer/Managers/WorkoutSessionCoordinator.swift:51-66` record, recovery complete,
@@ -575,8 +628,14 @@ reset at three sites.
 launch/first-snapshot/freshness tasks; the deadline lives in the reducer while the timer
 that enforces it lives in the manager.
 
-**E-15 Route batch queue / generation / timestamp gates** — `WorkoutShared/WorkoutRuntimeLogic.swift:348-656`.
-Small pure latches held in bools; well tested.
+**E-15 Route batch queue / generation / timestamp gates** — `WorkoutShared/WorkoutRuntimeLogic.swift:482-817`
+(`WorkoutRouteCaptureLifecycle` through `WorkoutRouteTimestampGate`). Small pure latches held
+in bools; well tested. #793 adds two more, both host-tested in `WorkoutContractTests`:
+`WorkoutCyclingSpeedBuffer` (`:361-382`) halves its contents and doubles its sampling interval
+at 8,640 entries, and `WorkoutCyclingElevationGain` (`:384-420`) uses a nil anchor or last
+point as "segment broken" and a nil `meters` as "never counted". `WorkoutAssociatedRoutePolicy`
+(`:871-890`) now keeps the builder whenever any point was inserted and reports `.unknown`
+after a failure.
 
 **E-16 WorkoutViews local latches** — `BikeComputer/Views/WorkoutViews.swift:53-54`
 `pendingStart` (cleared in seven or eight branches) + `presentedAlert`; `:529-530` segment
@@ -599,11 +658,12 @@ six persisted sets/dicts (ready receipts, pending deletions, pending installs, a
 installs, rejected reasons, pending install start), four RAM sets (immediate installs,
 queued provider deletions, two tombstone sets), deletion retry attempt/task, expiry tasks;
 on-disk `WatchRouteOperationJournalV2`. The explicit `PhoneRouteWatchSyncStateV1` is
-derived by `syncState(for:)` (`:1368-1381`) from set membership, and also assigned directly
+derived by `syncState(for:)` (`:1375-1389`) from set membership, and also assigned directly
 at 10 sites. Hidden sub-states: TransferringImmediate, PendingInstallStale (>7 d),
 DeleteQueuedToProvider, TombstonedAwaitingReceipt, journal-applied-but-not-unlinked.
 Smell: four persistence calls repeated after nearly every mutation with per-site subsets;
-the `.rejected` branch writes the state after `reload` recomputed it (`:1113-1121`);
+the `.rejected` branch writes the state after `reload` recomputed it (`:991-994`, inside
+the `.rejected` case at `:941`);
 `deletionRetryAttempt` resets only on a `.deleted` receipt.
 
 **G-2 Navigation session (`NavigationEngine`)** — `BikeComputer/Managers/NavigationEngine.swift:38-89`
@@ -672,9 +732,10 @@ per session), expiry task. Clean recompute; hidden state is the per-session dism
 per identity (operation, generation, applied). Issued → Admitted → Applied; "no entry" vs
 "applied" vs "unapplied" distinguished by callers, not the journal.
 
-**G-15 Strava bookmark lifecycle** — `PhoneRouteLibrary.swift:183-203`, `:461-600`.
-Imported → ReloadAttempted → Validated → Expired (route removed, bookmark kept) → Deleted;
-two paths call the same removal.
+**G-15 Strava bookmark lifecycle** — `PhoneRouteLibrary.swift:30` (`stravaReloadBookmarks`),
+`:469-607` (`expiredStravaBookmarks` through `purge`). Imported → ReloadAttempted →
+Validated → Expired (route removed, bookmark kept) → Deleted; two paths call the same
+removal.
 
 **G-16 Social notification binding** — `BikeComputer/Services/SocialNotificationBinding.swift:10-27`
 explicit status + persisted bound owner / release pending; failures swallowed (`:115`).
@@ -717,18 +778,36 @@ error); `SavedRouteRenameInteraction` (`editingRouteID` nil = idle);
 phases; `BicinoServiceSession.registrationTasks` dedupe; topography tile tasks + label
 generation.
 
+**G-25 Saved-route normalization: stored versus reread route** —
+`RideShared/NavigationRouteArchive.swift:52-56` `storedRoute` (what `contentHash` covers, what
+encoding writes, what sharing uploads and geometry fingerprints use) beside `route` (what is
+drawn, navigated, profiled and sent to the Bicino), rebuilt on every decode by
+`RouteCoordinateNormalizationV1.rereadVersion1` (`NavigationRouteArchive.swift:85`;
+`RideShared/RouteCoordinateNormalization.swift:106-161`). Added by #794. An Apple Maps route
+saved with normalization version 1 stays version 1 on disk and is read as version 2 in RAM:
+StoredV2 / StoredV1Unchanged (outside the rectangle, wholly mainland, or a reread that would
+fail validation) / StoredV1Reread. A versioned representation more than a lifecycle.
+**Smell:** the field is chosen per call site (4 production `.storedRoute` reads against 39
+`archive.route` reads); identity (`routeID`, `revision`, `contentHash`) is unchanged while the
+geometry moves, so identity-keyed caches must re-check geometry. The elevation service does
+(`BikeComputer/Managers/RouteElevationService.swift:321`), #794 drops profile-only sidecars
+with a stale digest when a profile is replaced (`BikeComputer/Managers/PhoneRouteLibrary.swift:392-397`),
+and offline navigation pairs the reread geometry with the stored hash
+(`BikeComputer/Managers/NavigationEngine.swift:235`). Whether the firmware or Watch caches
+anything by that hash was not checked.
+
 ## 7. Watch app (`BikeComputerWatch/`)
 
 **W-1 Terminal cleanup / detached finalization** — `Managers/WatchWorkoutManager.swift:398-402`,
-`:496-511`, `:553-559` five published pending bools (archive, publication, mirror delivery,
+`:498-513`, `:555-561` five published pending bools (archive, publication, mirror delivery,
 start-failure mirror, retrying), authoritative end date, identity metadata retry, recovered
 save mode, prepared route, terminal cleanup session ID/disposition, confirmed snapshot,
 reconciliation gate, detached reconciliation, retry task/counters, pending error
-persistence; plus `session`/`builder` nil-ness. `terminalCleanupState` (`:887`) *derives*
+persistence; plus `session`/`builder` nil-ness. `terminalCleanupState` (`:892`) *derives*
 Delivering / Retrying / RetryRequired / None with sub-cases from ~10 bools. Transitions:
-`completeFinalization` (`:3559`), `finishTerminalRuntimeAfterPublication` (`:3727`),
-`retryTerminalPublicationAndArchive` (`:3763`), `releaseHealthKitObjectsAfterTerminalPublicationFailure`
-(`:3796`, ~30 resets), `clearActiveObjects` (`:3836`), retry scheduling (`:1565-1652`,
+`completeFinalization` (`:3612`), `finishTerminalRuntimeAfterPublication` (`:3780`),
+`retryTerminalPublicationAndArchive` (`:3816`), `releaseHealthKitObjectsAfterTerminalPublicationFailure`
+(`:3849`, ~30 resets), `clearActiveObjects` (`:3889`), retry scheduling (`:1570-1657`,
 exponential, 15 cap). Smell: the same reset block exists twice; the "lifecycle ended" edge
 is applied before publication can fail, so `.ended` + publication-pending is live.
 
@@ -741,7 +820,7 @@ workoutSaved) is monotonic via `rank`, but applies only to `.save`; discard, tom
 takeover and corrupt-reset are parallel flag files. `reload()` (`:381`) collapses to four
 load states and the manager re-derives ~8 sub-states from the identity's optionals.
 
-**W-3 Companion mirror transport** — `WatchWorkoutManager.swift:515-519` envelope buffer
+**W-3 Companion mirror transport** — `WatchWorkoutManager.swift:517-521` envelope buffer
 (explicit), `isMirroring`, start in flight, start/send attempt IDs, retry/start-timeout/
 live-send-timeout/shutdown-watchdog tasks, shutdown retry count, phone schema version.
 NotMirroring / StartInFlight / Mirroring / SendInFlight / RetryScheduled / ShutdownDelivery
@@ -765,7 +844,7 @@ preparation machine.
 `@Published state` (12 cases) written at 27 sites alongside the explicit
 `RideBLETransportStateMachineV1`. The reducer is authoritative for readiness; `state` is a
 mirror that also carries non-transport values (`.notEnrolled`, `.bluetoothUnavailable`,
-`.busy`, `.failed`). `reduceTransport` (`:2165`) demotes `.ready` but never promotes;
+`.busy`, `.failed`). `reduceTransport` (`:2154`) demotes `.ready` but never promotes;
 `.failed` can show while the reducer is recovering; `disconnectingForBusyLease` and
 `stoppingPhonePreparation` are side flags the reducer does not know.
 
@@ -781,7 +860,7 @@ sub-phases are explicit; entry conditions mix `canReleaseLease`, lease-release a
 connection generation and `linkEnded` from four callbacks; the restoration one-shot has
 three exits (`:532`).
 
-**W-8 Ride transition confirmation (origin tracking)** — `WatchWorkoutManager.swift:531-551`
+**W-8 Ride transition confirmation (origin tracking)** — `WatchWorkoutManager.swift:533-553`
 write revision, pending automatic start/transition annotations, three mutually exclusive
 "origin pending" bools, launch contexts, manual override pending + generation + 10 s task,
 pending system event, last processed stamps, pending remote acknowledgement. OriginUnknown /
@@ -792,13 +871,13 @@ Confirmed × ManualOverride. Revision-fenced writes stand in for a per-transitio
 closure task, attempted final closure, attempt IDs, remote control context, allows saving
 unconfirmed, persisted `RemoteSegmentIntent`. Idle / InFlight / TimedOutUnconfirmed /
 FinalClosureAttempted / RecoveredIntentPending. Smell: `waitForSegmentOperationBeforeFinalization`
-(`:4051`) is a 25 ms polling loop.
+(`:4104`) is a 25 ms polling loop.
 
-**W-10 Recovery loop and launch admission** — `:390`, `:409-411`, `:486-488`, `:510`,
-`:558` `isRecovering`, `isRecoveryLoopRunning`, signal queue (generation + parked), pending
+**W-10 Recovery loop and launch admission** — `:390`, `:409-411`, `:488-490`, `:512`,
+`:560` `isRecovering`, `isRecoveryLoopRunning`, signal queue (generation + parked), pending
 configuration, pending launch request + expiry, authorization/complication tasks, setup
-state. `canAdmitConfirmedWorkoutLaunch` (`:1784`) is an 8-term conjunction; `isRecovering`
-ends as `terminalCleanupSessionID != nil` (`:1729`). Two bools for one loop; drain/reconcile
+state. `canAdmitConfirmedWorkoutLaunch` (`:1787`) is an 8-term conjunction; `isRecovering`
+ends as `terminalCleanupSessionID != nil` (`:1734`). Two bools for one loop; drain/reconcile
 called from four `defer` sites.
 
 **W-11 Watch navigation request generations** — `Managers/WatchNavigationManager.swift:124-139`
@@ -814,10 +893,20 @@ state). Idle / DecisionAcceptedAwaitingSnapshot / Confirmed. A pending decision 
 expected state never arrives is cleared only by a device-ID change (no timeout; firmware
 times out first).
 
-**W-13 Route recorder capture** — `Managers/WatchRouteRecorder.swift:33-45` builder,
-workout start, active, may-contain-existing, timestamp gate, explicit capture lifecycle,
-accumulator, queue, flush task, generation, save failed (sticky). Clean-ish; `isWorkoutActive`
-duplicates the manager's lifecycle.
+**W-13 Route recorder capture** — `Managers/WatchRouteRecorder.swift:33-52` builder, workout
+start, active, may-contain-existing, timestamp gate, explicit capture lifecycle, accumulator,
+queue, flush task, generation, save failed (sticky), and since #793 elevation gain with its
+active-period start, a speed-capture flag, a speed buffer and a 10 s in-flight-insert grace.
+Capturing / RouteFailed(insert in flight | settled) / Finalizing / Released. Since #793 a
+route failure keeps the builder and its accepted points (`failRouteSaving`, `:432-437`);
+finalization waits up to 10 s for an insert still in flight (`flushPendingRouteLocations`
+`:385-398`, `waitForInFlightInsert` `:402-412`, a 50 ms polling loop) and reports the route
+as `.unknown` rather than discarding it. **Smell:** `takeCyclingMetrics()` (`:167-173`) is
+both the save-path read (`WatchWorkoutManager.swift:3413`) and the reset used by `begin`
+(`WatchRouteRecorder.swift:93`), `discardRoute` (`:129`) and
+`completeAfterWorkoutAlreadySaved` (`:139`), so metrics are exported at most once and a
+relaunch before the export loses them (recovered sessions skip elevation, `:312`);
+`isWorkoutActive` still duplicates the manager's lifecycle.
 
 **W-14 WatchConnectivity background delivery + release outbox** —
 `Managers/WatchConnectivityCoordinator.swift:49-66` activated, activation failed (sticky per
@@ -839,6 +928,23 @@ window, route generation gate, `reconnectAttempt` (1..6, 2ⁿ capped 30 s, reset
 success), latest/dispatched GPS and motion pairs (`WatchDeviceLink.swift:139-151`), motion
 cleared sentinel (`:146`), location consumer map, network availability.
 
+**W-18 Watch Health setup state and the later-optional prompt** —
+`Managers/WatchWorkoutManager.swift:378` `@Published setupState` (explicit
+`WatchWorkoutSetupState`, seven cases, `:7-15`) assigned at 27 sites with no transition guard
+(26 before #793). Readiness is resolved from `readinessTypesToShare` (`:7423-7425`) while
+requests ask for `typesToShare` (`:7427-7429`), which adds the later optional Cycling Speed
+type; the gap is a hidden per-install sub-state (Ready with optional types requested / not
+yet requested) read live from HealthKit (`laterOptionalHealthAccessRequestStatus`,
+`:1895-1906`) and never stored. A Start tapped on the Watch (`suppliedConfiguration == nil`,
+`:1924-1926`) moves Ready → Authorizing → refresh (`requestLaterOptionalHealthAccessIfNeeded`,
+`:1873-1893`); remote and automatic starts skip it; speed collection is enabled only when
+sharing is already authorized (`configureDataSource`, `:7390-7400`). **Smell:** local versus
+remote origin is inferred from a nil configuration; while that sheet is up, a remote start
+finds `.authorizing`, `authorizeHealthKit` returns early (`:1840-1844`) and the `.ready` guard
+(`:1928`) drops the start silently (read from code, not exercised);
+`refreshAuthorizationIfNeeded` (`:949`) and launch admission (`:1787-1794`) also stand down
+for the window.
+
 ---
 
 ## 8. Cross-device (distributed) state machines
@@ -846,7 +952,7 @@ cleared sentinel (`:146`), location consumer map, network availability.
 Ranked by risk. Each spans two or three parties; the firmware half is cited by ID.
 
 ### X-1 Map upload → prepare/commit → activate → renderer ACK → receipt → library (highest risk)
-Parties: firmware MT-1, MT-2, MT-3, MT-4, MT-5, MT-6, MT-8, MT-9, MT-10, TR-14; phone C-1,
+Parties: firmware MT-1, MT-2, MT-3, MT-4, MT-5, MT-6, MT-8, MT-9, MT-10, MT-13, TR-14; phone C-1,
 C-2, C-3, C-7, C-8, D-1.
 Joint phases: Uploading(stream seq) → LegacyReady+grant | Prepared → Accepted (commit) →
 Activating(activation seq, renderer pending) ↔ Recovering → Installed (renderer ACK +
@@ -869,7 +975,16 @@ unknown; (c) the legacy grant has no timeout (MT-8), so a stuck device-side term
 409 `activation_busy` to every new upload with no phone command to clear it short of reboot;
 (d) four firmware "busy" predicates (MT-7) vs the phone's pending/paused predicates derive
 from different fields; (e) the selection intent (MT-12) settles only on the next library
-task, so phone inventory can show manual for the length of a retry loop.
+task, so phone inventory can show manual for the length of a retry loop; (f) since #791 the
+device refuses an upload or a Use with `stream_settle_previous` while the previous map's
+cleanup is unsettled (MT-13), and the app has no case for that code: an upload refusal
+shows the generic 503 text (`BikeComputer/Models/OfflineMapPlatform.swift:1447-1480`), a
+library failure falls back to "Could not update the device maps" (`:1825-1836`), and
+`requiresLibraryAction` (`:1840-1846`) omits it, although the cure is a successful cleanup
+retry or switching back to the previous map; boot resume does not refuse, so after a
+reboot that resumes an upload the same SD state can surface as 409 `stream_ready_pending`
+(`esp32/lib/map_transfer_http/map_transfer_http.cpp:1608-1612`; read from code, not
+exercised).
 
 ### X-2 Watch-direct ride handoff: preparation → yield → lease → handback → release
 Parties: Watch W-4, W-5, W-7, W-15; phone A-8, E-9; firmware BLE-6 lease and BLE-1 session.
@@ -900,7 +1015,7 @@ Joint phases: Downloading/ImageVerified (phone) → MaintenanceRequested(correla
 [reboot into new slot, pending verify] → Unresolved until the next authenticated status
 shows the new build (+ receipt ack when required) → Installed | RolledBack | Failed |
 Cancelled. Moved by DTRN prepare/enter, HTTP begin/image/finalize/cancel,
-`markRunningAppValid` (firmware `main.cpp:2229`) + receipt reconcile, maintenance exit
+`markRunningAppValid` (firmware `main.cpp:1987`) + receipt reconcile, maintenance exit
 (button, timers, request).
 Persistence: phone UserDefaults pending record; firmware RTC request (consumed once), NVS
 receipt, OTA slot state.
@@ -914,7 +1029,10 @@ binds the post-update boot to the pending record except the build number; the fi
 reset-before-cancel (TR-4) accepts a phone cancel during commit while the device still
 reboots, so the phone marks cancelled and the device installs; a receipt persistence
 failure on the valid path is ignored (TR-5), so `requiresOperationReceipt` can wait on a
-receipt that never appears.
+receipt that never appears. The e-paper family has no maintenance mode: BLE refuses the
+request with `firmware_maintenance_unsupported`
+(`esp32/lib/ble_navigation/ble_navigation.cpp:4604-4607`; SYS-10), and the app has no case
+for that code.
 
 ### X-4 Ride automation: decision → ack → prompt → response → confirmation / cancellation
 Parties: firmware RA-1, RA-2, RA-10, RA-13; phone E-6; Watch W-12 plus the mirror (E-1, W-3).
@@ -939,7 +1057,8 @@ disconnect in between leaves the phone retrying the same generation (idempotent,
 retry counter grows).
 
 ### X-5 Ownership: register → provisional key → promote; owner session; Watch controller enrol/revoke
-Parties: firmware BLE-1, BLE-4, BLE-5, BLE-6, BLE-7; phone A-4, A-5, A-12, A-13, B-6, E-9;
+Parties: firmware BLE-1, BLE-4, BLE-5, BLE-6, BLE-7, EP-3, EP-4; phone A-4, A-5, A-12, A-13,
+B-6, E-9;
 Watch credential store.
 Joint phases (registration): Unclaimed/Idle → PAIR sent/Pairing(code, 120 s) → PAIR_READY
 + phone confirm → CONFIRM → PAIRED (phone keeps provisional) → OWNER/SERVER2/PROOF/OK2 on
@@ -959,7 +1078,11 @@ user can sit in comparison-ready after expiry and CONFIRM fails with no distinct
 state; `pendingDeregistrationDeviceID` cleared at seven sites; "ownership invalidated while
 linked" (BLE-1) reaches the phone only as a disconnect; promotion-in-flight is reset on
 disconnect but not on the WC failure path, so a silent Watch blocks re-promotion until
-reconnect.
+reconnect. On the e-paper the device can also end a comparison itself: holding up or down
+calls `cancelPairingOnDevice()` (`esp32/lib/board_input/board_input.cpp:45-46` →
+`ble_navigation.cpp:8556-8564` → `device_ownership.hpp:62-66`), which clears pairing
+without telling the phone, so the phone sits in comparison-ready exactly as after the 120 s
+expiry; confirmation is accepted only while the code is on glass (EP-3).
 
 ### X-6 Transfer session + BLE link-loss grace + lease rebind
 Parties: firmware TR-1, TR-2, TR-3, BLE-2, BLE-3; phone D-1, D-2, D-3, A-1.
@@ -997,10 +1120,15 @@ binding, so a phone relaunch restarts at 1 and is rejected until a rebind bumps 
 generation; the policy stays installed on firmware after the capture clears (RA-4) and the
 phone's generation only increments, so a firmware reboot (generation 0) accepts anything;
 the retention lease has two refreshers (RA-8) and a one-chunk-at-a-time download can exceed
-10 min with no non-chunk request.
+10 min with no non-chunk request. Since #796 the phone also records the firmware storage
+backend from the BLE `deviceStorageBackend` string at diagnostics entry
+(`BikeComputer/Managers/DeviceTransferManager.swift:2443`), frozen at the first inventory so
+a nil at that moment stays "Unknown" for the whole collection, and the dated-event range at
+completion; both are local metadata that exported receipts exclude (D-6).
 
 ### X-8 Workout session mirror (Watch primary ↔ phone mirror/recorder ↔ device telemetry)
-Parties: Watch W-1, W-2, W-3, W-8, W-9; phone E-1, E-2, E-3, E-4, E-5, E-8; firmware BLE-12,
+Parties: Watch W-1, W-2, W-3, W-8, W-9, W-13, W-18; phone E-1, E-2, E-3, E-4, E-5, E-8;
+firmware BLE-12,
 BLE-15, `GroupTracker`, workout `SessionState` reducer.
 Joint phases: NoSession → WatchLaunchRequested → MirrorStarting (10 s) → Live (core +
 extended heartbeat, firmware pairs frames) → Paused/Resumed (controls with sequence gate) →
@@ -1017,14 +1145,24 @@ Divergences: Watch and phone each own a "terminal delivered to device" belief wi
 cross-check; firmware retains only 8 results, so a controller with more outstanding
 critical IDs across a flapping link gets a fresh apply instead of a replay; the phone's
 navigation-clear intent (A-10) survives reconnect but is superseded silently, so the device
-may keep guidance the phone believes cleared if the new route write then fails.
+may keep guidance the phone believes cleared if the new route write then fails. Since #793
+each recording owner exports cycling metrics (GPS speed, elevation gain) when its save
+finishes, with no protocol change: the phone reports a failure in its terminal message
+(`BikeComputer/Managers/PhoneWorkoutRecorder.swift:519`, `:558`), the Watch ignores the result
+(`BikeComputerWatch/Managers/WatchWorkoutManager.swift:3414`). Cycling Speed is requested
+only from a foreground phone start or a Start tapped on the Watch (E-3, W-18), so a ride
+started from the bike computer or remotely gets GPS speed only if the rider answered an
+earlier local prompt; HealthKit holds that state, not either app.
 
 ### X-9 Navigation route / GPS / maneuver delivery with payload generations
-Parties: phone A-9, A-10, A-14, B-12; Watch B-14, W-6; firmware BLE-15 and the map-setting
-redraw policy.
+Parties: phone A-9, A-10, A-14, B-12; Watch B-14, W-6; firmware BLE-15, POS-1 and the
+map-setting redraw policy.
 Joint phases per connection: Unsent → ProfilesNegotiated (six one-shot flags) → route /
 maneuver / GPS replaceable latest-wins → ClearIntent (RCM1) → ClearAcked | Superseded;
-firmware Empty → Staged(gen) → Applied on the UI task.
+firmware Empty → Staged(gen) → Applied on the UI task into the shared position record only
+while `position_source` accepts phone positions; otherwise a GPS packet is decoded into a
+discarded record that still syncs the RTC, feeds ride automation and counts toward GPS
+freshness (`esp32/lib/ble_navigation/ble_navigation.cpp:5852-5885`; X-12).
 Divergences: six per-connection "already sent" bools instead of a negotiation phase;
 firmware rejects stale by command/state generation but replaceable writes carry no
 generation, so an old connection's late ATT write on a restored link is fenced only by the
@@ -1040,7 +1178,17 @@ Failure modes: ack lost → 5 s timeout → phone failed while firmware already 
 revision+1 → the next save conflicts; disconnect mid-upload → firmware drops the partial.
 Divergences: a timed-out save whose ack arrives late is ignored by ID although the firmware
 state moved; a retry after a lost ack carries a new request ID with the same CRC, so it is a
-second revision bump (no idempotency key).
+second revision bump (no idempotency key). On the e-paper every stored or new map profile
+passes through `effectiveMapProfile`
+(`esp32/lib/ble_navigation/screen_configuration.hpp:133-143`, used at
+`screen_configuration.cpp:175`, `:181` and `mainScr.cpp:672`), and `loadSettingsFromNVS`
+zeroes five render settings at boot (`ble_navigation.cpp:7844-7850`), so the persisted
+document can hold rotation, bird's-eye and 3D values the device never applies; the app hides
+those controls by capability instead of reading the effective profile. Single settings split
+the same way: the firmware drops ten IDs (4, 6, 11, 12, 15, 25, 26, 35, 36, 37) before
+counting the packet (`ble_navigation.cpp:6013-6016`), while the app's `sendSetting` refuses
+only five of them (6, 11, 12, 15, 37; `BikeComputer/Managers/BLEManager.swift:5449-5454`) and
+relies on capability bits for the rest.
 
 ### X-11 Request/response correlations (lower risk, same pattern)
 - Destination picker: firmware BLE-9 ↔ phone B-3 + status sequence. Firmware times out on
@@ -1056,6 +1204,41 @@ second revision bump (no idempotency key).
 - Map profile / settings one-shots: phone A-14 ↔ firmware redraw policy; setting write
   generations.
 
+### X-12 Position-source arbitration (receiver board ↔ phone/Watch GPS stream)
+Parties: firmware POS-1, POS-2, POS-3, POS-4, UI-5 and the BLE GPS intake
+(`esp32/lib/ble_navigation/ble_navigation.cpp:5845-5962`); phone G-2 sender
+(`BikeComputer/Managers/NavigationEngine.swift:958`), Watch-direct sender
+(`BikeComputerWatch/Managers/WatchDeviceLink.swift:1610-1630`), A-21. Added by #775 and #776.
+Joint phases on a receiver board: PhoneOwns (no fix; `active=phone`) → GnssOwns (valid fix
+under 3 s old; phone packets are decoded into a discarded record but still sync the RTC and
+feed ride automation and diagnostics; `active=gnss`) → Handover (invalid interval or 3 s
+without a valid fix; `active=none` until the next phone packet applies) → PhoneOwns. Boards
+without a receiver stay in PhoneOwns. The phone does not take part: it streams at its own
+cadence, learns the static capability from CAP2 TLV 5 and the live state only from
+developer `DSTS` polls.
+Persistence: none; firmware RAM, phone mirrors reset per connection.
+Failure modes: receiver stream stops → the phone owns after 3 s and the module restarts
+after at least 15 s of silence (doubling to 300 s); phone disconnect while GNSS owns → the
+record keeps updating standalone; reboot → the reader starts the module fresh with a RESET
+pulse.
+Divergences: (a) phone and Watch GPS packets bundle position with ride totals (distance,
+elapsed and, from the phone during navigation, route remaining;
+`esp32/lib/ble_navigation/gps_position_protocol.hpp:142-189`) and the device gates the bundle
+as a unit (`ble_navigation.cpp:5852-5856`), so while GNSS owns the record the ride-stats route
+remaining, `hasActiveNavigation` (`esp32/lib/gui/src/rideTelemetryPresenter.hpp:97-101`) and
+the legacy distance and elapsed values (`:140-141`) freeze at the last applied phone value,
+including after the phone ends navigation; (b) fix validity has three copies with different
+expiry: the arbiter (3 s, time-expired), `GnssStatus.fixValid` reported in `DSTS` (last
+interval, never expires) and `isGpsFixed` (cleared only by a later invalid interval); (c) the
+app mirrors the 3 s hold (`BikeComputer/Utilities/NavigationProtocol.swift:1253`); (d) the
+record arbiter and ride automation's accuracy selector choose independently and only the
+first is reported; (e) `deviceHasGNSSReceiver` has no app consumer, so the phone cannot adapt
+and cannot see which source drives a ride; (f) GNSS time never sets the clock (SYS-9);
+(g) phone packet counters still enter the map's position signature while GNSS owns the record
+(`esp32/lib/maps/src/maps.cpp:4637-4640`), so each phone packet re-observes the unchanged GNSS
+fix, benign on a read of `mapPresentation.hpp:297-337` and not traced further. All of these
+come from reading the code, not from hardware.
+
 ### Cross-device divergences, summarized
 1. **Boot-local counters crossing the air.** Activation sequence, transfer generation, ride
    generation, lease generation and diagnostics boot sequence all reset on firmware reboot;
@@ -1063,7 +1246,8 @@ second revision bump (no idempotency key).
    Only map operations (admission epoch + revision) and ride automation (ride generation in
    every frame) carry an explicit epoch.
 2. **Timeout mirrors.** The phone copies firmware constants (15/45 s rebind, 30 s
-   automation, 5 s ack, 10/8 s ATT) instead of reading them; each is a latent desync.
+   automation, 5 s ack, 10/8 s ATT, and since #776 the 3 s GNSS hold of X-12) instead of
+   reading them; each is a latent desync.
 3. **Terminal states acknowledged one way.** Renderer ACK → receipt (map), app-valid →
    receipt (OTA) and RAK1 (ride) are device terminals the phone learns by polling; the
    firmware never learns the phone's terminal (saved tombstone, acquisition complete,
@@ -1075,6 +1259,13 @@ second revision bump (no idempotency key).
 5. **Status strings as the contract.** `activation.status`, `networkTransport`,
    `maintenance.stage`, `libraryAction` and selection health are switched on by the phone's
    reconcilers, so every firmware string-state smell is also a cross-device one.
+   `positionSource.active` joins them as a display-only string (X-12), and two new device
+   codes have no phone case at all: `stream_settle_previous` (X-1) and
+   `firmware_maintenance_unsupported` (X-3).
+6. **Payloads gated as one unit.** A GPS packet carries position and ride totals together,
+   and a receiver board accepts or discards the whole packet by position ownership, so the
+   totals freeze while GNSS owns the record (X-12 a). The e-paper's effective map profile is
+   the same shape: the stored document and the applied profile diverge silently (X-10).
 
 ---
 
@@ -1087,15 +1278,17 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
    comparison at the consumer.
 2. **Copy-pasted resets** — A-1 session reset (3×), A-2 `autoReconnect` (37 writes), B-1
    dismissal flag (11), B-2 cancel-and-bump (4×), E-1 `resetRemoteTransport` (17 fields from
-   4 callers), E-4 automatic choice (7), G-2 begin/stop (~25-30 fields each), W-1 release
+   4 callers), E-3 `resetFinished` (36 fields; the discard branch resets two), E-4 automatic choice (7), G-2 begin/stop (~25-30 fields each), W-1 release
    block (2×, ~30 resets), W-4 accepted flag (6), W-5 link state (27 writes).
 3. **Strings as phases** — C-1 outcome, C-2 observation/cleanup, D-4 status, D-8 broker
    status, D-10 replay status, D-12 transport, D-14 and G-10 status messages, B-2
-   calculation status.
+   calculation status, and the firmware storage-backend literals (`sdmmc`, `spi`,
+   `legacy_spi_migration`, `ffat`) mapped for D-6.
 4. **Nullable as phase** — E-1 (six optionals), E-6 (optional within optional), E-8 (three
-   frames), G-22 resolver, W-4 (two IDs), W-11 (two record pairs), G-24.
+   frames), G-22 resolver, W-4 (two IDs), W-11 (two record pairs), G-24, D-6
+   `firmwareLogDates`, E-15 `WorkoutCyclingElevationGain.meters`.
 5. **Explicit enum shadowed, derived or unguarded** — A-4 auth flow, B-4 sync state (14
-   writes), D-4 stage (any-to-any), E-3 recorder state (14 writes, shared reducer unused),
+   writes), D-4 stage (any-to-any), E-3 recorder state (17 writes, shared reducer unused), W-18 setup state (27 writes),
    E-10 Strava activity, G-1 Watch sync state (derived and also assigned), W-1 cleanup
    state (derived from ~10 bools), W-5 link state (mirror), `WorkoutMirrorStateReducer`
    connection state (23 writes).
@@ -1104,12 +1297,16 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
    record vs E-3 flags, G-1 six sets, W-2 flag files, W-4 intent + handback, W-14 outbox.
 7. **Lazy expiry inside getters and recomputed phases** — B-5, B-7, C-8, D-7 policy, E-13,
    G-5, W-1, W-10.
+8. **Take-and-reset accessors** — W-13 `takeCyclingMetrics()` and
+   `WorkoutCyclingSpeedBuffer.take()` (E-15) are both the read and the reset, so an export
+   happens at most once and a relaunch before it loses the data.
 
 ## Where an explicit machine would pay off most (app and cross-device)
 
 1. **X-1 / C-1 / C-2 / D-1** device map install: one phone-side `DeviceInstallState` fed
    by the operation journal only, with the outcome string and per-map mirror derived from
-   it; pair it with the firmware root classifier proposed in the firmware document.
+   it; pair it with the firmware root classifier proposed in the firmware document, which would
+   also absorb MT-13's `stream_settle_previous` gate.
 2. **X-3 / D-4** firmware update: guard `updatePending(stage:)` with the same transition
    table on both reconcile and error paths, drop the status string, and bind the post-update
    boot to the pending record by correlation, not build number.
@@ -1120,13 +1317,16 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
    enum in place of the `autoReconnect` mode flag, and a scan-purpose reconcile that takes a
    typed reason.
 5. **E-3** phone recorder: drive `state` through the existing `WorkoutLifecycleReducer`
-   like the Watch does.
+   like the Watch does. Since #793 it has 17 unguarded writes and a 36-field reset.
 6. **X-4 / E-6 / RA-1** ride automation: one decision enum with a single `settle(reason)`
    on both sides and one shared deadline origin.
 7. **W-1 / W-5** Watch: make `terminalCleanupState` the stored state instead of a
    derivation, and stop writing the published link state outside `reduceTransport`.
 8. **X-6 / D-2** rebind: have the firmware advertise its grace deadline in DSTS and let the
    rebind policy accept retained OS claims so map uploads can rebind.
+9. **X-12 / POS-1..3 / A-21** position source: report the hold and fix validity from one
+   firmware owner, gate GPS packets only on their position fields, and let the app read the
+   active source instead of mirroring the 3 s hold.
 
 Dead or vestigial on the app side: the power-button honk retry (A-16, feature removed on
 firmware), the second copy of the route search panel (G-9), and the duplicated
@@ -1160,7 +1360,7 @@ Explicit but shadowed, derived, mirrored or unguarded (also counted above): `Aut
 `MultiStopRoutePlanner.State` (G-22), `DurableMapDownloadCoordinator.Ownership.Phase` (C-5),
 `WatchDeviceLinkState` (W-5), `WatchNavigationState` + `WatchOnlineRoutingStatusV1` (W-11),
 `WatchWorkoutCleanupState` (W-1), `WatchWorkoutRecoveryStore.LoadState` (W-2),
-`BicinoUserSession.State` (G-24).
+`BicinoUserSession.State` (G-24), `WatchWorkoutSetupState` (W-18, 27 unguarded writes).
 
 Value, result and wire enums with no transitions: `BLEDiscoveryOrigin`, `ATTWriteOwner`,
 `RideApplicationDeliveryOutcome`, `DeviceDestinationStatusCode`, `DeviceTransferSession.Mode`,
@@ -1168,4 +1368,4 @@ Value, result and wire enums with no transitions: `BLEDiscoveryOrigin`, `ATTWrit
 `RendererBenchmark*Outcome`, `WorkoutSessionStateV1`, `WorkoutControlV1`,
 `RideAutomationKind/Transition/Origin/Result`, `WorldRadioCommand`, `MapTrackingBehavior`,
 `ContentSheetDestination`, `SettingsSheetDestination`, `WatchRouteSyncOperationV1`,
-`GPXRouteImportSourceV1`.
+`GPXRouteImportSourceV1`, `DiagnosticsFirmwareStorage`, `DiagnosticsFirmwareLogDates`.
