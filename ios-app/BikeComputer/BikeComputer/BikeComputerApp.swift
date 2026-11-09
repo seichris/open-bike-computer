@@ -124,6 +124,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                         && presentation.connectionState != .awaitingFirstSnapshot
                         && presentation.connectionState != .launchingWatch
                 },
+                isApplicationActive: { UIApplication.shared.applicationState == .active },
                 requestLocationAuthorization: { [weak locationManager] in
                     locationManager?.requestWhenInUseAuthorization()
                 }

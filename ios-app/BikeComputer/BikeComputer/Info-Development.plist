@@ -80,7 +80,7 @@
 	<key>NSHealthShareUsageDescription</key>
 	<string>Bicino reads live and completed cycling workout metrics from your selected recorder: iPhone or Apple Watch. Heart rate on iPhone requires a compatible external monitor.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Bicino saves cycling workouts, cycling distance, and permitted workout routes to HealthKit from your selected recorder: iPhone or Apple Watch.</string>
+	<string>Bicino saves cycling workouts, cycling distance and speed, elevation gain, and permitted workout routes to HealthKit from your selected recorder: iPhone or Apple Watch.</string>
 
 	<!-- Location Accuracy -->
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>

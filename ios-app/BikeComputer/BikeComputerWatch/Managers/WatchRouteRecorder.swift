@@ -42,13 +42,25 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private var flushTask: Task<Void, Never>?
     private var onLocationUpdate: (() -> Void)?
     private var routeGeneration = WorkoutRouteGenerationGate()
+    private var elevationGain = WorkoutCyclingElevationGain()
+    private var elevationPeriodStart: Date?
+    private var capturesGPSSpeed = false
+    private var speedBuffer = WorkoutCyclingSpeedBuffer()
+    /// How long finalization waits for an insert that was still in flight
+    /// when route saving failed. HealthKit may have stopped answering, so
+    /// the wait is bounded; an answer within it still counts its points.
+    private let inFlightInsertGracePeriod: Duration
 
     override convenience init() {
         self.init(locationService: WatchLocationService())
     }
 
-    init(locationService: WatchLocationService) {
+    init(
+        locationService: WatchLocationService,
+        inFlightInsertGracePeriod: Duration = .seconds(10)
+    ) {
         self.locationService = locationService
+        self.inFlightInsertGracePeriod = inFlightInsertGracePeriod
         self.authorizationState = locationService.authorizationState
         super.init()
         locationService.$authorizationState
@@ -68,6 +80,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         startDate: Date,
         motionSampleEpoch: UInt16? = nil,
         mayContainExistingRouteData: Bool = false,
+        capturesGPSSpeed: Bool = false,
         onLocationUpdate: @escaping () -> Void
     ) {
         stopLocationUpdates()
@@ -77,6 +90,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         self.onLocationUpdate = onLocationUpdate
         isWorkoutActive = true
         self.mayContainExistingRouteData = mayContainExistingRouteData
+        _ = takeCyclingMetrics()
+        self.capturesGPSSpeed = capturesGPSSpeed
         distanceAccumulator = WorkoutRouteDistanceAccumulator(
             mayContainExistingRouteData: mayContainExistingRouteData
         )
@@ -111,6 +126,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         stopLocationUpdates()
         invalidateRouteBuilder(discard: true)
         clearAfterFinalization()
+        _ = takeCyclingMetrics()
     }
 
     /// Releases local route state after HealthKit reconciliation confirms that
@@ -120,6 +136,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         stopLocationUpdates()
         invalidateRouteBuilder(discard: false)
         clearAfterFinalization()
+        _ = takeCyclingMetrics()
     }
 
     /// Flushes the associated route before its workout is finished. An
@@ -145,6 +162,14 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
             routeStatus: hasRouteBuilder ? decision.routeStatus : .unavailable,
             distanceMeters: distanceMeters
         )
+    }
+
+    func takeCyclingMetrics() -> (elevationGainMeters: Double?, speeds: [WorkoutCyclingSpeedObservation]) {
+        let metrics = (elevationGain.meters, speedBuffer.take())
+        elevationGain = WorkoutCyclingElevationGain()
+        elevationPeriodStart = nil
+        capturesGPSSpeed = false
+        return metrics
     }
 
     private func startLocationUpdatesWhenAuthorized() {
@@ -253,6 +278,15 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
                 distanceAccumulator?.breakSegment()
                 continue
             }
+            if !wasPaused, location.timestamp <= now {
+                recordCyclingMetrics(
+                    location,
+                    hasMovingSegment: hasBoundedMotionSegment
+                        && (motionDistance ?? 0) > max(
+                            priorObservation?.horizontalAccuracy ?? 0, location.horizontalAccuracy
+                        )
+                )
+            }
             lastDistanceLocation = location
             distanceAccumulator?.appendPoint(
                 segmentDistanceFromPrevious: segmentDistanceFromPrevious
@@ -270,6 +304,22 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         onLocationUpdate?()
 
         enqueueRouteLocations(routeAccepted)
+    }
+
+    private func recordCyclingMetrics(_ location: CLLocation, hasMovingSegment: Bool) {
+        let timestamp = location.timestamp
+        let speedObservation = WorkoutCyclingSpeedObservation(metersPerSecond: location.speed, timestamp: timestamp)
+        if !mayContainExistingRouteData {
+            let periodStart = captureLifecycle?.activePeriodStart(at: timestamp)
+            if elevationPeriodStart != periodStart {
+                elevationGain.breakSegment()
+                elevationPeriodStart = periodStart
+            }
+            if (speedObservation?.metersPerSecond ?? 0) > 0.5 || hasMovingSegment {
+                elevationGain.record(altitude: location.altitude, accuracy: location.verticalAccuracy, at: timestamp)
+            }
+        }
+        if capturesGPSSpeed, let speedObservation { speedBuffer.record(speedObservation) }
     }
 
 #if WORKOUT_CONTRACT_XCTEST
@@ -333,13 +383,32 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     private func flushPendingRouteLocations() async {
-        if let flushTask {
+        if flushTask != nil, routeSavingFailed {
+            // Overflow means HealthKit stopped keeping up, so the insert
+            // still in flight may never answer. Count it if it answers in
+            // time, but never let it hold the save.
+            await waitForInFlightInsert(upTo: inFlightInsertGracePeriod)
+        } else if let flushTask {
             await flushTask.value
         }
         guard !routeQueue.isEmpty, routeBuilder != nil, !routeSavingFailed else {
             return
         }
         await drainRouteQueue(generation: routeGeneration.current)
+    }
+
+    /// Returns when the in-flight insert answers or `limit` passes. Awaiting
+    /// a task's value ignores cancellation and deadlines, so this polls.
+    private func waitForInFlightInsert(upTo limit: Duration) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: limit)
+        while flushTask != nil, clock.now < deadline {
+            do {
+                try await clock.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
     }
 
     private func clearAfterFinalization() {
@@ -363,16 +432,9 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private func failRouteSaving() {
         routeSavingFailed = true
         routeQueue.markFailed()
-        if mayContainExistingRouteData {
-            // Stop this process from making further inserts, while retaining
-            // the associated builder so HealthKit can preserve route samples
-            // that may have been written before recovery.
-            routeGeneration.advance()
-            flushTask?.cancel()
-            flushTask = nil
-        } else {
-            invalidateRouteBuilder(discard: true)
-        }
+        // Keep the builder and the success count. If an insert was already
+        // in flight at overflow, finalization waits up to
+        // `inFlightInsertGracePeriod` for its result.
     }
 
     private func invalidateRouteBuilder(discard: Bool) {
