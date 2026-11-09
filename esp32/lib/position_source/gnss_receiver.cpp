@@ -519,7 +519,7 @@ struct I2cTransport {
     policy.begin(nowMs);
   }
 
-  enum class Outcome : uint8_t { noAnswer, partial, complete };
+  using Outcome = I2cPollOutcome;
 
   // One poll: the length query, then the announced bytes in chunks, each
   // consumed as it arrives. received is the number of stream bytes read.
@@ -586,14 +586,13 @@ struct I2cTransport {
       printBoot(probeReported ? "ok" : answered ? "pending" : "retry");
     // Restart the module when its stream stops. The clock is read after the
     // poll, which can take seconds, and again after the reset pulse.
-    if (policy.notePoll(answered, bytesNow, millis())) {
+    if (policy.notePoll(outcome, bytesNow, millis())) {
       pulseReset(bytesNow == 0 ? "no bytes yet" : "stream stopped");
       printBoot(probeReported ? "ok" : "retry");
       policy.restarted(millis());
     }
     locked = sawValidSentence;
-    return policy.nextPollDelayMs(answered, outcome == Outcome::partial,
-                                  wasPresent);
+    return policy.nextPollDelayMs(outcome, wasPresent);
   }
 };
 
