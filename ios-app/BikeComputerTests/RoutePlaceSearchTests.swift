@@ -168,8 +168,12 @@ extension OnlinePOISearchTests {
             for: .nearby([RoutePlace(name: "Fresh Mart", distanceMeters: 320, offRouteMeters: 0)],
                          radiusMeters: 1_000),
             kind: .supermarket, locale: english)
-            == "You're not navigating. The nearest supermarket is Fresh Mart, 300 m away.",
-                     "Nearby replies round to 50 m")
+            == "The nearest supermarket is Fresh Mart, 300 m away.",
+                     "Nearby replies round to 50 m and never claim the rider isn't navigating")
+        precondition(RoutePlaceSearchReply.text(
+            for: .nearby([], radiusMeters: 1_000), kind: .pharmacy, locale: english)
+            == "I couldn't find a pharmacy within 1 km of you.",
+                     "An empty nearby search says how far it looked")
         print("Route place search: corridor, bounded search, error handling and replies passed")
     }
 }

@@ -399,11 +399,13 @@ nonisolated enum RoutePlaceSearchReply {
                 text += " Also on your route: \(others.joined(separator: " and "))."
             }
             return text
+        // Also the answer for a navigating rider who is off the route, so it
+        // never claims the rider isn't navigating.
         case .nearby(let places, let radiusMeters):
             guard let first = places.first else {
-                return "You're not navigating, and I couldn't find a \(kind.spokenName) within \(distance(radiusMeters, locale))."
+                return "I couldn't find a \(kind.spokenName) within \(distance(radiusMeters, locale)) of you."
             }
-            var text = "You're not navigating. The nearest \(kind.spokenName) is \(first.name), " +
+            var text = "The nearest \(kind.spokenName) is \(first.name), " +
                 "\(distance(first.distanceMeters, locale)) away."
             let others = places.dropFirst().map { "\($0.name), \(distance($0.distanceMeters, locale)) away" }
             if !others.isEmpty {

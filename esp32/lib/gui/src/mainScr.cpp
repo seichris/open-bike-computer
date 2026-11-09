@@ -3112,10 +3112,22 @@ screen_configuration_protocol::ScreenActivationResult activateMainScreen(
       return report(Result::NoMatchingScreen);
     }
     showScreenInstance(index);
-  } else if (request.action == Action::Next) {
-    toggleNavigationScreen();
   } else {
-    togglePreviousNavigationScreen();
+#if MAP_POIS_RUNTIME_ENABLED
+    // Leaving a Nearby POI map for its picker changes the view, not the
+    // instance, and is still a switch.
+    const bool nearbyStep = activeTile == NEARBY && nearby.showingMap;
+#else
+    const bool nearbyStep = false;
+#endif
+    if (request.action == Action::Next) {
+      toggleNavigationScreen();
+    } else {
+      togglePreviousNavigationScreen();
+    }
+    if (nearbyStep) {
+      return report(Result::Switched);
+    }
   }
   return report(activeScreenInstanceID == previousInstanceID
                     ? Result::AlreadyActive
