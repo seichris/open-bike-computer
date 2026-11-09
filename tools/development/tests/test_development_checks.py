@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -165,6 +166,18 @@ class DevelopmentChecksTests(unittest.TestCase):
         for name in groups:
             for source in swift.sources(name, groups):
                 self.assertTrue((ROOT / source).is_file(), (name, source))
+
+    def test_every_firmware_python_test_module_is_run_by_a_check(self):
+        # No check discovers esp32/tools/tests, so a module that no check
+        # command names never runs locally or in CI. Nine had drifted out
+        # unnoticed by 2026-11-09, one of them with a stale assertion.
+        commands = "\n".join(
+            check["command"] for check in json.loads(runner.REGISTRY.read_text())["checks"]
+        )
+        named = set(re.findall(r"\btest_\w+", commands))
+        modules = sorted(path.stem for path in (ROOT / "esp32/tools/tests").glob("test_*.py"))
+        self.assertGreater(len(modules), 50)
+        self.assertEqual([], [module for module in modules if module not in named])
 
     def test_source_groups_reject_cycles(self):
         with self.assertRaisesRegex(ValueError, "cyclic"):
