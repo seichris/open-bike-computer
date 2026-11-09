@@ -974,17 +974,19 @@ changes by status word, and the firmware mixes two counters in one field (MT-9),
 power cut the phone can only wait for a terminal it may never see on legacy firmware;
 (b) a stale or mismatched renderer ACK is silently ignored (MT-3) and a permanently failing
 receipt write never terminates (MT-5), so the phone polls until its own deadline and reports
-unknown; (c) the legacy grant has no timeout (MT-8), so a stuck device-side terminal answers
-409 `activation_busy` to every new upload with no phone command to clear it short of reboot;
+unknown; (c) while accepted work is unresolved the device answers 409 `activation_busy` to
+every new upload with no phone command to clear it; commit recovery bounds that work to three
+attempts and a 10-minute progress stall (MT-6, MT-8), and only an ambiguous receipt write or
+a missing renderer acknowledgement keeps it, by design, until it resolves or the next boot;
 (d) four firmware "busy" predicates (MT-7) vs the phone's pending/paused predicates derive
 from different fields; (e) the selection intent (MT-12) settles only on the next library
 task, so phone inventory can show manual for the length of a retry loop; (f) since #791 the
 device refuses an upload or a Use with `stream_settle_previous` while the previous map's
-cleanup is unsettled (MT-13), and the app has no case for that code: an upload refusal
-shows the generic 503 text (`BikeComputer/Models/OfflineMapPlatform.swift:1447-1480`), a
-library failure falls back to "Could not update the device maps" (`:1825-1836`), and
-`requiresLibraryAction` (`:1840-1846`) omits it, although the cure is a successful cleanup
-retry or switching back to the previous map; boot resume does not refuse, so after a
+cleanup is unsettled (MT-13); since 2026-11-09 the app explains it on both paths
+(`BikeComputer/Models/OfflineMapPlatform.swift:1468-1472`, `:1840-1841`) and keeps Resume
+available, because a later attempt retries the cleanup, but the device has no status that
+tells the phone when the cleanup succeeded, so the rider retries blind; boot resume does
+not refuse, so after a
 reboot that resumes an upload the same SD state can surface as 409 `stream_ready_pending`
 (`esp32/lib/map_transfer_http/map_transfer_http.cpp:1608-1612`; read from code, not
 exercised).
@@ -1034,8 +1036,11 @@ reboots, so the phone marks cancelled and the device installs; a receipt persist
 failure on the valid path is ignored (TR-5), so `requiresOperationReceipt` can wait on a
 receipt that never appears. The e-paper family has no maintenance mode: BLE refuses the
 request with `firmware_maintenance_unsupported`
-(`esp32/lib/ble_navigation/ble_navigation.cpp:4604-4607`; SYS-10), and the app has no case
-for that code.
+(`esp32/lib/ble_navigation/ble_navigation.cpp:4604-4607`; SYS-10), but the app never sends
+it, because the board advertises `firmwareMaintenanceV1: false` and the app checks that
+flag first (`BikeComputer/Managers/DeviceTransferManager.swift:2128-2130`). The app then
+says the update needs firmware with maintenance mode, which on the e-paper reads as if a
+newer firmware would help.
 
 ### X-4 Ride automation: decision → ack → prompt → response → confirmation / cancellation
 Parties: firmware RA-1, RA-2, RA-10, RA-13; phone E-6; Watch W-12 plus the mirror (E-1, W-3).
@@ -1262,9 +1267,10 @@ come from reading the code, not from hardware.
 5. **Status strings as the contract.** `activation.status`, `networkTransport`,
    `maintenance.stage`, `libraryAction` and selection health are switched on by the phone's
    reconcilers, so every firmware string-state smell is also a cross-device one.
-   `positionSource.active` joins them as a display-only string (X-12), and two new device
-   codes have no phone case at all: `stream_settle_previous` (X-1) and
-   `firmware_maintenance_unsupported` (X-3).
+   `positionSource.active` joins them as a display-only string (X-12). Of the two device
+   codes added since late October, `stream_settle_previous` now has a phone case (X-1 f)
+   and `firmware_maintenance_unsupported` is never reached, because the app checks the
+   capability flag first (X-3).
 6. **Payloads gated as one unit.** A GPS packet carries position and ride totals together,
    and until 2026-11-09 a receiver board accepted or discarded the whole packet by position
    ownership, freezing the totals while GNSS owned the record (X-12 a, now fixed). The
