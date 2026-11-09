@@ -130,6 +130,7 @@ struct OnlinePOISearchTests {
         precondition(emptyResponse.items.isEmpty && !emptyResponse.usedCategoryTextFallback,
                      "No-results is distinct from unavailable service")
         print("Online POI search: radius, deduplication, multi-selection, stale-response, dismissal, selection and throttle checks passed")
+        try await routePlaceSearchTests()
     }
 
     @MainActor

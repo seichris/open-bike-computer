@@ -109,6 +109,22 @@ inline bool supportsMapPois(uint8_t clientVersion, bool runtimeEnabled,
   return runtimeEnabled && screenConfigurationReady &&
          clientVersion >= MAP_POIS_CLIENT_VERSION;
 }
+// Remote screen activation (Siri and Shortcuts) stays in development profiles
+// until a physical board check; production keeps only the button/tap cycle.
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+inline constexpr bool SCREEN_ACTIVATION_ENABLED = true;
+#else
+inline constexpr bool SCREEN_ACTIVATION_ENABLED = false;
+#endif
+// Activation travels on the screen-configuration characteristic and selects
+// configured instances, so it is offered only alongside that feature.
+inline bool supportsScreenActivation(uint8_t clientVersion,
+                                     bool implementationEnabled,
+                                     bool screenConfigurationAdvertised) {
+  return implementationEnabled && screenConfigurationAdvertised &&
+         clientVersion >= ride_ble_protocol_generated::
+                              EXTENDED_SCREEN_ACTIVATION_V1_MINIMUM_CLIENT_VERSION;
+}
 inline bool supportsMapNavigationOrientation(uint8_t clientVersion,
                                               bool implementationEnabled) {
   return implementationEnabled &&
@@ -156,7 +172,8 @@ constexpr uint32_t SUPPORTED_EXTENDED_FEATURES =
     generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE |
     generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE |
     generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE |
-    generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE;
+    generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE |
+    generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE;
 static_assert((UNSUPPORTED_FEATURES & SUPPORTED_FEATURES) == 0 &&
                   (UNSUPPORTED_FEATURES | SUPPORTED_FEATURES) ==
                       generated::ALL_FEATURES,

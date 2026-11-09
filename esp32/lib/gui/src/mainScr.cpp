@@ -3066,6 +3066,62 @@ void togglePreviousNavigationScreen() {
   showPreviousMainScreen();
 }
 
+// The same readiness the BOOT/PWR toggles require before cycling.
+static bool mainScreenTilesReady() {
+  return isMainScreen && mainScreen && mapTile && navTile && rideStatsTile &&
+         batteryStatusTile && (!world_radio_config::ENABLED || worldRadioTile) &&
+         (!route_elevation_config::ENABLED || elevationTile) &&
+         mapGuidanceOverlay;
+}
+
+screen_configuration_protocol::ScreenActivationResult activateMainScreen(
+    const screen_configuration_protocol::ActivationRequest &request,
+    uint32_t &activeInstanceID, uint8_t &activeType) {
+  using Action = screen_configuration_protocol::ScreenActivationAction;
+  using Result = screen_configuration_protocol::ScreenActivationResult;
+  const bool ready = mainScreenTilesReady() && screen_configuration::isReady();
+  const auto report = [&](Result result) {
+    activeInstanceID = activeScreenInstanceID;
+    activeType = screen_configuration_protocol::ACTIVATION_NO_SCREEN_TYPE;
+    if (screen_configuration::isReady()) {
+      const auto &document = screen_configuration::activeSnapshot().document;
+      if (activeScreenInstanceIndex < document.instanceCount) {
+        activeType = static_cast<uint8_t>(
+            document.instances[activeScreenInstanceIndex].type);
+      }
+    }
+    return result;
+  };
+  if (!ready) {
+    return report(Result::Unavailable);
+  }
+
+  // Next and Previous follow the physical buttons, including the Nearby
+  // map-to-picker step, so remote and on-device cycling stay identical.
+  const uint32_t previousInstanceID = activeScreenInstanceID;
+  if (request.action == Action::ShowTypes) {
+    bool alreadyActive = false;
+    const uint8_t index = screen_configuration::activationTargetIndex(
+        screen_configuration::activeSnapshot().document,
+        activeScreenInstanceIndex, request.types.data(), request.typeCount,
+        alreadyActive);
+    if (alreadyActive) {
+      return report(Result::AlreadyActive);
+    }
+    if (index == screen_configuration::kInvalidInstanceIndex) {
+      return report(Result::NoMatchingScreen);
+    }
+    showScreenInstance(index);
+  } else if (request.action == Action::Next) {
+    toggleNavigationScreen();
+  } else {
+    togglePreviousNavigationScreen();
+  }
+  return report(activeScreenInstanceID == previousInstanceID
+                    ? Result::AlreadyActive
+                    : Result::Switched);
+}
+
 /**
  * @brief Create Main Screen - SIMPLIFIED: Map Only
  *

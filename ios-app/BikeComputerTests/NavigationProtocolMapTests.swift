@@ -10713,7 +10713,7 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 35, "capability version negotiates the position-source record after board display metadata, POIs, route elevation, friend-marker size, group riders and terrain")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 36, "capability version negotiates screen activation after the position-source record, board display metadata, POIs, route elevation, friend-marker size, group riders and terrain")
         assertEqual(RideBLEGeneratedProtocolV1.extendedBoardDisplayMetadataFeature, 1 << 4, "extended bit 4 advertises board display metadata without reusing terrain bit 31")
         assertEqual(RideBLEGeneratedProtocolV1.extendedBoardDisplayMetadataMinimumClientVersion, 34, "board metadata requires the coordinated version 34 client")
         assertEqual(RideBLEGeneratedProtocolV1.boardDisplayTLVType, 4, "board metadata has its own TLV after the extended feature word")
