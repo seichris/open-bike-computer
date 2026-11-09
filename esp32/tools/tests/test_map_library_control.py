@@ -98,7 +98,8 @@ struct Installer {
   // Storage order: S settles the selected and previous maps, U moves the
   // pointer, L reads the inventory.
   std::string calls;
-  InstallStatus settleSelectionStreamMaps(){calls+='S';return {true,"stream_settle_none",""};}
+  InstallStatus settleResult{true,"stream_settle_none",""};
+  InstallStatus settleSelectionStreamMaps(){calls+='S';return settleResult;}
   InstallStatus selectInstalledMap(const std::string&s,const std::string&){
     assert(writeFailureClears==selectAttempts+1); // Each Use records only its own writes.
     calls+='U';++selectAttempts;
@@ -328,12 +329,16 @@ int main(){using namespace map_transfer;
     // The upload/renderer ACK path schedules refresh directly, without a BLE request.
     s.libraryAction_="refresh";s.executeLibraryTask();assert(!s.libraryAutomaticBlockKnown_);
   }
-  for(bool throwInBegin:{false,true}){
+  for(bool throwInBegin:{false,true})for(bool unsettledPrevious:{false,true}){
     reset();MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.throwAfterSelect=!throwInBegin;s.activationState_.throwBegin=throwInBegin;
     s.considerAutomaticMap(0,0,false);s.executeLibraryTask();
     assert(s.libraryError_=="library_memory"&&s.librarySelectionStarted_&&!s.activationState_.running);
+    // The pointer has already moved, so the map it pushed into the previous
+    // slot may now fail its settle. The retry still owes the renderer the map.
+    if(unsettledPrevious)s.installer_.settleResult={false,"stream_settle_previous",""};
     assert(s.libraryRetryAfterMs_>clockMs);clockMs+=5000;s.executeLibraryTask();
     assert(s.pendingRendererAcknowledgement_&&s.pendingMapRoot_==city().root&&s.libraryAction_.empty());
+    assert(s.installer_.calls=="SUSU"&&s.libraryError_.empty());
   }
   reset();
   for(const std::string error:{"label_block_contract","label_font_missing","label_languages"}) {
@@ -496,6 +501,51 @@ int main(){using namespace map_transfer;
     journal.installer_.policyWrite=true;
     assert(journal.requestMapLibrary("auto"));journal.executeLibraryTask();
     assert(journal.installer_.automatic&&!journal.libraryManualPending_&&journal.installer_.intentRoot.empty());
+  }
+  // A switch pushes the previous map out of the pointer, where a marker that
+  // its failed cleanup left is pending work: boot would select that map again.
+  // So a Use moves nothing, keeps the policy and fails with the settle's code.
+  // A failure on the selected map does not refuse, since that map stays in the
+  // pointer as the previous one.
+  for(const std::string code:{"stream_settle_previous","stream_settle_cleanup"}){
+    reset();MapTransferHttpServer use;liveHome(use);use.installer_.settleResult={false,code,"cleanup will retry"};
+    assert(use.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'1')));use.executeLibraryTask();
+    const bool refused=code=="stream_settle_previous";
+    assert(use.installer_.calls==(refused?"S":"SU")&&use.installer_.selected==(refused?0:1));
+    assert(use.installer_.active.root==(refused?home().root:city().root));
+    assert(use.pendingRendererAcknowledgement_==!refused&&use.libraryManualPending_==!refused);
+    assert(use.installer_.automatic&&use.libraryCommandID_==std::string(32,'1'));
+    assert(use.libraryCommandError_==(refused?code:"")&&use.libraryError_==(refused?code:""));
+    if(refused)assert(use.storageWriteCodes.empty()&&!use.librarySelectionStarted_&&use.libraryRetryAfterMs_==0);
+  }
+  // A Use of the map the pointer already names writes nothing, and a switch
+  // back to the previous map keeps both maps in the pointer: neither pushes
+  // the unsettled map out, so neither is refused. Switching back is also what
+  // lets uploads resume.
+  for(const bool switchBack:{false,true}){
+    reset();MapTransferHttpServer keep;liveHome(keep);
+    if(switchBack){keep.installer_.active.previousRoot=city().root;keep.installer_.active.previousSessionId="city";}
+    keep.installer_.settleResult={false,"stream_settle_previous","previous map cleanup will retry"};
+    assert(keep.requestMapLibrary("select",switchBack?"city":"home",std::string(64,'b'),std::string(32,'2')));
+    keep.executeLibraryTask();
+    assert(keep.installer_.calls=="SU"&&keep.installer_.selected==1);
+    assert(keep.installer_.active.root==(switchBack?city().root:home().root));
+    assert(keep.libraryCommandError_.empty()&&keep.libraryError_.empty());
+  }
+  {
+    // An automatic switch is refused the same way and retries later; the
+    // covering map is not rejected as a bad candidate.
+    reset();MapTransferHttpServer automatic;liveHome(automatic);
+    automatic.installer_.settleResult={false,"stream_settle_previous",""};
+    automatic.considerAutomaticMap(0,0,false);assert(automatic.libraryAction_=="automatic-select");automatic.executeLibraryTask();
+    assert(automatic.installer_.calls=="S"&&automatic.installer_.active.root==home().root&&!automatic.pendingRendererAcknowledgement_);
+    assert(automatic.libraryError_=="stream_settle_previous"&&automatic.libraryRejectedSessions_.empty());
+    assert(automatic.libraryRetryAfterMs_>clockMs);
+    // Refresh moves nothing, so it lists the library whatever the settle says.
+    reset();MapTransferHttpServer refreshing;liveHome(refreshing);
+    refreshing.installer_.settleResult={false,"stream_settle_previous",""};
+    refreshing.libraryAction_="refresh";refreshing.executeLibraryTask();
+    assert(refreshing.installer_.calls=="SL"&&refreshing.libraryKnown_&&refreshing.libraryError_.empty());
   }
 
   MapTransferHttpServer maximum;
