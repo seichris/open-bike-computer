@@ -25,7 +25,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private let persistence: any WorkoutRecordingPersisting
     private let onRecoveredMirror: (HKWorkoutSession) -> Void
     private let canStartAfterAuthorization: () -> Bool
+    private let isApplicationActive: () -> Bool
     private let requestLocationAuthorization: () -> Void
+    private let requestHealthAuthorization: (@MainActor (Set<HKSampleType>, Set<HKObjectType>) async throws -> Void)?
     private var session: HKWorkoutSession?
     private var builder: HKLiveWorkoutBuilder?
     private var routeBuilder: HKWorkoutRouteBuilder?
@@ -86,6 +88,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         healthStore: HKHealthStore = HKHealthStore(),
         onRecoveredMirror: @escaping (HKWorkoutSession) -> Void = { _ in },
         canStartAfterAuthorization: @escaping () -> Bool = { true },
+        isApplicationActive: @escaping () -> Bool = { true },
         requestLocationAuthorization: @escaping () -> Void = {},
         finishWorkoutCallback: @escaping @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void = { builder, completion in
             builder.finishWorkout(completion: completion)
@@ -93,7 +96,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         savedWorkoutLookup: (@MainActor (UUID) async throws -> HKWorkout?)? = nil,
         nativeTransitionWrite: @escaping @MainActor (HKLiveWorkoutBuilder, HKWorkoutEvent) async throws -> Void = { builder, event in
             try await builder.addWorkoutEvents([event])
-        }
+        },
+        requestHealthAuthorization: (@MainActor (Set<HKSampleType>, Set<HKObjectType>) async throws -> Void)? = nil
     ) {
         self.persistence = persistence
         self.healthStore = healthStore
@@ -102,7 +106,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         self.nativeTransitionWrite = nativeTransitionWrite
         self.onRecoveredMirror = onRecoveredMirror
         self.canStartAfterAuthorization = canStartAfterAuthorization
+        self.isApplicationActive = isApplicationActive
         self.requestLocationAuthorization = requestLocationAuthorization
+        self.requestHealthAuthorization = requestHealthAuthorization
         super.init()
         store.recordingOwner = .iphone
         locationSubscription = locations.sink { [weak self] location in
@@ -130,11 +136,13 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         publish()
         do {
             guard HKHealthStore.isHealthDataAvailable() else { throw RecorderError.unavailable }
-            try await healthStore.requestAuthorization(
-                toShare: [HKObjectType.workoutType(), HKSeriesType.workoutRoute(), Self.distanceType,
-                          WorkoutCyclingHealthKitExport.speedType],
-                read: [HKObjectType.workoutType(), Self.distanceType, Self.heartRateType, Self.energyType]
-            )
+            let share = Self.startShareTypes(includingLaterOptionalTypes: isApplicationActive())
+            let read: Set<HKObjectType> = [HKObjectType.workoutType(), Self.distanceType, Self.heartRateType, Self.energyType]
+            if let requestHealthAuthorization {
+                try await requestHealthAuthorization(share, read)
+            } else {
+                try await healthStore.requestAuthorization(toShare: share, read: read)
+            }
             guard healthStore.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized else {
                 throw HKError(.errorAuthorizationDenied)
             }
@@ -909,6 +917,18 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         await finalization?.value
     }
 #endif
+
+    /// HealthKit can show its permission sheet only while Bicino is in the
+    /// foreground, and it completes the request only after the rider answers.
+    /// A start from the bike computer usually runs in the background, so it
+    /// asks only for the types every released build requested. Cycling Speed
+    /// was added later and is optional: it is requested only from the
+    /// foreground.
+    private static func startShareTypes(includingLaterOptionalTypes: Bool) -> Set<HKSampleType> {
+        var types: Set<HKSampleType> = [HKObjectType.workoutType(), HKSeriesType.workoutRoute(), distanceType]
+        if includingLaterOptionalTypes { types.insert(WorkoutCyclingHealthKitExport.speedType) }
+        return types
+    }
 
     private static var distanceType: HKQuantityType { HKQuantityType(.distanceCycling) }
     private static var heartRateType: HKQuantityType { HKQuantityType(.heartRate) }

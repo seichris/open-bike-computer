@@ -710,8 +710,10 @@ nonisolated struct WorkoutSegmentAccumulator: Equatable, Sendable {
 
 nonisolated enum WorkoutRouteQueuePolicy {
     /// Bounds retained-but-not-yet-written location data if HealthKit stalls.
-    /// A route is abandoned on overflow instead of silently saving a partial
-    /// path while the workout and live location metrics continue.
+    /// Overflow stops route writing for the rest of the workout. Points that
+    /// HealthKit already accepted stay with the workout, which then reports
+    /// its route as unknown rather than present; see
+    /// `WorkoutAssociatedRoutePolicy`.
     static let maximumPendingPointCount = 200
 
     static func canAppend(currentCount: Int, incomingCount: Int) -> Bool {

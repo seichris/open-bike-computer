@@ -421,6 +421,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         (@MainActor () async throws -> Void)?
     private let injectedAuthorizationRefreshOperation: (@MainActor () async -> Void)?
     private let injectedAuthorizationRefreshState: WatchWorkoutSetupState?
+    private let injectedLaterOptionalAuthorizationStatus:
+        (@MainActor () async -> HKAuthorizationRequestStatus?)?
     private let injectedDetachedRecoveryPause: (@MainActor () async -> Void)?
     private let injectedIdentityMetadataRetryAdapter:
         WatchWorkoutIdentityMetadataRetryAdapter?
@@ -649,6 +651,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         requestAuthorization: (@MainActor () async throws -> Void)? = nil,
         refreshAuthorization: (@MainActor () async -> Void)? = nil,
         authorizationRefreshState: WatchWorkoutSetupState? = nil,
+        laterOptionalAuthorizationStatus:
+            (@MainActor () async -> HKAuthorizationRequestStatus?)? = nil,
         pauseDetachedRecovery: (@MainActor () async -> Void)? = nil,
         identityMetadataRetryAdapter:
             WatchWorkoutIdentityMetadataRetryAdapter? = nil,
@@ -729,6 +733,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedAuthorizationRequestOperation = requestAuthorization
         self.injectedAuthorizationRefreshOperation = refreshAuthorization
         self.injectedAuthorizationRefreshState = authorizationRefreshState
+        self.injectedLaterOptionalAuthorizationStatus = laterOptionalAuthorizationStatus
         self.injectedDetachedRecoveryPause = pauseDetachedRecovery
         self.injectedIdentityMetadataRetryAdapter = identityMetadataRetryAdapter
         self.injectedRecoveredSaveRuntimeAdapter = recoveredSaveRuntimeAdapter
@@ -1817,7 +1822,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
 
         do {
-            let requestStatus = try await authorizationRequestStatus()
+            // Optional types added after release never move setup out of
+            // Ready; see `readinessTypesToShare`.
+            let requestStatus = try await authorizationRequestStatus(
+                toShare: Self.readinessTypesToShare
+            )
             setupState = Self.resolveSetupState(
                 requiredShareStatuses: requiredShareStatuses,
                 requestStatus: requestStatus
@@ -1855,6 +1864,47 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
+    /// Asks for optional Health types added after release (Cycling Speed)
+    /// before a Start tapped on this Watch, where the rider can see and answer
+    /// the sheet. Remote and automatic starts never call this, and readiness
+    /// ignores these types, so an app update cannot hold a ride started from
+    /// iPhone or the bike computer behind a new prompt. A failed or declined
+    /// request never blocks the start; the refresh decides readiness.
+    private func requestLaterOptionalHealthAccessIfNeeded() async {
+        guard setupState == .ready,
+              await laterOptionalHealthAccessRequestStatus() == .shouldRequest,
+              setupState == .ready else {
+            return
+        }
+        setupState = .authorizing
+        do {
+            if let injectedAuthorizationRequestOperation {
+                try await injectedAuthorizationRequestOperation()
+            } else {
+                try await healthStore.requestAuthorization(
+                    toShare: Self.typesToShare,
+                    read: Self.typesToRead
+                )
+            }
+        } catch {
+            // Optional types never gate recording.
+        }
+        await refreshAuthorizationState()
+    }
+
+    private func laterOptionalHealthAccessRequestStatus() async
+        -> HKAuthorizationRequestStatus? {
+        if let injectedLaterOptionalAuthorizationStatus {
+            return await injectedLaterOptionalAuthorizationStatus()
+        }
+        // Tests that fake authorization must never reach the real store.
+        guard injectedAuthorizationRefreshOperation == nil,
+              HKHealthStore.isHealthDataAvailable() else {
+            return nil
+        }
+        return try? await authorizationRequestStatus(toShare: Self.typesToShare)
+    }
+
     func startOutdoorCyclingWorkout(
         configuration suppliedConfiguration: HKWorkoutConfiguration? = nil
     ) async {
@@ -1872,6 +1922,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         if setupState != .ready {
             guard setupState != .denied else { return }
             await authorizeHealthKit()
+        } else if suppliedConfiguration == nil {
+            await requestLaterOptionalHealthAccessIfNeeded()
         }
         guard setupState == .ready,
               admissionRecoveryGeneration == recoverySignalQueue.generation,
@@ -7197,12 +7249,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    private func authorizationRequestStatus() async throws ->
-        HKAuthorizationRequestStatus {
+    private func authorizationRequestStatus(
+        toShare shareTypes: Set<HKSampleType>
+    ) async throws -> HKAuthorizationRequestStatus {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<HKAuthorizationRequestStatus, Error>) in
             healthStore.getRequestStatusForAuthorization(
-                toShare: Self.typesToShare,
+                toShare: shareTypes,
                 read: Self.typesToRead
             ) { status, error in
                 if let error {
@@ -7337,7 +7390,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func configureDataSource(_ builder: HKLiveWorkoutBuilder, configuration: HKWorkoutConfiguration) {
         let source = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
         let speedType = WorkoutCyclingHealthKitExport.speedType
-        if !source.typesToCollect.contains(speedType) {
+        // Collect sensor speed only when it can be saved; otherwise keep the
+        // data source's own defaults.
+        if WorkoutCyclingHealthKitExport.canWriteSpeed(to: healthStore),
+           !source.typesToCollect.contains(speedType) {
             source.enableCollection(for: speedType, predicate: nil)
         }
         builder.dataSource = source
@@ -7347,12 +7403,29 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         [HKObjectType.workoutType()]
     }
 
-    private static var optionalTypesToShare: Set<HKSampleType> {
-        [HKSeriesType.workoutRoute(), WorkoutCyclingHealthKitExport.speedType]
+    /// Optional types that every released build already requested.
+    private static var releasedOptionalTypesToShare: Set<HKSampleType> {
+        [HKSeriesType.workoutRoute()]
     }
 
-    private static var typesToShare: Set<HKSampleType> {
-        requiredTypesToShare.union(optionalTypesToShare)
+    /// Optional types added after release. They never decide readiness, so
+    /// they are asked for only alongside a prompt that setup needs anyway, or
+    /// before a Start tapped on the Watch
+    /// (`requestLaterOptionalHealthAccessIfNeeded`).
+    private static var laterOptionalTypesToShare: Set<HKSampleType> {
+        [WorkoutCyclingHealthKitExport.speedType]
+    }
+
+    /// Setup readiness, and therefore remote and automatic starts, depends
+    /// only on these. Adding a type here re-prompts every installed Watch
+    /// before its next ride; add new optional types to
+    /// `laterOptionalTypesToShare` instead.
+    static var readinessTypesToShare: Set<HKSampleType> {
+        requiredTypesToShare.union(releasedOptionalTypesToShare)
+    }
+
+    static var typesToShare: Set<HKSampleType> {
+        readinessTypesToShare.union(laterOptionalTypesToShare)
     }
 
     private static var typesToRead: Set<HKObjectType> {

@@ -46,13 +46,21 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private var elevationPeriodStart: Date?
     private var capturesGPSSpeed = false
     private var speedBuffer = WorkoutCyclingSpeedBuffer()
+    /// How long finalization waits for an insert that was still in flight
+    /// when route saving failed. HealthKit may have stopped answering, so
+    /// the wait is bounded; an answer within it still counts its points.
+    private let inFlightInsertGracePeriod: Duration
 
     override convenience init() {
         self.init(locationService: WatchLocationService())
     }
 
-    init(locationService: WatchLocationService) {
+    init(
+        locationService: WatchLocationService,
+        inFlightInsertGracePeriod: Duration = .seconds(10)
+    ) {
         self.locationService = locationService
+        self.inFlightInsertGracePeriod = inFlightInsertGracePeriod
         self.authorizationState = locationService.authorizationState
         super.init()
         locationService.$authorizationState
@@ -375,13 +383,32 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     }
 
     private func flushPendingRouteLocations() async {
-        if let flushTask {
+        if flushTask != nil, routeSavingFailed {
+            // Overflow means HealthKit stopped keeping up, so the insert
+            // still in flight may never answer. Count it if it answers in
+            // time, but never let it hold the save.
+            await waitForInFlightInsert(upTo: inFlightInsertGracePeriod)
+        } else if let flushTask {
             await flushTask.value
         }
         guard !routeQueue.isEmpty, routeBuilder != nil, !routeSavingFailed else {
             return
         }
         await drainRouteQueue(generation: routeGeneration.current)
+    }
+
+    /// Returns when the in-flight insert answers or `limit` passes. Awaiting
+    /// a task's value ignores cancellation and deadlines, so this polls.
+    private func waitForInFlightInsert(upTo limit: Duration) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: limit)
+        while flushTask != nil, clock.now < deadline {
+            do {
+                try await clock.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+        }
     }
 
     private func clearAfterFinalization() {
@@ -406,7 +433,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         routeSavingFailed = true
         routeQueue.markFailed()
         // Keep the builder and the success count. If an insert was already
-        // in flight at overflow, finalization will wait for its result.
+        // in flight at overflow, finalization waits up to
+        // `inFlightInsertGracePeriod` for its result.
     }
 
     private func invalidateRouteBuilder(discard: Bool) {

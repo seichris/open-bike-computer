@@ -1482,6 +1482,136 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(manager.setupState, .denied)
     }
 
+    func testHealthReadinessExcludesOptionalTypesAddedAfterRelease() {
+        XCTAssertEqual(
+            WatchWorkoutManager.readinessTypesToShare,
+            Set<HKSampleType>([
+                HKObjectType.workoutType(),
+                HKSeriesType.workoutRoute(),
+            ]),
+            "A new optional type must not move installed Watches out of Ready"
+        )
+        XCTAssertTrue(
+            WatchWorkoutManager.typesToShare.contains(
+                HKQuantityType(.cyclingSpeed)
+            )
+        )
+        XCTAssertTrue(
+            WatchWorkoutManager.readinessTypesToShare.isSubset(
+                of: WatchWorkoutManager.typesToShare
+            )
+        )
+    }
+
+    func testRemoteStartNeverAsksForLaterOptionalHealthAccess() async throws {
+        var statusQueryCount = 0
+        var authorizationRequestCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: WatchWorkoutRecoveryStore(
+                persistence: ToggleRecoveryPersistence()
+            ),
+            requestAuthorization: { authorizationRequestCount += 1 },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            laterOptionalAuthorizationStatus: {
+                statusQueryCount += 1
+                return .shouldRequest
+            },
+            initializeOnLaunch: false
+        )
+        manager.refreshAuthorizationIfNeeded()
+        try await waitUntil { manager.setupState == .ready }
+
+        // An indoor configuration passes the authorization step, then fails
+        // before any HealthKit session exists.
+        let indoor = HKWorkoutConfiguration()
+        indoor.activityType = .cycling
+        indoor.locationType = .indoor
+        await manager.startOutdoorCyclingWorkout(configuration: indoor)
+
+        XCTAssertEqual(statusQueryCount, 0)
+        XCTAssertEqual(authorizationRequestCount, 0)
+        XCTAssertEqual(manager.setupState, .failed)
+        XCTAssertFalse(manager.isWorkoutActive)
+    }
+
+    func testLocalStartAsksForLaterOptionalHealthAccessOnce() async throws {
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let authorizationRequest = AsyncThrowingVoidProbe()
+        var statusQueryCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            requestAuthorization: { try await authorizationRequest.run() },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            laterOptionalAuthorizationStatus: {
+                statusQueryCount += 1
+                return .shouldRequest
+            },
+            initializeOnLaunch: false
+        )
+        manager.refreshAuthorizationIfNeeded()
+        try await waitUntil { manager.setupState == .ready }
+
+        let startTask = Task { await manager.startOutdoorCyclingWorkout() }
+        try await waitUntil { authorizationRequest.callCount == 1 }
+        XCTAssertEqual(statusQueryCount, 1)
+        XCTAssertEqual(manager.setupState, .authorizing)
+
+        // A second tap while the sheet is up must not ask again.
+        await manager.startOutdoorCyclingWorkout()
+        XCTAssertEqual(authorizationRequest.callCount, 1)
+
+        // Another ride's identity stops this start before it creates a real
+        // HealthKit session, without the recovery loop changing setup state.
+        _ = try recoveryStore.begin(startDate: Date())
+        authorizationRequest.fail()
+        await startTask.value
+
+        XCTAssertEqual(
+            manager.setupState,
+            .ready,
+            "A declined or failed optional request must not block setup"
+        )
+        XCTAssertFalse(manager.isWorkoutActive)
+        XCTAssertEqual(manager.state, .idle)
+    }
+
+    func testLocalStartSkipsOptionalRequestWhenAlreadyAnswered() async throws {
+        let recoveryStore = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        var authorizationRequestCount = 0
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(),
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore,
+            requestAuthorization: { authorizationRequestCount += 1 },
+            refreshAuthorization: {},
+            authorizationRefreshState: .ready,
+            laterOptionalAuthorizationStatus: {
+                // Stops the start before it creates a real HealthKit session.
+                _ = try? recoveryStore.begin(startDate: Date())
+                return .unnecessary
+            },
+            initializeOnLaunch: false
+        )
+        manager.refreshAuthorizationIfNeeded()
+        try await waitUntil { manager.setupState == .ready }
+
+        await manager.startOutdoorCyclingWorkout()
+
+        XCTAssertEqual(authorizationRequestCount, 0)
+        XCTAssertEqual(manager.setupState, .ready)
+        XCTAssertFalse(manager.isWorkoutActive)
+    }
+
     func testComplicationLaunchCancelStartsZeroWorkouts() async throws {
         let recovery = RecoveryProbe()
         var startCount = 0
@@ -5118,6 +5248,56 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(metrics.speeds.map(\.metersPerSecond), [3, 4, 5, 6])
         XCTAssertEqual(metrics.speeds.map(\.timestamp), [1, 6, 15, 20].map { start.addingTimeInterval($0) })
         XCTAssertTrue(recorder.takeCyclingMetrics().speeds.isEmpty, "Finalization can consume GPS samples only once")
+    }
+
+    func testFinalizationBoundsWaitForInsertInFlightAtOverflow() async throws {
+        let point = CLLocation(latitude: 1.30, longitude: 103.80)
+        let builder = StalledRouteBuilder()
+        let recorder = WatchRouteRecorder(
+            locationService: WatchLocationService(),
+            inFlightInsertGracePeriod: .milliseconds(100)
+        )
+        recorder.begin(routeBuilder: builder, startDate: Date()) {}
+        recorder.enqueueRouteLocations([point])
+        try await waitUntil { builder.insertCallCount == 1 }
+        // HealthKit stops answering and the pending queue overflows.
+        recorder.enqueueRouteLocations(Array(
+            repeating: point,
+            count: WorkoutRouteQueuePolicy.maximumPendingPointCount + 1
+        ))
+
+        let prepared = await recorder.prepareForWorkoutFinalization()
+
+        XCTAssertTrue(recorder.routeSavingFailed)
+        XCTAssertEqual(prepared.routeStatus, .unavailable, "No point was confirmed before the deadline")
+        XCTAssertEqual(builder.discardCallCount, 1)
+        builder.completeInsert()
+        await Task.yield()
+        XCTAssertEqual(builder.discardCallCount, 1, "A late answer must not change the finished decision")
+    }
+
+    func testFinalizationCountsInsertThatAnswersWithinGracePeriod() async throws {
+        let point = CLLocation(latitude: 1.30, longitude: 103.80)
+        let builder = StalledRouteBuilder()
+        let recorder = WatchRouteRecorder(
+            locationService: WatchLocationService(),
+            inFlightInsertGracePeriod: .seconds(5)
+        )
+        recorder.begin(routeBuilder: builder, startDate: Date()) {}
+        recorder.enqueueRouteLocations([point])
+        try await waitUntil { builder.insertCallCount == 1 }
+        recorder.enqueueRouteLocations(Array(
+            repeating: point,
+            count: WorkoutRouteQueuePolicy.maximumPendingPointCount + 1
+        ))
+
+        let finalization = Task { await recorder.prepareForWorkoutFinalization() }
+        builder.completeInsert()
+        let prepared = await finalization.value
+
+        XCTAssertEqual(prepared.routeStatus, .unknown, "The accepted batch keeps the partial route")
+        XCTAssertEqual(builder.discardCallCount, 0)
+        XCTAssertEqual(builder.insertCallCount, 1)
     }
 
     func testRecorderRetainsRecoveredRouteBuilderButDiscardsNewBuilderOnInsertFailure() async {
@@ -9172,6 +9352,30 @@ private final class FailingRouteBuilder: WatchWorkoutRouteBuilding {
         insertCallCount += 1
         guard insertCallCount <= successfulInsertCount else { throw Failure.requested }
         successfulPointCount += locations.count
+    }
+
+    func discard() {
+        discardCallCount += 1
+    }
+}
+
+/// An insert that stays in flight until the test answers it.
+@MainActor
+private final class StalledRouteBuilder: WatchWorkoutRouteBuilding {
+    private(set) var insertCallCount = 0
+    private(set) var discardCallCount = 0
+    private var pendingInsert: CheckedContinuation<Void, Error>?
+
+    func insertRouteData(_ locations: [CLLocation]) async throws {
+        insertCallCount += 1
+        try await withCheckedThrowingContinuation { continuation in
+            pendingInsert = continuation
+        }
+    }
+
+    func completeInsert() {
+        pendingInsert?.resume()
+        pendingInsert = nil
     }
 
     func discard() {
