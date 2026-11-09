@@ -1948,10 +1948,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 configuration: configuration
             )
             let builder = session.associatedWorkoutBuilder()
-            builder.dataSource = HKLiveWorkoutDataSource(
-                healthStore: healthStore,
-                workoutConfiguration: configuration
-            )
+            configureDataSource(builder, configuration: configuration)
             session.delegate = self
             builder.delegate = self
 
@@ -1972,7 +1969,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             routeRecorder.begin(
                 routeBuilder: routeBuilder,
                 startDate: startDate,
-                motionSampleEpoch: motionSampleEpoch
+                motionSampleEpoch: motionSampleEpoch,
+                capturesGPSSpeed: WorkoutCyclingHealthKitExport.canWriteSpeed(to: healthStore)
             ) { [weak self] in
                 self?.scheduleCoalescedSnapshot()
             }
@@ -2323,10 +2321,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         ) {
             return terminalOutcome
         }
-        recoveredBuilder.dataSource = HKLiveWorkoutDataSource(
-            healthStore: healthStore,
-            workoutConfiguration: recoveredSession.workoutConfiguration
-        )
+        configureDataSource(recoveredBuilder, configuration: recoveredSession.workoutConfiguration)
 
         let startDate = recoveredSession.startDate
             ?? recoveryStore.recoveredIdentity?.startDate
@@ -2925,7 +2920,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             routeBuilder: routeBuilder,
             startDate: startDate,
             motionSampleEpoch: motionSampleEpoch,
-            mayContainExistingRouteData: true
+            mayContainExistingRouteData: true,
+            capturesGPSSpeed: WorkoutCyclingHealthKitExport.canWriteSpeed(to: healthStore)
         ) { [weak self] in
             self?.scheduleCoalescedSnapshot()
         }
@@ -3362,6 +3358,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                         throw WorkoutSegmentWriteError.finalizationPending
                     }
                     try await endCollection(builder, at: endDate)
+                    let metrics = routeRecorder.takeCyclingMetrics()
+                    _ = await WorkoutCyclingHealthKitExport.write(
+                        elevationGainMeters: metrics.elevationGainMeters, speeds: metrics.speeds,
+                        to: builder, healthStore: healthStore, endDate: endDate
+                    )
                     updateAllMetrics(from: builder, capturedAt: endDate)
                 },
                 markCollectionEnded: { [recoveryStore] in
@@ -7333,12 +7334,21 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
+    private func configureDataSource(_ builder: HKLiveWorkoutBuilder, configuration: HKWorkoutConfiguration) {
+        let source = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
+        let speedType = WorkoutCyclingHealthKitExport.speedType
+        if !source.typesToCollect.contains(speedType) {
+            source.enableCollection(for: speedType, predicate: nil)
+        }
+        builder.dataSource = source
+    }
+
     private static var requiredTypesToShare: Set<HKSampleType> {
         [HKObjectType.workoutType()]
     }
 
     private static var optionalTypesToShare: Set<HKSampleType> {
-        [HKSeriesType.workoutRoute()]
+        [HKSeriesType.workoutRoute(), WorkoutCyclingHealthKitExport.speedType]
     }
 
     private static var typesToShare: Set<HKSampleType> {

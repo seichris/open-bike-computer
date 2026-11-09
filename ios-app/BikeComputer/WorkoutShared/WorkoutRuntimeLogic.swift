@@ -1,4 +1,8 @@
 import Foundation
+#if os(iOS) || os(watchOS)
+import HealthKit
+import OSLog
+#endif
 
 nonisolated enum WorkoutFinishDisposition: String, Codable, Equatable, Sendable {
     case save
@@ -340,6 +344,139 @@ nonisolated enum WorkoutRouteSegmentFilter {
     }
 }
 
+nonisolated struct WorkoutCyclingSpeedObservation: Equatable, Sendable {
+    let metersPerSecond: Double
+    let timestamp: Date
+
+    init?(metersPerSecond: Double, timestamp: Date) {
+        guard (0...WorkoutRouteSegmentFilter.maximumCyclingSpeedMetersPerSecond)
+            .contains(metersPerSecond),
+              timestamp.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        self.metersPerSecond = metersPerSecond
+        self.timestamp = timestamp
+    }
+}
+
+/// Holds GPS speed for the save decision without writing Health samples on discard.
+nonisolated struct WorkoutCyclingSpeedBuffer {
+    private var observations: [WorkoutCyclingSpeedObservation] = []
+    private var interval: TimeInterval = 5
+
+    mutating func record(_ observation: WorkoutCyclingSpeedObservation) {
+        if let previous = observations.last,
+           observation.timestamp.timeIntervalSince(previous.timestamp) < interval { return }
+        // Bound storage on long rides by reducing the sampling rate in place.
+        if observations.count == 8_640 {
+            observations = stride(from: 0, to: observations.count, by: 2).map { observations[$0] }
+            interval *= 2
+        }
+        observations.append(observation)
+    }
+
+    mutating func take() -> [WorkoutCyclingSpeedObservation] {
+        let captured = observations
+        self = Self()
+        return captured
+    }
+}
+
+/// Counts sustained climbs while ignoring small vertical GPS fluctuations.
+nonisolated struct WorkoutCyclingElevationGain {
+    private var anchor: (altitude: Double, accuracy: Double)?
+    private var lastPoint: (altitude: Double, timestamp: Date)?
+    private(set) var meters: Double?
+
+    mutating func record(altitude: Double, accuracy: Double, at timestamp: Date) {
+        guard altitude.isFinite, (0...20).contains(accuracy) else {
+            breakSegment()
+            return
+        }
+        if let lastPoint {
+            let interval = timestamp.timeIntervalSince(lastPoint.timestamp)
+            guard interval > 0 else { return }
+            if interval > WorkoutRouteCaptureLifecycle.maximumSegmentGap
+                || abs(altitude - lastPoint.altitude) > 5 + 6 * interval {
+                breakSegment()
+            }
+        }
+        lastPoint = (altitude, timestamp)
+        guard let anchor else {
+            anchor = (altitude, accuracy)
+            return
+        }
+        if meters == nil { meters = 0 }
+        let change = altitude - anchor.altitude
+        if abs(change) >= max(5, accuracy, anchor.accuracy) {
+            meters = (meters ?? 0) + max(0, change)
+            self.anchor = (altitude, accuracy)
+        }
+    }
+
+    mutating func breakSegment() {
+        anchor = nil
+        lastPoint = nil
+    }
+}
+
+#if os(iOS) || os(watchOS)
+@available(iOS 17.0, watchOS 10.0, *)
+@MainActor
+enum WorkoutCyclingHealthKitExport {
+    static var speedType: HKQuantityType { HKQuantityType(.cyclingSpeed) }
+
+    static func canWriteSpeed(to healthStore: HKHealthStore) -> Bool {
+        healthStore.authorizationStatus(for: speedType) == .sharingAuthorized
+    }
+
+    /// Call after collection ends and only for an explicit save. HealthKit
+    /// may persist added quantity samples even if the builder is discarded.
+    static func write(
+        elevationGainMeters: Double?,
+        speeds: [WorkoutCyclingSpeedObservation],
+        to builder: HKWorkoutBuilder,
+        healthStore: HKHealthStore,
+        endDate: Date
+    ) async -> Bool {
+        let logger = Logger(subsystem: "org.bicino.workout", category: "healthkit")
+        var success = true
+        if let elevationGainMeters, builder.metadata[HKMetadataKeyElevationAscended] == nil {
+            do {
+                try await builder.addMetadata([
+                    HKMetadataKeyElevationAscended: HKQuantity(unit: .meter(), doubleValue: elevationGainMeters)
+                ])
+            } catch {
+                logger.error("Could not save workout elevation gain")
+                success = false
+            }
+        }
+
+        // Use GPS only if the native speed series is empty to avoid counting
+        // the same period twice.
+        guard !speeds.isEmpty, canWriteSpeed(to: healthStore), let startDate = builder.startDate else { return success }
+        let type = speedType
+        let statistics = builder.statistics(for: type)
+        guard statistics?.mostRecentQuantity() == nil, statistics?.averageQuantity() == nil else { return success }
+
+        let inWorkout = speeds.filter { $0.timestamp > startDate && $0.timestamp <= endDate }
+        let unit = HKUnit.meter().unitDivided(by: .second())
+        for offset in stride(from: 0, to: inWorkout.count, by: 200) {
+            let samples = inWorkout.dropFirst(offset).prefix(200).map { speed in
+                HKQuantitySample(
+                    type: type, quantity: HKQuantity(unit: unit, doubleValue: speed.metersPerSecond),
+                    start: speed.timestamp, end: speed.timestamp
+                )
+            }
+            do { try await builder.addSamples(samples) }
+            catch {
+                logger.error("Could not save workout GPS speed samples")
+                return false
+            }
+        }
+        return success
+    }
+}
+#endif
+
 /// Classify delayed points by HealthKit's transition timestamp, not callback
 /// state. Bound both retained history and distance interpolation through gaps.
 nonisolated struct WorkoutRouteCaptureLifecycle {
@@ -362,6 +499,12 @@ nonisolated struct WorkoutRouteCaptureLifecycle {
 
     func paused(at date: Date) -> Bool? {
         transitions.last(where: { $0.at <= date })?.paused
+    }
+
+    func activePeriodStart(at date: Date) -> Date? {
+        guard let transition = transitions.last(where: { $0.at <= date }),
+              !transition.paused else { return nil }
+        return transition.at
     }
 }
 
@@ -729,22 +872,12 @@ nonisolated enum WorkoutAssociatedRoutePolicy {
         routeSavingFailed: Bool,
         mayContainExistingRouteData: Bool
     ) -> WorkoutAssociatedRouteDecision {
-        guard !routeSavingFailed else {
-            return WorkoutAssociatedRouteDecision(
-                // A recovered associated builder can already contain route
-                // samples written before this process launched. A later
-                // insert failure makes route presence unknowable, but must
-                // not erase those earlier samples by discarding the builder.
-                keepBuilderForWorkout: mayContainExistingRouteData,
-                routeStatus: mayContainExistingRouteData
-                    ? .unknown
-                    : .unavailable
-            )
-        }
+        // A failed insert can invalidate further writes. Keep any points
+        // already accepted by HealthKit, including possible pre-recovery data.
         if insertedPointCount > 0 {
             return WorkoutAssociatedRouteDecision(
                 keepBuilderForWorkout: true,
-                routeStatus: .present
+                routeStatus: routeSavingFailed ? .unknown : .present
             )
         }
         return WorkoutAssociatedRouteDecision(

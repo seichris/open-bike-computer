@@ -43,6 +43,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var finishAttempted = false
     private var routeWriteFailed = false
     private var distanceWriteFailed = false
+    private var cyclingMetricsWriteFailed = false
+    private var capturesGPSSpeed = false
+    private var speedBuffer = WorkoutCyclingSpeedBuffer()
+    private var elevationGain = WorkoutCyclingElevationGain()
     private var recoveredRoute = false
     private var insertedRoutePoints = 0
     private var startDate: Date?
@@ -127,7 +131,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         do {
             guard HKHealthStore.isHealthDataAvailable() else { throw RecorderError.unavailable }
             try await healthStore.requestAuthorization(
-                toShare: [HKObjectType.workoutType(), HKSeriesType.workoutRoute(), Self.distanceType],
+                toShare: [HKObjectType.workoutType(), HKSeriesType.workoutRoute(), Self.distanceType,
+                          WorkoutCyclingHealthKitExport.speedType],
                 read: [HKObjectType.workoutType(), Self.distanceType, Self.heartRateType, Self.energyType]
             )
             guard healthStore.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized else {
@@ -475,6 +480,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 guard self.record?.sessionID == id, self.builder === builder else { return }
                 if choice == .discard {
                     // Never call finishWorkout on any discard path or retry.
+                    speedBuffer = WorkoutCyclingSpeedBuffer()
+                    elevationGain = WorkoutCyclingElevationGain()
                     routeBuilder?.discard()
                     builder.discardWorkout()
                 } else {
@@ -495,6 +502,13 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                         savedWorkout = existing
                         saveConfirmed = true
                     } else {
+                        // A recovered recorder cannot measure the climb before recovery.
+                        let gain = recoveredRoute ? nil : elevationGain.meters
+                        let exported = await WorkoutCyclingHealthKitExport.write(
+                            elevationGainMeters: gain, speeds: speedBuffer.take(),
+                            to: builder, healthStore: healthStore, endDate: endDate ?? Date()
+                        )
+                        cyclingMetricsWriteFailed = cyclingMetricsWriteFailed || !exported
                         // Set before calling out: a failed/ambiguous completion
                         // is reconciled, not blindly retried or rebuilt.
                         var attempted = self.record ?? record
@@ -533,8 +547,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         guard let record, let next = record.finished(choice) else { throw RecorderError.identityMismatch }
         try persist(next)
         state = .ended
-        message = choice == .save && (routeWriteFailed || distanceWriteFailed)
-            ? "Workout saved, but some GPS data could not be written. Review the route and distance in Apple Health."
+        message = choice == .save && (routeWriteFailed || distanceWriteFailed || cyclingMetricsWriteFailed)
+            ? "Workout saved, but some GPS data could not be written. Review the ride in Apple Health."
             : nil
         publish()
     }
@@ -551,6 +565,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         sequence = 0; generation = UUID(); token = UInt16.random(in: 1...UInt16.max)
         collectionStarted = false; collectionEnded = false; finishAttempted = false
         routeWriteFailed = false; distanceWriteFailed = false; recoveredRoute = false
+        cyclingMetricsWriteFailed = false; capturesGPSSpeed = false
+        speedBuffer = WorkoutCyclingSpeedBuffer(); elevationGain = WorkoutCyclingElevationGain()
         insertedRoutePoints = 0; savedWorkout = nil; saveConfirmed = false
         recoveryAttachmentPending = false
         startDate = nil; endDate = nil; latestLocation = nil; lastLocation = nil
@@ -571,6 +587,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         // GPS distance is written exactly once by the pipeline below. Do not
         // simultaneously collect system-generated cycling distance samples.
         source.disableCollection(for: Self.distanceType)
+        capturesGPSSpeed = WorkoutCyclingHealthKitExport.canWriteSpeed(to: healthStore)
         if builder.dataSource == nil { builder.dataSource = source }
     }
 
@@ -668,19 +685,31 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
               ), workoutStart: startDate, now: Date()),
               latestLocation.map({ location.timestamp > $0.timestamp }) ?? true else { return }
         var sample: HKQuantitySample?
+        var hasMovingSegment = false
         if let previous = lastLocation {
             let interval = location.timestamp.timeIntervalSince(previous.timestamp)
             let distance = location.distance(from: previous)
             if interval <= WorkoutRouteCaptureLifecycle.maximumSegmentGap,
                WorkoutRouteSegmentFilter.accepts(distanceMeters: distance, interval: interval),
                // Avoid summing stationary GPS drift into a cycling workout.
-               location.speed > 0.5 || distance > max(previous.horizontalAccuracy, location.horizontalAccuracy),
-               healthStore.authorizationStatus(for: Self.distanceType) == .sharingAuthorized {
-                sample = HKQuantitySample(
-                    type: Self.distanceType, quantity: HKQuantity(unit: .meter(), doubleValue: distance),
-                    start: previous.timestamp, end: location.timestamp
-                )
+               location.speed > 0.5 || distance > max(previous.horizontalAccuracy, location.horizontalAccuracy) {
+                hasMovingSegment = true
+                if healthStore.authorizationStatus(for: Self.distanceType) == .sharingAuthorized {
+                    sample = HKQuantitySample(
+                        type: Self.distanceType, quantity: HKQuantity(unit: .meter(), doubleValue: distance),
+                        start: previous.timestamp, end: location.timestamp
+                    )
+                }
             }
+        }
+        let speedObservation = WorkoutCyclingSpeedObservation(
+            metersPerSecond: location.speed, timestamp: location.timestamp
+        )
+        if location.timestamp > startDate, location.timestamp <= Date() {
+            if !recoveredRoute, (speedObservation?.metersPerSecond ?? 0) > 0.5 || hasMovingSegment {
+                elevationGain.record(altitude: location.altitude, accuracy: location.verticalAccuracy, at: location.timestamp)
+            }
+            if capturesGPSSpeed, let speedObservation { speedBuffer.record(speedObservation) }
         }
         latestLocation = location
         lastLocation = location
@@ -923,6 +952,7 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
                       nativeTransitionGeneration == transitionGeneration else { return }
                 state = toState == .running ? .running : .paused
                 lastLocation = nil
+                elevationGain.breakSegment()
                 timestampGate?.resume(at: date)
                 lastTransitionOrigin = origin
                 lastTransitionAt = date

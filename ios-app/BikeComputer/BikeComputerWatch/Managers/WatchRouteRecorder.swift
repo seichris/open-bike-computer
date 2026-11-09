@@ -42,6 +42,10 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private var flushTask: Task<Void, Never>?
     private var onLocationUpdate: (() -> Void)?
     private var routeGeneration = WorkoutRouteGenerationGate()
+    private var elevationGain = WorkoutCyclingElevationGain()
+    private var elevationPeriodStart: Date?
+    private var capturesGPSSpeed = false
+    private var speedBuffer = WorkoutCyclingSpeedBuffer()
 
     override convenience init() {
         self.init(locationService: WatchLocationService())
@@ -68,6 +72,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         startDate: Date,
         motionSampleEpoch: UInt16? = nil,
         mayContainExistingRouteData: Bool = false,
+        capturesGPSSpeed: Bool = false,
         onLocationUpdate: @escaping () -> Void
     ) {
         stopLocationUpdates()
@@ -77,6 +82,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         self.onLocationUpdate = onLocationUpdate
         isWorkoutActive = true
         self.mayContainExistingRouteData = mayContainExistingRouteData
+        _ = takeCyclingMetrics()
+        self.capturesGPSSpeed = capturesGPSSpeed
         distanceAccumulator = WorkoutRouteDistanceAccumulator(
             mayContainExistingRouteData: mayContainExistingRouteData
         )
@@ -111,6 +118,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         stopLocationUpdates()
         invalidateRouteBuilder(discard: true)
         clearAfterFinalization()
+        _ = takeCyclingMetrics()
     }
 
     /// Releases local route state after HealthKit reconciliation confirms that
@@ -120,6 +128,7 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         stopLocationUpdates()
         invalidateRouteBuilder(discard: false)
         clearAfterFinalization()
+        _ = takeCyclingMetrics()
     }
 
     /// Flushes the associated route before its workout is finished. An
@@ -145,6 +154,14 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
             routeStatus: hasRouteBuilder ? decision.routeStatus : .unavailable,
             distanceMeters: distanceMeters
         )
+    }
+
+    func takeCyclingMetrics() -> (elevationGainMeters: Double?, speeds: [WorkoutCyclingSpeedObservation]) {
+        let metrics = (elevationGain.meters, speedBuffer.take())
+        elevationGain = WorkoutCyclingElevationGain()
+        elevationPeriodStart = nil
+        capturesGPSSpeed = false
+        return metrics
     }
 
     private func startLocationUpdatesWhenAuthorized() {
@@ -253,6 +270,15 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
                 distanceAccumulator?.breakSegment()
                 continue
             }
+            if !wasPaused, location.timestamp <= now {
+                recordCyclingMetrics(
+                    location,
+                    hasMovingSegment: hasBoundedMotionSegment
+                        && (motionDistance ?? 0) > max(
+                            priorObservation?.horizontalAccuracy ?? 0, location.horizontalAccuracy
+                        )
+                )
+            }
             lastDistanceLocation = location
             distanceAccumulator?.appendPoint(
                 segmentDistanceFromPrevious: segmentDistanceFromPrevious
@@ -270,6 +296,22 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
         onLocationUpdate?()
 
         enqueueRouteLocations(routeAccepted)
+    }
+
+    private func recordCyclingMetrics(_ location: CLLocation, hasMovingSegment: Bool) {
+        let timestamp = location.timestamp
+        let speedObservation = WorkoutCyclingSpeedObservation(metersPerSecond: location.speed, timestamp: timestamp)
+        if !mayContainExistingRouteData {
+            let periodStart = captureLifecycle?.activePeriodStart(at: timestamp)
+            if elevationPeriodStart != periodStart {
+                elevationGain.breakSegment()
+                elevationPeriodStart = periodStart
+            }
+            if (speedObservation?.metersPerSecond ?? 0) > 0.5 || hasMovingSegment {
+                elevationGain.record(altitude: location.altitude, accuracy: location.verticalAccuracy, at: timestamp)
+            }
+        }
+        if capturesGPSSpeed, let speedObservation { speedBuffer.record(speedObservation) }
     }
 
 #if WORKOUT_CONTRACT_XCTEST
@@ -363,16 +405,8 @@ final class WatchRouteRecorder: NSObject, ObservableObject {
     private func failRouteSaving() {
         routeSavingFailed = true
         routeQueue.markFailed()
-        if mayContainExistingRouteData {
-            // Stop this process from making further inserts, while retaining
-            // the associated builder so HealthKit can preserve route samples
-            // that may have been written before recovery.
-            routeGeneration.advance()
-            flushTask?.cancel()
-            flushTask = nil
-        } else {
-            invalidateRouteBuilder(discard: true)
-        }
+        // Keep the builder and the success count. If an insert was already
+        // in flight at overflow, finalization will wait for its result.
     }
 
     private func invalidateRouteBuilder(discard: Bool) {

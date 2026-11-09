@@ -5075,6 +5075,51 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertTrue(progress.canFinalize)
     }
 
+    func testRecorderKeepsSuccessfulGPSBatchWhenLaterInsertFails() async {
+        let start = Date()
+        let point = CLLocation(latitude: 1.30, longitude: 103.80)
+        let builder = FailingRouteBuilder(successfulInsertCount: 1)
+        let recorder = WatchRouteRecorder()
+        recorder.begin(routeBuilder: builder, startDate: start) {}
+        recorder.enqueueRouteLocations(Array(repeating: point, count: 41))
+
+        let prepared = await recorder.prepareForWorkoutFinalization()
+
+        XCTAssertEqual(builder.insertCallCount, 2, "HealthKit insert errors can be terminal")
+        XCTAssertEqual(builder.successfulPointCount, 20)
+        XCTAssertEqual(builder.discardCallCount, 0)
+        XCTAssertTrue(recorder.routeSavingFailed)
+        XCTAssertEqual(prepared.routeStatus, .unknown)
+    }
+
+    func testWatchGPSMetricsUseActivePointsWithoutRoutePermission() async {
+        let start = Date().addingTimeInterval(-23)
+        let recorder = WatchRouteRecorder()
+        recorder.begin(routeBuilder: nil, startDate: start, capturesGPSSpeed: true) {}
+        recorder.setPaused(true, at: start.addingTimeInterval(8))
+        recorder.setPaused(false, at: start.addingTimeInterval(14))
+        func point(_ second: Double, _ altitude: Double, _ speed: Double) -> CLLocation {
+            CLLocation(
+                coordinate: .init(latitude: 0, longitude: second * 0.00002),
+                altitude: altitude, horizontalAccuracy: 5, verticalAccuracy: 4,
+                course: 0, speed: speed, timestamp: start.addingTimeInterval(second)
+            )
+        }
+        recorder.receiveLocationsForTesting([
+            point(1, 100, 3), point(6, 106, 4), point(11, 120, 7),
+            point(15, 122, 5), point(20, 128, 6)
+        ])
+
+        let route = await recorder.prepareForWorkoutFinalization()
+        let metrics = recorder.takeCyclingMetrics()
+
+        XCTAssertEqual(route.routeStatus, .unavailable)
+        XCTAssertEqual(metrics.elevationGainMeters, 12)
+        XCTAssertEqual(metrics.speeds.map(\.metersPerSecond), [3, 4, 5, 6])
+        XCTAssertEqual(metrics.speeds.map(\.timestamp), [1, 6, 15, 20].map { start.addingTimeInterval($0) })
+        XCTAssertTrue(recorder.takeCyclingMetrics().speeds.isEmpty, "Finalization can consume GPS samples only once")
+    }
+
     func testRecorderRetainsRecoveredRouteBuilderButDiscardsNewBuilderOnInsertFailure() async {
         let startDate = Date(timeIntervalSinceReferenceDate: 800_036_900)
         let location = CLLocation(
@@ -9114,12 +9159,19 @@ private final class ToggleRecoveryPersistence: WorkoutRecoveryPersistence {
 private final class FailingRouteBuilder: WatchWorkoutRouteBuilding {
     enum Failure: Error { case requested }
 
+    private let successfulInsertCount: Int
     private(set) var insertCallCount = 0
+    private(set) var successfulPointCount = 0
     private(set) var discardCallCount = 0
+
+    init(successfulInsertCount: Int = 0) {
+        self.successfulInsertCount = successfulInsertCount
+    }
 
     func insertRouteData(_ locations: [CLLocation]) async throws {
         insertCallCount += 1
-        throw Failure.requested
+        guard insertCallCount <= successfulInsertCount else { throw Failure.requested }
+        successfulPointCount += locations.count
     }
 
     func discard() {
