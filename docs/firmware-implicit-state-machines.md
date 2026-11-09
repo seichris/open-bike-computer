@@ -387,23 +387,40 @@ rendered/painted diff caches (caches, not phases).
 `.installing`, `.stream-checkpoint`, `.ready`, `.operation-prepared`, `.operation-ready`,
 `.activation-consumed`, `.library-retained`, `.removing-<session>` tombstones, plus
 `/VECTMAP/.pending-stream-activation.json` and `.activation-transaction.json`
-(`map_transfer.cpp:47-67`), each with `.bak`/`.tmp` variants that count as present.
+(`map_transfer.cpp:45-69`).
 Staging → LegacyReady | OperationPrepared → OperationReady → Installed → Removing → Gone.
-Writers: `prepareRoot`/`writeFinalMetadata` (`map_stream_install.cpp:940-1210`),
-`promotePreparedOperation` (`map_transfer.cpp:2228`), `selectReadyStreamMap` (`:2561`),
-`settleSelectionStreamMaps` (`:2712`), `finalizeOperation` (`:2312`),
-`restoreRetainedLibraryVersion` (`:2494`), `pruneObsoleteInstalledMaps` (`:4123`).
-**Smell:** the root is re-classified by at least five readers with different predicates
-(`:2771`, `:4165`, `:3890`, `:5133`, recovery); `.bak` handling repeated by hand; consumed
-and `.library-retained` together is legal only to two functions.
+Writers: `prepareRoot`/`writeFinalMetadata` (`map_stream_install.cpp:936-1206`),
+`promotePreparedOperation` (`map_transfer.cpp:2238`), `selectReadyStreamMap` (`:2571`),
+`settleSelectionStreamMaps` (`:2723`), `finalizeOperation` (`:2323`),
+`restoreRetainedLibraryVersion` (`:2505`), `pruneObsoleteInstalledMaps` (`:4120`).
+Since 2026-11-10 the lifecycle markers are named and read in one place,
+`map_root_state.hpp`: a marker counts when its file or its `.bak` copy is a regular file,
+never a `.tmp`, and `.library-retained` has no `.bak` (`present`, `:64`). A per-root
+view (`Markers`, `:73`) checks each marker at most once, and each reader's
+decision is a named predicate: `streamRecoveryCandidate` (stream boot recovery,
+`map_stream_install.cpp:505`), `unusableActiveRoot` and `uploadFinished`
+(`activeRootExists`, `map_transfer.cpp:5119`; also `readInstalledMap` `:3862` and
+pruning), `unsettledLegacyUpload` (settling, legacy `.ready` only),
+`discardableLegacyStreamState` (`discardAllUnselectedStreamMaps` `:3579`, legacy
+state only) and `pruneKeepsByMarkers`. `test_map_root_state.cpp` compares every predicate
+with the expression it replaced over all combinations of marker copies. **Smell:** each
+reader still classifies the root for itself; there is no stored root state.
+`promotePreparedOperation` has to check `.library-retained` live (`:2269`) because
+its loop writes that marker. Consumed and `.library-retained` together is legal only to two
+functions.
 
-**MT-2 Activation transaction journal** — the `"phase"` string in
-`.activation-transaction.json` (`:933-952`, legacy `:2035-2082`) plus `retainedSelection`
-and `operationID` fields and the file's existence (`hasInterruptedActivation`, `:3627`).
-absent / publishing / ready / ready+retained / committed / damaged / quarantined.
-Parsed by two readers with different accepted sets (`:2831` vs `:3241`); which of
-`.tmp`/`.bak`/primary is authoritative is decided differently in `:3158` and
-`:2340-2370`. The file is at once a crash log, a lock and recovery evidence.
+**MT-2 Activation transaction journal** — the `"phase"` of `.activation-transaction.json`
+(stream writer `map_transfer.cpp:933-954`, archive writer
+`:2042-2089`) plus `retainedSelection` and `operationID` fields and the file's
+existence (`hasInterruptedActivation`, `:3627`). absent / publishing / ready /
+ready+retained / committed / damaged / quarantined. Since 2026-11-10 the phase is parsed
+once into `root_state::JournalPhase` (`map_root_state.hpp:156`, `:175`) and
+written through `journalPhaseName`. The two recovery readers keep different accepted
+sets, now named: stream recovery accepts ready and committed (`streamJournalAccepts`,
+`map_transfer.cpp:2913`), archive recovery also publishing (`archiveJournalAccepts`,
+`:3286`), which matches what each writer emits. Which of `.tmp`/`.bak`/primary is
+authoritative is still decided differently in `:2351` and `:2381-2411`.
+The file is at once a crash log, a lock and recovery evidence.
 
 **MT-3 Renderer handoff / pending map** — `map_transfer_http.hpp` ~`:190-200`
 `pendingMapRoot_`, `SessionId_`, `MapId_`, `OperationID_`, `LibraryCommandID_`,
@@ -452,10 +469,15 @@ not acknowledged an activation, which is fail-closed by design: accepted work ca
 revoked. `releaseCommitGrant` (`:709`) is called from five sites under different conditions.
 (The first survey said the grant had no timeout; corrected on 2026-11-09.)
 
-**MT-9 `MapActivationState` status string** — `running` + `status` ∈ idle/activating/
-installed/failed/recovering/prepared (`map_transfer.cpp:1142-1218`). "prepared" exists only
-to defeat the `AlreadyInstalled` guard (`.cpp:1040`, `:2493`); `finish` is called with
-literals from ~12 sites; `activationSnapshot` (`:1936`) overlays MT-10 on top.
+**MT-9 `MapActivationState` status** — `running` + an `ActivationStatus` enum since
+2026-11-10 (idle/activating/installed/failed/recovering/prepared,
+`map_activation_status.hpp:9`), with one conversion to the wire strings
+(`activationStatusName`); `setStatus` keeps the snapshot's string equal to it
+(`map_transfer.cpp:1144`, `finish` `:1199`), so the BLE and HTTP status text is
+unchanged. "prepared" still exists only to defeat the `AlreadyInstalled` guard
+(`map_transfer_http.cpp:1078`, `:2506`); the status arguments at 16 call sites in
+`map_transfer_http.cpp` are enum values instead of literals; `activationSnapshot`
+(`:1933`) overlays MT-10 on top.
 
 **MT-10 Stream status overlay** — `streamStatusActive_` + `streamInstallState_` snapshot;
 cleared by hand in six places; a Paused upload is re-marked active at boot (`:2224`).
@@ -1033,9 +1055,10 @@ Stale, Deadband, Incompatible) occur only in the host test. Host-tested
    and MAP-4's three frame resets, whose subsets diverged further with #442. Every one is a place where a
    future field is forgotten.
 3. **Strings as phases.** `status_` in OTA (TR-4), `networkTransport_` (TR-1),
-   `libraryAction_` (MT-7), `MapActivationState.status` (MT-9), `MapSelectionHealth.state`
-   (MT-16), the journal `"phase"` (MT-2), `pendingAuthNonce` non-emptiness (BLE-6/7), the
-   `stream_settle_previous` gate code (MT-13).
+   `libraryAction_` (MT-7), `MapSelectionHealth.state` (MT-16), `pendingAuthNonce`
+   non-emptiness (BLE-6/7), the `stream_settle_previous` gate code (MT-13). The activation
+   status (MT-9) and the journal phase (MT-2) became enums on 2026-11-10; only their wire
+   form is a string.
 4. **Lazy expiry on read.** Suppression windows (RA-2), lease expiry (BLE-6), UI error
    timers (RA-13), prediction phases (MAP-5), station state (TR-7), the e-paper "comparison on glass"
    (EP-3, recomputed from five fields per read), position-source holds
@@ -1072,8 +1095,10 @@ Stale, Deadband, Incompatible) occur only in the host test. Host-tested
 Ranked by blast radius and by how many of the smells above a single enum would remove:
 
 1. **MT-1 + MT-2 + MT-9** map-root marker files, journal phase string and activation
-   status: one `RootState` classifier used by every reader, and one activation enum
-   instead of a string, would collapse five divergent predicates and two parsers.
+   status. Partly done on 2026-11-10: marker names, the `.bak` rule and each reader's
+   decision live in `map_root_state.hpp`, and the journal phase and activation status are
+   enums with one wire conversion. Still open: one stored root state instead of per-reader
+   predicates, which would also absorb MT-13's `stream_settle_previous` gate.
 2. **TR-4** OTA upload: drop `status_` and the maintenance stage mirror in favour of
    the existing `Transaction`, and fix the reset-before-cancel ordering that bypasses the
    CommitStarted guard.
