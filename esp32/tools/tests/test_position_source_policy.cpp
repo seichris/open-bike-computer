@@ -10,6 +10,7 @@
 
 using position_source::Arbiter;
 using position_source::BaudProbe;
+using position_source::I2cPollOutcome;
 using position_source::I2cReceiverPolicy;
 using position_source::NmeaLineValidator;
 using position_source::Source;
@@ -137,6 +138,9 @@ void testBaudProbe() {
 }
 
 using Policy = I2cReceiverPolicy;
+constexpr I2cPollOutcome kNoAnswer = I2cPollOutcome::noAnswer;
+constexpr I2cPollOutcome kPartial = I2cPollOutcome::partial;
+constexpr I2cPollOutcome kComplete = I2cPollOutcome::complete;
 
 void testI2cHealthyStream() {
   Policy policy;
@@ -146,12 +150,12 @@ void testI2cHealthyStream() {
   // starting length.
   for (uint32_t now = 1200; now < 400'000; now += 200) {
     bytes += 300;
-    assert(!policy.notePoll(true, bytes, now));
+    assert(!policy.notePoll(kComplete, bytes, now));
     assert(policy.silentWindowMs == Policy::kSilentWindowMs);
-    assert(policy.nextPollDelayMs(true, false, true) == Policy::kIdlePollMs);
+    assert(policy.nextPollDelayMs(kComplete, true) == Policy::kIdlePollMs);
   }
   // A partial drain left bytes behind: the next query follows at once.
-  assert(policy.nextPollDelayMs(true, true, true) == 0);
+  assert(policy.nextPollDelayMs(kPartial, true) == 0);
 }
 
 void testI2cAbsentModule() {
@@ -159,21 +163,21 @@ void testI2cAbsentModule() {
   policy.begin(0);
   // Four misses keep the 2 s cadence; the fifth slows polling down.
   for (uint32_t miss = 1; miss <= 4; ++miss) {
-    assert(!policy.notePoll(false, 0, miss * 2000));
-    assert(policy.nextPollDelayMs(false, false, false) == Policy::kAbsentPollMs);
+    assert(!policy.notePoll(kNoAnswer, 0, miss * 2000));
+    assert(policy.nextPollDelayMs(kNoAnswer, false) == Policy::kAbsentPollMs);
   }
-  assert(!policy.notePoll(false, 0, 10'000));
-  assert(policy.nextPollDelayMs(false, false, false) ==
+  assert(!policy.notePoll(kNoAnswer, 0, 10'000));
+  assert(policy.nextPollDelayMs(kNoAnswer, false) ==
          Policy::kAbsentSlowPollMs);
   // The next slow poll is past the window with more than three polls: restart.
-  assert(policy.notePoll(false, 0, 40'000));
+  assert(policy.notePoll(kNoAnswer, 0, 40'000));
   policy.restarted(40'100);
   assert(policy.silentWindowMs == 2 * Policy::kSilentWindowMs);
   assert(policy.pollsSinceProgress == 0 && policy.progressMs == 40'100);
   // The restart clears the failure count: the module that comes back up is
   // polled at the 2 s cadence, not the slow one.
   assert(policy.consecutiveFailures == 0);
-  assert(policy.nextPollDelayMs(false, false, false) == Policy::kAbsentPollMs);
+  assert(policy.nextPollDelayMs(kNoAnswer, false) == Policy::kAbsentPollMs);
 }
 
 void testI2cSilentWindow() {
@@ -181,14 +185,14 @@ void testI2cSilentWindow() {
   Policy policy;
   policy.begin(1000);
   // A long first poll is past the window, but three polls are needed.
-  assert(!policy.notePoll(true, 0, 20'000));
-  assert(!policy.notePoll(true, 0, 20'200));
-  assert(policy.notePoll(true, 0, 20'400));
+  assert(!policy.notePoll(kComplete, 0, 20'000));
+  assert(!policy.notePoll(kComplete, 0, 20'200));
+  assert(policy.notePoll(kComplete, 0, 20'400));
   policy.restarted(20'500);
   // And many polls never restart it before the doubled window has passed.
   for (uint32_t now = 20'700; now < 20'500 + 30'000; now += 200)
-    assert(!policy.notePoll(true, 0, now));
-  assert(policy.notePoll(true, 0, 20'500 + 30'000));
+    assert(!policy.notePoll(kComplete, 0, now));
+  assert(policy.notePoll(kComplete, 0, 20'500 + 30'000));
 }
 
 void testI2cWindowDoublesAndResets() {
@@ -200,13 +204,13 @@ void testI2cWindowDoublesAndResets() {
     const uint32_t due = policy.progressMs + policy.silentWindowMs;
     // Three polls one millisecond early: the window is not over yet.
     for (int poll = 0; poll < 3; ++poll)
-      assert(!policy.notePoll(false, 0, due - 1));
-    assert(policy.notePoll(false, 0, due));
+      assert(!policy.notePoll(kNoAnswer, 0, due - 1));
+    assert(policy.notePoll(kNoAnswer, 0, due));
     policy.restarted(due + 100);
     assert(policy.silentWindowMs == window);
   }
   // Bytes flowing again return the window to its starting length.
-  assert(!policy.notePoll(true, 42, policy.progressMs + 10));
+  assert(!policy.notePoll(kComplete, 42, policy.progressMs + 10));
   assert(policy.silentWindowMs == Policy::kSilentWindowMs);
   assert(policy.pollsSinceProgress == 0);
 }
@@ -214,36 +218,36 @@ void testI2cWindowDoublesAndResets() {
 void testI2cStreamStops() {
   Policy policy;
   policy.begin(0);
-  assert(!policy.notePoll(true, 500, 1000));
-  assert(!policy.notePoll(true, 900, 1200));  // the last new bytes
+  assert(!policy.notePoll(kComplete, 500, 1000));
+  assert(!policy.notePoll(kComplete, 900, 1200));  // the last new bytes
   // Afterwards the slave alternates between refusing and answering empty:
   // the restart follows 15 s after the last new byte, not after the start.
   uint32_t now = 1400;
   for (; now < 1200 + Policy::kSilentWindowMs; now += 200)
-    assert(!policy.notePoll(now % 400 == 0, 900, now));
-  assert(policy.notePoll(false, 900, 1200 + Policy::kSilentWindowMs));
+    assert(!policy.notePoll(now % 400 == 0 ? kComplete : kNoAnswer, 900, now));
+  assert(policy.notePoll(kNoAnswer, 900, 1200 + Policy::kSilentWindowMs));
 }
 
 void testI2cPollCadence() {
   Policy policy;
   policy.begin(0);
-  assert(policy.nextPollDelayMs(true, false, false) == Policy::kIdlePollMs);
-  assert(policy.nextPollDelayMs(true, true, false) == 0);
+  assert(policy.nextPollDelayMs(kComplete, false) == Policy::kIdlePollMs);
+  assert(policy.nextPollDelayMs(kPartial, false) == 0);
   // A slave that answered the previous poll and now refuses is busy, not
   // gone: poll again at once.
-  assert(!policy.notePoll(false, 0, 100));
-  assert(policy.nextPollDelayMs(false, false, true) == 0);
+  assert(!policy.notePoll(kNoAnswer, 0, 100));
+  assert(policy.nextPollDelayMs(kNoAnswer, true) == 0);
   // The failure count saturates instead of wrapping back to the fast cadence.
   for (int miss = 0; miss < 300; ++miss)
-    assert(!policy.notePoll(false, 0, 200));
+    assert(!policy.notePoll(kNoAnswer, 0, 200));
   assert(policy.consecutiveFailures == UINT8_MAX);
-  assert(policy.nextPollDelayMs(false, false, false) ==
+  assert(policy.nextPollDelayMs(kNoAnswer, false) ==
          Policy::kAbsentSlowPollMs);
-  // One answer clears it.
-  assert(!policy.notePoll(true, 0, 300));
+  // One answer clears it, a partial drain included.
+  assert(!policy.notePoll(kPartial, 0, 300));
   assert(policy.consecutiveFailures == 0);
-  assert(!policy.notePoll(false, 0, 400));
-  assert(policy.nextPollDelayMs(false, false, false) == Policy::kAbsentPollMs);
+  assert(!policy.notePoll(kNoAnswer, 0, 400));
+  assert(policy.nextPollDelayMs(kNoAnswer, false) == Policy::kAbsentPollMs);
 }
 
 void testI2cClockWrap() {
@@ -251,10 +255,10 @@ void testI2cClockWrap() {
   const uint32_t start = UINT32_MAX - 5'000;
   policy.begin(start);
   // The millisecond clock wraps during the window.
-  assert(!policy.notePoll(true, 0, start + 2'000));
-  assert(!policy.notePoll(true, 0, start + 4'000));
-  assert(!policy.notePoll(true, 0, start + Policy::kSilentWindowMs - 1));
-  assert(policy.notePoll(true, 0, start + Policy::kSilentWindowMs));
+  assert(!policy.notePoll(kComplete, 0, start + 2'000));
+  assert(!policy.notePoll(kComplete, 0, start + 4'000));
+  assert(!policy.notePoll(kComplete, 0, start + Policy::kSilentWindowMs - 1));
+  assert(policy.notePoll(kComplete, 0, start + Policy::kSilentWindowMs));
 }
 
 }  // namespace
