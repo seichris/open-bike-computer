@@ -47,20 +47,65 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
     static let schemaVersion: UInt16 = 1
 
     let schemaVersion: UInt16
+    /// The route exactly as saved: what `contentHash` covers, what encoding
+    /// writes and sharing uploads, and what geometry fingerprints use.
+    let storedRoute: NavigationRouteV1
+    /// The route to draw, navigate, profile and send to the Bicino. It is
+    /// `storedRoute`, except for a version-1 Apple Maps route that version 2
+    /// reads differently (`RouteCoordinateNormalizationV1.rereadVersion1`).
     let route: NavigationRouteV1
     let createdAt: Date
     let deleteAfter: Date?
     let contentHash: String
 
-    var routeID: UUID { route.routeID }
-    var revision: UInt32 { route.revision }
-    var providerID: String { route.provider.providerID }
+    var routeID: UUID { storedRoute.routeID }
+    var revision: UInt32 { storedRoute.revision }
+    var providerID: String { storedRoute.provider.providerID }
 
     private struct HashPayload: Codable {
         let schemaVersion: UInt16
         let route: NavigationRouteV1
         let createdAt: Date
         let deleteAfter: Date?
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, route, createdAt, deleteAfter, contentHash
+    }
+
+    init(
+        schemaVersion: UInt16,
+        storedRoute: NavigationRouteV1,
+        createdAt: Date,
+        deleteAfter: Date?,
+        contentHash: String
+    ) {
+        self.schemaVersion = schemaVersion
+        self.storedRoute = storedRoute
+        route = RouteCoordinateNormalizationV1.rereadVersion1(storedRoute)
+        self.createdAt = createdAt
+        self.deleteAfter = deleteAfter
+        self.contentHash = contentHash
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            schemaVersion: try values.decode(UInt16.self, forKey: .schemaVersion),
+            storedRoute: try values.decode(NavigationRouteV1.self, forKey: .route),
+            createdAt: try values.decode(Date.self, forKey: .createdAt),
+            deleteAfter: try values.decodeIfPresent(Date.self, forKey: .deleteAfter),
+            contentHash: try values.decode(String.self, forKey: .contentHash)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(storedRoute, forKey: .route)
+        try values.encode(createdAt, forKey: .createdAt)
+        try values.encodeIfPresent(deleteAfter, forKey: .deleteAfter)
+        try values.encode(contentHash, forKey: .contentHash)
     }
 
     static func create(
@@ -88,7 +133,7 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         let hash = try hash(payload)
         return NavigationRouteArchiveV1(
             schemaVersion: schemaVersion,
-            route: route,
+            storedRoute: route,
             createdAt: normalizedCreatedAt,
             deleteAfter: normalizedDeleteAfter,
             contentHash: hash
@@ -103,9 +148,9 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         guard schemaVersion == Self.schemaVersion else {
             throw NavigationRouteArchiveError.invalidSchemaVersion(schemaVersion)
         }
-        try route.validate(limits: limits)
+        try storedRoute.validate(limits: limits)
         try Self.validateRetention(
-            route: route,
+            route: storedRoute,
             createdAt: createdAt,
             deleteAfter: deleteAfter,
             purpose: purpose,
@@ -113,7 +158,7 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         )
         let payload = HashPayload(
             schemaVersion: schemaVersion,
-            route: route,
+            route: storedRoute,
             createdAt: createdAt,
             deleteAfter: deleteAfter
         )
@@ -244,7 +289,7 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
     /// Exact bytes for server-side verification without cross-language JSON
     /// floating-point re-encoding. The receiver also compares decoded content.
     func socialHashPayload() throws -> Data {
-        try Self.encoder().encode(HashPayload(schemaVersion: schemaVersion, route: route,
+        try Self.encoder().encode(HashPayload(schemaVersion: schemaVersion, route: storedRoute,
                                               createdAt: createdAt, deleteAfter: deleteAfter))
     }
 

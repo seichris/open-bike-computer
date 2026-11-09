@@ -16,6 +16,7 @@ enum RideSharedTests {
         testMotionDispatchAge()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testMainlandChinaRegion()
+        try testLegacyMapKitRoutes()
         try testGPXImport()
         try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()
@@ -2039,7 +2040,7 @@ enum RideSharedTests {
 
         let corrupted = NavigationRouteArchiveV1(
             schemaVersion: archive.schemaVersion,
-            route: archive.route,
+            storedRoute: archive.storedRoute,
             createdAt: archive.createdAt,
             deleteAfter: archive.deleteAfter,
             contentHash: String(repeating: "0", count: 64)
@@ -2061,7 +2062,7 @@ enum RideSharedTests {
         }
         let wrongSchema = NavigationRouteArchiveV1(
             schemaVersion: 99,
-            route: archive.route,
+            storedRoute: archive.storedRoute,
             createdAt: archive.createdAt,
             deleteAfter: archive.deleteAfter,
             contentHash: archive.contentHash

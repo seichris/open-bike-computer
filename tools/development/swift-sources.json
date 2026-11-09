@@ -400,7 +400,8 @@
     "ride-shared-1": {
       "sources": [
         "ios-app/BikeComputerTests/RideSharedTests.swift",
-        "ios-app/BikeComputerTests/MainlandChinaRegionTests.swift"
+        "ios-app/BikeComputerTests/MainlandChinaRegionTests.swift",
+        "ios-app/BikeComputerTests/LegacyMapKitRouteTests.swift"
       ],
       "groups": [
         "common-2",
@@ -591,7 +592,10 @@
         "ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift",
         "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
         "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
-        "ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift"
+        "ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/MainlandChinaRegion.swift",
+        "ios-app/BikeComputer/RideShared/MainlandChinaRegion.generated.swift"
       ]
     },
     "common-3": {

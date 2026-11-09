@@ -129,6 +129,7 @@ Macau or Xiamen with Kinmen, therefore lines up on both sides:
 | Watch online routing endpoints | WGS-84 to Apple Maps |
 | Simulated positions shown on Apple Maps (`NavigationEngine`) | WGS-84 to Apple Maps |
 | Topography overlay (`BicinoTopographyTileOverlay`, `TopographyMapKitTileWarp`) | per pixel, Apple Maps to WGS-84 |
+| Version-1 Apple Maps routes when an archive is loaded (`NavigationRouteArchiveV1`, `RouteCoordinateNormalizationV1.rereadVersion1`) | WGS-84 as version 1 saved it, to Apple Maps and back with version 2 |
 
 The firmware and the map backend never convert.
 
@@ -140,27 +141,71 @@ reached WGS-84. Routes normalized from Apple Maps now carry version 2
 rectangle from 0.8293 to 55.8271° N and 72.004 to 135.5° E as GCJ-02. That
 rectangle also covers Hong Kong, Macau, Taiwan, the Koreas, western Japan,
 most of Southeast Asia, most of India and southern Siberia. There, version 1
-shifted Apple Maps routes by up to about 730 m, typically 130 to 620 m in the
-cities affected, and the phone shifted GPS by the same amount before
-comparing it with the route. As a result, live navigation
-measured a rider as off the route there.
+saved Apple Maps routes up to about 730 m off the road, typically 130 to
+620 m in the cities affected.
 
-Archives saved before this change keep their bytes. Rewriting them would
-change their content hash, which identifies a route revision in the library,
-on the Watch, in elevation profiles and in social shares. Affected archives
-are those with the `apple.mapkit` provider, normalization version 1, and
-geometry outside mainland China but inside the old rectangle. Before this
-change the phone drew them on Apple Maps, but navigation and the Bicino
-followed a line up to about 730 m away. Now the phone draws them where navigation
-and the Bicino already put them. Planning such a route again replaces it.
+### Version-1 Apple Maps archives
 
-The version-1 shift is a fixed function, so a later migration could rebuild
-these archives as new revisions. GPX, Strava and shared routes are WGS-84
-from the start, so the old rectangle only misdrew them; they need no repair.
+Saved archives keep their bytes. An archive's content hash identifies its
+revision in the library, on the Watch, in elevation profiles and in social
+shares, so the app reads version-1 routes again instead of rewriting them.
+When an archive with the `apple.mapkit` provider and normalization version 1
+is loaded, `RouteCoordinateNormalizationV1.rereadVersion1` reads its route
+as follows:
+
+1. Each point inside the old rectangle gets back the GCJ-02 shift that
+   version 1 removed (`GCJ02.fromWGS84`). That is where the phone drew it
+   before version 2, and it recovers the point's Apple Maps coordinate.
+2. These coordinates are read with version 2, in order, like a newly planned
+   route. A point read as mainland China keeps its stored value, which both
+   versions compute the same way, so mainland routes are unchanged.
+3. Version 2 settles a first point that has two readings with the position
+   the route was requested from. An archive does not keep that position, so
+   the side of the first point with a single reading is used instead.
+4. The endpoints and bounds follow the new points, and the route is marked
+   version 2. If the new points would make the route invalid, for example a
+   segment beyond the Bicino's 16-bit delta range, the stored route is used.
+
+`NavigationRouteArchiveV1` holds both routes:
+
+- **`storedRoute`** is the route as saved. The content hash covers it,
+  encoding and social sharing send it, and social geometry fingerprints use
+  it, as the backend does. A social duplicate copies it, so the copy is read
+  the same way and keeps the original's fingerprint.
+- **`route`** is the route the app uses. The saved-route map, offline
+  navigation and the route sent to the Bicino, elevation profiles, favorites
+  starred from the route and social previews all follow it.
+
+The library, Watch sync, elevation bindings and social provenance therefore
+go on identifying the same revision. An elevation profile cached for the
+stored line no longer matches the route's geometry. The next online lookup
+measures the road and replaces it under the same binding.
+
+Some cases stay wrong:
+
+- **Within the border strip:** a route that stays in a strip beside a
+  mainland border has no point with a single reading. It keeps the mainland
+  reading, like a new route with no reference.
+- **Across a border:** a route crossing a mainland border is misread after
+  the crossing until it leaves the strip, as version 2 reads one.
+- **At the rectangle's edges:** a stored point up to about 410 m west of
+  72.004° E or 140 m south of 0.8293° N may have come from either side of the
+  rectangle. Like the old drawing, the reading leaves it in place.
+- **On the backend:** it stores and fingerprints the saved bytes and never
+  converts. Group Ride progress there compares riders with the stored points,
+  so for an affected version-1 route it stays unknown.
+
+Other providers, such as GPX and Strava routes, are WGS-84 from the start.
+The old rectangle only misdrew them, and they are not read again.
 
 ## Recovery
 
-Reverting this change and shipping an app update restores the rectangle. The
-Watch receives the same app update. Version-2 archives remain valid, because
-validation accepts any positive normalization version. No server state or
-firmware changes.
+Reverting the precise region and shipping an app update restores the
+rectangle. The Watch receives the same app update. Version-2 archives remain
+valid, because validation accepts any positive normalization version.
+
+Reading version-1 archives again writes nothing to them, so reverting it and
+shipping an app update returns those routes to their stored geometry. An
+elevation profile cached for the new geometry then no longer matches, and the
+next online lookup replaces it. Neither change needs server or firmware
+changes.
