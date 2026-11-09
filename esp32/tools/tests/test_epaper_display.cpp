@@ -181,17 +181,77 @@ int main() {
   assert(!policy.shouldSleep(idle - 1));
   assert(policy.shouldSleep(idle));
   policy.sleep();
-  assert(policy.sleeping());
-  assert(!policy.ready(idle, true));
-  assert(policy.ready(idle, true, true));
+  // Idle sleep still takes a frame, so changed content can wake the panel;
+  // explicit sleep is a policy state that waits for an explicit wake.
+  assert(policy.sleeping() && !policy.explicitSleep());
+  assert(policy.ready(idle, true));
+  policy.sleep(true);
+  assert(policy.explicitSleep() && !policy.ready(idle, true));
   policy.wake();
+  assert(!policy.sleeping() && !policy.explicitSleep());
   assert(policy.nextReason() == RefreshReason::Wake);
-  assert(policy.fail());
+  assert(policy.fail(idle));
   assert(policy.nextReason() == RefreshReason::Recovery);
-  assert(!policy.fail() && policy.fault());
-  assert(!policy.ready(idle + 9999, true));
-  policy.wake(); assert(policy.fullRequired(0));
-  policy.sleep(); assert(!policy.ready(0, true));
+  assert(!policy.fail(idle) && policy.fault());
+  // A latched fault retries one full refresh after a delay instead of waiting
+  // for a reboot; only the explicit diagnostic wake used to clear it.
+  assert(!policy.ready(idle + faultRetryInitialMs - 1, true));
+  assert(policy.faultRetryDue(idle + faultRetryInitialMs));
+  assert(policy.ready(idle + faultRetryInitialMs, true));
+  assert(policy.fullRequired(0) &&
+         policy.nextReason() == RefreshReason::Recovery);
+  const uint32_t firstRetry = idle + faultRetryInitialMs;
+  policy.start(firstRetry);
+  assert(!policy.ready(firstRetry, true)); // Busy with the retry.
+  const uint32_t retryFailed = firstRetry + 3000;
+  assert(!policy.fail(retryFailed) && policy.fault());
+  assert(policy.faultRetryDelayMs() == 2 * faultRetryInitialMs);
+  assert(!policy.ready(retryFailed + 2 * faultRetryInitialMs - 1, true));
+  assert(policy.ready(retryFailed + 2 * faultRetryInitialMs, true));
+  const uint32_t secondRetry = retryFailed + 2 * faultRetryInitialMs;
+  policy.start(secondRetry);
+  policy.complete(secondRetry + 2500, true);
+  policy.recovered(); // A successful retry clears the fault.
+  assert(!policy.fault() && !policy.faultRetryDue(secondRetry + 999999));
+  assert(!policy.ready(secondRetry + 2500 + fullWaveformRestMs - 1, true));
+  assert(policy.ready(secondRetry + 2500 + fullWaveformRestMs, true));
+  assert(policy.fail(secondRetry + 9000));
+  assert(!policy.fail(secondRetry + 9000) &&
+         policy.faultRetryDelayMs() == faultRetryInitialMs);
+  policy.wake(); assert(!policy.fault() && policy.fullRequired(0));
+  policy.sleep(true); assert(!policy.ready(0, true));
+
+  // Failed retries back off up to the maximum delay.
+  PresentationPolicy capped;
+  assert(capped.fail(0) && !capped.fail(0));
+  for (unsigned i = 0; i < 12; ++i) assert(!capped.fail(i * 1000U));
+  assert(capped.faultRetryDelayMs() == faultRetryMaximumMs);
+
+  // A failed sleep command is not a waveform: it neither delays the next frame
+  // nor restarts the waveform rest, and the next attempt waits its own
+  // interval.
+  PresentationPolicy sleeper;
+  sleeper.start(0); sleeper.complete(1000, true);
+  const uint32_t sleepAt = 1000 + panelIdleSleepMs;
+  assert(sleeper.shouldSleep(sleepAt));
+  sleeper.sleepFailed(sleepAt);
+  assert(sleeper.ready(sleepAt, false));
+  assert(!sleeper.shouldSleep(sleepAt + panelIdleSleepMs - 1));
+  assert(sleeper.shouldSleep(sleepAt + panelIdleSleepMs));
+
+  // The pairing comparison stays attested through a same-code partial
+  // waveform, so a status update does not re-block the keys; a full waveform,
+  // another pairing or another context withdraws it first.
+  static_assert(keepsComparisonOnGlass(7, 3, 7, 3, false));
+  static_assert(!keepsComparisonOnGlass(7, 3, 7, 3, true));
+  static_assert(!keepsComparisonOnGlass(7, 3, 0, 3, false));
+  static_assert(!keepsComparisonOnGlass(7, 3, 8, 3, false));
+  static_assert(!keepsComparisonOnGlass(7, 3, 7, 4, false));
+  static_assert(!keepsComparisonOnGlass(0, 3, 0, 3, false));
+  static_assert(comparisonOnGlass(7, 3, 7, 3));
+  static_assert(!comparisonOnGlass(7, 3, 8, 3) &&
+                !comparisonOnGlass(7, 3, 7, 4));
+  static_assert(!comparisonOnGlass(0, 3, 0, 3));
 
   PresentationPolicy slow;
   slow.start(0); slow.complete(1200, false);

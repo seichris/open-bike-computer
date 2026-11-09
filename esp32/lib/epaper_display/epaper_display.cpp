@@ -129,9 +129,8 @@ Transport transport;
 
 void displayWorker(void *) {
   Ssd1677<Transport> panel(transport);
-  // Explicit diagnostic sleep remains asleep until an explicit wake. Ordinary
-  // idle sleep wakes itself when a changed complete frame is available.
-  bool wakeForChangedContent = true;
+  // A due fault retry needs a frame; ask the UI for one once per retry window.
+  bool recoveryCompositionRequested = false;
   if (!transport.begin()) {
     portENTER_CRITICAL(&mux); snapshot.fault = true; portEXIT_CRITICAL(&mux);
     for (;;) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -148,13 +147,12 @@ void displayWorker(void *) {
     const bool explicitSleep = sleepRequested && !shouldWake;
     sleepRequested = wakeRequested = false;
     portEXIT_CRITICAL(&mux);
-    if (explicitSleep) wakeForChangedContent = false;
     if (shouldWake) {
       const bool wasSleeping = policy.sleeping();
       policy.wake();
-      wakeForChangedContent = true;
       portENTER_CRITICAL(&mux);
-      snapshot.sleeping = false; snapshot.fault = false;
+      snapshot.sleeping = false; snapshot.explicitSleep = false;
+      snapshot.fault = false;
       if (wasSleeping) ++snapshot.wakeCount;
       portEXIT_CRITICAL(&mux);
     }
@@ -162,7 +160,7 @@ void displayWorker(void *) {
     FrameMailbox::Provenance provenance{0, 0, 0};
     const uint32_t now = millis();
     portENTER_CRITICAL(&mux);
-    if (!explicitSleep && policy.ready(now, urgent, wakeForChangedContent)) {
+    if (!explicitSleep && policy.ready(now, urgent)) {
       const auto frame = mailbox.claim();
       if (frame.pixels) {
         flight = frame.pixels;
@@ -173,7 +171,14 @@ void displayWorker(void *) {
       }
     }
     portEXIT_CRITICAL(&mux);
+    if (generation) recoveryCompositionRequested = false;
     if (!generation) {
+      if (policy.faultRetryDue(now) && !recoveryCompositionRequested) {
+        // poll() redraws the active screen; its frame becomes the retry.
+        recoveryCompositionRequested = true;
+        contextCompositionPending.store(true, std::memory_order_release);
+        ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+      }
       const bool idleSleep = policy.shouldSleep(now);
       if (explicitSleep || idleSleep) {
         const bool wasSleeping = policy.sleeping();
@@ -186,8 +191,9 @@ void displayWorker(void *) {
         portENTER_CRITICAL(&mux);
         if (ok) {
           if (!wasSleeping) ++snapshot.sleepCount;
-          policy.sleep();
+          policy.sleep(explicitSleep);
           snapshot.sleeping = true;
+          snapshot.explicitSleep = policy.explicitSleep();
           if (explicitSleep) snapshot.pairingGeneration = 0;
         } else {
           ++snapshot.sleepFailures;
@@ -223,6 +229,13 @@ void displayWorker(void *) {
     bool ok = true;
     uint32_t waveformDurationMs = 0, waveformStartedMs = 0, waveformFinishedMs = 0;
     if (full || !dirty.empty()) {
+      // Withdraw the pairing attestation before any waveform that could flash
+      // or replace the comparison code; a same-code partial keeps it.
+      portENTER_CRITICAL(&mux);
+      if (!keepsComparisonOnGlass(snapshot.pairingGeneration, snapshot.context,
+                                  pairing, context, full))
+        snapshot.pairingGeneration = 0;
+      portEXIT_CRITICAL(&mux);
       power_management::ScopedLock powerLock(power_management::LockDomain::Display);
       for (uint8_t attempt = 0; attempt < 2; ++attempt) {
         waveformStartedMs = millis();
@@ -235,8 +248,11 @@ void displayWorker(void *) {
         waveformFinishedMs = millis();
         waveformDurationMs = waveformFinishedMs - waveformStartedMs;
         if (ok) break;
-        portENTER_CRITICAL(&mux); ++snapshot.failures; portEXIT_CRITICAL(&mux);
-        if (!policy.fail()) break;
+        portENTER_CRITICAL(&mux);
+        ++snapshot.failures;
+        snapshot.pairingGeneration = 0; // The glass is uncertain.
+        portEXIT_CRITICAL(&mux);
+        if (!policy.fail(waveformFinishedMs)) break;
         full = true; // Controller/base history is now uncertain.
         reason = RefreshReason::Recovery;
       }
@@ -379,12 +395,12 @@ void setPairingGeneration(uint32_t generation) {
 uint32_t pairingGeneration() { return currentPairing.load(); }
 bool pairingPresented() {
   const Status s = status();
-  // SSD1677 deep sleep leaves the e-paper image visible. An automatically
-  // sleeping controller therefore does not invalidate an already completed
-  // comparison generation.
-  return currentPairing.load() != 0 && !s.fault && !s.busy &&
-         s.pairingGeneration == currentPairing.load() &&
-         s.context == currentContext.load();
+  // The worker owns the attestation: it publishes the comparison's pairing and
+  // context when that frame completes, and withdraws it before a waveform that
+  // could flash or replace the code, on failure and on explicit sleep. SSD1677
+  // deep sleep leaves the image visible, so idle sleep keeps it.
+  return comparisonOnGlass(s.pairingGeneration, s.context,
+                           currentPairing.load(), currentContext.load());
 }
 void sleep() {
   invalidateContext();
