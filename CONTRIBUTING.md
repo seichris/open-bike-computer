@@ -164,6 +164,22 @@ Bundle**. A Mac can collect the same app container with
 --bundle-id LetItRide.BikeComputer.dev`. Do not include Wi-Fi credentials,
 hotspot passwords, or temporary transfer URLs/tokens in reports.
 
+### Run the 1.75-inch firmware in the simulator
+
+Load a `WAVESHARE_AMOLED_175` build into the `codex/bicino-175-prototype`
+branch of `seichris/esp32sim` to debug boot, UI, and navigation without
+flashing a board. Use the browser for the display and controls, scripted replay
+for repeatable route and GPS tests, or Bicino Dev with the macOS BLE bridge for
+real phone input. The simulator renders maps from a preloaded microSD image.
+Test map uploads over Wi-Fi on a physical board.
+[Simulator quickstart](https://github.com/seichris/esp32sim/blob/216fc3638a65231ceda3819287c529f81c3449ab/examples/bicino175/README.md)
+
+![Bicino 1.75-inch simulator in a browser showing Golden Gate turn guidance](docs/images/bicino175-simulator.jpg)
+
+The screenshot shows a scripted route on the Golden Gate demo map.
+Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
+ODbL 1.0.
+
 ### Debug a physical device in the browser
 
 Remote device debugging displays and controls the real Bicino framebuffer in a
