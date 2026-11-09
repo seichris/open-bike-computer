@@ -36,7 +36,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var controlTimeout: Task<Void, Never>?
     private var finalization: Task<Void, Never>?
     private var flushTask: Task<Void, Never>?
-    private var state: WorkoutSessionStateV1 = .idle
+    // The Watch's shared reducer owns the session state. Every change is an
+    // event; recovery rebuilds the reducer from idle (adoptLifecycle).
+    private var lifecycle = WorkoutLifecycleReducer()
+    private var state: WorkoutSessionStateV1 { lifecycle.state }
     private var sequence: UInt64 = 0
     private var token: UInt16 = 1
     private var generation = UUID()
@@ -132,7 +135,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         record = requested
         message = nil
         store.beginLocalWorkout()
-        state = .starting
+        applyLifecycle(.requestStart)
         publish()
         do {
             guard HKHealthStore.isHealthDataAvailable() else { throw RecorderError.unavailable }
@@ -195,7 +198,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 catch { message = "Workout setup failed and its recovery record could not be cleared. Reopen Bicino before starting again." }
             }
             message = message ?? "iPhone workout could not start. Allow Workouts in Settings › Health › Apps › Bicino, then try again."
-            state = .failed
+            // As before the reducer, a failed start always ends failed, even if a
+            // discard during startup already ended the recording.
+            if !applyLifecycle(.fail) { adoptLifecycle(.failed) }
             store.failSession(error: Self.safeError(error))
             store.recordingMessage = message
         }
@@ -255,7 +260,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                     startDate = workout.startDate
                     endDate = workout.endDate
                 }
-                state = .ended
+                adoptLifecycle(.ended, choice: expected.finishedChoice)
                 publish()
                 return
             }
@@ -282,7 +287,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 record = nil
                 return
             }
-            state = .ending
+            adoptLifecycle(.ending)
             message = "The iPhone recording could not be recovered. Its save status is unknown; check Apple Health. Bicino will not create a duplicate recording."
             var unresolved = expected
             unresolved.phase = .unresolved
@@ -343,19 +348,19 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             // A terminal tombstone must never re-enter finishWorkout.
             if next.finishedChoice == .discard { builder.discardWorkout(); routeBuilder?.discard() }
             recovered.end()
-            state = .ended
+            adoptLifecycle(.ended, choice: next.finishedChoice)
             recoveryAttachmentPending = false
             publish()
             return
         }
         switch recovered.state {
-        case .running: state = .running
-        case .paused: state = .paused; pauseOrigin = .unknown
+        case .running: adoptLifecycle(.running)
+        case .paused: adoptLifecycle(.paused); pauseOrigin = .unknown
         case .stopped, .ended:
-            state = .ending
+            adoptLifecycle(.ending)
             endDate = recovered.endDate ?? Date()
         case .notStarted, .prepared:
-            state = .starting
+            adoptLifecycle(.starting)
         @unknown default: throw RecorderError.identityMismatch
         }
         recoveryAttachmentPending = false
@@ -459,7 +464,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         controlTimeout?.cancel()
         endDate = session.endDate ?? endDate ?? Date()
         lastLocation = nil
-        state = .ending
+        applyLifecycle(.requestEnd(Self.finishDisposition(choice)))
         _ = store.markPendingControl(choice == .save ? .endAndSave : .discard)
         publish()
         switch session.state {
@@ -554,11 +559,75 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private func complete(_ choice: WorkoutRecordingDisposition) throws {
         guard let record, let next = record.finished(choice) else { throw RecorderError.identityMismatch }
         try persist(next)
-        state = .ended
+        // Recovery can complete a recording it never saw running.
+        if !lifecycle.apply(.sessionEnded) { adoptLifecycle(.ended, choice: choice) }
         message = choice == .save && (routeWriteFailed || distanceWriteFailed || cyclingMetricsWriteFailed)
             ? "Workout saved, but some GPS data could not be written. Review the ride in Apple Health."
             : nil
         publish()
+    }
+
+    /// Applies a rider request or a HealthKit-confirmed change to the shared
+    /// reducer. A refused event leaves the state unchanged.
+    @discardableResult
+    private func applyLifecycle(_ event: WorkoutLifecycleEvent) -> Bool {
+        let applied = lifecycle.apply(event)
+#if DEBUG
+        if !applied {
+            NSLog("Bicino recorder ignored lifecycle event %@ in state %@",
+                  String(describing: event), state.rawValue)
+        }
+#endif
+        return applied
+    }
+
+    /// HealthKit confirmed a pause or resume. A session confirmed paused while
+    /// still starting passes through running, as the Watch's recovery does.
+    private func confirmNativeState(paused: Bool) -> Bool {
+        guard paused else { return applyLifecycle(.sessionRunning) }
+        if state == .starting { applyLifecycle(.sessionRunning) }
+        return applyLifecycle(.sessionPaused)
+    }
+
+    /// Recovery adopts the state that HealthKit or the durable record reports
+    /// without replaying the ride: rebuild the reducer from idle along the
+    /// legal path to that state, as the Watch does.
+    private func adoptLifecycle(_ target: WorkoutSessionStateV1,
+                                choice: WorkoutRecordingDisposition? = nil) {
+        var adopted = WorkoutLifecycleReducer()
+        let disposition = choice.map(Self.finishDisposition)
+        switch target {
+        case .idle:
+            break
+        case .starting:
+            adopted.apply(.requestStart)
+        case .running:
+            adopted.apply(.requestStart)
+            adopted.apply(.sessionRunning)
+        case .paused:
+            adopted.apply(.requestStart)
+            adopted.apply(.sessionRunning)
+            adopted.apply(.sessionPaused)
+        case .ending:
+            adopted.apply(.requestStart)
+            if let disposition { adopted.apply(.requestEnd(disposition)) }
+            else { adopted.apply(.sessionStopped) }
+        case .ended:
+            adopted.apply(.requestStart)
+            adopted.apply(.requestEnd(disposition ?? .save))
+            adopted.apply(.sessionEnded)
+        case .failed:
+            adopted.apply(.requestStart)
+            adopted.apply(.fail)
+        }
+        lifecycle = adopted
+    }
+
+    private static func finishDisposition(_ choice: WorkoutRecordingDisposition) -> WorkoutFinishDisposition {
+        switch choice {
+        case .save: .save
+        case .discard: .discard
+        }
     }
 
     func resetFinished() {
@@ -569,7 +638,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         timer?.cancel(); timer = nil
         controlTimeout?.cancel(); controlTimeout = nil
         session = nil; builder = nil; routeBuilder = nil
-        record = nil; state = .idle; message = nil
+        record = nil; lifecycle = WorkoutLifecycleReducer(); message = nil
         sequence = 0; generation = UUID(); token = UInt16.random(in: 1...UInt16.max)
         collectionStarted = false; collectionEnded = false; finishAttempted = false
         routeWriteFailed = false; distanceWriteFailed = false; recoveredRoute = false
@@ -906,7 +975,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         self.record = record
         startDate = record.startedAt
         endDate = Date()
-        state = .ending
+        adoptLifecycle(.ending, choice: record.finishChoice)
         collectionStarted = true
         collectionEnded = true
         store.beginLocalWorkout()
@@ -969,8 +1038,8 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
                     }
                 }
                 guard session === workoutSession,
-                      nativeTransitionGeneration == transitionGeneration else { return }
-                state = toState == .running ? .running : .paused
+                      nativeTransitionGeneration == transitionGeneration,
+                      confirmNativeState(paused: toState == .paused) else { return }
                 lastLocation = nil
                 elevationGain.breakSegment()
                 timestampGate?.resume(at: date)
@@ -987,8 +1056,11 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
                 store.confirmSessionState(state, at: date)
                 publish()
             case .stopped:
+                // HealthKit stops the session after End or on its own. A
+                // recording that already ended never re-enters finalization.
+                _ = lifecycle.apply(.sessionStopped)
+                guard state == .ending else { return }
                 endDate = workoutSession.endDate ?? date
-                state = .ending
                 lastLocation = nil
                 publish()
                 if record?.finishChoice != nil { beginFinalization() }
@@ -998,7 +1070,7 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
                 }
             case .ended:
                 if record?.phase != .finished, finalization == nil {
-                    state = .ending
+                    _ = lifecycle.apply(.sessionStopped)
                     message = "iPhone ended the session without a confirmed saved result. Check Health before recording again."
                     publish(error: .finalSummaryUnavailable)
                 }
@@ -1011,7 +1083,7 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
     nonisolated func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
         Task { @MainActor [weak self] in
             guard let self, session === workoutSession, record?.phase != .finished else { return }
-            state = .ending
+            _ = lifecycle.apply(.sessionStopped)
             message = "The iPhone workout was interrupted. Review this recording before starting another; Bicino has not saved or discarded it automatically."
             publish(error: Self.safeError(error))
         }
