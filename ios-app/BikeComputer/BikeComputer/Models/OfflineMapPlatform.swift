@@ -1465,6 +1465,11 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             if body.contains("\"stream_ready_pending\"") {
                 return "Another map is still waiting to finish installing on the Bike Computer. Restart the Bike Computer to finish it, then try again."
             }
+            // The previous map's cleanup keeps failing; each later upload
+            // retries it, and choosing that map again lets uploads resume.
+            if body.contains("\"stream_settle_previous\"") {
+                return "The Bike Computer is still cleaning up the map it used before. Try again shortly. If this keeps happening, choose that earlier map again in Settings → Saved Maps, then retry."
+            }
             if body.contains("\"activation_busy\"") || body.contains("\"operation_busy\"") {
                 return "The Bike Computer is still installing another map. Wait for it to finish, then try again."
             }
@@ -1832,6 +1837,8 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
             return "The Bike Computer could not save the map choice yet. It keeps the choice and retries; refresh to check."
         case "library_owner":
             return "The Bike Computer is busy with another map task and updates its saved maps when it finishes. If this does not clear, restart the Bike Computer."
+        case "stream_settle_previous":
+            return "The Bike Computer is still cleaning up the map it used before. Try again shortly, or choose that earlier map again first."
         default:
             return "Could not update the device maps. Refresh and try again."
         }
