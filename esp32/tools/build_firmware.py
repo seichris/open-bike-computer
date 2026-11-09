@@ -2193,6 +2193,14 @@ def main(
     raw_arguments = tuple(sys.argv[1:] if argv is None else argv)
     args = _parse_args(raw_arguments)
     try:
+        if args.environment == "WAVESHARE_AMOLED_175_SIMULATOR" and (
+            args.upload_only
+            or args.upload_port is not None
+            or args.device_serial is not None
+            or args.device_name is not None
+            or args.factory_output_dir is not None
+        ):
+            raise BuildError("the simulator profile is build-only")
         try:
             runtime = runtime_handoff(raw_arguments, args.project_dir.resolve())
         except FirmwareRuntimeError as error:

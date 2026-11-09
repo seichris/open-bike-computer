@@ -639,6 +639,10 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         networkStart_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
           preferredNetwork_ = {};
+#if defined(BICINO_SIMULATOR_MAP_LAN) && BICINO_SIMULATOR_MAP_LAN
+        if (requestedMode == "map")
+          preferredNetwork_ = {"Bicino-Sim", ""};
+#endif
         startedAp_ = false;
         startedStation_ = false;
         hotspotFallback_ = false;
@@ -868,6 +872,12 @@ bool HttpTransferServer::startNetwork() {
   }
 
   if (!lanReady) {
+#if defined(BICINO_SIMULATOR_MAP_LAN) && BICINO_SIMULATOR_MAP_LAN
+    if (mode == "map") {
+      setLastError("simulator_lan_unavailable", "The emulator's Bicino-Sim virtual network is unavailable");
+      return false;
+    }
+#endif
     std::string fallbackReason = requestedHotspotFallbackReason;
     if (preferLan) {
       const StationState stationStatus = networkOwner->stationState();
