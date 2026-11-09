@@ -684,7 +684,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: firmware-host-evidence
+          # Firmware core warm calls this workflow once per hardware family in
+          # one run, and artifact names must be unique within a run.
+          name: firmware-host-evidence${{ inputs.firmware_hardware && format('-{0}', inputs.firmware_hardware) || '' }}
           path: ${{ runner.temp }}/dev-checks/
           if-no-files-found: error
 

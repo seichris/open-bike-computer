@@ -640,9 +640,10 @@ selects:
 
 - CI minutes and disk scale with the number of variants, not with the code
   structure. Path-based routing keeps a pull request's matrix tied to what it
-  touched; the `Firmware core warm` workflow warms only the 1.75 family today
-  and should warm each supported family, or pull-request builds of other
-  families stay cold.
+  touched; the `Firmware core warm` workflow warms every family on each
+  `main` push that touches `esp32/` (the AMOLED pair, the GNSS variant and the
+  e-paper, two families at a time), so pull-request builds of each family can
+  restore their cores. A new variant joins that matrix through its CI selector.
 - Every variant needs its own hardware for its gates. A variant without a
   board on the bench cannot be supported, whatever the code allows.
 - The shared presentation contract is the one new abstraction with design
