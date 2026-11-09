@@ -561,9 +561,18 @@ void MapTransferHttpServer::executeLibraryTask() try {
   // Settle before Use moves the pointer and before Refresh lists the library,
   // so a finished map whose consumed marker failed is listed again and is
   // settled before a Use can push it out of the pointer. Outside the pointer
-  // its marker is pending work that refuses uploads and that boot selects.
-  if (result.ok && (selecting || action == "refresh"))
-    (void)installer_.settleSelectionStreamMaps();
+  // its marker is pending work that refuses uploads and that boot selects, so
+  // while the previous map's cleanup keeps failing, a switch moves nothing and
+  // fails with stream_settle_previous; the next attempt retries the cleanup.
+  // A failed selected map stays in the pointer as the previous map, and
+  // Refresh lists the library whatever the result. A selection retried after
+  // allocation failure may already have moved the pointer, so it still hands
+  // that map to the renderer.
+  if (result.ok && (selecting || action == "refresh")) {
+    auto settled = installer_.settleSelectionStreamMaps();
+    if (selecting && !librarySelectionStarted_ && settled.code == "stream_settle_previous")
+      result = std::move(settled);
+  }
   if (result.ok && selecting) {
     // Persist the chosen identity in RAM before any pointer write. A retry
     // after allocation failure must hand this exact map to the renderer,
@@ -1555,8 +1564,16 @@ bool MapTransferHttpServer::handleInstallStream(
   }
   // The selected and previous maps are installed even when their consumed
   // marker failed, so they must not count as another pending upload. The scan
-  // skips them either way, as boot recovery does, if this cleanup fails again.
-  (void)installer_.settleSelectionStreamMaps();
+  // skips both while they stay in the pointer, as boot recovery does. This
+  // upload's activation would push the previous map out, where an unsettled
+  // marker is pending work that refuses uploads and that boot selects again:
+  // refuse until its cleanup succeeds. A failed selected map stays protected
+  // as the previous map, so its cleanup failure does not refuse.
+  const InstallStatus settled = installer_.settleSelectionStreamMaps();
+  if (settled.code == "stream_settle_previous") {
+    sendError(client, 503, settled.code, settled.message);
+    return true;
+  }
   MapStreamInstallSnapshot recoverableStream;
   MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(recoverableStream);
   if (streamRecovery == MapStreamRecoveryResult::Invalid) {
@@ -2304,7 +2321,10 @@ void MapTransferHttpServer::resumePendingActivations() {
   }
   // A selected or previous map whose consumed marker failed needs cleanup,
   // not another activation with a full block scan. If this cleanup fails
-  // again, the scan skips both, as upload admission does.
+  // again, the scan skips both, as upload admission does. Boot has no request
+  // to refuse on stream_settle_previous, though: a pending upload resumed
+  // below still pushes an unsettled previous map out of the pointer, where
+  // its marker becomes pending work again.
   (void)installer_.settleSelectionStreamMaps();
   MapStreamInstallSnapshot streamSnapshot;
   const MapStreamRecoveryResult streamRecovery = readPendingStreamInstall(streamSnapshot);
