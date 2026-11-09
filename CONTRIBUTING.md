@@ -146,23 +146,33 @@ whose locked bytes have changed still stop before PlatformIO.
 
 ### Capture diagnostic logs
 
-For firmware boot or crash logs, identify the board's stable USB serial with
-`pio device list`, start a bounded capture, and reproduce the problem while it
-is running:
+For retained ride or firmware logs, connect the intended Bicino to the iPhone
+over Bluetooth and open **Settings → Developer Settings → Diagnostics**. With
+the app active and the ride stopped, tap **Download Device Logs**. Accept any
+device Wi-Fi join prompt on the unlocked iPhone. If the join times out, tap
+**Download Device Logs** again to resume the same collection. Once delivery
+completes, use **Export Selected Collection** and **Share Latest Export**.
+The app authenticates over Bluetooth and downloads the logs over Wi-Fi.
+
+Use **Export Recorder History** for iPhone events outside the selected
+collection. A trusted Mac can also copy the existing phone recorder with
+`ios-app/scripts/collect-ride-diagnostics.sh --device DEVICE_IDENTIFIER
+--bundle-id LetItRide.BikeComputer.dev`. For comparison across captures, bundle
+verification, and privacy guidance, see the
+[Bicino diagnostics skill](.agents/skills/bicino-diagnostics/SKILL.md).
+
+For a planned USB boot capture on a diagnostic build, get the board's stable
+USB serial from `pio device list`. Start the capture before reconnecting.
 
 ```sh
 cd esp32
 python3 tools/capture_boot.py \
-  --device-serial SERIAL_FROM_PIO_DEVICE_LIST --duration 90 --reset
+  --device-serial SERIAL_FROM_PIO_DEVICE_LIST --duration 90
 ```
 
-For a structured support bundle, open **Settings -> Diagnostics** in the iOS
-app, enable detailed capture only while reproducing the issue, optionally tap
-**Mark Issue Now**, then tap **Download Device Logs** and **Export Support
-Bundle**. A Mac can collect the same app container with
-`ios-app/scripts/collect-ride-diagnostics.sh --device DEVICE_IDENTIFIER
---bundle-id LetItRide.BikeComputer.dev`. Do not include Wi-Fi credentials,
-hotspot passwords, or temporary transfer URLs/tokens in reports.
+Reserve `--reset` for an intentional warm reset. Use the owner app to export
+production `boot/acceptance` evidence. Keep Wi-Fi credentials, hotspot passwords,
+and transfer tokens out of reports.
 
 ### Run the 1.75-inch firmware in the simulator
 

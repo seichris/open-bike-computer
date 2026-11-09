@@ -97,9 +97,17 @@ def failed_copy(value):
 if failed_copy(payload):
     raise SystemExit("devicectl reported a failed copy; inspect JSON output")
 
-root = destination / source
-if not root.is_dir():
-    raise SystemExit(f"diagnostics root was not copied: {root}")
+nested_root = destination / source
+# devicectl can copy the source directory's contents directly into the destination.
+flat_copy = any((destination / name).is_dir() for name in ("app", "device", "imported-device"))
+if nested_root.is_dir():
+    if flat_copy:
+        raise SystemExit("copied diagnostics contain both nested and flat roots")
+    root = nested_root
+elif flat_copy:
+    root = destination
+else:
+    raise SystemExit(f"diagnostics root was not copied: {nested_root}")
 
 legacy_device_root = root / "imported-device"
 canonical_device_root = root / "device"

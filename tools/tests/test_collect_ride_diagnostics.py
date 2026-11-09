@@ -18,6 +18,7 @@ class CollectRideDiagnosticsTests(unittest.TestCase):
         collector_root="app/123e4567-e89b-12d3-a456-426614174000",
         sidecar_name="manifest.json",
         event_name="events-000001.jsonl",
+        copy_prefix="Library/Application Support/BicinoDiagnostics/v1/",
     ):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -41,7 +42,7 @@ while [ \"$#\" -gt 0 ]; do
     *) shift ;;
   esac
 done
-target=\"$destination/Library/Application Support/BicinoDiagnostics/v1/${COLLECTOR_ROOT}\"
+target=\"$destination/${COLLECTOR_COPY_PREFIX}${COLLECTOR_ROOT}\"
 mkdir -p \"$target\"
 cp \"$COLLECTOR_FIXTURE\" \"$target/${COLLECTOR_EVENT_NAME}\"
 if [ -n \"${COLLECTOR_SIDECAR_FIXTURE:-}\" ]; then
@@ -55,6 +56,7 @@ printf '{}' > \"$json_output\"
         environment["PATH"] = f"{mock_bin}:{environment['PATH']}"
         environment["COLLECTOR_FIXTURE"] = str(fixture)
         environment["COLLECTOR_ROOT"] = collector_root
+        environment["COLLECTOR_COPY_PREFIX"] = copy_prefix
         environment["COLLECTOR_SIDECAR_NAME"] = sidecar_name
         environment["COLLECTOR_EVENT_NAME"] = event_name
         if sidecar is not None:
@@ -142,6 +144,20 @@ printf '{}' > \"$json_output\"
             self.valid_app_manifest(),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_validates_flat_devicectl_copy(self):
+        result, destination = self.run_collector(
+            self.valid_event(), self.valid_app_manifest(), copy_prefix="",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("validated 1 JSONL stream(s), 1 JSON sidecar(s)", result.stdout)
+        self.assertTrue((destination / "app").is_dir())
+
+        invalid = self.valid_event()
+        invalid["fields"] = {"latitude": 1.0}
+        result, _ = self.run_collector(invalid, copy_prefix="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown field", result.stderr)
 
     def test_rejects_noncanonical_collected_path(self):
         temporary = TemporaryDirectory()
