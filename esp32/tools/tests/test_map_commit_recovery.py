@@ -220,6 +220,79 @@ int main() {
                             str(path / "test.cpp"), "-o", str(path / "test")], check=True)
             subprocess.run([str(path / "test")], check=True)
 
+    def test_upload_admission_refuses_an_unsettled_previous_map(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        install = method(source, "handleInstallStream")
+        start = install.index("InstallStatus recovered = installer_.recoverInterruptedActivation();")
+        admission = install[start:install.index(
+            "if (!installer_.pruneObsoleteInstalledMaps(sessionId))", start)]
+        # Boot has no request to refuse: it settles what it can and goes on.
+        boot = method(source, "resumePendingActivations", returns="void ")
+        self.assertIn("(void)installer_.settleSelectionStreamMaps();", boot)
+        fixture = r'''
+#include <cassert>
+#include <string>
+struct InstallStatus { bool ok = false; std::string code, message; };
+enum class MapStreamRecoveryResult { None, Found, Invalid, Ambiguous };
+enum class MapStreamInstallState { Receiving, Ready };
+struct MapStreamInstallSnapshot {
+  MapStreamInstallState state = MapStreamInstallState::Receiving; std::string sessionId;
+};
+struct ReadyStreamMap { std::string operationID; };
+struct Request { std::string mapOperationID; };
+struct Client {};
+struct Installer {
+  InstallStatus settled{true, "stream_settle_none", ""};
+  InstallStatus recoverInterruptedActivation() const { return {true, "ok", ""}; }
+  InstallStatus settleSelectionStreamMaps() const { return settled; }
+  InstallStatus discardAllUnselectedStreamMaps() const { return {true, "ok", ""}; }
+  InstallStatus readReadyStreamMap(const std::string &, ReadyStreamMap &) const { return {true, "ok", ""}; }
+};
+struct Server {
+  Installer installer_;
+  int status = 0, scans = 0;
+  std::string code, message;
+  void sendError(Client &, int value, const std::string &errorCode, const std::string &errorMessage) {
+    status = value; code = errorCode; message = errorMessage;
+  }
+  MapStreamRecoveryResult readPendingStreamInstall(MapStreamInstallSnapshot &) {
+    ++scans; return MapStreamRecoveryResult::None;
+  }
+  void updateStreamInstallState(const MapStreamInstallSnapshot &, bool) {}
+  // The admission steps of handleInstallStream; true when they answered.
+  bool admit(const Request &request, Client &client, const std::string &sessionId) {
+''' + admission + r'''
+    return false;
+  }
+};
+int main() {
+  Request request; Client client;
+  // This upload's activation would push a previous map whose cleanup failed
+  // again out of the pointer, where its marker is pending work: refused
+  // before the pending scan.
+  Server refused;
+  refused.installer_.settled = {false, "stream_settle_previous", "previous map cleanup will retry"};
+  assert(refused.admit(request, client, "upload"));
+  assert(refused.status == 503 && refused.code == "stream_settle_previous" &&
+         refused.message == "previous map cleanup will retry" && refused.scans == 0);
+  // A failed selected map stays in the pointer as the previous map, and the
+  // other results leave nothing unsettled.
+  for (const std::string code : {"stream_settle_cleanup", "stream_installed",
+                                 "stream_settle_none", "stream_settle_deferred"}) {
+    Server admitted;
+    admitted.installer_.settled = {code != "stream_settle_cleanup", code, ""};
+    assert(!admitted.admit(request, client, "upload"));
+    assert(admitted.status == 0 && admitted.scans == 1);
+  }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="settle-admission-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
     def test_every_legacy_resume_reserves_bounded_retries(self):
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
         resume = method(source, "resumePendingStreamActivation")

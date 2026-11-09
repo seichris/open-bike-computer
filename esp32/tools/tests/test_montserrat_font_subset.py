@@ -45,8 +45,6 @@ LARGE_FONT_EXCLUSIONS = {
                              "BATTERY_3", "BATTERY_FULL", "CHARGE"},
     ("waitingScr.cpp", 48): {"BATTERY_EMPTY", "BATTERY_1", "BATTERY_2",
                              "BATTERY_3", "BATTERY_FULL", "CHARGE"},
-    # The cycle arrow is the 18 px label; 48 px is the guidance distance.
-    ("mainScr.cpp", 48): {"RIGHT"},
 }
 
 
