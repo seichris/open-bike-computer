@@ -79,7 +79,7 @@ GUI_SYMBOLS = (
     "BATTERY_EMPTY", "BATTERY_1", "BATTERY_2", "BATTERY_3", "BATTERY_FULL",
     "CHARGE",                       # notifyBar, waitingScr battery line
     "GPS", "WIFI", "SD_CARD",       # notifyBar, preConnectionIcons
-    "LEFT", "RIGHT", "FILE",        # gpx screens, button bar, main screen
+    "LEFT", "FILE",                 # gpx screens, button bar
     "PLAY", "PAUSE", "SHUFFLE",     # worldRadioScr controls, gpx list
     "LOOP", "OK", "WARNING",        # gpxDetailScr, preConnectionIcons, upgrade
     "SETTINGS", "PLUS", "MINUS",    # device and map settings screens
