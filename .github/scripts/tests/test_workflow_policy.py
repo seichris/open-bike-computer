@@ -1238,7 +1238,15 @@ class FirmwareCoreWarmPolicyTests(unittest.TestCase):
         self.assertIn('      - ".github/actions/firmware-build-cache/**"\n', push)
         self.assertIn("uses: ./.github/workflows/ci.yml", warm)
         self.assertIn("scope: firmware\n", warm)
-        self.assertIn("firmware_hardware: ${{ inputs.firmware_hardware || '175' }}", warm)
+        # Every family is warmed, not only the 1.75: "all" is the AMOLED pair.
+        self.assertIn("firmware_hardware: ${{ matrix.hardware }}", warm)
+        self.assertIn("'[\"all\",\"175_gnss\",\"397\"]'", warm)
+        self.assertIn("format('[\"{0}\"]', inputs.firmware_hardware)", warm)
+        self.assertIn("max-parallel: 2", warm)
+        self.assertIn("fail-fast: false", warm)
+        dispatch = mapping_block(warm, "workflow_dispatch", indent=2)
+        for family in ("every", '"175"', '"206"', '"397"', '"175_gnss"'):
+            self.assertIn(f"          - {family}\n", dispatch)
         permissions = mapping_block(warm, "permissions", indent=0)
         self.assertIn("  actions: read", permissions)
         self.assertIn("  contents: read", permissions)
