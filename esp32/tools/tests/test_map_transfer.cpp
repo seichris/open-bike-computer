@@ -35,6 +35,7 @@ void operator delete(void *memory, size_t) noexcept { std::free(memory); }
 #endif
 
 using map_transfer::ActivationBeginResult;
+using map_transfer::ActivationStatus;
 using map_transfer::ActiveMapSelection;
 using map_transfer::MapActivationState;
 using map_transfer::MapManifest;
@@ -652,6 +653,25 @@ static void testTargetThreeBuildingContractValidation() {
   assert(contentReceipt.empty());
 }
 
+static void testActivationStatusWireNames() {
+  // BLE status and HTTP JSON carry exactly these strings.
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Idle)) == "idle");
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Activating)) == "activating");
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Installed)) == "installed");
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Failed)) == "failed");
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Recovering)) == "recovering");
+  assert(std::string(map_transfer::activationStatusName(ActivationStatus::Prepared)) == "prepared");
+  MapActivationState state;
+  assert(state.status() == ActivationStatus::Idle && state.snapshot().status == "idle");
+  assert(state.begin("session") == ActivationBeginResult::Started);
+  assert(state.status() == ActivationStatus::Activating &&
+         state.snapshot().status == "activating");
+  state.finish(ActivationStatus::Prepared, "", "", "");
+  assert(state.snapshot().status == "prepared" && !state.snapshot().running);
+  // Prepared is not installed, so the same session can begin again.
+  assert(state.begin("session") == ActivationBeginResult::Started);
+}
+
 static void testActivationStateTracksAttemptsAndCompactStatus() {
   MapActivationState state;
   auto initial = state.snapshot();
@@ -676,7 +696,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(state.begin("session-2") == ActivationBeginResult::Busy);
   assert(state.snapshot().sequence == 1);
 
-  state.finish("failed", "map-1", "file_sha256",
+  state.finish(ActivationStatus::Failed, "map-1", "file_sha256",
                "staged map file sha256 mismatch: VECTMAP/map-1/123.fmb");
   auto failed = state.snapshot();
   assert(!failed.running);
@@ -702,7 +722,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(second.status == "activating");
   assert(second.errorCode.empty());
 
-  state.finish("installed", "map-1", "", "");
+  state.finish(ActivationStatus::Installed, "map-1", "", "");
   assert(state.begin("session-1") == ActivationBeginResult::AlreadyInstalled);
   assert(state.snapshot().sequence == 2);
   assert(state.begin("session-2") == ActivationBeginResult::Started);
@@ -720,7 +740,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(handedOffState.begin("stream-session", 3, 8) ==
          ActivationBeginResult::Started);
   assert(handedOffState.snapshot().sequence == 8);
-  handedOffState.finish("failed", "", "test", "test");
+  handedOffState.finish(ActivationStatus::Failed, "", "test", "test");
   assert(handedOffState.begin("stream-session", 3, 4) ==
          ActivationBeginResult::Started);
   assert(handedOffState.snapshot().sequence == 9);
@@ -728,10 +748,10 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   MapActivationState recovering;
   assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
   recovering.rememberOwnerRecovery("stream_active_write");
-  recovering.finish("recovering", "", "stream_transaction_recovery", "retry");
+  recovering.finish(ActivationStatus::Recovering, "", "stream_transaction_recovery", "retry");
   assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
   recovering.rememberOwnerRecovery("later_worker_error");
-  recovering.finish("failed", "map", "stream_finalization", "removed unselected staging");
+  recovering.finish(ActivationStatus::Failed, "map", "stream_finalization", "removed unselected staging");
   for (bool compactStatus : {false, true}) {
     const auto json = recovering.json(compactStatus);
     assert(json.find("\"ownerRecoveryCode\":\"stream_active_write\"") != std::string::npos);
@@ -742,7 +762,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(recovering.snapshot().terminalCode[0] == '\0');
   const std::string oversized(1000, 'x');
   recovering.rememberOwnerRecovery(oversized.c_str());
-  recovering.finish("failed", "map", oversized, "");
+  recovering.finish(ActivationStatus::Failed, "map", oversized, "");
   assert(std::strlen(recovering.snapshot().ownerRecoveryCode.data()) == 63);
   assert(std::strlen(recovering.snapshot().terminalCode.data()) == 63);
   assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
@@ -752,7 +772,7 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   // running under the previous session.
   MapActivationState unwound;
   assert(unwound.begin("previous", 3) == ActivationBeginResult::Started);
-  unwound.finish("installed", "map", "", "");
+  unwound.finish(ActivationStatus::Installed, "map", "", "");
   const std::string longSession(47, 's'); // One 48-byte block in libstdc++ and libc++.
   const unsigned rejected = rejectedAllocations;
   rejectAllocationSize = longSession.size() + 1;
@@ -2213,6 +2233,7 @@ int main() {
   testTargetTwoLabelContractValidation();
   testLabelContractScanReportsEveryBlock();
   testTargetThreeBuildingContractValidation();
+  testActivationStatusWireNames();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
 #if MAP_POIS_RUNTIME_ENABLED

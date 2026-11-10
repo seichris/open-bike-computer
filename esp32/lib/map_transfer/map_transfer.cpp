@@ -55,13 +55,14 @@ constexpr const char *kPendingStreamActivationFile =
     "/VECTMAP/.pending-stream-activation.json";
 constexpr const char *kInstalledManifestFile = ".manifest.json";
 constexpr const char *kInstalledReceiptFile = ".verified.sha256";
-constexpr const char *kStreamReadyFile = ".ready";
-constexpr const char *kStreamConsumedFile = ".activation-consumed";
+// Marker names come from map_root_state.hpp, which also decides which copies
+// of a marker count; readers use rootMarkers()/rootMarkerPresent().
+constexpr const char *kStreamConsumedFile = root_state::fileName(root_state::Marker::Consumed);
 constexpr const char *kStreamCheckpointFile = ".stream-checkpoint";
-constexpr const char *kStreamInstallingFile = ".installing";
+constexpr const char *kStreamInstallingFile = root_state::fileName(root_state::Marker::Installing);
 // Completed library evidence preserved while a same-content operation owns the
 // root between promotion and its terminal result.
-constexpr const char *kLibraryRetainedFile = ".library-retained";
+constexpr const char *kLibraryRetainedFile = root_state::fileName(root_state::Marker::LibraryRetained);
 constexpr const char *kManualSelectionIntentFile =
     "/VECTMAP/.library-selection-intent.json";
 constexpr const char *kRendererValidationReceiptPrefix = "renderer-v1:";
@@ -1139,6 +1140,11 @@ std::string sha256Hex(const uint8_t *data, size_t len) {
   return sha.finalHex();
 }
 
+void MapActivationState::setStatus(ActivationStatus status) {
+  status_ = status;
+  state_.status = activationStatusName(status);
+}
+
 ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
                                                 uint8_t totalSteps,
                                                 uint32_t minimumSequence) {
@@ -1146,7 +1152,7 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
     return state_.sessionId == sessionId ? ActivationBeginResult::AlreadyRunning
                                          : ActivationBeginResult::Busy;
   }
-  if (state_.status == "installed" && state_.sessionId == sessionId) {
+  if (status_ == ActivationStatus::Installed && state_.sessionId == sessionId) {
     return ActivationBeginResult::AlreadyInstalled;
   }
   // Copy before the first change. An allocation failure must not leave the
@@ -1165,7 +1171,7 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   state_.sequence = std::max<uint32_t>(nextSequence, minimumSequence);
   if (state_.sequence == 0)
     state_.sequence = 1;
-  state_.status = "activating";
+  setStatus(ActivationStatus::Activating);
   state_.sessionId = std::move(session);
   state_.mapId.clear();
   state_.step = 1;
@@ -1189,18 +1195,18 @@ void MapActivationState::updateProgress(const ActivationProgress &progress) {
   }
 }
 
-void MapActivationState::finish(std::string status, std::string mapId,
+void MapActivationState::finish(ActivationStatus status, std::string mapId,
               std::string errorCode, std::string errorMessage) {
   state_.running = false;
-  state_.status = std::move(status);
+  setStatus(status);
   state_.mapId = std::move(mapId);
-  if (state_.status == "installed") {
+  if (status == ActivationStatus::Installed) {
     state_.step = state_.totalSteps;
     state_.progress = 100;
   }
   state_.errorCode = std::move(errorCode);
   state_.errorMessage = std::move(errorMessage);
-  if (state_.status == "failed" || state_.status == "installed") {
+  if (status == ActivationStatus::Failed || status == ActivationStatus::Installed) {
     state_.terminalCode.fill(0);
     const auto &code = state_.errorCode.empty() ? state_.status : state_.errorCode;
     std::copy_n(code.data(), std::min(code.size(), state_.terminalCode.size() - 1),
@@ -2032,7 +2038,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     return fail("install_cleanup", "could not clear incomplete map version");
   if (onProgress)
     onProgress({4, 5, 0, manifest.files.size()});
-  if (!writeTextFileAtomic(transactionPath, transactionJson("publishing"))) {
+  if (!writeTextFileAtomic(transactionPath, transactionJson(root_state::journalPhaseName(root_state::JournalPhase::Publishing)))) {
     return fail("transaction", "could not start map activation transaction");
   }
   if (!publishStagedFiles(sessionId, manifest, destinationRoot, onProgress)) {
@@ -2050,7 +2056,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
     abandonNewRoot();
     return labelStatus;
   }
-  if (!writeTextFileAtomic(transactionPath, transactionJson("ready"))) {
+  if (!writeTextFileAtomic(transactionPath, transactionJson(root_state::journalPhaseName(root_state::JournalPhase::Ready)))) {
     abandonNewRoot();
     return fail("transaction", "could not prepare map activation switch");
   }
@@ -2079,7 +2085,7 @@ InstallStatus MapTransferInstaller::activateStagedMap(
   }
   if (onProgress)
     onProgress({5, 5, 1, 1});
-  if (!writeTextFileAtomic(transactionPath, transactionJson("committed"))) {
+  if (!writeTextFileAtomic(transactionPath, transactionJson(root_state::journalPhaseName(root_state::JournalPhase::Committed)))) {
     return {true, "cleanup_pending",
             "map selected; activation journal cleanup will retry"};
   }
@@ -2147,9 +2153,12 @@ InstallStatus MapTransferInstaller::readStreamMapMetadata(
   };
   std::string value, selectedMarker;
   bool markerFound = false;
-  const bool operationReady = prepared || fileExists(joinPath(root, ".operation-ready")) ||
-                              fileExists(joinPath(root, ".operation-ready.bak"));
-  for (const std::string &path : candidates(joinPath(root, prepared ? ".operation-prepared" : (operationReady ? ".operation-ready" : kStreamReadyFile)))) {
+  const bool operationReady =
+      prepared || rootMarkerPresent(root, root_state::Marker::OperationReady);
+  for (const std::string &path : candidates(root_state::markerPath(root,
+           prepared ? root_state::Marker::OperationPrepared
+                    : (operationReady ? root_state::Marker::OperationReady
+                                      : root_state::Marker::Ready)))) {
     ReadyStreamMap candidate;
     if (readTextFile(path, value, 2048) && parseMarker(value, candidate) &&
         (!operationReady || (candidate.operationID.size() == 32 &&
@@ -2256,7 +2265,8 @@ InstallStatus MapTransferInstaller::promotePreparedOperation(
   // reactivation restores the version instead of discarding it as staging.
   for (const auto &suffix : {"", ".bak"}) {
     std::string consumed;
-    if (fileExists(joinPath(root, kLibraryRetainedFile)) ||
+    // A live check, not a view: this loop writes the marker it checks.
+    if (rootMarkerPresent(root, root_state::Marker::LibraryRetained) ||
         !readTextFile(joinPath(root, kStreamConsumedFile) + suffix, consumed, 2048) ||
         jsonStringValue(consumed, "sessionId") != sessionId ||
         jsonStringValue(consumed, "mapId") != metadata.mapId ||
@@ -2289,13 +2299,13 @@ InstallStatus MapTransferInstaller::cancelOperationStaging(
   if (!cancelled) return fail("operation_not_cancelled","cancellation must persist before staging cleanup");
   ReadyStreamMap prepared;
   const auto root=joinPath(storageRoot_,std::string("/VECTMAP/.maps/")+sessionId);
-  const bool marker=fileExists(joinPath(root,".operation-prepared")) || fileExists(joinPath(root,".operation-prepared.bak"));
+  auto rootState=rootMarkers(root);
+  const bool marker=rootState.has(root_state::Marker::OperationPrepared);
   if (marker && (!readPreparedOperation(sessionId,prepared).ok || prepared.operationID!=operationID))
     return fail("operation_cleanup_conflict","prepared metadata belongs to another attempt");
   ActiveMapSelection active; const auto selected=readActiveMap(active);
   const auto relative=std::string("/VECTMAP/.maps/")+sessionId;
-  const bool completedLibraryMap = fileExists(joinPath(root, kStreamConsumedFile)) ||
-      fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  const bool completedLibraryMap = rootState.has(root_state::Marker::Consumed);
   if (completedLibraryMap || (selected.ok && (active.root==relative || active.previousRoot==relative))) {
     // Preparing/retransmitting identical bytes does not own the pre-existing
     // selected or rollback map. Cancel only this attempt's separate envelope.
@@ -2514,8 +2524,7 @@ bool MapTransferInstaller::restoreRetainedLibraryVersion(
 
 bool MapTransferInstaller::preparationBlocksActivation(const ReadyStreamMap &ready) const {
   const auto root=joinPath(storageRoot_,ready.root);
-  if (!fileExists(joinPath(root,".operation-prepared")) &&
-      !fileExists(joinPath(root,".operation-prepared.bak"))) return false;
+  if (!rootMarkerPresent(root, root_state::Marker::OperationPrepared)) return false;
   ReadyStreamMap prepared;
   // A new preparation must not inherit an older legacy or consumed operation's
   // ready authority merely because signed content reuses the same root/session.
@@ -2613,7 +2622,8 @@ InstallStatus MapTransferInstaller::selectReadyStreamMap(
                     "could not refresh active map target metadata");
     }
     if (!ready.operationID.empty()) {
-      const std::string transaction = streamActivationTransaction(ready, selectedTarget, previous, "ready", true);
+      const std::string transaction = streamActivationTransaction(
+          ready, selectedTarget, previous, root_state::journalPhaseName(root_state::JournalPhase::Ready), true);
       if (!writeTextFileAtomic(joinPath(storageRoot_,kActivationTransactionFile),transaction))
         return fail("operation_transaction","could not retain renderer recovery evidence");
       return {true,"operation_selected_pending_renderer",""};
@@ -2649,7 +2659,7 @@ InstallStatus MapTransferInstaller::selectReadyStreamMap(
   const auto transaction = [&](const char *phase) {
     return streamActivationTransaction(ready, selectedTarget, previous, phase);
   };
-  if (!writeTextFileAtomic(transactionPath, transaction("ready")))
+  if (!writeTextFileAtomic(transactionPath, transaction(root_state::journalPhaseName(root_state::JournalPhase::Ready))))
     return fail("stream_transaction_write",
                 "could not start stream activation transaction");
   if (onProgress)
@@ -2680,7 +2690,7 @@ InstallStatus MapTransferInstaller::selectReadyStreamMap(
   if (!markStreamActivationConsumed(ready))
     return {true, "cleanup_pending",
             "stream map selected; consumed marker will retry"};
-  if (!writeTextFileAtomic(transactionPath, transaction("committed")))
+  if (!writeTextFileAtomic(transactionPath, transaction(root_state::journalPhaseName(root_state::JournalPhase::Committed))))
     return {true, "cleanup_pending",
             "stream map selected; journal cleanup will retry"};
   const std::string root = joinPath(storageRoot_, ready.root);
@@ -2735,15 +2745,13 @@ InstallStatus MapTransferInstaller::settleSelectionStreamMaps() const try {
     if (!safeId(sessionId) || selectedRoot != std::string("/VECTMAP/.maps/") + sessionId)
       continue;
     const std::string root = joinPath(storageRoot_, selectedRoot);
-    const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
-                          fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+    auto rootState = rootMarkers(root);
     const bool pendingNamesRoot = !pending.empty() && jsonStringValue(pending, "sessionId") == sessionId;
     // Checked before the ready marker, whose read hashes the whole manifest:
     // Saved Maps settles too, and a settled root needs no reads beyond these.
-    if ((consumed && !pendingNamesRoot) ||
-        (!fileExists(joinPath(root, kStreamReadyFile)) &&
-         !fileExists(joinPath(root, kStreamReadyFile) + ".bak")))
+    if (!rootState.unsettledLegacyUpload(pendingNamesRoot))
       continue;
+    const bool consumed = rootState.has(root_state::Marker::Consumed);
     if (!readReadyStreamMap(sessionId, ready).ok || !ready.operationID.empty() ||
         ready.root != selectedRoot ||
         ready.mapId != (previous ? active.previousMapId : active.mapId) ||
@@ -2793,8 +2801,7 @@ InstallStatus MapTransferInstaller::resolvePendingStreamActivation(
       if (!readReadyStreamMap(name, ready).ok || preparationBlocksActivation(ready))
         continue;
       const std::string readyRoot = joinPath(mapsRoot, name);
-      if (fileExists(joinPath(readyRoot, kStreamConsumedFile)) ||
-          fileExists(joinPath(readyRoot, kStreamConsumedFile) + ".bak")) {
+      if (rootMarkerPresent(readyRoot, root_state::Marker::Consumed)) {
         continue;
       }
       if (activeStatus.ok && active.root == ready.root &&
@@ -2844,7 +2851,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
     std::string previousRoot;
     std::string previousManifestReceipt;
     std::string previousSignedManifestReceipt;
-    std::string phase;
+    root_state::JournalPhase phase = root_state::JournalPhase::Invalid;
     std::string transactionPath;
     std::string installedRoot;
     MapTargetMetadata transactionTarget;
@@ -2879,7 +2886,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   workspace->previousTarget = targetMetadataFromJson(
       transaction, "previous", &previousTargetParsed);
   const auto &previousTarget = workspace->previousTarget;
-  workspace->phase = jsonStringValue(transaction, "phase");
+  workspace->phase = root_state::parseJournalPhase(jsonStringValue(transaction, "phase"));
   const auto &phase = workspace->phase;
   workspace->transactionPath = joinPath(storageRoot_, kActivationTransactionFile);
   const auto &transactionPath = workspace->transactionPath;
@@ -2902,7 +2909,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
         !targetMetadataEmpty(previousTarget) ||
         !previousManifestReceipt.empty() ||
         !previousSignedManifestReceipt.empty())) ||
-      (phase != "ready" && phase != "committed")) {
+      !root_state::streamJournalAccepts(phase)) {
     return fail("stream_transaction_invalid",
                 "stream activation transaction is invalid");
   }
@@ -3261,7 +3268,7 @@ InstallStatus MapTransferInstaller::recoverLegacyActivationTransaction(
   bool previousTargetParsed = false;
   const MapTargetMetadata previousTarget = targetMetadataFromJson(
       transaction, "previous", &previousTargetParsed);
-  const std::string phase = jsonStringValue(transaction, "phase");
+  const auto phase = root_state::parseJournalPhase(jsonStringValue(transaction, "phase"));
   if (!safeId(sessionId) || !safeMapId(mapId) || !safeActiveRoot(root) ||
       !transactionTargetParsed || !targetMetadataValid(transactionTarget) ||
       (!previousRoot.empty() &&
@@ -3275,7 +3282,7 @@ InstallStatus MapTransferInstaller::recoverLegacyActivationTransaction(
         (!previousTargetParsed || !targetMetadataValid(previousTarget)))) ||
       (previousRoot.empty() &&
        (!previousTargetParsed || !targetMetadataEmpty(previousTarget))) ||
-      (phase != "publishing" && phase != "ready" && phase != "committed")) {
+      !root_state::archiveJournalAccepts(phase)) {
     const auto clearInvalidTransaction = [&]() {
       return removeTree(transactionPath) &&
              removeTree(transactionPath + ".bak") &&
@@ -3489,8 +3496,8 @@ InstallStatus MapTransferInstaller::discardIncompleteStreamMap(
   if (!active.ok && active.code != "active_missing")
     return active;
   const std::string root = joinPath(storageRoot_, relativeRoot);
-  if (fileExists(joinPath(root, kStreamReadyFile)) ||
-      fileExists(joinPath(root, kStreamReadyFile) + ".bak")) {
+  // Only the legacy `.ready` marker refuses here, as before.
+  if (rootMarkerPresent(root, root_state::Marker::Ready)) {
     return fail("stream_discard_ready",
                 "cannot discard a ready stream map as incomplete");
   }
@@ -3528,14 +3535,14 @@ InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
     }
   }
   const auto completedRoot = joinPath(storageRoot_, relativeRoot);
-  if (fileExists(joinPath(completedRoot, kStreamConsumedFile)) ||
-      fileExists(joinPath(completedRoot, kStreamConsumedFile) + ".bak")) {
+  auto completedState = rootMarkers(completedRoot);
+  if (completedState.has(root_state::Marker::Consumed)) {
     return clearPendingStreamActivation(sessionId)
         ? InstallStatus{true, "library_kept", ""}
         : fail("stream_discard_cleanup", "could not clear abandoned activation metadata");
   }
   // A failed same-content reactivation keeps the completed version it reused.
-  if (fileExists(joinPath(completedRoot, kLibraryRetainedFile))) {
+  if (completedState.has(root_state::Marker::LibraryRetained)) {
     if (!restoreRetainedLibraryVersion(sessionId))
       return fail("stream_discard_cleanup", "completed library version restoration must retry");
     return clearPendingStreamActivation(sessionId)
@@ -3558,9 +3565,9 @@ InstallStatus MapTransferInstaller::keepSelectedStreamMap(
     return fail("stream_discard_session", "stream session is invalid");
   // The same completed-version branches as discard, minus the deletion.
   const auto root = joinPath(storageRoot_, std::string("/VECTMAP/.maps/") + sessionId);
-  const bool consumed = fileExists(joinPath(root, kStreamConsumedFile)) ||
-                        fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
-  if (!consumed && (!fileExists(joinPath(root, kLibraryRetainedFile)) ||
+  auto rootState = rootMarkers(root);
+  const bool consumed = rootState.has(root_state::Marker::Consumed);
+  if (!consumed && (!rootState.has(root_state::Marker::LibraryRetained) ||
                     !restoreRetainedLibraryVersion(sessionId)))
     return fail("stream_keep_unverified", "selected map has no completed version to keep");
   return clearPendingStreamActivation(sessionId)
@@ -3597,15 +3604,7 @@ InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
         continue;
       }
       const std::string root = joinPath(mapsRoot, sessionId);
-      if (fileExists(joinPath(root, kStreamConsumedFile)) ||
-          fileExists(joinPath(root, kStreamConsumedFile) + ".bak") ||
-          fileExists(joinPath(root, kLibraryRetainedFile))) continue;
-      const bool streamState =
-          fileExists(joinPath(root, kStreamReadyFile)) ||
-          fileExists(joinPath(root, kStreamReadyFile) + ".bak") ||
-          fileExists(joinPath(root, kStreamInstallingFile)) ||
-          fileExists(joinPath(root, kStreamInstallingFile) + ".bak");
-      if (streamState && !removeTree(root))
+      if (rootMarkers(root).discardableLegacyStreamState() && !removeTree(root))
         cleaned = false;
     }
     ::closedir(directory);
@@ -3886,16 +3885,13 @@ InstallStatus MapTransferInstaller::readInstalledMap(
     return fail("library_missing", "installed map is missing");
   // Prepared/uncommitted content must never become selectable through the
   // library, even if it shares a session with a previously consumed stream.
-  if (fileExists(joinPath(path, ".operation-prepared")) ||
-      fileExists(joinPath(path, ".operation-prepared.bak")))
+  auto rootState = rootMarkers(path);
+  if (rootState.has(root_state::Marker::OperationPrepared))
     return fail("library_uncommitted", "map installation is not complete");
   auto &manifest = workspace->manifest;
   if (!readInstalledManifest(root, manifest).ok)
     return fail("library_manifest", "installed map metadata is invalid");
-  const bool stream = fileExists(joinPath(path, kStreamReadyFile)) ||
-      fileExists(joinPath(path, ".operation-ready")) ||
-      fileExists(joinPath(path, kStreamReadyFile) + ".bak") ||
-      fileExists(joinPath(path, ".operation-ready.bak"));
+  const bool stream = rootState.uploadFinished();
   auto &receipt = workspace->receipt; auto &signedReceipt = workspace->signedReceipt;
   if (stream) {
     auto &ready = workspace->ready;
@@ -4167,16 +4163,11 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     }
     const std::string candidate = std::string("/VECTMAP/.maps/") + name;
     const std::string candidatePath = joinPath(root, name);
-    const bool consumed =
-        fileExists(joinPath(candidatePath, kStreamConsumedFile)) ||
-        fileExists(joinPath(candidatePath, kStreamConsumedFile) + ".bak");
+    auto rootState = rootMarkers(candidatePath);
+    const bool consumed = rootState.has(root_state::Marker::Consumed);
     ReadyStreamMap recoverableReady;
     const bool freshReady =
-        !consumed &&
-        (fileExists(joinPath(candidatePath, kStreamReadyFile)) ||
-         fileExists(joinPath(candidatePath, kStreamReadyFile) + ".bak") ||
-         fileExists(joinPath(candidatePath, ".operation-ready")) ||
-         fileExists(joinPath(candidatePath, ".operation-ready.bak"))) &&
+        !consumed && rootState.uploadFinished() &&
         readReadyStreamMap(name, recoverableReady).ok;
     if (candidate == selected.root || candidate == selected.previousRoot ||
         candidate == pendingRoot || candidate == transactionRoot ||
@@ -4184,13 +4175,9 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
         freshReady ||
         // Completed maps form the persistent SD library. Cleanup may reclaim
         // abandoned staging, never another city that the rider installed.
-        consumed || fileExists(joinPath(candidatePath, kLibraryRetainedFile)) ||
-        fileExists(joinPath(candidatePath, kInstalledReceiptFile)) ||
-        ((keepInstallingSessionId.empty() ||
-          name == keepInstallingSessionId) &&
-         (fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||
-          fileExists(joinPath(candidatePath, kStreamInstallingFile) +
-                     ".bak")))) {
+        rootState.pruneKeepsByMarkers(keepInstallingSessionId.empty() ||
+                                      name == keepInstallingSessionId) ||
+        fileExists(joinPath(candidatePath, kInstalledReceiptFile))) {
       continue;
     }
     // Only delete directories that belong to our map-session namespace.
@@ -5136,17 +5123,11 @@ bool MapTransferInstaller::activeRootExists(const std::string &root) const {
     return false;
   if (root == "/VECTMAP")
     return true;
-  const bool installing =
-      fileExists(joinPath(path, kStreamInstallingFile)) ||
-      fileExists(joinPath(path, kStreamInstallingFile) + ".bak");
-  const bool readyMarker = fileExists(joinPath(path, ".operation-ready")) ||
-      fileExists(joinPath(path, ".operation-ready.bak")) ||
-      fileExists(joinPath(path, kStreamReadyFile)) ||
-      fileExists(joinPath(path, kStreamReadyFile) + ".bak");
-  if (installing && !readyMarker) {
+  auto rootState = rootMarkers(path);
+  if (rootState.unusableActiveRoot()) {
     return false;
   }
-  if (readyMarker) {
+  if (rootState.uploadFinished()) {
     const std::string prefix = "/VECTMAP/.maps/";
     ReadyStreamMap ready;
     return readReadyStreamMap(root.substr(prefix.size()), ready).ok;
