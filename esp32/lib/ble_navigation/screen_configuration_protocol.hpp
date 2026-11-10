@@ -826,6 +826,97 @@ inline bool decodeAcknowledgement(
   return true;
 }
 
+// Screen activation shows a configured screen now; it never edits the
+// document. Request: "SCSW" | RequestID | Action | TypeCount | Types...
+// Result: "SCSR" | RequestID | Result | ActiveInstanceID | ActiveType.
+using ScreenActivationAction = ride_ble_protocol_generated::ScreenActivationAction;
+using ScreenActivationResult = ride_ble_protocol_generated::ScreenActivationResult;
+constexpr std::size_t MAX_ACTIVATION_TYPES =
+    ride_ble_protocol_generated::MAXIMUM_SCREEN_ACTIVATION_TYPES;
+constexpr std::size_t ACTIVATION_HEADER_BYTES = 10;
+constexpr std::size_t ACTIVATION_RESULT_BYTES = 14;
+constexpr uint8_t ACTIVATION_NO_SCREEN_TYPE = 0xFF;
+
+struct ActivationRequest {
+  uint32_t requestID = 0;
+  ScreenActivationAction action = ScreenActivationAction::Next;
+  uint8_t typeCount = 0;
+  std::array<ScreenType, MAX_ACTIVATION_TYPES> types{};
+};
+
+enum class ActivationDecode : uint8_t { NotActivation, Malformed, Valid };
+
+inline std::size_t encodeActivationRequest(const ActivationRequest &request,
+                                           uint8_t *output,
+                                           std::size_t capacity) {
+  const bool showsTypes = request.action == ScreenActivationAction::ShowTypes;
+  const std::size_t length = ACTIVATION_HEADER_BYTES + request.typeCount;
+  if (request.requestID == 0 || output == nullptr || capacity < length ||
+      request.typeCount > MAX_ACTIVATION_TYPES ||
+      showsTypes != (request.typeCount > 0) ||
+      static_cast<uint8_t>(request.action) >
+          static_cast<uint8_t>(ScreenActivationAction::Previous))
+    return 0;
+  std::memcpy(output, ride_ble_protocol_generated::SCREEN_ACTIVATION_MAGIC, 4);
+  wire_bytes::writeU32(output + 4, request.requestID);
+  output[8] = static_cast<uint8_t>(request.action);
+  output[9] = request.typeCount;
+  for (uint8_t index = 0; index < request.typeCount; ++index)
+    output[ACTIVATION_HEADER_BYTES + index] =
+        static_cast<uint8_t>(request.types[index]);
+  return length;
+}
+
+// Malformed still reports the request ID when one could be read, so the
+// sender receives a definite rejection instead of waiting for a timeout.
+inline ActivationDecode decodeActivationRequest(const uint8_t *data,
+                                                std::size_t length,
+                                                ActivationRequest &request) {
+  request = {};
+  if (!hasMagic(data, length,
+                ride_ble_protocol_generated::SCREEN_ACTIVATION_MAGIC))
+    return ActivationDecode::NotActivation;
+  if (length < ACTIVATION_HEADER_BYTES)
+    return ActivationDecode::Malformed;
+  request.requestID = wire_bytes::readU32(data + 4);
+  const uint8_t rawAction = data[8];
+  const uint8_t typeCount = data[9];
+  const bool knownAction =
+      rawAction <= static_cast<uint8_t>(ScreenActivationAction::Previous);
+  const bool showsTypes =
+      rawAction == static_cast<uint8_t>(ScreenActivationAction::ShowTypes);
+  if (request.requestID == 0 || !knownAction ||
+      typeCount > MAX_ACTIVATION_TYPES || showsTypes != (typeCount > 0) ||
+      length != ACTIVATION_HEADER_BYTES + typeCount)
+    return ActivationDecode::Malformed;
+  for (uint8_t index = 0; index < typeCount; ++index) {
+    const uint8_t rawType = data[ACTIVATION_HEADER_BYTES + index];
+    if (rawType > static_cast<uint8_t>(ScreenType::Nearby))
+      return ActivationDecode::Malformed;
+    request.types[index] = static_cast<ScreenType>(rawType);
+  }
+  request.action = static_cast<ScreenActivationAction>(rawAction);
+  request.typeCount = typeCount;
+  return ActivationDecode::Valid;
+}
+
+inline std::size_t encodeActivationResult(uint32_t requestID,
+                                          ScreenActivationResult result,
+                                          uint32_t activeInstanceID,
+                                          uint8_t activeType, uint8_t *output,
+                                          std::size_t capacity) {
+  if (requestID == 0 || output == nullptr ||
+      capacity < ACTIVATION_RESULT_BYTES)
+    return 0;
+  std::memcpy(output,
+              ride_ble_protocol_generated::SCREEN_ACTIVATION_RESULT_MAGIC, 4);
+  wire_bytes::writeU32(output + 4, requestID);
+  output[8] = static_cast<uint8_t>(result);
+  wire_bytes::writeU32(output + 9, activeInstanceID);
+  output[13] = activeType;
+  return ACTIVATION_RESULT_BYTES;
+}
+
 class UploadReassembler {
 public:
   ChunkResult consume(const uint8_t *frame, std::size_t length,

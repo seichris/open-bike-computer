@@ -76,6 +76,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     private var workoutLiveActivityController: AnyObject?
     private var workoutLiveActivityCommandRouter: AnyObject?
     private var workoutLiveActivityIntentDispatcher: AnyObject?
+    private var bicinoSiriActions: AnyObject?
     private var cancellables = Set<AnyCancellable>()
     lazy var coordinator = BikeComputerCoordinator(
         destinationStore: destinationStore,
@@ -390,6 +391,44 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             workoutLiveActivityCommandRouter = commandRouter
             workoutLiveActivityIntentDispatcher = dispatcher
             workoutLiveActivityController = controller
+
+            let routePlaceSearch = RoutePlaceSearch()
+            let siriActions = BicinoSiriActions(
+                activateScreen: { [weak self] request in
+                    guard let self else { return .notConnected }
+                    let bleManager = coordinator.bleManager
+                    // Siri may have just launched the app; give a restored
+                    // link a moment to authenticate and report capabilities.
+                    let deadline = Date().addingTimeInterval(5)
+                    while !(bleManager.isNavigationReady &&
+                            bleManager.hasReceivedDeviceCapabilities),
+                          Date() < deadline {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                    return await bleManager.activateDeviceScreen(request)
+                },
+                findPlaces: { [weak self] kind in
+                    guard let self else { return .unavailable }
+                    let route = coordinator.routeAheadForPlaceSearch()
+                    if route == nil,
+                       !RoutePlaceCorridor.isUsable(locationManager.currentLocation) {
+                        // A suspended app can hold an old fix; ask for one.
+                        locationManager.requestLocation()
+                        let deadline = Date().addingTimeInterval(5)
+                        while !RoutePlaceCorridor.isUsable(locationManager.currentLocation),
+                              Date() < deadline {
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                        }
+                    }
+                    return await routePlaceSearch.find(
+                        kind,
+                        route: route,
+                        location: locationManager.currentLocation
+                    )
+                }
+            )
+            AppDependencyManager.shared.add(dependency: siriActions)
+            bicinoSiriActions = siriActions
         }
         
         return true

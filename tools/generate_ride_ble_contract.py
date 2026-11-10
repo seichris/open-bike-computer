@@ -133,6 +133,21 @@ def load_contract() -> dict:
         raise SystemExit("screen configuration document limit must be 1...4096")
     if sorted(screen_configuration["results"].values()) != list(range(7)):
         raise SystemExit("screen configuration results must be stable values 0...6")
+    magic_keys = ("request_magic", "upload_magic", "download_magic", "ack_magic",
+                  "activation_magic", "activation_result_magic")
+    for key in magic_keys[4:]:
+        if len(screen_configuration[key].encode("ascii")) != 4:
+            raise SystemExit(f"screen_configuration.{key} must be four ASCII bytes")
+    if len({screen_configuration[key] for key in magic_keys}) != len(magic_keys):
+        raise SystemExit("screen configuration frames need distinct magics")
+    if not 1 <= screen_configuration["maximum_activation_types"] <= len(screen_types):
+        raise SystemExit("screen activation may name at most every screen type")
+    if sorted(screen_configuration["activation_actions"].values()) != list(range(3)):
+        raise SystemExit("screen activation actions must be stable values 0...2")
+    if sorted(screen_configuration["activation_results"].values()) != list(range(6)):
+        raise SystemExit("screen activation results must be stable values 0...5")
+    if "screen_activation_v1" not in contract["capabilities"]["extended_features"]:
+        raise SystemExit("screen activation needs its extended capability bit")
     command = bytes.fromhex(delivery["golden"]["command_hex"])
     acknowledgement = bytes.fromhex(delivery["golden"]["ack_hex"])
     if len(command) < delivery["command_header_bytes"]:
@@ -231,6 +246,9 @@ def render_swift(contract: dict) -> str:
             f'    static let screenConfigurationUploadMagic = "{screen_configuration["upload_magic"]}"',
             f'    static let screenConfigurationDownloadMagic = "{screen_configuration["download_magic"]}"',
             f'    static let screenConfigurationAcknowledgementMagic = "{screen_configuration["ack_magic"]}"',
+            f'    static let screenActivationMagic = "{screen_configuration["activation_magic"]}"',
+            f'    static let screenActivationResultMagic = "{screen_configuration["activation_result_magic"]}"',
+            f"    static let maximumScreenActivationTypes = {screen_configuration['maximum_activation_types']}",
         ]
     )
     requests = contract["device_requests"]
@@ -269,6 +287,12 @@ def render_swift(contract: dict) -> str:
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", "", "enum RideBLEScreenConfigurationResultV1: UInt8, Equatable, Sendable {"])
     for name, value in screen_configuration["results"].items():
+        lines.append(f"    case {camel(name)} = {value}")
+    lines.extend(["}", "", "nonisolated enum RideBLEScreenActivationActionV1: UInt8, Equatable, Sendable {"])
+    for name, value in screen_configuration["activation_actions"].items():
+        lines.append(f"    case {camel(name)} = {value}")
+    lines.extend(["}", "", "nonisolated enum RideBLEScreenActivationResultV1: UInt8, Equatable, Sendable {"])
+    for name, value in screen_configuration["activation_results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
     # The legacy screen-settings channel carries the released screens through
@@ -376,6 +400,9 @@ def render_cpp(contract: dict) -> str:
             f'inline constexpr char SCREEN_CONFIGURATION_UPLOAD_MAGIC[] = "{screen_configuration["upload_magic"]}";',
             f'inline constexpr char SCREEN_CONFIGURATION_DOWNLOAD_MAGIC[] = "{screen_configuration["download_magic"]}";',
             f'inline constexpr char SCREEN_CONFIGURATION_ACK_MAGIC[] = "{screen_configuration["ack_magic"]}";',
+            f'inline constexpr char SCREEN_ACTIVATION_MAGIC[] = "{screen_configuration["activation_magic"]}";',
+            f'inline constexpr char SCREEN_ACTIVATION_RESULT_MAGIC[] = "{screen_configuration["activation_result_magic"]}";',
+            f"inline constexpr std::size_t MAXIMUM_SCREEN_ACTIVATION_TYPES = {screen_configuration['maximum_activation_types']};",
         ]
     )
     lines.extend(
@@ -408,6 +435,12 @@ def render_cpp(contract: dict) -> str:
         lines.append(f"  {pascal(name)} = {value},")
     lines.extend(["};", "", "enum class ScreenConfigurationResult : uint8_t {"])
     for name, value in screen_configuration["results"].items():
+        lines.append(f"  {pascal(name)} = {value},")
+    lines.extend(["};", "", "enum class ScreenActivationAction : uint8_t {"])
+    for name, value in screen_configuration["activation_actions"].items():
+        lines.append(f"  {pascal(name)} = {value},")
+    lines.extend(["};", "", "enum class ScreenActivationResult : uint8_t {"])
+    for name, value in screen_configuration["activation_results"].items():
         lines.append(f"  {pascal(name)} = {value},")
     lines.extend(["};", "", "enum class ScreenType : uint8_t {"])
     for name, value in contract["screen_types"].items():

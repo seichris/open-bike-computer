@@ -4,7 +4,15 @@
     "online-poi": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Managers/OnlinePOISearchSession.swift",
-        "ios-app/BikeComputerTests/OnlinePOISearchTests.swift"
+        "ios-app/BikeComputer/BikeComputer/Managers/RoutePlaceSearch.swift",
+        "ios-app/BikeComputer/RideShared/MainlandChinaRegion.swift",
+        "ios-app/BikeComputer/RideShared/MainlandChinaRegion.generated.swift",
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputerTests/OnlinePOISearchTests.swift",
+        "ios-app/BikeComputerTests/RoutePlaceSearchTests.swift"
       ]
     },
     "topography-native-reader": {
@@ -56,6 +64,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/BicinoDeviceIntroductionPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Models/BicinoURLSchemeConfig.swift",
         "ios-app/BikeComputerTests/DeviceScreenConfigurationTests.swift",
+        "ios-app/BikeComputerTests/DeviceScreenActivationTests.swift",
         "ios-app/BikeComputerTests/DeviceScreenConfigurationStateTests.swift",
         "ios-app/BikeComputerTests/NavigationProtocolTests.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
@@ -535,6 +544,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
         "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenActivation.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",

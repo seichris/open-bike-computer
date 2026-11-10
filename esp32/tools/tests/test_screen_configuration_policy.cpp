@@ -66,6 +66,36 @@ int main() {
   assert(nextEnabledInstanceOfType(document, 0, ScreenType::Map,
                                    ScreenType::MapNavigation) == 3);
 
+  // Remote activation keeps a matching visible screen, then tries the
+  // requested types in order, each from the visible screen onward.
+  bool alreadyActive = false;
+  const ScreenType mapTypes[] = {ScreenType::Map, ScreenType::MapNavigation};
+  assert(activationTargetIndex(document, 0, mapTypes, 2, alreadyActive) == 0);
+  assert(alreadyActive);
+  assert(activationTargetIndex(document, 2, mapTypes, 2, alreadyActive) == 3);
+  assert(!alreadyActive);
+  const ScreenType rideStatsType[] = {ScreenType::RideStats};
+  assert(activationTargetIndex(document, 3, rideStatsType, 1, alreadyActive) ==
+         2);
+  assert(!alreadyActive);
+  const ScreenType navigationThenStats[] = {ScreenType::Navigation,
+                                            ScreenType::RideStats};
+  assert(activationTargetIndex(document, 0, navigationThenStats, 2,
+                               alreadyActive) == 2);
+  const ScreenType batteryType[] = {ScreenType::BatteryStatus};
+  assert(activationTargetIndex(document, 0, batteryType, 1, alreadyActive) ==
+         kInvalidInstanceIndex);
+  assert(!alreadyActive);
+  // A disabled instance never counts as the visible match.
+  assert(activationTargetIndex(document, 1, mapTypes, 2, alreadyActive) == 3);
+  assert(!alreadyActive);
+  assert(activationTargetIndex(document, kInvalidInstanceIndex, rideStatsType,
+                               1, alreadyActive) == 2);
+  assert(activationTargetIndex(document, 0, nullptr, 1, alreadyActive) ==
+         kInvalidInstanceIndex);
+  assert(activationTargetIndex(document, 0, mapTypes, 0, alreadyActive) ==
+         kInvalidInstanceIndex);
+
   const uint32_t firstSignature = mapProfileSignature(document.instances[0]);
   document.instances[3].mapProfile.zoomLevel += 1;
   assert(mapProfileSignature(document.instances[3]) != firstSignature);
