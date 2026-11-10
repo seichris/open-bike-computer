@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 35
+    static let currentClientVersion: UInt8 = 36
     static let extendedFeatureTLVType: UInt8 = 3
     static let boardDisplayTLVType: UInt8 = 4
     static let boardDisplayVersion: UInt8 = 1
@@ -99,6 +99,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let extendedBoardDisplayMetadataMinimumClientVersion: UInt8 = 34
     static let extendedPositionSourceMetadataFeature: UInt32 = 1 << 5
     static let extendedPositionSourceMetadataMinimumClientVersion: UInt8 = 35
+    static let extendedScreenActivationV1Feature: UInt32 = 1 << 6
+    static let extendedScreenActivationV1MinimumClientVersion: UInt8 = 36
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16
@@ -109,6 +111,9 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let screenConfigurationUploadMagic = "SCUP"
     static let screenConfigurationDownloadMagic = "SCDN"
     static let screenConfigurationAcknowledgementMagic = "SCAK"
+    static let screenActivationMagic = "SCSW"
+    static let screenActivationResultMagic = "SCSR"
+    static let maximumScreenActivationTypes = 4
     static let workoutStartRequestMagic = "WREQ"
     static let destinationRequestMagic = "DREQ"
     static let worldRadioRequestMagic = "WRQ1"
@@ -165,6 +170,21 @@ enum RideBLEScreenConfigurationResultV1: UInt8, Equatable, Sendable {
     case persistenceFailed = 4
     case busy = 5
     case unauthorized = 6
+}
+
+nonisolated enum RideBLEScreenActivationActionV1: UInt8, Equatable, Sendable {
+    case showTypes = 0
+    case next = 1
+    case previous = 2
+}
+
+nonisolated enum RideBLEScreenActivationResultV1: UInt8, Equatable, Sendable {
+    case switched = 0
+    case alreadyActive = 1
+    case noMatchingScreen = 2
+    case unavailable = 3
+    case malformed = 4
+    case busy = 5
 }
 
 nonisolated enum RideBLEScreenTypeV1: UInt8, CaseIterable, Codable, Sendable {

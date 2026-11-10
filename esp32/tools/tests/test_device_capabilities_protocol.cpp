@@ -146,7 +146,26 @@ int main() {
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 35);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 36);
+  // Screen activation is extended bit 6 and rides on screen configuration.
+  static_assert(ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE == 64);
+  static_assert(ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_MINIMUM_CLIENT_VERSION == 36);
+  assert(!device_capabilities_protocol::supportsScreenActivation(35, true, true));
+  assert(!device_capabilities_protocol::supportsScreenActivation(36, true, false));
+  assert(!device_capabilities_protocol::supportsScreenActivation(36, false, true));
+  assert(device_capabilities_protocol::supportsScreenActivation(36, true, true));
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  static_assert(device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED);
+#else
+  static_assert(!device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED,
+                "production keeps remote screen activation off until a board check");
+#endif
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE) == extendedSize);
+  const uint8_t screenActivationGolden[] = {3, 4, 0x40, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(screenActivationGolden); ++index)
+    assert(output[30 + index] == screenActivationGolden[index]);
   // The friend-marker size flag shares the extended word with group riders.
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),

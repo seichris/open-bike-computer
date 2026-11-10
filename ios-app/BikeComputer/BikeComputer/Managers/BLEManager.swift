@@ -1117,6 +1117,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsFriendMarkerScale = false
     /// Route elevation profiles (ELV1) and the optional Elevation screen.
     @Published private(set) var supportsRouteElevation = false
+    /// Showing a configured screen on request (SCSW), for Siri and Shortcuts.
+    @Published private(set) var supportsScreenActivation = false
     var onRouteElevationAcknowledgement: ((Data) -> Void)?
     /// Shared by the iPhone map and every bike-computer map screen.
     @Published private(set) var friendMarkerScale: FriendMarkerScale = .normal
@@ -1464,6 +1466,7 @@ class BLEManager: NSObject, ObservableObject {
     private var screenConfigurationCharacteristic: CBCharacteristic?
     let deviceScreenConfigurationController =
         DeviceScreenConfigurationController()
+    let deviceScreenActivationClient = DeviceScreenActivationClient()
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
     var workoutMotionUptime = { ProcessInfo.processInfo.systemUptime }
     private var deviceInformation: [CBUUID: String] = [:]
@@ -5939,6 +5942,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -7426,6 +7430,7 @@ class BLEManager: NSObject, ObservableObject {
             deviceID: connectedDeviceID,
             generation: rideDeliveryConnectionGeneration
         )
+        deviceScreenActivationClient.disconnect()
         if rideTransportStateMachine.phase != .idle {
             _ = reduceRideTransport(.disconnected(
                 generation: rideTransportStateMachine.generation
@@ -7614,6 +7619,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -9114,6 +9120,24 @@ class BLEManager: NSObject, ObservableObject {
         scheduleNavigationFlushRetryIfNeeded()
         log("Queued \(frames.count) \(label) frame(s)")
         return true
+    }
+
+    /// Shows a device screen now, for Siri and Shortcuts actions. Only the
+    /// owner iPhone's authenticated link carries the owner-only channel.
+    func activateDeviceScreen(
+        _ request: DeviceScreenActivationRequest
+    ) async -> DeviceScreenActivationOutcome {
+        guard isConnected, isNavigationReady, authenticatedWriteSession != nil else {
+            return .notConnected
+        }
+        guard supportsScreenActivation else { return .unsupported }
+        return await deviceScreenActivationClient.activate(request) { [weak self] frame, failed in
+            self?.enqueueScreenConfigurationFrames(
+                [frame],
+                onSent: {},
+                onWriteFailure: failed
+            ) ?? false
+        }
     }
 
     @discardableResult
@@ -11090,6 +11114,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 log("Rejected invalid or unauthenticated screen configuration notification")
                 return
             }
+            if deviceScreenActivationClient.receive(payload) {
+                return
+            }
             deviceScreenConfigurationController.receive(
                 payload,
                 deviceID: deviceID,
@@ -11161,6 +11188,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -11540,6 +11568,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         // the device's new document. The controller instead fails closed when
         // its enqueue closure cannot reach the characteristic.
         supportsScreenConfiguration = advertisesScreenConfiguration
+        // Activation selects configured instances on the same characteristic.
+        supportsScreenActivation = advertisesScreenConfiguration &&
+            extendedFeatureFlags &
+                RideBLEGeneratedProtocolV1.extendedScreenActivationV1Feature != 0
         if advertisesScreenConfiguration,
            let capabilities = screenConfigurationCapabilities,
            let peripheral = connectedPeripheral,
