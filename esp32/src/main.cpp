@@ -752,6 +752,12 @@ void appRemoteDebugPointerActivity() {
   displayInactivityPolicy.noteMeaningfulActivity(millis());
 }
 
+// A screen the rider asked for by voice must be visible, even when it was
+// already showing behind a dimmed or switched-off display.
+void appScreenActivationActivity() {
+  displayInactivityPolicy.noteMeaningfulActivity(millis());
+}
+
 #include "lvglSetup.hpp"
 #include "settings.hpp"
 #include "tasks.hpp"

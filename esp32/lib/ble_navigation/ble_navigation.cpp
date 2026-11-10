@@ -132,6 +132,10 @@ BLENavigationServer bleNavServer;
 extern void requestMapRender(map_render_policy::Reason reason);
 extern void applyDeviceScreenSettings();
 extern void applyDeviceScreenConfiguration();
+extern screen_configuration_protocol::ScreenActivationResult
+activateMainScreen(const screen_configuration_protocol::ActivationRequest &request,
+                   uint32_t &activeInstanceID, uint8_t &activeType);
+extern void appScreenActivationActivity();
 extern bool isMapScreenActive();
 extern bool isMapGuidanceScreenActive();
 
@@ -782,6 +786,13 @@ struct PendingScreenConfigurationControl {
   uint32_t acknowledgementRequestID = 0;
   screen_configuration::CommitResult acknowledgementResult =
       screen_configuration::CommitResult::Malformed;
+  bool activationRequested = false;
+  screen_configuration_protocol::ActivationRequest activation{};
+  bool activationRejectionReady = false;
+  uint32_t activationRejectedRequestID = 0;
+  screen_configuration_protocol::ScreenActivationResult
+      activationRejectedResult =
+          screen_configuration_protocol::ScreenActivationResult::Malformed;
 };
 
 struct OutgoingScreenConfigurationSnapshot {
@@ -810,6 +821,9 @@ static std::atomic<bool> screenConfigurationResetRequested{false};
 static bool screenConfigurationAckPending = false;
 static uint32_t screenConfigurationAckRequestID = 0;
 static screen_configuration::CommitOutcome screenConfigurationAckOutcome{};
+static bool screenActivationResultPending = false;
+static std::array<uint8_t, screen_configuration_protocol::ACTIVATION_RESULT_BYTES>
+    screenActivationResultFrame{};
 static NimBLECharacteristic *screenConfigurationCharacteristic = nullptr;
 static BICINO_TASK_DATA std::array<uint8_t,
                   screen_configuration_protocol::MAX_DOCUMENT_BYTES>
@@ -2432,6 +2446,17 @@ static void queueScreenConfigurationAcknowledgement(
   screenConfigurationAckPending = true;
 }
 
+static void queueScreenActivationResult(
+    uint32_t requestID,
+    screen_configuration_protocol::ScreenActivationResult result,
+    uint32_t activeInstanceID, uint8_t activeType) {
+  screenActivationResultPending =
+      screen_configuration_protocol::encodeActivationResult(
+          requestID, result, activeInstanceID, activeType,
+          screenActivationResultFrame.data(),
+          screenActivationResultFrame.size()) != 0;
+}
+
 static bool beginScreenConfigurationSnapshot(uint32_t requestID) {
   if (screenConfigurationSnapshotActive.load(std::memory_order_acquire) ||
       requestID == 0)
@@ -2470,6 +2495,16 @@ static void pumpScreenConfigurationNotifications() {
       screenConfigurationCharacteristic == nullptr ||
       deferredNotificationAvailableCapacity() == 0)
     return;
+  if (screenActivationResultPending) {
+    if (notifyAuthenticatedPayload(
+            screenConfigurationCharacteristic,
+            device_ownership::AuthenticatedChannel::ScreenConfiguration,
+            screenActivationResultFrame.data(),
+            screenActivationResultFrame.size(), "screen activation result")) {
+      screenActivationResultPending = false;
+    }
+    return;
+  }
   if (screenConfigurationAckPending) {
     uint8_t frame[screen_configuration_protocol::ACK_BYTES]{};
     const std::size_t length =
@@ -2534,6 +2569,7 @@ static void processPendingScreenConfiguration() {
     screenConfigurationSnapshotActive.store(false,
                                             std::memory_order_release);
     screenConfigurationAckPending = false;
+    screenActivationResultPending = false;
     screen_configuration::resetTransferState();
   }
   uint32_t snapshotRequestID = 0;
@@ -2543,7 +2579,29 @@ static void processPendingScreenConfiguration() {
   uint32_t rejectedRequestID = 0;
   screen_configuration::CommitResult rejectedResult =
       screen_configuration::CommitResult::Malformed;
+  bool activationReady = false;
+  screen_configuration_protocol::ActivationRequest activation{};
+  uint32_t activationRejectedRequestID = 0;
+  screen_configuration_protocol::ScreenActivationResult
+      activationRejectedResult =
+          screen_configuration_protocol::ScreenActivationResult::Malformed;
   if (xSemaphoreTake(screenConfigurationMutex, 0) == pdTRUE) {
+    // Activation results use their own slot, so a pending document
+    // acknowledgement never delays switching the visible screen.
+    if (screenActivationResultPending) {
+      // Leave the next activation staged until its predecessor's result is
+      // accepted by the deferred notification queue.
+    } else if (pendingScreenConfiguration.activationRejectionReady) {
+      activationRejectedRequestID =
+          pendingScreenConfiguration.activationRejectedRequestID;
+      activationRejectedResult =
+          pendingScreenConfiguration.activationRejectedResult;
+      pendingScreenConfiguration.activationRejectionReady = false;
+    } else if (pendingScreenConfiguration.activationRequested) {
+      activation = pendingScreenConfiguration.activation;
+      activationReady = true;
+      pendingScreenConfiguration.activationRequested = false;
+    }
     // Consume at most one control result per pass. This keeps the single
     // bounded ACK slot from being overwritten when a busy/malformed request,
     // a completed upload, and a snapshot request arrive close together.
@@ -2586,6 +2644,32 @@ static void processPendingScreenConfiguration() {
                   static_cast<unsigned long>(rejectedRequestID),
                   static_cast<unsigned>(rejectedResult),
                   static_cast<unsigned long>(rejected.revision));
+  }
+  if (activationRejectedRequestID != 0) {
+    queueScreenActivationResult(
+        activationRejectedRequestID, activationRejectedResult, 0,
+        screen_configuration_protocol::ACTIVATION_NO_SCREEN_TYPE);
+  } else if (activationReady) {
+    uint32_t activeInstanceID = 0;
+    uint8_t activeType =
+        screen_configuration_protocol::ACTIVATION_NO_SCREEN_TYPE;
+    const auto result =
+        activateMainScreen(activation, activeInstanceID, activeType);
+    if (result ==
+            screen_configuration_protocol::ScreenActivationResult::Switched ||
+        result == screen_configuration_protocol::ScreenActivationResult::
+                      AlreadyActive) {
+      appScreenActivationActivity();
+    }
+    queueScreenActivationResult(activation.requestID, result, activeInstanceID,
+                                activeType);
+    Serial.printf("BLE screens: activation=%lu action=%u result=%u "
+                  "instance=%lu type=%u\n",
+                  static_cast<unsigned long>(activation.requestID),
+                  static_cast<unsigned>(activation.action),
+                  static_cast<unsigned>(result),
+                  static_cast<unsigned long>(activeInstanceID),
+                  static_cast<unsigned>(activeType));
   }
   if (uploadRequestID != 0) {
     const auto outcome = screen_configuration::commit(
@@ -5056,6 +5140,13 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     if (includePositionSource)
       extendedFeatureFlags |= ride_ble_protocol_generated::
           EXTENDED_POSITION_SOURCE_METADATA_FEATURE;
+    if (device_capabilities_protocol::supportsScreenActivation(
+            clientVersion,
+            device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED,
+            (featureFlags &
+             device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE) != 0))
+      extendedFeatureFlags |=
+          ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE;
     if (board_traits::epaper) {
       // Last, so no feature computed above can reach the one-bit renderer.
       featureFlags &=
@@ -7622,6 +7713,42 @@ public:
       } else {
         pendingScreenConfiguration.snapshotRequested = true;
         pendingScreenConfiguration.snapshotRequestID = requestID;
+      }
+      xSemaphoreGive(screenConfigurationMutex);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      return;
+    }
+    // Without the feature (production), SCSW stays an ignored frame exactly
+    // as it was before activation existed.
+    screen_configuration_protocol::ActivationRequest activation{};
+    const auto activationDecode =
+        device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED
+            ? screen_configuration_protocol::decodeActivationRequest(
+                  bytes, payload.size(), activation)
+            : screen_configuration_protocol::ActivationDecode::NotActivation;
+    if (activationDecode !=
+        screen_configuration_protocol::ActivationDecode::NotActivation) {
+      if (screenConfigurationMutex == nullptr ||
+          xSemaphoreTake(screenConfigurationMutex, 0) != pdTRUE) {
+        return;
+      }
+      const bool malformed =
+          activationDecode ==
+          screen_configuration_protocol::ActivationDecode::Malformed;
+      if (malformed || pendingScreenConfiguration.activationRequested) {
+        if (activation.requestID != 0) {
+          pendingScreenConfiguration.activationRejectionReady = true;
+          pendingScreenConfiguration.activationRejectedRequestID =
+              activation.requestID;
+          pendingScreenConfiguration.activationRejectedResult =
+              malformed ? screen_configuration_protocol::
+                              ScreenActivationResult::Malformed
+                        : screen_configuration_protocol::
+                              ScreenActivationResult::Busy;
+        }
+      } else {
+        pendingScreenConfiguration.activationRequested = true;
+        pendingScreenConfiguration.activation = activation;
       }
       xSemaphoreGive(screenConfigurationMutex);
       ui_scheduler::notify(ui_scheduler::WakeReason::Ble);

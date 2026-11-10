@@ -158,6 +158,34 @@ inline uint8_t nextEnabledInstanceOfType(const Document &document,
   return kInvalidInstanceIndex;
 }
 
+// A remote activation keeps a visible screen that already matches any
+// requested type. Otherwise the requested types are tried in order, each from
+// the visible screen onward in cycle order.
+inline uint8_t activationTargetIndex(const Document &document,
+                                     uint8_t currentIndex,
+                                     const ScreenType *types,
+                                     uint8_t typeCount, bool &alreadyActive) {
+  alreadyActive = false;
+  if (types == nullptr || typeCount == 0)
+    return kInvalidInstanceIndex;
+  if (currentIndex < document.instanceCount &&
+      document.instances[currentIndex].enabled) {
+    for (uint8_t index = 0; index < typeCount; ++index) {
+      if (document.instances[currentIndex].type == types[index]) {
+        alreadyActive = true;
+        return currentIndex;
+      }
+    }
+  }
+  for (uint8_t index = 0; index < typeCount; ++index) {
+    const uint8_t candidate = nextEnabledInstanceOfType(
+        document, currentIndex, types[index], types[index]);
+    if (candidate != kInvalidInstanceIndex)
+      return candidate;
+  }
+  return kInvalidInstanceIndex;
+}
+
 inline uint32_t mapProfileSignature(const ScreenInstance &instance) {
   uint8_t bytes[24]{};
   std::size_t size = 0;

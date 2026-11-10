@@ -1205,6 +1205,51 @@ apps keep an acknowledged per-device cache, always request a fresh snapshot on
 connect, preserve unsaved same-device edits across a transient reconnect, and
 offer an explicit choice after a revision conflict.
 
+### Screen activation
+
+Clients at version `36` can negotiate CAP2 extended feature bit `6`
+(`screen_activation_v1`). Firmware advertises it only beside bit `26`, because
+activation selects configured instances and uses the same owner-only protected
+channel `8` and characteristic. It shows a screen immediately and never edits
+the document, its revision or the default screen. The iPhone uses it for Siri
+and Shortcuts actions such as "Open Map screen" and "Next screen". Until a
+physical board check, firmware advertises bit `6` and decodes `SCSW` only in
+development profiles (`FIRMWARE_DIAGNOSTICS=1`); production keeps the bit
+clear and ignores `SCSW` frames, so its screens change only by button or tap.
+
+```text
+Request: "SCSW" | RequestID: UInt32LE | Action: UInt8 | TypeCount: UInt8 |
+         ScreenType: UInt8 x TypeCount
+Result:  "SCSR" | RequestID: UInt32LE | Result: UInt8 |
+         ActiveInstanceID: UInt32LE | ActiveScreenType: UInt8
+```
+
+Actions are `0=Show Types`, `1=Next` and `2=Previous`. Show Types carries one
+to four screen types in preference order; Next and Previous carry none and
+follow the BOOT and PWR buttons exactly, including Nearby's map-to-picker step.
+For Show Types, a visible enabled instance whose type is in the list is kept;
+otherwise each type in order is searched from the visible instance onward in
+cycle order, and the first enabled match is shown. The iPhone asks for Map
+with `[Map, Map + Navigation]` and for Navigation with
+`[Navigation, Map + Navigation]`, so a rider with only the combined screen
+still gets a map or guidance.
+
+Results are `0=Switched`, `1=Already Active`, `2=No Matching Screen`,
+`3=Unavailable` (the main screens are not showing, for example during pairing,
+in device settings or before the configuration store is ready), `4=Malformed`
+and `5=Busy` (a previous activation has not been applied yet). The result
+reports the instance and type visible after the request, or `0` and `255` when
+none applies. Switched and Already Active count as display activity, so a
+dimmed or switched-off display wakes to show the requested screen. A request ID
+that could be read is always answered, including Malformed and Busy; a frame
+without one is ignored. Firmware applies one activation per UI pass, keeps its
+result slot separate from `SCAK`, and drops a staged request or unsent result
+when the link resets.
+
+Golden frames: Show Types `[Map, Map + Navigation]` for request `0x01020304` is
+`53 43 53 57 04 03 02 01 00 02 00 03`; Switched to Ride Stats instance
+`0x0A0B0C0D` is `53 43 53 52 04 03 02 01 00 0D 0C 0B 0A 02`.
+
 ## Device Sound Playback
 
 The authenticated command channel accepts a sound-play frame on either the
@@ -1427,8 +1472,10 @@ Version `33` requests extended bit `3`, map POIs and Nearby. Versions `31` and
 `32` retain their released friend-marker sizing and route elevation meanings
 and cannot negotiate POIs. Version `34` requests extended bit `4`, board
 display/input metadata (TLV type `4`, below). Version `35` requests extended
-bit `5`, the position-source record (TLV type `5`, below).
-The current iPhone client negotiates version `35`; older direct Watch clients
+bit `5`, the position-source record (TLV type `5`, below). Version `36`
+requests extended bit `6`, screen activation (see
+[Screen activation](#screen-activation)).
+The current iPhone client negotiates version `36`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
@@ -1535,8 +1582,10 @@ exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
 numbered from the first word. Its bit `0` is `group_riders_v1`, bit `1` is
-`friend_marker_scale_v1`, bit `2` is `route_elevation_v1`, and bit `3` is
-`map_pois`; absent means zero. Firmware sets bit `1` whenever it
+`friend_marker_scale_v1`, bit `2` is `route_elevation_v1`, bit `3` is
+`map_pois`, bit `4` is `board_display_metadata`, bit `5` is
+`position_source_metadata`, and bit `6` is `screen_activation_v1`; absent means
+zero. Firmware sets bit `1` whenever it
 can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
 independent of this session's group-rider relay, so a stored size can be
 changed before friends appear. Firmware without bit `1` ignores setting `39`.
@@ -1630,6 +1679,10 @@ Position source, phone and Quectel LC76G receiver, extended bit 5 and TLV type 5
 
 Position source, phone only (every board without a receiver), extended bit 5:
 43 41 50 32 01 00 00 00 00 03 04 20 00 00 00 05 04 01 01 00 00
+
+Screen activation, CAP2 schema 1, extended feature bit 6 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 40 00 00 00
+This isolates the feature bit; firmware advertises it only beside bit 26.
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

@@ -85,6 +85,113 @@ static void assertPersistable(const Document &document) {
   assert(decoded.instanceCount == document.instanceCount);
 }
 
+static void testScreenActivationFrames() {
+  // Golden layout shared with docs/ble-protocol.md and the iOS codec.
+  ActivationRequest showMap{};
+  showMap.requestID = 0x01020304;
+  showMap.action = ScreenActivationAction::ShowTypes;
+  showMap.typeCount = 2;
+  showMap.types[0] = ScreenType::Map;
+  showMap.types[1] = ScreenType::MapNavigation;
+  uint8_t frame[ACTIVATION_HEADER_BYTES + MAX_ACTIVATION_TYPES]{};
+  assert(encodeActivationRequest(showMap, frame, sizeof(frame)) == 12);
+  const uint8_t expectedShowMap[] = {'S', 'C', 'S', 'W', 4, 3, 2, 1,
+                                     0,   2,   0,   3};
+  assert(std::memcmp(frame, expectedShowMap, sizeof(expectedShowMap)) == 0);
+  ActivationRequest decoded{};
+  assert(decodeActivationRequest(frame, 12, decoded) ==
+         ActivationDecode::Valid);
+  assert(decoded.requestID == 0x01020304);
+  assert(decoded.action == ScreenActivationAction::ShowTypes);
+  assert(decoded.typeCount == 2);
+  assert(decoded.types[0] == ScreenType::Map);
+  assert(decoded.types[1] == ScreenType::MapNavigation);
+
+  ActivationRequest next{};
+  next.requestID = 9;
+  next.action = ScreenActivationAction::Next;
+  assert(encodeActivationRequest(next, frame, sizeof(frame)) ==
+         ACTIVATION_HEADER_BYTES);
+  assert(decodeActivationRequest(frame, ACTIVATION_HEADER_BYTES, decoded) ==
+         ActivationDecode::Valid);
+  assert(decoded.action == ScreenActivationAction::Next);
+  assert(decoded.typeCount == 0);
+  next.action = ScreenActivationAction::Previous;
+  assert(encodeActivationRequest(next, frame, sizeof(frame)) ==
+         ACTIVATION_HEADER_BYTES);
+  assert(decodeActivationRequest(frame, ACTIVATION_HEADER_BYTES, decoded) ==
+         ActivationDecode::Valid);
+  assert(decoded.action == ScreenActivationAction::Previous);
+
+  // Encoders refuse frames the decoder would reject.
+  next.typeCount = 1;
+  assert(encodeActivationRequest(next, frame, sizeof(frame)) == 0);
+  showMap.typeCount = 0;
+  assert(encodeActivationRequest(showMap, frame, sizeof(frame)) == 0);
+  showMap.typeCount = MAX_ACTIVATION_TYPES + 1;
+  assert(encodeActivationRequest(showMap, frame, sizeof(frame)) == 0);
+  showMap.typeCount = 2;
+  showMap.requestID = 0;
+  assert(encodeActivationRequest(showMap, frame, sizeof(frame)) == 0);
+  showMap.requestID = 5;
+  assert(encodeActivationRequest(showMap, frame, 11) == 0);
+
+  // Malformed frames keep their request ID so the sender gets a rejection.
+  uint8_t malformed[ACTIVATION_HEADER_BYTES + MAX_ACTIVATION_TYPES + 1]{};
+  std::memcpy(malformed, expectedShowMap, sizeof(expectedShowMap));
+  assert(decodeActivationRequest(malformed, 11, decoded) ==
+         ActivationDecode::Malformed);
+  assert(decoded.requestID == 0x01020304);
+  assert(decodeActivationRequest(malformed, 13, decoded) ==
+         ActivationDecode::Malformed);
+  malformed[11] = static_cast<uint8_t>(ScreenType::Nearby) + 1;
+  assert(decodeActivationRequest(malformed, 12, decoded) ==
+         ActivationDecode::Malformed);
+  malformed[11] = static_cast<uint8_t>(ScreenType::Nearby);
+  assert(decodeActivationRequest(malformed, 12, decoded) ==
+         ActivationDecode::Valid);
+  malformed[8] = 3;
+  assert(decodeActivationRequest(malformed, 12, decoded) ==
+         ActivationDecode::Malformed);
+  malformed[8] = static_cast<uint8_t>(ScreenActivationAction::Next);
+  assert(decodeActivationRequest(malformed, 12, decoded) ==
+         ActivationDecode::Malformed);
+  malformed[8] = static_cast<uint8_t>(ScreenActivationAction::ShowTypes);
+  malformed[9] = 0;
+  assert(decodeActivationRequest(malformed, ACTIVATION_HEADER_BYTES,
+                                 decoded) == ActivationDecode::Malformed);
+  malformed[9] = MAX_ACTIVATION_TYPES + 1;
+  assert(decodeActivationRequest(malformed, sizeof(malformed), decoded) ==
+         ActivationDecode::Malformed);
+  std::memset(malformed + 4, 0, 4);
+  malformed[9] = 1;
+  assert(decodeActivationRequest(malformed, 11, decoded) ==
+         ActivationDecode::Malformed);
+  assert(decoded.requestID == 0);
+  assert(decodeActivationRequest(malformed, 6, decoded) ==
+         ActivationDecode::Malformed);
+  uint8_t request[REQUEST_BYTES]{};
+  assert(encodeRequest(42, request, sizeof(request)) == REQUEST_BYTES);
+  assert(decodeActivationRequest(request, sizeof(request), decoded) ==
+         ActivationDecode::NotActivation);
+
+  uint8_t result[ACTIVATION_RESULT_BYTES]{};
+  assert(encodeActivationResult(0x01020304, ScreenActivationResult::Switched,
+                                0x0A0B0C0D,
+                                static_cast<uint8_t>(ScreenType::RideStats),
+                                result, sizeof(result)) ==
+         ACTIVATION_RESULT_BYTES);
+  const uint8_t expectedResult[] = {'S', 'C', 'S', 'R', 4,   3,   2,
+                                    1,   0,   13,  12,  11,  10,  2};
+  assert(std::memcmp(result, expectedResult, sizeof(expectedResult)) == 0);
+  assert(encodeActivationResult(0, ScreenActivationResult::Busy, 0,
+                                ACTIVATION_NO_SCREEN_TYPE, result,
+                                sizeof(result)) == 0);
+  assert(encodeActivationResult(1, ScreenActivationResult::Busy, 0,
+                                ACTIVATION_NO_SCREEN_TYPE, result,
+                                ACTIVATION_RESULT_BYTES - 1) == 0);
+}
+
 static void testStoredNearbyScreens() {
   constexpr bool runtime = map_profile_protocol::POIS_RUNTIME_ENABLED;
   std::array<uint8_t, MAX_DOCUMENT_BYTES> bytes{};
@@ -470,5 +577,6 @@ int main() {
          ride_ble_protocol_generated::ScreenConfigurationResult::Applied);
   assert(revision == 4);
   assert(checksum == documentCRC(encoded.data(), size));
+  testScreenActivationFrames();
   return 0;
 }
