@@ -4909,6 +4909,117 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect() {
+        let boot = "0123456789abcdef0123456789abcdef"
+        let otherBoot = "fedcba9876543210fedcba9876543210"
+
+        // The binding rule: the original connection always binds; after a
+        // reconnect only the same well-formed boot ID on both sides does.
+        assert(LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: nil,
+                                              currentEpoch: 7, currentBootID: nil),
+               "the observing connection binds without a boot ID")
+        assert(LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: boot,
+                                              currentEpoch: 8, currentBootID: boot),
+               "a reconnect to the same boot binds")
+        assert(!LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: boot,
+                                               currentEpoch: 8, currentBootID: otherBoot),
+               "a reboot ends the binding")
+        assert(!LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: nil,
+                                               currentEpoch: 8, currentBootID: boot) &&
+               !LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: boot,
+                                               currentEpoch: 8, currentBootID: nil),
+               "a missing boot ID on either side keeps the connection-only rule")
+        assert(!LegacyObservationBinding.binds(observedEpoch: 7, observedBootID: "BOOT",
+                                               currentEpoch: 8, currentBootID: "BOOT"),
+               "a malformed boot ID never binds across connections")
+        assert(!LegacyObservationBinding.binds(observedEpoch: nil, observedBootID: boot,
+                                               currentEpoch: 8, currentBootID: boot),
+               "an observation without a connection never binds")
+
+        func status(_ state: String, bootID: String?) -> MapTransferDeviceStatus {
+            let health = bootID.map {
+                ",\"selectionHealth\":{\"schemaVersion\":1,\"bootID\":\"\($0)\",\"revision\":1," +
+                "\"state\":\"ready\",\"root\":\"/VECTMAP/.maps/map-1-manifest\",\"operationID\":\"\"," +
+                "\"mapID\":\"map-1\",\"sessionID\":\"map-1-manifest\",\"affectedOperationID\":\"\"}"
+            } ?? ""
+            return try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data(("""
+            {"activeMapId":"map-1","activeSessionId":"map-1-manifest","activation":{"status":"\(state)","sequence":5,"sessionId":"map-1-manifest","mapId":"map-1"}
+            """ + health + "}").utf8))
+        }
+
+        let bleManager = BLEManager()
+        bleManager.applyAuthenticatedMapTransferStatus(status("installed", bootID: "NOT-A-BOOT-ID"))
+        assert(bleManager.mapTransferBootID == nil, "a malformed boot ID is not a boot identity")
+        bleManager.applyAuthenticatedMapTransferStatus(status("installed", bootID: nil))
+        assert(bleManager.mapTransferBootID == nil, "older firmware reports no boot ID")
+        bleManager.applyAuthenticatedMapTransferStatus(status("installed", bootID: boot))
+        assertEqual(bleManager.mapTransferBootID, boot, "the map status names its device boot")
+
+        let reconnected = bleManager.transferConnectionEpoch &+ 1
+        for state in ["installed", "failed"] {
+            // (boot recorded with the upload, boot the device reports now, binds)
+            let cases: [(String?, String?, Bool, String)] = [
+                (boot, boot, true, "a reconnect to the same boot accepts the result it finished"),
+                (otherBoot, boot, false, "a reboot during the upload never binds its result"),
+                (nil, boot, false, "an upload observed without a boot ID keeps today's rule"),
+                (boot, nil, false, "older firmware after the reconnect keeps today's rule"),
+            ]
+            for (recordedBoot, reportedBoot, binds, message) in cases {
+                let suite = "offline-map-same-boot-\(UUID().uuidString)"
+                guard let defaults = UserDefaults(suiteName: suite) else {
+                    assert(false, "test defaults should create")
+                    return
+                }
+                defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+                defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+                defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+                defaults.set(4, forKey: "offlineMap.lastTransfer.previousSequence")
+                bleManager.applyAuthenticatedMapTransferStatus(status(state, bootID: reportedBoot))
+                let manager = OfflineMapManager(defaults: defaults)
+                manager.recordTransferObservationForTesting(connectionEpoch: reconnected,
+                                                            bootID: recordedBoot)
+                manager.reconcileLastTransfer(bleManager: bleManager)
+                assertEqual(manager.lastTransferOutcome, binds ? state : "unknown",
+                            "\(state): \(message)")
+                defaults.removePersistentDomain(forName: suite)
+            }
+        }
+
+        // The durable record's terminal proof follows the same rule.
+        func legacyRecord(bootID: String?) -> DeviceMapOperationRecord {
+            DeviceMapOperationRecord(schemaVersion: 1, deviceID: String(repeating: "a", count: 32),
+                operationID: UUID(), sessionID: "session-1", mapID: "map-1",
+                manifestReceipt: String(repeating: "b", count: 64),
+                signedManifestReceipt: String(repeating: "c", count: 64),
+                streamSHA256: String(repeating: "d", count: 64), streamBytes: 123,
+                artifactFilename: "map.bmap", appNamespace: "test", createdAt: Date(),
+                connectionEpoch: 7, observation: "enter_requested", cleanup: "pending",
+                usesDurableProtocol: false, lastReceipt: nil,
+                observationProcessID: DeviceMapOperationStore.observationProcessID,
+                legacyBootID: bootID)
+        }
+        var sameBoot = legacyRecord(bootID: boot)
+        assert(sameBoot.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: sameBoot.deviceID, connectionEpoch: 8,
+            processID: DeviceMapOperationStore.observationProcessID, currentBootID: boot),
+               "a same-boot reconnect records the legacy terminal proof")
+        var rebooted = legacyRecord(bootID: boot)
+        assert(!rebooted.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: rebooted.deviceID, connectionEpoch: 8,
+            processID: DeviceMapOperationStore.observationProcessID, currentBootID: otherBoot),
+               "a different boot never records the proof")
+        var relaunched = legacyRecord(bootID: boot)
+        assert(!relaunched.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: relaunched.deviceID, connectionEpoch: 8, processID: UUID(), currentBootID: boot),
+               "the boot ID does not survive an app relaunch")
+        assert(legacyRecord(bootID: boot).blocksNewTransfer(connectionEpoch: 7,
+                   processID: DeviceMapOperationStore.observationProcessID) &&
+               !legacyRecord(bootID: boot).blocksNewTransfer(connectionEpoch: 8,
+                   processID: DeviceMapOperationStore.observationProcessID),
+               "admission stays per connection: a reconnect never blocks a new transfer")
+    }
+
+    @MainActor
     static func testOfflineMapManagerReconcilesInterruptedActivation() {
         let suite = "offline-map-reconcile-test-\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
