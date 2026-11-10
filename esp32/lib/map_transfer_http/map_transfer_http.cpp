@@ -650,7 +650,7 @@ void MapTransferHttpServer::executeLibraryTask() try {
     if (changed) {
       // Renderer acknowledgement is live selection evidence. Reusing a map
       // never manufactures a new durable upload/installation result.
-      activationState_.finish("idle", "", "", "");
+      activationState_.finish(ActivationStatus::Idle, "", "", "");
       activationState_.begin(selected.sessionId, 1);
       pendingMapLibraryCommandID_ = requestID;
       pendingMapFromLibrary_ = true;
@@ -688,7 +688,7 @@ void MapTransferHttpServer::recoverLibraryTask(const char *code) {
   if (librarySelectionStarted_) {
     // begin()/mailbox string copies can fail partway through. Release only
     // this incomplete live handoff so the retained request can retry.
-    activationState_.finish("idle", "", "", "");
+    activationState_.finish(ActivationStatus::Idle, "", "", "");
     pendingMapRoot_.clear(); pendingMapSessionId_.clear(); pendingMapId_.clear();
     pendingMapOperationID_.clear(); pendingMapLibraryCommandID_.clear(); pendingMapRootTaken_ = false;
     pendingRendererAcknowledgement_ = false; pendingMapFromLibrary_ = false;
@@ -905,7 +905,7 @@ void MapTransferHttpServer::executeOperationTask() try {
   operationTaskSubmitted_=false;
   unlockState();
   if (completed && !terminal.empty()) {
-    finishActivation(failed ? "failed" : "installed",map,failed ? "renderer_reload" : "","");
+    finishActivation(failed ? ActivationStatus::Failed : ActivationStatus::Installed,map,failed ? "renderer_reload" : "","");
     {
       StateGuard guard(*this);
       terminalOperationID_.clear(); terminalSessionID_.clear(); terminalMapID_.clear();
@@ -1079,7 +1079,7 @@ MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) 
         // As in beginDeferredActivation: the same content under a new
         // operation is a new installation; earlier renderer success cannot
         // complete its receipt. Legacy work keeps that success.
-        activationState_.finish("prepared", "", "", "");
+        activationState_.finish(ActivationStatus::Prepared, "", "", "");
         begun = activationState_.begin(identity.session, 3);
       }
       if (begun == ActivationBeginResult::AlreadyRunning && !stalled)
@@ -1112,10 +1112,10 @@ MapTransferHttpServer::recoverCommitDisposition(const CommitRecovery &recovery) 
     streamStatusActive_ = false;
   }
   if (exhausted)
-    finishActivation("failed", identity.map, "activation_retry_limit",
+    finishActivation(ActivationStatus::Failed, identity.map, "activation_retry_limit",
                      "map activation kept failing; upload the map again");
   else
-    finishActivation("failed", identity.map, "stream_finalization",
+    finishActivation(ActivationStatus::Failed, identity.map, "stream_finalization",
                      "map finalization failed; unselected staging was removed");
   releaseCommitGrant();
   return CommitRecoveryResult::Completed;
@@ -2038,7 +2038,7 @@ void MapTransferHttpServer::acknowledgeActivatedMapRoot(
     return; // process() persists the renderer receipt on the storage worker
   }
   if (loaded) {
-    finishActivation("installed", mapId, "", "");
+    finishActivation(ActivationStatus::Installed, mapId, "", "");
     releaseCommitGrant();
     if (automaticExit)
       requestAutomaticExit();
@@ -2192,7 +2192,7 @@ void MapTransferHttpServer::executeRollback() {
   }
   if (transfer) {
     // Short fixed error text stays within string small-buffer storage.
-    if (!needsReceipt) activationState_.finish("failed", "", "renderer_reload", "");
+    if (!needsReceipt) activationState_.finish(ActivationStatus::Failed, "", "renderer_reload", "");
     rollbackKind_ = RollbackKind::None;
   }
   unlockState();
@@ -2372,16 +2372,16 @@ void MapTransferHttpServer::requestAutomaticExit() {
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
-void MapTransferHttpServer::finishActivation(std::string status, std::string mapId,
+void MapTransferHttpServer::finishActivation(ActivationStatus status, std::string mapId,
               std::string errorCode, std::string errorMessage) {
   // Reserve report copies before entering the state mutex. Moving the
   // prepared fields into the state is allocation-free.
   std::string stateCode = errorCode;
   std::string stateMessage = errorMessage;
-  const bool terminal = status == "failed" || status == "installed";
-  const std::string phase = status;
+  const bool terminal = status == ActivationStatus::Failed || status == ActivationStatus::Installed;
+  const std::string phase = activationStatusName(status);
   lockState();
-  activationState_.finish(std::move(status), std::move(mapId),
+  activationState_.finish(status, std::move(mapId),
                           std::move(stateCode), std::move(stateMessage));
   unlockState();
   if (terminal) recordActivationOutcome(phase, errorCode);
@@ -2459,7 +2459,7 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
                                    context, 1, nullptr);
   if (created != pdPASS) {
     delete context;
-    finishActivation("failed", "", "activation_task",
+    finishActivation(ActivationStatus::Failed, "", "activation_task",
                      "could not start activation task");
     if (automaticExit)
       requestAutomaticExit();
@@ -2472,7 +2472,7 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
 }
 
 catch (const std::bad_alloc &) {
-  finishActivation("failed", "", "out_of_memory", "");
+  finishActivation(ActivationStatus::Failed, "", "out_of_memory", "");
   return false;
 }
 
@@ -2507,7 +2507,7 @@ void MapTransferHttpServer::beginDeferredActivation(
         !commitRecovery_.identity.operation.empty()) {
       // Same content is a different logical installation when its operation ID
       // is new. Historical renderer success cannot complete this new receipt.
-      activationState_.finish("prepared", "", "", "");
+      activationState_.finish(ActivationStatus::Prepared, "", "", "");
       beginResult = activationState_.begin(activation.sessionId, 3, activation.minimumSequence);
     }
     if (beginResult == ActivationBeginResult::Started) {
@@ -2541,7 +2541,7 @@ void MapTransferHttpServer::beginDeferredActivation(
       // activation body runs, so the storage worker retries it.
       retryAcceptedActivation(activation.sessionId);
       rememberOwnerRecovery("activation_owner");
-      finishActivation("recovering", "", "activation_owner",
+      finishActivation(ActivationStatus::Recovering, "", "activation_owner",
                        "accepted map activation requires recovery");
     }
     transferServer_->sampleResources("after_map_activation");
@@ -2621,7 +2621,7 @@ void MapTransferHttpServer::finishUnwoundActivation(
     const std::string &sessionId) noexcept {
   StateGuard guard(*this);
   if (activationState_.runningFor(sessionId) && !pendingRendererAcknowledgement_)
-    activationState_.finish("recovering", "", "out_of_memory", "");
+    activationState_.finish(ActivationStatus::Recovering, "", "out_of_memory", "");
 }
 
 bool MapTransferHttpServer::runStreamActivationTask(
@@ -2638,14 +2638,14 @@ bool MapTransferHttpServer::runStreamActivationTask(
   if (!activated.ok) {
     recordStorageWriteFailure(activated.code.c_str());
     if (internalOwner) rememberOwnerRecovery(activated.code.c_str());
-    finishActivation("recovering", "", activated.code, activated.message);
+    finishActivation(ActivationStatus::Recovering, "", activated.code, activated.message);
     return false;
   }
   ActiveMapSelection selected;
   InstallStatus active = installer_.readActiveMap(selected);
   if (!active.ok || selected.sessionId != sessionId) {
     if (internalOwner) rememberOwnerRecovery(active.ok ? "stream_activation_identity" : active.code.c_str());
-    finishActivation("recovering", active.ok ? selected.mapId : "",
+    finishActivation(ActivationStatus::Recovering, active.ok ? selected.mapId : "",
                      active.ok ? "stream_activation_identity" : active.code,
                      active.ok ? "activated stream session does not match"
                                : active.message);
@@ -2655,7 +2655,7 @@ bool MapTransferHttpServer::runStreamActivationTask(
   const auto readyStatus=installer_.readReadyStreamMap(sessionId,ready);
   if (!readyStatus.ok) {
     if (internalOwner) rememberOwnerRecovery(readyStatus.code.c_str());
-    finishActivation("recovering","",readyStatus.code,readyStatus.message); return false;
+    finishActivation(ActivationStatus::Recovering,"",readyStatus.code,readyStatus.message); return false;
   }
   std::string operationID = ready.operationID; // Allocate before taking the mutex.
   StateGuard guard(*this);

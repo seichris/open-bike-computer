@@ -87,7 +87,7 @@ public:
   void setLastError(const std::string &code,const std::string &) {
     errorCode=code;transfer.lastErrorCode=code;++errorReports;
   }
-  void finishActivation(const std::string &,const std::string &,const std::string &,const std::string &) {++finishes;}
+  void finishActivation(ActivationStatus,const std::string &,const std::string &,const std::string &) {++finishes;}
   void releaseCommitGrant() {++releases;}
   void requestAutomaticExit() {++exits;}
   std::string readOperationStatus(const std::string &id) {

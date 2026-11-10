@@ -677,7 +677,7 @@
       "name": "Map transfer host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "for poi_runtime in 0 1; do\ng++ -std=c++17 -DMAP_POIS_RUNTIME_ENABLED=${poi_runtime} \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapPoiBlock.cpp \\\n  lib/maps/src/mapBuildingBlock.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer\ndone",
+      "command": "for poi_runtime in 0 1; do\ng++ -std=c++17 -DMAP_POIS_RUNTIME_ENABLED=${poi_runtime} \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapPoiBlock.cpp \\\n  lib/maps/src/mapBuildingBlock.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer\ndone\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_root_state.cpp \\\n  -o ${TMPDIR}/test_map_root_state\n${TMPDIR}/test_map_root_state",
       "tools": [
         "python3",
         "g++"

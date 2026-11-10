@@ -21,6 +21,8 @@ class RuntimeRollbackFailureTests(unittest.TestCase):
 #include <new>
 #include <utility>
 #include "map_selection_health.hpp"
+#include "map_activation_status.hpp"
+using map_transfer::ActivationStatus;
 struct ActiveMapSelection { std::string sessionId, root, mapId; };
 struct Status { bool ok = true; };
 struct Installer {
@@ -32,7 +34,7 @@ struct Installer {
   }
 };
 struct Activation {
-  void finish(std::string, std::string, std::string, std::string) {}
+  void finish(ActivationStatus, std::string, std::string, std::string) {}
 };
 struct SerialStub {
   void println(const char *) {}

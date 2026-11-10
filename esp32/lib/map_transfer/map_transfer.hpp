@@ -1,5 +1,7 @@
 #pragma once
 
+#include "map_activation_status.hpp"
+#include "map_root_state.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -187,8 +189,9 @@ public:
                               uint8_t totalSteps = 5,
                               uint32_t minimumSequence = 0);
   void updateProgress(const ActivationProgress &progress);
-  void finish(std::string status, std::string mapId,
+  void finish(ActivationStatus status, std::string mapId,
               std::string errorCode, std::string errorMessage);
+  ActivationStatus status() const { return status_; }
   void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
   bool runningFor(const std::string &sessionId) const {
@@ -200,7 +203,10 @@ public:
   const std::array<char, 64> &terminalCode() const { return state_.terminalCode; }
 
 private:
+  // state_.status always holds activationStatusName(status_).
+  void setStatus(ActivationStatus status);
   MapActivationSnapshot state_;
+  ActivationStatus status_ = ActivationStatus::Idle;
 };
 
 class MapTransferInstaller {
@@ -423,6 +429,17 @@ private:
                            const std::string &signedManifestReceipt) const;
   bool activeRootExists(const std::string &root) const;
   bool fileExists(const std::string &path) const;
+  // A root's lifecycle markers on this card, read through fileExists.
+  struct RegularFileCheck {
+    const MapTransferInstaller *installer;
+    bool operator()(const std::string &path) const { return installer->fileExists(path); }
+  };
+  root_state::Markers<RegularFileCheck> rootMarkers(const std::string &root) const {
+    return root_state::Markers<RegularFileCheck>(RegularFileCheck{this}, root);
+  }
+  bool rootMarkerPresent(const std::string &root, root_state::Marker marker) const {
+    return root_state::present(RegularFileCheck{this}, root, marker);
+  }
   bool dirExists(const std::string &path) const;
   bool fileSize(const std::string &path, uint64_t &size) const;
   bool fileSha256Hex(const std::string &path, std::string &hex) const;
