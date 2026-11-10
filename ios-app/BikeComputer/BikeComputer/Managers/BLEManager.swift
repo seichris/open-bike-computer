@@ -1262,6 +1262,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published private(set) var hasFreshMapTransferStatus = false
+    /// The device boot that reported this connection's map transfer status:
+    /// `selectionHealth.bootID`, a fresh 128-bit value every boot. Nil until a
+    /// fresh status reports one, and always on firmware without it.
+    private(set) var mapTransferBootID: String?
     /// Map-stream signers the connected bike verifies (`keyId=SHA256(key)`),
     /// from its authenticated map transfer status; nil until it reports them.
     @Published private(set) var mapTransferStreamTrust: [String]?
@@ -7543,6 +7547,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         hasFreshMapTransferStatus = false
+        mapTransferBootID = nil
         mapTransferStreamTrust = nil
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
@@ -12544,6 +12549,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         projectMapSelectionHealth(status.selectionHealth, fieldPresent: status.selectionHealth != nil,
                                   activeRoot: status.activeRoot)
         hideProvisionalActiveMap()
+        mapTransferBootID = status.selectionHealth.map(\.bootID).flatMap {
+            MapOperationQueryPacket.make(operationID: $0) != nil ? $0 : nil
+        }
         hasFreshMapTransferStatus = true
     }
 

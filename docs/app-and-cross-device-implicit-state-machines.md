@@ -284,7 +284,8 @@ consumers; ordering between the two sources is implicit.
 
 **C-1 Last-transfer outcome string (phone view of a device install)** — `:2289-2294`
 `lastTransferOutcome` (literals `""`, uploading, activating, unconfirmed, installed, failed,
-cancelled, unknown), map ID, idle-on-another-map, connection epoch (RAM only); ten
+cancelled, unknown), map ID, idle-on-another-map, connection epoch and device boot ID (RAM
+only); ten
 UserDefaults keys (`:7817-7832`); per-pack mirror in `SavedMapArtifactMetadata` (`:1602-1613`).
 `hasPendingDeviceActivation` is literally `== "unconfirmed"` (`:2338`). Transitions:
 `recordTransfer` (`:7661`), `updateLastTransferOutcome` (`:7754`, re-derives from the
@@ -969,7 +970,10 @@ anchors + A/B operation ledger; phone per-map metadata + operation journal + lea
 Failure modes: response lost after commit → phone must query the exact operation ID, but
 legacy uploads only have the boot-local sequence; firmware reboot mid-activation → boot
 resume on the storage owner; phone kill → `adoptRecoveredJob` and re-poll; BLE loss →
-grace window (X-6), else the session is torn down while accepted work continues.
+grace window (X-6), else the session is torn down while accepted work continues; since
+2026-11-10 a legacy result still binds after a reconnect to the same device boot
+(`selectionHealth.bootID`), so an install that finished during the gap is confirmed rather
+than reported as unknown.
 Divergences: (a) the phone binds "same attempt" to a boot-local sequence whose meaning
 changes by status word, and the firmware mixes two counters in one field (MT-9), so after a
 power cut the phone can only wait for a terminal it may never see on legacy firmware;
@@ -1261,8 +1265,9 @@ come from reading the code, not from hardware.
 1. **Boot-local counters crossing the air.** The activation sequence, transfer generation
    and lease generation restart when the firmware reboots, but the phone never carries one
    across a reboot. Each is protected differently:
-   - The legacy activation baseline is bound to the BLE connection epoch and the app
-     process (`BikeComputer/Managers/OfflineMapManager.swift:2877-2889`).
+   - The legacy activation baseline is bound to the app process and to the BLE connection
+     epoch or, since 2026-11-10, the same device boot ID on a reconnect (see below)
+     (`BikeComputer/Managers/OfflineMapManager.swift:2879-2891`).
    - A resumed transfer session must match its random session-token digest and generation
      (`BikeComputer/Managers/DeviceOperationCoordinator.swift:82-95`).
    - The phone's lease generation is a fixed per-connection sentinel.
@@ -1271,11 +1276,13 @@ come from reading the code, not from hardware.
    - The diagnostics boot sequence is persisted on the card, so it does not restart.
 
    The first survey said the phone infers reboots from status words; that was wrong
-   (corrected 2026-11-10). The real cost runs the other way. A legacy install binding is
-   dropped on every reconnect, even within one boot, so an install that finishes during a
-   BLE gap reads as "result unknown, send it again". A per-boot identity in `DSTS` would let
-   that binding survive a same-boot reconnect; that is a change to the production install
-   path, not yet made.
+   (corrected 2026-11-10). The real cost ran the other way: a legacy install binding was
+   dropped on every reconnect, even within one boot, so an install that finished during a
+   BLE gap read as "result unknown, send it again". Since 2026-11-10 the app keeps that
+   binding across a same-boot reconnect by comparing `selectionHealth.bootID`, the 128-bit
+   boot epoch the map status already carried (`LegacyObservationBinding` in
+   `BikeComputer/Models/DeviceMapOperation.swift`); a reboot, an app relaunch or firmware
+   without the field still end it, and admission of a new transfer stays per connection.
 2. **Timeout mirrors.** The phone copies firmware constants (15/45 s rebind, 30 s
    automation, 5 s ack, 10/8 s ATT, and since #776 the 3 s GNSS hold of X-12) instead of
    reading them; each is a latent desync.

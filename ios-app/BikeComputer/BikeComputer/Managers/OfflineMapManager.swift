@@ -2292,6 +2292,8 @@ final class OfflineMapManager: ObservableObject {
     // In memory only: like a legacy record, a relaunched process has not
     // observed the last transfer and cannot bind its result to this epoch.
     private var lastTransferConnectionEpoch: UInt64?
+    // The device boot ID reported on lastTransferConnectionEpoch, if any.
+    private var lastTransferBootID: String?
     @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
     @Published private(set) var catalogShares: [OfflineMapCatalogShare] = []
     @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
@@ -4608,11 +4610,15 @@ final class OfflineMapManager: ObservableObject {
                                                     bleManager: BLEManager) -> Bool {
         lastTransferMapId == mapID &&
             defaults.string(forKey: OfflineMapDefaults.lastTransferSessionIdKey) == sessionID &&
-            lastTransferConnectionEpoch == bleManager.transferConnectionEpoch
+            LegacyObservationBinding.binds(observedEpoch: lastTransferConnectionEpoch,
+                                           observedBootID: lastTransferBootID,
+                                           currentEpoch: bleManager.transferConnectionEpoch,
+                                           currentBootID: bleManager.mapTransferBootID)
     }
 
-    // A legacy result is only bound in the BLE connection and app process that
-    // observed its transfer; a device reboot always replaces the connection.
+    // A legacy result is only bound in the app process that observed its
+    // transfer, on that BLE connection or a reconnect to the same device boot
+    // (LegacyObservationBinding); a device reboot always ends the binding.
     // Elsewhere, wait only for a live activation of this session. Otherwise
     // nothing can still confirm it: stop polling and let a re-send of the same
     // signed stream produce a fresh terminal result. Never infer from a pointer.
@@ -4649,9 +4655,13 @@ final class OfflineMapManager: ObservableObject {
             return true
         }
         guard record.usesDurableProtocol else {
-            // A legacy sequence retained across a connection/reboot is not an
-            // exact-operation receipt. Do not bind old records to a new epoch.
-            if record.connectionEpoch != bleManager.transferConnectionEpoch ||
+            // A legacy sequence retained across a reboot or relaunch is not an
+            // exact-operation receipt. Only its connection or a reconnect to the
+            // same device boot may bind it.
+            if !LegacyObservationBinding.binds(observedEpoch: record.connectionEpoch,
+                                               observedBootID: record.legacyBootID,
+                                               currentEpoch: bleManager.transferConnectionEpoch,
+                                               currentBootID: bleManager.mapTransferBootID) ||
                 record.observationProcessID != DeviceMapOperationStore.observationProcessID {
                 resolveUnboundLegacyResult(sessionID: record.sessionID, bleManager: bleManager)
                 return true
@@ -4808,7 +4818,7 @@ final class OfflineMapManager: ObservableObject {
                 previousMapId: record.previousConfirmedSelection?.mapID,
                 previousSessionId: record.previousConfirmedSelection?.sessionID,
                 previousSequence: nil, outcome: "unconfirmed",
-                connectionEpoch: record.connectionEpoch, protocolVersion: 2,
+                connectionEpoch: record.connectionEpoch, bootID: record.legacyBootID, protocolVersion: 2,
                 streamFormatVersion: 1,
                 artifactURL: (try? cachedPackDirectory())?.appendingPathComponent(record.artifactFilename),
                 updateOperationRecord: false)
@@ -5479,8 +5489,9 @@ final class OfflineMapManager: ObservableObject {
         syncCatalogLibraryIfNeeded()
     }
 
-    func recordTransferObservationForTesting(connectionEpoch: UInt64) {
+    func recordTransferObservationForTesting(connectionEpoch: UInt64, bootID: String? = nil) {
         lastTransferConnectionEpoch = connectionEpoch
+        lastTransferBootID = bootID
     }
 
     func useMapOperationStoreForTesting(_ store: DeviceMapOperationStore) {
@@ -6631,7 +6642,8 @@ final class OfflineMapManager: ObservableObject {
                     observation: "enter_requested", cleanup: "pending", usesDurableProtocol: false,
                     lastReceipt: nil,
                     observationProcessID: DeviceMapOperationStore.observationProcessID,
-                    previousConfirmedSelection: previousSelection
+                    previousConfirmedSelection: previousSelection,
+                    legacyBootID: bleManager.mapTransferBootID
                 )
             }
             if let deviceOperation {
@@ -6643,7 +6655,7 @@ final class OfflineMapManager: ObservableObject {
                                    previousSessionId: bleManager.mapTransferActiveSessionId,
                                    previousSequence: bleManager.mapTransferActivationSequence,
                                    outcome: "unconfirmed",
-                                   connectionEpoch: bleManager.transferConnectionEpoch, protocolVersion: 2,
+                                   connectionEpoch: bleManager.transferConnectionEpoch, bootID: bleManager.mapTransferBootID, protocolVersion: 2,
                                    streamFormatVersion: 1, artifactURL: packURL)
                 }
             }
@@ -6869,7 +6881,7 @@ final class OfflineMapManager: ObservableObject {
                     previousSequence: initialDeviceStatus.activation?.sequence ??
                         bleManager.mapTransferActivationSequence,
                     outcome: "uploading",
-                    connectionEpoch: bleManager.transferConnectionEpoch,
+                    connectionEpoch: bleManager.transferConnectionEpoch, bootID: bleManager.mapTransferBootID,
                     protocolVersion: 2,
                     streamFormatVersion: 1,
                     artifactURL: packURL
@@ -7018,7 +7030,7 @@ final class OfflineMapManager: ObservableObject {
             previousSessionId: activeSessionID,
             previousSequence: attemptSequence,
             outcome: disposition == .installed ? "installed" : "unconfirmed",
-            connectionEpoch: bindsOriginalObservation ? bleManager.transferConnectionEpoch : nil,
+            connectionEpoch: bindsOriginalObservation ? bleManager.transferConnectionEpoch : nil, bootID: bindsOriginalObservation ? bleManager.mapTransferBootID : nil,
             protocolVersion: 2,
             streamFormatVersion: 1,
             artifactURL: artifactURL
@@ -7095,7 +7107,7 @@ final class OfflineMapManager: ObservableObject {
             previousSessionId: previousSessionID,
             previousSequence: previousSequence,
             outcome: "activating",
-            connectionEpoch: bleManager.transferConnectionEpoch,
+            connectionEpoch: bleManager.transferConnectionEpoch, bootID: bleManager.mapTransferBootID,
             protocolVersion: 2,
             streamFormatVersion: 1,
             artifactURL: artifactURL
@@ -7665,12 +7677,14 @@ final class OfflineMapManager: ObservableObject {
                                 previousSequence: UInt32?,
                                 outcome: String,
                                 connectionEpoch: UInt64?,
+                                bootID: String? = nil,
                                 protocolVersion: Int = 1,
                                 streamFormatVersion: Int? = nil,
                                 artifactURL: URL? = nil,
                                 updateOperationRecord: Bool = true) {
         lastTransferObservedIdleOnAnotherMap = false
         lastTransferConnectionEpoch = connectionEpoch
+        lastTransferBootID = connectionEpoch == nil ? nil : bootID
         lastTransferMapId = mapId
         defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
         defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
@@ -7747,7 +7761,8 @@ final class OfflineMapManager: ObservableObject {
               var record = currentDeviceMapOperation, record.mapID == mapID, record.sessionID == sessionID,
               record.confirmLegacyTerminal(outcome: outcome, deviceID: deviceID,
                 connectionEpoch: bleManager.transferConnectionEpoch,
-                processID: DeviceMapOperationStore.observationProcessID) else { return }
+                processID: DeviceMapOperationStore.observationProcessID,
+                currentBootID: bleManager.mapTransferBootID) else { return }
         try? self.deviceMapOperationStore.save(record)
     }
 

@@ -1191,6 +1191,7 @@ struct NavigationProtocolTests {
         await testOtherManagersSerializeWithPassiveMapCleanup()
         await testTerminalJournalCleanupConvergesFromFreshIdleStatus()
         testOfflineMapManagerResendsUnobservedLegacyResult()
+        testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapManagerAdoptsLiveAttemptOfTakenOverUpload()
