@@ -122,7 +122,7 @@ struct Installer {
 struct Activation {
   bool running=false,throwBegin=false;
   bool acceptsUploads()const{return !running;}
-  void finish(std::string,std::string,std::string,std::string){running=false;}
+  void finish(ActivationStatus,std::string,std::string,std::string){running=false;}
   void begin(const std::string&,int){running=true;if(throwBegin){throwBegin=false;throw std::bad_alloc();}}
 };
 struct Server {bool enabled=false;Server status(){return *this;}};
@@ -182,7 +182,7 @@ public:
   void considerMapSuggestion(int32_t,int32_t,bool);
   void submitLibraryTask();
   void lockState(){} void unlockState(){}
-  void finishActivation(std::string a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
+  void finishActivation(ActivationStatus a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
   std::vector<std::string> storageWriteCodes;
   void recordStorageWriteFailure(const char*code){storageWriteCodes.push_back(code);}
   void releaseCommitGrant(){} void requestAutomaticExit(){}
