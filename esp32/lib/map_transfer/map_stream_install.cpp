@@ -1,5 +1,6 @@
 #include "map_stream_install.hpp"
 #include "map_file_io.hpp"
+#include "map_root_state.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
@@ -18,12 +19,12 @@
 namespace map_transfer {
 namespace {
 
-constexpr const char *kInstallingFile = ".installing";
+// Lifecycle marker names come from map_root_state.hpp.
+constexpr const char *kInstallingFile = root_state::fileName(root_state::Marker::Installing);
 constexpr const char *kCheckpointFile = ".stream-checkpoint";
 constexpr const char *kManifestFile = ".manifest.json";
 constexpr const char *kManifestReceiptFile = ".verified.sha256";
-constexpr const char *kReadyFile = ".ready";
-constexpr const char *kConsumedFile = ".activation-consumed";
+constexpr const char *kReadyFile = root_state::fileName(root_state::Marker::Ready);
 constexpr const char *kPendingFile = "/VECTMAP/.pending-stream-activation.json";
 constexpr size_t kMaximumCheckpointBytes = 4096;
 
@@ -500,25 +501,20 @@ readRecoverableMapStreamInstall(
         !safeSessionIdentifier(sessionId))
       continue;
     const std::string root = joinPath(mapsRoot, sessionId);
-    const bool operationReady = regularFileExists(joinPath(root, ".operation-ready")) ||
-                                regularFileExists(joinPath(root, ".operation-ready.bak"));
-    const bool operationPrepared = regularFileExists(joinPath(root, ".operation-prepared")) ||
-        regularFileExists(joinPath(root, ".operation-prepared.bak"));
-    const bool ready = operationReady || regularFileExists(joinPath(root, kReadyFile)) ||
-                       regularFileExists(joinPath(root, kReadyFile) + ".bak");
-    const bool consumed =
-        regularFileExists(joinPath(root, kConsumedFile)) ||
-        regularFileExists(joinPath(root, kConsumedFile) + ".bak");
-    const bool installing =
-        regularFileExists(joinPath(root, kInstallingFile)) ||
-        regularFileExists(joinPath(root, kInstallingFile) + ".bak");
-    if ((!ready || consumed) && !installing && !operationPrepared)
+    auto rootState = root_state::markers(regularFileExists, root);
+    if (!rootState.streamRecoveryCandidate())
       continue;
+    const bool operationReady = rootState.has(root_state::Marker::OperationReady);
+    const bool operationPrepared = rootState.has(root_state::Marker::OperationPrepared);
+    const bool ready = rootState.uploadFinished();
     MapStreamInstallSnapshot candidate;
     std::string marker;
     bool markerValid = false;
-    const std::string markerPath =
-        joinPath(root, operationPrepared ? ".operation-prepared" : (operationReady ? ".operation-ready" : (ready ? kReadyFile : kInstallingFile)));
+    const std::string markerPath = root_state::markerPath(root,
+        operationPrepared ? root_state::Marker::OperationPrepared
+                          : (operationReady ? root_state::Marker::OperationReady
+                                            : (ready ? root_state::Marker::Ready
+                                                     : root_state::Marker::Installing)));
     for (const std::string &path : {markerPath, markerPath + ".bak"}) {
       std::string value;
       if (!readText(path, value, 2048))

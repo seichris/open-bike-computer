@@ -6,6 +6,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The activation status enum and its wire names come from the real header;
+# the fixtures below stand in for the rest of the HTTP server.
+ACTIVATION_STATUS = ('#include "' + str(ROOT / "lib/map_transfer/map_activation_status.hpp") + '"\n'
+                     "using map_transfer::ActivationStatus;\n"
+                     "using map_transfer::activationStatusName;\n")
 # Start of the bounded retry constants and helpers in map_transfer_http.cpp.
 RETRY_POLICY = "namespace {\n// Accepted work gets this many activation attempts"
 # Fixtures that include the constants reference each one; clang rejects unused ones.
@@ -51,7 +57,7 @@ class MapCommitRecoveryTests(unittest.TestCase):
         retry = source[source.index(RETRY_POLICY):source.index(RECOVER)]
         execute = source[source.index("void MapTransferHttpServer::executeActivation("):
                          source.index("bool MapTransferHttpServer::runStreamActivationTask(")]
-        fixture = r'''
+        fixture = ACTIVATION_STATUS + r'''
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -83,8 +89,8 @@ public:
     std::string session="accepted-session", status="activating", code;
     bool running=true;
     bool runningFor(const std::string &id) const { return running && session==id; }
-    void finish(std::string state, std::string, std::string error, std::string) {
-      running=false; status=state; code=error;
+    void finish(ActivationStatus state, std::string, std::string error, std::string) {
+      running=false; status=activationStatusName(state); code=error;
     }
   } activationState_;
   int outcome=0, runs=0;
@@ -545,7 +551,7 @@ int main() {
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
         body = source[source.index("void MapTransferHttpServer::beginDeferredActivation("):
                       source.index("void MapTransferHttpServer::ownedActivation(")]
-        fixture = r'''
+        fixture = ACTIVATION_STATUS + r'''
 #include <cassert>
 #include <new>
 #include <string>
@@ -558,7 +564,7 @@ struct ActivationState {
   ActivationBeginResult begin(const std::string &,int,unsigned) {
     ++begins; return installed?ActivationBeginResult::AlreadyInstalled:ActivationBeginResult::Started;
   }
-  void finish(const char *,const char *,const char *,const char *) {installed=false;}
+  void finish(ActivationStatus,const char *,const char *,const char *) {installed=false;}
   void updateProgress(Progress) {}
 };
 struct Transfer {void sampleResources(const char *) {}};
@@ -583,7 +589,7 @@ public:
   static void ownedInstalledCleanup(void *,const char *,bool) {}
   std::string finished,lastError;
   void retryAcceptedActivation(const std::string &) {++retries;}
-  void finishActivation(const char *status,const char *,const char *,const char *) {finished=status;}
+  void finishActivation(ActivationStatus status,const char *,const char *,const char *) {finished=activationStatusName(status);}
   void setLastError(const char *code,const char *) {lastError=code;}
   void rememberOwnerRecovery(const char *) {}
   void beginDeferredActivation(const DeferredActivation &,bool);
@@ -637,7 +643,7 @@ int main() {
         compiler = shutil.which("c++")
         self.assertIsNotNone(compiler)
         source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
-        fixture = r'''
+        fixture = ACTIVATION_STATUS + r'''
 #include <cassert>
 #include <new>
 #include <string>
@@ -707,8 +713,8 @@ struct Activation {
     running = true; step = 1; status = "activating";
     return ActivationBeginResult::Started;
   }
-  void finish(const char *state, const char *, const char *, const char *) {
-    running = false; status = state; installed = status == "installed";
+  void finish(ActivationStatus state, const char *, const char *, const char *) {
+    running = false; status = activationStatusName(state); installed = status == "installed";
   }
   void updateProgress(const Progress &progress) { if (running) step = progress.step; }
 };
@@ -743,7 +749,7 @@ public:
     return true;
   }
   std::string finishedCode;
-  void finishActivation(const char *, const std::string &, const char *code, const char *) {
+  void finishActivation(ActivationStatus, const std::string &, const char *code, const char *) {
     finished = true; finishedCode = code;
   }
   void releaseCommitGrant() { released = true; }
@@ -920,7 +926,7 @@ int main() {
     // operation: the attempt starts over and reports its own progress.
     MapTransferHttpServer server;
     accepted(server, id);
-    server.activationState_.finish("installed", "", "", "");
+    server.activationState_.finish(ActivationStatus::Installed, "", "", "");
     assert(server.recoverCommitDisposition({id}) == Result::Completed && server.dispatched);
     assert(server.activationState_.begins == 2 && server.activationState_.running);
     assert(server.activationState_.step == 3);
@@ -931,7 +937,7 @@ int main() {
     legacy.operation.clear();
     MapTransferHttpServer server;
     accepted(server, legacy);
-    server.activationState_.finish("installed", "", "", "");
+    server.activationState_.finish(ActivationStatus::Installed, "", "", "");
     assert(server.recoverCommitDisposition({legacy}) == Result::Completed && server.dispatched);
     assert(server.activationState_.begins == 1 && server.activationState_.status == "installed");
   }

@@ -263,7 +263,7 @@ private:
                  const std::string &message);
   void lockState() const;
   void unlockState() const;
-  void finishActivation(std::string status, std::string mapId,
+  void finishActivation(ActivationStatus status, std::string mapId,
               std::string errorCode, std::string errorMessage);
   void updateActivationProgress(const ActivationProgress &progress);
   bool startActivationTask(const std::string &sessionId, bool automaticExit);

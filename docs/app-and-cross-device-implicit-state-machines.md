@@ -1325,8 +1325,8 @@ The iPhone and Watch code repeats the firmware's idioms one for one:
 
 1. **X-1 / C-1 / C-2 / D-1** device map install: one phone-side `DeviceInstallState` fed
    by the operation journal only, with the outcome string and per-map mirror derived from
-   it; pair it with the firmware root classifier proposed in the firmware document, which would
-   also absorb MT-13's `stream_settle_previous` gate.
+   it; pair it with the firmware's shared marker classifier (MT-1, `map_root_state.hpp`), whose
+   stored root state would also absorb MT-13's `stream_settle_previous` gate.
 2. **X-3 / D-4** firmware update: guard `updatePending(stage:)` with the same transition
    table on both reconcile and error paths, drop the status string, and bind the post-update
    boot to the pending record by correlation, not build number.
