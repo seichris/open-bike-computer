@@ -2953,6 +2953,15 @@ through the existing authenticated, chunked map-status notification path.
 Clients fence boot/revision freshness within their authenticated connection,
 match `root`, `mapID`, and `sessionID` to the independently reported active
 selection, and suppress current-use presence for anything other than `ready`.
+
+The iPhone also uses `bootID` as the device's boot identity for legacy
+(non-operation) installs. Their result binds to the activation sequence, which
+restarts on reboot, so the app normally binds it to the BLE connection that
+observed the upload. After a reconnect, in the same app process, it keeps that
+binding only when the new connection's `selectionHealth.bootID` equals the
+value reported when the upload was observed. A changed or malformed `bootID`,
+or firmware without `selectionHealth`, keeps the connection-only rule.
+Admission of a new transfer stays per connection.
 A live install additionally requires its exact durable Installed receipt: a
 renderer ACK with failed receipt persistence cannot confer operation success.
 

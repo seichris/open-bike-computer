@@ -134,6 +134,22 @@ nonisolated struct DeviceMapConfirmedSelectionSnapshot: Codable, Equatable, Send
     }
 }
 
+// A legacy (non-operation) result is bound to the BLE connection that observed
+// its transfer, because the activation sequence restarts when the firmware
+// reboots. A reconnect to the same boot keeps the sequence, so the result stays
+// bound when the device reports the same 128-bit boot ID it reported then. A
+// missing or malformed ID on either side keeps the connection-only rule.
+nonisolated enum LegacyObservationBinding {
+    static func binds(observedEpoch: UInt64?, observedBootID: String?,
+                      currentEpoch: UInt64, currentBootID: String?) -> Bool {
+        guard let observedEpoch else { return false }
+        if observedEpoch == currentEpoch { return true }
+        guard let observedBootID, let currentBootID,
+              DeviceMapOperationReceipt.isLowerHex(observedBootID, count: 32) else { return false }
+        return observedBootID == currentBootID
+    }
+}
+
 nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let deviceID: String
@@ -167,6 +183,9 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     var legacyTerminalConfirmedAt: Date? = nil
     var previousConfirmedSelection: DeviceMapConfirmedSelectionSnapshot? = nil
     var fencedRetirement: DeviceMapFencedRetirement? = nil
+    /// The device boot ID reported on `connectionEpoch` when this legacy
+    /// record was created; nil when that status had none.
+    var legacyBootID: String? = nil
 
     func originalUploadIsFenced(unavailable: DeviceMapOperationReceipt,
                                 admission: DeviceMapOperationAdmission) -> Bool {
@@ -209,9 +228,14 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
 
     mutating func confirmLegacyTerminal(outcome: String, deviceID: String,
                                        connectionEpoch: UInt64, processID: UUID,
+                                       currentBootID: String? = nil,
                                        now: Date = Date()) -> Bool {
         guard !usesDurableProtocol, lastReceipt == nil, acknowledgedAt == nil,
-              self.deviceID == deviceID, self.connectionEpoch == connectionEpoch,
+              self.deviceID == deviceID,
+              LegacyObservationBinding.binds(observedEpoch: self.connectionEpoch,
+                                             observedBootID: legacyBootID,
+                                             currentEpoch: connectionEpoch,
+                                             currentBootID: currentBootID),
               observationProcessID == processID,
               ["installed_confirmed", "failed_or_rolled_back"].contains(outcome),
               !isTerminal || observation == outcome else { return false }
@@ -230,9 +254,10 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
 
     // Durable admission requires a terminal receipt or verified retirement of
     // an unavailable, uncommitted attempt whose original PUT is boot-fenced.
-    // A legacy observation can only become terminal in the BLE connection and
-    // app process that created it (confirmLegacyTerminal). After either changes
-    // it stays unresolved history, but must not block another transfer forever;
+    // A legacy observation can only become terminal in the app process that
+    // created it, on its BLE connection or a reconnect to the same device boot
+    // (confirmLegacyTerminal). Admission stays per connection: after a reconnect
+    // or relaunch it is unresolved history and must not block another transfer;
     // active OS uploads and the firmware commit grant are fenced separately.
     func blocksNewTransfer(connectionEpoch: UInt64, processID: UUID) -> Bool {
         guard !isTerminal, !isRetiredUnknown else { return false }
