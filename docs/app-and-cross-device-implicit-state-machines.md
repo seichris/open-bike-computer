@@ -1248,11 +1248,24 @@ fix, benign on a read of `mapPresentation.hpp:297-337` and not traced further. A
 come from reading the code, not from hardware.
 
 ### Cross-device divergences, summarized
-1. **Boot-local counters crossing the air.** Activation sequence, transfer generation, ride
-   generation, lease generation and diagnostics boot sequence all reset on firmware reboot;
-   the phone persists its last-seen value and must infer a reboot from status-word context.
-   Only map operations (admission epoch + revision) and ride automation (ride generation in
-   every frame) carry an explicit epoch.
+1. **Boot-local counters crossing the air.** The activation sequence, transfer generation
+   and lease generation restart when the firmware reboots, but the phone never carries one
+   across a reboot. Each is protected differently:
+   - The legacy activation baseline is bound to the BLE connection epoch and the app
+     process (`BikeComputer/Managers/OfflineMapManager.swift:2877-2889`).
+   - A resumed transfer session must match its random session-token digest and generation
+     (`BikeComputer/Managers/DeviceOperationCoordinator.swift:82-95`).
+   - The phone's lease generation is a fixed per-connection sentinel.
+   - Ride automation keys its watermarks by the ride generation, which NVS bumps on every
+     boot (`esp32/lib/ride_automation/ride_automation_runtime.cpp:201-221`).
+   - The diagnostics boot sequence is persisted on the card, so it does not restart.
+
+   The first survey said the phone infers reboots from status words; that was wrong
+   (corrected 2026-11-10). The real cost runs the other way. A legacy install binding is
+   dropped on every reconnect, even within one boot, so an install that finishes during a
+   BLE gap reads as "result unknown, send it again". A per-boot identity in `DSTS` would let
+   that binding survive a same-boot reconnect; that is a change to the production install
+   path, not yet made.
 2. **Timeout mirrors.** The phone copies firmware constants (15/45 s rebind, 30 s
    automation, 5 s ack, 10/8 s ATT, and since #776 the 3 s GNSS hold of X-12) instead of
    reading them; each is a latent desync.
