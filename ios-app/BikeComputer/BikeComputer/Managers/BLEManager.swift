@@ -2972,9 +2972,13 @@ class BLEManager: NSObject, ObservableObject {
         _ = requestWatchDirectRideReconciliation(forExplicitDiscovery: false)
     }
 
+    /// `phoneRecordingBlocksHandoff` is this iPhone's own unfinished or
+    /// unrecovered recording. Both it and navigation keep the Bicino under the
+    /// code every Watch build knows; the response names which one holds it.
     func handleWatchDirectRidePreparationRequest(
         _ request: WatchDirectRidePreparationRequestV1,
-        phoneNavigationActive: Bool
+        phoneNavigationActive: Bool,
+        phoneRecordingBlocksHandoff: Bool = false
     ) -> WatchDirectRidePreparationResponseV1 {
         switch request.operation {
         case .release:
@@ -3004,10 +3008,11 @@ class BLEManager: NSObject, ObservableObject {
                     accepted: true
                 )
             }
-            let rejection = WatchDirectRidePreparationPolicyV1.rejectionCode(
+            let rejection = WatchDirectRidePreparationPolicyV1.rejection(
                 requestedDeviceID: request.deviceID,
                 selectedDeviceID: activeDeviceID,
                 phoneNavigationActive: phoneNavigationActive,
+                phoneRecordingBlocksHandoff: phoneRecordingBlocksHandoff,
                 transferActive: mapTransferModeEnabled ||
                     !deviceTransferMode.isEmpty,
                 administrationActive:
@@ -3020,7 +3025,8 @@ class BLEManager: NSObject, ObservableObject {
                 return WatchDirectRidePreparationResponseV1(
                     requestID: request.requestID,
                     accepted: false,
-                    errorCode: rejection
+                    errorCode: rejection.code,
+                    phoneActivity: rejection.phoneActivity
                 )
             }
 

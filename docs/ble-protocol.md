@@ -324,6 +324,16 @@ returns a link won in the meantime. Outside a handback, a
 iPhone also uses that code while its own workout recording, recovery or storage
 failure blocks a handoff.
 
+That rejection also carries an optional `phoneActivity`: `navigation` while
+iPhone navigation holds the Bicino, `recording` while iPhone's own recording,
+recovery or storage failure does. Navigation wins when both hold. The code stays
+`phone_navigation_active` for every build: earlier Watch builds ignore the key,
+and a rejection without it, or with an activity the Watch does not know, reads
+as navigation as before. Watch uses the activity only for its message, "Bicino
+is recording a ride on iPhone" for `recording`. A `recording` answer during a
+handback restores the hold exactly like a `navigation` answer, because iPhone
+keeps the link for that ride.
+
 Both peers order duplicate requests for one handoff. In iPhone's outbox a newer
 request for the same handoff replaces an older one, an older request requeued
 after its transfer was lost cannot replace a newer one, and a failed transfer is

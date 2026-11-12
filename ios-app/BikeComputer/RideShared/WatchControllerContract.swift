@@ -542,25 +542,76 @@ enum WatchDirectRideReconciliationPolicyV1 {
     }
 }
 
+/// What keeps the Bicino on iPhone when it rejects a preparation with
+/// `phone_navigation_active`. The code stays the same for every Watch build;
+/// the activity rides beside it so a current Watch can say which one it is.
+enum WatchDirectRidePhoneActivityV1: String, Codable, Equatable, Sendable {
+    /// iPhone navigation needs the link while it runs.
+    case navigation
+    /// iPhone records its own ride, or has not finished recovering one.
+    case recording
+}
+
 struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {
     static let schemaVersion = 1
+    static let phoneBusyCode = "phone_navigation_active"
 
     let schema: Int
     let requestID: UUID
     let accepted: Bool
     let errorCode: String?
+    /// Absent from earlier iPhone builds and ignored by earlier Watch builds.
+    let phoneActivity: WatchDirectRidePhoneActivityV1?
 
-    init(requestID: UUID, accepted: Bool, errorCode: String? = nil) {
+    private enum CodingKeys: String, CodingKey {
+        case schema, requestID, accepted, errorCode, phoneActivity
+    }
+
+    init(
+        requestID: UUID,
+        accepted: Bool,
+        errorCode: String? = nil,
+        phoneActivity: WatchDirectRidePhoneActivityV1? = nil
+    ) {
         schema = Self.schemaVersion
         self.requestID = requestID
         self.accepted = accepted
         self.errorCode = errorCode.map { String($0.prefix(64)) }
+        self.phoneActivity = phoneActivity
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try values.decode(Int.self, forKey: .schema)
+        requestID = try values.decode(UUID.self, forKey: .requestID)
+        accepted = try values.decode(Bool.self, forKey: .accepted)
+        errorCode = try values.decodeIfPresent(String.self, forKey: .errorCode)
+        // A later iPhone may name an activity this build does not know. The
+        // rejection still applies, so the activity reads as unspecified.
+        let activity = try? values.decodeIfPresent(
+            String.self,
+            forKey: .phoneActivity
+        )
+        phoneActivity = activity.flatMap(
+            WatchDirectRidePhoneActivityV1.init(rawValue:)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schema, forKey: .schema)
+        try values.encode(requestID, forKey: .requestID)
+        try values.encode(accepted, forKey: .accepted)
+        try values.encodeIfPresent(errorCode, forKey: .errorCode)
+        try values.encodeIfPresent(phoneActivity, forKey: .phoneActivity)
     }
 
     func validated() throws -> Self {
         guard schema == Self.schemaVersion,
               accepted ? errorCode == nil : errorCode?.isEmpty == false,
-              errorCode?.utf8.count ?? 0 <= 64 else {
+              errorCode?.utf8.count ?? 0 <= 64,
+              phoneActivity == nil ||
+                (!accepted && errorCode == Self.phoneBusyCode) else {
             throw WatchControllerContractError.invalidEnvelope
         }
         return self
@@ -600,12 +651,38 @@ enum WatchDirectRidePreparationPolicyV1 {
         transferActive: Bool,
         administrationActive: Bool
     ) -> String? {
+        rejection(
+            requestedDeviceID: requestedDeviceID,
+            selectedDeviceID: selectedDeviceID,
+            phoneNavigationActive: phoneNavigationActive,
+            phoneRecordingBlocksHandoff: false,
+            transferActive: transferActive,
+            administrationActive: administrationActive
+        )?.code
+    }
+
+    /// iPhone navigation and iPhone's own recording both keep the Bicino and
+    /// share the code every Watch build understands; the activity says which.
+    /// Navigation wins when both hold, because a handback is about it.
+    static func rejection(
+        requestedDeviceID: String,
+        selectedDeviceID: String?,
+        phoneNavigationActive: Bool,
+        phoneRecordingBlocksHandoff: Bool,
+        transferActive: Bool,
+        administrationActive: Bool
+    ) -> (code: String, phoneActivity: WatchDirectRidePhoneActivityV1?)? {
         guard requestedDeviceID == selectedDeviceID else {
-            return "different_device"
+            return ("different_device", nil)
         }
-        guard !phoneNavigationActive else { return "phone_navigation_active" }
-        guard !transferActive else { return "device_transfer_active" }
-        guard !administrationActive else { return "device_admin_active" }
+        if phoneNavigationActive {
+            return (WatchDirectRidePreparationResponseV1.phoneBusyCode, .navigation)
+        }
+        if phoneRecordingBlocksHandoff {
+            return (WatchDirectRidePreparationResponseV1.phoneBusyCode, .recording)
+        }
+        guard !transferActive else { return ("device_transfer_active", nil) }
+        guard !administrationActive else { return ("device_admin_active", nil) }
         return nil
     }
 

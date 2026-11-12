@@ -1842,6 +1842,118 @@ enum RideSharedTests {
             ) == preparationResponse,
             "Watch-direct preparation responses bind the request identity"
         )
+        try expect(
+            try WatchDirectRidePreparationResponseV1.decode(
+                preparationResponse.encoded()
+            ).phoneActivity == nil,
+            "an earlier iPhone's rejection names no activity"
+        )
+        // iPhone names what keeps the Bicino beside the code every Watch
+        // build knows, so an earlier Watch still reads today's rejection.
+        let recordingRejection = WatchDirectRidePreparationResponseV1(
+            requestID: preparationRequest.requestID,
+            accepted: false,
+            errorCode: "phone_navigation_active",
+            phoneActivity: .recording
+        )
+        try expect(
+            try WatchDirectRidePreparationResponseV1.decode(
+                recordingRejection.encoded()
+            ) == recordingRejection,
+            "the iPhone activity survives the reply"
+        )
+        struct EarlierWatchResponse: Decodable {
+            let schema: Int
+            let requestID: UUID
+            let accepted: Bool
+            let errorCode: String?
+        }
+        let earlierWatch = try PropertyListDecoder().decode(
+            EarlierWatchResponse.self,
+            from: recordingRejection.encoded()
+        )
+        expect(
+            !earlierWatch.accepted &&
+                earlierWatch.errorCode == "phone_navigation_active" &&
+                earlierWatch.requestID == preparationRequest.requestID,
+            "an earlier Watch build decodes the same rejection and ignores the activity"
+        )
+        var laterPhone = try PropertyListSerialization.propertyList(
+            from: recordingRejection.encoded(),
+            format: nil
+        ) as? [String: Any] ?? [:]
+        laterPhone["phoneActivity"] = "charging"
+        let laterResponse = try WatchDirectRidePreparationResponseV1.decode(
+            PropertyListSerialization.data(
+                fromPropertyList: laterPhone,
+                format: .binary,
+                options: 0
+            )
+        )
+        expect(
+            laterResponse.phoneActivity == nil &&
+                laterResponse.errorCode == "phone_navigation_active",
+            "an activity this build does not know reads as unspecified"
+        )
+        expect(
+            (try? WatchDirectRidePreparationResponseV1(
+                requestID: preparationRequest.requestID,
+                accepted: true,
+                phoneActivity: .navigation
+            ).encoded()) == nil &&
+                (try? WatchDirectRidePreparationResponseV1(
+                    requestID: preparationRequest.requestID,
+                    accepted: false,
+                    errorCode: "device_transfer_active",
+                    phoneActivity: .recording
+                ).encoded()) == nil,
+            "only the phone-busy rejection names an iPhone activity"
+        )
+        func phoneRejection(
+            selected: String?,
+            navigation: Bool,
+            recording: Bool
+        ) -> (code: String, phoneActivity: WatchDirectRidePhoneActivityV1?)? {
+            WatchDirectRidePreparationPolicyV1.rejection(
+                requestedDeviceID: deviceID,
+                selectedDeviceID: selected,
+                phoneNavigationActive: navigation,
+                phoneRecordingBlocksHandoff: recording,
+                transferActive: false,
+                administrationActive: false
+            )
+        }
+        let recordingOnly = phoneRejection(
+            selected: deviceID, navigation: false, recording: true
+        )
+        expect(
+            recordingOnly?.code == "phone_navigation_active" &&
+                recordingOnly?.phoneActivity == .recording,
+            "iPhone's own recording keeps the Bicino under the shared code"
+        )
+        expect(
+            phoneRejection(
+                selected: deviceID, navigation: true, recording: false
+            )?.phoneActivity == .navigation &&
+                phoneRejection(
+                    selected: deviceID, navigation: true, recording: true
+                )?.phoneActivity == .navigation,
+            "navigation names itself, and wins when the iPhone also records"
+        )
+        expect(
+            phoneRejection(
+                selected: deviceID, navigation: false, recording: false
+            ) == nil,
+            "an idle iPhone still yields the selected Bicino"
+        )
+        let otherDevice = phoneRejection(
+            selected: otherCredential.deviceID, navigation: true, recording: true
+        )
+        expect(
+            otherDevice?.code == "different_device" &&
+                otherDevice?.phoneActivity == nil,
+            "a different selected Bicino is still rejected first"
+        )
         expect(
             WatchDirectRidePreparationPolicyV1.rejectionCode(
                 requestedDeviceID: deviceID,
