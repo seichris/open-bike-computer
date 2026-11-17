@@ -543,6 +543,62 @@ final class WorkoutMirrorManager: NSObject {
         enqueueStateChangingControl(.discard)
     }
 
+    func savedWorkoutInFitness(
+        sessionID: UUID,
+        requestReadAccess: Bool
+    ) async throws -> WorkoutSavedInFitness? {
+        guard HKHealthStore.isHealthDataAvailable(), let appID = Bundle.main.bundleIdentifier else { return nil }
+        let type = HKObjectType.workoutType()
+        if requestReadAccess {
+            try await healthStore.requestAuthorization(toShare: [], read: [type])
+        }
+        try Task.checkCancellation()
+        let identifier = sessionID.uuidString
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: [identifier]),
+            HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeySyncIdentifier,
+                allowedValues: ["LetItRide.BikeComputer.workout.\(identifier)"]),
+            HKQuery.predicateForWorkouts(with: .cycling)
+        ])
+        let descriptor = HKSampleQueryDescriptor(
+            predicates: [.workout(predicate)], sortDescriptors: []
+        )
+        let matches = try await descriptor.result(for: healthStore).filter { workout in
+            let source = workout.sourceRevision.source.bundleIdentifier
+            return source == appID || source == appID + ".watchkitapp"
+        }
+        guard matches.count == 1, let workout = matches.first,
+              workout.endDate >= workout.startDate,
+              workout.duration.isFinite, workout.duration >= 0 else { return nil }
+        func total(_ identifier: HKQuantityTypeIdentifier, unit: HKUnit) -> Double? {
+            guard let value = workout.statistics(for: HKQuantityType(identifier))?
+                .sumQuantity()?.doubleValue(for: unit),
+                value.isFinite, value >= 0 else { return nil }
+            return value
+        }
+        return WorkoutSavedInFitness(
+            sessionID: sessionID,
+            startDate: workout.startDate,
+            endDate: workout.endDate,
+            duration: workout.duration,
+            distanceMeters: total(.distanceCycling, unit: .meter()),
+            activeKilocalories: total(.activeEnergyBurned, unit: .kilocalorie())
+        )
+    }
+
+    func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool {
+        guard store.presentation.canReconcileFromFitness(sessionID: saved.sessionID) else { return false }
+        if #available(iOS 17.0, *), let transport = mirroredTransport {
+            // An attachment with unknown or different provenance may be a
+            // new ride. Wait for its identity before changing ownership.
+            guard currentTransportSessionID == saved.sessionID else { return false }
+            transport.installDelegate(nil)
+            mirroredTransport = nil
+        }
+        resetRemoteTransport()
+        return store.reconcileSavedWorkout(saved)
+    }
+
     @discardableResult
     func resetTerminalPresentation() -> Bool {
         guard pendingTerminalFailureCode == nil,
@@ -619,7 +675,8 @@ final class WorkoutMirrorManager: NSObject {
                 firstSnapshotTimeoutAttemptID = nil
                 return
             }
-            if store.presentation.connectionState == .failed {
+            if store.presentation.connectionState == .failed
+                || store.presentation.connectionState == .ended {
                 if #available(iOS 17.0, *) {
                     mirroredTransport?.installDelegate(nil)
                     mirroredTransport = nil
@@ -1330,7 +1387,8 @@ final class WorkoutMirrorManager: NSObject {
                 ?? date
         }
         store.confirmSessionState(state, at: date)
-        if store.presentation.connectionState != .awaitingFirstSnapshot {
+        if store.presentation.connectionState != .awaitingFirstSnapshot,
+           !store.presentation.awaitingReplacementMirror {
             cancelFirstSnapshotTimeout()
         }
         synchronizeControlTimeoutWithPresentation()

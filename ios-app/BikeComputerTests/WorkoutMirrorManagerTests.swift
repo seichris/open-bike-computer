@@ -3548,6 +3548,57 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         }
     }
 
+    func testFitnessReconciliationKeepsLiveReplacementForLateSnapshot() async throws {
+        let start = Date().addingTimeInterval(-3_600)
+        let saved = WorkoutSavedInFitness(
+            sessionID: UUID(), startDate: start,
+            endDate: start.addingTimeInterval(1_800), duration: 1_700,
+            distanceMeters: 12_000, activeKilocalories: 300
+        )
+        let manager = WorkoutMirrorManager(watchLaunchTimeout: 0.02)
+        XCTAssertTrue(manager.reconcileSavedWorkout(saved))
+
+        // A stale mirror that reports only an ended native session keeps the
+        // saved summary. Its native callback must not cancel the timeout.
+        let stale = FakeMirroredSessionTransport()
+        manager.acceptMirroredTransport(stale)
+        manager.applyNativeSessionState(.ended, at: Date(), from: stale)
+        XCTAssertEqual(manager.store.presentation.fitnessReconciliation,
+                       .awaitingReplacementMirror)
+        try await waitUntil { !stale.hasDelegate }
+        XCTAssertEqual(manager.store.presentation.fitnessReconciliation, .verified)
+        XCTAssertEqual(manager.store.presentation.finalSnapshot?.terminalOutcome, .saved)
+        XCTAssertTrue(manager.store.canResetTerminalPresentation)
+
+        // HealthKit reports this mirror live, so it is a new ride whose
+        // credentialed snapshot is late.
+        let replacement = FakeMirroredSessionTransport(sessionStartDate: Date())
+        replacement.initialSessionState = .running
+        manager.acceptMirroredTransport(replacement)
+        XCTAssertEqual(manager.store.presentation.connectionState, .awaitingFirstSnapshot)
+        XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+        XCTAssertNil(manager.store.presentation.fitnessReconciliation)
+        try await waitUntil {
+            manager.store.presentation.connectionState == .disconnected
+        }
+        XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+        XCTAssertTrue(replacement.hasDelegate,
+                      "The live replacement keeps its transport for a late snapshot")
+        XCTAssertFalse(manager.store.canResetTerminalPresentation)
+        XCTAssertFalse(manager.reconcileSavedWorkout(saved),
+                       "A transport without the saved ride's identity is not reconciled")
+        XCTAssertTrue(replacement.hasDelegate)
+
+        let now = Date()
+        manager.applyRemoteEnvelopes(
+            [makeSnapshotEnvelope(sequence: 1, capturedAt: now, sessionID: UUID())],
+            receivedAt: now,
+            from: replacement
+        )
+        XCTAssertEqual(manager.store.presentation.connectionState, .connected)
+        XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+    }
+
     func testHungTerminalAttemptCannotBlockOrClearSameControlRetry() async throws {
         for (index, control) in [
             WorkoutControlV1.endAndSave,

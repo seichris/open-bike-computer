@@ -270,6 +270,13 @@ final class WorkoutMetricsStore: ObservableObject {
     }
 
     @discardableResult
+    func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool {
+        let reconciled = reducer.reconcileSavedWorkout(saved)
+        if reconciled { publish() }
+        return reconciled
+    }
+
+    @discardableResult
     func resetTerminalPresentation() -> Bool {
         let didReset = reducer.resetTerminalPresentation()
         publish()

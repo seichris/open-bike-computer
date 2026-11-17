@@ -1999,6 +1999,7 @@ struct ContentView: View {
             coordinator: coordinator,
             workoutStore: workoutStore,
             watchAvailability: watchAvailability,
+            recordingCoordinator: workoutSessionCoordinator,
             isCompactHeight: isCompactHeight,
             onStopNavigation: { coordinator.stopNavigation() },
             onStartWorkout: {

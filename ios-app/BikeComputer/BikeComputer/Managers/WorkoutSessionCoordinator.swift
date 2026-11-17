@@ -24,6 +24,8 @@ protocol WorkoutWatchRecording: RideAutomationWorkoutControlling {
     func endAndSave()
     func discard()
     func refreshFreshness()
+    func savedWorkoutInFitness(sessionID: UUID, requestReadAccess: Bool) async throws -> WorkoutSavedInFitness?
+    func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool
     @discardableResult func resetTerminalPresentation() -> Bool
 }
 
@@ -51,6 +53,8 @@ final class WorkoutSessionCoordinator: ObservableObject {
     @Published private(set) var record: WorkoutRecordingRecord?
     @Published private(set) var recoveryComplete = false
     @Published private(set) var notice: WorkoutRecordingNotice?
+    @Published private(set) var fitnessCheckMessage: String?
+    @Published private(set) var isCheckingFitnessOnRequest = false
     let phoneSupported: Bool
 
     private let persistence: any WorkoutRecordingPersisting
@@ -58,6 +62,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
     private var recoveryTask: Task<Void, Never>?
     private var startTask: Task<Void, Never>?
+    private var fitnessCheckTask: Task<Void, Never>?
+    private var fitnessCheckSessionID: UUID?
+    private var fitnessCheckAttemptID: UUID?
     private var pendingAutomaticChoice = false
     private var storageFailed = false
     private var isResetting = false
@@ -120,7 +127,87 @@ final class WorkoutSessionCoordinator: ObservableObject {
         }.store(in: &subscriptions)
     }
 
-    deinit { recoveryTask?.cancel(); startTask?.cancel() }
+    deinit {
+        recoveryTask?.cancel()
+        startTask?.cancel()
+        fitnessCheckTask?.cancel()
+    }
+
+    private func fitnessCheckCandidate(_ presentation: WorkoutMirrorPresentationV1) -> UUID? {
+        guard recoveryComplete, !storageFailed, let record, record.owner == .watch,
+              // A provisional Watch launch reservation has no verified start.
+              record.startedAt != nil, record.finishChoice != .discard,
+              // A finished ride has nothing to reconcile. Its Watch
+              // presentation may already belong to a new, unidentified ride.
+              record.phase != .finished,
+              presentation.canReconcileFromFitness(sessionID: record.sessionID)
+        else { return nil }
+        return record.sessionID
+    }
+
+    var canCheckFitness: Bool { fitnessCheckCandidate(watch.store.presentation) != nil }
+
+    func checkFitness() {
+        guard !isCheckingFitnessOnRequest else { return }
+        if let sessionID = fitnessCheckCandidate(watch.store.presentation) {
+            startFitnessCheck(sessionID: sessionID, requestReadAccess: true)
+        }
+    }
+
+    private func synchronizeFitnessCheck(with presentation: WorkoutMirrorPresentationV1) {
+        let candidate = fitnessCheckCandidate(presentation)
+        guard candidate != fitnessCheckSessionID else { return }
+        fitnessCheckTask?.cancel()
+        fitnessCheckTask = nil
+        fitnessCheckAttemptID = nil
+        fitnessCheckSessionID = candidate
+        if fitnessCheckMessage != nil { fitnessCheckMessage = nil }
+        if isCheckingFitnessOnRequest { isCheckingFitnessOnRequest = false }
+        if let candidate {
+            startFitnessCheck(sessionID: candidate, requestReadAccess: false)
+        }
+    }
+
+    private func startFitnessCheck(sessionID: UUID, requestReadAccess: Bool) {
+        fitnessCheckTask?.cancel()
+        fitnessCheckSessionID = sessionID
+        let attempt = UUID()
+        fitnessCheckAttemptID = attempt
+        if requestReadAccess {
+            isCheckingFitnessOnRequest = true
+            fitnessCheckMessage = "Checking Fitness…"
+        }
+        // A Watch save can reach iPhone after mirroring disconnects.
+        let delays: [UInt64] = requestReadAccess ? [0] : [0, 5, 15, 40]
+        fitnessCheckTask = Task { @MainActor [weak self, watch] in
+            defer {
+                if let self, fitnessCheckAttemptID == attempt {
+                    fitnessCheckTask = nil
+                    if requestReadAccess { isCheckingFitnessOnRequest = false }
+                }
+            }
+            for delay in delays {
+                if delay > 0 {
+                    do { try await Task.sleep(nanoseconds: delay * 1_000_000_000) }
+                    catch { return }
+                }
+                guard !Task.isCancelled,
+                      self?.fitnessCheckCandidate(watch.store.presentation) == sessionID else { return }
+                let saved = try? await watch.savedWorkoutInFitness(
+                    sessionID: sessionID, requestReadAccess: requestReadAccess
+                )
+                guard !Task.isCancelled, let self,
+                      fitnessCheckAttemptID == attempt,
+                      fitnessCheckCandidate(watch.store.presentation) == sessionID else { return }
+                if let saved, saved.sessionID == sessionID, watch.reconcileSavedWorkout(saved) {
+                    return
+                }
+                if requestReadAccess {
+                    fitnessCheckMessage = "Bicino couldn’t verify this ride in Fitness yet."
+                }
+            }
+        }
+    }
 
     var blocksBikeComputerHandoff: Bool {
         !WorkoutRecordingStartPolicy.mayYieldBikeComputer(record: record)
@@ -410,6 +497,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
 
     private func receiveWatch(_ presentation: WorkoutMirrorPresentationV1) {
         guard !isResetting, !storageFailed else { return }
+        defer { synchronizeFitnessCheck(with: presentation) }
         // Native phone recovery must finish before adopting an unsolicited Watch ride.
         guard recoveryComplete || record?.owner == .watch else { return }
         let hasActiveEvidence = presentation.isWorkoutActive
@@ -473,8 +561,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
             if notice != unresolved { notice = unresolved }
         } else if notice?.kind == .watchUnresolved,
-                  presentation.sessionID != nil,
-                  presentation.sessionID == record?.sessionID {
+                  let record, presentation.sessionID == record.sessionID {
             notice = nil
         }
         publishWatch()
@@ -568,7 +655,12 @@ final class WorkoutSessionCoordinator: ObservableObject {
     }
 
     func dismissNotice() { notice = nil }
-    func refreshFreshness() { watch.refreshFreshness() }
+    func refreshFreshness() {
+        watch.refreshFreshness()
+        if fitnessCheckTask == nil, let sessionID = fitnessCheckCandidate(watch.store.presentation) {
+            startFitnessCheck(sessionID: sessionID, requestReadAccess: false)
+        }
+    }
     func pause() { if record?.owner == .iphone { phone?.pause() } else if record?.owner == .watch { watch.pause() } }
     func resume() { if record?.owner == .iphone { phone?.resume() } else if record?.owner == .watch { watch.resume() } }
     func markSegment() { if record?.owner == .iphone { phone?.markSegment() } else if record?.owner == .watch { watch.markSegment() } }
@@ -581,7 +673,8 @@ final class WorkoutSessionCoordinator: ObservableObject {
             phone?.resetFinished()
             return store.resetTerminalPresentation()
         }
-        guard current.phase == .finished else { return false }
+        guard current.phase == .finished,
+              current.owner != .watch || watch.store.canResetTerminalPresentation else { return false }
         do { try persistence.clear(sessionID: current.sessionID) }
         catch { persistenceError(); return false }
         isResetting = true
