@@ -60,6 +60,10 @@ nonisolated struct WorkoutRideContinuation: Codable, Equatable, Sendable {
         /// Apple Watch kept recording after iPhone took over. Its Fitness
         /// workout is left intact; Bicino counts it only up to `endedAt`.
         var recordedPastHandoff = false
+        /// The rider discarded the Watch workout on Apple Watch, so Fitness
+        /// will never contain it. Bicino keeps the totals it already counted.
+        /// Optional so records written before this field still decode.
+        var discardedOnWatch: Bool?
     }
 
     /// Late Watch data: a mirrored snapshot or the saved Fitness workout.
@@ -70,6 +74,8 @@ nonisolated struct WorkoutRideContinuation: Codable, Equatable, Sendable {
         var activeKilocalories: Double?
         var averageHeartRate: Double?
         var savedInFitness = false
+        /// A terminal discard: a status report that carries no totals.
+        var discardedOnWatch = false
     }
 
     var schemaVersion = 1
@@ -100,6 +106,12 @@ nonisolated struct WorkoutRideContinuation: Codable, Equatable, Sendable {
     func absorbing(_ evidence: WatchEvidence, phoneStartedAt: Date?) -> Self {
         var next = self
         if evidence.savedInFitness { next.watch.savedInFitness = true }
+        if evidence.discardedOnWatch {
+            // The discard report has no statistics and says nothing about
+            // recording past the handoff; it only changes the Watch's outcome.
+            next.watch.discardedOnWatch = true
+            return next.isValid ? next : self
+        }
         guard evidence.capturedAt.timeIntervalSinceReferenceDate.isFinite,
               evidence.capturedAt >= watch.startedAt else { return next }
         // Before the iPhone recorder confirms its start, the rider's choice

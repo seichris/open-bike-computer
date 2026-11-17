@@ -97,8 +97,11 @@ keeps its largest value, so a smaller or incomplete save never removes counted
 data). Data captured after the iPhone start overlaps it: Bicino records the
 overlap and the Watch save but leaves those totals only in the Watch's own Fitness
 workout. A reconnecting Watch that is still recording is explained, never
-adopted. The Watch part is looked up in Fitness (read-only, without a prompt)
-after the handoff, on recovery and when the app becomes active, until found.
+adopted. If the rider discards the Watch workout on Apple Watch, that discard is
+stored as the Watch part's outcome: its already-counted totals stay in the ride,
+and the summary says it is not in Fitness. The Watch part is looked up in Fitness
+(read-only, without a prompt) after the handoff, on recovery and when the app
+becomes active, until found or discarded.
 
 Continued Watch sessions are kept in a bounded ledger
 (`WorkoutRecording/handed-off-watch-v1.json`, 16 entries, 14 days) so that after

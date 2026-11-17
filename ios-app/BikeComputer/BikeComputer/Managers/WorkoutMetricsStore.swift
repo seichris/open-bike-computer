@@ -548,6 +548,7 @@ nonisolated struct WorkoutRideContinuationSummary: Equatable, Sendable {
     let phone: Part?
     let watchSaved: Bool
     let watchRecordedPastHandoff: Bool
+    var watchDiscarded = false
     let handoffAt: Date
 
     var totalMovingTime: TimeInterval? {
@@ -607,7 +608,8 @@ nonisolated enum WorkoutRideContinuationMath {
             distanceMeters: snapshot.cyclingDistance?.value,
             activeKilocalories: snapshot.activeEnergy?.value,
             averageHeartRate: snapshot.averageHeartRate?.value,
-            savedInFitness: snapshot.state == .ended && snapshot.terminalOutcome == .saved
+            savedInFitness: snapshot.state == .ended && snapshot.terminalOutcome == .saved,
+            discardedOnWatch: snapshot.state == .ended && snapshot.terminalOutcome == .discarded
         )
     }
 
@@ -753,6 +755,7 @@ nonisolated enum WorkoutRideContinuationMath {
             phone: phone,
             watchSaved: watch.savedInFitness,
             watchRecordedPastHandoff: watch.recordedPastHandoff,
+            watchDiscarded: watch.discardedOnWatch == true && !watch.savedInFitness,
             handoffAt: continuation.handoffAt
         )
     }

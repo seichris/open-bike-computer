@@ -188,13 +188,22 @@ struct WorkoutRideContinuationSummaryView: View {
         }
     }
 
+    /// Claims a Fitness workout only once Apple Watch reported or Fitness
+    /// showed it saved; a discard on Apple Watch is never described as kept.
     private var watchDetail: String {
-        if summary.watchRecordedPastHandoff {
-            return "Apple Watch kept recording after the handoff. Its own Fitness workout keeps all of it; this ride counts it only up to its last data before the handoff."
+        if summary.watchDiscarded {
+            return "Discarded on Apple Watch, so it isn’t in Fitness. This ride keeps its last report from before the handoff."
         }
-        return summary.watchSaved
-            ? "Saved in Fitness as its own workout"
-            : "Apple Watch saves its part when it can; the totals here are its last report."
+        switch (summary.watchSaved, summary.watchRecordedPastHandoff) {
+        case (true, true):
+            return "Apple Watch kept recording after the handoff. Its own Fitness workout keeps all of it; this ride counts it only up to its last data before the handoff."
+        case (true, false):
+            return "Saved in Fitness as its own workout"
+        case (false, true):
+            return "Apple Watch kept recording after the handoff. This ride counts it only up to its last data before the handoff. End that workout on Apple Watch to keep it in Fitness."
+        case (false, false):
+            return "Apple Watch saves its part when it can; the totals here are its last report."
+        }
     }
 
     @ViewBuilder

@@ -926,6 +926,41 @@ struct WorkoutSessionCoordinatorTests {
         for _ in 0..<20 { await Task.yield() }
         check(lookups == lookupsAfterSave, "A saved Watch part is not looked up again")
 
+        // The rider discards the continued Watch workout on Apple Watch after
+        // the handoff (as in the 2026-11-17 device test).
+        let (discarding, discardingWatch, discardingPhone, discardingDisk, _) = harness()
+        discarding.recoverIfNeeded()
+        await spin { discarding.recoveryComplete }
+        let discardedID = UUID()
+        discardingWatch.emit(id: discardedID, state: .running,
+                             capturedAt: Date().addingTimeInterval(-5), moving: 20, distance: 150)
+        discardingWatch.store.disconnect(error: .watchUnavailable)
+        var discardLookups = 0
+        discardingWatch.fitnessLookup = { _, _ in
+            discardLookups += 1
+            return nil
+        }
+        check(discarding.continueOnIPhone(), "The rider continues on iPhone")
+        await spin { discardingPhone.starts == 1 && discarding.record?.startedAt != nil
+            && discardLookups >= 1 }
+        discardingWatch.emit(id: discardedID, state: .ended, outcome: .discarded, capturedAt: Date())
+        let discardedPart = try require(discarding.record?.continuation?.watch)
+        check(discardedPart.discardedOnWatch == true && !discardedPart.recordedPastHandoff
+                && !discardedPart.savedInFitness && discardedPart.distanceMeters == 150
+                && discardingDisk.record?.continuation == discarding.record?.continuation,
+              "A Watch discard is stored as the Watch part's outcome; counted totals stay")
+        check(discarding.rideContinuationSummary?.watchDiscarded == true
+                && discarding.rideContinuationSummary?.watchSaved == false
+                && discarding.record?.owner == .iphone
+                && discarding.store.presentation.snapshot.cyclingDistance?.value == 150
+                && discardingWatch.saves == 0,
+              "The summary reports the discard, not a Fitness workout; iPhone keeps recording")
+        let lookupsAfterDiscard = discardLookups
+        discarding.refreshFreshness()
+        for _ in 0..<20 { await Task.yield() }
+        check(discardLookups == lookupsAfterDiscard && !discarding.canCheckFitness,
+              "A discarded Watch part is no longer looked up in Fitness")
+
         // A failed iPhone start restores Watch ownership.
         let (failing, failingWatch, failingPhone, failingDisk, failingLedger) = harness()
         failing.recoverIfNeeded()

@@ -181,6 +181,8 @@ struct WorkoutRecordingOwnershipTests {
         let encoded = try JSONEncoder().encode(phone)
         check(try JSONDecoder().decode(WorkoutRecordingRecord.self, from: encoded) == phone,
               "Both parts survive a restart in the single owner record")
+        check(!String(decoding: encoded, as: UTF8.self).contains("discardedOnWatch"),
+              "Records from builds before the discard outcome (no such key) decode as shown above")
         let legacy = WorkoutRecordingRecord(owner: .watch, sessionID: UUID(), requestedAt: date)
         var legacyJSON = try require(JSONSerialization.jsonObject(
             with: JSONEncoder().encode(legacy)) as? [String: Any])
@@ -215,6 +217,14 @@ struct WorkoutRecordingOwnershipTests {
               "Watch totals after the handoff are not added to the ride a second time")
         check(overlap.watch.recordedPastHandoff && overlap.watch.savedInFitness,
               "The overlap and the Watch save are recorded without discarding either")
+        let discarded = late.absorbing(.init(capturedAt: date, discardedOnWatch: true),
+                                       phoneStartedAt: phoneStart)
+        check(discarded.watch.discardedOnWatch == true
+                && discarded.watch.endedAt == late.watch.endedAt
+                && discarded.watch.distanceMeters == late.watch.distanceMeters
+                && discarded.watch.movingTime == late.watch.movingTime
+                && !discarded.watch.recordedPastHandoff && !discarded.watch.savedInFitness,
+              "A discard on Apple Watch changes only the Watch outcome; counted totals stay")
         let older = late.absorbing(.init(
             capturedAt: lastWatchData, movingTime: 2_000, distanceMeters: 15_000
         ), phoneStartedAt: phoneStart)

@@ -398,7 +398,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
 
     private func watchPartFitnessCandidate() -> UUID? {
         guard recoveryComplete, !storageFailed, let record, record.owner == .iphone,
-              let continuation = record.continuation, !continuation.watch.savedInFitness
+              let continuation = record.continuation, !continuation.watch.savedInFitness,
+              // A discarded Watch workout never reaches Fitness.
+              continuation.watch.discardedOnWatch != true
         else { return nil }
         return continuation.watch.sessionID
     }

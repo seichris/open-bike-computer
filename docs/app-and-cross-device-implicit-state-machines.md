@@ -571,11 +571,11 @@ or never-started iPhone start restores the Watch record. Smell: `recoveryComplet
 "recovered" is not monotonic; `pendingAutomaticChoice` cleared in seven places; readiness
 recomputed in two spots.
 
-**E-5 Persisted recording record phase** — `WorkoutShared/WorkoutRecordingOwnership.swift:177-251`
+**E-5 Persisted recording record phase** — `WorkoutShared/WorkoutRecordingOwnership.swift:189-261`
 explicit `Phase` (starting/running/paused/finishing/unresolved/finished) + finish choice,
 finished choice, save attempted, pending native transitions, and an optional Watch-part
-`continuation` (`:46-131`, iPhone owner only) whose `endedAt`/totals only grow before the
-iPhone start and whose overlap/saved flags are latched; legal combinations enforced by
+`continuation` (`:46-145`, iPhone owner only) whose `endedAt`/totals only grow before the
+iPhone start and whose overlap/saved/discarded-on-Watch flags are latched; legal combinations enforced by
 `isValid`, only finishing/finished built through guarded builders. E-3's flags are its RAM
 shadow.
 

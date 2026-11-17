@@ -1,8 +1,9 @@
 # Continue on iPhone — local review record (2026-11-17)
 
-Local implementation on branch `claude/bicino-continue-iphone-9dfa5b`; no PR,
-no push, no deployment, no device install. This file is the REVIEW.md record
-until a PR exists.
+Branch `claude/bicino-continue-iphone-9dfa5b`, published as
+[PR #813](https://github.com/seichris/open-bike-computer/pull/813). This file
+carries the REVIEW.md ledger; the PR description holds the exact current head,
+its checks and the physical-device evidence.
 
 ## Source
 
@@ -21,8 +22,19 @@ Activity. No BLE schema, firmware or backend change.
 
 ## Review
 
-- Passes used: 2 of 3. Pass 1: independent read-only review of the complete
-  diff. Pass 2: delta review of the fixes. State after pass 2: clean.
+- Passes used: 3 of 3.
+  - Pass 1: independent read-only review of the complete diff at base
+    `fdd47a55` (CIP-1..5).
+  - Pass 2: delta review of those fixes; clean.
+  - Pass 3 (2026-11-17, after publication at `d59ebfc8`): code delta since
+    pass 2 was none (the commit only added this record); base delta to
+    `f0304e2c` is one line in `.github/workflows/map-platform-image.yml`, no
+    effect. Scope expanded only to the Watch-discard path, because the PR's
+    physical test discarded the Watch workout after the handoff. Found CIP-6.
+- State: **needs-rethink** under REVIEW.md, because pass 3 was not clean. CIP-6
+  is fixed and verified by regression and mutation tests, but no review pass
+  has confirmed that fix; a fourth pass needs explicit direction. The proposed
+  narrower step is a confirming review of the CIP-6 delta only.
 - Findings (all fixed and verified):
   - CIP-1 (P2) offer shown where the start gate always refused it
     (restart, HealthKit-active Watch session with no snapshot). Gate now admits
@@ -35,14 +47,34 @@ Activity. No BLE schema, firmware or backend change.
     Watch record back (possible "no recorder" state).
   - CIP-5 (P2) an unreadable handoff ledger could later be overwritten,
     dropping earlier entries.
-- Active findings: 0.
+  - CIP-6 (P2, pass 3) a discard of the continued Watch workout on Apple Watch
+    was absorbed as "recorded past the handoff", so the summary claimed the
+    Watch's own Fitness workout keeps the data, and the Watch-part Fitness
+    lookup repeated on every app activation. Trigger: handoff, Watch
+    reconnects, rider discards on Apple Watch (the PR's device sequence). Fix:
+    the discard is stored as a status-only Watch outcome (`discardedOnWatch`,
+    optional so earlier records decode), counted totals stay, lookups stop,
+    and the copy claims Fitness only after a Watch or Fitness save.
+- Open defects: 0. Unconfirmed by review: the CIP-6 fix.
 - Accepted P3 notes: start failure after `startedAt` plus a failed restore
   write ends in the existing ambiguous-recovery path; a permanently corrupt
   ledger is never rebuilt and is re-read on each Watch update; a ledger removal
   made while unreadable can return (harmless while the restored Watch record
   holds that session).
 
-## Checks (dirty working tree; no receipts signed or published)
+## Checks for CIP-6 (pre-commit)
+
+- `ios-app/scripts/run-workout-recording-tests.sh`: ownership 316
+  assertions, coordinator 185. New: a discard is status-only in the model and
+  older records decode; the coordinator reproduces handoff then Watch discard
+  (outcome stored durably, totals kept, summary reports the discard, lookups
+  stop).
+- Mutation check: removing the discard latch, or the lookup stop, fails these
+  tests.
+- Exact-head development checks and CI for the commit carrying this fix are
+  recorded in the PR description, not here.
+
+## Historical checks before publication (dirty working tree; no receipts)
 
 - `ios-app/scripts/run-workout-recording-tests.sh`: ownership 314 assertions
   (was 285), coordinator 181 (was 109). New coverage: transient disconnect,
@@ -67,6 +99,9 @@ Activity. No BLE schema, firmware or backend change.
 
 ## Not verified (needs physical devices)
 
+The PR description records the 2026-11-17 stationary device test at
+`d59ebfc8`. It does not cover the CIP-6 change. Still unverified:
+
 - HealthKit starting a primary iPhone session while the Watch's mirrored
   session (disconnected, or HealthKit-active without snapshots) is held.
 - What `recoverActiveWorkoutSession` returns when both sessions exist; the
@@ -75,6 +110,8 @@ Activity. No BLE schema, firmware or backend change.
   totals; Live Activity switching sessions.
 - The Watch's own behaviour when it returns (it keeps recording; the rider ends
   it on Apple Watch).
+- Watch battery shutdown, outdoor GPS/maps, firmware telemetry, Live Activity
+  and a delayed Watch-save import (limits recorded in the PR).
 
 ## Recovery
 
