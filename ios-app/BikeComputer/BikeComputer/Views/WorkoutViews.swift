@@ -375,7 +375,9 @@ struct WorkoutCompactCard: View {
         case .disconnected:
             return "Apple Watch disconnected"
         case .ended:
-            return terminalTitle(presentation.finalSnapshot ?? presentation.snapshot, owner: store.recordingOwner)
+            return presentation.fitnessReconciliation != nil
+                ? "Saved in Fitness"
+                : terminalTitle(presentation.finalSnapshot ?? presentation.snapshot, owner: store.recordingOwner)
         case .failed:
             return errorTitle(presentation.errorCode)
         }
@@ -503,6 +505,9 @@ struct WorkoutCompactCard: View {
         let prefix: String
         switch snapshot.terminalOutcome {
         case .saved:
+            if store.presentation.fitnessReconciliation != nil {
+                return "\(elapsed)  •  \(distance) \(unit)"
+            }
             prefix = "Saved by \(store.recordingOwner.displayName)"
         case .discarded:
             prefix = "Not saved to Health"
@@ -875,7 +880,9 @@ struct WorkoutDashboardView: View {
             } else {
                 VStack(spacing: 8) {
                     ProgressView()
-                    Text("Waiting for the final saved or discarded result from \(store.recordingOwner.displayName)…")
+                    Text(presentation.awaitingReplacementMirror
+                        ? "Connecting to a Watch workout…"
+                        : "Waiting for the final saved or discarded result from \(store.recordingOwner.displayName)…")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1108,10 +1115,12 @@ struct WorkoutDashboardView: View {
                 ? "Watch disconnected — workout continues"
                 : "Watch disconnected — verify workout on Watch"
         case .ended:
-            return terminalTitle(
-                store.presentation.finalSnapshot ?? store.presentation.snapshot,
-                owner: store.recordingOwner
-            )
+            return store.presentation.fitnessReconciliation != nil
+                ? "Saved in Fitness"
+                : terminalTitle(
+                    store.presentation.finalSnapshot ?? store.presentation.snapshot,
+                    owner: store.recordingOwner
+                )
         case .failed: return errorTitle(store.presentation.errorCode)
         }
     }

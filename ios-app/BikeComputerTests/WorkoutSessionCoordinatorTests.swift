@@ -68,6 +68,7 @@ private final class FakeWatch: WorkoutWatchRecording {
     var starts = 0
     var pauses = 0
     var saves = 0
+    var fitnessLookup: ((UUID, Bool) async throws -> WorkoutSavedInFitness?)?
     var startAdmission: (() -> Void)?
     var sequence: UInt64 = 0
     var launchID = UUID()
@@ -87,6 +88,10 @@ private final class FakeWatch: WorkoutWatchRecording {
     func endAndSave() { saves += 1 }
     func discard() {}
     func refreshFreshness() {}
+    func savedWorkoutInFitness(sessionID: UUID, requestReadAccess: Bool) async throws -> WorkoutSavedInFitness? {
+        try await fitnessLookup?(sessionID, requestReadAccess)
+    }
+    func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool { store.reconcileSavedWorkout(saved) }
     func resetTerminalPresentation() -> Bool { store.resetTerminalPresentation() }
     func requestAutomaticTransition(_ transition: RideAutomationTransition, context: WorkoutControlContextV1) -> Bool { true }
     func requestAutomaticTransitionConfirmation(_ transition: RideAutomationTransition, context: WorkoutControlContextV1) -> Bool { true }
@@ -207,6 +212,92 @@ struct WorkoutSessionCoordinatorTests {
         check(disk.record?.sessionID == watchID, "Unsolicited Watch adoption persists")
         coordinator.pause()
         check(watch.pauses == 1, "Controls now target adopted Watch")
+
+        let (reconciling, interrupted, _, _, savedDisk) = harness()
+        reconciling.recoverIfNeeded()
+        await spin { reconciling.recoveryComplete }
+        let savedID = UUID()
+        interrupted.emit(id: savedID, state: .running)
+        let healthSave = WorkoutSavedInFitness(
+            sessionID: savedID, startDate: interrupted.date,
+            endDate: interrupted.date.addingTimeInterval(55), duration: 50,
+            distanceMeters: 400, activeKilocalories: nil
+        )
+        var automaticLookups = 0
+        var manualLookups = 0
+        interrupted.fitnessLookup = { id, requestAccess in
+            check(id == savedID, "Fitness query is scoped to the original Watch ride")
+            if requestAccess {
+                manualLookups += 1
+                return healthSave
+            }
+            automaticLookups += 1
+            return nil
+        }
+        check(!reconciling.canCheckFitness, "A verified live Watch ride is not reconciled")
+        _ = interrupted.store.markPendingControl(.endAndSave, sequence: 42)
+        interrupted.store.disconnect(error: .watchUnavailable)
+        await spin { automaticLookups == 1 }
+        check(reconciling.store.presentation.isWorkoutActive && savedDisk.record?.phase == .running,
+              "No HealthKit match means the Watch ride remains unresolved")
+        reconciling.checkFitness()
+        await spin { reconciling.store.presentation.finalSnapshot?.terminalOutcome == .saved }
+        check(manualLookups == 1 && interrupted.saves == 0,
+              "Manual check requests read access and never sends a Watch save command")
+        check(savedDisk.record?.phase == .finished && savedDisk.record?.finishedChoice == .save,
+              "The matching Fitness workout durably resolves Watch ownership")
+        check(!reconciling.store.presentation.isWorkoutActive
+                && reconciling.store.presentation.pendingControl == nil
+                && !reconciling.store.shouldMaintainWorkoutServices
+                && reconciling.store.presentation.fitnessReconciliation == .verified
+                && reconciling.store.presentation.finalSnapshot?.elapsedTime?.value == 50,
+              "The verified Fitness summary removes queued controls and ride services")
+        let late = WorkoutEnvelopeV1(kind: .snapshot, sessionID: savedID, sessionToken: 19,
+            sequence: 100, capturedAt: Date(),
+            snapshot: WorkoutSnapshotV1(state: .running, startDate: interrupted.date))
+        interrupted.store.attachMirroredSession(at: Date())
+        interrupted.store.confirmSessionState(.running, at: Date())
+        check(!reconciling.resetTerminalPresentation(),
+              "Done cannot clear ownership while a replacement mirror is being identified")
+        check(interrupted.store.ingestBatch([late], receivedAt: Date()).acceptedEnvelopes.isEmpty,
+              "Late snapshots cannot resurrect the workout saved in Fitness")
+        check(interrupted.store.timeOutFirstSnapshot()
+                && reconciling.store.presentation.finalSnapshot?.terminalOutcome == .saved,
+              "An attachment timeout restores dismissal of the saved summary")
+        interrupted.emit(id: UUID(), state: .running)
+        check(reconciling.record?.owner == .watch && reconciling.record?.sessionID != savedID
+                && reconciling.store.presentation.isWorkoutActive,
+              "A verified new Watch ride supersedes the saved Fitness summary")
+
+        let (racing, racingWatch, _, _, racingDisk) = harness()
+        racing.recoverIfNeeded()
+        await spin { racing.recoveryComplete }
+        racingWatch.emit(id: savedID, state: .running)
+        var pendingLookup: CheckedContinuation<WorkoutSavedInFitness?, Never>?
+        racingWatch.fitnessLookup = { _, _ in
+            await withCheckedContinuation { pendingLookup = $0 }
+        }
+        racingWatch.store.disconnect(error: .watchUnavailable)
+        await spin { pendingLookup != nil }
+        let newID = UUID()
+        racingWatch.emit(id: newID, state: .running)
+        pendingLookup?.resume(returning: healthSave)
+        for _ in 0..<8 { await Task.yield() }
+        check(racingDisk.record?.sessionID == newID && racing.store.presentation.isWorkoutActive,
+              "A late HealthKit lookup cannot finish a replacement Watch ride")
+
+        let (relaunch, relaunchWatch, _, _, relaunchDisk) = harness()
+        let preexisting = WorkoutRecordingRecord(owner: .watch, sessionID: savedID,
+            requestedAt: healthSave.startDate, startedAt: healthSave.startDate, phase: .running)
+        try relaunchDisk.save(preexisting)
+        relaunchWatch.fitnessLookup = { id, _ in id == savedID ? healthSave : nil }
+        relaunch.recoverIfNeeded()
+        await spin { relaunch.store.presentation.finalSnapshot?.terminalOutcome == .saved }
+        check(relaunch.record?.phase == .finished && relaunch.notice == nil,
+              "Cold launch resolves a saved Watch ride from its persisted identity")
+        check(relaunch.resetTerminalPresentation() && relaunchDisk.record == nil
+                && relaunch.store.presentation.connectionState == .idle,
+              "Done clears the completed ride without new recording or save actions")
 
         // Exercise the actual failed/expired launch reducers, rather than
         // replacing the presentation with the generic failSession helper.

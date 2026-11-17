@@ -185,6 +185,7 @@ struct RideMetricsPanel: View {
     @ObservedObject var coordinator: BikeComputerCoordinator
     @ObservedObject var workoutStore: WorkoutMetricsStore
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @ObservedObject var recordingCoordinator: WorkoutSessionCoordinator
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let isCompactHeight: Bool
@@ -730,7 +731,9 @@ struct RideMetricsPanel: View {
     @ViewBuilder
     private var workoutControls: some View {
         let presentation = workoutStore.presentation
-        if presentation.isWorkoutActive {
+        if presentation.connectionState == .disconnected && recordingCoordinator.canCheckFitness {
+            WorkoutFitnessCheckView(coordinator: recordingCoordinator)
+        } else if presentation.isWorkoutActive {
             Button(action: onMarkSegment) {
                 RideSegmentControlLabel(
                     number: presentation.snapshot.currentSegmentIndex
