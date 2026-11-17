@@ -38,6 +38,152 @@ nonisolated struct WorkoutNativeTransitionIntent: Codable, Equatable, Sendable {
     let capturedAt: Date
 }
 
+/// A Watch-owned ride that the rider explicitly continued on iPhone. Bicino
+/// keeps both parts as one ride; HealthKit keeps them as two workouts. Only
+/// part boundaries and summary totals are stored here, never Health samples or
+/// route coordinates. The time between the parts is an unrecorded gap: no
+/// distance is counted across it and no route line joins the two parts.
+nonisolated struct WorkoutRideContinuation: Codable, Equatable, Sendable {
+    /// Bicino's view of the Watch part. `endedAt` is the capture time of the
+    /// latest Watch data counted in this ride; nil while none is known (for
+    /// example after a restart while Apple Watch was unreachable).
+    struct WatchPart: Codable, Equatable, Sendable {
+        let sessionID: UUID
+        let requestedAt: Date
+        let startedAt: Date
+        var endedAt: Date?
+        var movingTime: TimeInterval?
+        var distanceMeters: Double?
+        var activeKilocalories: Double?
+        var averageHeartRate: Double?
+        var savedInFitness = false
+        /// Apple Watch kept recording after iPhone took over. Its Fitness
+        /// workout is left intact; Bicino counts it only up to `endedAt`.
+        var recordedPastHandoff = false
+        /// The rider discarded the Watch workout on Apple Watch, so Fitness
+        /// will never contain it. Bicino keeps the totals it already counted.
+        /// Optional so records written before this field still decode.
+        var discardedOnWatch: Bool?
+    }
+
+    /// Late Watch data: a mirrored snapshot or the saved Fitness workout.
+    struct WatchEvidence: Equatable, Sendable {
+        let capturedAt: Date
+        var movingTime: TimeInterval?
+        var distanceMeters: Double?
+        var activeKilocalories: Double?
+        var averageHeartRate: Double?
+        var savedInFitness = false
+        /// A terminal discard: a status report that carries no totals.
+        var discardedOnWatch = false
+    }
+
+    var schemaVersion = 1
+    var watch: WatchPart
+    /// When the rider chose Continue on iPhone (iPhone clock).
+    let handoffAt: Date
+
+    var isValid: Bool {
+        schemaVersion == 1
+            && watch.sessionID != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            && [watch.requestedAt, watch.startedAt, handoffAt].allSatisfy {
+                $0.timeIntervalSinceReferenceDate.isFinite
+            }
+            && (watch.endedAt.map {
+                $0.timeIntervalSinceReferenceDate.isFinite && $0 >= watch.startedAt
+            } ?? true)
+            && [watch.movingTime, watch.distanceMeters, watch.activeKilocalories].allSatisfy {
+                $0.map { $0.isFinite && $0 >= 0 } ?? true
+            }
+            && (watch.averageHeartRate.map { $0.isFinite && $0 > 0 } ?? true)
+    }
+
+    /// Counts late Watch data without double-counting time that iPhone also
+    /// recorded. Totals are cumulative, so data captured before iPhone took
+    /// over can only extend the Watch part (each total keeps its largest
+    /// value). Data captured afterwards overlaps the iPhone part: it is
+    /// recorded as overlap and left only in the Watch's own Fitness workout.
+    func absorbing(_ evidence: WatchEvidence, phoneStartedAt: Date?) -> Self {
+        var next = self
+        if evidence.savedInFitness { next.watch.savedInFitness = true }
+        if evidence.discardedOnWatch {
+            // The discard report has no statistics and says nothing about
+            // recording past the handoff; it only changes the Watch's outcome.
+            next.watch.discardedOnWatch = true
+            return next.isValid ? next : self
+        }
+        guard evidence.capturedAt.timeIntervalSinceReferenceDate.isFinite,
+              evidence.capturedAt >= watch.startedAt else { return next }
+        // Before the iPhone recorder confirms its start, the rider's choice
+        // is the boundary.
+        if evidence.capturedAt > (phoneStartedAt ?? handoffAt) {
+            next.watch.recordedPastHandoff = true
+            return next.isValid ? next : self
+        }
+        if let endedAt = watch.endedAt, evidence.capturedAt < endedAt { return next }
+        func larger(_ value: Double?, _ current: Double?) -> Double? {
+            guard let value, value.isFinite, value >= 0 else { return current }
+            return max(value, current ?? 0)
+        }
+        next.watch.endedAt = evidence.capturedAt
+        next.watch.movingTime = larger(evidence.movingTime, watch.movingTime)
+        next.watch.distanceMeters = larger(evidence.distanceMeters, watch.distanceMeters)
+        next.watch.activeKilocalories = larger(evidence.activeKilocalories, watch.activeKilocalories)
+        if let heartRate = evidence.averageHeartRate, heartRate.isFinite, heartRate > 0 {
+            next.watch.averageHeartRate = heartRate
+        }
+        return next.isValid ? next : self
+    }
+
+    /// The unrecorded interval between the Watch part and the iPhone part.
+    /// Nil while either boundary is unknown.
+    func gap(phoneStartedAt: Date?) -> DateInterval? {
+        guard let endedAt = watch.endedAt, let phoneStartedAt else { return nil }
+        // Watch and iPhone clocks can differ slightly; never report negative time.
+        return DateInterval(start: min(endedAt, phoneStartedAt), end: phoneStartedAt)
+    }
+}
+
+/// Watch sessions the rider continued on iPhone. A late reconnect or save of
+/// one of these sessions is never adopted as a new Watch-owned ride, so Bicino
+/// cannot switch a continued ride back to Apple Watch or count it twice.
+nonisolated struct WorkoutHandoffLedger: Codable, Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
+        let watchSessionID: UUID
+        let handedOffAt: Date
+    }
+
+    static let capacity = 16
+    static let retention: TimeInterval = 14 * 24 * 60 * 60
+
+    var schemaVersion = 1
+    private(set) var entries: [Entry] = []
+
+    func contains(_ watchSessionID: UUID) -> Bool {
+        entries.contains { $0.watchSessionID == watchSessionID }
+    }
+
+    func inserting(_ watchSessionID: UUID, at date: Date) -> Self {
+        var next = self
+        next.entries.removeAll {
+            $0.watchSessionID == watchSessionID
+                || date.timeIntervalSince($0.handedOffAt) > Self.retention
+        }
+        next.entries.append(Entry(watchSessionID: watchSessionID, handedOffAt: date))
+        next.entries.sort { $0.handedOffAt < $1.handedOffAt }
+        if next.entries.count > Self.capacity {
+            next.entries.removeFirst(next.entries.count - Self.capacity)
+        }
+        return next
+    }
+
+    func removing(_ watchSessionID: UUID) -> Self {
+        var next = self
+        next.entries.removeAll { $0.watchSessionID == watchSessionID }
+        return next
+    }
+}
+
 /// Only identity and lifecycle bookkeeping are persisted here. Health samples
 /// and route coordinates remain in HealthKit, not UserDefaults or diagnostics.
 nonisolated struct WorkoutRecordingRecord: Codable, Equatable, Sendable {
@@ -56,9 +202,14 @@ nonisolated struct WorkoutRecordingRecord: Codable, Equatable, Sendable {
     // Written before crossing the potentially ambiguous HealthKit save boundary.
     var saveAttempted: Bool = false
     var pendingNativeTransitions: [WorkoutNativeTransitionIntent]?
+    /// Present only on an iPhone recording that continues a Watch-owned ride.
+    var continuation: WorkoutRideContinuation?
 
     var isValid: Bool {
         schemaVersion == 1
+            && (continuation.map {
+                owner == .iphone && $0.isValid && $0.watch.sessionID != sessionID
+            } ?? true)
             && sessionID != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
             && requestedAt.timeIntervalSinceReferenceDate.isFinite
             && (startedAt?.timeIntervalSinceReferenceDate.isFinite ?? true)
@@ -148,6 +299,22 @@ nonisolated enum WorkoutRecordingStartPolicy {
         case .unsupported:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
         }
+    }
+
+    /// Final check after Health authorization, immediately before iPhone
+    /// creates its session. An active Watch workout normally blocks it; only
+    /// an explicit Continue on iPhone may start beside the session it
+    /// continues. After a restart HealthKit can report that session before
+    /// any snapshot identifies it; that unidentified session is admitted, and
+    /// the coordinator reports a conflict if it later proves to be another.
+    static func phoneMayStart(
+        _ record: WorkoutRecordingRecord,
+        watchSessionID: UUID?,
+        watchWorkoutBusy: Bool
+    ) -> Bool {
+        guard watchWorkoutBusy else { return true }
+        guard let continued = record.continuation?.watch.sessionID else { return false }
+        return watchSessionID == nil || continued == watchSessionID
     }
 
     static func mayPublish(

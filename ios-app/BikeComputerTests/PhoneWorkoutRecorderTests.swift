@@ -140,6 +140,37 @@ final class PhoneWorkoutRecorderTests: XCTestCase {
         XCTAssertEqual(writes, 3, "A completed attachment is idempotent")
     }
 
+    /// Continue on iPhone: a failed start leaves its reservation on disk for
+    /// the coordinator's single atomic write of the original Watch record.
+    /// Deleting it first could leave the ride with no recorder.
+    func testFailedContinuationStartKeepsReservationForAtomicWatchRestore() async throws {
+        var part = WorkoutRideContinuation.WatchPart(
+            sessionID: UUID(), requestedAt: Date().addingTimeInterval(-600),
+            startedAt: Date().addingTimeInterval(-590))
+        part.endedAt = Date().addingTimeInterval(-30)
+        var continued = WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: Date())
+        continued.continuation = WorkoutRideContinuation(watch: part, handoffAt: Date())
+        let ordinary = WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: Date())
+        for reservation in [continued, ordinary] {
+            let persistence = PhoneRecordingPersistenceProbe()
+            try persistence.save(reservation)
+            let recorder = PhoneWorkoutRecorder(
+                persistence: persistence,
+                locations: Empty().eraseToAnyPublisher(),
+                canStartAfterAuthorization: { _ in false },
+                requestHealthAuthorization: { _, _ in }
+            )
+            await recorder.start(reservation)
+            XCTAssertNil(recorder.record, "A failed start never reports a recording")
+            if reservation.continuation != nil {
+                XCTAssertEqual(persistence.record, reservation,
+                               "The continuation reservation is replaced, never deleted first")
+            } else {
+                XCTAssertNil(persistence.record, "An ordinary failed start is still cleared")
+            }
+        }
+    }
+
     func testBackgroundStartDoesNotAskForLaterOptionalHealthAccess() async throws {
         let released: Set<HKSampleType> = [
             HKObjectType.workoutType(), HKSeriesType.workoutRoute(), HKQuantityType(.distanceCycling)
@@ -151,7 +182,7 @@ final class PhoneWorkoutRecorderTests: XCTestCase {
                 persistence: PhoneRecordingPersistenceProbe(),
                 locations: Empty().eraseToAnyPublisher(),
                 // Stop right after authorization; this test starts no session.
-                canStartAfterAuthorization: { false },
+                canStartAfterAuthorization: { _ in false },
                 isApplicationActive: { applicationIsActive },
                 requestHealthAuthorization: { share, _ in requested = share }
             )

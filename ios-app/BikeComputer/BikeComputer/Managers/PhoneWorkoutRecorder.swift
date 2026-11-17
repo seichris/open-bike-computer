@@ -13,6 +13,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
     nonisolated static let ownerMetadataKey = "org.bicino.recordingOwner.v1"
     nonisolated static let segmentMetadataKey = "org.bicino.phoneSegment.v1"
+    /// The Watch workout this iPhone recording continues. Both stay separate
+    /// HealthKit workouts; this links them without changing either.
+    nonisolated static let continuesWatchWorkoutMetadataKey = "org.bicino.continuesWatchWorkout.v1"
 
     let store = WorkoutMetricsStore()
     private(set) var record: WorkoutRecordingRecord?
@@ -24,7 +27,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var recoveryAttachmentPending = false
     private let persistence: any WorkoutRecordingPersisting
     private let onRecoveredMirror: (HKWorkoutSession) -> Void
-    private let canStartAfterAuthorization: () -> Bool
+    private let canStartAfterAuthorization: (WorkoutRecordingRecord) -> Bool
     private let isApplicationActive: () -> Bool
     private let requestLocationAuthorization: () -> Void
     private let requestHealthAuthorization: (@MainActor (Set<HKSampleType>, Set<HKObjectType>) async throws -> Void)?
@@ -90,7 +93,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         locations: AnyPublisher<CLLocation?, Never>,
         healthStore: HKHealthStore = HKHealthStore(),
         onRecoveredMirror: @escaping (HKWorkoutSession) -> Void = { _ in },
-        canStartAfterAuthorization: @escaping () -> Bool = { true },
+        canStartAfterAuthorization: @escaping (WorkoutRecordingRecord) -> Bool = { _ in true },
         isApplicationActive: @escaping () -> Bool = { true },
         requestLocationAuthorization: @escaping () -> Void = {},
         finishWorkoutCallback: @escaping @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void = { builder, completion in
@@ -149,7 +152,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             guard healthStore.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized else {
                 throw HKError(.errorAuthorizationDenied)
             }
-            guard canStartAfterAuthorization() else { throw RecorderError.identityMismatch }
+            guard canStartAfterAuthorization(requested) else { throw RecorderError.identityMismatch }
             requestLocationAuthorization()
             let configuration = HKWorkoutConfiguration()
             configuration.activityType = .cycling
@@ -164,12 +167,20 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             configureDataSource(builder, configuration: configuration)
             // The same identity is used on recovery and for save reconciliation.
             // Never construct a replacement builder for an interrupted ride.
-            try await builder.addMetadata([
+            var metadata: [String: Any] = [
                 HKMetadataKeyExternalUUID: requested.sessionID.uuidString,
                 Self.ownerMetadataKey: WorkoutRecordingOwner.iphone.rawValue
-            ])
+            ]
+            if let continued = requested.continuation?.watch.sessionID {
+                metadata[Self.continuesWatchWorkoutMetadataKey] = continued.uuidString
+            }
+            try await builder.addMetadata(metadata)
             let date = Date()
-            var next = requested
+            // Build from the current record: the coordinator may have stored
+            // late Watch-part data while authorization was pending.
+            guard var next = record, next.sessionID == requested.sessionID else {
+                throw RecorderError.identityMismatch
+            }
             next.startedAt = date
             try persist(next)
             startDate = date
@@ -193,9 +204,16 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             session = nil
             builder = nil
             routeBuilder = nil
-            if let id = record?.sessionID {
-                do { try persistence.clear(sessionID: id); record = nil }
-                catch { message = "Workout setup failed and its recovery record could not be cleared. Reopen Bicino before starting again." }
+            if let current = record {
+                if current.continuation != nil {
+                    // The coordinator replaces this reservation with the
+                    // original Watch record in one atomic write. Deleting it
+                    // first could leave the ride with no recorder at all.
+                    record = nil
+                } else {
+                    do { try persistence.clear(sessionID: current.sessionID); record = nil }
+                    catch { message = "Workout setup failed and its recovery record could not be cleared. Reopen Bicino before starting again." }
+                }
             }
             message = message ?? "iPhone workout could not start. Allow Workouts in Settings › Health › Apps › Bicino, then try again."
             // As before the reducer, a failed start always ends failed, even if a
@@ -244,7 +262,14 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 #endif
         if let recovered, recovered.type == .mirrored {
             onRecoveredMirror(recovered)
-            if expected?.owner == .iphone { throw RecorderError.identityMismatch }
+            if let expected, expected.owner == .iphone {
+                // A reservation that never started has no iPhone session;
+                // the mirror is Apple Watch's. Anything else is ambiguous.
+                guard expected.startedAt == nil, expected.finishChoice == nil else {
+                    throw RecorderError.identityMismatch
+                }
+                try releaseUnstartedReservation(expected)
+            }
             return
         }
         guard let recovered else {
@@ -283,8 +308,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             }
             if expected.startedAt == nil && expected.finishChoice == nil {
                 // No session was started and HealthKit confirms none is active.
-                try persistence.clear(sessionID: expected.sessionID)
-                record = nil
+                try releaseUnstartedReservation(expected)
                 return
             }
             adoptLifecycle(.ending)
@@ -656,6 +680,22 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private func persist(_ next: WorkoutRecordingRecord) throws {
         try persistence.save(next)
         record = next
+    }
+
+    /// A Continue on iPhone reservation is replaced by the coordinator's
+    /// atomic write of the Watch record, never deleted first.
+    private func releaseUnstartedReservation(_ expected: WorkoutRecordingRecord) throws {
+        if expected.continuation == nil { try persistence.clear(sessionID: expected.sessionID) }
+        record = nil
+    }
+
+    func updateContinuation(_ continuation: WorkoutRideContinuation) -> Bool {
+        guard var next = record,
+              next.continuation?.watch.sessionID == continuation.watch.sessionID else { return false }
+        next.continuation = continuation
+        guard next.isValid else { return false }
+        do { try persist(next) } catch { return false }
+        return true
     }
 
     private func configureDataSource(_ builder: HKLiveWorkoutBuilder, configuration: HKWorkoutConfiguration) {
