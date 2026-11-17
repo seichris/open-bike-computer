@@ -119,11 +119,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 onRecoveredMirror: { [weak workoutMirrorManager] session in
                     workoutMirrorManager?.acceptMirroredSession(session, origin: .nativeRecovery)
                 },
-                canStartAfterAuthorization: { [weak workoutMirrorManager] in
+                canStartAfterAuthorization: { [weak workoutMirrorManager] record in
                     guard let presentation = workoutMirrorManager?.store.presentation else { return false }
-                    return !presentation.isWorkoutActive
-                        && presentation.connectionState != .awaitingFirstSnapshot
-                        && presentation.connectionState != .launchingWatch
+                    // Only an explicit Continue on iPhone may start beside
+                    // the exact Watch session it continues.
+                    return WorkoutRecordingStartPolicy.phoneMayStart(
+                        record,
+                        watchSessionID: presentation.sessionID,
+                        watchWorkoutBusy: presentation.isWorkoutActive
+                            || presentation.connectionState == .awaitingFirstSnapshot
+                            || presentation.connectionState == .launchingWatch
+                    )
                 },
                 isApplicationActive: { UIApplication.shared.applicationState == .active },
                 requestLocationAuthorization: { [weak locationManager] in

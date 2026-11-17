@@ -731,6 +731,9 @@ struct RideMetricsPanel: View {
     @ViewBuilder
     private var workoutControls: some View {
         let presentation = workoutStore.presentation
+        if recordingCoordinator.canContinueOnIPhone {
+            WorkoutContinueOnIPhoneButton(coordinator: recordingCoordinator)
+        }
         if presentation.connectionState == .disconnected && recordingCoordinator.canCheckFitness {
             WorkoutFitnessCheckView(coordinator: recordingCoordinator)
         } else if presentation.isWorkoutActive {

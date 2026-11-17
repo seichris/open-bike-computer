@@ -560,17 +560,22 @@ share set requested at start depends on the app being in the foreground (`:142`,
 discard branch resets only the two metric accumulators (`:496-497`).
 
 **E-4 Session coordinator recovery / ownership arbitration** —
-`BikeComputer/Managers/WorkoutSessionCoordinator.swift:51-66` record, recovery complete,
+`BikeComputer/Managers/WorkoutSessionCoordinator.swift:92-120` record, recovery complete,
 notice, recovery/start tasks, pending automatic choice, storage failed, resetting, phone
-recovery deferred for Watch, Watch retry session, primary recovery required. NotRecovered →
-Recovering → Recovered | RecoveryFailed × DeferredForWatch × AutomaticChoicePending ×
-WatchRetryPending × Resetting. Smell: `recoveryComplete` is set false from three places so
+recovery deferred for Watch, Watch retry session, primary recovery required, and (Continue
+on iPhone) the persisted handed-off Watch session ledger plus the Watch-part Fitness lookup
+task/attempt. NotRecovered → Recovering → Recovered | RecoveryFailed × DeferredForWatch ×
+AutomaticChoicePending × WatchRetryPending × Resetting. The handoff offer is derived, not
+stored (`WorkoutHandoffPolicy`); the in-flight handoff reuses the start task, and a failed
+or never-started iPhone start restores the Watch record. Smell: `recoveryComplete` is set false from three places so
 "recovered" is not monotonic; `pendingAutomaticChoice` cleared in seven places; readiness
 recomputed in two spots.
 
-**E-5 Persisted recording record phase** — `WorkoutShared/WorkoutRecordingOwnership.swift:44-112`
+**E-5 Persisted recording record phase** — `WorkoutShared/WorkoutRecordingOwnership.swift:177-251`
 explicit `Phase` (starting/running/paused/finishing/unresolved/finished) + finish choice,
-finished choice, save attempted, pending native transitions; legal combinations enforced by
+finished choice, save attempted, pending native transitions, and an optional Watch-part
+`continuation` (`:46-131`, iPhone owner only) whose `endedAt`/totals only grow before the
+iPhone start and whose overlap/saved flags are latched; legal combinations enforced by
 `isValid`, only finishing/finished built through guarded builders. E-3's flags are its RAM
 shadow.
 

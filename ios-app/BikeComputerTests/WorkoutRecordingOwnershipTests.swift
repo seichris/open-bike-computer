@@ -140,7 +140,146 @@ struct WorkoutRecordingOwnershipTests {
         check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: "invalid") == nil
                   && WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: 7) == nil,
               "Malformed or unsupported metadata cannot manufacture recording data")
+        try continueOnIPhoneModel(date: date, check: check)
         print("Workout recording ownership: \(assertions) assertions passed")
+    }
+
+    /// Continue on iPhone: one atomic owner record carries the Watch part,
+    /// late Watch data never double-counts, and the gap is never negative.
+    @MainActor
+    private static func continueOnIPhoneModel(
+        date: Date, check: (Bool, String) -> Void
+    ) throws {
+        let watchID = UUID()
+        let watchStart = date.addingTimeInterval(-3_600)
+        let lastWatchData = date.addingTimeInterval(-600)
+        let handoff = date.addingTimeInterval(-300)
+        let phoneStart = date.addingTimeInterval(-298)
+        var part = WorkoutRideContinuation.WatchPart(
+            sessionID: watchID, requestedAt: watchStart, startedAt: watchStart)
+        part.endedAt = lastWatchData
+        part.movingTime = 2_400
+        part.distanceMeters = 20_000
+        part.averageHeartRate = 140
+        let continuation = WorkoutRideContinuation(watch: part, handoffAt: handoff)
+        check(continuation.isValid, "A Watch part with ordered boundaries is valid")
+
+        var phone = WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: handoff)
+        phone.continuation = continuation
+        check(phone.isValid, "An iPhone recording may continue a Watch ride")
+        var watchOwned = WorkoutRecordingRecord(owner: .watch, sessionID: UUID(), requestedAt: handoff)
+        watchOwned.continuation = continuation
+        check(!watchOwned.isValid, "Only an iPhone recording can carry a continued Watch part")
+        var sameSession = WorkoutRecordingRecord(owner: .iphone, sessionID: watchID, requestedAt: handoff)
+        sameSession.continuation = continuation
+        check(!sameSession.isValid, "The iPhone part has its own HealthKit identity")
+        var reversed = part
+        reversed.endedAt = watchStart.addingTimeInterval(-1)
+        check(!WorkoutRideContinuation(watch: reversed, handoffAt: handoff).isValid,
+              "A Watch part cannot end before it starts")
+
+        let encoded = try JSONEncoder().encode(phone)
+        check(try JSONDecoder().decode(WorkoutRecordingRecord.self, from: encoded) == phone,
+              "Both parts survive a restart in the single owner record")
+        let legacy = WorkoutRecordingRecord(owner: .watch, sessionID: UUID(), requestedAt: date)
+        var legacyJSON = try require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(legacy)) as? [String: Any])
+        legacyJSON.removeValue(forKey: "continuation")
+        check(try JSONDecoder().decode(WorkoutRecordingRecord.self,
+                from: JSONSerialization.data(withJSONObject: legacyJSON)) == legacy,
+              "Records written before this change still load")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bicino-continuation-\(UUID().uuidString)/owner-v1.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = WorkoutRecordingStore(url: url)
+        try store.save(phone)
+        check(try store.load() == phone, "The owner file keeps the Watch part across launches")
+
+        // Late data captured before iPhone took over extends the Watch part.
+        let late = continuation.absorbing(.init(
+            capturedAt: date.addingTimeInterval(-400), movingTime: 2_550,
+            distanceMeters: 21_000, averageHeartRate: 142
+        ), phoneStartedAt: phoneStart)
+        check(late.watch.endedAt == date.addingTimeInterval(-400)
+                && late.watch.movingTime == 2_550 && late.watch.distanceMeters == 21_000
+                && !late.watch.recordedPastHandoff,
+              "Watch data from before the iPhone start shrinks the gap")
+        check(late.gap(phoneStartedAt: phoneStart)?.duration == 102,
+              "The gap runs from the last counted Watch data to the iPhone start")
+        // Data after the iPhone start overlaps the iPhone part.
+        let overlap = late.absorbing(.init(
+            capturedAt: date, movingTime: 2_800, distanceMeters: 23_500, savedInFitness: true
+        ), phoneStartedAt: phoneStart)
+        check(overlap.watch.movingTime == 2_550 && overlap.watch.distanceMeters == 21_000
+                && overlap.watch.endedAt == late.watch.endedAt,
+              "Watch totals after the handoff are not added to the ride a second time")
+        check(overlap.watch.recordedPastHandoff && overlap.watch.savedInFitness,
+              "The overlap and the Watch save are recorded without discarding either")
+        let older = late.absorbing(.init(
+            capturedAt: lastWatchData, movingTime: 2_000, distanceMeters: 15_000
+        ), phoneStartedAt: phoneStart)
+        check(older == late, "An older late report cannot shrink the Watch part")
+        let partialSave = late.absorbing(.init(
+            capturedAt: date.addingTimeInterval(-350), movingTime: 2_500, distanceMeters: nil,
+            savedInFitness: true
+        ), phoneStartedAt: phoneStart)
+        check(partialSave.watch.movingTime == 2_550 && partialSave.watch.distanceMeters == 21_000
+                && partialSave.watch.savedInFitness,
+              "A smaller or incomplete Fitness total never discards data already counted")
+        let beforeStart = continuation.absorbing(.init(
+            capturedAt: handoff.addingTimeInterval(1), movingTime: 3_000
+        ), phoneStartedAt: nil)
+        check(beforeStart.watch.recordedPastHandoff && beforeStart.watch.movingTime == 2_400,
+              "Before iPhone confirms its start, the rider's choice is the boundary")
+        var skewed = part
+        skewed.endedAt = phoneStart.addingTimeInterval(2)
+        check(WorkoutRideContinuation(watch: skewed, handoffAt: handoff)
+                .gap(phoneStartedAt: phoneStart)?.duration == 0,
+              "A Watch clock running ahead never produces negative gap time")
+        var unknown = part
+        unknown.endedAt = nil
+        check(WorkoutRideContinuation(watch: unknown, handoffAt: handoff)
+                .gap(phoneStartedAt: phoneStart) == nil,
+              "An unknown Watch end leaves the gap unknown, not zero")
+
+        check(WorkoutRecordingStartPolicy.phoneMayStart(
+                phone, watchSessionID: watchID, watchWorkoutBusy: true),
+              "Continue on iPhone may start beside the exact unreachable Watch session")
+        check(!WorkoutRecordingStartPolicy.phoneMayStart(
+                phone, watchSessionID: UUID(), watchWorkoutBusy: true),
+              "A different identified Watch workout still blocks the continuation")
+        check(WorkoutRecordingStartPolicy.phoneMayStart(
+                phone, watchSessionID: nil, watchWorkoutBusy: true),
+              "After a restart, a Watch session HealthKit reports before any snapshot may be the continued one")
+        let ordinary = WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: date)
+        check(!WorkoutRecordingStartPolicy.phoneMayStart(
+                ordinary, watchSessionID: watchID, watchWorkoutBusy: true)
+                && !WorkoutRecordingStartPolicy.phoneMayStart(
+                    ordinary, watchSessionID: nil, watchWorkoutBusy: true),
+              "An ordinary iPhone start never runs beside an active Watch workout")
+        check(WorkoutRecordingStartPolicy.phoneMayStart(
+                ordinary, watchSessionID: nil, watchWorkoutBusy: false),
+              "An idle Watch never blocks iPhone")
+
+        var ledger = WorkoutHandoffLedger().inserting(watchID, at: date)
+        check(ledger.contains(watchID), "A continued Watch session is remembered")
+        check(ledger.inserting(watchID, at: date).entries.count == 1, "Entries are unique")
+        for offset in 0..<WorkoutHandoffLedger.capacity {
+            ledger = ledger.inserting(UUID(), at: date.addingTimeInterval(Double(offset + 1)))
+        }
+        check(ledger.entries.count == WorkoutHandoffLedger.capacity && !ledger.contains(watchID),
+              "The ledger is bounded, dropping the oldest session")
+        let expired = WorkoutHandoffLedger().inserting(watchID, at: date)
+            .inserting(UUID(), at: date.addingTimeInterval(WorkoutHandoffLedger.retention + 1))
+        check(!expired.contains(watchID) && expired.entries.count == 1,
+              "Old handoffs expire")
+        check(!WorkoutHandoffLedger().inserting(watchID, at: date).removing(watchID).contains(watchID),
+              "A handoff that never started iPhone is forgotten")
+        let ledgerURL = url.deletingLastPathComponent().appendingPathComponent("handed-off-watch-v1.json")
+        let ledgerStore = WorkoutHandoffLedgerStore(url: ledgerURL)
+        check(try ledgerStore.load() == WorkoutHandoffLedger(), "A missing ledger is empty")
+        try ledgerStore.save(ledger)
+        check(try ledgerStore.load() == ledger, "The ledger survives relaunch")
     }
 
     private static func require<T>(_ value: T?) throws -> T {

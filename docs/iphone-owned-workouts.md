@@ -4,9 +4,11 @@
 
 Adds native primary HealthKit workout recording on iOS 26+ alongside the existing
 Watch primary recorder and iPhone mirror. This is not standalone ESP32 recording,
-not automatic recorder failover, and not a workout handoff protocol. Earlier iOS
-navigation and Watch-mirroring minimum versions are unchanged. No BLE schema or
-firmware change is introduced.
+not automatic recorder failover, and not a Watch↔iPhone handoff protocol: the only
+change of recorder during a ride is the rider's explicit Continue on iPhone
+(below), which sends Apple Watch no command. Earlier iOS navigation and
+Watch-mirroring minimum versions are unchanged. No BLE schema or firmware change
+is introduced.
 
 Apple's primary API reference and sample:
 - [Track workouts with HealthKit on iOS and iPadOS](https://developer.apple.com/videos/play/wwdc2025/322/)
@@ -29,6 +31,9 @@ protected until first unlock, excluded from backup, and contains no raw samples.
 | Watch unavailable or companion missing | Ask for explicit recorder choice |
 | Watch launch times out | Retain unresolved Watch ownership; never auto-fallback |
 | Owner disconnects or another device reconnects | Keep the selected owner |
+| Active Watch ride stops reporting (disconnected, stale, or unmirrored after an iPhone restart) | Keep Watch ownership; offer Continue on iPhone |
+| Rider confirms Continue on iPhone | One atomic owner-record write moves the ride to a new iPhone recording that carries the Watch part |
+| Continued Watch session reconnects, sends late data or saves | Never switch back; count Watch data only up to the iPhone start |
 | Another Watch session arrives during phone recording | Surface conflict; do not publish it over phone data or stop either ride |
 | Finish confirmed | Keep the terminal tombstone until Done or the rider explicitly starts the next workout |
 
@@ -48,6 +53,58 @@ Watch-direct recording logic is not rewritten.
 Automatic ride detection remains Watch-only, gated by the selected owner. It
 cannot silently opt a rider into automatic phone recording. Manual phone pause,
 resume, and segments work independently of automatic detection.
+
+## Continue on iPhone
+
+When an active Watch-owned ride stops reporting, the record stays Watch-owned
+and the app offers **Continue on iPhone** (map card, navigation ride panel and
+workout dashboard). It is offered for a started Watch ride (running, paused or
+unresolved) whose own session is disconnected or stale, or, after an iPhone
+restart, when no session has been mirrored yet. It is not offered while a Watch
+end/discard is pending, for an unconfirmed launch, or for another Watch session.
+The rider confirms; nothing waits for Apple Watch to return, reboot or sync.
+
+The handoff writes one `WorkoutRecordingRecord` owned by iPhone with a new
+session identity and a `continuation`: the Watch session identity, start, the
+capture time of its latest counted data (`endedAt`) and summary totals (moving
+time, distance, energy, average heart rate). No samples or coordinates are
+stored. The existing `PhoneWorkoutRecorder` then starts a new HealthKit workout
+at the handoff (metadata `org.bicino.continuesWatchWorkout.v1` names the Watch
+workout). The phone's final authorization check admits only the Watch session
+being continued; after a restart that may be a session HealthKit reports before
+any snapshot identifies it, and if it later proves to be another session Bicino
+shows a conflict. If the iPhone start fails, or the app stops before it began
+(including when HealthKit recovery returns the Watch's mirrored session), one
+atomic write replaces the iPhone reservation with the original Watch record. The
+reservation is never deleted first, so a failed write leaves it for recovery to
+restore from. The recorder builds its started record from the current record, so
+Watch-part data stored during Health authorization is kept. The handed-off
+ledger is never written while it cannot be read; entries remembered meanwhile
+are merged once it can.
+
+Fitness keeps two workouts: the Watch's (never stopped, saved or discarded by
+iPhone) and the iPhone's. Bicino shows one ride. The coordinator's output (the
+dashboard, Live Activity and bike computer) adds the Watch part's totals to the
+iPhone part and starts the ride at the Watch start; the time between the parts is
+an unrecorded gap that adds ride time but no moving time or distance. The iPhone
+route starts at its own first fix, so no route line or distance joins the parts.
+The ride summary lists the Watch part, the gap (or "unknown" until the Watch's
+last data is known) and the iPhone part, and draws them as separate bars.
+
+Late Watch data is absorbed by capture time. Mirrored snapshots or a Fitness save
+captured before the iPhone start can extend the Watch part (each cumulative total
+keeps its largest value, so a smaller or incomplete save never removes counted
+data). Data captured after the iPhone start overlaps it: Bicino records the
+overlap and the Watch save but leaves those totals only in the Watch's own Fitness
+workout. A reconnecting Watch that is still recording is explained, never
+adopted. The Watch part is looked up in Fitness (read-only, without a prompt)
+after the handoff, on recovery and when the app becomes active, until found.
+
+Continued Watch sessions are kept in a bounded ledger
+(`WorkoutRecording/handed-off-watch-v1.json`, 16 entries, 14 days) so that after
+Done, or a relaunch, a late reconnect or save of that session is never adopted as
+a new Watch ride. Once Apple Watch stops mirroring it, the stale session is
+released so it cannot block the next ride.
 
 ## Phone collection and finalization
 
@@ -132,3 +189,11 @@ build is not a device validation.
       both workouts intact for explicit review.
 - [ ] Legacy iOS Watch mirroring, old firmware telemetry, and OS upgrade/relaunch
       during terminal summary all retain existing compatibility.
+- [ ] Continue on iPhone with the Watch out of range and with the Watch app
+      crashed/rebooting: iPhone starts beside the disconnected mirrored session
+      (HealthKit concurrency), the bike computer accepts the new session token and
+      keeps showing whole-ride totals, the Live Activity switches sessions.
+- [ ] After the handoff: Watch reconnects still recording (no switch back), the
+      Watch saves its part late (Fitness entry kept, gap updated), iPhone relaunch
+      mid-ride and after finish (one ride with the same gap), Done then a late
+      Watch reconnect (not adopted, next ride can start).
