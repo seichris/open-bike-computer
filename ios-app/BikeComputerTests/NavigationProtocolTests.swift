@@ -880,6 +880,7 @@ struct NavigationProtocolTests {
             return
         }
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
+            testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect()
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
             await testOfflineMapManagerConfirmsAcceptedOperationAfterTransportExit()

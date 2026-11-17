@@ -4936,15 +4936,20 @@ extension NavigationProtocolTests {
                                                currentEpoch: 8, currentBootID: boot),
                "an observation without a connection never binds")
 
-        func status(_ state: String, bootID: String?) -> MapTransferDeviceStatus {
+        func statusData(_ state: String, bootID: String?) -> Data {
             let health = bootID.map {
                 ",\"selectionHealth\":{\"schemaVersion\":1,\"bootID\":\"\($0)\",\"revision\":1," +
                 "\"state\":\"ready\",\"root\":\"/VECTMAP/.maps/map-1-manifest\",\"operationID\":\"\"," +
                 "\"mapID\":\"map-1\",\"sessionID\":\"map-1-manifest\",\"affectedOperationID\":\"\"}"
             } ?? ""
-            return try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data(("""
+            return Data(("""
             {"activeMapId":"map-1","activeSessionId":"map-1-manifest","activation":{"status":"\(state)","sequence":5,"sessionId":"map-1-manifest","mapId":"map-1"}
-            """ + health + "}").utf8))
+            """ + health + "}").utf8)
+        }
+
+        func status(_ state: String, bootID: String?) -> MapTransferDeviceStatus {
+            try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+                from: statusData(state, bootID: bootID))
         }
 
         let bleManager = BLEManager()
@@ -4954,6 +4959,27 @@ extension NavigationProtocolTests {
         assert(bleManager.mapTransferBootID == nil, "older firmware reports no boot ID")
         bleManager.applyAuthenticatedMapTransferStatus(status("installed", bootID: boot))
         assertEqual(bleManager.mapTransferBootID, boot, "the map status names its device boot")
+
+        for reportedBoot in [otherBoot, nil, boot, "NOT-A-BOOT-ID", boot] {
+            assert(bleManager.handleMapTransferStatusNotification(
+                Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) +
+                    statusData("installed", bootID: reportedBoot)))
+            assertEqual(bleManager.mapTransferBootID,
+                reportedBoot == "NOT-A-BOOT-ID" ? nil : reportedBoot,
+                "BLE status replaces or clears the boot identity after reconnect")
+        }
+
+        let chunkedStatus = statusData("installed", bootID: otherBoot)
+        let midpoint = chunkedStatus.count / 2
+        let chunkPrefix = Data(DeviceBLEProtocol.mapTransferStatusChunkPrefix.utf8)
+        assert(bleManager.handleMapTransferStatusNotification(
+            chunkPrefix + Data([1, 0, 2]) + chunkedStatus.prefix(midpoint)))
+        assertEqual(bleManager.mapTransferBootID, boot,
+            "an incomplete status cannot replace the last complete boot identity")
+        assert(bleManager.handleMapTransferStatusNotification(
+            chunkPrefix + Data([1, 1, 2]) + chunkedStatus.suffix(from: midpoint)))
+        assertEqual(bleManager.mapTransferBootID, otherBoot,
+            "a complete chunked BLE status reports the new device boot")
 
         let reconnected = bleManager.transferConnectionEpoch &+ 1
         for state in ["installed", "failed"] {
@@ -4974,7 +5000,9 @@ extension NavigationProtocolTests {
                 defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
                 defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
                 defaults.set(4, forKey: "offlineMap.lastTransfer.previousSequence")
-                bleManager.applyAuthenticatedMapTransferStatus(status(state, bootID: reportedBoot))
+                assert(bleManager.handleMapTransferStatusNotification(
+                    Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) +
+                        statusData(state, bootID: reportedBoot)))
                 let manager = OfflineMapManager(defaults: defaults)
                 manager.recordTransferObservationForTesting(connectionEpoch: reconnected,
                                                             bootID: recordedBoot)

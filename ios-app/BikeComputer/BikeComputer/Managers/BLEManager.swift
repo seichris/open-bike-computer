@@ -12693,6 +12693,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let health = (object["selectionHealth"] as? [String: Any]).flatMap {
             try? JSONSerialization.data(withJSONObject: $0)
         }.flatMap { try? JSONDecoder().decode(MapSelectionHealth.self, from: $0) }
+        mapTransferBootID = health.map(\.bootID).flatMap {
+            MapOperationQueryPacket.make(operationID: $0) != nil ? $0 : nil
+        }
         projectMapSelectionHealth(health, fieldPresent: object["selectionHealth"] != nil,
                                   activeRoot: object["activeRoot"] as? String)
         hideProvisionalActiveMap()
