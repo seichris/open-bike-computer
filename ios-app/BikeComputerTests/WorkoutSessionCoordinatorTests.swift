@@ -213,7 +213,7 @@ struct WorkoutSessionCoordinatorTests {
         coordinator.pause()
         check(watch.pauses == 1, "Controls now target adopted Watch")
 
-        let (reconciling, interrupted, _, _, savedDisk) = harness()
+        let (reconciling, interrupted, reconcilingPhone, _, savedDisk) = harness()
         reconciling.recoverIfNeeded()
         await spin { reconciling.recoveryComplete }
         let savedID = UUID()
@@ -255,8 +255,9 @@ struct WorkoutSessionCoordinatorTests {
         let late = WorkoutEnvelopeV1(kind: .snapshot, sessionID: savedID, sessionToken: 19,
             sequence: 100, capturedAt: Date(),
             snapshot: WorkoutSnapshotV1(state: .running, startDate: interrupted.date))
+        // A stale mirror of the saved ride reports only that it has ended.
         interrupted.store.attachMirroredSession(at: Date())
-        interrupted.store.confirmSessionState(.running, at: Date())
+        interrupted.store.confirmSessionState(.ended, at: Date())
         check(!reconciling.resetTerminalPresentation(),
               "Done cannot clear ownership while a replacement mirror is being identified")
         check(interrupted.store.ingestBatch([late], receivedAt: Date()).acceptedEnvelopes.isEmpty,
@@ -264,6 +265,25 @@ struct WorkoutSessionCoordinatorTests {
         check(interrupted.store.timeOutFirstSnapshot()
                 && reconciling.store.presentation.finalSnapshot?.terminalOutcome == .saved,
               "An attachment timeout restores dismissal of the saved summary")
+        // HealthKit reports a live session, so this is a new ride whose
+        // snapshot is late. It must not be dropped as an unverified mirror.
+        interrupted.store.attachMirroredSession(at: Date())
+        interrupted.store.confirmSessionState(.running, at: Date())
+        check(reconciling.store.presentation.connectionState == .awaitingFirstSnapshot
+                && reconciling.store.presentation.isWorkoutActive
+                && reconciling.store.presentation.fitnessReconciliation == nil,
+              "HealthKit's live state shows the new Watch ride instead of the saved summary")
+        check(interrupted.store.timeOutFirstSnapshot()
+                && reconciling.store.presentation.connectionState == .disconnected
+                && reconciling.store.presentation.isWorkoutActive,
+              "A silent live replacement stays a disconnected active ride")
+        check(!reconciling.resetTerminalPresentation()
+                && !reconciling.requestStart(explicitOwner: .iphone)
+                && reconcilingPhone.starts == 0
+                && savedDisk.record?.sessionID == savedID,
+              "The live replacement blocks Done and a second recorder")
+        check(!reconciling.canCheckFitness,
+              "A finished ride is not checked again over the live replacement")
         interrupted.emit(id: UUID(), state: .running)
         check(reconciling.record?.owner == .watch && reconciling.record?.sessionID != savedID
                 && reconciling.store.presentation.isWorkoutActive,

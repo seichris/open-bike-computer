@@ -1076,6 +1076,13 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         at date: Date
     ) {
         guard sessionStateConfirmedAt.map({ date >= $0 }) ?? true else { return }
+        if fitnessSave != nil, hasMirroredSession,
+           state == .running || state == .paused || state == .ending {
+            // The saved ride has ended, so a live native session on a newly
+            // attached mirror is a new Watch ride. Show it, and keep its
+            // transport for a late snapshot, instead of the saved summary.
+            fitnessSave = nil
+        }
         confirmedSessionState = state
         sessionStateConfirmedAt = date
         clearConfirmedControlIfNeeded(for: state, terminalOutcome: nil)

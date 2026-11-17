@@ -137,6 +137,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
         guard recoveryComplete, !storageFailed, let record, record.owner == .watch,
               // A provisional Watch launch reservation has no verified start.
               record.startedAt != nil, record.finishChoice != .discard,
+              // A finished ride has nothing to reconcile. Its Watch
+              // presentation may already belong to a new, unidentified ride.
+              record.phase != .finished,
               presentation.canReconcileFromFitness(sessionID: record.sessionID)
         else { return nil }
         return record.sessionID
