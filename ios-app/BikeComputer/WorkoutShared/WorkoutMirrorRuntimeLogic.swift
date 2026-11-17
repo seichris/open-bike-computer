@@ -1290,6 +1290,28 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     mutating func resetTerminalPresentation() -> Bool {
         guard canResetTerminalPresentation else { return false }
         sequenceGate.retireCurrentSession()
+        clearPresentationToIdle()
+        return true
+    }
+
+    /// The rider continued this unreachable Watch session on iPhone and has
+    /// dismissed that ride. Stop presenting it so it cannot block the next
+    /// ride. Its identity is deliberately not retired: if Apple Watch mirrors
+    /// the session again, the iPhone coordinator recognizes and ignores it.
+    @discardableResult
+    mutating func releaseHandedOffSession(_ sessionID: UUID) -> Bool {
+        guard presentation.sessionID == sessionID else { return false }
+        switch connectionState {
+        case .disconnected, .stale, .failed, .ended:
+            break
+        case .unsupported, .idle, .launchingWatch, .awaitingFirstSnapshot, .connected:
+            return false
+        }
+        clearPresentationToIdle()
+        return true
+    }
+
+    private mutating func clearPresentationToIdle() {
         fitnessSave = nil
         connectionState = .idle
         latestEnvelope = nil
@@ -1306,7 +1328,6 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         activeLaunchID = nil
         launchDeadline = nil
         hasMirroredSession = false
-        return true
     }
 
     private func acknowledgementConfirmsPendingControl(

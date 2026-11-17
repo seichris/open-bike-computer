@@ -599,6 +599,20 @@ final class WorkoutMirrorManager: NSObject {
         return store.reconcileSavedWorkout(saved)
     }
 
+    /// The rider continued this unreachable session on iPhone and dismissed
+    /// that ride. Detach it without sending the Watch any control.
+    @discardableResult
+    func releaseHandedOffSession(_ sessionID: UUID) -> Bool {
+        guard store.presentation.sessionID == sessionID,
+              store.releaseHandedOffSession(sessionID) else { return false }
+        if #available(iOS 17.0, *) {
+            mirroredTransport?.installDelegate(nil)
+            mirroredTransport = nil
+        }
+        resetRemoteTransport()
+        return true
+    }
+
     @discardableResult
     func resetTerminalPresentation() -> Bool {
         guard pendingTerminalFailureCode == nil,

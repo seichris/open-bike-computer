@@ -16,12 +16,30 @@ private final class MemoryRecordingStore: WorkoutRecordingPersisting {
         self.record = record
         saves += 1
     }
+    var clears = 0
     func clear(sessionID: UUID) throws {
         if fails { throw WorkoutRecordingStore.StoreError.invalidRecord }
         guard record == nil || record?.sessionID == sessionID else {
             throw WorkoutRecordingStore.StoreError.identityMismatch
         }
         record = nil
+        clears += 1
+    }
+}
+
+@MainActor
+private final class MemoryHandoffLedger: WorkoutHandoffLedgerPersisting {
+    var ledger = WorkoutHandoffLedger()
+    var fails = false
+    /// The file exists but cannot be read, while writes would still succeed.
+    var readFails = false
+    func load() throws -> WorkoutHandoffLedger {
+        if fails || readFails { throw WorkoutRecordingStore.StoreError.invalidRecord }
+        return ledger
+    }
+    func save(_ ledger: WorkoutHandoffLedger) throws {
+        if fails { throw WorkoutRecordingStore.StoreError.invalidRecord }
+        self.ledger = ledger
     }
 }
 
@@ -93,11 +111,18 @@ private final class FakeWatch: WorkoutWatchRecording {
     }
     func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool { store.reconcileSavedWorkout(saved) }
     func resetTerminalPresentation() -> Bool { store.resetTerminalPresentation() }
+    var releases: [UUID] = []
+    func releaseHandedOffSession(_ sessionID: UUID) -> Bool {
+        guard store.releaseHandedOffSession(sessionID) else { return false }
+        releases.append(sessionID)
+        return true
+    }
     func requestAutomaticTransition(_ transition: RideAutomationTransition, context: WorkoutControlContextV1) -> Bool { true }
     func requestAutomaticTransitionConfirmation(_ transition: RideAutomationTransition, context: WorkoutControlContextV1) -> Bool { true }
     func requestAutomaticStartAnnotation(context: WorkoutControlContextV1) -> Bool { true }
 
-    func emit(id: UUID, state: WorkoutSessionStateV1, outcome: WorkoutTerminalOutcomeV1? = nil) {
+    func emit(id: UUID, state: WorkoutSessionStateV1, outcome: WorkoutTerminalOutcomeV1? = nil,
+              capturedAt: Date = Date(), moving: Double? = nil, distance: Double? = nil) {
         sequence += 1
         if startDates[id] == nil {
             startDates[id] = date.addingTimeInterval(Double(startDates.count))
@@ -105,9 +130,16 @@ private final class FakeWatch: WorkoutWatchRecording {
         if state.isActive { store.attachMirroredSession(at: Date()) }
         let result = store.ingestBatch([WorkoutEnvelopeV1(
             kind: .snapshot, sessionID: id, sessionToken: 19,
-            sequence: sequence, capturedAt: Date(),
+            sequence: sequence, capturedAt: capturedAt,
             snapshot: WorkoutSnapshotV1(state: state, startDate: startDates[id],
-                availability: [], terminalOutcome: outcome)
+                elapsedTime: moving.map { WorkoutMetricV1(value: $0, unit: .seconds, capturedAt: capturedAt) },
+                cyclingDistance: distance.map {
+                    WorkoutMetricV1(value: $0, unit: .meters, capturedAt: capturedAt, source: .healthKit)
+                },
+                availability: WorkoutAvailabilityMaskV1()
+                    .union(moving == nil ? [] : .elapsedTime)
+                    .union(distance == nil ? [] : .cyclingDistance),
+                terminalOutcome: outcome)
         )], receivedAt: Date())
         precondition(result.rejections.isEmpty && result.acceptedEnvelopes.count == 1,
                      "Fixture must pass real contract and chronological session validation")
@@ -121,8 +153,16 @@ private final class FakePhone: PhoneWorkoutRecording {
     var record: WorkoutRecordingRecord?
     var message: String?
     var recoveryFails = false
+    var startFails = false
+    /// HealthKit's recovery returns Apple Watch's mirrored session.
+    var recoversMirror = false
+    /// The real recorder's final check after Health authorization.
+    var startGate: ((WorkoutRecordingRecord) -> Bool)?
+    /// Models the Health authorization await inside the real start.
+    var startWindow: (() async -> Void)?
     var recoveries = 0
     var starts = 0
+    var continuationWrites = 0
     var pauses = 0
     var saves = 0
     var sequence: UInt64 = 0
@@ -131,6 +171,16 @@ private final class FakePhone: PhoneWorkoutRecording {
         recoveries += 1
         if recoveryFails { throw WorkoutRecordingStore.StoreError.invalidRecord }
         guard let expected, expected.owner == .iphone else { return }
+        let unstarted = expected.startedAt == nil && expected.finishChoice == nil
+        if recoversMirror, !unstarted { throw WorkoutRecordingStore.StoreError.identityMismatch }
+        if unstarted {
+            // As in the real recorder: a reservation that never started has
+            // no iPhone session. A Continue on iPhone reservation is left for
+            // the coordinator to replace atomically; others are cleared.
+            if expected.continuation == nil { try persistence.clear(sessionID: expected.sessionID) }
+            record = nil
+            return
+        }
         record = expected
         store.beginLocalWorkout()
         emit(expected.phase == .finished ? .ended : .running)
@@ -138,10 +188,24 @@ private final class FakePhone: PhoneWorkoutRecording {
     func start(_ record: WorkoutRecordingRecord) async {
         precondition(persistence.record == record, "Owner must be durable before start")
         self.record = record
-        self.record?.startedAt = Date().addingTimeInterval(-1)
-        self.record?.phase = .running
-        starts += 1
         store.beginLocalWorkout()
+        if let startWindow { await startWindow() }
+        guard !startFails, startGate?(record) ?? true,
+              var next = self.record, next.sessionID == record.sessionID else {
+            if self.record?.continuation == nil, let id = self.record?.sessionID {
+                try? persistence.clear(sessionID: id)
+            }
+            self.record = nil
+            message = "iPhone workout could not start."
+            store.failSession(error: .sessionFailed)
+            return
+        }
+        // Built from the current record, as in the real recorder.
+        next.startedAt = Date()
+        next.phase = .running
+        try! persistence.save(next)
+        self.record = next
+        starts += 1
         emit(.running)
     }
     func pause() { pauses += 1; emit(.paused) }
@@ -155,17 +219,32 @@ private final class FakePhone: PhoneWorkoutRecording {
         emit(.ended)
     }
     func resetFinished() { record = nil; _ = store.resetTerminalPresentation() }
+    func updateContinuation(_ continuation: WorkoutRideContinuation) -> Bool {
+        guard var next = record,
+              next.continuation?.watch.sessionID == continuation.watch.sessionID else { return false }
+        next.continuation = continuation
+        guard (try? persistence.save(next)) != nil else { return false }
+        record = next
+        continuationWrites += 1
+        return true
+    }
     private func emit(_ state: WorkoutSessionStateV1) {
         guard let record else { return }
         sequence += 1
+        let now = Date()
+        let elapsed = record.startedAt.map {
+            WorkoutMetricV1(value: max(0, now.timeIntervalSince($0)), unit: .seconds, capturedAt: now)
+        }
         let result = store.ingestBatch([WorkoutEnvelopeV1(
             kind: .snapshot, sessionID: record.sessionID, sessionToken: 23,
-            sequence: sequence, capturedAt: Date(),
+            sequence: sequence, capturedAt: now,
             snapshot: WorkoutSnapshotV1(state: state,
-                startDate: record.startedAt, availability: [],
-                terminalOutcome: record.finishedChoice.map { $0 == .save ? .saved : .discarded })
+                startDate: record.startedAt, elapsedTime: elapsed,
+                availability: elapsed == nil ? [] : .elapsedTime,
+                terminalOutcome: record.finishedChoice.map { $0 == .save ? .saved : .discarded },
+                wallElapsedTime: elapsed)
         )], receivedAt: Date())
-        precondition(result.rejections.isEmpty)
+        precondition(result.rejections.isEmpty, "Phone fixture rejected: \(result.rejections) state=\(state)")
     }
 }
 
@@ -183,7 +262,8 @@ struct WorkoutSessionCoordinatorTests {
             let phone = FakePhone(disk)
             let availability = FakeAvailability()
             return (WorkoutSessionCoordinator(watch: watch, watchAvailability: availability,
-                persistence: disk, phone: phone), watch, phone, availability, disk)
+                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger()),
+                    watch, phone, availability, disk)
         }
         let (coordinator, watch, phone, availability, disk) = harness()
         check(!coordinator.canOfferNewWorkout,
@@ -457,7 +537,8 @@ struct WorkoutSessionCoordinatorTests {
             watch: restartWatch,
             watchAvailability: restartAvailability,
             persistence: finishedDisk,
-            phone: restartPhone
+            phone: restartPhone,
+            handoffLedger: MemoryHandoffLedger()
         )
         restart.recoverIfNeeded()
         await spin { restart.recoveryComplete }
@@ -486,7 +567,7 @@ struct WorkoutSessionCoordinatorTests {
         deferredPhone.recoveryFails = true
         let watchRecovery = WorkoutSessionCoordinator(watch: recoveredWatch,
             watchAvailability: FakeAvailability(), persistence: watchRecoveryDisk,
-            phone: deferredPhone)
+            phone: deferredPhone, handoffLedger: MemoryHandoffLedger())
         check(watchRecovery.record?.phase == .unresolved
                 && watchRecovery.notice?.kind == .watchUnresolved,
               "A cold-launch unresolved Watch owner exposes its recovery actions")
@@ -529,7 +610,7 @@ struct WorkoutSessionCoordinatorTests {
         retryPhone.recoveryFails = true
         let guardedRetry = WorkoutSessionCoordinator(watch: retryWatch,
             watchAvailability: FakeAvailability(), persistence: retryDisk,
-            phone: retryPhone)
+            phone: retryPhone, handoffLedger: MemoryHandoffLedger())
         guardedRetry.recoverIfNeeded()
         await spin { guardedRetry.recoveryComplete }
         check(retryPhone.recoveries == 0 && retryWatch.starts == 0,
@@ -596,8 +677,453 @@ struct WorkoutSessionCoordinatorTests {
             check(local.markPendingControl(.markSegment, sequence: 3),
                   "Only a confirmed segment outcome admits the next mark")
         }
+        try await continueOnIPhoneScenarios(check: check)
         print("Workout session coordinator: \(count) assertions passed")
     }
+
+    /// Continue on iPhone: transient disconnect, explicit handoff, late Watch
+    /// recovery, Done, restart, and a failed iPhone start.
+    @MainActor
+    private static func continueOnIPhoneScenarios(check: (Bool, String) -> Void) async throws {
+        func harness(_ existingDisk: MemoryRecordingStore? = nil,
+                     ledger existingLedger: MemoryHandoffLedger? = nil)
+            -> (WorkoutSessionCoordinator, FakeWatch, FakePhone, MemoryRecordingStore, MemoryHandoffLedger) {
+            let disk = existingDisk ?? MemoryRecordingStore()
+            let ledger = existingLedger ?? MemoryHandoffLedger()
+            let watch = FakeWatch()
+            let phone = FakePhone(disk)
+            let availability = FakeAvailability()
+            availability.availability = .ready(isReachable: true)
+            // The same final gate BikeComputerApp gives the real recorder.
+            phone.startGate = { [weak watch] record in
+                guard let presentation = watch?.store.presentation else { return false }
+                return WorkoutRecordingStartPolicy.phoneMayStart(
+                    record, watchSessionID: presentation.sessionID,
+                    watchWorkoutBusy: presentation.isWorkoutActive
+                        || presentation.connectionState == .awaitingFirstSnapshot
+                        || presentation.connectionState == .launchingWatch)
+            }
+            return (WorkoutSessionCoordinator(watch: watch, watchAvailability: availability,
+                persistence: disk, phone: phone, handoffLedger: ledger), watch, phone, disk, ledger)
+        }
+
+        // Transient disconnect: Apple Watch stays the recorder.
+        let (ride, watch, phone, disk, ledger) = harness()
+        ride.recoverIfNeeded()
+        await spin { ride.recoveryComplete }
+        // The rider started on Apple Watch; its mirrored ride is adopted.
+        let watchID = UUID()
+        watch.emit(id: watchID, state: .running, capturedAt: Date().addingTimeInterval(-8),
+                   moving: 30, distance: 250)
+        check(ride.record?.owner == .watch && ride.record?.sessionID == watchID
+                && ride.record?.phase == .running && !ride.canContinueOnIPhone,
+              "A connected Watch ride offers no handoff")
+        watch.store.disconnect(error: .watchUnavailable)
+        check(ride.record?.owner == .watch && disk.record?.sessionID == watchID
+                && ride.record?.phase == .running,
+              "A disconnect alone keeps Apple Watch as the recorder")
+        check(ride.canContinueOnIPhone && phone.starts == 0,
+              "A disconnect offers Continue on iPhone but starts nothing")
+        check(!ride.requestStart(explicitOwner: .iphone) && phone.starts == 0,
+              "An ordinary iPhone start is still blocked by the unreachable Watch ride")
+        check(ride.store.recordingOwner == .watch && ride.store.presentation.sessionID == watchID,
+              "The dashboard keeps showing the Watch ride while it is unreachable")
+        let reconnectAt = Date().addingTimeInterval(-6)
+        watch.emit(id: watchID, state: .running, capturedAt: reconnectAt, moving: 35, distance: 300)
+        check(!ride.canContinueOnIPhone && ride.record?.owner == .watch && phone.starts == 0
+                && ledger.ledger.entries.isEmpty,
+              "Reconnecting withdraws the offer; nothing switched")
+        watch.store.refreshFreshness(at: Date().addingTimeInterval(30))
+        check(ride.canContinueOnIPhone && ride.record?.owner == .watch,
+              "Stale Watch data offers the handoff without switching")
+        _ = watch.store.markPendingControl(.endAndSave, sequence: 99)
+        watch.store.disconnect(error: .watchUnavailable)
+        check(!ride.canContinueOnIPhone,
+              "A ride the rider asked to end is not offered for continuation")
+        watch.store.failPendingControl(.endAndSave, sequence: 99, error: .watchUnavailable)
+        check(ride.canContinueOnIPhone, "Once that end request fails, the offer returns")
+
+        // Explicit handoff: the existing iPhone recorder starts now.
+        var authorization: CheckedContinuation<Void, Never>?
+        phone.startWindow = { await withCheckedContinuation { authorization = $0 } }
+        let beforeHandoff = Date()
+        check(ride.continueOnIPhone(), "The rider can continue without waiting for Apple Watch")
+        check(ride.record?.owner == .iphone && disk.record == ride.record
+                && disk.record?.continuation?.watch.sessionID == watchID
+                && disk.record?.continuation?.watch.endedAt == reconnectAt
+                && disk.record?.continuation?.watch.distanceMeters == 300
+                && (disk.record?.requestedAt ?? .distantPast) >= beforeHandoff,
+              "One durable owner record moves the ride to iPhone with the Watch part's last report")
+        check(ledger.ledger.contains(watchID), "The continued Watch session is remembered")
+        await spin { authorization != nil }
+        // While iPhone waits for Health authorization, the Watch reconnects
+        // and delivers data it captured before the handoff.
+        let lateAt = reconnectAt.addingTimeInterval(2)
+        watch.emit(id: watchID, state: .running, capturedAt: lateAt, moving: 40, distance: 340)
+        check(disk.record?.continuation?.watch.endedAt == lateAt && disk.record?.startedAt == nil,
+              "Late pre-handoff Watch data is stored while iPhone is still starting")
+        check(ride.record?.owner == .iphone && ride.notice?.kind == .information
+                && ride.notice?.message.contains("still recording") == true,
+              "A Watch still recording is explained, not adopted")
+        phone.startWindow = nil
+        authorization?.resume()
+        await spin { phone.starts == 1 && ride.record?.startedAt != nil }
+        let phoneRecord = try require(ride.record)
+        let continuation = try require(phoneRecord.continuation)
+        check(continuation.watch.endedAt == lateAt && continuation.watch.movingTime == 40
+                && continuation.watch.distanceMeters == 340
+                && continuation.watch.startedAt == watch.startDates[watchID]
+                && disk.record == phoneRecord,
+              "The iPhone start keeps Watch-part data stored while it was authorizing")
+        check((phoneRecord.startedAt ?? .distantPast) >= (continuation.handoffAt),
+              "The iPhone recording starts at the handoff, not before it")
+        check(phone.record == phoneRecord && phone.record?.sessionID != watchID,
+              "The existing iPhone recorder records the continuation under its own identity")
+        check(ride.store.recordingOwner == .iphone
+                && ride.store.presentation.sessionID == phoneRecord.sessionID,
+              "Bike computer and dashboard now follow iPhone")
+        let combined = ride.store.presentation.snapshot
+        let phoneOnly = phone.store.presentation.snapshot
+        check(combined.startDate == watch.startDates[watchID]
+                && combined.cyclingDistance?.value == 340
+                && combined.elapsedTime?.value == (phoneOnly.elapsedTime?.value ?? 0) + 40,
+              "The ride shows Watch and iPhone totals together")
+        check(phoneOnly.cyclingDistance == nil && phoneOnly.startDate == phoneRecord.startedAt,
+              "The iPhone recorder and its HealthKit workout keep only the iPhone part")
+        check((combined.wallElapsedTime?.value ?? 0) + 0.001 >= (combined.elapsedTime?.value ?? 0),
+              "The gap adds ride time, never moving time")
+        let summary = try require(ride.rideContinuationSummary)
+        check(summary.gap?.start == lateAt && summary.gap?.end == phoneRecord.startedAt
+                && summary.watch.distanceMeters == 340 && summary.phone?.endedAt == nil,
+              "The summary shows the Watch part, the unrecorded gap and the live iPhone part")
+        check(!ride.canContinueOnIPhone && ride.blocksBikeComputerHandoff
+                && ride.notice?.kind != .conflict,
+              "The continued session is neither re-offered nor a conflict")
+        ride.pause()
+        check(phone.pauses == 1 && watch.pauses == 0, "Controls go to the iPhone recorder")
+
+        // Late Watch recovery after the iPhone start: a reconnect never
+        // switches back and overlapping data is not counted twice.
+        check(ride.store.presentation.sessionID == phoneRecord.sessionID,
+              "A reconnected Watch never takes the ride back")
+        watch.emit(id: watchID, state: .running, capturedAt: Date(), moving: 90, distance: 800)
+        check(ride.record?.continuation?.watch.distanceMeters == 340
+                && ride.record?.continuation?.watch.recordedPastHandoff == true
+                && ride.store.presentation.snapshot.cyclingDistance?.value == 340,
+              "Watch data that overlaps the iPhone part is not counted twice")
+        watch.emit(id: watchID, state: .ended, outcome: .saved, capturedAt: Date(),
+                   moving: 92, distance: 820)
+        check(ride.record?.continuation?.watch.savedInFitness == true
+                && ride.record?.continuation?.watch.distanceMeters == 340
+                && ride.record?.owner == .iphone && ride.notice == nil && watch.saves == 0,
+              "The Watch saves its own Fitness workout; Bicino neither ends nor discards it")
+
+        ride.endAndSave()
+        check(phone.saves == 1 && watch.saves == 0 && ride.record?.phase == .finished,
+              "Finishing saves only the iPhone part")
+        let saved = ride.store.presentation.finalSnapshot ?? ride.store.presentation.snapshot
+        check(saved.cyclingDistance?.value == 340 && saved.startDate == watch.startDates[watchID],
+              "The finished summary keeps the whole ride")
+        check(ride.rideContinuationSummary?.phone?.endedAt != nil
+                && ride.rideContinuationSummary?.phone?.outcome == .saved,
+              "The finished iPhone part has an end time and its own outcome")
+
+        // Restart: both parts persist as one ride.
+        let (restarted, restartedWatch, restartedPhone, _, _) = harness(disk, ledger: ledger)
+        restarted.recoverIfNeeded()
+        await spin { restarted.recoveryComplete }
+        check(restarted.record == disk.record && restartedPhone.recoveries == 1
+                && restarted.record?.continuation?.watch.sessionID == watchID,
+              "A relaunch recovers the continued ride from its single owner record")
+        check(restarted.rideContinuationSummary?.gap == ride.rideContinuationSummary?.gap
+                && (restarted.store.presentation.finalSnapshot ?? restarted.store.presentation.snapshot)
+                    .cyclingDistance?.value == 340,
+              "The relaunched summary shows the same parts and gap")
+        check(restarted.resetTerminalPresentation() && disk.record == nil
+                && restarted.store.presentation.connectionState == .idle,
+              "Done dismisses the continued ride")
+        check(ledger.ledger.contains(watchID), "Done keeps ignoring the continued Watch session")
+
+        // A mirror that has not identified itself yet is reserved provisionally,
+        // then dropped once it proves to be the continued session.
+        restartedWatch.store.attachMirroredSession(at: Date())
+        restartedWatch.store.confirmSessionState(.running, at: Date())
+        check(restarted.record?.owner == .watch && restarted.record?.startedAt == nil,
+              "An unidentified mirror is held provisionally, as before")
+        restartedWatch.emit(id: watchID, state: .running, capturedAt: Date(), moving: 95, distance: 830)
+        check(restarted.record == nil && disk.record == nil
+                && restarted.store.presentation.connectionState == .idle,
+              "A late reconnect of the continued session is never adopted as a new ride")
+        check(restarted.notice?.message.contains("still recording the ride you continued") == true,
+              "The rider learns why that Watch workout is not shown")
+        restartedWatch.emit(id: watchID, state: .ended, outcome: .saved, capturedAt: Date(),
+                            moving: 96, distance: 835)
+        await spin { restartedWatch.store.presentation.connectionState == .idle }
+        check(restartedWatch.releases == [watchID] && restarted.record == nil
+                && restarted.notice == nil && restartedWatch.saves == 0,
+              "Once that Watch workout ends it is released without any Watch command")
+        let nextWatchID = UUID()
+        restartedWatch.emit(id: nextWatchID, state: .running)
+        check(restarted.record?.owner == .watch && restarted.record?.sessionID == nextWatchID,
+              "A new Watch ride is still adopted normally")
+
+        // Restart before the iPhone recording started: the ride stays the Watch's.
+        let crashDisk = MemoryRecordingStore()
+        let crashLedger = MemoryHandoffLedger()
+        let crashedWatchID = UUID()
+        var crashedPart = WorkoutRideContinuation.WatchPart(
+            sessionID: crashedWatchID, requestedAt: Date().addingTimeInterval(-600),
+            startedAt: Date().addingTimeInterval(-590))
+        crashedPart.endedAt = Date().addingTimeInterval(-60)
+        var pending = WorkoutRecordingRecord(owner: .iphone, sessionID: UUID(), requestedAt: Date())
+        pending.continuation = WorkoutRideContinuation(watch: crashedPart, handoffAt: Date())
+        try crashDisk.save(pending)
+        crashLedger.ledger = crashLedger.ledger.inserting(crashedWatchID, at: Date())
+        let (crashed, crashedWatch, crashedPhone, _, _) = harness(crashDisk, ledger: crashLedger)
+        // The Watch workout is still running, so HealthKit's recovery returns
+        // its mirrored session rather than an iPhone one.
+        crashedPhone.recoversMirror = true
+        crashed.recoverIfNeeded()
+        await spin { crashed.recoveryComplete }
+        check(crashed.record?.owner == .watch && crashed.record?.sessionID == crashedWatchID
+                && crashed.record?.startedAt == crashedPart.startedAt
+                && crashDisk.record == crashed.record && crashedPhone.starts == 0
+                && crashDisk.clears == 0 && crashed.notice?.kind != .recovery,
+              "A handoff interrupted before iPhone started is replaced, not deleted, by the Watch record")
+        crashedPhone.recoversMirror = false
+        check(!crashLedger.ledger.contains(crashedWatchID),
+              "The interrupted handoff is forgotten so the Watch ride stays adoptable")
+        check(crashed.canContinueOnIPhone,
+              "After a restart the rider can continue without waiting for Apple Watch")
+        let fitnessSave = WorkoutSavedInFitness(
+            sessionID: crashedWatchID, startDate: crashedPart.startedAt,
+            endDate: Date().addingTimeInterval(-45), duration: 500,
+            distanceMeters: 4_000, activeKilocalories: 120)
+        var lookups = 0
+        var lookedUp: [(UUID, Bool)] = []
+        crashedWatch.fitnessLookup = { id, requestAccess in
+            lookups += 1
+            lookedUp.append((id, requestAccess))
+            return fitnessSave
+        }
+        check(crashed.continueOnIPhone(), "Continue on iPhone with no Watch data since restart")
+        check(crashed.record?.continuation?.watch.endedAt == nil
+                && crashed.rideContinuationSummary?.gap == nil,
+              "With no Watch data the gap is unknown, not invented")
+        await spin { crashed.record?.continuation?.watch.savedInFitness == true }
+        let filled = try require(crashed.record?.continuation?.watch)
+        check(lookedUp.allSatisfy { $0.0 == crashedWatchID && !$0.1 },
+              "Only the continued Watch workout is looked up, without a prompt")
+        check(filled.endedAt == fitnessSave.endDate && filled.movingTime == 500
+                && filled.distanceMeters == 4_000 && filled.activeKilocalories == 120
+                && crashed.rideContinuationSummary?.gap?.start == fitnessSave.endDate
+                && crashed.record?.owner == .iphone && crashedWatch.saves == 0,
+              "A late Fitness save fills in the Watch part and the gap, read-only")
+        check(crashed.store.presentation.snapshot.cyclingDistance?.value == 4_000,
+              "The live ride includes the Watch part found in Fitness")
+        let lookupsAfterSave = lookups
+        crashed.refreshFreshness()
+        for _ in 0..<20 { await Task.yield() }
+        check(lookups == lookupsAfterSave, "A saved Watch part is not looked up again")
+
+        // The rider discards the continued Watch workout on Apple Watch after
+        // the handoff (as in the 2026-11-17 device test).
+        let (discarding, discardingWatch, discardingPhone, discardingDisk, _) = harness()
+        discarding.recoverIfNeeded()
+        await spin { discarding.recoveryComplete }
+        let discardedID = UUID()
+        discardingWatch.emit(id: discardedID, state: .running,
+                             capturedAt: Date().addingTimeInterval(-5), moving: 20, distance: 150)
+        discardingWatch.store.disconnect(error: .watchUnavailable)
+        var discardLookups = 0
+        discardingWatch.fitnessLookup = { _, _ in
+            discardLookups += 1
+            return nil
+        }
+        check(discarding.continueOnIPhone(), "The rider continues on iPhone")
+        await spin { discardingPhone.starts == 1 && discarding.record?.startedAt != nil
+            && discardLookups >= 1 }
+        discardingWatch.emit(id: discardedID, state: .ended, outcome: .discarded, capturedAt: Date())
+        let discardedPart = try require(discarding.record?.continuation?.watch)
+        check(discardedPart.discardedOnWatch == true && !discardedPart.recordedPastHandoff
+                && !discardedPart.savedInFitness && discardedPart.distanceMeters == 150
+                && discardingDisk.record?.continuation == discarding.record?.continuation,
+              "A Watch discard is stored as the Watch part's outcome; counted totals stay")
+        check(discarding.rideContinuationSummary?.watchDiscarded == true
+                && discarding.rideContinuationSummary?.watchSaved == false
+                && discarding.record?.owner == .iphone
+                && discarding.store.presentation.snapshot.cyclingDistance?.value == 150
+                && discardingWatch.saves == 0,
+              "The summary reports the discard, not a Fitness workout; iPhone keeps recording")
+        let lookupsAfterDiscard = discardLookups
+        discarding.refreshFreshness()
+        for _ in 0..<20 { await Task.yield() }
+        check(discardLookups == lookupsAfterDiscard && !discarding.canCheckFitness,
+              "A discarded Watch part is no longer looked up in Fitness")
+
+        // A failed iPhone start restores Watch ownership.
+        let (failing, failingWatch, failingPhone, failingDisk, failingLedger) = harness()
+        failing.recoverIfNeeded()
+        await spin { failing.recoveryComplete }
+        check(failing.requestStart(), "Watch ride starts")
+        let failingID = UUID()
+        failingWatch.emit(id: failingID, state: .running, moving: 10, distance: 50)
+        failingWatch.store.disconnect(error: .watchUnavailable)
+        failingPhone.startFails = true
+        check(failing.continueOnIPhone(), "The handoff is attempted")
+        await spin { failing.record?.owner == .watch }
+        check(failing.record?.sessionID == failingID && failingDisk.record == failing.record
+                && !failingLedger.ledger.contains(failingID)
+                && failing.notice?.kind == .information
+                && failing.store.recordingOwner == .watch
+                && failing.store.presentation.sessionID == failingID,
+              "If iPhone cannot start, the ride stays with Apple Watch")
+        check(failingDisk.clears == 0,
+              "The iPhone reservation is replaced by the Watch record, never deleted first")
+        check(failing.canContinueOnIPhone, "The rider may try again")
+        var failingAuthorization: CheckedContinuation<Void, Never>?
+        failingPhone.startWindow = { await withCheckedContinuation { failingAuthorization = $0 } }
+        check(failing.continueOnIPhone(), "A second attempt is made")
+        await spin { failingAuthorization != nil }
+        failingDisk.fails = true
+        failingAuthorization?.resume()
+        await spin { failing.notice?.kind == .recovery }
+        failingDisk.fails = false
+        check(failingDisk.record?.owner == .iphone && failingDisk.record?.startedAt == nil
+                && failingDisk.record?.continuation?.watch.sessionID == failingID,
+              "If the Watch record cannot be written, the reservation still holds the ride")
+        failingPhone.startWindow = nil
+        failing.retryRecovery()
+        await spin { failing.recoveryComplete }
+        check(failing.record?.owner == .watch && failing.record?.sessionID == failingID
+                && failingDisk.record == failing.record && failingDisk.clears == 0
+                && !failingLedger.ledger.contains(failingID),
+              "Recovery restores the Watch ride from that reservation")
+
+        // After an iPhone restart HealthKit reports the Watch ride, but no
+        // snapshot identifies it. The offer must also pass the start gate.
+        let liveDisk = MemoryRecordingStore()
+        let liveID = UUID()
+        try liveDisk.save(WorkoutRecordingRecord(owner: .watch, sessionID: liveID,
+            requestedAt: Date().addingTimeInterval(-300),
+            startedAt: Date().addingTimeInterval(-290), phase: .running))
+        let (live, liveWatch, livePhone, _, _) = harness(liveDisk)
+        live.recoverIfNeeded()
+        await spin { live.recoveryComplete }
+        liveWatch.store.attachMirroredSession(at: Date())
+        liveWatch.store.confirmSessionState(.running, at: Date())
+        check(liveWatch.store.timeOutFirstSnapshot()
+                && liveWatch.store.presentation.connectionState == .disconnected
+                && liveWatch.store.presentation.sessionID == nil
+                && liveWatch.store.presentation.isWorkoutActive,
+              "HealthKit reports the Watch ride but no snapshot arrives")
+        check(live.record?.sessionID == liveID && live.canContinueOnIPhone,
+              "That unreachable ride is offered for continuation")
+        check(live.continueOnIPhone(), "The rider continues")
+        await spin { livePhone.starts == 1 && live.record?.startedAt != nil }
+        check(live.record?.owner == .iphone && live.notice == nil
+                && live.record?.continuation?.watch.sessionID == liveID,
+              "The start gate admits the unidentified session being continued")
+
+        // An unreadable ledger is never written over.
+        let lockedLedger = MemoryHandoffLedger()
+        let earlierID = UUID()
+        lockedLedger.ledger = WorkoutHandoffLedger().inserting(earlierID, at: Date().addingTimeInterval(-60))
+        lockedLedger.readFails = true
+        let (locked, lockedWatch, lockedPhone, _, _) = harness(ledger: lockedLedger)
+        locked.recoverIfNeeded()
+        await spin { locked.recoveryComplete }
+        let lockedID = UUID()
+        lockedWatch.emit(id: lockedID, state: .running, moving: 5, distance: 20)
+        lockedWatch.store.disconnect(error: .watchUnavailable)
+        check(locked.continueOnIPhone(), "Continuing does not depend on the ledger")
+        await spin { lockedPhone.starts == 1 }
+        check(lockedLedger.ledger.contains(earlierID) && !lockedLedger.ledger.contains(lockedID),
+              "While unreadable, the stored ledger keeps its earlier entries")
+        lockedLedger.readFails = false
+        lockedWatch.emit(id: lockedID, state: .running, moving: 9, distance: 40)
+        check(lockedLedger.ledger.contains(earlierID) && lockedLedger.ledger.contains(lockedID)
+                && locked.record?.owner == .iphone,
+              "Once readable, earlier and new handoffs are both kept")
+
+        // Offer policy and display arithmetic.
+        let date = Date()
+        let policyID = UUID()
+        let running = WorkoutRecordingRecord(owner: .watch, sessionID: policyID,
+            requestedAt: date, startedAt: date, phase: .running)
+        func presentation(_ connection: WorkoutMirrorConnectionStateV1,
+                          _ state: WorkoutSessionStateV1, id: UUID?,
+                          pending: WorkoutControlV1? = nil) -> WorkoutMirrorPresentationV1 {
+            WorkoutMirrorPresentationV1(connectionState: connection,
+                snapshot: WorkoutSnapshotV1(state: state, startDate: date), sessionID: id,
+                capturedAt: date, receivedAt: date, confirmedSessionState: nil, errorCode: nil,
+                pendingControl: pending, finalSnapshot: nil, navigation: .empty)
+        }
+        func offered(_ record: WorkoutRecordingRecord?, _ presentation: WorkoutMirrorPresentationV1,
+                     ready: Bool = true, phone: Bool = true) -> Bool {
+            WorkoutHandoffPolicy.mayOfferContinueOnIPhone(record: record,
+                presentation: presentation, ready: ready, phoneSupported: phone)
+        }
+        check(offered(running, presentation(.disconnected, .paused, id: policyID)),
+              "A paused, unreachable Watch ride can continue on iPhone")
+        check(!offered(running, presentation(.disconnected, .running, id: policyID), ready: false)
+                && !offered(running, presentation(.disconnected, .running, id: policyID), phone: false),
+              "No offer before recovery or without the iOS 26 recorder")
+        check(!offered(running, presentation(.disconnected, .ending, id: policyID))
+                && !offered(running, presentation(.disconnected, .running, id: policyID, pending: .discard)),
+              "An ending ride is not continued")
+        check(!offered(running, presentation(.disconnected, .running, id: UUID()))
+                && !offered(running, presentation(.awaitingFirstSnapshot, .running, id: nil))
+                && !offered(running, presentation(.connected, .running, id: policyID)),
+              "Another session, a reattaching mirror or a live Watch is not offered")
+        check(offered(running, presentation(.disconnected, .running, id: nil))
+                && offered(running, presentation(.idle, .idle, id: nil)),
+              "An unidentified unreachable session or no mirror at all is offered")
+        var launching = running
+        launching.startedAt = nil
+        launching.phase = .unresolved
+        check(!offered(launching, presentation(.idle, .idle, id: nil)),
+              "An unconfirmed Watch launch has no ride to continue")
+        var phoneOwned = running
+        phoneOwned.owner = .iphone
+        check(!offered(phoneOwned, presentation(.disconnected, .running, id: policyID)),
+              "An iPhone ride is never offered")
+
+        var part = WorkoutRideContinuation.WatchPart(sessionID: policyID, requestedAt: date,
+            startedAt: date.addingTimeInterval(-1_000))
+        part.movingTime = 300
+        part.distanceMeters = 2_000
+        part.activeKilocalories = 80
+        part.averageHeartRate = 130
+        let math = WorkoutRideContinuation(watch: part, handoffAt: date.addingTimeInterval(-500))
+        let phoneStart = date.addingTimeInterval(-500)
+        let phoneSnapshot = WorkoutSnapshotV1(state: .running, startDate: phoneStart,
+            elapsedTime: WorkoutMetricV1(value: 100, unit: .seconds, capturedAt: date),
+            averageHeartRate: WorkoutMetricV1(value: 150, unit: .beatsPerMinute, capturedAt: date),
+            currentSpeed: WorkoutMetricV1(value: 7, unit: .metersPerSecond, capturedAt: date,
+                                          source: .iPhoneLocation),
+            availability: [.elapsedTime, .averageHeartRate, .currentSpeed],
+            wallElapsedTime: WorkoutMetricV1(value: 120, unit: .seconds, capturedAt: date))
+        let whole = WorkoutRideContinuationMath.combined(phoneSnapshot, continuation: math)
+        check(whole.startDate == part.startedAt && whole.elapsedTime?.value == 400
+                && whole.wallElapsedTime?.value == 620 && whole.cyclingDistance?.value == 2_000
+                && whole.activeEnergy?.value == 80 && whole.averageHeartRate?.value == 135
+                && whole.currentSpeed == phoneSnapshot.currentSpeed
+                && whole.availability.contains(.cyclingDistance),
+              "Totals add up, the average is time-weighted and live values stay iPhone's")
+        let skewed = WorkoutRideContinuation.WatchPart(sessionID: policyID, requestedAt: date,
+            startedAt: phoneStart.addingTimeInterval(1))
+        check(WorkoutRideContinuationMath.combined(phoneSnapshot,
+                continuation: WorkoutRideContinuation(watch: skewed, handoffAt: date)) == phoneSnapshot,
+              "Inconsistent clocks never produce a negative-length ride")
+    }
+
+    private static func require<T>(_ value: T?) throws -> T {
+        guard let value else { throw CoordinatorTestError.missingValue }
+        return value
+    }
+
+    private enum CoordinatorTestError: Error { case missingValue }
 
     @MainActor
     private static func spin(until condition: () -> Bool) async {

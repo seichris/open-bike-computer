@@ -2266,8 +2266,10 @@ struct ContentView: View {
     private var shouldShowWorkoutRecoveryStatus: Bool {
         // A reserved Watch ride can have no native mirror at all after a
         // restart. Keep its recovery actions visible even with an idle store.
-        workoutSessionCoordinator.record?.owner == .watch
-            && workoutSessionCoordinator.record?.phase == .unresolved
+        (workoutSessionCoordinator.record?.owner == .watch
+            && workoutSessionCoordinator.record?.phase == .unresolved)
+            // An unreachable Watch ride offers the explicit iPhone handoff.
+            || workoutSessionCoordinator.canContinueOnIPhone
     }
 
     private var shouldShowWorkoutStatusCard: Bool {

@@ -706,6 +706,10 @@ struct WorkoutDashboardView: View {
                     }
                 }
 
+                if let continuation = recordingCoordinator?.rideContinuationSummary {
+                    WorkoutRideContinuationSummaryView(summary: continuation)
+                }
+
                 if snapshot.lastCompletedSegment != nil,
                    store.presentation.isWorkoutActive {
                     HStack(spacing: 7) {
