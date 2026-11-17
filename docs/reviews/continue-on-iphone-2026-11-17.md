@@ -1,16 +1,25 @@
 # Continue on iPhone — local review record (2026-11-17)
 
 Branch `claude/bicino-continue-iphone-9dfa5b`, published as
-[PR #813](https://github.com/seichris/open-bike-computer/pull/813). This file
-carries the REVIEW.md ledger; the PR description holds the exact current head,
-its checks and the physical-device evidence.
+[PR #813](https://github.com/seichris/open-bike-computer/pull/813) and merged
+by seichris on 2026-11-17 as `cae11b2f` from head `92a49a75` (which contains
+the CIP-6 fix). This file carries the REVIEW.md ledger; the PR description
+holds the merged head's checks and the physical-device evidence.
 
 ## Source
 
-- Base: `fdd47a55` (origin/main, includes PR #810 Fitness reconciliation).
-- Head: the local commit that adds this record on that branch (not pushed).
-  Every check below ran on the identical working tree before that commit,
-  except this file.
+- Implementation base: `fdd47a55` (includes PR #810 Fitness reconciliation).
+  PR base at merge: `f0304e2c`.
+- Implementation commit: `d59ebfc8`. Its pre-publication checks (historical
+  section below) ran on the identical working tree except this file.
+- Merged head: `92a49a75` (base-sync merge `fad208a5` + the CIP-6 commit).
+  Merge commit `cae11b2f` has parents `f0304e2c` and `92a49a75`, and its tree
+  `0cab7fdf` is identical to `92a49a75`'s, so evidence for `92a49a75` covers
+  the merged tree exactly.
+- Merge provenance: #813 was merged at 2026-11-17 18:17Z while this ledger
+  recorded needs-rethink (pass 3 not clean). REVIEW.md expects such a change
+  to stay unmerged until resolved. The confirming pass 4 ran afterwards, on
+  that identical tree.
 - Not included: the parked partial-save patch in
   `~/.codex/worktrees/bicino-save-partial-watch-workout` (left untouched).
 
@@ -33,12 +42,22 @@ Activity. No BLE schema, firmware or backend change.
     effect. Scope expanded only to the Watch-discard path, because the PR's
     physical test discarded the Watch workout after the handoff. Found CIP-6,
     fixed in `92a49a75`; pass 3 was therefore not clean (needs-rethink).
-  - Pass 4 (user-directed, independent, read-only): scope limited to the CIP-6
+  - Pass 4 (user-directed, independent, read-only; it ran after the merge, on
+    the merged code): scope limited to the CIP-6
     delta `fad208a5..92a49a75` and the code it depends on. Verdict: CIP-6
     resolved wherever the discard reaches iPhone (live mirrored snapshot,
     before or during the iPhone start, after finish before Done, after a
-    relaunch once recorded); no P0-P2 regression; suites and both mutation
-    checks re-run on a copy of `92a49a75`. Clean.
+    relaunch once recorded); no P0-P2 regression. Clean.
+    Evidence, on a scratch copy of `92a49a75` (no dev-check report; the
+    reviewer ran the suite directly):
+    - `bash ios-app/scripts/run-workout-recording-tests.sh`: ownership 316,
+      coordinator 185 assertions passed.
+    - Mutations: removing the discard branch in `absorbing` fails the
+      ownership test; removing the discard condition from the Watch-part
+      lookup candidate fails the coordinator test.
+    - Uncommitted scratch scenarios passed: discard during the iPhone start,
+      after the iPhone part finished but before Done, and after a relaunch
+      once the discard was recorded.
 - State: **clean** after the confirming pass 4. No further automatic passes.
 - Findings (all fixed and verified):
   - CIP-1 (P2) offer shown where the start gate always refused it
