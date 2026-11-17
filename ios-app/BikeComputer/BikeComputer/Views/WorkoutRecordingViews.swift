@@ -35,6 +35,7 @@ struct WorkoutRecordingStatusView: View {
                     recorderChoices
                 }
             }
+            WorkoutFitnessCheckView(coordinator: coordinator)
             if let message = store.recordingMessage {
                 Text(message).font(.subheadline).foregroundStyle(.secondary)
             }
@@ -98,5 +99,23 @@ struct WorkoutRecordingStatusView: View {
             }
         }
         .disabled(!coordinator.recoveryComplete || coordinator.record != nil)
+    }
+}
+
+
+struct WorkoutFitnessCheckView: View {
+    @ObservedObject var coordinator: WorkoutSessionCoordinator
+
+    var body: some View {
+        if coordinator.canCheckFitness {
+            VStack(alignment: .leading, spacing: 4) {
+                Button("Check Fitness", action: coordinator.checkFitness)
+                    .buttonStyle(.bordered)
+                    .disabled(coordinator.isCheckingFitnessOnRequest)
+                if let message = coordinator.fitnessCheckMessage {
+                    Text(message).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }

@@ -1041,8 +1041,14 @@ nonisolated struct WorkoutEnvelopeSequenceGate: Sendable {
 
     mutating func retireCurrentSession() {
         guard let sessionID = currentSnapshotEnvelope?.sessionID else { return }
+        retireSession(sessionID)
+    }
+
+    mutating func retireSession(_ sessionID: UUID) {
         retiredSessionIDs.insert(sessionID)
-        currentSnapshotEnvelope = nil
+        if currentSnapshotEnvelope?.sessionID == sessionID {
+            currentSnapshotEnvelope = nil
+        }
     }
 
     private func canAcceptGenerationReset(

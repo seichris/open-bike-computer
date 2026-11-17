@@ -314,6 +314,36 @@ nonisolated struct WorkoutNavigationContextV1: Equatable, Sendable {
     )
 }
 
+/// Evidence from a saved HealthKit workout with the verified Watch session ID.
+nonisolated struct WorkoutSavedInFitness: Equatable, Sendable {
+    let sessionID: UUID
+    let startDate: Date
+    let endDate: Date
+    let duration: TimeInterval
+    let distanceMeters: Double?
+    let activeKilocalories: Double?
+
+    var summary: WorkoutSnapshotV1 {
+        WorkoutSnapshotV1(
+            state: .ended,
+            startDate: startDate,
+            elapsedTime: WorkoutMetricV1(
+                value: duration, unit: .seconds, capturedAt: endDate, source: .healthKit
+            ),
+            activeEnergy: activeKilocalories.map {
+                WorkoutMetricV1(value: $0, unit: .kilocalories, capturedAt: endDate, source: .healthKit)
+            },
+            cyclingDistance: distanceMeters.map {
+                WorkoutMetricV1(value: $0, unit: .meters, capturedAt: endDate, source: .healthKit)
+            },
+            availability: WorkoutAvailabilityMaskV1.elapsedTime
+                .union(distanceMeters == nil ? [] : .cyclingDistance)
+                .union(activeKilocalories == nil ? [] : .activeEnergy),
+            terminalOutcome: .saved
+        )
+    }
+}
+
 nonisolated struct WorkoutMirrorPresentationV1: Equatable, Sendable {
     let connectionState: WorkoutMirrorConnectionStateV1
     let snapshot: WorkoutSnapshotV1
@@ -325,6 +355,13 @@ nonisolated struct WorkoutMirrorPresentationV1: Equatable, Sendable {
     let pendingControl: WorkoutControlV1?
     let finalSnapshot: WorkoutSnapshotV1?
     let navigation: WorkoutNavigationContextV1
+    enum FitnessReconciliation: Equatable, Sendable {
+        case verified
+        case awaitingReplacementMirror
+    }
+    var fitnessReconciliation: FitnessReconciliation?
+
+    var awaitingReplacementMirror: Bool { fitnessReconciliation == .awaitingReplacementMirror }
 
     static let idle = Self(
         connectionState: .idle,
@@ -354,6 +391,15 @@ nonisolated struct WorkoutMirrorPresentationV1: Equatable, Sendable {
             return true
         case .launchingWatch, .awaitingFirstSnapshot, .connected, .stale, .ended:
             return false
+        }
+    }
+
+    func canReconcileFromFitness(sessionID: UUID) -> Bool {
+        guard self.sessionID == nil || self.sessionID == sessionID,
+              (finalSnapshot ?? snapshot).terminalOutcome == nil else { return false }
+        switch connectionState {
+        case .idle, .disconnected, .failed, .ended: return true
+        case .unsupported, .launchingWatch, .awaitingFirstSnapshot, .connected, .stale: return false
         }
     }
 
@@ -407,7 +453,8 @@ nonisolated enum WorkoutIPhoneTelemetryMerge {
             errorCode: base.errorCode,
             pendingControl: base.pendingControl,
             finalSnapshot: base.finalSnapshot,
-            navigation: navigation
+            navigation: navigation,
+            fitnessReconciliation: base.fitnessReconciliation
         )
     }
 
@@ -631,9 +678,26 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     private(set) var sessionStateConfirmedAt: Date?
 
     private var sequenceGate = WorkoutEnvelopeSequenceGate()
+    private var fitnessSave: WorkoutSavedInFitness?
 
     var presentation: WorkoutMirrorPresentationV1 {
-        WorkoutMirrorPresentationV1(
+        if let fitnessSave {
+            let summary = fitnessSave.summary
+            return WorkoutMirrorPresentationV1(
+                connectionState: .ended,
+                snapshot: summary,
+                sessionID: fitnessSave.sessionID,
+                capturedAt: fitnessSave.endDate,
+                receivedAt: nil,
+                confirmedSessionState: .ended,
+                errorCode: nil,
+                pendingControl: nil,
+                finalSnapshot: summary,
+                navigation: .empty,
+                fitnessReconciliation: hasMirroredSession ? .awaitingReplacementMirror : .verified
+            )
+        }
+        return WorkoutMirrorPresentationV1(
             connectionState: connectionState,
             snapshot: latestEnvelope?.snapshot ?? WorkoutSnapshotV1(state: .idle),
             sessionID: latestEnvelope?.sessionID,
@@ -665,6 +729,9 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     }
 
     var canResetTerminalPresentation: Bool {
+        // Let a newly attached mirror establish its identity before Done can
+        // dismiss the saved summary and detach that transport.
+        if fitnessSave != nil { return !hasMirroredSession }
         guard !presentation.isWorkoutActive,
               pendingControl == nil else { return false }
         guard connectionState == .ended else { return true }
@@ -794,11 +861,19 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     @discardableResult
     mutating func timeOutFirstSnapshot() -> Bool {
         guard hasMirroredSession,
-              connectionState == .awaitingFirstSnapshot else {
+              connectionState == .awaitingFirstSnapshot || fitnessSave != nil else {
             return false
         }
         activeLaunchID = nil
         launchDeadline = nil
+        if fitnessSave != nil {
+            // No validated replacement arrived. Keep the Fitness result and
+            // let the manager detach the unverified transport.
+            hasMirroredSession = false
+            connectionState = .ended
+            confirmedSessionState = .ended
+            return true
+        }
         let hasAuthoritativeActiveEvidence =
             latestEnvelope?.snapshot?.state.isActive == true
             || confirmedSessionState == .running
@@ -922,6 +997,11 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
             return result
         }
 
+        if fitnessSave != nil {
+            fitnessSave = nil
+            confirmedSessionState = nil
+            sessionStateConfirmedAt = nil
+        }
         let previousSessionID = latestEnvelope?.sessionID
         if let previousSessionID, previousSessionID != envelope.sessionID {
             confirmedSessionState = nil
@@ -996,6 +1076,13 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
         at date: Date
     ) {
         guard sessionStateConfirmedAt.map({ date >= $0 }) ?? true else { return }
+        if fitnessSave != nil, hasMirroredSession,
+           state == .running || state == .paused || state == .ending {
+            // The saved ride has ended, so a live native session on a newly
+            // attached mirror is a new Watch ride. Show it, and keep its
+            // transport for a late snapshot, instead of the saved summary.
+            fitnessSave = nil
+        }
         confirmedSessionState = state
         sessionStateConfirmedAt = date
         clearConfirmedControlIfNeeded(for: state, terminalOutcome: nil)
@@ -1177,9 +1264,33 @@ nonisolated struct WorkoutMirrorStateReducer: Sendable {
     }
 
     @discardableResult
+    mutating func reconcileSavedWorkout(_ saved: WorkoutSavedInFitness) -> Bool {
+        guard presentation.canReconcileFromFitness(sessionID: saved.sessionID) else { return false }
+        sequenceGate.retireSession(saved.sessionID)
+        latestEnvelope = nil
+        lastReceivedAt = nil
+        finalSnapshot = nil
+        hasMirroredSession = false
+        activeLaunchID = nil
+        launchDeadline = nil
+        confirmedSessionState = .ended
+        sessionStateConfirmedAt = nil
+        errorCode = nil
+        commandErrorCode = nil
+        pendingControl = nil
+        pendingControlSequence = nil
+        unconfirmedSegmentControlSequence = nil
+        clearTimedOutTerminalControl()
+        connectionState = .ended
+        fitnessSave = saved
+        return true
+    }
+
+    @discardableResult
     mutating func resetTerminalPresentation() -> Bool {
         guard canResetTerminalPresentation else { return false }
         sequenceGate.retireCurrentSession()
+        fitnessSave = nil
         connectionState = .idle
         latestEnvelope = nil
         lastReceivedAt = nil
