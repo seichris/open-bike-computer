@@ -769,8 +769,9 @@ struct RideMetricsPanel: View {
                 "Current segment \(presentation.snapshot.currentSegmentIndex)"
             )
 
-            // Short labels, as on the Workout dashboard, keep three buttons
-            // readable on a phone; VoiceOver keeps the full names.
+            // Short labels keep three buttons readable on a phone; VoiceOver
+            // keeps the full names. Finish, not End: it saves at once and sits
+            // below End navigation, so the two must not share a word.
             if presentation.sessionState == .paused {
                 Button(action: onResumeWorkout) {
                     RideControlLabel("Resume", systemImage: "play.fill")
@@ -793,7 +794,7 @@ struct RideMetricsPanel: View {
             }
 
             Button(action: onEndAndSaveWorkout) {
-                RideControlLabel("End", systemImage: "stop.fill")
+                RideControlLabel("Finish", systemImage: "stop.fill")
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
@@ -801,7 +802,7 @@ struct RideMetricsPanel: View {
                 presentation.sessionState == .ending
                     || !canControlWorkout
             )
-            .accessibilityLabel("End workout")
+            .accessibilityLabel("Finish workout")
         } else if isNavigating && presentation.canStartNewWorkout {
             WorkoutStartButton(
                 watchAvailability: watchAvailability,
