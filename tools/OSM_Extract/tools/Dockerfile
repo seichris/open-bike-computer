@@ -25,6 +25,7 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     cmake \
     libbz2-dev \
     libexpat1-dev \
+    libfribidi0 \
     python3-dev \
     zlib1g-dev \
     gdal-bin \
