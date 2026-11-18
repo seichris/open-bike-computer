@@ -5,6 +5,11 @@
 namespace disconnected_shutdown_policy {
 
 constexpr uint32_t registrationGraceSeconds = 10 * 60;
+// After the last confirmed movement a GNSS board stays awake for at least
+// this long (or the configured timeout, if longer) before it may sleep, so a
+// phone-off ride survives a stop at a light or a café but a parked board
+// still powers down (docs/firmware-power-management.md).
+constexpr uint32_t motionHoldSeconds = 5 * 60;
 
 enum class Action : uint8_t {
   None,
@@ -17,7 +22,33 @@ struct UpdateResult {
   Action action = Action::None;
   uint32_t timeoutSeconds = 0;
   bool waitingForRegistration = false;
+  // The countdown has run out, but recent standalone movement holds the
+  // board awake.
+  bool heldByMotion = false;
 };
+
+// Standalone movement confirmed by the board's own receiver
+// (gnss_motion_policy.hpp). Boards without one pass the default, which never
+// holds, so their behaviour is unchanged.
+struct MotionHold {
+  bool moving = false;
+  // Movement was confirmed at least once, so lastMovementMs is meaningful.
+  bool moved = false;
+  uint32_t lastMovementMs = 0;
+};
+
+inline bool motionHolds(const MotionHold &motion, uint32_t nowMs,
+                        uint32_t timeoutSeconds) {
+  if (motion.moving)
+    return true;
+  if (!motion.moved)
+    return false;
+  const uint32_t holdSeconds =
+      timeoutSeconds > motionHoldSeconds ? timeoutSeconds : motionHoldSeconds;
+  return static_cast<uint64_t>(
+             static_cast<uint32_t>(nowMs - motion.lastMovementMs)) <
+         static_cast<uint64_t>(holdSeconds) * 1000ULL;
+}
 
 inline uint32_t effectiveTimeoutSeconds(uint32_t configuredTimeoutSeconds,
                                         bool ownershipClaimed) {
@@ -30,9 +61,14 @@ inline uint32_t effectiveTimeoutSeconds(uint32_t configuredTimeoutSeconds,
 
 class Tracker {
 public:
+  // "Never" (a zero timeout) and a connection always win. Otherwise a
+  // shutdown is due once the board has been disconnected for the timeout
+  // and, if it moved, at least max(timeout, motionHoldSeconds) has passed
+  // since its last movement. An announced shutdown is never withdrawn.
   UpdateResult update(uint32_t nowMs, bool connected,
                       uint32_t configuredTimeoutSeconds,
-                      bool ownershipClaimed) {
+                      bool ownershipClaimed,
+                      const MotionHold &motion = {}) {
     const uint32_t timeoutSeconds = effectiveTimeoutSeconds(
         configuredTimeoutSeconds, ownershipClaimed);
     const bool waitingForRegistration = !ownershipClaimed;
@@ -58,6 +94,12 @@ public:
         static_cast<uint64_t>(timeoutSeconds) * 1000ULL;
     if (static_cast<uint64_t>(elapsedMs) < deadlineMs) {
       return {Action::None, timeoutSeconds, waitingForRegistration};
+    }
+
+    if (!shutdownAnnounced_ && motionHolds(motion, nowMs, timeoutSeconds)) {
+      UpdateResult held{Action::None, timeoutSeconds, waitingForRegistration};
+      held.heldByMotion = true;
+      return held;
     }
 
     if (!shutdownAnnounced_) {

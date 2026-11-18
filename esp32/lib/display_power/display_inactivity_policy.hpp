@@ -38,6 +38,10 @@ constexpr bool shouldPollTouchWhileDisplayInactive(Mode currentMode,
 struct Context {
   bool navigating = false;
   bool workoutActive = false;
+  // Standalone movement confirmed by the board's own receiver while no phone
+  // session drives the screen (docs/firmware-power-management.md); always false on
+  // boards without a receiver.
+  bool gnssMoving = false;
   bool automaticDisplayOffEnabled = true;
   bool transferActive = false;
   bool attentionActive = false;
@@ -141,12 +145,12 @@ public:
     }
 
     const bool heldAwake =
-        context.navigating || context.workoutActive || context.transferActive ||
-        context.attentionActive;
+        context.navigating || context.workoutActive || context.gnssMoving ||
+        context.transferActive || context.attentionActive;
     if (heldAwake_ && !heldAwake) {
-      // Leaving navigation, workout, transfer, pairing, or audio should start
-      // a fresh idle interval instead of immediately inheriting the time spent
-      // held.
+      // Leaving navigation, workout, standalone movement, transfer, pairing,
+      // or audio should start a fresh idle interval instead of immediately
+      // inheriting the time spent held.
       lastMeaningfulActivityMs_ = nowMs;
     }
     heldAwake_ = heldAwake;
@@ -155,7 +159,7 @@ public:
     if (context.transferActive) {
       requested = Mode::Transfer;
     } else if (context.navigating || context.workoutActive ||
-               context.attentionActive) {
+               context.gnssMoving || context.attentionActive) {
       requested = Mode::Active;
     } else if (!context.automaticDisplayOffEnabled) {
       requested = Mode::Active;
