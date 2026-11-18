@@ -132,14 +132,16 @@ struct WorkoutFitnessCheckView: View {
 }
 
 /// The explicit rider choice to keep recording on iPhone after Apple Watch
-/// stops responding. Nothing switches until the rider confirms.
-struct WorkoutContinueOnIPhoneButton: View {
+/// stops responding. Nothing switches until the rider confirms. A control
+/// row passes its own label so the button matches the row's other controls.
+struct WorkoutContinueOnIPhoneButton<Label: View>: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator
+    @ViewBuilder let label: () -> Label
     @State private var confirms = false
 
     var body: some View {
         Button { confirms = true } label: {
-            Label("Continue on iPhone", systemImage: "iphone")
+            label()
         }
         .buttonStyle(.borderedProminent)
         .disabled(!coordinator.canContinueOnIPhone)
@@ -149,6 +151,14 @@ struct WorkoutContinueOnIPhoneButton: View {
             Button("Keep Apple Watch", role: .cancel) {}
         } message: {
             Text("iPhone starts recording now. What Apple Watch recorded stays in Fitness as its own workout, and Bicino shows both parts as one ride with the unrecorded gap between them. Bicino won’t switch back if Apple Watch reconnects.")
+        }
+    }
+}
+
+extension WorkoutContinueOnIPhoneButton where Label == SwiftUI.Label<Text, Image> {
+    init(coordinator: WorkoutSessionCoordinator) {
+        self.init(coordinator: coordinator) {
+            SwiftUI.Label("Continue on iPhone", systemImage: "iphone")
         }
     }
 }
