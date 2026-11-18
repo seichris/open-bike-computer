@@ -742,7 +742,7 @@
       "name": "BLE disconnect diagnostics host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_disconnect_diagnostics.cpp \\\n  -o ${TMPDIR}/test_ble_disconnect_diagnostics\n${TMPDIR}/test_ble_disconnect_diagnostics",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_disconnect_diagnostics.cpp \\\n  -o ${TMPDIR}/test_ble_disconnect_diagnostics\n${TMPDIR}/test_ble_disconnect_diagnostics\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_advertising_recovery_policy.cpp \\\n  -o ${TMPDIR}/test_ble_advertising_recovery_policy\n${TMPDIR}/test_ble_advertising_recovery_policy",
       "tools": [
         "python3",
         "g++"
