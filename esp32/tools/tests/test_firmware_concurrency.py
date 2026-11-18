@@ -83,7 +83,7 @@ namespace ride_delivery_protocol { bool leaseMatches(unsigned a,unsigned b) { re
 void noteRideDeliveryMember(unsigned,unsigned,unsigned) {}
 unsigned routeCalls=0, gpsCalls=0;
 void handleRouteGeometryPayload(const uint8_t *,size_t,const char *) { ++routeCalls; }
-void handleGpsPayload(const uint8_t *,size_t,const char *,unsigned) { ++gpsCalls; }
+void handleGpsPayload(const uint8_t *,size_t,const char *,unsigned,unsigned) { ++gpsCalls; }
 std::vector<unsigned> applied;
 bool refill=true;
 void enqueue(unsigned id, bool fallback=false) {
