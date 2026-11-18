@@ -32,6 +32,7 @@ extern Power power;
 #include "device_screen_protocol.hpp"
 #include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
+#include "phone_ride_totals.hpp"
 #include "../position_source/position_source.hpp"
 #include "map_setting_packet.hpp"
 #include "map_setting_redraw_policy.hpp"
@@ -1103,6 +1104,16 @@ NavigationData getCurrentNavigationData() { return currentNavData.read(); }
 bool hasCurrentNavigationData() {
   const auto data = currentNavData.read();
   return data.distance > 0 || data.instruction[0] != '\0';
+}
+
+// UI task only: written by handleGpsPayload(), read by the Ride Stats
+// presenter. The session generation is the atomic ride payload generation.
+static phone_ride_totals::Stamp phoneRideTotalsStamp;
+
+bool phoneRideTotalsFresh(uint32_t nowMs) {
+  return phone_ride_totals::fresh(
+      phoneRideTotalsStamp, nowMs,
+      ridePayloadGeneration.load(std::memory_order_acquire));
 }
 
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
@@ -5935,7 +5946,8 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
 
 static void handleGpsPayload(
     const uint8_t *data, size_t len, const char *source,
-    const gps_input_freshness::ArrivalBatch &arrivals) {
+    const gps_input_freshness::ArrivalBatch &arrivals,
+    uint32_t payloadGeneration) {
   gps_position_protocol::Packet packet{};
   // While the board's own receiver holds a valid fix, the phone's position
   // still feeds ride automation and diagnostics but not the shared position
@@ -5950,6 +5962,11 @@ static void handleGpsPayload(
     return;
   }
   gps_position_protocol::apply(packet, appliesToPosition, gps.gpsData);
+  // Every authenticated packet refreshes the totals it just wrote (or
+  // cleared). The stamp carries the packet's own session: a link that ended
+  // after the mailbox check makes these totals stale at once.
+  phoneRideTotalsStamp =
+      phone_ride_totals::received(millis(), payloadGeneration);
 
   bool rtcTimestampSynced = false;
   if (packet.hasUnixTime) {
@@ -6578,7 +6595,8 @@ static void processPendingMapInputs() {
       handleRouteGeometryPayload(input.data, input.length, source);
       break;
     case PendingMapInputType::Gps:
-      handleGpsPayload(input.data, input.length, source, input.gpsArrivals);
+      handleGpsPayload(input.data, input.length, source, input.gpsArrivals,
+                       input.payloadGeneration);
       break;
     case PendingMapInputType::Setting:
       handleMapSettingPayload(input.data, input.length, source);

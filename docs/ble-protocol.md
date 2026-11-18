@@ -591,6 +591,17 @@ SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 All GPS packet versions reject latitude outside -90...90 degrees or longitude
 outside -180...180 degrees before updating map state or arrival freshness.
 
+`DistanceTraveled`, `ElapsedTime` and `RouteRemaining` apply whichever source
+owns the position: the phone or Watch is their only source, including while a
+GNSS board's own receiver holds the position. Firmware keeps their freshness
+apart from position freshness (`phone_ride_totals.hpp`). They are live only
+while packets of the current authenticated ride session keep arriving (within
+10 seconds); when the link or controller lease ends they are withdrawn at once.
+Ride Stats then shows Distance and Elapsed as unavailable, and Route Left
+disappears. A reconnect does not revive them; the next packet replaces them,
+so a navigation stopped while disconnected never returns. Workout telemetry
+keeps its own freshness and is unaffected.
+
 Live CoreLocation coordinates are sent as WGS-84. Simulated positions follow
 the route's WGS-84 geometry and are sent unchanged. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the

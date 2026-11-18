@@ -600,7 +600,7 @@
       "name": "Workout telemetry state and presentation host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_workout_telemetry_state.cpp \\\n  -o ${TMPDIR}/test_workout_telemetry_state\n${TMPDIR}/test_workout_telemetry_state",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_workout_telemetry_state.cpp \\\n  -o ${TMPDIR}/test_workout_telemetry_state\n${TMPDIR}/test_workout_telemetry_state\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_phone_ride_totals.cpp \\\n  -o ${TMPDIR}/test_phone_ride_totals\n${TMPDIR}/test_phone_ride_totals",
       "tools": [
         "python3",
         "g++"

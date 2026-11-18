@@ -186,6 +186,9 @@ const ScreenMapRenderSettings &currentMapStyleSettings();
 
 NavigationData getCurrentNavigationData();
 bool hasCurrentNavigationData();
+// UI task: whether GPSDATA's distance, elapsed time and route remaining are
+// live phone/Watch values (phone_ride_totals.hpp).
+bool phoneRideTotalsFresh(uint32_t nowMs);
 int16_t getPhoneBatteryLevelPercent();
 bool isPhoneBatteryCharging();
 
