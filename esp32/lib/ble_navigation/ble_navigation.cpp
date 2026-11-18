@@ -2562,27 +2562,38 @@ static void completeBleSessionAuthentication() {
   queueOwnershipUiUpdate();
 }
 
-static bool notifyAuthenticatedPayload(
+// BEGIN authenticated notification admission
+// (compiled on the host by tools/tests/test_ride_acknowledgement_fence.py)
+enum class AuthenticatedNotifyResult : uint8_t {
+  Queued,
+  // The expected session or ride lease no longer holds: the payload belongs
+  // to an earlier controller and must never be sent.
+  Fenced,
+  // Not sendable right now: lock busy, session down or queue full.
+  Unavailable,
+};
+
+static AuthenticatedNotifyResult notifyAuthenticatedPayloadResult(
     NimBLECharacteristic *characteristic,
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
-    size_t length, const char *label,
-    ride_command_admission::Authorization expected = {}) {
-  (void)label;
+    size_t length, ride_command_admission::Authorization expected) {
   if (characteristic == nullptr || data == nullptr ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex,
                      isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
           pdTRUE) {
-    return false;
+    return AuthenticatedNotifyResult::Unavailable;
   }
+  // The fence runs under the same lock that admits the notification, so a
+  // session or lease replaced at any earlier moment is seen here.
   if (expected.sessionGeneration != 0 &&
       !ride_command_admission::mayApply(
           expected, {ridePayloadGeneration.load(std::memory_order_acquire),
                      deviceOwnership.authenticatedRideLeaseGeneration(millis())},
           deviceOwnership.isSessionAuthenticated())) {
     xSemaphoreGive(deviceOwnershipMutex);
-    return false;
+    return AuthenticatedNotifyResult::Fenced;
   }
   std::string frame;
   const std::string payload(reinterpret_cast<const char *>(data), length);
@@ -2590,7 +2601,7 @@ static bool notifyAuthenticatedPayload(
       channel, payload, frame);
   if (!protectedPayload || activeConnHandle == BLE_HS_CONN_HANDLE_NONE) {
     xSemaphoreGive(deviceOwnershipMutex);
-    return false;
+    return AuthenticatedNotifyResult::Unavailable;
   }
   const uint16_t connectionHandle = activeConnHandle;
   const uint8_t *frameData =
@@ -2601,7 +2612,20 @@ static bool notifyAuthenticatedPayload(
   const bool sent = enqueueDeferredNotification(
       characteristic, connectionHandle, frameData, frame.size());
   xSemaphoreGive(deviceOwnershipMutex);
-  return sent;
+  return sent ? AuthenticatedNotifyResult::Queued
+              : AuthenticatedNotifyResult::Unavailable;
+}
+// END authenticated notification admission
+
+static bool notifyAuthenticatedPayload(
+    NimBLECharacteristic *characteristic,
+    device_ownership::AuthenticatedChannel channel, const uint8_t *data,
+    size_t length, const char *label,
+    ride_command_admission::Authorization expected = {}) {
+  (void)label;
+  return notifyAuthenticatedPayloadResult(characteristic, channel, data,
+                                          length, expected) ==
+         AuthenticatedNotifyResult::Queued;
 }
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
@@ -2889,17 +2913,25 @@ static uint32_t currentAuthoritativeRideLeaseGeneration(
   return leaseGeneration;
 }
 
+// BEGIN deferred ride acknowledgement
+// (compiled on the host by tools/tests/test_ride_acknowledgement_fence.py)
+//
 // An acknowledgement whose notification could not be queued: inside NimBLE
 // callbacks the ownership lock is tried without waiting, and the deferred
 // queue is bounded. The phone holds every other write behind a pending
 // acknowledgement and, before its retry fix, reconnected when that retry could
 // not be admitted (GNSS bench, 2026-11-18). The loop task therefore resends the
-// latest failed acknowledgement a few times while the same authenticated
-// session lasts; the phone ignores a duplicate by command ID.
+// latest failed acknowledgement a few times; the phone ignores a duplicate by
+// command ID.
+//
+// Each resend is fenced by the session and ride lease the acknowledgement was
+// made for, checked under the ownership lock that admits the notification
+// (notifyAuthenticatedPayloadResult). A link or lease replaced at any moment
+// before that lock therefore retires the acknowledgement instead of letting it
+// enter the new session.
 struct PendingRideAcknowledgement {
   uint8_t payload[ride_delivery_protocol::ACK_SIZE]{};
-  uint32_t sessionGeneration = 0;
-  uint32_t leaseGeneration = 0;
+  ride_command_admission::Authorization authorization{};
   uint8_t commandClass = 0;
   uint8_t attempts = 0;
   bool pending = false;
@@ -2944,12 +2976,15 @@ static void notifyRideDeliveryAcknowledgement(
   Serial.println("BLE Ride Delivery: acknowledgement queue failed; the loop "
                  "task resends it");
   const uint8_t commandClass = static_cast<uint8_t>(acknowledgement.type);
+  // The session and lease this acknowledgement belongs to. Both are read on
+  // the host task that just admitted the command, before any later callback
+  // could replace them.
+  const ride_command_admission::Authorization authorization{
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      acknowledgement.leaseGeneration};
   portENTER_CRITICAL(&pendingRideAcknowledgementMux);
   std::memcpy(pendingRideAcknowledgement.payload, payload, length);
-  pendingRideAcknowledgement.sessionGeneration =
-      ridePayloadGeneration.load(std::memory_order_acquire);
-  pendingRideAcknowledgement.leaseGeneration =
-      acknowledgement.leaseGeneration;
+  pendingRideAcknowledgement.authorization = authorization;
   pendingRideAcknowledgement.commandClass = commandClass;
   pendingRideAcknowledgement.attempts = 0;
   pendingRideAcknowledgement.pending = true;
@@ -2967,22 +3002,21 @@ static void resendPendingRideAcknowledgement() {
   portEXIT_CRITICAL(&pendingRideAcknowledgementMux);
   if (!copy.pending)
     return;
-  const bool sameSession =
-      copy.sessionGeneration ==
-      ridePayloadGeneration.load(std::memory_order_acquire);
-  const bool sent =
-      sameSession &&
-      notifyAuthenticatedNavigation(mapTransferStatusCharacteristic,
-                                    copy.payload, sizeof(copy.payload));
+  const AuthenticatedNotifyResult result = notifyAuthenticatedPayloadResult(
+      mapTransferStatusCharacteristic,
+      device_ownership::AuthenticatedChannel::Navigation, copy.payload,
+      sizeof(copy.payload), copy.authorization);
   const uint8_t attempts = static_cast<uint8_t>(copy.attempts + 1U);
-  const bool finished =
-      sent || !sameSession || attempts >= kRideAcknowledgementResends;
+  const bool finished = result != AuthenticatedNotifyResult::Unavailable ||
+                        attempts >= kRideAcknowledgementResends;
   bool current = false;
   portENTER_CRITICAL(&pendingRideAcknowledgementMux);
   // A newer failure replaced the slot meanwhile: leave that one alone.
   current = pendingRideAcknowledgement.pending &&
-            pendingRideAcknowledgement.sessionGeneration ==
-                copy.sessionGeneration &&
+            pendingRideAcknowledgement.authorization.sessionGeneration ==
+                copy.authorization.sessionGeneration &&
+            pendingRideAcknowledgement.authorization.leaseGeneration ==
+                copy.authorization.leaseGeneration &&
             std::memcmp(pendingRideAcknowledgement.payload, copy.payload,
                         sizeof(copy.payload)) == 0;
   if (current) {
@@ -2994,10 +3028,13 @@ static void resendPendingRideAcknowledgement() {
   portEXIT_CRITICAL(&pendingRideAcknowledgementMux);
   if (current && finished) {
     recordRideAcknowledgementResend(
-        sent ? "resent" : (sameSession ? "dropped" : "session_ended"),
-        copy.commandClass, copy.leaseGeneration, attempts);
+        result == AuthenticatedNotifyResult::Queued   ? "resent"
+        : result == AuthenticatedNotifyResult::Fenced ? "fenced"
+                                                      : "dropped",
+        copy.commandClass, copy.authorization.leaseGeneration, attempts);
   }
 }
+// END deferred ride acknowledgement
 
 static void emitRideDeliveryAcknowledgement(
     const ride_delivery_protocol::CommandMember &member,
