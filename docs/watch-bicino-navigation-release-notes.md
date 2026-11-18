@@ -25,6 +25,9 @@ has passed with release-build evidence.
 
 - Online Watch routing is off by default and no hardware or reachability signal
   changes the setting.
+- Where Apple Maps has no cycling directions (the UAE, for example), online
+  Watch routes and their reroutes use car directions that avoid highways and
+  tolls, and live navigation says so.
 - **Queued** means a route transfer is pending. Only the green Watch status icon
   confirms exact hash-verified installation.
 - Offline deviation shows distance from the route and never makes a network
