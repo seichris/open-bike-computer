@@ -130,6 +130,7 @@ extension OfflineRouteSaveTests {
         try multiStopReorderingReusesLegs()
         try multiStopStaleResultsAndCancellation()
         try multiStopLegFailuresAndRetry()
+        try multiStopCarFallbackWhereCyclingIsUnavailable()
         try multiStopJoinsAndRouteLimits()
         try multiStopSaveReloadAndOfflineNavigation()
         try multiStopRoundTripNavigation()
@@ -384,6 +385,66 @@ extension OfflineRouteSaveTests {
         f.factory.tasks[6].succeed(with: [Stops.bakeryToOffice])
         check(planner.readyPlan?.legs.count == 2 && f.factory.tasks.count == 7,
             "The route completes once the failed leg succeeds")
+    }
+
+    /// Where Apple Maps has no cycling coverage, each cycling leg falls back
+    /// to car directions that avoid highways and tolls; the plan marks those
+    /// legs, and failures say what actually went wrong.
+    static func multiStopCarFallbackWhereCyclingIsUnavailable() throws {
+        func directionsError(_ code: Int) -> NSError {
+            NSError(domain: MKErrorDomain, code: Int(MKError.Code.serverFailure.rawValue),
+                    userInfo: [CyclingDirectionsFallback.directionsErrorCodeKey: code])
+        }
+        let outOfCoverage = directionsError(8)
+        func isCarAvoidingHighwaysAndTolls(_ task: TestNavigationDirectionsTask) -> Bool {
+            task.request.transportType == .automobile &&
+                task.request.highwayPreference == .avoid &&
+                task.request.tollPreference == .avoid
+        }
+
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let planner = f.makePlanner()
+        let request = Stops.request([Stops.home, Stops.bakery, Stops.office])
+        planner.plan(request)
+        f.factory.tasks[0].fail(with: outOfCoverage)
+        check(f.factory.tasks.count == 2 && isCarAvoidingHighwaysAndTolls(f.factory.tasks[1]) &&
+              Stops.endpoints(f.factory.tasks[1]) == [Stops.home.mapCoordinate, Stops.bakery.mapCoordinate],
+              "A leg without cycling coverage asks for car directions between the same stops")
+        f.factory.tasks[1].succeed(with: [Stops.homeToBakery])
+        check(f.factory.tasks.count == 3 && f.factory.tasks[2].request.transportType == RouteTransportTypes.cycling,
+              "The next leg still asks for cycling directions first")
+        f.factory.tasks[2].succeed(with: [Stops.bakeryToOffice])
+        check(planner.readyPlan?.carDirectionLegs == [0] && planner.readyPlan?.usesCarDirections == true,
+              "The plan marks only the car leg")
+
+        // Reusing cached legs keeps the mark without asking again.
+        planner.plan(Stops.request([Stops.home, Stops.bakery]))
+        check(f.factory.tasks.count == 3 && planner.readyPlan?.carDirectionLegs == [0],
+              "A cached car leg is reused and still marked")
+
+        // Failures name their real cause, not a lost connection.
+        let failing = f.makePlanner()
+        let base = f.factory.tasks.count
+        failing.plan(request)
+        f.factory.tasks[base].fail(with: outOfCoverage)
+        f.factory.tasks[base + 1].fail(with: URLError(.notConnectedToInternet))
+        check(failing.failure == .leg(index: 0, message:
+                "Apple Maps has no cycling directions here and found no car route from Home to Bakery."),
+              "A failed fallback says cycling is unavailable and no car route was found")
+        failing.retry()
+        f.factory.tasks[base + 2].fail(with: directionsError(16))
+        check(f.factory.tasks.count == base + 3 &&
+              failing.failure == .leg(index: 0, message: "No route was found from Home to Bakery."),
+              "Not reachable is reported as no route, without a car request")
+
+        // A chosen travel mode is never replaced.
+        let driving = f.makePlanner()
+        driving.plan(MultiStopRouteRequest(places: [Stops.home, Stops.office], transportType: .automobile))
+        f.factory.tasks[base + 3].fail(with: outOfCoverage)
+        check(f.factory.tasks.count == base + 4 &&
+              driving.failure == .leg(index: 0, message:
+                "Apple Maps has no directions for this travel mode from Home to Office."),
+              "A chosen car route is not retried and says why it failed")
     }
 
     static func multiStopJoinsAndRouteLimits() throws {

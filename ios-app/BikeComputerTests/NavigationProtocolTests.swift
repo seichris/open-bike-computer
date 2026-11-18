@@ -924,6 +924,7 @@ struct NavigationProtocolTests {
         testCoordinatorRequiresSelectionForSingleRoute()
         testCoordinatorNavigationReclaimsWatchDirectBicino()
         testCoordinatorReroutesAndAppliesLatestRoute()
+        testCoordinatorFallsBackToCarWhereCyclingIsUnavailable()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testLocationStreamRecovery()
@@ -4754,6 +4755,193 @@ struct NavigationProtocolTests {
         assertEqual(manager.watchDirectRideReconciliationRequestForTesting?
             .purpose, .releaseWhenIdle,
                     "without phone navigation a foreground check only releases idle rides")
+    }
+
+    /// Where Apple Maps has no cycling coverage (the UAE, for example), a
+    /// cycling request fails with the server-failure code and directions
+    /// error 8; the coordinator then uses car directions that avoid highways
+    /// and tolls, says so, and keeps that choice when it reroutes.
+    @MainActor
+    static func testCoordinatorFallsBackToCarWhereCyclingIsUnavailable() {
+        let suite = "CoordinatorCyclingFallback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        func directionsError(_ code: Int, _ description: String) -> NSError {
+            NSError(
+                domain: MKErrorDomain,
+                code: Int(MKError.Code.serverFailure.rawValue),
+                userInfo: [
+                    CyclingDirectionsFallback.directionsErrorCodeKey: code,
+                    NSLocalizedDescriptionKey: description
+                ]
+            )
+        }
+        let outOfCoverage = directionsError(8, "Cycling Directions Not Available")
+        let notReachable = directionsError(16, "No Route Available")
+        let cycling = RouteTransportTypes.cycling
+
+        assert(CyclingDirectionsFallback.usesCarDirections(after: outOfCoverage, requested: cycling),
+               "cycling outside Apple Maps' coverage falls back to car directions")
+        assert(!CyclingDirectionsFallback.usesCarDirections(after: outOfCoverage, requested: .automobile),
+               "a chosen car route is never replaced")
+        assert(!CyclingDirectionsFallback.usesCarDirections(after: outOfCoverage, requested: .walking),
+               "a chosen walking route is never replaced")
+        assert(!CyclingDirectionsFallback.usesCarDirections(after: notReachable, requested: cycling),
+               "a route that does not exist is not looked for by car")
+        assert(!CyclingDirectionsFallback.usesCarDirections(after: MKError(.serverFailure), requested: cycling),
+               "a plain server failure is not a coverage gap")
+        assert(!CyclingDirectionsFallback.usesCarDirections(after: MKError(.directionsNotFound), requested: cycling),
+               "directions not found is not a coverage gap")
+        assert(!CyclingDirectionsFallback.usesCarDirections(
+                   after: URLError(.notConnectedToInternet), requested: cycling),
+               "a connection failure is not a coverage gap")
+        assert(!CyclingDirectionsFallback.usesCarDirections(
+                   after: NSError(domain: "Other", code: 2,
+                                  userInfo: [CyclingDirectionsFallback.directionsErrorCodeKey: 8]),
+                   requested: cycling),
+               "only MapKit errors are classified")
+
+        let factory = TestNavigationDirectionsFactory()
+        let coordinator = BikeComputerCoordinator(
+            destinationStore: SavedDestinationStore(defaults: defaults),
+            directionsFactory: factory.makeTask,
+            startServices: false
+        )
+        defer { coordinator.stopNavigation() }
+
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000)
+        let destinationCoordinate = CLLocationCoordinate2D(latitude: 37.0040, longitude: -122.0000)
+        let source = MKMapItem(placemark: MKPlacemark(coordinate: sourceCoordinate))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate: destinationCoordinate))
+        let carRoute = TestRoute(
+            instructions: "Continue on the car route",
+            coordinates: [sourceCoordinate, destinationCoordinate]
+        )
+        func avoidsHighwaysAndTolls(_ request: MKDirections.Request) -> Bool {
+            request.transportType == .automobile &&
+                request.highwayPreference == .avoid &&
+                request.tollPreference == .avoid
+        }
+
+        // A direct start falls back, starts the car route and says so.
+        coordinator.startNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: cycling
+        )
+        assertEqual(factory.tasks.count, 1, "cycling directions are requested first")
+        assert(factory.tasks[0].request.transportType == cycling, "the first request is cycling")
+        factory.tasks[0].fail(with: outOfCoverage)
+        assertEqual(factory.tasks.count, 2, "no cycling coverage requests car directions")
+        guard factory.tasks.count == 2,
+              let carSource = factory.tasks[1].request.source,
+              let carDestination = factory.tasks[1].request.destination else {
+            assert(false, "the car request keeps both endpoints")
+            return
+        }
+        assert(avoidsHighwaysAndTolls(factory.tasks[1].request),
+               "car directions for a bike avoid highways and tolls")
+        assert(!factory.tasks[1].request.requestsAlternateRoutes,
+               "a direct start still asks for one route")
+        assertCoordinate(carSource.placemark.coordinate,
+                         latitude: sourceCoordinate.latitude,
+                         longitude: sourceCoordinate.longitude,
+                         "the car request starts where cycling did")
+        assertCoordinate(carDestination.placemark.coordinate,
+                         latitude: destinationCoordinate.latitude,
+                         longitude: destinationCoordinate.longitude,
+                         "the car request keeps the destination")
+        factory.tasks[1].succeed(with: [carRoute])
+        assert(coordinator.isNavigating && coordinator.currentRoute === carRoute,
+               "the car route starts navigation")
+        assert(coordinator.routeCalculation.status.hasPrefix(CyclingDirectionsFallback.routeNotice),
+               "the rider is told the route is car directions")
+        assert(
+            waitForMainLoop(timeout: 2) { !coordinator.routeCalculation.isCalculating },
+            "the calculation finishes as for any started route"
+        )
+
+        // Its reroute stays a car route that avoids highways and tolls.
+        let offRouteLocation = testLocation(latitude: 37.0003, longitude: -121.9995)
+        for _ in 0..<3 {
+            coordinator.processNavigationLocationForTesting(freshNavigationFix(offRouteLocation))
+        }
+        assertEqual(factory.tasks.count, 3, "off-route fixes request a reroute")
+        if factory.tasks.count == 3 {
+            assert(avoidsHighwaysAndTolls(factory.tasks[2].request),
+                   "the reroute repeats the car request")
+        }
+        coordinator.stopNavigation()
+
+        // A planned route offers the car alternatives with the notice.
+        coordinator.planNavigation(
+            from: .mapItem(source),
+            to: .mapItem(destination),
+            transportType: cycling,
+            isTestMode: true
+        )
+        factory.tasks[3].fail(with: outOfCoverage)
+        assertEqual(factory.tasks.count, 5, "planning falls back too")
+        if factory.tasks.count == 5 {
+            assert(avoidsHighwaysAndTolls(factory.tasks[4].request) &&
+                       factory.tasks[4].request.requestsAlternateRoutes,
+                   "planned car directions still offer alternatives")
+            factory.tasks[4].succeed(with: [carRoute])
+        }
+        assertEqual(coordinator.routeAlternatives.count, 1, "the car route is offered")
+        assertEqual(coordinator.routeAlternatives.first?.advisoryNotices.first,
+                    CyclingDirectionsFallback.routeNotice,
+                    "the route preview says it is a car route")
+        if let alternative = coordinator.routeAlternatives.first {
+            coordinator.selectRouteAlternative(alternative.id)
+            coordinator.startSelectedRoute()
+        }
+        assert(coordinator.isNavigating && coordinator.currentRoute === carRoute,
+               "the selected car route starts like any selected route")
+        coordinator.stopNavigation()
+
+        // A route that does not exist is reported, not looked for by car.
+        coordinator.planNavigation(
+            from: .mapItem(source), to: .mapItem(destination),
+            transportType: cycling, isTestMode: true
+        )
+        factory.tasks[5].fail(with: notReachable)
+        assertEqual(factory.tasks.count, 6, "not reachable requests nothing more")
+        assertEqual(coordinator.routeCalculation.status, "Err: No Route Available",
+                    "MapKit's own reason is shown")
+
+        // If car directions fail too, the cycling reason is shown.
+        coordinator.planNavigation(
+            from: .mapItem(source), to: .mapItem(destination),
+            transportType: cycling, isTestMode: true
+        )
+        factory.tasks[6].fail(with: outOfCoverage)
+        factory.tasks[7].fail(with: URLError(.notConnectedToInternet))
+        assertEqual(coordinator.routeCalculation.status, "Err: Cycling Directions Not Available",
+                    "a failed car fallback reports why cycling failed")
+        assert(coordinator.routeAlternatives.isEmpty, "nothing is offered")
+
+        // A newer request cancels a car fallback still in flight.
+        coordinator.planNavigation(
+            from: .mapItem(source), to: .mapItem(destination),
+            transportType: cycling, isTestMode: true
+        )
+        factory.tasks[8].fail(with: outOfCoverage)
+        coordinator.planNavigation(
+            from: .mapItem(source), to: .mapItem(destination),
+            transportType: .automobile, isTestMode: true
+        )
+        assert(factory.tasks[9].isCancelled, "the superseded car fallback is cancelled")
+        factory.tasks[9].succeed(with: [carRoute])
+        assert(coordinator.routeAlternatives.isEmpty, "a cancelled fallback offers nothing")
+
+        // A chosen car route is never replaced or changed.
+        assert(factory.tasks[10].request.transportType == .automobile &&
+                   factory.tasks[10].request.highwayPreference != .avoid,
+               "a chosen car route keeps MapKit's defaults")
+        factory.tasks[10].fail(with: outOfCoverage)
+        assertEqual(factory.tasks.count, 11, "a chosen car route is not retried")
     }
 
     @MainActor
