@@ -7686,6 +7686,11 @@ private struct WorkoutContractTestSuite {
                 && !status.contains("Rerouting unavailable offline"),
             "active Watch guidance keeps the compact offline layout while surfacing online attribution and actionable Bicino failures"
         )
+        expect(
+            status.contains("navigationManager.routeDirectionsNotice")
+                && status.contains("systemImage: \"car.fill\""),
+            "active Watch guidance says when the route is car directions"
+        )
 
         let navigationOnly = sources["navigationOnly"] ?? ""
         expect(

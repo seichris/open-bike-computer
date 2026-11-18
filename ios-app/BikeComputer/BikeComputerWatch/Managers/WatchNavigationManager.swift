@@ -90,6 +90,17 @@ final class WatchNavigationManager: ObservableObject {
     @Published private(set) var routeAttribution: String?
     @Published private(set) var onlineStatus: WatchOnlineRoutingStatusV1 =
         .idle
+    /// The directions that drew the active route. A route that fell back to
+    /// car directions keeps them when it reroutes.
+    @Published private(set) var routeDirections: NavigationRouteDirectionsV1 =
+        .cycling
+
+    /// Tells the rider the active route is car directions.
+    var routeDirectionsNotice: String? {
+        routeDirections == .carAvoidingHighwaysAndTolls
+            ? WatchCyclingDirectionsFallback.routeNotice
+            : nil
+    }
 
     var canRecalculateOnline: Bool {
         settingsStore.policy == .onlineAllowed &&
@@ -334,6 +345,7 @@ final class WatchNavigationManager: ObservableObject {
         activeRecord = nil
         activeDestination = nil
         routeAttribution = nil
+        routeDirections = .cycling
         startedAt = nil
         lastJournalStepIndex = nil
         requestOrigin = nil
@@ -367,6 +379,7 @@ final class WatchNavigationManager: ObservableObject {
         activeRecord = nil
         activeDestination = nil
         routeAttribution = nil
+        routeDirections = .cycling
         startedAt = nil
         lastJournalStepIndex = nil
         requestOrigin = nil
@@ -578,7 +591,7 @@ final class WatchNavigationManager: ObservableObject {
             defer { finishRequest(identity) }
             guard isRequestCurrent(identity) else { return }
             do {
-                let routes = try await onlineProvider.routes(for:
+                let response = try await onlineProvider.routes(for:
                     NavigationRouteRequestV1(
                         source: RouteEndpointV1(
                             coordinate: source.coordinate,
@@ -587,11 +600,12 @@ final class WatchNavigationManager: ObservableObject {
                         destination: endpoint,
                         localeIdentifier: Locale.current.identifier,
                         transportType: .cycling,
-                        requestAlternatives: false
+                        requestAlternatives: false,
+                        directions: .cycling
                     )
                 )
                 guard isRequestCurrent(identity) else { return }
-                guard let route = routes.first,
+                guard let route = response.routes.first,
                       route.provider == onlineProvider.metadata,
                       route.provider.storageScope == .activeOnly,
                       let currentLocation = lastLocation,
@@ -611,6 +625,7 @@ final class WatchNavigationManager: ObservableObject {
                 pendingFavorite = nil
                 activeDestination = endpoint
                 routeAttribution = route.provider.attribution
+                routeDirections = response.directions
                 startedAt = now()
                 onlineStatus = .online
                 guard let snapshot = runtime.snapshot else {
@@ -657,13 +672,16 @@ final class WatchNavigationManager: ObservableObject {
         if !explicit && !rerouteCooldown.canAttempt(at: now()) { return }
         if explicit { _ = rerouteCooldown.canAttempt(at: now(), interval: 0) }
         let identity = beginRequest(origin: source.coordinate)
+        // A car route that replaced unavailable cycling directions reroutes
+        // by car; a cycling reroute can still fall back to car directions.
+        let directions = routeDirections
         onlineStatus = .rerouting
         requestTask = Task { [weak self] in
             guard let self else { return }
             defer { finishRequest(identity) }
             guard isRequestCurrent(identity) else { return }
             do {
-                let routes = try await onlineProvider.routes(for:
+                let response = try await onlineProvider.routes(for:
                     NavigationRouteRequestV1(
                         source: RouteEndpointV1(
                             coordinate: source.coordinate,
@@ -672,11 +690,12 @@ final class WatchNavigationManager: ObservableObject {
                         destination: activeDestination,
                         localeIdentifier: Locale.current.identifier,
                         transportType: .cycling,
-                        requestAlternatives: false
+                        requestAlternatives: false,
+                        directions: directions
                     )
                 )
                 guard isRequestCurrent(identity) else { return }
-                guard let replacement = routes.first,
+                guard let replacement = response.routes.first,
                       replacement.provider == onlineProvider.metadata,
                       replacement.provider.storageScope == .activeOnly,
                       let currentLocation = lastLocation,
@@ -694,6 +713,7 @@ final class WatchNavigationManager: ObservableObject {
                 try journalStore.clear()
                 runtime = candidate
                 routeAttribution = replacement.provider.attribution
+                routeDirections = response.directions
                 if let activeRecord {
                     routeLibrary.deactivate(
                         WatchRouteIdentityV1(archive: activeRecord.archive)

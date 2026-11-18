@@ -97,6 +97,14 @@ struct WatchNavigationStatusView: View {
                         .multilineTextAlignment(.center)
                 }
 
+                if let directionsNotice =
+                    navigationManager.routeDirectionsNotice {
+                    Label(directionsNotice, systemImage: "car.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                }
+
                 if let routeAttribution {
                     Text("Route by \(routeAttribution)")
                         .font(.caption2)
