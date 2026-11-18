@@ -8124,7 +8124,7 @@ private struct WorkoutContractTestSuite {
                     "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
                 )
                 && compactNavigationDetailsViewSource.contains(
-                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Endworkout\",systemImage:\"stop.fill\")}"
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"End\",systemImage:\"stop.fill\")}"
                 )
                 && !compactNavigationDetailsViewSource.contains(
                     "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
@@ -8860,6 +8860,24 @@ private struct WorkoutContractTestSuite {
                     separatedBy: "WorkoutContinueOnIPhoneButton("
                 ).count == 2,
             "Continue on iPhone must take its own full-width row below the ride controls, never a slot in the workout control row"
+        )
+        expect(
+            compactNavigation.contains(
+                "}elseifisNavigating&&workoutStore.presentation.isWorkoutActive{VStack(spacing:8){navigationControlHStack(spacing:8){workoutControls}}}else{HStack(spacing:8){navigationControlworkoutControls}}"
+            )
+                && compactNavigation.contains(
+                    "Button(action:onStopNavigation){RideControlLabel(\"Endnavigation\",systemImage:\"xmark\")}"
+                )
+                && compactNavigation.contains(
+                    "Button(action:onPauseWorkout){RideControlLabel(\"Pause\",systemImage:\"pause.fill\")}"
+                )
+                && compactNavigation.contains(
+                    "Button(action:onResumeWorkout){RideControlLabel(\"Resume\",systemImage:\"play.fill\")}"
+                )
+                && compactNavigation.contains(".accessibilityLabel(\"Pauseworkout\")")
+                && compactNavigation.contains(".accessibilityLabel(\"Resumeworkout\")")
+                && compactNavigation.contains(".accessibilityLabel(\"Endworkout\")"),
+            "while navigating with a workout, End navigation must take its own row above the workout controls, and the workout controls' short labels must keep full VoiceOver names"
         )
         expect(
             compactWorkout.contains("case.activationFailed:")

@@ -714,12 +714,22 @@ struct RideMetricsPanel: View {
         }
     }
 
+    /// A phone row fits three labeled ride controls, not four. While
+    /// navigating with a workout, End navigation takes its own row above the
+    /// workout controls, so no label truncates.
     @ViewBuilder
     private var controlRow: some View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(spacing: 8) {
                 navigationControl
                 workoutControls
+            }
+        } else if isNavigating && workoutStore.presentation.isWorkoutActive {
+            VStack(spacing: 8) {
+                navigationControl
+                HStack(spacing: 8) {
+                    workoutControls
+                }
             }
         } else {
             HStack(spacing: 8) {
@@ -733,11 +743,10 @@ struct RideMetricsPanel: View {
     private var navigationControl: some View {
         if isNavigating {
             Button(action: onStopNavigation) {
-                RideControlLabel("End", systemImage: "xmark")
+                RideControlLabel("End navigation", systemImage: "xmark")
             }
             .buttonStyle(.bordered)
             .tint(.red)
-            .accessibilityLabel("End navigation")
         }
     }
 
@@ -760,22 +769,19 @@ struct RideMetricsPanel: View {
                 "Current segment \(presentation.snapshot.currentSegmentIndex)"
             )
 
+            // Short labels, as on the Workout dashboard, keep three buttons
+            // readable on a phone; VoiceOver keeps the full names.
             if presentation.sessionState == .paused {
                 Button(action: onResumeWorkout) {
-                    RideControlLabel(
-                        "Resume workout",
-                        systemImage: "play.fill"
-                    )
+                    RideControlLabel("Resume", systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .disabled(!canControlWorkout)
+                .accessibilityLabel("Resume workout")
             } else {
                 Button(action: onPauseWorkout) {
-                    RideControlLabel(
-                        "Pause workout",
-                        systemImage: "pause.fill"
-                    )
+                    RideControlLabel("Pause", systemImage: "pause.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
@@ -783,13 +789,11 @@ struct RideMetricsPanel: View {
                     presentation.sessionState != .running
                         || !canControlWorkout
                 )
+                .accessibilityLabel("Pause workout")
             }
 
             Button(action: onEndAndSaveWorkout) {
-                RideControlLabel(
-                    "End workout",
-                    systemImage: "stop.fill"
-                )
+                RideControlLabel("End", systemImage: "stop.fill")
             }
             .buttonStyle(.borderedProminent)
             .tint(.red)
@@ -797,6 +801,7 @@ struct RideMetricsPanel: View {
                 presentation.sessionState == .ending
                     || !canControlWorkout
             )
+            .accessibilityLabel("End workout")
         } else if isNavigating && presentation.canStartNewWorkout {
             WorkoutStartButton(
                 watchAvailability: watchAvailability,
@@ -937,7 +942,9 @@ private struct RideSegmentControlLabel: View {
         }
         .font(.subheadline.weight(.semibold))
         .lineLimit(1)
-        .minimumScaleFactor(0.62)
+        // The badge keeps its size, so the title may shrink a little further
+        // than the other ride labels before it would truncate.
+        .minimumScaleFactor(0.5)
         .frame(maxWidth: .infinity, minHeight: 36)
     }
 }
