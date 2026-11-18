@@ -1625,6 +1625,7 @@ private struct SavedMapRow: View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let needsInstallationRetry = packURL.map(manager.needsMapInstallationRetry) ?? false
         let installedDeviceMap = item.installedDeviceMap ?? packURL.flatMap {
             manager.installedDeviceMap(for: $0, library: bleManager.deviceMapLibrary)
         }
@@ -1781,7 +1782,7 @@ private struct SavedMapRow: View {
                         manager.transferCachedPack(at: packURL, bleManager: bleManager)
                     } label: {
                         Image(
-                            systemName: isPausedUpload
+                            systemName: isPausedUpload || needsInstallationRetry
                                 ? "arrow.clockwise.circle"
                                 : "arrow.up.circle"
                         )
@@ -1800,8 +1801,10 @@ private struct SavedMapRow: View {
                     .accessibilityLabel(
                         isPausedUpload
                             ? "Resume transferring \(displayName) to device"
-                            : (installedDeviceMap == nil ? "Install \(displayName) on the Bike Computer"
-                                : "Use \(displayName) already installed on the SD card")
+                            : (needsInstallationRetry
+                                ? "Retry installing \(displayName) on the Bike Computer"
+                                : (installedDeviceMap == nil ? "Install \(displayName) on the Bike Computer"
+                                    : "Use \(displayName) already installed on the SD card"))
                     )
                 } else if let installedDeviceMap {
                     Button {
@@ -1877,6 +1880,13 @@ private struct SavedMapRow: View {
                     fraction: uploadProgress,
                     detail: nil
                 )
+            }
+
+            if needsInstallationRetry {
+                Label("Installation result unknown. Tap Retry to send this map again and verify it.",
+                      systemImage: "arrow.clockwise.circle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             if let status = catalogAvailability?.statusText {

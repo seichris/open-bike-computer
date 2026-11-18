@@ -2974,6 +2974,16 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func needsMapInstallationRetry(_ packURL: URL) -> Bool {
+        guard lastTransferOutcome == "unknown",
+              lastTransferMapId == savedMapID(for: packURL),
+              defaults.string(forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey)
+                == packURL.lastPathComponent,
+              let signedReceipt = SavedMapArtifactMetadataStore.load(for: packURL)?
+                .primaryArtifact?.signedManifestReceipt else { return false }
+        return defaults.string(forKey: OfflineMapDefaults.lastTransferSessionIdKey) == signedReceipt
+    }
+
     func isAwaitingMapActivationConfirmation(_ packURL: URL) -> Bool {
         guard !isPausedMapUpload(packURL) else { return false }
         let candidateMapID = savedMapID(for: packURL)
@@ -6599,7 +6609,10 @@ final class OfflineMapManager: ObservableObject {
             return
         }
 
-        if !resumePausedUpload, bleManager.hasFreshMapTransferStatus,
+        // An SD inventory entry cannot verify a transfer whose terminal result
+        // was lost across a reboot. Retry must obtain a fresh upload result.
+        if !resumePausedUpload, !needsMapInstallationRetry(packURL),
+           bleManager.hasFreshMapTransferStatus,
            let library = bleManager.deviceMapLibrary, library.isComplete {
             if let installed = library.installed(mapID: prepared.mapID,
                 manifestReceipt: prepared.artifact.manifestReceipt,
