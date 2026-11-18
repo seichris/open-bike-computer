@@ -104,6 +104,19 @@ def default_font_faces() -> tuple[FontFaceSpec, ...]:
                 FontFaceSpec(5, cjk, 4, "cjk-hk"),
             )
         )
+    arabic = _first_existing(
+        (
+            os.environ.get("OBC_LABEL_ARABIC_FONT"),
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        )
+    )
+    if arabic is not None:
+        faces.append(FontFaceSpec(6, arabic, 0, "arabic"))
+    arabic_latin = _first_existing(
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",)
+    )
+    if arabic_latin is not None and arabic_latin != latin:
+        faces.append(FontFaceSpec(7, arabic_latin, 0, "arabic-latin"))
     return tuple(faces)
 
 
@@ -217,6 +230,24 @@ class FontPackBuilder:
         self._hb_fonts[key] = font
         return font
 
+    def _shape_buffers(
+        self, face: FontFaceSpec, text: str, language: str | None
+    ) -> list[hb.Buffer] | None:
+        buffers = []
+        for pixel_size in FONT_SIZES:
+            buffer = hb.Buffer()
+            buffer.add_str(text)
+            if language:
+                buffer.language = language
+            buffer.guess_segment_properties()
+            hb.shape(self._harfbuzz_font(face, pixel_size), buffer)
+            if not buffer.glyph_infos or len(buffer.glyph_infos) > MAX_GLYPHS_PER_RUN:
+                raise FontAssetError("shaped label run is empty or too long")
+            if any(info.codepoint == 0 for info in buffer.glyph_infos):
+                return None
+            buffers.append(buffer)
+        return buffers
+
     def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
         self.shape_calls += 1
         cache_key = (text, language)
@@ -227,21 +258,26 @@ class FontPackBuilder:
         started = time.perf_counter()
         try:
             face = self._face_for(text, language)
+            buffers = self._shape_buffers(face, text, language)
+            if buffers is None:
+                # Labels may contain native-script text even when all preferred
+                # languages use Latin or CJK. Try the Arabic face and then the
+                # face with both Arabic and Latin coverage for mixed labels.
+                for fallback in self.faces:
+                    if fallback.name not in {"arabic", "arabic-latin"} or fallback == face:
+                        continue
+                    buffers = self._shape_buffers(fallback, text, language)
+                    if buffers is not None:
+                        face = fallback
+                        self.fallback_selections += 1
+                        break
+            if buffers is None:
+                raise FontAssetError("font does not contain every label glyph")
+
             runs: list[ShapedRun] = []
-            for size_id, pixel_size in enumerate(FONT_SIZES):
-                font = self._harfbuzz_font(face, pixel_size)
-                buffer = hb.Buffer()
-                buffer.add_str(text)
-                if language:
-                    buffer.language = language
-                buffer.guess_segment_properties()
-                hb.shape(font, buffer)
-                if not buffer.glyph_infos or len(buffer.glyph_infos) > MAX_GLYPHS_PER_RUN:
-                    raise FontAssetError("shaped label run is empty or too long")
+            for size_id, buffer in enumerate(buffers):
                 placements: list[GlyphPlacement] = []
                 for info, position in zip(buffer.glyph_infos, buffer.glyph_positions):
-                    if info.codepoint == 0:
-                        raise FontAssetError("font does not contain every label glyph")
                     asset_id = self._asset_glyph_id(face.face_id, info.codepoint)
                     values = (position.x_offset, position.y_offset, position.x_advance)
                     if any(value < -32768 or value > 32767 for value in values):

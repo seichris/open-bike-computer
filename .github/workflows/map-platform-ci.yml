@@ -179,6 +179,14 @@ jobs:
         run: docker compose build tools
       - name: Smoke test tools image
         run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import osmium; import shapely; import yaml; from osgeo import ogr"
+      - name: Verify road-label shaping with the packaged fonts
+        run: >-
+          docker compose run --rm
+          --volume "${{ github.workspace }}:/repo:ro"
+          --workdir /repo/tools/OSM_Extract
+          --env OBC_REQUIRE_WORKER_FONTS=1
+          tools python -m unittest discover -s tests
+          -p test_font_asset.py -v
       - name: Require real full-source and prepared-shard POI equivalence
         run: >-
           docker compose run --rm

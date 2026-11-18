@@ -1,3 +1,4 @@
+import os
 import pathlib
 import struct
 import sys
@@ -14,6 +15,7 @@ from font_asset import (
     FONT_SIZES,
     FontFaceSpec,
     FontPackBuilder,
+    default_font_faces,
     rle_decode,
     rle_encode,
 )
@@ -25,6 +27,32 @@ FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 class FontAssetPolicyTests(unittest.TestCase):
     def test_font_tiers_start_at_the_previous_large_size(self):
         self.assertEqual(FONT_SIZES, (18, 22, 26))
+
+    def test_native_arabic_road_labels_work_with_latin_and_cjk_preferences(self):
+        if (
+            os.getenv("OBC_REQUIRE_WORKER_FONTS") != "1"
+            and not pathlib.Path(
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"
+            ).is_file()
+        ):
+            self.skipTest("Linux map worker fonts are unavailable")
+        faces = {face.name: face.face_id for face in default_font_faces()}
+        for text, language, face in (
+            ("Main Street", "en", "latin"),
+            ("皇后大道東", "zh-Hans", "cjk-sc"),
+            ("قناة دبي", None, "arabic"),
+            ("قناة دبي D92", None, "arabic-latin"),
+        ):
+            with self.subTest(text=text):
+                builder = FontPackBuilder(preferred_languages=["en-US", "zh-Hans-US"])
+                runs = builder.shape(text, language)
+
+                self.assertEqual(len(runs), len(FONT_SIZES))
+                self.assertTrue(all(run.glyphs for run in runs))
+                self.assertEqual(
+                    {face_id for face_id, _ in builder._asset_id_by_key},
+                    {faces[face]},
+                )
 
 
 @unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")
