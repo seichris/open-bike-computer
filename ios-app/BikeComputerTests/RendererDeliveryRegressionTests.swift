@@ -121,11 +121,14 @@ struct RendererDeliveryRegressionTests {
             expect(!q.enqueueLatestRouteSnapshot(route(0, bytes: 0)), "clear cannot be snapshot")
             expect(drain(&q).map(\.label) == ["route-1"], "retained")
         }
-        run("queue/protected priority application group retains members and order") {
+        run("queue/protected critical application group retains members and order") {
             var q = NavigationWriteQueue(maxCount: 3, priorityMaxCount: 3)
             let id = UUID()
             let members = [route(7, key: "command", command: id), route(8, key: "command", command: id)]
-            expect(q.enqueuePrioritizedAtomically(members), "whole group")
+            // Command members never use the ordinary priority capacity.
+            expect(!q.enqueuePrioritizedAtomically(members), "ordinary admission refuses command members")
+            expect(q.count == 0, "no partial admission")
+            expect(q.enqueueCriticalAtomically(members, liveCommandIDs: [id]), "whole group")
             expect(q.enqueueLatestRouteSnapshot(route(1)), "route")
             expect(q.enqueueLatestRouteSnapshot(route(2)), "route replacement")
             let sent = drain(&q)
