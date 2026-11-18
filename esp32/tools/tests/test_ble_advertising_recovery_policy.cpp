@@ -1,7 +1,7 @@
 // Host test for bounded advertising supervision after a NimBLE host reset.
-//
-//   g++ -std=c++17 -Wall -Wextra -Werror \
-//     tools/tests/test_ble_advertising_recovery_policy.cpp
+// Built and run by the "BLE disconnect diagnostics host tests" check with
+// g++ -std=c++17 -Wall -Wextra -Werror. (A line comment must not end in a
+// backslash: GCC's -Wcomment rejects the continuation.)
 #include "../../lib/ble_navigation/ble_advertising_recovery_policy.hpp"
 
 #include <cassert>
