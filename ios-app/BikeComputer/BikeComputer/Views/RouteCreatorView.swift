@@ -254,6 +254,11 @@ struct RouteCreatorView: View {
                 Text("\(plan.legs.count) \(plan.legs.count == 1 ? "leg" : "legs") · \(plan.route.steps.count) instructions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let notice = plan.carDirectionsNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("createdRouteSummary")
