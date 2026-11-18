@@ -8124,7 +8124,7 @@ private struct WorkoutContractTestSuite {
                     "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
                 )
                 && compactNavigationDetailsViewSource.contains(
-                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"End\",systemImage:\"stop.fill\")}"
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Finish\",systemImage:\"stop.fill\")}"
                 )
                 && !compactNavigationDetailsViewSource.contains(
                     "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
@@ -8800,7 +8800,7 @@ private struct WorkoutContractTestSuite {
             "\"Segment\"",
             "\"Pauseworkout\"",
             "\"Resumeworkout\"",
-            "\"Endworkout\"",
+            "\"Finishworkout\"",
             "onStopNavigation",
             "onMarkSegment",
             "onPauseWorkout",
@@ -8876,7 +8876,7 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactNavigation.contains(".accessibilityLabel(\"Pauseworkout\")")
                 && compactNavigation.contains(".accessibilityLabel(\"Resumeworkout\")")
-                && compactNavigation.contains(".accessibilityLabel(\"Endworkout\")"),
+                && compactNavigation.contains(".accessibilityLabel(\"Finishworkout\")"),
             "while navigating with a workout, End navigation must take its own row above the workout controls, and the workout controls' short labels must keep full VoiceOver names"
         )
         expect(
