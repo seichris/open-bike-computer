@@ -637,9 +637,13 @@ explain what made the controller and host disagree.
 `ble ride_command_ack_resend` covers a ride-delivery acknowledgement whose
 notification could not be queued: `queue_failed`, with `commandClass` and
 `leaseGeneration`. Inside a NimBLE callback the ownership lock is tried without
-waiting. The loop task resends the acknowledgement up to three times within
-the same session and then records `resent`, `dropped` or `session_ended` (with
-`attempt`). The phone ignores a duplicate acknowledgement by command ID.
+waiting. The loop task resends the acknowledgement up to three times. Each
+resend is checked, under the ownership lock that admits the notification,
+against the session and ride lease the acknowledgement was made for. The loop
+task then records `resent`, `dropped` (still not sendable after three
+attempts) or `fenced` (the session or lease was replaced, so the
+acknowledgement is retired unsent), with `attempt`. The phone ignores a
+duplicate acknowledgement by command ID.
 
 `power gnss_motion` records standalone movement confirmed by a GNSS board's own
 receiver: `phase` `moving` when movement starts, and `stationary` when it ends

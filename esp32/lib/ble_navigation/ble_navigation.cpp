@@ -2976,9 +2976,11 @@ static void notifyRideDeliveryAcknowledgement(
   Serial.println("BLE Ride Delivery: acknowledgement queue failed; the loop "
                  "task resends it");
   const uint8_t commandClass = static_cast<uint8_t>(acknowledgement.type);
-  // The session and lease this acknowledgement belongs to. Both are read on
-  // the host task that just admitted the command, before any later callback
-  // could replace them.
+  // The session and lease this acknowledgement belongs to. The lease is the
+  // one the command was admitted or noted under. The session is read here,
+  // where the outcome is emitted: the host task for most commands, the loop
+  // task for route acknowledgements. A replacement before this read also moves
+  // the lease (a release makes it 0), so the resend fence still rejects it.
   const ride_command_admission::Authorization authorization{
       ridePayloadGeneration.load(std::memory_order_acquire),
       acknowledgement.leaseGeneration};
