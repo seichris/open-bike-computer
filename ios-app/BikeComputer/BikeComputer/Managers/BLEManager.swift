@@ -5079,10 +5079,13 @@ class BLEManager: NSObject, ObservableObject {
         }
         pending.writes = writes
         pendingRideApplicationDeliveries[commandID] = pending
-        // Critical commands have their own bounded allowance in the priority
-        // lane: ordinary traffic queued behind another command's
-        // acknowledgement wait must not make this command fail admission.
-        guard navigationWriteQueue.enqueueCriticalAtomically(writes) else {
+        // Critical commands have their own bounded capacity in the priority
+        // lane, apart from ordinary traffic, and each live command keeps its
+        // share until it settles, so a sent command can always retry once.
+        guard navigationWriteQueue.enqueueCriticalAtomically(
+            writes,
+            liveCommandIDs: Set(pendingRideApplicationDeliveries.keys)
+        ) else {
             pendingRideApplicationDeliveries.removeValue(forKey: commandID)
             pending.isFinished = true
             log("Critical ride command was not admitted atomically")
@@ -5186,14 +5189,14 @@ class BLEManager: NSObject, ObservableObject {
                         "members": String(current.memberCount),
                     ]
                 )
-                // Every write waited behind this acknowledgement, so the
-                // priority lane may be full of newer ordinary traffic. The
-                // retry re-sends a command the device ordered before all of
-                // it: admit it ahead of that ordinary traffic, within the
-                // critical allowance.
+                // Every write waited behind this acknowledgement, so newer
+                // traffic may fill the lane. The command still holds its
+                // critical share, and the device ordered it before all of that
+                // traffic: the retry goes to the head of the lane.
                 guard self.navigationWriteQueue.enqueueCriticalAtomically(
                     current.writes,
-                    atHead: true
+                    atHead: true,
+                    liveCommandIDs: Set(self.pendingRideApplicationDeliveries.keys)
                 ) else {
                     self.finishRideApplicationDelivery(
                         commandID: commandID,

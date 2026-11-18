@@ -3804,63 +3804,132 @@ extension NavigationProtocolTests {
     }
 
     static func testCriticalCommandAdmissionReserve() {
-        var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
-        let firstCommand = UUID()
-        let secondCommand = UUID()
-        for index in 0..<2 {
-            assert(queue.enqueuePrioritizedAtomically([
-                NavigationWrite(data: Data([UInt8(10 + index)]),
-                                label: "ordinary-\(index)")
-            ]), "ordinary priority traffic fills the lane")
+        func group(_ id: UUID, _ frames: Int, byte: UInt8, size: Int = 1) -> [NavigationWrite] {
+            (0..<frames).map {
+                NavigationWrite(data: Data(repeating: byte &+ UInt8($0), count: size),
+                                label: "critical-\(byte)-\($0)",
+                                applicationCommandID: id)
+            }
         }
-        assert(!queue.enqueuePrioritizedAtomically([
-            NavigationWrite(data: Data([12]), label: "ordinary-overflow")
-        ]), "ordinary traffic cannot use the critical reserve")
-        assert(!queue.enqueueCriticalAtomically([
-            NavigationWrite(data: Data([13]), label: "no-command-id")
-        ]), "the reserve admits only frames that carry a command ID")
-        assert(queue.enqueueCriticalAtomically([
-            NavigationWrite(data: Data([20]), label: "new-critical",
-                            applicationCommandID: secondCommand)
-        ]), "a new critical command is admitted behind a full lane")
-        assert(queue.enqueueCriticalAtomically([
-            NavigationWrite(data: Data([30]), label: "retry-route",
-                            applicationCommandID: firstCommand),
-            NavigationWrite(data: Data([31]), label: "retry-maneuver",
-                            applicationCommandID: firstCommand),
-        ], atHead: true), "a retried critical command is admitted at the head")
-        let oversizedGroup = UUID()
-        assert(!queue.enqueueCriticalAtomically((0..<3).map {
-            NavigationWrite(data: Data([UInt8(60 + $0)]), label: "oversized-\($0)",
-                            applicationCommandID: oversizedGroup)
-        }), "one critical group is still limited to the lane's own size")
-        let overAllowance = UUID()
-        assert(!queue.enqueueCriticalAtomically([
-            NavigationWrite(data: Data([40]), label: "beyond-allowance-1",
-                            applicationCommandID: overAllowance),
-            NavigationWrite(data: Data([41]), label: "beyond-allowance-2",
-                            applicationCommandID: overAllowance),
-        ]), "queued critical frames stay within twice the lane's limits")
-        var order: [Data] = []
-        queue.flush(canSend: { true }) { order.append($0.data) }
-        assertEqual(order, [Data([30]), Data([31]), Data([10]), Data([11]),
-                            Data([20])],
-                    "a retry precedes traffic queued after its original; a new command keeps its order")
+        func ordinary(_ byte: UInt8) -> NavigationWrite {
+            NavigationWrite(data: Data([byte]), label: "ordinary-\(byte)",
+                            writeClass: .transfer)
+        }
 
-        // The production lane: a full workout group (core, extended, origin
-        // and two zone frames) is admitted behind six ordinary writes.
-        var productionLane = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        // Codex reproduction (2026-11-18): a sent five-frame workout group
+        // awaits its acknowledgement while two newer five-frame groups queue.
+        var lane = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        let original = UUID(), newer = UUID(), newest = UUID()
+        var live: Set<UUID> = [original]
+        assert(lane.enqueueCriticalAtomically(group(original, 5, byte: 0x10),
+                                              liveCommandIDs: live),
+               "the production five-frame workout group is admitted")
+        lane.flush(canSend: { true }) { _ in }
+        live.formUnion([newer, newest])
+        assert(lane.enqueueCriticalAtomically(group(newer, 5, byte: 0x20),
+                                              liveCommandIDs: live),
+               "a newer five-frame group queues behind the sent command")
+        assert(lane.enqueueCriticalAtomically(group(newest, 5, byte: 0x30),
+                                              liveCommandIDs: live),
+               "a second newer five-frame group still fits")
+        assert(lane.enqueuePrioritizedAtomically([ordinary(0x01)]),
+               "ordinary priority traffic keeps its own capacity beside critical frames")
+        assert(lane.enqueueCriticalAtomically(group(original, 5, byte: 0x10),
+                                              atHead: true, liveCommandIDs: live),
+               "the sent command's one retry is guaranteed its held capacity")
+        var order: [UInt8] = []
+        lane.flush(canSend: { true }) { order.append($0.data[0]) }
+        assertEqual(order, [0x10, 0x11, 0x12, 0x13, 0x14,
+                            0x20, 0x21, 0x22, 0x23, 0x24,
+                            0x30, 0x31, 0x32, 0x33, 0x34, 0x01],
+                    "the retry precedes newer commands; groups and ordinary traffic keep their order")
+
+        // Critical saturation: new commands stop at three lanes' worth of
+        // held frames, but the held retry and ordinary traffic are unaffected.
+        var saturated = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        let sent = UUID(), b = UUID(), c = UUID(), d = UUID(), clear = UUID(),
+            extra = UUID()
+        var held: Set<UUID> = [sent, b, c, d, clear, extra]
+        assert(saturated.enqueueCriticalAtomically(group(sent, 5, byte: 0x40),
+                                                   liveCommandIDs: held))
+        saturated.flush(canSend: { true }) { _ in }
+        assert(saturated.enqueueCriticalAtomically(group(b, 5, byte: 0x50),
+                                                   liveCommandIDs: held))
+        assert(saturated.enqueueCriticalAtomically(group(c, 5, byte: 0x60),
+                                                   liveCommandIDs: held))
+        assert(!saturated.enqueueCriticalAtomically(group(d, 5, byte: 0x70),
+                                                    liveCommandIDs: held),
+               "a fourth five-frame command exceeds the critical capacity")
+        assert(saturated.enqueueCriticalAtomically(group(clear, 2, byte: 0x80),
+                                                   liveCommandIDs: held),
+               "a two-frame navigation clear still fits beside them")
+        assert(!saturated.enqueueCriticalAtomically(group(extra, 2, byte: 0x90),
+                                                    liveCommandIDs: held),
+               "the critical capacity is a hard bound")
         for index in 0..<6 {
-            assert(productionLane.enqueuePrioritizedAtomically([
-                NavigationWrite(data: Data([UInt8(index)]), label: "ordinary-\(index)")
-            ]), "ordinary traffic fills the production lane")
+            assert(saturated.enqueuePrioritizedAtomically([ordinary(UInt8(index))]),
+                   "ordinary traffic fills its own six-frame capacity at critical saturation")
         }
-        let workoutGroup = UUID()
-        assert(productionLane.enqueueCriticalAtomically((0..<5).map {
-            NavigationWrite(data: Data(repeating: UInt8($0), count: 64),
-                            label: "workout-\($0)",
-                            applicationCommandID: workoutGroup)
-        }), "a five-frame workout group keeps its admission behind a full lane")
+        assert(!saturated.enqueuePrioritizedAtomically([ordinary(0x0F)]),
+               "ordinary capacity is bounded too")
+        assert(saturated.enqueueCriticalAtomically(group(sent, 5, byte: 0x40),
+                                                   atHead: true, liveCommandIDs: held),
+               "the sent command's retry is admitted at critical and ordinary saturation")
+
+        // A settled command releases its hold and queued frames at the next
+        // admission, so new commands fit again.
+        var droppedSettled = 0
+        var settling = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        let first = UUID(), second = UUID(), third = UUID(), fourth = UUID()
+        var liveNow: Set<UUID> = [first, second, third, fourth]
+        assert(settling.enqueueCriticalAtomically(group(first, 6, byte: 0xA0),
+                                                  liveCommandIDs: liveNow))
+        assert(settling.enqueueCriticalAtomically(group(second, 6, byte: 0xB0),
+                                                  liveCommandIDs: liveNow))
+        let thirdGroup = group(third, 6, byte: 0xC0).map { write in
+            NavigationWrite(data: write.data, label: write.label,
+                            onDrop: { droppedSettled += 1 },
+                            applicationCommandID: third)
+        }
+        assert(settling.enqueueCriticalAtomically(thirdGroup, liveCommandIDs: liveNow))
+        assert(!settling.enqueueCriticalAtomically(group(fourth, 1, byte: 0xD0),
+                                                   liveCommandIDs: liveNow))
+        liveNow.remove(third)
+        assert(settling.enqueueCriticalAtomically(group(fourth, 1, byte: 0xD0),
+                                                  liveCommandIDs: liveNow),
+               "a settled command's hold returns to the critical capacity")
+        assertEqual(droppedSettled, 6, "the settled command's queued frames leave the lane")
+
+        // Guards.
+        var guarded = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        let solo = UUID(), stranger = UUID()
+        assert(!guarded.enqueueCriticalAtomically(group(solo, 7, byte: 0xE0),
+                                                  liveCommandIDs: [solo]),
+               "one group is still limited to the lane's own size")
+        assert(!guarded.enqueueCriticalAtomically(group(stranger, 1, byte: 0xE8),
+                                                  liveCommandIDs: [solo]),
+               "a command the caller no longer tracks is not admitted")
+        assert(!guarded.enqueueCriticalAtomically(
+            group(solo, 1, byte: 0xE9) + group(stranger, 1, byte: 0xEA),
+            liveCommandIDs: [solo, stranger]),
+               "a group carries exactly one command ID")
+        assert(!guarded.enqueuePrioritizedAtomically(group(solo, 1, byte: 0xEB)),
+               "critical frames cannot enter through ordinary admission")
+        assert(guarded.enqueueCriticalAtomically(group(solo, 2, byte: 0xEC),
+                                                 liveCommandIDs: [solo]))
+        assert(!guarded.enqueueCriticalAtomically(group(solo, 2, byte: 0xEC),
+                                                  atHead: true, liveCommandIDs: [solo]),
+               "a retry never duplicates the command's frames still queued")
+        guarded.removeAll()
+        let g1 = UUID(), g2 = UUID(), g3 = UUID()
+        let afterReset: Set<UUID> = [solo, g1, g2, g3]
+        assert(guarded.enqueueCriticalAtomically(group(g1, 6, byte: 0xF0),
+                                                 liveCommandIDs: afterReset)
+               && guarded.enqueueCriticalAtomically(group(g2, 6, byte: 0xF1),
+                                                    liveCommandIDs: afterReset)
+               && guarded.enqueueCriticalAtomically(group(g3, 6, byte: 0xF2),
+                                                    liveCommandIDs: afterReset),
+               "removeAll releases every hold, even of a still-live command")
 
         // The 2026-11-18 incident: an acknowledgement is lost while ordinary
         // priority traffic fills the lane behind the acknowledgement wait.
