@@ -103,20 +103,19 @@ enum CyclingDirectionsFallback {
     }
 
     /// The car routes a rider should be offered: those without highways or
-    /// tolls when there is one, otherwise all of them; shortest first, and
-    /// only the first when `alternatives` is false.
+    /// tolls when there is one, otherwise all of them; shortest first. A
+    /// caller that wants one route takes the first, or the first it can use.
     static func cyclingFriendlyRoutes(
-        from routes: [MKRoute],
-        alternatives: Bool
+        from routes: [MKRoute]
     ) -> [CyclingFallbackCarRoute] {
-        let car = routes.map(CyclingFallbackCarRoute.init)
+        let car = routes.map { CyclingFallbackCarRoute($0) }
         let clear = car.filter { !$0.hasHighways && !$0.hasTolls }
         let ordered = (clear.isEmpty ? car : clear).enumerated().sorted {
             $0.element.distance != $1.element.distance
                 ? $0.element.distance < $1.element.distance
                 : $0.offset < $1.offset
         }.map(\.element)
-        return alternatives ? ordered : Array(ordered.prefix(1))
+        return ordered
     }
 
     static func notice(hasHighways: Bool, hasTolls: Bool) -> String {
@@ -253,10 +252,7 @@ final class CyclingFallbackDirectionsTask: NavigationDirectionsTask {
                 case .success(let routes) where !routes.isEmpty:
                     self.usedCarDirections = true
                     completion(.success(
-                        CyclingDirectionsFallback.cyclingFriendlyRoutes(
-                            from: routes,
-                            alternatives: self.request.requestsAlternateRoutes
-                        )
+                        CyclingDirectionsFallback.cyclingFriendlyRoutes(from: routes)
                     ))
                 case .success:
                     completion(.failure(error))

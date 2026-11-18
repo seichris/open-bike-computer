@@ -4921,6 +4921,11 @@ struct NavigationProtocolTests {
                "the reroute applies the clear car route")
         assertEqual(coordinator.activeRouteNotice, clearNotice,
                     "the rider is still told after the reroute")
+        let rerouteCyclingTime = rerouteClear.distance /
+            CyclingDirectionsFallback.cyclingSpeedMetersPerSecond
+        assert(abs((coordinator.routeRemainingTime ?? 0) - rerouteCyclingTime) <
+                   rerouteCyclingTime * 0.1,
+               "the rerouted ride's remaining time stays at a cycling pace")
         coordinator.stopNavigation()
         assertEqual(coordinator.activeRouteNotice, nil, "the notice ends with the navigation")
 
