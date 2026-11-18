@@ -346,6 +346,11 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    /// Shown while navigating a car route that stands in for unavailable
+    /// cycling directions, whether it came from planning or a reroute.
+    var activeRouteNotice: String? {
+        (currentRoute as? CyclingFallbackCarRoute)?.advisoryNotices.first
+    }
     @Published private(set) var offlineRouteSummary: PlannedRouteSummaryV1?
     @Published private(set) var offlineRoutePolyline: MKPolyline?
 
@@ -406,9 +411,6 @@ class BikeComputerCoordinator: ObservableObject {
     private var lastRerouteRequestDate = Date.distantPast
     private let rerouteCooldown: TimeInterval = 15
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
-    /// Set for a car route that replaced unavailable cycling directions, so a
-    /// reroute keeps avoiding highways and tolls.
-    private var routeAvoidsHighwaysAndTolls = false
     private var deviceCapabilityRefreshGeneration: UInt = 0
     private var routeCalculationGeneration: UInt = 0
     private var pendingNavigationStart: (
@@ -440,7 +442,6 @@ class BikeComputerCoordinator: ObservableObject {
         let alternatives: [NavigationRouteAlternativeV1]
         let destination: MKMapItem
         let transportType: MKDirectionsTransportType
-        let avoidsHighwaysAndTolls: Bool
         let isTestMode: Bool
         let initialLocation: CLLocation
     }
@@ -1192,7 +1193,6 @@ class BikeComputerCoordinator: ObservableObject {
             with: alternative.route,
             destination: pendingRoutePlan.destination,
             transportType: pendingRoutePlan.transportType,
-            avoidsHighwaysAndTolls: pendingRoutePlan.avoidsHighwaysAndTolls,
             isTestMode: pendingRoutePlan.isTestMode,
             initialLocation: pendingRoutePlan.initialLocation
         )
@@ -1893,14 +1893,11 @@ extension BikeComputerCoordinator {
         directions.calculate { [weak self] result in
             guard let self, self.routeCalculationGeneration == generation else { return }
             self.ongoingDirections = nil
-            // A car route that replaced unavailable cycling directions runs,
-            // and reroutes, like a car route the rider chose. Each such route
+            // A car route standing in for unavailable cycling directions
             // carries its own notice and a cycling-pace travel time
-            // (CyclingFallbackCarRoute).
+            // (CyclingFallbackCarRoute). The navigation keeps the requested
+            // travel mode, so every reroute tries cycling, then falls back.
             let usedCarDirections = directions.usedCarDirections
-            let effectiveTransportType = usedCarDirections
-                ? MKDirectionsTransportType.automobile
-                : requestedTransportType
 
             switch result {
             case .failure(let error):
@@ -2001,8 +1998,7 @@ extension BikeComputerCoordinator {
                     self.pendingRoutePlan = PendingRoutePlan(
                         alternatives: alternatives,
                         destination: destinationItem,
-                        transportType: effectiveTransportType,
-                        avoidsHighwaysAndTolls: usedCarDirections,
+                        transportType: requestedTransportType,
                         isTestMode: isTestMode,
                         initialLocation: initialLocation
                     )
@@ -2027,8 +2023,7 @@ extension BikeComputerCoordinator {
                 self.beginNavigation(
                     with: route,
                     destination: destinationItem,
-                    transportType: effectiveTransportType,
-                    avoidsHighwaysAndTolls: usedCarDirections,
+                    transportType: requestedTransportType,
                     isTestMode: isTestMode,
                     initialLocation: initialLocation
                 )
@@ -2048,7 +2043,6 @@ extension BikeComputerCoordinator {
         with route: MKRoute,
         destination: MKMapItem,
         transportType: MKDirectionsTransportType,
-        avoidsHighwaysAndTolls: Bool = false,
         isTestMode: Bool,
         initialLocation: CLLocation
     ) {
@@ -2058,7 +2052,6 @@ extension BikeComputerCoordinator {
         navigationDestination = destination
         lastRerouteObservationAt = nil
         self.transportType = transportType
-        routeAvoidsHighwaysAndTolls = avoidsHighwaysAndTolls
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
         navEngine.startNavigation(
@@ -2113,15 +2106,12 @@ extension BikeComputerCoordinator {
         request.destination = destination
         request.transportType = transportType
         request.requestsAlternateRoutes = false
-        if routeAvoidsHighwaysAndTolls {
-            CyclingDirectionsFallback.avoidHighwaysAndTolls(request)
-        }
 
         lastRerouteRequestDate = now()
         print("Off route by \(Int(distanceToRoute.rounded()))m; requesting reroute")
 
-        // A cycling route can lead out of Apple Maps' cycling coverage; the
-        // reroute there continues by car, as a planned route would.
+        // A cycling reroute outside Apple Maps' cycling coverage, including
+        // every reroute of a fallback car route, falls back the same way.
         let directions = CyclingFallbackDirectionsTask(
             request: request,
             factory: directionsFactory
@@ -2164,10 +2154,6 @@ extension BikeComputerCoordinator {
                 }
 
                 self.currentRoute = route
-                if directions.usedCarDirections {
-                    self.transportType = .automobile
-                    self.routeAvoidsHighwaysAndTolls = true
-                }
                 self.routeDeviationDetector.reset()
                 self.navEngine.replaceRoute(
                     with: route,
