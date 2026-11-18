@@ -17,8 +17,19 @@ struct MultiStopRoutePlan: Identifiable {
     /// Legs that are car directions because Apple Maps has no cycling
     /// directions there (`CyclingDirectionsFallback`).
     let carDirectionLegs: [Int]
+    /// The car legs among them that use highways or toll roads.
+    let carDirectionLegsWithHighwaysOrTolls: [Int]
 
     var usesCarDirections: Bool { !carDirectionLegs.isEmpty }
+
+    var carDirectionsNotice: String? {
+        guard usesCarDirections else { return nil }
+        return CyclingDirectionsFallback.planNotice(
+            carLegs: carDirectionLegs.count,
+            totalLegs: legs.count,
+            carLegsWithHighwaysOrTolls: carDirectionLegsWithHighwaysOrTolls.count
+        )
+    }
 }
 
 enum MultiStopRoutePlanFailure: Equatable {
@@ -63,10 +74,12 @@ final class MultiStopRoutePlanner: ObservableObject {
     private var cachedLegOrder: [LegKey] = []
 
     /// A calculated leg and whether it is car directions standing in for
-    /// unavailable cycling directions.
+    /// unavailable cycling directions, and if so whether that car route uses
+    /// highways or toll roads.
     private struct PlannedLeg {
         let route: NavigationRouteV1
         let usesCarDirections: Bool
+        let usesHighwaysOrTolls: Bool
     }
 
     /// Instructions are localized, so a leg is only reused in its locale.
@@ -207,7 +220,7 @@ final class MultiStopRoutePlanner: ObservableObject {
                     )
                 ))
             case .success(let routes):
-                guard let leg = Self.preferredLeg(
+                guard let (leg, mapKitRoute) = Self.preferredLeg(
                     from: routes,
                     source: source,
                     destination: destination,
@@ -219,9 +232,12 @@ final class MultiStopRoutePlanner: ObservableObject {
                     ))
                     return
                 }
+                let usesCarDirections = mapKitRoute is CyclingFallbackCarRoute
                 let planned = PlannedLeg(
                     route: leg,
-                    usesCarDirections: directions.usedCarDirections
+                    usesCarDirections: usesCarDirections,
+                    usesHighwaysOrTolls: usesCarDirections &&
+                        (mapKitRoute.hasHighways || mapKitRoute.hasTolls)
                 )
                 self.store(planned, for: self.legKey(
                     from: source,
@@ -264,6 +280,9 @@ final class MultiStopRoutePlanner: ObservableObject {
                 draft: draft,
                 carDirectionLegs: plannedLegs.indices.filter {
                     plannedLegs[$0].usesCarDirections
+                },
+                carDirectionLegsWithHighwaysOrTolls: plannedLegs.indices.filter {
+                    plannedLegs[$0].usesHighwaysOrTolls
                 }
             ))
         } catch let error as MultiStopRouteStitchError {
@@ -304,12 +323,13 @@ final class MultiStopRoutePlanner: ObservableObject {
 
     /// The same preference as direct planning: fastest, then shortest, then
     /// MapKit's order, skipping any response that cannot be normalized safely.
+    /// Returns the canonical leg and the MapKit route it came from.
     private static func preferredLeg(
         from routes: [MKRoute],
         source: MultiStopRoutePlace,
         destination: MultiStopRoutePlace,
         localeIdentifier: String
-    ) -> NavigationRouteV1? {
+    ) -> (NavigationRouteV1, MKRoute)? {
         let ordered = routes.enumerated().sorted { lhs, rhs in
             if lhs.element.expectedTravelTime != rhs.element.expectedTravelTime {
                 return lhs.element.expectedTravelTime < rhs.element.expectedTravelTime
@@ -327,7 +347,7 @@ final class MultiStopRoutePlanner: ObservableObject {
                 destinationLabel: destination.label,
                 localeIdentifier: localeIdentifier
             ) {
-                return leg
+                return (leg, candidate.element)
             }
         }
         return nil

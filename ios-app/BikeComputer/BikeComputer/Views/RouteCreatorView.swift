@@ -254,15 +254,10 @@ struct RouteCreatorView: View {
                 Text("\(plan.legs.count) \(plan.legs.count == 1 ? "leg" : "legs") · \(plan.route.steps.count) instructions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if plan.usesCarDirections {
-                    Label(
-                        plan.carDirectionLegs.count == plan.legs.count
-                            ? CyclingDirectionsFallback.routeNotice
-                            : "No cycling directions for \(plan.carDirectionLegs.count) of \(plan.legs.count) legs: car directions avoiding highways and tolls",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                if let notice = plan.carDirectionsNotice {
+                    Label(notice, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
             }
             .accessibilityElement(children: .combine)

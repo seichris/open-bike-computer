@@ -55,16 +55,20 @@ typealias NavigationDirectionsFactory = @MainActor (MKDirections.Request) -> any
 /// that does not exist between the points reports not reachable (16) with the
 /// same `MKError` code (observed with iOS and macOS 26 MapKit; the key is not
 /// documented). Only the out-of-coverage failure falls back to car
-/// directions, which avoid highways and tolls because a bike may not use
-/// them. Every other failure is reported as before, and if Apple drops the
-/// key the rider just sees the cycling error again.
+/// directions. Every other failure is reported as before, and if Apple drops
+/// the key the rider just sees the cycling error again.
+///
+/// Avoiding highways and tolls is only a preference to MapKit: it still
+/// returns faster alternatives on them. Car routes without highways or tolls
+/// are therefore kept whenever there is one, and every car route's notice
+/// says which of the two it uses.
 enum CyclingDirectionsFallback {
     static let directionsErrorCodeKey = "MKDirectionsErrorCode"
     static let outOfCoverageCode = 8
     static let notReachableCode = 16
-    /// Shown with every route that came from the fallback.
-    static let routeNotice =
-        "No cycling directions here: car route avoiding highways and tolls"
+    /// MapKit's own cycling estimates average 15–16 km/h; car times would be
+    /// two to three times too short for a bike.
+    static let cyclingSpeedMetersPerSecond: CLLocationSpeed = 15_000 / 3_600
 
     static func isOutOfCoverage(_ error: Error) -> Bool {
         directionsErrorCode(of: error) == outOfCoverageCode
@@ -81,12 +85,13 @@ enum CyclingDirectionsFallback {
         transportType == RouteTransportTypes.cycling && isOutOfCoverage(error)
     }
 
-    /// The same endpoints and alternatives as car directions.
+    /// The same endpoints as car directions. Alternatives are always asked
+    /// for, so that a route without highways or tolls can be found.
     static func carRequest(for request: MKDirections.Request) -> MKDirections.Request {
         let car = MKDirections.Request()
         car.source = request.source
         car.destination = request.destination
-        car.requestsAlternateRoutes = request.requestsAlternateRoutes
+        car.requestsAlternateRoutes = true
         car.transportType = .automobile
         avoidHighwaysAndTolls(car)
         return car
@@ -97,6 +102,70 @@ enum CyclingDirectionsFallback {
         request.tollPreference = .avoid
     }
 
+    /// The car routes a rider should be offered: those without highways or
+    /// tolls when there is one, otherwise all of them; shortest first, and
+    /// only the first when `alternatives` is false.
+    static func cyclingFriendlyRoutes(
+        from routes: [MKRoute],
+        alternatives: Bool
+    ) -> [CyclingFallbackCarRoute] {
+        let car = routes.map(CyclingFallbackCarRoute.init)
+        let clear = car.filter { !$0.hasHighways && !$0.hasTolls }
+        let ordered = (clear.isEmpty ? car : clear).enumerated().sorted {
+            $0.element.distance != $1.element.distance
+                ? $0.element.distance < $1.element.distance
+                : $0.offset < $1.offset
+        }.map(\.element)
+        return alternatives ? ordered : Array(ordered.prefix(1))
+    }
+
+    static func notice(hasHighways: Bool, hasTolls: Bool) -> String {
+        switch (hasHighways, hasTolls) {
+        case (false, false):
+            "No cycling directions here: car route without highways or tolls"
+        case (true, false):
+            "No cycling directions here: car route uses highways; check it suits a bike"
+        case (false, true):
+            "No cycling directions here: car route uses toll roads; check it suits a bike"
+        case (true, true):
+            "No cycling directions here: car route uses highways and toll roads; check it suits a bike"
+        }
+    }
+
+    /// Create a Route's summary for a plan with car legs.
+    static func planNotice(
+        carLegs: Int,
+        totalLegs: Int,
+        carLegsWithHighwaysOrTolls: Int
+    ) -> String {
+        let scope = carLegs == totalLegs
+            ? "No cycling directions here"
+            : "No cycling directions for \(carLegs) of \(totalLegs) legs"
+        guard carLegsWithHighwaysOrTolls > 0 else {
+            return "\(scope): car directions without highways or tolls"
+        }
+        let affected = carLegsWithHighwaysOrTolls == 1
+            ? "1 car leg uses"
+            : "\(carLegsWithHighwaysOrTolls) car legs use"
+        return "\(scope): car directions; \(affected) highways or toll roads, check they suit a bike"
+    }
+
+    static func cyclingTravelTime(forDistance distance: CLLocationDistance) -> TimeInterval {
+        distance.isFinite && distance > 0 ? distance / cyclingSpeedMetersPerSecond : 0
+    }
+
+    /// A car failure the rider can act on (connection, Apple Maps busy) is
+    /// worth reporting instead of the cycling failure; a car request that
+    /// found no route is not.
+    static func isTransient(_ error: Error) -> Bool {
+        let error = error as NSError
+        if error.domain == NSURLErrorDomain { return true }
+        guard error.domain == MKErrorDomain else { return false }
+        if error.code == Int(MKError.Code.loadingThrottled.rawValue) { return true }
+        return error.code == Int(MKError.Code.serverFailure.rawValue) &&
+            directionsErrorCode(of: error) == nil
+    }
+
     private static func directionsErrorCode(of error: Error) -> Int? {
         let error = error as NSError
         guard error.domain == MKErrorDomain else { return nil }
@@ -104,10 +173,42 @@ enum CyclingDirectionsFallback {
     }
 }
 
+/// A car route standing in for unavailable cycling directions. It keeps
+/// MapKit's geometry and instructions, gives the travel time at a cycling
+/// pace, and carries its own notice in place of MapKit's car advice, so the
+/// preview, the ride's remaining time and saved routes all agree.
+final class CyclingFallbackCarRoute: MKRoute {
+    let base: MKRoute
+
+    init(_ base: MKRoute) {
+        self.base = base
+        super.init()
+    }
+
+    override var name: String { base.name }
+    override var advisoryNotices: [String] {
+        [CyclingDirectionsFallback.notice(
+            hasHighways: base.hasHighways,
+            hasTolls: base.hasTolls
+        )]
+    }
+    override var distance: CLLocationDistance { base.distance }
+    override var expectedTravelTime: TimeInterval {
+        CyclingDirectionsFallback.cyclingTravelTime(forDistance: base.distance)
+    }
+    override var transportType: MKDirectionsTransportType { base.transportType }
+    override var polyline: MKPolyline { base.polyline }
+    override var steps: [MKRoute.Step] { base.steps }
+    override var hasTolls: Bool { base.hasTolls }
+    override var hasHighways: Bool { base.hasHighways }
+}
+
 /// Runs a directions request and, when Apple Maps has no cycling coverage for
-/// it, the same request as car directions (`CyclingDirectionsFallback`). Other
-/// requests and failures pass through unchanged. If the car request fails too,
-/// the cycling failure is reported, because it says why cycling failed.
+/// it, the same request as car directions (`CyclingDirectionsFallback`), whose
+/// routes it delivers as `CyclingFallbackCarRoute`s. Other requests and
+/// failures pass through unchanged. If the car request fails too, the cycling
+/// failure is reported, unless the car failure is a connection or capacity
+/// problem the rider can act on.
 @MainActor
 final class CyclingFallbackDirectionsTask: NavigationDirectionsTask {
     private let request: MKDirections.Request
@@ -148,11 +249,23 @@ final class CyclingFallbackDirectionsTask: NavigationDirectionsTask {
             carTask.calculate { [weak self] carResult in
                 guard let self, !self.isCancelled else { return }
                 self.active = nil
-                if case .success(let routes) = carResult, !routes.isEmpty {
+                switch carResult {
+                case .success(let routes) where !routes.isEmpty:
                     self.usedCarDirections = true
-                    completion(.success(routes))
-                } else {
+                    completion(.success(
+                        CyclingDirectionsFallback.cyclingFriendlyRoutes(
+                            from: routes,
+                            alternatives: self.request.requestsAlternateRoutes
+                        )
+                    ))
+                case .success:
                     completion(.failure(error))
+                case .failure(let carError):
+                    completion(.failure(
+                        CyclingDirectionsFallback.isTransient(carError)
+                            ? carError
+                            : error
+                    ))
                 }
             }
         }
@@ -1781,14 +1894,13 @@ extension BikeComputerCoordinator {
             guard let self, self.routeCalculationGeneration == generation else { return }
             self.ongoingDirections = nil
             // A car route that replaced unavailable cycling directions runs,
-            // and reroutes, like a car route the rider chose, and says so.
+            // and reroutes, like a car route the rider chose. Each such route
+            // carries its own notice and a cycling-pace travel time
+            // (CyclingFallbackCarRoute).
             let usedCarDirections = directions.usedCarDirections
             let effectiveTransportType = usedCarDirections
                 ? MKDirectionsTransportType.automobile
                 : requestedTransportType
-            let fallbackNotices = usedCarDirections
-                ? [CyclingDirectionsFallback.routeNotice]
-                : []
 
             switch result {
             case .failure(let error):
@@ -1875,8 +1987,7 @@ extension BikeComputerCoordinator {
                                 : entry.name,
                             distanceMeters: entry.candidate.distance,
                             expectedTravelTime: entry.candidate.expectedTravelTime,
-                            advisoryNotices: fallbackNotices +
-                                entry.candidate.advisoryNotices
+                            advisoryNotices: entry.candidate.advisoryNotices
                         )
                     }
                     guard let selected = alternatives.first else {
@@ -1907,9 +2018,11 @@ extension BikeComputerCoordinator {
                 print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
                 print("Steps: \(route.steps.count)")
 
-                self.routeCalculation.status = usedCarDirections
-                    ? "\(CyclingDirectionsFallback.routeNotice). Starting navigation..."
-                    : "Starting navigation..."
+                if usedCarDirections, let notice = route.advisoryNotices.first {
+                    self.routeCalculation.status = "\(notice). Starting navigation..."
+                } else {
+                    self.routeCalculation.status = "Starting navigation..."
+                }
 
                 self.beginNavigation(
                     with: route,
