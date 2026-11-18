@@ -45,8 +45,11 @@ inline bool motionHolds(const MotionHold &motion, uint32_t nowMs,
     return false;
   const uint32_t holdSeconds =
       timeoutSeconds > motionHoldSeconds ? timeoutSeconds : motionHoldSeconds;
-  return static_cast<uint64_t>(
-             static_cast<uint32_t>(nowMs - motion.lastMovementMs)) <
+  // A movement time read after nowMs (same loop pass) is zero elapsed, not a
+  // wrapped four-billion-millisecond age.
+  const int32_t delta = static_cast<int32_t>(nowMs - motion.lastMovementMs);
+  const uint32_t elapsed = delta < 0 ? 0U : static_cast<uint32_t>(delta);
+  return static_cast<uint64_t>(elapsed) <
          static_cast<uint64_t>(holdSeconds) * 1000ULL;
 }
 

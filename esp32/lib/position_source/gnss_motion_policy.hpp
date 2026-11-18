@@ -43,6 +43,14 @@ struct Sample {
   double longitude = 0.0;
 };
 
+// Time from `thenMs` to `nowMs` across the 32-bit wrap. A timestamp taken
+// after `nowMs` was read (a fix captured later in the same loop pass) counts
+// as zero elapsed, never as a wrapped four-billion-millisecond age.
+inline uint32_t elapsedMs(uint32_t nowMs, uint32_t thenMs) {
+  const int32_t delta = static_cast<int32_t>(nowMs - thenMs);
+  return delta < 0 ? 0U : static_cast<uint32_t>(delta);
+}
+
 // Equirectangular distance; ample for tens to hundreds of metres.
 inline float distanceMeters(double latitudeA, double longitudeA,
                             double latitudeB, double longitudeB) {
@@ -66,8 +74,7 @@ public:
   void observe(const Sample &sample) {
     const bool consecutive =
         haveLastSample_ &&
-        static_cast<uint32_t>(sample.capturedAtMs - lastSampleMs_) <=
-            kMaximumSampleGapMs;
+        elapsedMs(sample.capturedAtMs, lastSampleMs_) <= kMaximumSampleGapMs;
     haveLastSample_ = true;
     lastSampleMs_ = sample.capturedAtMs;
     if (!sample.locationValid || !sample.speedValid) {
@@ -98,8 +105,7 @@ public:
 
   // Every loop pass: ends movement when no moving fix arrived for kStopMs.
   void tick(uint32_t nowMs) {
-    if (moving_ &&
-        static_cast<uint32_t>(nowMs - lastMovementMs_) >= kStopMs) {
+    if (moving_ && elapsedMs(nowMs, lastMovementMs_) >= kStopMs) {
       stop(nowMs);
     }
   }
@@ -119,7 +125,7 @@ public:
 
 private:
   void observeWhileMoving(const Sample &sample) {
-    if (static_cast<uint32_t>(sample.capturedAtMs - progressAnchor_.capturedAtMs) >=
+    if (elapsedMs(sample.capturedAtMs, progressAnchor_.capturedAtMs) >=
         kProgressWindowMs) {
       if (distanceMeters(progressAnchor_.latitude, progressAnchor_.longitude,
                          sample.latitude, sample.longitude) <

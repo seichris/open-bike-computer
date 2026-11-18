@@ -5189,7 +5189,8 @@ class BLEManager: NSObject, ObservableObject {
                 // Every write waited behind this acknowledgement, so the
                 // priority lane may be full of newer ordinary traffic. The
                 // retry re-sends a command the device ordered before all of
-                // it: admit it at the head, within the critical allowance.
+                // it: admit it ahead of that ordinary traffic, within the
+                // critical allowance.
                 guard self.navigationWriteQueue.enqueueCriticalAtomically(
                     current.writes,
                     atHead: true

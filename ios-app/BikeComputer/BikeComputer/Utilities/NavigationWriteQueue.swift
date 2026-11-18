@@ -467,7 +467,9 @@ struct NavigationWriteQueue {
     ///
     /// `atHead` is for a retry of a command that was already sent: the device
     /// ordered the original before everything queued since, so the retry goes
-    /// ahead of that traffic, behind any earlier critical retry.
+    /// ahead of the ordinary traffic queued since. It stays behind critical
+    /// frames already at the head of the lane, so earlier retries and any
+    /// newer critical command queued during the wait keep their place.
     @discardableResult
     mutating func enqueueCriticalAtomically(
         _ writes: [NavigationWrite],

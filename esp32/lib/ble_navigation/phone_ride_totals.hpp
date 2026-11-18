@@ -10,8 +10,15 @@
 // phone totals looked live (GNSS bench, 2026-11-18). Totals are live only
 // while they come from the current ride payload generation (one per
 // authenticated controller lease; it advances when the link or lease ends)
-// and keep arriving. Losing the session withdraws them at once, and a
-// reconnect never revives them: only the next packet replaces them.
+// and that session stays alive: a packet, or a confirmed ride-lease renewal
+// after the packet, within kFreshMs. Losing the session withdraws them at
+// once, and a reconnect never revives them: only the next packet replaces
+// them.
+//
+// The lease renewal matters for the Watch. It sends GPS only when it moves
+// but renews its ride lease every five seconds, so a rider waiting at a light
+// keeps their last totals and Route Left, as before. When renewals stop the
+// lease itself expires after fifteen seconds.
 namespace phone_ride_totals {
 
 // The phone sends GPS about once a second while navigating. Allow for the
@@ -30,11 +37,29 @@ inline Stamp received(uint32_t nowMs, uint32_t sessionGeneration) {
   return {nowMs, sessionGeneration};
 }
 
+// Time from `thenMs` to `nowMs` across the 32-bit wrap; a timestamp written
+// after `nowMs` was read counts as zero elapsed.
+inline uint32_t elapsedMs(uint32_t nowMs, uint32_t thenMs) {
+  const int32_t delta = static_cast<int32_t>(nowMs - thenMs);
+  return delta < 0 ? 0U : static_cast<uint32_t>(delta);
+}
+
+// `leaseRenewedAtMs` is the last confirmed ride-lease renewal of the
+// connected controller, or zero for none. It counts only when it follows the
+// packet, so a renewal from before the totals cannot extend them.
 inline bool fresh(const Stamp &stamp, uint32_t nowMs,
-                  uint32_t currentSessionGeneration) {
-  return stamp.sessionGeneration != 0 &&
-         stamp.sessionGeneration == currentSessionGeneration &&
-         static_cast<uint32_t>(nowMs - stamp.receivedAtMs) < kFreshMs;
+                  uint32_t currentSessionGeneration,
+                  uint32_t leaseRenewedAtMs = 0) {
+  if (stamp.sessionGeneration == 0 ||
+      stamp.sessionGeneration != currentSessionGeneration)
+    return false;
+  if (elapsedMs(nowMs, stamp.receivedAtMs) < kFreshMs)
+    return true;
+  const bool renewedAfterPacket =
+      leaseRenewedAtMs != 0 &&
+      static_cast<int32_t>(leaseRenewedAtMs - stamp.receivedAtMs) >= 0;
+  return renewedAfterPacket &&
+         elapsedMs(nowMs, leaseRenewedAtMs) < kFreshMs;
 }
 
 } // namespace phone_ride_totals

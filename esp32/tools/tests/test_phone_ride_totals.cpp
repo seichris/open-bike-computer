@@ -262,6 +262,40 @@ void testConnectedExpiry() {
   assert(!expired.elapsedSeconds.available);
 }
 
+// A Watch sends GPS only when it moves (2 m distance filter) but renews its
+// ride lease every five seconds. Waiting at a light it keeps its totals and
+// Route Left; once renewals stop, the totals expire.
+void testWatchStationaryKeepsTotalsWhileLeaseRenews() {
+  RideData data;
+  const uint32_t generation = 31;
+  const uint32_t packetAt = 200'000;
+  gps_position_protocol::apply(navigatingPacket(4'200, 960, 7'300), true, data);
+  const Stamp stamp = received(packetAt, generation);
+  uint32_t renewedAt = 0;
+  // Two minutes at a light: no GPS, a lease heartbeat every five seconds.
+  for (uint32_t now = packetAt; now <= packetAt + 120'000; now += 500) {
+    if ((now - packetAt) % 5'000 == 0 && now != packetAt)
+      renewedAt = now;
+    const ViewModel model = makeViewModel(
+        workout_telemetry::Snapshot{},
+        legacyFrom(data, fresh(stamp, now, generation, renewedAt)));
+    assert(model.hasActiveNavigation);
+    assert(model.routeRemainingMeters.value == 7'300);
+    assert(model.distanceMeters.available && model.elapsedSeconds.available);
+  }
+  // The heartbeats stop (app suspended, lease left to expire).
+  const uint32_t lastRenewal = renewedAt;
+  assert(fresh(stamp, lastRenewal + kFreshMs - 1, generation, lastRenewal));
+  assert(!fresh(stamp, lastRenewal + kFreshMs, generation, lastRenewal));
+  // A renewal from before the packet cannot extend it.
+  assert(!fresh(stamp, packetAt + kFreshMs + 1, generation, packetAt - 1));
+  // A renewal never revives totals from an ended session.
+  assert(!fresh(stamp, packetAt + 1'000, generation + 1, packetAt + 900));
+  // Timestamps written after `now` was read count as current.
+  assert(fresh(received(5'003, 9), 5'000, 9));
+  assert(fresh(stamp, packetAt + 30'000, generation, packetAt + 30'002));
+}
+
 void testLegacyInitializerKeepsConnectedBehavior() {
   // Existing positional initializers (and the default) still mean live.
   const LegacyRideTelemetry legacy{27, 88, 8'000, 3'723, true, 1'500};
@@ -280,6 +314,7 @@ int main() {
   testStopWhileDisconnectedNeverRevivesRouteTotals();
   testReconnectWhileNavigatingResumesFromNewPackets();
   testConnectedExpiry();
+  testWatchStationaryKeepsTotalsWhileLeaseRenews();
   testLegacyInitializerKeepsConnectedBehavior();
   return 0;
 }

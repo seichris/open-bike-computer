@@ -213,6 +213,40 @@ void testSpeedWithoutProgressCannotHoldForever() {
          gnss_motion::kProgressWindowMs);
 }
 
+// main.cpp reads `now` before the fix is captured: a tick slightly earlier
+// than the fix must not wrap into a four-billion-millisecond age.
+void testTickBeforeCaptureKeepsMoving() {
+  Detector detector;
+  double north = 0;
+  uint32_t capture = 10'000;
+  for (uint32_t second = 0; second < 30; ++second) {
+    capture += 1'000;
+    north += 20.0 / 3.6;
+    detector.observe(fix(capture, 20.0F, north));
+    // The loop's `now` was read 3 ms before this fix was captured.
+    detector.tick(capture - 3);
+    if (second >= 3)
+      assert(detector.moving());
+  }
+  assert(detector.moving());
+  // Only Started was ever reported; no stationary churn while riding.
+  assert(detector.takeTransition() == Transition::Started);
+  assert(detector.takeTransition() == Transition::None);
+  assert(gnss_motion::elapsedMs(100, 103) == 0);
+  assert(gnss_motion::elapsedMs(5, UINT32_MAX - 4) == 10);
+}
+
+void testFutureMovementTimeHolds() {
+  MotionHold recent;
+  recent.moved = true;
+  recent.lastMovementMs = 500'003; // read after `now`
+  assert(disconnected_shutdown_policy::motionHolds(recent, 500'000, 120));
+  Tracker tracker;
+  tracker.update(0, false, 120, true);
+  const auto held = tracker.update(500'000, false, 120, true, recent);
+  assert(held.action == Action::None && held.heldByMotion);
+}
+
 void testNonGnssShutdownIsUnchanged() {
   Tracker withDefault;
   Tracker legacy;
@@ -426,6 +460,8 @@ int main() {
   testStoppingEndsMovementAfterStopWindow();
   testStaleOrInvalidFixEndsMovement();
   testSpeedWithoutProgressCannotHoldForever();
+  testTickBeforeCaptureKeepsMoving();
+  testFutureMovementTimeHolds();
   testNonGnssShutdownIsUnchanged();
   testNeverAndConnectedAlwaysWin();
   testMovingRideNeverShutsDown();

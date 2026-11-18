@@ -595,8 +595,12 @@ outside -180...180 degrees before updating map state or arrival freshness.
 owns the position: the phone or Watch is their only source, including while a
 GNSS board's own receiver holds the position. Firmware keeps their freshness
 apart from position freshness (`phone_ride_totals.hpp`). They are live only
-while packets of the current authenticated ride session keep arriving (within
-10 seconds); when the link or controller lease ends they are withdrawn at once.
+within the current authenticated ride session, and only while it stays alive.
+That means a packet within the last 10 seconds, or a ride-lease renewal
+(`LEASE_OK`, for example to a Watch's five-second `LEASE_HEARTBEAT`) after the
+packet within the last 10 seconds. A Watch waiting at a light therefore keeps
+its totals and Route Left. When the link or controller lease ends, the totals
+are withdrawn at once.
 Ride Stats then shows Distance and Elapsed as unavailable, and Route Left
 disappears. A reconnect does not revive them; the next packet replaces them,
 so a navigation stopped while disconnected never returns. Workout telemetry

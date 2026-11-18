@@ -1110,11 +1110,15 @@ bool hasCurrentNavigationData() {
 // UI task only: written by handleGpsPayload(), read by the Ride Stats
 // presenter. The session generation is the atomic ride payload generation.
 static phone_ride_totals::Stamp phoneRideTotalsStamp;
+// Host task: when the connected controller's ride lease was last confirmed
+// (a LEASE_OK answer to its claim or heartbeat); zero for never.
+static std::atomic<uint32_t> rideLeaseRenewedAtMs{0};
 
 bool phoneRideTotalsFresh(uint32_t nowMs) {
   return phone_ride_totals::fresh(
       phoneRideTotalsStamp, nowMs,
-      ridePayloadGeneration.load(std::memory_order_acquire));
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      rideLeaseRenewedAtMs.load(std::memory_order_acquire));
 }
 
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
@@ -3164,6 +3168,13 @@ static void handleAuthPayload(const std::string &frame) {
         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       ownershipLockAcquired = true;
       ownershipResult = deviceOwnership.handle(value, millis());
+      // The plaintext answer, before any protection below: the controller
+      // still holds its ride lease, so its last ride totals stay live.
+      if (ownershipResult.matched && ownershipResult.response == "LEASE_OK") {
+        const uint32_t renewedAtMs = millis();
+        rideLeaseRenewedAtMs.store(renewedAtMs == 0 ? 1 : renewedAtMs,
+                                   std::memory_order_release);
+      }
       if (ownershipResult.event == device_ownership::Event::Paired) {
         unauthenticatedWindowStartMs.store(millis(), std::memory_order_release);
       }

@@ -2401,7 +2401,8 @@ void loop() {
     lastBleHousekeepingMs = now;
     bleNavServer.process();
     const bool freshGnssFix = position_source::applyPendingGnssFix();
-    observeGnssMotion(now, freshGnssFix);
+    // The fix was captured after `now` was read: tick at the current time.
+    observeGnssMotion(millis(), freshGnssFix);
     if (freshGnssFix && noteNavigationInputForMapEntry()) {
       Serial.println("GNSS: Fresh device fix received, transitioning to map...");
     }
