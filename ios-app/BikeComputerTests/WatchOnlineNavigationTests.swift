@@ -1,6 +1,7 @@
 import Combine
 import CoreLocation
 import Foundation
+import MapKit
 
 @main
 @MainActor
@@ -12,7 +13,309 @@ enum WatchOnlineNavigationTests {
         try await testAdvisoryNetworkAndPolicyGeneration()
         try await testRerouteFailurePreservesLoadedRoute()
         try await testNavigationPresentationAndIndependentRecovery()
+        try await testProviderFallsBackToCarWhereCyclingIsUnavailable()
+        try await testProviderReportsOtherFailuresUnchanged()
+        try await testProviderReroutesCarDirectionsByCar()
+        try await testProviderStartsNoCarRequestAfterCancellation()
+        try await testCarDirectionsRouteSaysSoAndReroutesByCar()
+        try await testCyclingRerouteCanFallBackToCar()
         print("WatchOnlineNavigationTests passed")
+    }
+
+    /// Where Apple Maps has no cycling coverage (the UAE, for example), a
+    /// cycling request fails with the server-failure code and directions
+    /// error 8. The provider then asks for car directions that avoid highways
+    /// and tolls for the same endpoints.
+    private static func testProviderFallsBackToCarWhereCyclingIsUnavailable()
+        async throws {
+        let directions = TestDirectionsFactory()
+        let provider = WatchOnlineRouteProvider(
+            directionsFactory: { directions.make($0) }
+        )
+        directions.outcomes = [
+            .failure(directionsError(8)),
+            .routes([TestMapKitRoute()]),
+        ]
+        let response = try await provider.routes(for: providerRequest())
+        let cycling = directions.requests.first
+        let car = directions.requests.last
+        expect(
+            directions.requests.count == 2 &&
+                cycling?.transportType == .cycling &&
+                cycling?.highwayPreference == .any &&
+                cycling?.tollPreference == .any,
+            "the first request asks for plain cycling directions"
+        )
+        expect(
+            car?.transportType == .automobile &&
+                car?.highwayPreference == .avoid &&
+                car?.tollPreference == .avoid,
+            "out of cycling coverage the request is repeated as car " +
+                "directions that avoid highways and tolls"
+        )
+        expect(
+            car?.source != nil && car?.source === cycling?.source &&
+                car?.destination != nil &&
+                car?.destination === cycling?.destination &&
+                car?.requestsAlternateRoutes == true &&
+                cycling?.requestsAlternateRoutes == true,
+            "the car request keeps the endpoints and alternatives"
+        )
+        expect(
+            response.directions == .carAvoidingHighwaysAndTolls &&
+                response.routes.count == 1 &&
+                response.routes.first?.transportType == .cycling &&
+                response.routes.first?.provider == RouteProviderPolicyV1.mapKit,
+            "the route is marked as car directions; the ride stays cycling"
+        )
+
+        let cyclingDirections = TestDirectionsFactory()
+        let cyclingProvider = WatchOnlineRouteProvider(
+            directionsFactory: { cyclingDirections.make($0) }
+        )
+        cyclingDirections.outcomes = [.routes([TestMapKitRoute()])]
+        let cyclingResponse = try await cyclingProvider.routes(
+            for: providerRequest()
+        )
+        expect(
+            cyclingDirections.requests.count == 1 &&
+                cyclingResponse.directions == .cycling,
+            "cycling directions where Apple Maps has them make one request"
+        )
+    }
+
+    private static func testProviderReportsOtherFailuresUnchanged()
+        async throws {
+        let failures: [(String, Error)] = [
+            ("not reachable (16)", directionsError(16)),
+            ("a plain server failure", MKError(.serverFailure)),
+            ("directions not found", MKError(.directionsNotFound)),
+            ("throttling", MKError(.loadingThrottled)),
+            ("no connection", URLError(.notConnectedToInternet)),
+            ("code 8 from another domain", NSError(
+                domain: "Other",
+                code: Int(MKError.Code.serverFailure.rawValue),
+                userInfo: ["MKDirectionsErrorCode": 8]
+            )),
+        ]
+        for (name, failure) in failures {
+            let directions = TestDirectionsFactory()
+            let provider = WatchOnlineRouteProvider(
+                directionsFactory: { directions.make($0) }
+            )
+            directions.outcomes = [
+                .failure(failure),
+                .routes([TestMapKitRoute()]),
+            ]
+            let error = await routeFailure(of: provider, providerRequest())
+            expect(
+                error.map { sameFailure($0, failure) } == true &&
+                    directions.requests.count == 1,
+                "\(name) is reported unchanged without a car request"
+            )
+        }
+
+        let directions = TestDirectionsFactory()
+        let provider = WatchOnlineRouteProvider(
+            directionsFactory: { directions.make($0) }
+        )
+        directions.outcomes = [
+            .failure(directionsError(8)),
+            .failure(URLError(.timedOut)),
+            .failure(directionsError(8)),
+            .routes([]),
+        ]
+        let carFailure = await routeFailure(of: provider, providerRequest())
+        expect(
+            carFailure.map { sameFailure($0, directionsError(8)) } == true &&
+                directions.requests.count == 2,
+            "a failed car fallback reports why cycling failed"
+        )
+        let emptyCar = await routeFailure(of: provider, providerRequest())
+        expect(
+            emptyCar.map { sameFailure($0, directionsError(8)) } == true &&
+                directions.requests.count == 4,
+            "a car fallback without routes reports why cycling failed"
+        )
+    }
+
+    /// A reroute of a car-directions route asks for car directions directly.
+    private static func testProviderReroutesCarDirectionsByCar() async throws {
+        let directions = TestDirectionsFactory()
+        let provider = WatchOnlineRouteProvider(
+            directionsFactory: { directions.make($0) }
+        )
+        directions.outcomes = [
+            .routes([TestMapKitRoute()]),
+            .failure(directionsError(8)),
+            .routes([TestMapKitRoute()]),
+        ]
+        let response = try await provider.routes(
+            for: providerRequest(directions: .carAvoidingHighwaysAndTolls)
+        )
+        let request = directions.requests.first
+        expect(
+            directions.requests.count == 1 &&
+                request?.transportType == .automobile &&
+                request?.highwayPreference == .avoid &&
+                request?.tollPreference == .avoid &&
+                response.directions == .carAvoidingHighwaysAndTolls,
+            "a car reroute makes one car request that avoids highways and tolls"
+        )
+        let error = await routeFailure(
+            of: provider,
+            providerRequest(directions: .carAvoidingHighwaysAndTolls)
+        )
+        expect(
+            error.map { sameFailure($0, directionsError(8)) } == true &&
+                directions.requests.count == 2,
+            "a failed car request is not repeated"
+        )
+    }
+
+    /// MapKit can still finish a cancelled request with the out-of-coverage
+    /// failure (seen on the watchOS 27 simulator), so cancellation must stop
+    /// the car request from starting.
+    private static func testProviderStartsNoCarRequestAfterCancellation()
+        async throws {
+        for cancellation in ["provider", "task", "newer request"] {
+            let directions = TestDirectionsFactory()
+            let provider = WatchOnlineRouteProvider(
+                directionsFactory: { directions.make($0) }
+            )
+            directions.outcomes = [
+                .pending,
+                .routes([TestMapKitRoute()]),
+                .routes([TestMapKitRoute()]),
+            ]
+            let task = Task { try await provider.routes(for: providerRequest()) }
+            await settle()
+            switch cancellation {
+            case "provider":
+                provider.cancel()
+            case "task":
+                task.cancel()
+            default:
+                let newer = try await provider.routes(for: providerRequest())
+                expect(
+                    newer.directions == .cycling,
+                    "the newer request gets its own cycling route"
+                )
+            }
+            directions.tasks.first?.resolve(.failure(directionsError(8)))
+            var isCancellation = false
+            if case .failure(let error) = await task.result {
+                isCancellation = error is CancellationError
+            }
+            expect(
+                isCancellation &&
+                    directions.requests.allSatisfy {
+                        $0.transportType == .cycling
+                    } &&
+                    directions.requests.count ==
+                        (cancellation == "newer request" ? 2 : 1),
+                "cancellation by \(cancellation) starts no car request"
+            )
+            // The manager cancels the provider with its task; a task
+            // cancelled alone leaves the MapKit request running.
+            expect(
+                cancellation == "task" ||
+                    directions.tasks.first?.isCancelled == true,
+                "cancellation by \(cancellation) cancels the MapKit request"
+            )
+        }
+    }
+
+    private static func testCarDirectionsRouteSaysSoAndReroutesByCar()
+        async throws {
+        let harness = try Harness(network: .available)
+        defer { harness.cleanup() }
+        harness.settings.setUseWatchCellularConnection(true)
+        harness.provider.outcomes = [
+            .success(route(), .carAvoidingHighwaysAndTolls),
+            .success(reroutedRoute(), .carAvoidingHighwaysAndTolls),
+        ]
+        harness.manager.startOnline(destination: favorite())
+        await settle()
+        expect(
+            harness.provider.requests.first?.directions == .cycling &&
+                harness.manager.snapshot?.routeID == route().id &&
+                harness.manager.routeDirections ==
+                    .carAvoidingHighwaysAndTolls &&
+                harness.manager.routeDirectionsNotice ==
+                    "No cycling directions here: car route avoiding " +
+                    "highways and tolls",
+            "a route that fell back to car directions starts and says so"
+        )
+        emitOffRoute(harness)
+        await settle()
+        expect(
+            harness.provider.requests.count == 2 &&
+                harness.provider.requests.last?.directions ==
+                    .carAvoidingHighwaysAndTolls &&
+                harness.manager.snapshot?.routeID == reroutedRoute().id &&
+                harness.manager.onlineStatus == .online &&
+                harness.manager.routeDirectionsNotice != nil,
+            "its reroute asks for car directions again and keeps the notice"
+        )
+        _ = harness.manager.stopNavigation()
+        expect(
+            harness.manager.routeDirections == .cycling &&
+                harness.manager.routeDirectionsNotice == nil,
+            "stopping navigation clears the car directions"
+        )
+        harness.provider.outcomes = [.success(route())]
+        harness.manager.startOnline(destination: favorite())
+        await settle()
+        expect(
+            harness.provider.requests.count == 3 &&
+                harness.provider.requests.last?.directions == .cycling &&
+                harness.manager.snapshot?.routeID == route().id &&
+                harness.manager.routeDirectionsNotice == nil,
+            "the next route asks for cycling directions again"
+        )
+    }
+
+    /// A cycling route can lead out of Apple Maps' cycling coverage; its
+    /// reroute then comes back as car directions, which the rider is told.
+    private static func testCyclingRerouteCanFallBackToCar() async throws {
+        let harness = try Harness(network: .available)
+        defer { harness.cleanup() }
+        harness.settings.setUseWatchCellularConnection(true)
+        harness.provider.outcomes = [
+            .success(route()),
+            .success(reroutedRoute(), .carAvoidingHighwaysAndTolls),
+            .failure(TestProviderError.unavailable),
+        ]
+        harness.manager.startOnline(destination: favorite())
+        await settle()
+        expect(
+            harness.manager.snapshot?.routeID == route().id &&
+                harness.manager.routeDirections == .cycling &&
+                harness.manager.routeDirectionsNotice == nil,
+            "a cycling route shows no car notice"
+        )
+        emitOffRoute(harness)
+        await settle()
+        expect(
+            harness.provider.requests.count == 2 &&
+                harness.provider.requests[1].directions == .cycling &&
+                harness.manager.snapshot?.routeID == reroutedRoute().id &&
+                harness.manager.routeDirectionsNotice != nil,
+            "a cycling reroute that fell back to car directions says so"
+        )
+        harness.manager.recalculateOnlineRoute()
+        await settle()
+        expect(
+            harness.provider.requests.count == 3 &&
+                harness.provider.requests[2].directions ==
+                    .carAvoidingHighwaysAndTolls &&
+                harness.manager.onlineStatus == .rerouteFailed &&
+                harness.manager.snapshot?.routeID == reroutedRoute().id &&
+                harness.manager.routeDirectionsNotice != nil,
+            "later reroutes ask for car directions; a failed one keeps " +
+                "the car route and its notice"
+        )
     }
 
     private static func testNavigationPresentationAndIndependentRecovery()
@@ -322,17 +625,17 @@ enum WatchOnlineNavigationTests {
     }
 
     private static func route(
-        provider: RouteProviderMetadataV1? = nil
-    ) -> NavigationRouteV1 {
-        let provider = provider ?? RouteProviderPolicyV1.mapKit
-        let points = [
+        provider: RouteProviderMetadataV1? = nil,
+        id: UUID = UUID(uuidString: "cccccccc-1111-2222-3333-dddddddddddd")!,
+        points: [RouteCoordinateV1] = [
             RouteCoordinateV1(latitude: 0, longitude: 0),
             RouteCoordinateV1(latitude: 0, longitude: 0.001),
-        ]
+        ],
+        distanceMeters: Double = 111
+    ) -> NavigationRouteV1 {
+        let provider = provider ?? RouteProviderPolicyV1.mapKit
         return NavigationRouteV1(
-            id: UUID(
-                uuidString: "cccccccc-1111-2222-3333-dddddddddddd"
-            )!,
+            id: id,
             revision: 1,
             provider: provider,
             localeIdentifier: "en_US",
@@ -343,7 +646,7 @@ enum WatchOnlineNavigationTests {
                 label: "Finish"
             ),
             bounds: RouteBoundsV1.enclosing(points)!,
-            distanceMeters: 111,
+            distanceMeters: distanceMeters,
             expectedTravelTimeSeconds: 30,
             name: "Online route",
             points: points,
@@ -353,9 +656,97 @@ enum WatchOnlineNavigationTests {
                 geometryEndIndex: 1,
                 instruction: "Arrive",
                 maneuver: .arrive,
-                distanceMeters: 111
+                distanceMeters: distanceMeters
             )],
             normalizationVersion: 1
+        )
+    }
+
+    /// A replacement that starts where `emitOffRoute` leaves the rider.
+    private static func reroutedRoute() -> NavigationRouteV1 {
+        route(
+            id: UUID(uuidString: "cccccccc-1111-2222-3333-eeeeeeeeeeee")!,
+            points: [
+                RouteCoordinateV1(latitude: 0.001, longitude: 0.0002),
+                RouteCoordinateV1(latitude: 0, longitude: 0.001),
+            ],
+            distanceMeters: 142
+        )
+    }
+
+    /// About 111 m north of `route()`, enough samples to count as off route.
+    private static func emitOffRoute(_ harness: Harness) {
+        let base = Date()
+        for offset in 1...3 {
+            harness.location.emit(CLLocation(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: 0.001,
+                    longitude: 0.0002
+                ),
+                altitude: 0,
+                horizontalAccuracy: 5,
+                verticalAccuracy: 5,
+                course: 0,
+                speed: 5,
+                timestamp: base.addingTimeInterval(Double(offset))
+            ))
+        }
+    }
+
+    /// A MapKit directions failure as watchOS reports it; the user-info key
+    /// is spelled out here so a typo in the provider fails the tests.
+    private static func directionsError(_ code: Int) -> NSError {
+        NSError(
+            domain: MKErrorDomain,
+            code: Int(MKError.Code.serverFailure.rawValue),
+            userInfo: ["MKDirectionsErrorCode": code]
+        )
+    }
+
+    private static func sameFailure(_ lhs: Error, _ rhs: Error) -> Bool {
+        let lhs = lhs as NSError
+        let rhs = rhs as NSError
+        return lhs.domain == rhs.domain && lhs.code == rhs.code &&
+            lhs.userInfo["MKDirectionsErrorCode"] as? Int ==
+                rhs.userInfo["MKDirectionsErrorCode"] as? Int
+    }
+
+    private static func routeFailure(
+        of provider: WatchOnlineRouteProvider,
+        _ request: NavigationRouteRequestV1
+    ) async -> Error? {
+        do {
+            _ = try await provider.routes(for: request)
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// Burj Khalifa toward Dubai Marina, where Apple Maps has no cycling
+    /// directions.
+    private static func providerRequest(
+        directions: NavigationRouteDirectionsV1 = .cycling
+    ) -> NavigationRouteRequestV1 {
+        NavigationRouteRequestV1(
+            source: RouteEndpointV1(
+                coordinate: RouteCoordinateV1(
+                    latitude: 25.1972,
+                    longitude: 55.2744
+                ),
+                label: "Current Location"
+            ),
+            destination: RouteEndpointV1(
+                coordinate: RouteCoordinateV1(
+                    latitude: 25.1950,
+                    longitude: 55.2715
+                ),
+                label: "Finish"
+            ),
+            localeIdentifier: "en_US",
+            transportType: .cycling,
+            requestAlternatives: true,
+            directions: directions
         )
     }
 
@@ -371,7 +762,10 @@ private enum TestProviderError: Error {
 @MainActor
 private final class TestOnlineProvider: NavigationRouteProvider {
     enum Outcome {
-        case success(NavigationRouteV1)
+        case success(
+            NavigationRouteV1,
+            NavigationRouteDirectionsV1 = .cycling
+        )
         case failure(Error)
         case pending
     }
@@ -380,17 +774,20 @@ private final class TestOnlineProvider: NavigationRouteProvider {
     var outcomes: [Outcome] = []
     var requests: [NavigationRouteRequestV1] = []
     var pendingContinuation:
-        CheckedContinuation<[NavigationRouteV1], Error>?
+        CheckedContinuation<NavigationRouteResponseV1, Error>?
     private(set) var cancellationCount = 0
 
     func routes(
         for request: NavigationRouteRequestV1
-    ) async throws -> [NavigationRouteV1] {
+    ) async throws -> NavigationRouteResponseV1 {
         requests.append(request)
         guard !outcomes.isEmpty else { throw TestProviderError.unavailable }
         switch outcomes.removeFirst() {
-        case .success(let route):
-            return [route]
+        case .success(let route, let directions):
+            return NavigationRouteResponseV1(
+                routes: [route],
+                directions: directions
+            )
         case .failure(let error):
             throw error
         case .pending:
@@ -410,10 +807,115 @@ private final class TestOnlineProvider: NavigationRouteProvider {
         let continuation = pendingContinuation
         pendingContinuation = nil
         switch result {
-        case .success(let route): continuation?.resume(returning: [route])
+        case .success(let route):
+            continuation?.resume(returning: NavigationRouteResponseV1(
+                routes: [route],
+                directions: .cycling
+            ))
         case .failure(let error): continuation?.resume(throwing: error)
         }
     }
+}
+
+/// Stands in for MapKit behind `WatchOnlineRouteProvider`.
+@MainActor
+private final class TestDirectionsFactory {
+    enum Outcome {
+        case routes([MKRoute])
+        case failure(Error)
+        case pending
+    }
+
+    var outcomes: [Outcome] = []
+    private(set) var requests: [MKDirections.Request] = []
+    private(set) var tasks: [TestDirections] = []
+
+    func make(
+        _ request: MKDirections.Request
+    ) -> any WatchDirectionsCalculating {
+        requests.append(request)
+        let task = TestDirections(
+            outcome: outcomes.isEmpty
+                ? .failure(TestProviderError.unavailable)
+                : outcomes.removeFirst()
+        )
+        tasks.append(task)
+        return task
+    }
+}
+
+@MainActor
+private final class TestDirections: WatchDirectionsCalculating {
+    private let outcome: TestDirectionsFactory.Outcome
+    private var continuation: CheckedContinuation<[MKRoute], Error>?
+    private(set) var isCancelled = false
+
+    init(outcome: TestDirectionsFactory.Outcome) {
+        self.outcome = outcome
+    }
+
+    func calculate() async throws -> [MKRoute] {
+        switch outcome {
+        case .routes(let routes):
+            return routes
+        case .failure(let error):
+            throw error
+        case .pending:
+            return try await withCheckedThrowingContinuation {
+                continuation = $0
+            }
+        }
+    }
+
+    /// Like MapKit, cancelling does not end a pending calculation.
+    func cancel() {
+        isCancelled = true
+    }
+
+    func resolve(_ result: Result<[MKRoute], Error>) {
+        let continuation = continuation
+        self.continuation = nil
+        continuation?.resume(with: result)
+    }
+}
+
+/// One step along three points near Burj Khalifa.
+private nonisolated final class TestMapKitRoute: MKRoute {
+    private let storedPolyline: MKPolyline
+    private let storedSteps: [MKRoute.Step]
+
+    override init() {
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 25.1972, longitude: 55.2744),
+            CLLocationCoordinate2D(latitude: 25.1961, longitude: 55.2730),
+            CLLocationCoordinate2D(latitude: 25.1950, longitude: 55.2715),
+        ]
+        storedPolyline = MKPolyline(
+            coordinates: coordinates,
+            count: coordinates.count
+        )
+        storedSteps = [TestMapKitRouteStep(polyline: storedPolyline)]
+        super.init()
+    }
+
+    override var steps: [MKRoute.Step] { storedSteps }
+    override var polyline: MKPolyline { storedPolyline }
+    override var distance: CLLocationDistance { 380 }
+    override var expectedTravelTime: TimeInterval { 120 }
+    override var name: String { "Test route" }
+}
+
+private nonisolated final class TestMapKitRouteStep: MKRoute.Step {
+    private let storedPolyline: MKPolyline
+
+    init(polyline: MKPolyline) {
+        storedPolyline = polyline
+        super.init()
+    }
+
+    override var instructions: String { "Arrive at destination" }
+    override var polyline: MKPolyline { storedPolyline }
+    override var distance: CLLocationDistance { 380 }
 }
 
 @MainActor

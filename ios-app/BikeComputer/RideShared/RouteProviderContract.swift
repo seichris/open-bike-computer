@@ -1,17 +1,37 @@
 import Foundation
 
+/// Which directions drew a route. The rider cycles either way
+/// (`RouteTransportTypeV1`); car directions replace cycling directions only
+/// where the provider has none for the area.
+nonisolated enum NavigationRouteDirectionsV1: Equatable {
+    case cycling
+    /// Car directions that avoid highways and tolls.
+    case carAvoidingHighwaysAndTolls
+}
+
 struct NavigationRouteRequestV1: Equatable {
     let source: RouteEndpointV1
     let destination: RouteEndpointV1
     let localeIdentifier: String
     let transportType: RouteTransportTypeV1
     let requestAlternatives: Bool
+    /// `.cycling` may be answered with car directions
+    /// (`NavigationRouteResponseV1.directions`). A reroute of such a route
+    /// asks for `.carAvoidingHighwaysAndTolls` directly.
+    let directions: NavigationRouteDirectionsV1
+}
+
+struct NavigationRouteResponseV1: Equatable {
+    let routes: [NavigationRouteV1]
+    let directions: NavigationRouteDirectionsV1
 }
 
 @MainActor
 protocol NavigationRouteProvider: AnyObject {
     var metadata: RouteProviderMetadataV1 { get }
-    func routes(for request: NavigationRouteRequestV1) async throws -> [NavigationRouteV1]
+    func routes(
+        for request: NavigationRouteRequestV1
+    ) async throws -> NavigationRouteResponseV1
     func cancel()
 }
 
