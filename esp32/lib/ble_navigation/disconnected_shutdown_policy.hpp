@@ -45,10 +45,11 @@ inline bool motionHolds(const MotionHold &motion, uint32_t nowMs,
     return false;
   const uint32_t holdSeconds =
       timeoutSeconds > motionHoldSeconds ? timeoutSeconds : motionHoldSeconds;
-  // A movement time read after nowMs (same loop pass) is zero elapsed, not a
-  // wrapped four-billion-millisecond age.
-  const int32_t delta = static_cast<int32_t>(nowMs - motion.lastMovementMs);
-  const uint32_t elapsed = delta < 0 ? 0U : static_cast<uint32_t>(delta);
+  // A movement time up to a second after nowMs (same loop pass) is zero
+  // elapsed rather than a wrapped age; anything older is plain elapsed time,
+  // so a movement weeks ago never holds the board awake.
+  const uint32_t raw = nowMs - motion.lastMovementMs;
+  const uint32_t elapsed = raw > UINT32_MAX - 1'000U ? 0U : raw;
   return static_cast<uint64_t>(elapsed) <
          static_cast<uint64_t>(holdSeconds) * 1000ULL;
 }

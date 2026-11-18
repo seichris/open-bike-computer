@@ -37,11 +37,12 @@ inline Stamp received(uint32_t nowMs, uint32_t sessionGeneration) {
   return {nowMs, sessionGeneration};
 }
 
-// Time from `thenMs` to `nowMs` across the 32-bit wrap; a timestamp written
-// after `nowMs` was read counts as zero elapsed.
+// Time from `thenMs` to `nowMs` across the 32-bit wrap. A timestamp up to a
+// second ahead (written after `nowMs` was read) counts as zero elapsed;
+// anything older, even beyond 2^31 ms, is plain elapsed time.
 inline uint32_t elapsedMs(uint32_t nowMs, uint32_t thenMs) {
-  const int32_t delta = static_cast<int32_t>(nowMs - thenMs);
-  return delta < 0 ? 0U : static_cast<uint32_t>(delta);
+  const uint32_t raw = nowMs - thenMs;
+  return raw > UINT32_MAX - 1'000U ? 0U : raw;
 }
 
 // `leaseRenewedAtMs` is the last confirmed ride-lease renewal of the

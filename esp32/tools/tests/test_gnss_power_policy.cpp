@@ -236,6 +236,33 @@ void testTickBeforeCaptureKeepsMoving() {
   assert(gnss_motion::elapsedMs(5, UINT32_MAX - 4) == 10);
 }
 
+// A movement weeks ago (beyond 2^31 ms) must not read as "just now".
+void testAncientMovementNeverHolds() {
+  constexpr uint32_t kDay = 24U * 60U * 60U * 1'000U;
+  assert(gnss_motion::elapsedMs(1'000'000, 1'000'500) == 0);
+  assert(gnss_motion::elapsedMs(30 * kDay, 5 * kDay) == 25 * kDay);
+  MotionHold ancient;
+  ancient.moved = true;
+  ancient.lastMovementMs = 1'000;
+  assert(!disconnected_shutdown_policy::motionHolds(ancient, 1'000 + 25 * kDay,
+                                                    120));
+  assert(!disconnected_shutdown_policy::motionHolds(ancient, 1'000 + 40 * kDay,
+                                                    600));
+  Tracker tracker;
+  const uint32_t disconnectedAt = 1'000 + 26 * kDay;
+  tracker.update(disconnectedAt, false, 120, true, ancient);
+  assert(tracker.update(disconnectedAt + 120'000, false, 120, true, ancient)
+             .action == Action::ShutdownDue);
+
+  // A detector left "moving" across a long gap stops on the next tick.
+  Detector detector;
+  uint32_t now = 0;
+  ride(detector, now, 10, 20.0F, 0);
+  assert(detector.moving());
+  detector.tick(now + 25 * kDay);
+  assert(!detector.moving());
+}
+
 void testFutureMovementTimeHolds() {
   MotionHold recent;
   recent.moved = true;
@@ -461,6 +488,7 @@ int main() {
   testStaleOrInvalidFixEndsMovement();
   testSpeedWithoutProgressCannotHoldForever();
   testTickBeforeCaptureKeepsMoving();
+  testAncientMovementNeverHolds();
   testFutureMovementTimeHolds();
   testNonGnssShutdownIsUnchanged();
   testNeverAndConnectedAlwaysWin();

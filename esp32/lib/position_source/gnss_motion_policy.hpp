@@ -43,12 +43,16 @@ struct Sample {
   double longitude = 0.0;
 };
 
-// Time from `thenMs` to `nowMs` across the 32-bit wrap. A timestamp taken
-// after `nowMs` was read (a fix captured later in the same loop pass) counts
-// as zero elapsed, never as a wrapped four-billion-millisecond age.
+// A timestamp at most this far ahead of `nowMs` was taken after `nowMs` was
+// read (a fix captured later in the same loop pass).
+constexpr uint32_t kFutureToleranceMs = 1'000;
+
+// Time from `thenMs` to `nowMs` across the 32-bit wrap. A slightly future
+// timestamp counts as zero elapsed instead of a wrapped four-billion
+// millisecond age; anything older, even beyond 2^31 ms, is plain elapsed time.
 inline uint32_t elapsedMs(uint32_t nowMs, uint32_t thenMs) {
-  const int32_t delta = static_cast<int32_t>(nowMs - thenMs);
-  return delta < 0 ? 0U : static_cast<uint32_t>(delta);
+  const uint32_t raw = nowMs - thenMs;
+  return raw > UINT32_MAX - kFutureToleranceMs ? 0U : raw;
 }
 
 // Equirectangular distance; ample for tens to hundreds of metres.

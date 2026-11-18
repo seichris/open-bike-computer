@@ -294,6 +294,11 @@ void testWatchStationaryKeepsTotalsWhileLeaseRenews() {
   // Timestamps written after `now` was read count as current.
   assert(fresh(received(5'003, 9), 5'000, 9));
   assert(fresh(stamp, packetAt + 30'000, generation, packetAt + 30'002));
+  // Weeks-old totals or renewals never read as current, even past 2^31 ms.
+  constexpr uint32_t kDay = 24U * 60U * 60U * 1'000U;
+  assert(!fresh(stamp, packetAt + 25 * kDay, generation));
+  assert(!fresh(stamp, packetAt + 25 * kDay, generation, packetAt + 1'000));
+  assert(phone_ride_totals::elapsedMs(25 * kDay + 7, 7) == 25 * kDay);
 }
 
 void testLegacyInitializerKeepsConnectedBehavior() {
