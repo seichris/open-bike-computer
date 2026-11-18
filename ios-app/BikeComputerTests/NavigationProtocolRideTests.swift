@@ -3803,6 +3803,120 @@ extension NavigationProtocolTests {
         manager.clearConnectionStateForTesting()
     }
 
+    static func testCriticalCommandAdmissionReserve() {
+        var queue = NavigationWriteQueue(maxCount: 4, priorityMaxCount: 2)
+        let firstCommand = UUID()
+        let secondCommand = UUID()
+        for index in 0..<2 {
+            assert(queue.enqueuePrioritizedAtomically([
+                NavigationWrite(data: Data([UInt8(10 + index)]),
+                                label: "ordinary-\(index)")
+            ]), "ordinary priority traffic fills the lane")
+        }
+        assert(!queue.enqueuePrioritizedAtomically([
+            NavigationWrite(data: Data([12]), label: "ordinary-overflow")
+        ]), "ordinary traffic cannot use the critical reserve")
+        assert(!queue.enqueueCriticalAtomically([
+            NavigationWrite(data: Data([13]), label: "no-command-id")
+        ]), "the reserve admits only frames that carry a command ID")
+        assert(queue.enqueueCriticalAtomically([
+            NavigationWrite(data: Data([20]), label: "new-critical",
+                            applicationCommandID: secondCommand)
+        ]), "a new critical command is admitted behind a full lane")
+        assert(queue.enqueueCriticalAtomically([
+            NavigationWrite(data: Data([30]), label: "retry-route",
+                            applicationCommandID: firstCommand),
+            NavigationWrite(data: Data([31]), label: "retry-maneuver",
+                            applicationCommandID: firstCommand),
+        ], atHead: true), "a retried critical command is admitted at the head")
+        let oversizedGroup = UUID()
+        assert(!queue.enqueueCriticalAtomically((0..<3).map {
+            NavigationWrite(data: Data([UInt8(60 + $0)]), label: "oversized-\($0)",
+                            applicationCommandID: oversizedGroup)
+        }), "one critical group is still limited to the lane's own size")
+        let overAllowance = UUID()
+        assert(!queue.enqueueCriticalAtomically([
+            NavigationWrite(data: Data([40]), label: "beyond-allowance-1",
+                            applicationCommandID: overAllowance),
+            NavigationWrite(data: Data([41]), label: "beyond-allowance-2",
+                            applicationCommandID: overAllowance),
+        ]), "queued critical frames stay within twice the lane's limits")
+        var order: [Data] = []
+        queue.flush(canSend: { true }) { order.append($0.data) }
+        assertEqual(order, [Data([30]), Data([31]), Data([10]), Data([11]),
+                            Data([20])],
+                    "a retry precedes traffic queued after its original; a new command keeps its order")
+
+        // The production lane: a full workout group (core, extended, origin
+        // and two zone frames) is admitted behind six ordinary writes.
+        var productionLane = NavigationWriteQueue(maxCount: 8, priorityMaxCount: 6)
+        for index in 0..<6 {
+            assert(productionLane.enqueuePrioritizedAtomically([
+                NavigationWrite(data: Data([UInt8(index)]), label: "ordinary-\(index)")
+            ]), "ordinary traffic fills the production lane")
+        }
+        let workoutGroup = UUID()
+        assert(productionLane.enqueueCriticalAtomically((0..<5).map {
+            NavigationWrite(data: Data(repeating: UInt8($0), count: 64),
+                            label: "workout-\($0)",
+                            applicationCommandID: workoutGroup)
+        }), "a five-frame workout group keeps its admission behind a full lane")
+
+        // The 2026-11-18 incident: an acknowledgement is lost while ordinary
+        // priority traffic fills the lane behind the acknowledgement wait.
+        let manager = BLEManager()
+        var writes: [Data] = []
+        var recoveries = 0
+        let endpoint = NavigationWriteEndpoint(maximumWriteLength: 185,
+            expectsWriteResponse: true, canSend: { true }, write: { writes.append($0) })
+        manager.configureNavigationClearForTesting(endpoint)
+        manager.installNavigationWriteStallRecoveryForTesting(timeout: 60) { recoveries += 1 }
+        manager.setRideApplicationAcknowledgementTimeoutForTesting(0.05)
+        manager.clearRouteGeometry()
+        manager.completeNavigationWriteForTesting(error: nil)
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.count, 2, "both clear members were dispatched")
+        guard let original = RideBLEApplicationCommandEnvelopeV1.decode(writes[0]) else {
+            assert(false, "the clear is an application command envelope")
+            return
+        }
+        var ordinaryWrites: [Data] = []
+        var admittedOrdinary = 0
+        for index in 0..<12 {
+            if manager.enqueueUnacknowledgedTransferWriteForTesting(
+                Data([0xA0, UInt8(index)]),
+                coalescingKey: nil,
+                write: { ordinaryWrites.append($0) }
+            ) {
+                admittedOrdinary += 1
+            }
+        }
+        assert(admittedOrdinary > 0 && admittedOrdinary < 12,
+               "ordinary priority traffic fills the lane during the acknowledgement wait")
+        assert(ordinaryWrites.isEmpty, "every write waits behind the acknowledgement")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        assertEqual(recoveries, 0,
+                    "a full priority lane does not turn the acknowledgement retry into a reconnect")
+        assertEqual(writes.count, 3, "the retry is the next acknowledged write")
+        let retried = RideBLEApplicationCommandEnvelopeV1.decode(writes[2])
+        assert(retried?.commandID == original.commandID,
+               "the retry repeats the same idempotent command")
+        assert(ordinaryWrites.isEmpty, "queued ordinary traffic stays behind the retry")
+        manager.completeNavigationWriteForTesting(error: nil)
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.count, 4, "the retry carries every member of the command")
+        manager.handleRideApplicationAcknowledgementForTesting(.init(
+            commandType: .navigationClear, result: .success,
+            commandID: original.commandID, stateGeneration: original.stateGeneration,
+            leaseGeneration: 1))
+        assert(!manager.pendingNavigationClearForTesting,
+               "the acknowledged retry settles the clear intent")
+        assert(waitForMainLoop(timeout: 1) { ordinaryWrites.count == admittedOrdinary },
+               "traffic held behind the acknowledgement is delivered afterwards, none evicted")
+        assertEqual(recoveries, 0, "the recovered command never reconnects")
+        manager.clearConnectionStateForTesting()
+    }
+
     static func testPhoneConnectionAdoptionOwnsGeneration() {
         for alreadyConnected in [false, true] {
             let manager = BLEManager()

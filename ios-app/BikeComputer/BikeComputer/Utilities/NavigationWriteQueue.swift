@@ -447,6 +447,71 @@ struct NavigationWriteQueue {
         return true
     }
 
+    /// Queued critical frames may total this multiple of the lane's count and
+    /// byte limits; ordinary priority frames do not count against it.
+    static let criticalAllowanceFactor = 2
+
+    /// Admits one complete critical application command (an RCM1 group whose
+    /// frames carry its command ID) even when ordinary priority traffic has
+    /// filled the lane. The ride writer holds every write while a critical
+    /// acknowledgement is pending, so the lane fills during that wait; a
+    /// critical command that had to compete for the ordinary capacity could
+    /// not be admitted, and the timeout retry then turned one lost
+    /// acknowledgement into a reconnect (GNSS bench, 2026-11-18).
+    ///
+    /// One group is still limited to the lane's own count and bytes, as
+    /// before. Critical frames already queued, plus this group, may total
+    /// `criticalAllowanceFactor` times those limits, while ordinary priority
+    /// traffic neither counts against them nor is evicted. The lane therefore
+    /// stays bounded at three times its ordinary limits.
+    ///
+    /// `atHead` is for a retry of a command that was already sent: the device
+    /// ordered the original before everything queued since, so the retry goes
+    /// ahead of that traffic, behind any earlier critical retry.
+    @discardableResult
+    mutating func enqueueCriticalAtomically(
+        _ writes: [NavigationWrite],
+        atHead: Bool = false
+    ) -> Bool {
+        let writeBytes = writes.reduce(0) { $0 + $1.data.count }
+        let queuedCritical = pendingPriorityWrites.filter {
+            $0.applicationCommandID != nil
+        }
+        let queuedCriticalBytes = queuedCritical.reduce(0) {
+            $0 + $1.data.count
+        }
+        guard !writes.isEmpty,
+              writes.count <= priorityMaxCount,
+              writeBytes <= priorityMaxPendingBytes,
+              writes.allSatisfy({
+                  $0.applicationCommandID != nil &&
+                      $0.data.count <= Self.maximumFrameBytes
+              }),
+              queuedCritical.count + writes.count <=
+                Self.criticalAllowanceFactor * priorityMaxCount,
+              queuedCriticalBytes + writeBytes <=
+                Self.criticalAllowanceFactor * priorityMaxPendingBytes else {
+            recordRejectedFrames(writes.count)
+            return false
+        }
+        beginEnqueueIfEmpty()
+        let enqueuedAt = now()
+        let admitted = writes.map {
+            $0.enqueued(at: enqueuedAt).protectingAtomicBatch()
+        }
+        if atHead {
+            let index = pendingPriorityWrites.firstIndex {
+                $0.applicationCommandID == nil
+            } ?? pendingPriorityWrites.endIndex
+            pendingPriorityWrites.insert(contentsOf: admitted, at: index)
+        } else {
+            pendingPriorityWrites.append(contentsOf: admitted)
+        }
+        recordEnqueuedFrames(writes.count)
+        recordDepth()
+        return true
+    }
+
     /// Replaces only an unsent, complete route snapshot. Unlike ordinary
     /// coalescing, this never evicts unrelated traffic or weakens the admitted
     /// frame's protection. Application-command members and route-clear/state

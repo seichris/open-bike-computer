@@ -5079,7 +5079,10 @@ class BLEManager: NSObject, ObservableObject {
         }
         pending.writes = writes
         pendingRideApplicationDeliveries[commandID] = pending
-        guard navigationWriteQueue.enqueuePrioritizedAtomically(writes) else {
+        // Critical commands have their own bounded allowance in the priority
+        // lane: ordinary traffic queued behind another command's
+        // acknowledgement wait must not make this command fail admission.
+        guard navigationWriteQueue.enqueueCriticalAtomically(writes) else {
             pendingRideApplicationDeliveries.removeValue(forKey: commandID)
             pending.isFinished = true
             log("Critical ride command was not admitted atomically")
@@ -5183,8 +5186,14 @@ class BLEManager: NSObject, ObservableObject {
                         "members": String(current.memberCount),
                     ]
                 )
-                guard self.navigationWriteQueue
-                    .enqueuePrioritizedAtomically(current.writes) else {
+                // Every write waited behind this acknowledgement, so the
+                // priority lane may be full of newer ordinary traffic. The
+                // retry re-sends a command the device ordered before all of
+                // it: admit it at the head, within the critical allowance.
+                guard self.navigationWriteQueue.enqueueCriticalAtomically(
+                    current.writes,
+                    atHead: true
+                ) else {
                     self.finishRideApplicationDelivery(
                         commandID: commandID,
                         outcome: .transportFailure(
@@ -7849,6 +7858,7 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func enqueueUnacknowledgedTransferWriteForTesting(
         _ data: Data,
+        coalescingKey: String? = "test.transfer.control",
         write: @escaping (Data) -> Void
     ) -> Bool {
         guard let endpoint = navigationWriteEndpoint else { return false }
@@ -7857,7 +7867,7 @@ class BLEManager: NSObject, ObservableObject {
             endpoint: endpoint,
             label: "test unacknowledged transfer",
             writeClass: .transfer,
-            coalescingKey: "test.transfer.control",
+            coalescingKey: coalescingKey,
             prioritized: true,
             transportWrite: write,
             transportCanSend: { true },
