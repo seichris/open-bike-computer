@@ -14,6 +14,7 @@ import time
 import freetype
 import uharfbuzz as hb
 
+from label_bidi import visual_runs
 from label_pipeline import normalize_preferred_languages
 
 
@@ -104,6 +105,19 @@ def default_font_faces() -> tuple[FontFaceSpec, ...]:
                 FontFaceSpec(5, cjk, 4, "cjk-hk"),
             )
         )
+    arabic = _first_existing(
+        (
+            os.environ.get("OBC_LABEL_ARABIC_FONT"),
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        )
+    )
+    if arabic is not None:
+        faces.append(FontFaceSpec(6, arabic, 0, "arabic"))
+    arabic_latin = _first_existing(
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",)
+    )
+    if arabic_latin is not None and arabic_latin != latin:
+        faces.append(FontFaceSpec(7, arabic_latin, 0, "arabic-latin"))
     return tuple(faces)
 
 
@@ -217,6 +231,33 @@ class FontPackBuilder:
         self._hb_fonts[key] = font
         return font
 
+    def _shape_glyphs(
+        self,
+        face: FontFaceSpec,
+        codepoints: list[int],
+        runs: list[tuple[int, int, str]],
+        language: str | None,
+    ) -> list[list[tuple[hb.GlyphInfo, hb.GlyphPosition]]] | None:
+        sizes = []
+        for pixel_size in FONT_SIZES:
+            font = self._harfbuzz_font(face, pixel_size)
+            glyphs = []
+            for start, end, direction in runs:
+                buffer = hb.Buffer()
+                buffer.add_codepoints(codepoints, start, end - start)
+                buffer.direction = direction
+                if language:
+                    buffer.language = language
+                buffer.guess_segment_properties()
+                hb.shape(font, buffer)
+                glyphs.extend(zip(buffer.glyph_infos or (), buffer.glyph_positions or ()))
+            if not glyphs or len(glyphs) > MAX_GLYPHS_PER_RUN:
+                raise FontAssetError("shaped label run is empty or too long")
+            if any(info.codepoint == 0 for info, _ in glyphs):
+                return None
+            sizes.append(glyphs)
+        return sizes
+
     def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
         self.shape_calls += 1
         cache_key = (text, language)
@@ -226,22 +267,29 @@ class FontPackBuilder:
             return cached
         started = time.perf_counter()
         try:
+            codepoints = list(map(ord, text))
+            visual_order = visual_runs(text, codepoints)
             face = self._face_for(text, language)
+            sizes = self._shape_glyphs(face, codepoints, visual_order, language)
+            if sizes is None:
+                # Labels may contain native-script text even when all preferred
+                # languages use Latin or CJK. Try the Arabic face and then the
+                # face with both Arabic and Latin coverage for mixed labels.
+                for fallback in self.faces:
+                    if fallback.name not in {"arabic", "arabic-latin"} or fallback == face:
+                        continue
+                    sizes = self._shape_glyphs(fallback, codepoints, visual_order, language)
+                    if sizes is not None:
+                        face = fallback
+                        self.fallback_selections += 1
+                        break
+            if sizes is None:
+                raise FontAssetError("font does not contain every label glyph")
+
             runs: list[ShapedRun] = []
-            for size_id, pixel_size in enumerate(FONT_SIZES):
-                font = self._harfbuzz_font(face, pixel_size)
-                buffer = hb.Buffer()
-                buffer.add_str(text)
-                if language:
-                    buffer.language = language
-                buffer.guess_segment_properties()
-                hb.shape(font, buffer)
-                if not buffer.glyph_infos or len(buffer.glyph_infos) > MAX_GLYPHS_PER_RUN:
-                    raise FontAssetError("shaped label run is empty or too long")
+            for size_id, glyphs in enumerate(sizes):
                 placements: list[GlyphPlacement] = []
-                for info, position in zip(buffer.glyph_infos, buffer.glyph_positions):
-                    if info.codepoint == 0:
-                        raise FontAssetError("font does not contain every label glyph")
+                for info, position in glyphs:
                     asset_id = self._asset_glyph_id(face.face_id, info.codepoint)
                     values = (position.x_offset, position.y_offset, position.x_advance)
                     if any(value < -32768 or value > 32767 for value in values):

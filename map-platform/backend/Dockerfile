@@ -25,12 +25,14 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    fonts-dejavu-core \
     fonts-noto-cjk \
     fonts-noto-core \
     gdal-bin \
     git \
     libexpat1 \
     libbrotli1 \
+    libfribidi0 \
     mapnik-utils \
     osmium-tool \
     python-is-python3 \

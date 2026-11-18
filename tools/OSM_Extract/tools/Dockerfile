@@ -4,6 +4,7 @@ LABEL maintainer="arestabrucs"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt update -qq && apt install -y --no-install-recommends \
     curl \
+    fonts-dejavu-core \
     fonts-noto-cjk \
     fonts-noto-core \
     git \
@@ -24,6 +25,7 @@ RUN apt update -qq && apt install -y --no-install-recommends \
     cmake \
     libbz2-dev \
     libexpat1-dev \
+    libfribidi0 \
     python3-dev \
     zlib1g-dev \
     gdal-bin \
