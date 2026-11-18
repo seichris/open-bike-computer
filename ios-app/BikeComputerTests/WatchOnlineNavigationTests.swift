@@ -84,7 +84,10 @@ enum WatchOnlineNavigationTests {
         let cyclingProvider = WatchOnlineRouteProvider(
             directionsFactory: { cyclingDirections.make($0) }
         )
-        cyclingDirections.outcomes = [.routes([TestMapKitRoute()])]
+        // MapKit's own advice on a cycling route is not a car notice.
+        cyclingDirections.outcomes = [
+            .routes([TestMapKitRoute(advisories: ["Steep climb ahead"])]),
+        ]
         let cyclingOptions = try await cyclingProvider.routes(
             for: providerRequest()
         )
@@ -93,7 +96,7 @@ enum WatchOnlineNavigationTests {
                 cyclingOptions.count == 1 &&
                 cyclingOptions.first?.notice == nil,
             "cycling directions where Apple Maps has them make one request " +
-                "and carry no notice"
+                "and carry no car notice"
         )
     }
 
@@ -945,12 +948,14 @@ private nonisolated final class TestMapKitRoute: MKRoute {
     private let storedHasHighways: Bool
     private let storedHasTolls: Bool
     private let storedName: String
+    private let storedAdvisories: [String]
 
     init(
         distance: CLLocationDistance = 380,
         highways: Bool = false,
         tolls: Bool = false,
-        name: String = "Test route"
+        name: String = "Test route",
+        advisories: [String] = []
     ) {
         let coordinates = [
             CLLocationCoordinate2D(latitude: 25.1972, longitude: 55.2744),
@@ -968,6 +973,7 @@ private nonisolated final class TestMapKitRoute: MKRoute {
         storedHasHighways = highways
         storedHasTolls = tolls
         storedName = name
+        storedAdvisories = advisories
         super.init()
     }
 
@@ -978,6 +984,7 @@ private nonisolated final class TestMapKitRoute: MKRoute {
     override var name: String { storedName }
     override var hasHighways: Bool { storedHasHighways }
     override var hasTolls: Bool { storedHasTolls }
+    override var advisoryNotices: [String] { storedAdvisories }
 }
 
 private nonisolated final class TestMapKitRouteStep: MKRoute.Step {
