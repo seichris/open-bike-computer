@@ -7,46 +7,6 @@ enum WatchOnlineRouteProviderError: Error, Equatable {
     case invalidRequest
 }
 
-/// Apple Maps has no cycling directions in some regions, the UAE among them.
-/// There a cycling request fails with `MKError.serverFailure`, and the error's
-/// `MKDirectionsErrorCode` reports the area as out of coverage (8). A route
-/// that does not exist between the points reports not reachable (16) with the
-/// same `MKError` code (seen with macOS 26, iOS 26.5 and watchOS 27 MapKit;
-/// the key is not documented). Only the out-of-coverage failure falls back to
-/// car directions, which avoid highways and tolls because a bike may not use
-/// them. If Apple drops the key, the rider sees the cycling failure as before.
-///
-/// The iPhone makes the same decision in `CyclingDirectionsFallback`, which
-/// lives in its coordinator and is not compiled into the Watch app.
-enum WatchCyclingDirectionsFallback {
-    static let directionsErrorCodeKey = "MKDirectionsErrorCode"
-    static let outOfCoverageCode = 8
-    /// Shown while the active route is car directions. Same text as iPhone.
-    static let routeNotice =
-        "No cycling directions here: car route avoiding highways and tolls"
-
-    static func isOutOfCoverage(_ error: Error) -> Bool {
-        let error = error as NSError
-        guard error.domain == MKErrorDomain else { return false }
-        return (error.userInfo[directionsErrorCodeKey] as? NSNumber)?
-            .intValue == outOfCoverageCode
-    }
-
-    /// The same endpoints and alternatives as car directions.
-    static func carRequest(
-        for request: MKDirections.Request
-    ) -> MKDirections.Request {
-        let car = MKDirections.Request()
-        car.source = request.source
-        car.destination = request.destination
-        car.requestsAlternateRoutes = request.requestsAlternateRoutes
-        car.transportType = .automobile
-        car.highwayPreference = .avoid
-        car.tollPreference = .avoid
-        return car
-    }
-}
-
 /// One MapKit directions calculation. Tests replace it.
 @MainActor
 protocol WatchDirectionsCalculating: AnyObject {
@@ -91,9 +51,13 @@ final class WatchOnlineRouteProvider: NavigationRouteProvider {
         self.directionsFactory = directionsFactory
     }
 
+    /// Cycling directions, or car directions where Apple Maps has none for
+    /// the area (`CyclingDirectionsFallback`, shared with iPhone). Every call,
+    /// a reroute too, asks for cycling first, so a ride returns to cycling
+    /// directions where coverage resumes.
     func routes(
         for request: NavigationRouteRequestV1
-    ) async throws -> NavigationRouteResponseV1 {
+    ) async throws -> [NavigationRouteOptionV1] {
         guard request.transportType == .cycling,
               request.source.coordinate.isValid,
               request.destination.coordinate.isValid else {
@@ -106,49 +70,56 @@ final class WatchOnlineRouteProvider: NavigationRouteProvider {
         directionsRequest.destination = Self.mapItem(for: request.destination)
         directionsRequest.transportType = .cycling
         directionsRequest.requestsAlternateRoutes = request.requestAlternatives
-        let carRequest = WatchCyclingDirectionsFallback.carRequest(
-            for: directionsRequest
-        )
 
         let mapKitRoutes: [MKRoute]
-        let directions: NavigationRouteDirectionsV1
-        switch request.directions {
-        case .carAvoidingHighwaysAndTolls:
-            mapKitRoutes = try await calculate(carRequest)
-            directions = .carAvoidingHighwaysAndTolls
-        case .cycling:
-            do {
-                mapKitRoutes = try await calculate(directionsRequest)
-                directions = .cycling
-            } catch let cyclingError {
-                guard WatchCyclingDirectionsFallback.isOutOfCoverage(
-                    cyclingError
-                ) else {
-                    throw cyclingError
-                }
-                guard generation == cancellationGeneration,
-                      !Task.isCancelled else {
-                    throw CancellationError()
-                }
-                // If the car request fails too, report why cycling failed,
-                // as the iPhone does.
-                let carRoutes = (try? await calculate(carRequest)) ?? []
-                guard !carRoutes.isEmpty else { throw cyclingError }
-                mapKitRoutes = carRoutes
-                directions = .carAvoidingHighwaysAndTolls
+        do {
+            mapKitRoutes = try await calculate(directionsRequest)
+        } catch let cyclingError {
+            guard CyclingDirectionsFallback.usesCarDirections(
+                after: cyclingError,
+                requested: directionsRequest.transportType
+            ) else {
+                throw cyclingError
             }
+            guard generation == cancellationGeneration,
+                  !Task.isCancelled else {
+                throw CancellationError()
+            }
+            let carRoutes: [MKRoute]
+            do {
+                carRoutes = try await calculate(
+                    CyclingDirectionsFallback.carRequest(for: directionsRequest)
+                )
+            } catch {
+                throw CyclingDirectionsFallback.isTransient(error)
+                    ? error
+                    : cyclingError
+            }
+            // Routes without highways or tolls first; the car request always
+            // asks for alternatives so that one can be found.
+            let preferred = CyclingDirectionsFallback.cyclingFriendlyRoutes(
+                from: carRoutes
+            )
+            guard !preferred.isEmpty else { throw cyclingError }
+            mapKitRoutes = request.requestAlternatives
+                ? preferred
+                : Array(preferred.prefix(1))
         }
-        let routes = try mapKitRoutes.map {
-            try WatchMapKitRouteAdapter.route(
-                from: $0,
-                source: request.source.coordinate,
-                sourceLabel: request.source.label,
-                destinationLabel: request.destination.label,
-                localeIdentifier: request.localeIdentifier
+        let options = try mapKitRoutes.map { mapKitRoute in
+            NavigationRouteOptionV1(
+                route: try WatchMapKitRouteAdapter.route(
+                    from: mapKitRoute,
+                    source: request.source.coordinate,
+                    sourceLabel: request.source.label,
+                    destinationLabel: request.destination.label,
+                    localeIdentifier: request.localeIdentifier
+                ),
+                notice: (mapKitRoute as? CyclingFallbackCarRoute)?
+                    .advisoryNotices.first
             )
         }
-        guard !routes.isEmpty else { throw WatchOnlineRouteProviderError.noRoute }
-        return NavigationRouteResponseV1(routes: routes, directions: directions)
+        guard !options.isEmpty else { throw WatchOnlineRouteProviderError.noRoute }
+        return options
     }
 
     func cancel() {
