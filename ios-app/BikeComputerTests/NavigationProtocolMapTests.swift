@@ -4909,6 +4909,115 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testUnknownInstalledMapRetryBypassesSelection() async {
+        let signedFixtureURL = URL(
+            fileURLWithPath: "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
+        )
+        let signedFixtureText = try! String(contentsOf: signedFixtureURL, encoding: .utf8)
+        let signedFixture = Dictionary(
+            uniqueKeysWithValues: signedFixtureText.split(separator: "\n").map { line in
+                let parts = line.split(
+                    separator: "=",
+                    maxSplits: 1,
+                    omittingEmptySubsequences: false
+                )
+                return (String(parts[0]), String(parts[1]))
+            }
+        )
+        let signedStream = Data(hex: signedFixture["stream_hex"]!)!
+        let signedPublicKey = Data(hex: signedFixture["public_key_x963_hex"]!)!
+        let signedPublicKeyHash = FirmwareUpdateManager.sha256Hex(signedPublicKey)
+        let signedArtifact = OfflineMapArtifact(
+            format: OfflineMapArtifact.bikeMapStreamFormat,
+            mediaType: "application/vnd.openbikecomputer.map-stream",
+            filename: "golden-map.bmap",
+            objectKey: "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
+                "\(signedPublicKeyHash)/\(String(repeating: "1", count: 64))/" +
+                "\(String(repeating: "2", count: 64))/" +
+                "\(signedFixture["signed_manifest_receipt"]!).bmap",
+            bytes: Int64(signedStream.count),
+            sha256: FirmwareUpdateManager.sha256Hex(signedStream),
+            manifestReceipt: signedFixture["manifest_receipt"],
+            signedManifestReceipt: signedFixture["signed_manifest_receipt"],
+            signatureKeyId: "map-test-2026-01",
+            signatureKeySha256: signedPublicKeyHash,
+            producerBuildSha256: String(repeating: "1", count: 64),
+            producerImageDigest: "sha256:" + String(repeating: "2", count: 64),
+            requiredIosBuild: "100",
+            requiredIosGitSha: String(repeating: "a", count: 40),
+            requiredIosBuildSha256: String(repeating: "b", count: 64),
+            requiredFirmwareVersion: nil,
+            requiredFirmwareBuild: nil,
+            requiredFirmwareGitSha: nil
+        )
+        let signedTrustStore = BikeMapStreamTrustStore(publicKeysByID: [
+            "map-test-2026-01": signedPublicKey,
+        ])
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("unknown-map-retry-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let packURL = directory.appendingPathComponent(signedArtifact.filename)
+        try! signedStream.write(to: packURL)
+        try! SavedMapArtifactMetadataStore.save(SavedMapArtifactMetadata(
+            schemaVersion: 1, mapID: "golden-map", displayName: "Golden map",
+            localArtifactFilename: packURL.lastPathComponent,
+            streamFormatVersion: 1, rendererFormatVersion: nil,
+            jobID: nil, serverURLString: nil, clientInstallationID: nil,
+            primaryArtifact: signedArtifact, legacyArtifact: nil,
+            lastTransferProtocol: 2, lastTransferStreamFormat: 1,
+            lastTransferSessionID: signedArtifact.signedManifestReceipt,
+            lastBackgroundTaskID: nil, lastDeviceSequence: nil, lastDeviceState: nil,
+            lastDeviceStep: nil, lastDeviceStepCount: nil, lastDeviceProgress: nil,
+            expectedActiveMapID: nil, expectedActiveSessionID: nil, lastTransferOutcome: nil
+        ), for: packURL)
+        let installed = DeviceInstalledMap(
+            sessionID: signedArtifact.signedManifestReceipt!, mapID: "golden-map",
+            manifestReceipt: signedArtifact.manifestReceipt!,
+            signedManifestReceipt: signedArtifact.signedManifestReceipt!,
+            displayName: "Golden map", payloadBytes: UInt64(signedStream.count), boundsE7: nil)
+
+        for outcome in ["installed", "unknown"] {
+            let suite = "unknown-map-retry-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("golden-map", forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(outcome, forKey: "offlineMap.lastTransfer.outcome")
+            defaults.set(packURL.lastPathComponent, forKey: "offlineMap.lastTransfer.artifactFilename")
+            defaults.set(installed.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            let manager = OfflineMapManager(defaults: defaults, cacheDirectory: directory,
+                mapStreamTrustStore: signedTrustStore)
+            let store = DeviceMapOperationStore(url: directory.appendingPathComponent(outcome + ".json"))
+            manager.useMapOperationStoreForTesting(store)
+            let ble = MapLibraryCommandTestBLEManager()
+            ble.publish(maps: [installed], selected: installed.sessionID, command: "previous")
+            assertEqual(manager.needsMapInstallationRetry(packURL), outcome == "unknown",
+                        "only an unknown result offers an installation retry")
+            defaults.set("different-session", forKey: "offlineMap.lastTransfer.sessionId")
+            assert(!manager.needsMapInstallationRetry(packURL), "retry belongs to the exact signed artifact")
+            defaults.set(installed.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+
+            manager.transferCachedPack(at: packURL, bleManager: ble)
+            let deadline = Date().addingTimeInterval(3)
+            while manager.isDeviceTransferBusy && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            assert(!manager.isDeviceTransferBusy, "cached transfer settles without a device")
+            let records = try! store.records()
+            if outcome == "installed" {
+                assert(records.isEmpty && manager.statusMessage == "map already in use",
+                       "normal installed maps retain the selection shortcut")
+            } else {
+                assert(records.count == 1 && records.first?.sessionID == installed.sessionID,
+                       "retry of an unknown result creates a fresh upload operation despite installed inventory")
+                assert(manager.errorMessage != nil && manager.lastTransferOutcome != "installed",
+                       "a disconnected test device cannot manufacture installation proof")
+            }
+        }
+    }
+
+    @MainActor
     static func testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect() {
         let boot = "0123456789abcdef0123456789abcdef"
         let otherBoot = "fedcba9876543210fedcba9876543210"

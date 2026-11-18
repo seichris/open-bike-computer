@@ -880,6 +880,7 @@ struct NavigationProtocolTests {
             return
         }
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
+            await testUnknownInstalledMapRetryBypassesSelection()
             testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect()
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
@@ -1191,6 +1192,7 @@ struct NavigationProtocolTests {
         await testExplicitTransferWaitsForPassiveMapCleanup()
         await testOtherManagersSerializeWithPassiveMapCleanup()
         await testTerminalJournalCleanupConvergesFromFreshIdleStatus()
+        await testUnknownInstalledMapRetryBypassesSelection()
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerKeepsLegacyBindingAcrossSameBootReconnect()
         testOfflineMapManagerReconcilesInterruptedActivation()
