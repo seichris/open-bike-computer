@@ -8853,6 +8853,15 @@ private struct WorkoutContractTestSuite {
             "accessibility controls must reflow and remain scrollable in compact-height layouts"
         )
         expect(
+            compactNavigation.contains(
+                "privatevarcontrols:someView{VStack(spacing:8){controlRowifrecordingCoordinator.canContinueOnIPhone{WorkoutContinueOnIPhoneButton(coordinator:recordingCoordinator){RideControlLabel(\"ContinueoniPhone\",systemImage:\"iphone\")}}}}"
+            )
+                && compactNavigation.components(
+                    separatedBy: "WorkoutContinueOnIPhoneButton("
+                ).count == 2,
+            "Continue on iPhone must take its own full-width row below the ride controls, never a slot in the workout control row"
+        )
+        expect(
             compactWorkout.contains("case.activationFailed:")
                 && compactWorkout.contains("Text(\"TryAgain\")")
                 && compactWorkout.contains("watchAvailability.activate()"),

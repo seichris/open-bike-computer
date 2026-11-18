@@ -701,8 +701,21 @@ struct RideMetricsPanel: View {
         .accessibilityElement(children: .combine)
     }
 
-    @ViewBuilder
+    /// Continue on iPhone takes a full-width row of its own below the ride
+    /// controls, so its label neither wraps nor squeezes theirs.
     private var controls: some View {
+        VStack(spacing: 8) {
+            controlRow
+            if recordingCoordinator.canContinueOnIPhone {
+                WorkoutContinueOnIPhoneButton(coordinator: recordingCoordinator) {
+                    RideControlLabel("Continue on iPhone", systemImage: "iphone")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var controlRow: some View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(spacing: 8) {
                 navigationControl
@@ -731,9 +744,6 @@ struct RideMetricsPanel: View {
     @ViewBuilder
     private var workoutControls: some View {
         let presentation = workoutStore.presentation
-        if recordingCoordinator.canContinueOnIPhone {
-            WorkoutContinueOnIPhoneButton(coordinator: recordingCoordinator)
-        }
         if presentation.connectionState == .disconnected && recordingCoordinator.canCheckFitness {
             WorkoutFitnessCheckView(coordinator: recordingCoordinator)
         } else if presentation.isWorkoutActive {
