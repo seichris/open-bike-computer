@@ -124,6 +124,12 @@ final class TestRoute: MKRoute {
     private let storedPolyline: MKPolyline
     private let storedDistance: CLLocationDistance
     private let storedExpectedTravelTime: TimeInterval
+    /// What MapKit reports for a car route on highways or toll roads.
+    var simulatedHighways = false
+    var simulatedTolls = false
+
+    override var hasHighways: Bool { simulatedHighways }
+    override var hasTolls: Bool { simulatedTolls }
 
     init(
         instructions: String,

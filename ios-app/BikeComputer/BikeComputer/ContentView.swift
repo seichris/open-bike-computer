@@ -316,6 +316,13 @@ struct ContentView: View {
                             .padding(.top, 8)
                     }
 
+                    if coordinator.isNavigating,
+                       let notice = coordinator.activeRouteNotice {
+                        activeRouteNoticeBanner(notice)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 6)
+                    }
+
                     if rideAutomationCoordinator.startPrompt != nil {
                         rideDetectionStartPrompt
                             .padding(.horizontal, 14)
@@ -2293,6 +2300,23 @@ struct ContentView: View {
             instruction: coordinator.currentInstruction,
             isCompactHeight: isCompactHeight
         )
+    }
+
+    /// The active route is car directions standing in for unavailable
+    /// cycling directions, including after a reroute.
+    private func activeRouteNoticeBanner(_ notice: String) -> some View {
+        Label(notice, systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                .ultraThinMaterial,
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .accessibilityIdentifier("activeRouteNotice")
     }
 
     private var shouldShowOfflineMapStatusChip: Bool {
