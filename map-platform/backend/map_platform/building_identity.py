@@ -34,6 +34,7 @@ BUILDING_NORMALIZATION_ALGORITHM_VERSION = 2
 # boundary from outside, where the clip is a GeometryCollection. A v2 cache
 # omits such buildings from those blocks and must not be reused.
 BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION = 3
+DENSE_BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION = 4
 BUILDING_FMB_VERSION = 4
 BUILDING_GEOMETRY_ENGINE_VERSION = "2.0.7"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -154,6 +155,7 @@ def selected_building_block_cache_identity(
     rules_path: Path,
     scope_plan: ScopePlan,
     calibration_generation: dict[str, Any],
+    allow_dense_buildings: bool = False,
 ) -> dict[str, Any]:
     """Return the request-independent identity for canonical building blocks."""
     calibration = selected_calibration_identity(
@@ -191,7 +193,10 @@ def selected_building_block_cache_identity(
         "relationRetryBufferMeters": scope_policy["relationRetryBufferMeters"],
         "maxGeometryBufferMeters": scope_policy["maxGeometryBufferMeters"],
         "normalizationAlgorithmVersion": BUILDING_NORMALIZATION_ALGORITHM_VERSION,
-        "blockEncodingAlgorithmVersion": BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION,
+        "blockEncodingAlgorithmVersion": (
+            DENSE_BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION
+            if allow_dense_buildings else BUILDING_BLOCK_ENCODING_ALGORITHM_VERSION
+        ),
         "geometryEngine": {
             "name": "shapely",
             "version": BUILDING_GEOMETRY_ENGINE_VERSION,

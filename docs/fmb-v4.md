@@ -37,16 +37,22 @@ all four critical sections:
 The section starts with:
 
 ```text
-buildingCount               u16, maximum 12,288
+buildingCount               u16, maximum 12,288 (20,480 on dense development FMB v4)
 reserved                    u16 = 0
-declaredPointCount          u32, maximum 131,072
+declaredPointCount          u32, maximum 131,072 (147,456 on dense development FMB v4)
 ```
 
-The producer, backend validator, and firmware stream validator enforce the
-12,288-record ceiling together. The point-count and 2 MiB block-size ceilings
-remain independent hard limits. Exceeding any limit fails the target-3 build
-with a typed error; the producer never truncates or silently downgrades the
-building table.
+Production and FMB v5/v6 keep the standard record and point ceilings. The
+development producer can encode up to 20,480 records and 147,456 points in FMB
+v4 (renderer target 3). It uses a separate building-block cache identity. A
+package containing any tile above a standard ceiling carries a signed minimum
+firmware version of 0.3.5 and is outside the durable-map compatibility contract.
+The firmware stream validator applies the higher bounds only to FMB v4.
+Production catalog promotion rejects dense development blocks.
+
+The 2 MiB block-size ceiling remains an independent hard limit.
+Exceeding a limit fails the build with a typed error. The producer preserves the
+complete admitted building table.
 
 Every building fragment has one fixed 18-byte record followed by its rings:
 

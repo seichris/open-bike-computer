@@ -131,6 +131,25 @@ def one_building_fmb4(
     return bytes(data)
 
 
+def repeated_building_fmb4(record_count: int, *, points_per_ring: int = 4) -> bytes:
+    data = bytearray(one_building_fmb4())
+    entry, offset, length = _section_span(data, 4)
+    record = bytes(data[offset + 8:offset + length])
+    if points_per_ring != 4:
+        # Repeat the fixture's first coordinate to exercise the declared point
+        # budget while preserving the same bounds and a zeroed wall mask.
+        points = record[22:38] + record[22:26] * (points_per_ring - 4)
+        record = (
+            record[:18] + struct.pack("<HBB", points_per_ring, 0, 0)
+            + points + bytes((points_per_ring + 7) // 8)
+        )
+    section = struct.pack("<HHI", record_count, 0, record_count * points_per_ring) + record * record_count
+    data[offset:] = section
+    struct.pack_into("<I", data, entry + 8, len(section))
+    _refresh_section_crc(data, entry, offset, len(section))
+    return bytes(data)
+
+
 def fmb6_with_pois(
     poi_records: tuple[tuple[int, int, int, int, int, int], ...] = (
         (12, 34, 2, 3, 2, 0),

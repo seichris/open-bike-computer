@@ -92,6 +92,9 @@ Not covered:
 
 - Renderer targets 1 and 2. No supported app requests them, and the producer
   leaves their manifests unmarked.
+- Development maps with an [FMB v4 building tile](fmb-v4.md#type-4-buildings)
+  above 12,288 records or 131,072 points. These maps carry a signed minimum
+  firmware version of 0.3.5. Production catalog promotion rejects them.
 - A profile made on a channel it does not list. The producer leaves that map
   unmarked, and CI checks that the generation policies never publish such a
   profile.
