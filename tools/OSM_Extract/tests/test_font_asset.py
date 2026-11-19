@@ -1,9 +1,12 @@
+import json
 import os
 import pathlib
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -28,7 +31,7 @@ class FontAssetPolicyTests(unittest.TestCase):
     def test_font_tiers_start_at_the_previous_large_size(self):
         self.assertEqual(FONT_SIZES, (18, 22, 26))
 
-    def test_native_arabic_road_labels_work_with_latin_and_cjk_preferences(self):
+    def require_worker_fonts(self):
         if (
             os.getenv("OBC_REQUIRE_WORKER_FONTS") != "1"
             and not pathlib.Path(
@@ -36,6 +39,9 @@ class FontAssetPolicyTests(unittest.TestCase):
             ).is_file()
         ):
             self.skipTest("Linux map worker fonts are unavailable")
+
+    def test_native_arabic_road_labels_work_with_latin_and_cjk_preferences(self):
+        self.require_worker_fonts()
         faces = {face.name: face.face_id for face in default_font_faces()}
         for text, language, face, visual_prefix in (
             ("Main Street", "en", "latin", ""),
@@ -66,6 +72,65 @@ class FontAssetPolicyTests(unittest.TestCase):
                         ]
                         actual = [glyph.glyph_id for glyph in run.glyphs]
                         self.assertEqual(actual[:len(expected)], expected)
+
+    def test_packaged_fonts_build_multilingual_map_with_unrenderable_labels(self):
+        self.require_worker_fonts()
+        unsupported = "Unrenderable \U0010fffd"
+        names = ["Οδός Αθηνάς", "ถนนสุขุมวิท", "नई दिल्ली", "דרך יפו", "улица Арбат"]
+        roads = [
+            ("1", unsupported, {"other_tags": f'"name:el"=>"{names[0]}"', "ref": "A1"}),
+            *((str(index), name, {}) for index, name in enumerate(names[1:], 2)),
+            ("6", unsupported, {}),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            features = [
+                {
+                    "type": "Feature",
+                    "properties": {"osm_id": key, "highway": "primary", "name": name, **tags},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[100, index * 300], [3000, index * 300]],
+                    },
+                }
+                for index, (key, name, tags) in enumerate(roads, 1)
+            ]
+            for layer, features_for_layer in (("lines", features), ("polygons", [])):
+                (root / f"map_{layer}.geojson").write_text(
+                    json.dumps({"type": "FeatureCollection", "features": features_for_layer}),
+                    encoding="utf-8",
+                )
+            finished = subprocess.run(
+                [
+                    sys.executable, "extract_features.py",
+                    "0", "0", "0.03", "0.03", str(root / "map"), str(root / "out"),
+                    "--renderer-format", "2", "--preferred-language", "el",
+                ],
+                cwd=ROOT / "scripts", text=True, capture_output=True, timeout=120,
+            )
+            self.assertEqual(finished.returncode, 0, finished.stdout + finished.stderr)
+            block, = (root / "out").rglob("*.fmb")
+            block_data = block.read_bytes()
+            for name in (*names, "A1"):
+                self.assertIn(name.encode(), block_data)
+            self.assertNotIn(unsupported.encode(), block_data)
+            stats = next(line for line in finished.stdout.splitlines() if line.startswith("LABEL_STATS:"))
+            self.assertEqual(json.loads(stats.partition(":")[2])["diagnostics"]["unsupportedLabelVariants"], 2)
+            font = (root / "out" / "assets" / "street-labels.fma").read_bytes()
+            self.assertGreater(len(default_font_faces()), 16)
+            self.assertTrue(1 <= font[7] <= 16)
+            self.assertIn(b"NotoSansThai", font)
+            self.assertIn(b"NotoSansDevanagari", font)
+
+    def test_glyph_budget_rejects_a_variant_without_partially_allocating_it(self):
+        self.require_worker_fonts()
+        builder = FontPackBuilder(faces=(default_font_faces()[0],))
+        builder.shape("A")
+        with patch("font_asset.MAX_DISTINCT_GLYPHS", 2):
+            self.assertIsNone(builder.measure_supported_widths("ABC"))
+            self.assertEqual(builder.glyph_count, 1)
+            self.assertIsNotNone(builder.measure_supported_widths("AB"))
+            self.assertEqual(builder.glyph_count, 2)
 
 
 @unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")
