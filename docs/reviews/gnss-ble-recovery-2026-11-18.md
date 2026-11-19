@@ -236,10 +236,11 @@ Executed locally on this Mac unless marked otherwise; none reused results.
 
 ## Hardware validation
 
-Not started. These items follow the retests owed by the first round and
-Chris's follow-up request. Each flash waits for Chris's approval of the exact
-image and board, after the USB identity and the live device state are
-confirmed.
+All six planned checks passed on November 18–19, 2026. Both candidate images
+ran build 107 from `f0b2a4d0e7501ee5e490eac909242d762bfee271`. The GNSS
+image (`6AF4FB93`) used firmware SHA-256 `57732194…8cb4`. The plain 1.75
+production image (`ADA131F1`) used `50b7c892…4d58`. Bicino Dev used the app
+sources from the candidate, built at `95bbc7a4`.
 
 **Test-only fault image (never merged).** Branch
 `claude/gnss-ble-recovery-fault-test` holds one test-only commit on top of the
@@ -256,25 +257,29 @@ It records `ble test_fault`, with `phase` `armed`, `ack_withheld` and
 `host_reset_scheduled`. The candidate image replaces it as soon as those tests
 are done.
 
-| Check | Board and image | Expectation | Result |
-| --- | --- | --- | --- |
-| Host reset recovery (F1) | GNSS 1.75, fault image | `ble host_reset` `reset` (12), then `synced`/`advertising`; the phone reconnects to the same peripheral without pairing | pending |
-| Acknowledgement recovery (app) | GNSS 1.75, fault image, new Bicino Dev | one `ride_command_ack_retry` (5 members), then the device's `duplicate` acknowledgement; no `criticalAdmissionFailed`, no reconnect | pending |
-| Bluetooth lost mid-route, then Stop and reconnect (F2) | GNSS 1.75, candidate | Distance, Elapsed and Route Left cleared when the link drops; no old route totals after Stop and reconnect | pending |
-| Parked and stopped sleep (F3) | GNSS 1.75, candidate, Disconnected Sleep 2 min | stationary with a fix: sleeps after 2 minutes and records no movement | pending |
-| Phone-off ride (F3) | GNSS 1.75, candidate, iPhone and Watch off | stays on and active while moving; dims and turns off at stops (15/45 s); sleeps about 5 minutes after the last movement; `power gnss_motion` `moving`/`stationary` | pending, timing set by Chris |
-| Existing timeout, no receiver | plain 1.75, candidate | disconnected sleep after 2 minutes, unchanged | pending |
+| Check | Board and image | Result |
+| --- | --- | --- |
+| Forced BLE host reset (F1) | GNSS 1.75, fault image `7586270c` | **Pass.** After reason 12, advertising resumed. Ultra reconnected and authenticated in about 4 seconds without pairing. |
+| Withheld workout acknowledgement | GNSS 1.75, same fault image and Bicino Dev | **Pass.** One retry sent the five-member command group and received the device's duplicate acknowledgement. The link stayed connected and the next command was acknowledged in 122 ms. |
+| Mid-route BLE loss, Stop and reconnect (F2) | GNSS 1.75, candidate | **Pass.** The route stopped while disconnected and the clear was acknowledged after reconnect. Ride Stats showed zero totals and no Route Left. Display clearing latency during the outage was unobserved. |
+| Parked sleep (F3) | GNSS 1.75, candidate, onboard fix and battery power | **Pass.** Shutdown began 120.383 s after the last BLE link dropped. The retained audit linked the BOOT press to confirmed deep sleep, GPIO0 wake and a sealed recorder. |
+| Standalone GNSS ride (F3) | GNSS 1.75, candidate | **Pass across two legs.** With both companions powered off for the second leg, the board stayed on the same boot throughout the roughly 11-minute ride and kept the display active during sustained movement. In the first leg, both companions were disconnected at the stop, and the board slept about five minutes after the last moving fix. The retained audit confirmed deep sleep and BOOT wake. The phone reconnected before the sleep window elapsed after the second leg. |
+| Existing timeout on the plain 1.75 | 175-b, production candidate, battery power | **Pass.** Shutdown began 120.592 s after the last BLE link dropped. The retained audit confirmed deep sleep and GPIO0 wake. The production boot checkpoint reported ready and Ultra authenticated after wake. |
 
-- 2.06 and e-paper are built by CI only; no board is planned.
-- The reason-12 trigger stays a separate investigation.
-- Diagnostics evidence uses the app's exported bundles and their whitelisted
-  fields only, never raw phone console or receiver/NMEA logs.
+The parked GNSS, standalone ride, and plain 1.75 support bundles verified both
+iPhone and firmware sources with 34/34, 62/62, and 51/51 chunks delivered,
+respectively. The verifier reported recording coverage limits. Raw logs are
+retained locally.
+
+The 2.06 and e-paper profiles are covered by CI builds. The original reason-12
+trigger remains a separate investigation.
 
 ## State
 
-**Blocked** on the hardware checks above (owner: Chris).
-- Findings: 0 active at P0-P2 after pass 4; ACK-FIRST-SEND and TOT-2 (P3) are
-  deferred.
-- Draft PR [#817](https://github.com/seichris/open-bike-computer/pull/817)
-  stays a draft until the hardware checks pass. It is then marked ready, and
-  merges once the exact candidate's `CI Gate` is green.
+The hardware gate passed. The branch update onto `31f05db4` preserved the PR's
+runtime changes and merged the two overlapping test files without conflicts.
+Physical evidence applies to the images listed above. The integrated revision
+requires the ready-for-review run's `CI Gate`.
+
+Findings after the user-directed follow-up review remain at zero active P0–P2.
+ACK-FIRST-SEND and TOT-2 (P3) are deferred.
