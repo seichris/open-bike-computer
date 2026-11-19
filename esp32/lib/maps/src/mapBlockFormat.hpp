@@ -26,6 +26,12 @@ constexpr uint32_t kMaximumDenseFmb4Buildings = 20480;
 constexpr uint32_t kMaximumBuildingRings = 32;
 constexpr uint32_t kMaximumBuildingPoints = 131072;
 constexpr uint32_t kMaximumDenseFmb4BuildingPoints = 147456;
+// Expanded tiles travel only through the development map signing channel.
+#if defined(MAP_STREAM_DEVELOPMENT_TRUST) && MAP_STREAM_DEVELOPMENT_TRUST
+constexpr bool kDenseFmb4BuildingsEnabled = true;
+#else
+constexpr bool kDenseFmb4BuildingsEnabled = false;
+#endif
 constexpr uint32_t kMaximumPois = 16384;
 
 // Performs the same structural walk as the renderer without allocating or

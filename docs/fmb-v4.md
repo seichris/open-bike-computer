@@ -47,8 +47,12 @@ development producer can encode up to 20,480 records and 147,456 points in FMB
 v4 (renderer target 3). It uses a separate building-block cache identity. A
 package containing any tile above a standard ceiling carries a signed minimum
 firmware version of 0.3.5 and is outside the durable-map compatibility contract.
-The firmware stream validator applies the higher bounds only to FMB v4.
-Production catalog promotion rejects dense development blocks.
+Only profiles that trust the development map signer accept these larger FMB v4
+tiles. Production firmware and catalog promotion enforce the standard limits.
+Before widening production reader admission, run the existing
+[renderer benchmark and physical acceptance matrix](renderer-benchmark.md#final-physical-matrix)
+with a dense tile on the 1.75-inch and 2.06-inch boards. Confirm PSRAM
+headroom, allocation behavior, and rendering latency for each board.
 
 The 2 MiB block-size ceiling remains an independent hard limit.
 Exceeding a limit fails the build with a typed error. The producer preserves the

@@ -240,9 +240,13 @@ int main() {
 
   const auto denseV4 =
       repeatBuilding(validV4, map_block_format::kMaximumDenseFmb4Buildings);
+  assert(map_block_format::validate(denseV4.data(), denseV4.size()) ==
+         map_block_format::kDenseFmb4BuildingsEnabled);
   assert(map_building_block::decode(denseV4.data(), denseV4.size(),
-                                    buildingBlock, &buildingError));
-  assert(buildingBlock.stats.records == map_block_format::kMaximumDenseFmb4Buildings);
+                                    buildingBlock, &buildingError) ==
+         map_block_format::kDenseFmb4BuildingsEnabled);
+  if (map_block_format::kDenseFmb4BuildingsEnabled)
+    assert(buildingBlock.stats.records == map_block_format::kMaximumDenseFmb4Buildings);
   const auto tooDenseV4 =
       repeatBuilding(validV4, map_block_format::kMaximumDenseFmb4Buildings + 1);
   assert(!map_block_format::validate(tooDenseV4.data(), tooDenseV4.size()));

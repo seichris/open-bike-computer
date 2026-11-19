@@ -591,11 +591,11 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
       return true;
     v3RecordsRemaining_ = littleEndian16(v3Record_);
     v4DeclaredBuildingPoints_ = littleEndian32(v3Record_ + 4);
+    const bool dense = kDenseFmb4BuildingsEnabled && binaryVersion_ == 4;
     const uint32_t maximumRecords =
-        binaryVersion_ == 4 ? kMaximumDenseFmb4Buildings : kMaximumBuildings;
-    const uint32_t maximumPoints = binaryVersion_ == 4
-                                       ? kMaximumDenseFmb4BuildingPoints
-                                       : kMaximumBuildingPoints;
+        dense ? kMaximumDenseFmb4Buildings : kMaximumBuildings;
+    const uint32_t maximumPoints =
+        dense ? kMaximumDenseFmb4BuildingPoints : kMaximumBuildingPoints;
     if (littleEndian16(v3Record_ + 2) != 0 ||
         v3RecordsRemaining_ > maximumRecords ||
         v4DeclaredBuildingPoints_ > maximumPoints)
