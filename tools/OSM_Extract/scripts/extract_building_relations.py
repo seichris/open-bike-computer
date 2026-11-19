@@ -39,6 +39,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.way_tags: dict[str, dict[str, str]] = {}
         self.part_parent_candidates: dict[str, set[str]] = {}
         self.part_parent_relations: dict[str, set[str]] = {}
+        self._single_outline_groups: dict[tuple, dict[str, frozenset]] = {}
         self.deferred_part_parent_candidates: dict[str, tuple[str, ...]] = {}
         self.parent_geometry_source_candidates: dict[str, set[str]] = {}
         self.parent_geometry_sources: dict[str, str] = {}
@@ -144,6 +145,19 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             return
         self.relations += 1
         canonical_parent_tags = dict(sorted(relation_tags.items()))
+        if self.audit_enabled and len(outlines) == 1 and len(parts) == len(set(parts)):
+            part_members = frozenset(
+                (member.type, member_key(member), member.role)
+                for member in relation.members
+                if member.type in {"w", "r"} and member.role in {"part", "building:part"}
+            )
+            other_members = tuple(sorted(
+                (member.type, member_key(member), member.role)
+                for member in relation.members
+                if (member.type, member_key(member), member.role) not in part_members
+            ))
+            group = (tuple(canonical_parent_tags.items()), other_members)
+            self._single_outline_groups.setdefault(group, {})[relation_key] = part_members
         for parent in outlines:
             existing_parent_tags = self.parent_tags.get(parent)
             if (
@@ -168,6 +182,31 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                     min(existing, parent) if existing is not None else parent
                 )
 
+    def _coalesce_duplicate_part_memberships(self) -> None:
+        groups = [group for group in self._single_outline_groups.values() if len(group) > 1]
+        if not groups:
+            return
+        referenced_relations = {
+            member["key"]
+            for members in self.relation_members.values()
+            for member in members
+            if member["type"] == "r"
+        }
+        canonical_ids: dict[str, str] = {}
+        for group in groups:
+            if referenced_relations.intersection(group):
+                continue
+            canonical = min(group, key=lambda key: (-len(group[key]), key))
+            # A duplicate can omit parts from the same outline. Only merge
+            # when one original relation accounts for every exact membership.
+            if all(parts <= group[canonical] for parts in group.values()):
+                canonical_ids.update((key, canonical) for key in group)
+        if canonical_ids:
+            self.part_parent_relations = {
+                part: {canonical_ids.get(relation, relation) for relation in relations}
+                for part, relations in self.part_parent_relations.items()
+            }
+
     def finalize(self) -> None:
         """Resolve explicit, standalone and redundant parts after all ways arrive.
 
@@ -178,6 +217,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         """
 
         if self.audit_enabled:
+            self._coalesce_duplicate_part_memberships()
             self.part_parents = {
                 part: next(iter(parents))
                 for part, parents in self.part_parent_candidates.items()
