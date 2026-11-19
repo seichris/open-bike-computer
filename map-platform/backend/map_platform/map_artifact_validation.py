@@ -20,8 +20,10 @@ MAX_GLYPHS_PER_RUN = 192
 MAX_GLYPH_RECORDS = 24576
 MAX_GLYPH_DIMENSION = 96
 MAX_BUILDINGS = 12288
+MAX_DENSE_BUILDINGS = 20480
 MAX_BUILDING_RINGS = 32
 MAX_BUILDING_POINTS = 131072
+MAX_DENSE_BUILDING_POINTS = 147456
 MAX_POIS = 16384
 
 _FMA_HEADER = struct.Struct("<4sBBBBIIIIII")
@@ -48,6 +50,7 @@ class BlockMetadata:
     contour_intervals: tuple[int, int] = (0, 0)
     poi_records: int = 0
     poi_categories: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
+    dense_buildings: bool = False
 
 
 def _take(data: bytes, offset: int, amount: int, context: str) -> tuple[bytes, int]:
@@ -237,7 +240,9 @@ def _validate_label_text(raw: bytes) -> str:
     return text
 
 
-def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
+def _validate_fmb_label_block(
+    path: Path, version: int, *, allow_dense_buildings: bool = False,
+) -> BlockMetadata:
     if version not in {3, 4, 5, 6}:
         raise ValueError("label block version is unsupported")
     data = path.read_bytes()
@@ -357,10 +362,10 @@ def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
                 raise ValueError("FMB v3 candidate flags are invalid")
     if cursor != len(labels_section):
         raise ValueError("FMB v3 label table has trailing bytes")
-    building_records, building_provenance = (
-        _validate_building_section(sections[3])
+    building_records, building_provenance, dense_buildings = (
+        _validate_building_section(sections[3], allow_dense=allow_dense_buildings)
         if version >= 4
-        else (0, (0, 0, 0, 0, 0))
+        else (0, (0, 0, 0, 0, 0), False)
     )
     poi_records, poi_categories = (
         _validate_poi_section(sections[5])
@@ -382,6 +387,7 @@ def _validate_fmb_label_block(path: Path, version: int) -> BlockMetadata:
         (contours.minor_interval_m, contours.index_interval_m) if contours else (0, 0),
         poi_records,
         poi_categories,
+        dense_buildings,
     )
 
 
@@ -389,8 +395,8 @@ def validate_fmb3(path: Path) -> BlockMetadata:
     return _validate_fmb_label_block(path, 3)
 
 
-def validate_fmb4(path: Path) -> BlockMetadata:
-    return _validate_fmb_label_block(path, 4)
+def validate_fmb4(path: Path, *, allow_dense_buildings: bool = False) -> BlockMetadata:
+    return _validate_fmb_label_block(path, 4, allow_dense_buildings=allow_dense_buildings)
 
 
 def validate_fmb5(path: Path) -> BlockMetadata:
@@ -439,11 +445,18 @@ def _validate_poi_section(section: bytes) -> tuple[int, tuple[int, int, int, int
 
 
 def _validate_building_section(
-    section: bytes,
-) -> tuple[int, tuple[int, int, int, int, int]]:
+    section: bytes, *, allow_dense: bool,
+) -> tuple[int, tuple[int, int, int, int, int], bool]:
     header, cursor = _take(section, 0, 8, "FMB v4 building header")
     record_count, reserved, declared_points = struct.unpack("<HHI", header)
-    if reserved != 0 or record_count > MAX_BUILDINGS or declared_points > MAX_BUILDING_POINTS:
+    dense_buildings = (
+        record_count > MAX_BUILDINGS or declared_points > MAX_BUILDING_POINTS
+    )
+    if dense_buildings and not allow_dense:
+        raise ValueError("dense FMB v4 block requires the development building limit")
+    maximum_records = MAX_DENSE_BUILDINGS if allow_dense else MAX_BUILDINGS
+    maximum_points = MAX_DENSE_BUILDING_POINTS if allow_dense else MAX_BUILDING_POINTS
+    if reserved != 0 or record_count > maximum_records or declared_points > maximum_points:
         raise ValueError("FMB v4 building header is invalid")
     actual_points = 0
     provenance_counts = [0, 0, 0, 0, 0]
@@ -484,7 +497,7 @@ def _validate_building_section(
                 or ring_reserved != 0
                 or (ring_index == 0 and ring_flags != 0)
                 or (ring_index > 0 and ring_flags != 1)
-                or point_count > MAX_BUILDING_POINTS - actual_points
+                or point_count > maximum_points - actual_points
             ):
                 raise ValueError("FMB v4 building ring is invalid")
             point_bytes, cursor = _take(
@@ -510,7 +523,7 @@ def _validate_building_section(
             raise ValueError("FMB v4 building bounds do not match its rings")
     if cursor != len(section) or actual_points != declared_points:
         raise ValueError("FMB v4 building section has trailing or missing data")
-    return record_count, tuple(provenance_counts)
+    return record_count, tuple(provenance_counts), dense_buildings
 
 
 def summarize_fmb4_buildings(paths: list[Path]) -> dict[str, int]:
@@ -518,7 +531,7 @@ def summarize_fmb4_buildings(paths: list[Path]) -> dict[str, int]:
 
 
 def summarize_fmb_buildings(
-    paths: list[Path], renderer_format_version: int
+    paths: list[Path], renderer_format_version: int, *, allow_dense_buildings: bool = False,
 ) -> dict[str, int]:
     validator = {
         3: validate_fmb4,
@@ -530,7 +543,10 @@ def summarize_fmb_buildings(
     counts = [0, 0, 0, 0, 0]
     records = 0
     for path in paths:
-        metadata = validator(path)
+        metadata = (
+            validate_fmb4(path, allow_dense_buildings=allow_dense_buildings)
+            if renderer_format_version == 3 else validator(path)
+        )
         records += metadata.building_records
         for index, value in enumerate(metadata.building_provenance):
             counts[index] += value
@@ -585,7 +601,10 @@ def validate_renderer_artifacts(
     map_id: str,
     files: list[dict],
     format_version: int,
-) -> None:
+    *,
+    allow_dense_buildings: bool = False,
+) -> bool:
+    dense_buildings = False
     paths = [entry["path"] for entry in files]
     from .terrain import validate_grid
     for relative in paths:
@@ -612,8 +631,11 @@ def validate_renderer_artifacts(
         font = validate_fma1(map_root / font_relative)
         for relative in fmb_paths:
             block = (
-                {2: validate_fmb3, 3: validate_fmb4, 4: validate_fmb5, 5: validate_fmb6}[format_version](map_root / relative)
+                validate_fmb4(map_root / relative, allow_dense_buildings=allow_dense_buildings)
+                if format_version == 3 else
+                {2: validate_fmb3, 4: validate_fmb5, 5: validate_fmb6}[format_version](map_root / relative)
             )
+            dense_buildings |= block.dense_buildings
             if block.profile_fingerprint != font.profile_fingerprint:
                 raise ValueError("FMB/FMA1 profile fingerprint mismatch")
             if block.maximum_glyph_id > font.glyph_count:
@@ -637,3 +659,4 @@ def validate_renderer_artifacts(
         validate_index(map_root, map_id, files)
     elif index_files:
         raise ValueError("POI index requires renderer target 5")
+    return dense_buildings

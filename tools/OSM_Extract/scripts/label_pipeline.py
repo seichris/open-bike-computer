@@ -474,6 +474,20 @@ def prepare_road_labels(
             preferred_languages=preferred_languages,
             international_fallback=international_fallback,
         )
+        text_width_pixels = None
+        if measure_text is not None:
+            text_width_pixels = 0.0
+            supported = []
+            for variant in variants:
+                widths = measure_text(variant.text, variant.language)
+                if widths is None:
+                    if diagnostics is not None:
+                        key = "unsupportedLabelVariants"
+                        diagnostics[key] = diagnostics.get(key, 0) + 1
+                    continue
+                supported.append(variant)
+                text_width_pixels = max(text_width_pixels, max(widths, default=0.0))
+            variants = tuple(supported)
         if diagnostics is not None:
             by_kind = diagnostics.setdefault("variantsByKind", {})
             by_language = diagnostics.setdefault("variantsByLanguage", {})
@@ -486,16 +500,6 @@ def prepare_road_labels(
         rank = road_rank(type_id)
         result["label_variants"] = [item.to_dict() for item in variants]
         result["label_rank"] = rank
-        text_width_pixels = None
-        if measure_text is not None:
-            text_width_pixels = max(
-                (
-                    width
-                    for item in variants
-                    for width in measure_text(item.text, item.language)
-                ),
-                default=0.0,
-            )
         result["label_candidates"] = generate_candidates(
             result["geom"],
             variants,

@@ -2135,6 +2135,7 @@ class MapBuildPipeline:
                 ),
                 scope_plan=scope_plan,
                 calibration_generation=calibration_generation,
+                allow_dense_buildings=self._allow_dense_buildings(job),
             )
             building_block_cache_identity_path = (
                 job_dir / "building-block-cache-identity.json"
@@ -2534,6 +2535,7 @@ class MapBuildPipeline:
                     ),
                     scope_plan=attempt_scope_plan,
                     calibration_generation=calibration_generation,
+                    allow_dense_buildings=self._allow_dense_buildings(job),
                 )
                 building_block_cache_identity_path.write_bytes(
                     canonical_building_json(block_cache_identity) + b"\n"
@@ -2890,6 +2892,7 @@ class MapBuildPipeline:
                 ),
                 scope_plan=global_plan,
                 calibration_generation=dict(calibration_generation),
+                allow_dense_buildings=self._allow_dense_buildings(job),
             )
             partition_path = parent_root / "partition-plan.json"
             if partition_path.is_file():
@@ -4241,6 +4244,7 @@ class MapBuildPipeline:
                 ),
                 scope_plan=scope_plan,
                 calibration_generation=calibration_document,
+                allow_dense_buildings=self._allow_dense_buildings(job),
             )
         except (OSError, TypeError, ValueError, KeyError) as exc:
             raise BuildingScopeError(
@@ -4757,6 +4761,7 @@ class MapBuildPipeline:
             ),
             scope_plan=scope_plan,
             calibration_generation=dict(calibration_generation_document),
+            allow_dense_buildings=self._allow_dense_buildings(job),
         )
         block_cache_identity_path.write_bytes(
             canonical_building_json(block_cache_identity) + b"\n"
@@ -5373,7 +5378,10 @@ class MapBuildPipeline:
                         != base_keys.compatibility
                     ):
                         return False
-                build_manifest(job, pack_root, self._pipeline_metadata())
+                build_manifest(
+                    job, pack_root, self._pipeline_metadata(),
+                    allow_dense_buildings=self._allow_dense_buildings(job),
+                )
             return True
         except (OSError, RuntimeError, SubsetReuseUnavailable, ValueError,
                 KeyError, TypeError, zipfile.BadZipFile, sqlite3.DatabaseError):
@@ -5547,7 +5555,10 @@ class MapBuildPipeline:
             indeterminate=False,
         )
         try:
-            build_manifest(job, pack_root, self._pipeline_metadata())
+            build_manifest(
+                job, pack_root, self._pipeline_metadata(),
+                allow_dense_buildings=self._allow_dense_buildings(job),
+            )
         except (OSError, RuntimeError, ValueError) as exc:
             raise SubsetReuseUnavailable(
                 "parent map renderer composition is invalid"
@@ -6021,8 +6032,6 @@ class MapBuildPipeline:
             durable_profile, self.deployment_channel
         ):
             durable_profile = None
-        if durable_profile is not None:
-            metrics[COMPATIBILITY_CONTRACT_METRIC] = self.compatibility_contract.contract
         manifest = build_manifest(
             job,
             pack_root,
@@ -6036,7 +6045,10 @@ class MapBuildPipeline:
                 if durable_profile is not None
                 else None
             ),
+            allow_dense_buildings=self._allow_dense_buildings(job),
         )
+        if "compatibility" in manifest:
+            metrics[COMPATIBILITY_CONTRACT_METRIC] = self.compatibility_contract.contract
         reserved_preview_sha256 = getattr(
             job, "_reserved_preview_sha256", None
         )
@@ -7765,6 +7777,12 @@ class MapBuildPipeline:
                 ) from exc
             raise
 
+    def _allow_dense_buildings(self, job: MapJob) -> bool:
+        return (
+            self.deployment_channel == "development"
+            and renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
+        )
+
     def _extract_features(
         self,
         job: MapJob,
@@ -7805,6 +7823,8 @@ class MapBuildPipeline:
             args.extend(
                 ["--international-fallback", labels["internationalFallback"]]
             )
+        if self._allow_dense_buildings(job):
+            args.append("--allow-dense-building-blocks")
         if scope_plan_path is not None:
             args.extend(["--scope-plan", str(scope_plan_path)])
             if planned_scope_marker is not None:

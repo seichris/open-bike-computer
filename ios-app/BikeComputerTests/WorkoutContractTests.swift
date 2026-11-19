@@ -7686,6 +7686,11 @@ private struct WorkoutContractTestSuite {
                 && !status.contains("Rerouting unavailable offline"),
             "active Watch guidance keeps the compact offline layout while surfacing online attribution and actionable Bicino failures"
         )
+        expect(
+            status.contains("navigationManager.routeDirectionsNotice")
+                && status.contains("systemImage: \"car.fill\""),
+            "active Watch guidance says when the route is car directions"
+        )
 
         let navigationOnly = sources["navigationOnly"] ?? ""
         expect(
@@ -8119,7 +8124,7 @@ private struct WorkoutContractTestSuite {
                     "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
                 )
                 && compactNavigationDetailsViewSource.contains(
-                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Endworkout\",systemImage:\"stop.fill\")}"
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Finish\",systemImage:\"stop.fill\")}"
                 )
                 && !compactNavigationDetailsViewSource.contains(
                     "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
@@ -8795,7 +8800,7 @@ private struct WorkoutContractTestSuite {
             "\"Segment\"",
             "\"Pauseworkout\"",
             "\"Resumeworkout\"",
-            "\"Endworkout\"",
+            "\"Finishworkout\"",
             "onStopNavigation",
             "onMarkSegment",
             "onPauseWorkout",
@@ -8846,6 +8851,33 @@ private struct WorkoutContractTestSuite {
                     "ifisCompactHeight&&dynamicTypeSize.isAccessibilitySize{ScrollView(.vertical,showsIndicators:true){VStack(spacing:8){metricContent"
                 ),
             "accessibility controls must reflow and remain scrollable in compact-height layouts"
+        )
+        expect(
+            compactNavigation.contains(
+                "privatevarcontrols:someView{VStack(spacing:8){controlRowifrecordingCoordinator.canContinueOnIPhone{WorkoutContinueOnIPhoneButton(coordinator:recordingCoordinator){RideControlLabel(\"ContinueoniPhone\",systemImage:\"iphone\")}}}}"
+            )
+                && compactNavigation.components(
+                    separatedBy: "WorkoutContinueOnIPhoneButton("
+                ).count == 2,
+            "Continue on iPhone must take its own full-width row below the ride controls, never a slot in the workout control row"
+        )
+        expect(
+            compactNavigation.contains(
+                "}elseifisNavigating&&workoutStore.presentation.isWorkoutActive{VStack(spacing:8){navigationControlHStack(spacing:8){workoutControls}}}else{HStack(spacing:8){navigationControlworkoutControls}}"
+            )
+                && compactNavigation.contains(
+                    "Button(action:onStopNavigation){RideControlLabel(\"Endnavigation\",systemImage:\"xmark\")}"
+                )
+                && compactNavigation.contains(
+                    "Button(action:onPauseWorkout){RideControlLabel(\"Pause\",systemImage:\"pause.fill\")}"
+                )
+                && compactNavigation.contains(
+                    "Button(action:onResumeWorkout){RideControlLabel(\"Resume\",systemImage:\"play.fill\")}"
+                )
+                && compactNavigation.contains(".accessibilityLabel(\"Pauseworkout\")")
+                && compactNavigation.contains(".accessibilityLabel(\"Resumeworkout\")")
+                && compactNavigation.contains(".accessibilityLabel(\"Finishworkout\")"),
+            "while navigating with a workout, End navigation must take its own row above the workout controls, and the workout controls' short labels must keep full VoiceOver names"
         )
         expect(
             compactWorkout.contains("case.activationFailed:")

@@ -14,6 +14,22 @@ struct MultiStopRoutePlan: Identifiable {
     let route: NavigationRouteV1
     /// The same route with the explicit phone-only saved scope.
     let draft: OfflineRouteSaveDraft
+    /// Legs that are car directions because Apple Maps has no cycling
+    /// directions there (`CyclingDirectionsFallback`).
+    let carDirectionLegs: [Int]
+    /// The car legs among them that use highways or toll roads.
+    let carDirectionLegsWithHighwaysOrTolls: [Int]
+
+    var usesCarDirections: Bool { !carDirectionLegs.isEmpty }
+
+    var carDirectionsNotice: String? {
+        guard usesCarDirections else { return nil }
+        return CyclingDirectionsFallback.planNotice(
+            carLegs: carDirectionLegs.count,
+            totalLegs: legs.count,
+            carLegsWithHighwaysOrTolls: carDirectionLegsWithHighwaysOrTolls.count
+        )
+    }
 }
 
 enum MultiStopRoutePlanFailure: Equatable {
@@ -54,8 +70,17 @@ final class MultiStopRoutePlanner: ObservableObject {
     private let now: () -> Date
     private var generation: UInt = 0
     private var activeDirections: (any NavigationDirectionsTask)?
-    private var cachedLegs: [LegKey: NavigationRouteV1] = [:]
+    private var cachedLegs: [LegKey: PlannedLeg] = [:]
     private var cachedLegOrder: [LegKey] = []
+
+    /// A calculated leg and whether it is car directions standing in for
+    /// unavailable cycling directions, and if so whether that car route uses
+    /// highways or toll roads.
+    private struct PlannedLeg {
+        let route: NavigationRouteV1
+        let usesCarDirections: Bool
+        let usesHighwaysOrTolls: Bool
+    }
 
     /// Instructions are localized, so a leg is only reused in its locale.
     private struct LegKey: Hashable {
@@ -154,7 +179,7 @@ final class MultiStopRoutePlanner: ObservableObject {
     private func continueCalculation(
         request: MultiStopRouteRequest,
         localeIdentifier: String,
-        legs: [NavigationRouteV1?],
+        legs: [PlannedLeg?],
         generation: UInt
     ) {
         guard generation == self.generation else { return }
@@ -174,7 +199,10 @@ final class MultiStopRoutePlanner: ObservableObject {
         directionsRequest.transportType = request.transportType
         directionsRequest.requestsAlternateRoutes = false
 
-        let directions = directionsFactory(directionsRequest)
+        let directions = CyclingFallbackDirectionsTask(
+            request: directionsRequest,
+            factory: directionsFactory
+        )
         activeDirections = directions
         directions.calculate { [weak self] result in
             guard let self, self.generation == generation,
@@ -184,10 +212,15 @@ final class MultiStopRoutePlanner: ObservableObject {
             case .failure(let error):
                 self.state = .failed(.leg(
                     index: index,
-                    message: Self.legFailureMessage(error, from: source, to: destination)
+                    message: Self.legFailureMessage(
+                        error,
+                        transportType: request.transportType,
+                        from: source,
+                        to: destination
+                    )
                 ))
             case .success(let routes):
-                guard let leg = Self.preferredLeg(
+                guard let (leg, mapKitRoute) = Self.preferredLeg(
                     from: routes,
                     source: source,
                     destination: destination,
@@ -199,14 +232,21 @@ final class MultiStopRoutePlanner: ObservableObject {
                     ))
                     return
                 }
-                self.store(leg, for: self.legKey(
+                let usesCarDirections = mapKitRoute is CyclingFallbackCarRoute
+                let planned = PlannedLeg(
+                    route: leg,
+                    usesCarDirections: usesCarDirections,
+                    usesHighwaysOrTolls: usesCarDirections &&
+                        (mapKitRoute.hasHighways || mapKitRoute.hasTolls)
+                )
+                self.store(planned, for: self.legKey(
                     from: source,
                     to: destination,
                     request: request,
                     localeIdentifier: localeIdentifier
                 ))
                 var legs = legs
-                legs[index] = leg
+                legs[index] = planned
                 self.continueCalculation(
                     request: request,
                     localeIdentifier: localeIdentifier,
@@ -217,7 +257,8 @@ final class MultiStopRoutePlanner: ObservableObject {
         }
     }
 
-    private func finish(request: MultiStopRouteRequest, legs: [NavigationRouteV1]) {
+    private func finish(request: MultiStopRouteRequest, legs plannedLegs: [PlannedLeg]) {
+        let legs = plannedLegs.map(\.route)
         do {
             let route = try MultiStopRouteStitcher.stitch(
                 legs: legs,
@@ -236,7 +277,13 @@ final class MultiStopRoutePlanner: ObservableObject {
                 request: request,
                 legs: legs,
                 route: route,
-                draft: draft
+                draft: draft,
+                carDirectionLegs: plannedLegs.indices.filter {
+                    plannedLegs[$0].usesCarDirections
+                },
+                carDirectionLegsWithHighwaysOrTolls: plannedLegs.indices.filter {
+                    plannedLegs[$0].usesHighwaysOrTolls
+                }
             ))
         } catch let error as MultiStopRouteStitchError {
             state = .failed(.route(message: error.localizedDescription))
@@ -265,7 +312,7 @@ final class MultiStopRoutePlanner: ObservableObject {
         )
     }
 
-    private func store(_ leg: NavigationRouteV1, for key: LegKey) {
+    private func store(_ leg: PlannedLeg, for key: LegKey) {
         cachedLegs[key] = leg
         cachedLegOrder.removeAll { $0 == key }
         cachedLegOrder.append(key)
@@ -276,12 +323,13 @@ final class MultiStopRoutePlanner: ObservableObject {
 
     /// The same preference as direct planning: fastest, then shortest, then
     /// MapKit's order, skipping any response that cannot be normalized safely.
+    /// Returns the canonical leg and the MapKit route it came from.
     private static func preferredLeg(
         from routes: [MKRoute],
         source: MultiStopRoutePlace,
         destination: MultiStopRoutePlace,
         localeIdentifier: String
-    ) -> NavigationRouteV1? {
+    ) -> (NavigationRouteV1, MKRoute)? {
         let ordered = routes.enumerated().sorted { lhs, rhs in
             if lhs.element.expectedTravelTime != rhs.element.expectedTravelTime {
                 return lhs.element.expectedTravelTime < rhs.element.expectedTravelTime
@@ -299,7 +347,7 @@ final class MultiStopRoutePlanner: ObservableObject {
                 destinationLabel: destination.label,
                 localeIdentifier: localeIdentifier
             ) {
-                return leg
+                return (leg, candidate.element)
             }
         }
         return nil
@@ -314,9 +362,20 @@ final class MultiStopRoutePlanner: ObservableObject {
 
     private static func legFailureMessage(
         _ error: Error,
+        transportType: MKDirectionsTransportType,
         from source: MultiStopRoutePlace,
         to destination: MultiStopRoutePlace
     ) -> String {
+        // Apple Maps reports these directions failures with the server-failure
+        // code, so they are told apart before it (CyclingDirectionsFallback).
+        if CyclingDirectionsFallback.isOutOfCoverage(error) {
+            return transportType == RouteTransportTypes.cycling
+                ? "Apple Maps has no cycling directions here and found no car route from \(source.label) to \(destination.label)."
+                : "Apple Maps has no directions for this travel mode from \(source.label) to \(destination.label)."
+        }
+        if CyclingDirectionsFallback.isNotReachable(error) {
+            return noRouteMessage(from: source, to: destination)
+        }
         if let mapError = error as? MKError {
             switch mapError.code {
             case .loadingThrottled:

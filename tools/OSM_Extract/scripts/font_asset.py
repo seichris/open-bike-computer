@@ -10,16 +10,19 @@ import os
 from pathlib import Path
 import struct
 import time
+import unicodedata
 
 import freetype
 import uharfbuzz as hb
 
+from label_bidi import visual_runs
 from label_pipeline import normalize_preferred_languages
 
 
 FMA_MAGIC = b"FMA1"
 FMA_VERSION = 1
 FONT_SIZES = (18, 22, 26)
+MAX_FONT_FACES = 16
 MAX_DISTINCT_GLYPHS = 8192
 MAX_GLYPH_RECORDS = MAX_DISTINCT_GLYPHS * len(FONT_SIZES)
 MAX_FONT_ASSET_BYTES = 16 * 1024 * 1024
@@ -34,6 +37,10 @@ _GLYPH_INDEX = struct.Struct("<HBBhhhHHHIIII")
 
 class FontAssetError(ValueError):
     pass
+
+
+class UnsupportedLabelError(FontAssetError):
+    """A single label cannot be represented with the available fonts."""
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,31 @@ def default_font_faces() -> tuple[FontFaceSpec, ...]:
                 FontFaceSpec(5, cjk, 4, "cjk-hk"),
             )
         )
+    arabic = _first_existing(
+        (
+            os.environ.get("OBC_LABEL_ARABIC_FONT"),
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        )
+    )
+    if arabic is not None:
+        faces.append(FontFaceSpec(6, arabic, 0, "arabic"))
+    arabic_latin = _first_existing(
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",)
+    )
+    if arabic_latin is not None and arabic_latin != latin:
+        faces.append(FontFaceSpec(7, arabic_latin, 0, "arabic-latin"))
+
+    # The worker already packages Noto's script-specific faces. Keep the
+    # established IDs and use a stable order for the additional regular faces.
+    # Only the faces used by the map are written to the bounded FMA1 table.
+    existing = {face.path.resolve() for face in faces}
+    noto_fonts = Path("/usr/share/fonts/truetype/noto")
+    fallbacks = [
+        path for path in sorted(noto_fonts.glob("NotoSans*-Regular.ttf"))
+        if path.resolve() not in existing
+    ]
+    for face_id, path in enumerate(fallbacks[:248], start=8):
+        faces.append(FontFaceSpec(face_id, path, 0, path.stem.removesuffix("-Regular")))
     return tuple(faces)
 
 
@@ -119,6 +151,10 @@ def _contains_cjk(text: str) -> bool:
 
 
 def _canonical_profile(languages, faces) -> bytes:
+    digests = {}
+    for face in faces:
+        if face.path not in digests:
+            digests[face.path] = face.sha256.hex()
     document = {
         "format": FMA_VERSION,
         "sizes": list(FONT_SIZES),
@@ -128,7 +164,7 @@ def _canonical_profile(languages, faces) -> bytes:
                 "id": face.face_id,
                 "name": face.name,
                 "collectionIndex": face.collection_index,
-                "sha256": face.sha256.hex(),
+                "sha256": digests[face.path],
             }
             for face in faces
         ],
@@ -148,20 +184,22 @@ class FontPackBuilder:
         if not self.faces or len({face.face_id for face in self.faces}) != len(self.faces):
             raise FontAssetError("font face IDs must be non-empty and unique")
         self._face_by_id = {face.face_id: face for face in self.faces}
-        self._font_data = {face.face_id: face.path.read_bytes() for face in self.faces}
+        self._font_data: dict[Path, bytes] = {}
         # HarfBuzz faces/fonts are immutable after their scale is configured.
         # Reusing them avoids rebuilding three native font objects for every
         # uncached label while preserving the same per-label buffer and glyph
         # allocation order.
         self._hb_faces: dict[tuple[int, int], hb.Face] = {}
         self._hb_fonts: dict[tuple[int, int], hb.Font] = {}
+        self._nominal_coverage: dict[tuple[int, int], bool] = {}
         profile = _canonical_profile(self.languages, self.faces)
         self.profile_fingerprint = int.from_bytes(
             hashlib.sha256(profile).digest()[:4], "little"
         )
         self._asset_id_by_key: dict[tuple[int, int], int] = {}
+        self._used_face_ids: set[int] = set()
         self._shape_cache: dict[
-            tuple[str, str | None], tuple[ShapedRun, ...]
+            tuple[str, str | None], tuple[ShapedRun, ...] | None
         ] = {}
         self.shape_calls = 0
         self.shape_cache_hits = 0
@@ -209,7 +247,9 @@ class FontPackBuilder:
         cached = self._hb_fonts.get(key)
         if cached is not None:
             return cached
-        hb_face = hb.Face(self._font_data[face.face_id], face.collection_index)
+        if face.path not in self._font_data:
+            self._font_data[face.path] = face.path.read_bytes()
+        hb_face = hb.Face(self._font_data[face.path], face.collection_index)
         font = hb.Font(hb_face)
         font.scale = (pixel_size * 64, pixel_size * 64)
         hb.ot_font_set_funcs(font)
@@ -217,41 +257,124 @@ class FontPackBuilder:
         self._hb_fonts[key] = font
         return font
 
-    def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
-        self.shape_calls += 1
-        cache_key = (text, language)
-        cached = self._shape_cache.get(cache_key)
-        if cached is not None:
-            self.shape_cache_hits += 1
-            return cached
-        started = time.perf_counter()
-        try:
-            face = self._face_for(text, language)
-            runs: list[ShapedRun] = []
-            for size_id, pixel_size in enumerate(FONT_SIZES):
-                font = self._harfbuzz_font(face, pixel_size)
+    def _shape_glyphs(
+        self,
+        face: FontFaceSpec,
+        codepoints: list[int],
+        runs: list[tuple[int, int, str]],
+        language: str | None,
+    ) -> list[list[tuple[hb.GlyphInfo, hb.GlyphPosition]]] | None:
+        sizes = []
+        for pixel_size in FONT_SIZES:
+            font = self._harfbuzz_font(face, pixel_size)
+            glyphs = []
+            for start, end, direction in runs:
                 buffer = hb.Buffer()
-                buffer.add_str(text)
+                buffer.add_codepoints(codepoints, start, end - start)
+                buffer.direction = direction
                 if language:
                     buffer.language = language
                 buffer.guess_segment_properties()
                 hb.shape(font, buffer)
-                if not buffer.glyph_infos or len(buffer.glyph_infos) > MAX_GLYPHS_PER_RUN:
-                    raise FontAssetError("shaped label run is empty or too long")
+                glyphs.extend(zip(buffer.glyph_infos or (), buffer.glyph_positions or ()))
+            if not glyphs or len(glyphs) > MAX_GLYPHS_PER_RUN or any(
+                info.codepoint == 0
+                or any(
+                    not -32768 <= value <= 32767
+                    for value in (position.x_offset, position.y_offset, position.x_advance)
+                )
+                for info, position in glyphs
+            ):
+                return None
+            sizes.append(glyphs)
+        return sizes
+
+    def _candidate_faces(self, primary: FontFaceSpec):
+        yield primary
+        for face_id in sorted(self._used_face_ids - {primary.face_id}):
+            yield self._face_by_id[face_id]
+        if len(self._used_face_ids) < MAX_FONT_FACES and self.glyph_count < MAX_DISTINCT_GLYPHS:
+            for face in self.faces:
+                if face != primary and face.face_id not in self._used_face_ids:
+                    yield face
+
+    def _fallback_covers(self, face: FontFaceSpec, required_codepoints: tuple[int, ...]) -> bool:
+        for codepoint in required_codepoints:
+            key = (face.face_id, codepoint)
+            if key not in self._nominal_coverage:
+                font = self._harfbuzz_font(face, FONT_SIZES[0])
+                self._nominal_coverage[key] = bool(font.get_nominal_glyph(codepoint))
+            if not self._nominal_coverage[key]:
+                return False
+        return True
+
+    def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
+        self.shape_calls += 1
+        cache_key = (text, language)
+        if cache_key in self._shape_cache:
+            cached = self._shape_cache[cache_key]
+            self.shape_cache_hits += 1
+            if cached is None:
+                raise UnsupportedLabelError("map label cannot be represented by the packaged fonts")
+            return cached
+        started = time.perf_counter()
+        try:
+            codepoints = list(map(ord, text))
+            visual_order = visual_runs(text, codepoints)
+            primary = self._face_for(text, language)
+            required_codepoints = None
+            for face in self._candidate_faces(primary):
+                if (
+                    face.face_id not in self._used_face_ids
+                    and (
+                        len(self._used_face_ids) == MAX_FONT_FACES
+                        or self.glyph_count == MAX_DISTINCT_GLYPHS
+                    )
+                ):
+                    continue
+                if face != primary:
+                    if required_codepoints is None:
+                        # Leave marks, formatting controls and canonically
+                        # decomposable characters to HarfBuzz's shaping.
+                        required_codepoints = tuple(
+                            ord(char)
+                            for char in dict.fromkeys(unicodedata.normalize("NFC", text))
+                            if (
+                                unicodedata.category(char)[0] in "LNS"
+                                or unicodedata.category(char) == "Co"
+                            )
+                            and unicodedata.normalize("NFD", char) == char
+                        )
+                    if not self._fallback_covers(face, required_codepoints):
+                        continue
+                sizes = self._shape_glyphs(face, codepoints, visual_order, language)
+                if sizes is None:
+                    continue
+                new_glyphs = {
+                    (face.face_id, info.codepoint) for glyphs in sizes for info, _ in glyphs
+                }.difference(self._asset_id_by_key)
+                if self.glyph_count + len(new_glyphs) <= MAX_DISTINCT_GLYPHS:
+                    break
+            else:
+                raise UnsupportedLabelError("map label cannot be represented by the packaged fonts")
+
+            runs: list[ShapedRun] = []
+            for size_id, glyphs in enumerate(sizes):
                 placements: list[GlyphPlacement] = []
-                for info, position in zip(buffer.glyph_infos, buffer.glyph_positions):
-                    if info.codepoint == 0:
-                        raise FontAssetError("font does not contain every label glyph")
+                for info, position in glyphs:
                     asset_id = self._asset_glyph_id(face.face_id, info.codepoint)
                     values = (position.x_offset, position.y_offset, position.x_advance)
-                    if any(value < -32768 or value > 32767 for value in values):
-                        raise FontAssetError("shaped glyph metrics exceed FMB v3 limits")
                     placements.append(GlyphPlacement(asset_id, *values))
                 runs.append(ShapedRun(size_id, tuple(placements)))
             result = tuple(runs)
+            self._used_face_ids.add(face.face_id)
+            if face != primary:
+                self.fallback_selections += 1
             self._shape_cache[cache_key] = result
             return result
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, UnsupportedLabelError):
+                self._shape_cache[cache_key] = None
             self.shaping_failures += 1
             raise
         finally:
@@ -266,6 +389,15 @@ class FontPackBuilder:
             abs(sum(glyph.x_advance for glyph in run.glyphs)) / 64.0
             for run in self.shape(text, language)
         )
+
+    def measure_supported_widths(
+        self, text: str, language: str | None = None
+    ) -> tuple[float, ...] | None:
+        """Let the road-label planner omit a variant the device cannot draw."""
+        try:
+            return self.measure_widths(text, language)
+        except UnsupportedLabelError:
+            return None
 
     @property
     def glyph_count(self) -> int:
@@ -331,7 +463,8 @@ class FontPackBuilder:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         face_bytes = bytearray()
-        for face in sorted(self.faces, key=lambda item: item.face_id):
+        used_faces = [face for face in self.faces if face.face_id in self._used_face_ids]
+        for face in sorted(used_faces or self.faces[:1], key=lambda item: item.face_id):
             name = face.name.encode("ascii")
             if not name or len(name) > 255:
                 raise FontAssetError("font face name is invalid")
@@ -393,7 +526,7 @@ class FontPackBuilder:
             FMA_VERSION,
             len(FONT_SIZES),
             len(self.languages),
-            len(self.faces),
+            max(1, len(used_faces)),
             self.profile_fingerprint,
             len(records),
             len(language_bytes),

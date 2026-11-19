@@ -108,6 +108,22 @@ static void refreshSectionCrc(std::vector<uint8_t> &data,
   write32(data, entryOffset + 12U, crc32(section));
 }
 
+static std::vector<uint8_t>
+repeatBuilding(const std::vector<uint8_t> &validV4, uint16_t count) {
+  const size_t entry = sectionEntryOffset(validV4, 4, 4);
+  const size_t section = read32(validV4, entry + 4U);
+  const size_t record = section + 8U;
+  std::vector<uint8_t> result(validV4.begin(), validV4.begin() + record);
+  result[section] = static_cast<uint8_t>(count);
+  result[section + 1U] = static_cast<uint8_t>(count >> 8U);
+  write32(result, section + 4U, 4U * count);
+  for (uint16_t index = 0; index < count; ++index)
+    result.insert(result.end(), validV4.begin() + record, validV4.end());
+  write32(result, entry + 8U, static_cast<uint32_t>(result.size() - section));
+  refreshSectionCrc(result, entry);
+  return result;
+}
+
 static std::vector<uint8_t> withEmptyContours(
     const std::vector<uint8_t> &validV4) {
   const size_t directory = extensionOffset(validV4, 4);
@@ -144,6 +160,7 @@ static std::vector<uint8_t> withEmptyContours(
 
 int main() {
   static_assert(map_block_format::kMaximumBuildings == 12288);
+  static_assert(map_block_format::kMaximumDenseFmb4Buildings == 20480);
   static_assert(map_block_format::kMaximumPois == 16384);
   for (size_t offset = 0; offset < 8; ++offset) {
     std::vector<uint8_t> unaligned(offset + 4, 0);
@@ -220,6 +237,28 @@ int main() {
   assert(buildingBlock.stats.records == 1);
   for (size_t size = 0; size < validV4.size(); ++size)
     assert(!map_block_format::validate(validV4.data(), size));
+
+  const auto denseV4 =
+      repeatBuilding(validV4, map_block_format::kMaximumDenseFmb4Buildings);
+  assert(map_block_format::validate(denseV4.data(), denseV4.size()) ==
+         map_block_format::kDenseFmb4BuildingsEnabled);
+  assert(map_building_block::decode(denseV4.data(), denseV4.size(),
+                                    buildingBlock, &buildingError) ==
+         map_block_format::kDenseFmb4BuildingsEnabled);
+  if (map_block_format::kDenseFmb4BuildingsEnabled)
+    assert(buildingBlock.stats.records == map_block_format::kMaximumDenseFmb4Buildings);
+  const auto tooDenseV4 =
+      repeatBuilding(validV4, map_block_format::kMaximumDenseFmb4Buildings + 1);
+  assert(!map_block_format::validate(tooDenseV4.data(), tooDenseV4.size()));
+  const auto denseV5 = withEmptyContours(denseV4);
+  assert(!map_block_format::validate(denseV5.data(), denseV5.size()));
+  auto tooManyPoints = validV4;
+  const size_t denseEntry = sectionEntryOffset(tooManyPoints, 4, 4);
+  const size_t denseOffset = read32(tooManyPoints, denseEntry + 4U);
+  write32(tooManyPoints, denseOffset + 4U,
+          map_block_format::kMaximumDenseFmb4BuildingPoints + 1);
+  refreshSectionCrc(tooManyPoints, denseEntry);
+  assert(!map_block_format::validate(tooManyPoints.data(), tooManyPoints.size()));
 
   const size_t buildingEntry = sectionEntryOffset(validV4, 4, 4);
   const size_t buildingSection = read32(validV4, buildingEntry + 4U);

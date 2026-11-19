@@ -162,6 +162,56 @@ class BuildingRelationIngressTests(unittest.TestCase):
         self.assertFalse(handler.deferred_part_parent_candidates)
         self.assertEqual(handler.ambiguous_parts, 1)
 
+    def test_duplicate_relation_uses_the_complete_part_list_in_any_order(self):
+        outline = {"type": "w", "ref": 12, "role": "outline"}
+        entrance = {"type": "n", "ref": 15, "role": "entrance"}
+        part = {"type": "w", "ref": 21, "role": "part"}
+        extra = {"type": "r", "ref": 22, "role": "part"}
+        older = self.relation(105, [outline, part, entrance])
+        newer = self.relation(106, [extra, entrance, part, outline])
+        for relations in ((older, newer), (newer, older)):
+            with self.subTest(order=tuple(relation.id for relation in relations)):
+                handler = BuildingRelationHandler(
+                    expected_closure={"requiredRelationKeys": ["r105", "r106"]}
+                )
+                for relation in relations:
+                    handler.relation(relation)
+                handler.finalize()
+                self.assertEqual(handler.part_parent_relations, {"w21": {"r106"}, "r22": {"r106"}})
+                self.assertEqual(handler.part_parents, {"w21": "w12", "r22": "w12"})
+                self.assertEqual(handler.ambiguous_parts, 0)
+                self.assertEqual(
+                    {key: len(members) for key, members in handler.relation_members.items()},
+                    {"r105": 3, "r106": 4},
+                )
+
+    def test_overlapping_relations_with_conflicting_semantics_still_fail_closed(self):
+        outline = {"type": "w", "ref": 12, "role": "outline"}
+        primary = {"type": "w", "ref": 21, "role": "part"}
+        part_two = {"type": "w", "ref": 22, "role": "part"}
+        part_three = {"type": "w", "ref": 23, "role": "part"}
+        entrance = {"type": "n", "ref": 15, "role": "entrance"}
+        for case, older_parts, newer_parts, tags, nested in (
+            ("different parts", [part_two], [part_three], None, False),
+            ("different tags", [], [part_two], {"type": "building", "height": "10"}, False),
+            ("different entrance", [], [part_two, entrance], None, False),
+            ("nested wrapper", [], [part_two], None, True),
+        ):
+            with self.subTest(case=case):
+                handler = BuildingRelationHandler(
+                    expected_closure={"requiredRelationKeys": ["r105", "r106", "r120"]}
+                )
+                handler.relation(self.relation(105, [outline, primary, *older_parts]))
+                handler.relation(self.relation(106, [outline, primary, *newer_parts], tags))
+                if nested:
+                    handler.relation(self.relation(
+                        120, [{"type": "r", "ref": 105, "role": "part"}],
+                    ))
+                handler.finalize()
+                self.assertEqual(handler.part_parent_relations["w21"], {"r105", "r106"})
+                self.assertNotIn("w21", handler.part_parents)
+                self.assertGreater(handler.ambiguous_parts, 0)
+
     def test_single_outer_multipolygon_can_restore_suppressed_outline_geometry(self):
         handler = BuildingRelationHandler(
             expected_closure={"requiredRelationKeys": ["r190", "r200"]}
@@ -208,6 +258,45 @@ class BuildingRelationIngressTests(unittest.TestCase):
         )
         self.assertEqual(handler.parts_without_outline, {"w30"})
         self.assertEqual(handler.incomplete_relation_parts, {"r106": ("w30",)})
+
+    def test_only_a_complete_tagged_part_can_replace_a_redundant_wrapper(self):
+        outer = {"type": "w", "ref": 30, "role": "outer"}
+        part = {"type": "w", "ref": 30, "role": "part"}
+        tagged_part = {"type": "multipolygon", "building:part": "yes", "height": "65"}
+        for case, wrapper_tags, way_tags, closed, sources, expected in (
+            ("exact", {}, {}, True, [(tagged_part, [outer])], {"r110"}),
+            ("missing source", {}, {}, True, [], set()),
+            ("open ring", {}, {}, False, [(tagged_part, [outer])], set()),
+            ("wrapper tags", {"height": "63"}, {}, True, [(tagged_part, [outer])], set()),
+            ("way tags", {}, {"height": "63"}, True, [(tagged_part, [outer])], set()),
+            ("only building", {}, {}, True, [
+                ({"type": "multipolygon", "building": "yes"}, [outer]),
+            ], set()),
+            ("hole", {}, {}, True, [
+                (tagged_part, [outer, {"type": "w", "ref": 31, "role": "inner"}]),
+            ], set()),
+            ("ambiguous source", {}, {}, True, [
+                (tagged_part, [outer]), (tagged_part, [outer]),
+            ], set()),
+        ):
+            with self.subTest(case=case):
+                handler = BuildingRelationHandler(
+                    expected_closure={
+                        "requiredRelationKeys": ["r106", "r110", "r111"],
+                        "requiredWayKeys": ["w30"],
+                    }
+                )
+                handler.way_tags["w30"] = way_tags
+                handler.way_nodes["w30"] = ["n1", "n2", "n3", "n1" if closed else "n4"]
+                handler.relation(self.relation(106, [part], {"type": "building", **wrapper_tags}))
+                for relation_id, (tags, members) in enumerate(sources, 110):
+                    handler.relation(self.relation(relation_id, members, tags))
+                handler.finalize()
+
+                self.assertEqual(handler.redundant_part_sources, expected)
+                self.assertEqual(handler.parts_without_outline, set() if expected else {"w30"})
+                self.assertFalse(handler.standalone_part_keys)
+                self.assertFalse(handler.part_parents)
 
     def test_single_explicit_building_part_is_retained_standalone(self):
         handler = BuildingRelationHandler(

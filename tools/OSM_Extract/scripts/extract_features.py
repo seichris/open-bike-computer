@@ -71,6 +71,7 @@ parser.add_argument("--calibration-source-sha256")
 parser.add_argument("--building-block-cache-root")
 parser.add_argument("--building-block-cache-identity")
 parser.add_argument("--building-block-workers", type=int, default=4)
+parser.add_argument("--allow-dense-building-blocks", action="store_true")
 parser.add_argument(
     "--debug-image-dir",
     help="write explicitly requested block preview PNGs outside the map output",
@@ -99,6 +100,8 @@ if (args.debug_image_dir is None) != (args.debug_image_limit is None):
     parser.error("debug image directory and limit must be supplied together")
 if args.debug_image_limit is not None and not 1 <= args.debug_image_limit <= 10000:
     parser.error("--debug-image-limit must be between 1 and 10000")
+if args.allow_dense_building_blocks and args.renderer_format != 3:
+    parser.error("--allow-dense-building-blocks requires renderer format 3")
 if args.output_blocks is not None and args.renderer_format != 5:
     parser.error("--output-blocks requires renderer format 5")
 
@@ -682,7 +685,9 @@ if includes_buildings:
                         merge_geometry_diagnostics(
                             geometry_diagnostics, block_diagnostics
                         )
-                    section, section_metadata = encode_building_section(records)
+                    section, section_metadata = encode_building_section(
+                        records, allow_dense=args.allow_dense_building_blocks
+                    )
                     if (
                         section_metadata["buildings"] != block_stats["recordCount"]
                         or section_metadata["buildingPoints"]
@@ -808,7 +813,7 @@ if args.renderer_format >= 2:
         preferred_languages=preferred_languages,
         international_fallback=args.international_fallback,
         diagnostics=label_diagnostics,
-        measure_text=font_builder.measure_widths,
+        measure_text=font_builder.measure_supported_widths,
     )
     label_phase_timings["labelCandidateGeneration"] = time.perf_counter() - candidate_started
 # polygons = make_all_convex( polygons)
@@ -960,6 +965,7 @@ for init_x, init_y in progress.track(block_positions):
         fmb_kwargs = {
             "renderer_target": args.renderer_format,
             "font_builder": font_builder,
+            "allow_dense_buildings": args.allow_dense_building_blocks,
         }
         if cached_building_block is not None:
             fmb_kwargs.update(

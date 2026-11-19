@@ -39,6 +39,7 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         self.way_tags: dict[str, dict[str, str]] = {}
         self.part_parent_candidates: dict[str, set[str]] = {}
         self.part_parent_relations: dict[str, set[str]] = {}
+        self._single_outline_groups: dict[tuple, dict[str, frozenset]] = {}
         self.deferred_part_parent_candidates: dict[str, tuple[str, ...]] = {}
         self.parent_geometry_source_candidates: dict[str, set[str]] = {}
         self.parent_geometry_sources: dict[str, str] = {}
@@ -49,6 +50,9 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         # source diagnostic actionable without dumping a whole relation/PBF.
         self.incomplete_relation_parts: dict[str, tuple[str, ...]] = {}
         self.standalone_part_keys: set[str] = set()
+        self.single_part_wrappers: set[str] = set()
+        self.exact_part_geometry_sources: set[str] = set()
+        self.redundant_part_sources: set[str] = set()
 
     def node(self, node) -> None:
         key = f"n{node.id}"
@@ -102,6 +106,11 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 self.parent_geometry_source_candidates.setdefault(
                     outer_members[0], set()
                 ).add(relation_key)
+                if (
+                    len(relation.members) == 1
+                    and relation_tags.get("building:part") not in (None, "", "no")
+                ):
+                    self.exact_part_geometry_sources.add(relation_key)
         if relation.tags.get("type") != "building":
             return
         outlines = sorted(
@@ -131,9 +140,24 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             if self.audit_enabled and parts and not outlines:
                 self.parts_without_outline.update(parts)
                 self.incomplete_relation_parts[relation_key] = tuple(parts)
+                if len(relation.members) == 1 and relation_tags == {"type": "building"}:
+                    self.single_part_wrappers.add(relation_key)
             return
         self.relations += 1
         canonical_parent_tags = dict(sorted(relation_tags.items()))
+        if self.audit_enabled and len(outlines) == 1 and len(parts) == len(set(parts)):
+            part_members = frozenset(
+                (member.type, member_key(member), member.role)
+                for member in relation.members
+                if member.type in {"w", "r"} and member.role in {"part", "building:part"}
+            )
+            other_members = tuple(sorted(
+                (member.type, member_key(member), member.role)
+                for member in relation.members
+                if (member.type, member_key(member), member.role) not in part_members
+            ))
+            group = (tuple(canonical_parent_tags.items()), other_members)
+            self._single_outline_groups.setdefault(group, {})[relation_key] = part_members
         for parent in outlines:
             existing_parent_tags = self.parent_tags.get(parent)
             if (
@@ -158,18 +182,42 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                     min(existing, parent) if existing is not None else parent
                 )
 
+    def _coalesce_duplicate_part_memberships(self) -> None:
+        groups = [group for group in self._single_outline_groups.values() if len(group) > 1]
+        if not groups:
+            return
+        referenced_relations = {
+            member["key"]
+            for members in self.relation_members.values()
+            for member in members
+            if member["type"] == "r"
+        }
+        canonical_ids: dict[str, str] = {}
+        for group in groups:
+            if referenced_relations.intersection(group):
+                continue
+            canonical = min(group, key=lambda key: (-len(group[key]), key))
+            # A duplicate can omit parts from the same outline. Only merge
+            # when one original relation accounts for every exact membership.
+            if all(parts <= group[canonical] for parts in group.values()):
+                canonical_ids.update((key, canonical) for key in group)
+        if canonical_ids:
+            self.part_parent_relations = {
+                part: {canonical_ids.get(relation, relation) for relation in relations}
+                for part, relations in self.part_parent_relations.items()
+            }
+
     def finalize(self) -> None:
-        """Apply the narrow standalone-part normalization after all ways arrive.
+        """Resolve explicit, standalone and redundant parts after all ways arrive.
 
         OSM objects are normally delivered ways before relations, but the
-        policy must not depend on callback order. Every direct member must be
-        a way with an explicit ``building`` or ``building:part`` tag. Parts
-        shared with another incomplete relation, or already associated with a
-        different building relation, remain fail-closed rather than being
-        silently reinterpreted.
+        result must be independent of callback order. Standalone parts need
+        their own building tags. Redundant wrappers need an exact tagged
+        source for their sole member and no other explicit associations.
         """
 
         if self.audit_enabled:
+            self._coalesce_duplicate_part_memberships()
             self.part_parents = {
                 part: next(iter(parents))
                 for part, parents in self.part_parent_candidates.items()
@@ -255,6 +303,30 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             if part not in unsafe_parts
         }
         self.parts_without_outline.difference_update(self.standalone_part_keys)
+        # An untagged wrapper contributes no building information if its only
+        # member is the complete ring of an explicitly tagged part multipolygon.
+        # Keep that source's identity and require its geometry after conversion.
+        for wrapper in self.single_part_wrappers:
+            (part,) = self.incomplete_relation_parts[wrapper]
+            if (
+                relation_part_counts[part] != 1
+                or part in self.part_parent_candidates
+                or part in self.parent_tags
+                or wrapper in self.part_parent_candidates
+                or wrapper in self.parent_tags
+                or self.way_tags.get(part) != {}
+            ):
+                continue
+            nodes = self.way_nodes[part]
+            if len(nodes) < 4 or nodes[0] != nodes[-1]:
+                continue
+            geometry_sources = self.parent_geometry_source_candidates.get(part, ())
+            if len(geometry_sources) != 1:
+                continue
+            (source,) = geometry_sources
+            if source in self.exact_part_geometry_sources:
+                self.parts_without_outline.remove(part)
+                self.redundant_part_sources.add(source)
 
 
 def load_scope_policy(path: Path) -> dict:
@@ -612,6 +684,8 @@ def main() -> None:
     }
     if handler.standalone_part_keys:
         result["standalonePartKeys"] = sorted(handler.standalone_part_keys)
+    if handler.redundant_part_sources:
+        result["redundantPartSources"] = sorted(handler.redundant_part_sources)
     if handler.deferred_part_parent_candidates:
         result["partParentCandidates"] = dict(
             sorted(handler.deferred_part_parent_candidates.items())

@@ -49,6 +49,78 @@ final class MapKitNavigationDirectionsTask: NavigationDirectionsTask {
 
 typealias NavigationDirectionsFactory = @MainActor (MKDirections.Request) -> any NavigationDirectionsTask
 
+/// Runs a directions request and, when Apple Maps has no cycling coverage for
+/// it, the same request as car directions (`CyclingDirectionsFallback`), whose
+/// routes it delivers as `CyclingFallbackCarRoute`s. Other requests and
+/// failures pass through unchanged. If the car request fails too, the cycling
+/// failure is reported, unless the car failure is a connection or capacity
+/// problem the rider can act on.
+@MainActor
+final class CyclingFallbackDirectionsTask: NavigationDirectionsTask {
+    private let request: MKDirections.Request
+    private let factory: NavigationDirectionsFactory
+    private var active: (any NavigationDirectionsTask)?
+    private var isCancelled = false
+    /// True once the delivered routes are car directions.
+    private(set) var usedCarDirections = false
+
+    init(
+        request: MKDirections.Request,
+        factory: @escaping NavigationDirectionsFactory
+    ) {
+        self.request = request
+        self.factory = factory
+    }
+
+    func calculate(
+        completion: @escaping @MainActor (Result<[MKRoute], Error>) -> Void
+    ) {
+        let task = factory(request)
+        active = task
+        task.calculate { [weak self] result in
+            guard let self, !self.isCancelled else { return }
+            guard case .failure(let error) = result,
+                  CyclingDirectionsFallback.usesCarDirections(
+                      after: error,
+                      requested: self.request.transportType
+                  ) else {
+                self.active = nil
+                completion(result)
+                return
+            }
+            let carTask = self.factory(
+                CyclingDirectionsFallback.carRequest(for: self.request)
+            )
+            self.active = carTask
+            carTask.calculate { [weak self] carResult in
+                guard let self, !self.isCancelled else { return }
+                self.active = nil
+                switch carResult {
+                case .success(let routes) where !routes.isEmpty:
+                    self.usedCarDirections = true
+                    completion(.success(
+                        CyclingDirectionsFallback.cyclingFriendlyRoutes(from: routes)
+                    ))
+                case .success:
+                    completion(.failure(error))
+                case .failure(let carError):
+                    completion(.failure(
+                        CyclingDirectionsFallback.isTransient(carError)
+                            ? carError
+                            : error
+                    ))
+                }
+            }
+        }
+    }
+
+    func cancel() {
+        isCancelled = true
+        active?.cancel()
+        active = nil
+    }
+}
+
 enum OfflineNavigationStartError: LocalizedError {
     case navigationActive
     case alreadyAtDestination
@@ -117,6 +189,11 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    /// Shown while navigating a car route that stands in for unavailable
+    /// cycling directions, whether it came from planning or a reroute.
+    var activeRouteNotice: String? {
+        (currentRoute as? CyclingFallbackCarRoute)?.advisoryNotices.first
+    }
     @Published private(set) var offlineRouteSummary: PlannedRouteSummaryV1?
     @Published private(set) var offlineRoutePolyline: MKPolyline?
 
@@ -1646,9 +1723,12 @@ extension BikeComputerCoordinator {
         request.transportType = requestedTransportType
         request.requestsAlternateRoutes = presentsAlternatives
 
-        print("Calculating route with transport type: \(self.transportType.rawValue)")
+        print("Calculating route with transport type: \(requestedTransportType.rawValue)")
 
-        let directions = directionsFactory(request)
+        let directions = CyclingFallbackDirectionsTask(
+            request: request,
+            factory: directionsFactory
+        )
         self.ongoingDirections = directions
         let initialLocation = RouteInitialLocation.location(
             for: sourceItem.placemark.coordinate
@@ -1656,6 +1736,11 @@ extension BikeComputerCoordinator {
         directions.calculate { [weak self] result in
             guard let self, self.routeCalculationGeneration == generation else { return }
             self.ongoingDirections = nil
+            // A car route standing in for unavailable cycling directions
+            // carries its own notice and a cycling-pace travel time
+            // (CyclingFallbackCarRoute). The navigation keeps the requested
+            // travel mode, so every reroute tries cycling, then falls back.
+            let usedCarDirections = directions.usedCarDirections
 
             switch result {
             case .failure(let error):
@@ -1772,7 +1857,11 @@ extension BikeComputerCoordinator {
                 print("Distance: \(route.distance)m, ETA: \(route.expectedTravelTime)s")
                 print("Steps: \(route.steps.count)")
 
-                self.routeCalculation.status = "Starting navigation..."
+                if usedCarDirections, let notice = route.advisoryNotices.first {
+                    self.routeCalculation.status = "\(notice). Starting navigation..."
+                } else {
+                    self.routeCalculation.status = "Starting navigation..."
+                }
 
                 self.beginNavigation(
                     with: route,
@@ -1864,7 +1953,12 @@ extension BikeComputerCoordinator {
         lastRerouteRequestDate = now()
         print("Off route by \(Int(distanceToRoute.rounded()))m; requesting reroute")
 
-        let directions = directionsFactory(request)
+        // A cycling reroute outside Apple Maps' cycling coverage, including
+        // every reroute of a fallback car route, falls back the same way.
+        let directions = CyclingFallbackDirectionsTask(
+            request: request,
+            factory: directionsFactory
+        )
         ongoingRerouteDirections = directions
         latestRerouteLocation = routeLocation
         directions.calculate { [weak self] result in

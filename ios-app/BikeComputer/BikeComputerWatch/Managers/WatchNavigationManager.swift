@@ -90,6 +90,10 @@ final class WatchNavigationManager: ObservableObject {
     @Published private(set) var routeAttribution: String?
     @Published private(set) var onlineStatus: WatchOnlineRoutingStatusV1 =
         .idle
+    /// Tells the rider the active route is car directions standing in for
+    /// unavailable cycling directions, and whether it uses highways or toll
+    /// roads. Each new route or reroute brings its own.
+    @Published private(set) var routeDirectionsNotice: String?
 
     var canRecalculateOnline: Bool {
         settingsStore.policy == .onlineAllowed &&
@@ -334,6 +338,7 @@ final class WatchNavigationManager: ObservableObject {
         activeRecord = nil
         activeDestination = nil
         routeAttribution = nil
+        routeDirectionsNotice = nil
         startedAt = nil
         lastJournalStepIndex = nil
         requestOrigin = nil
@@ -367,6 +372,7 @@ final class WatchNavigationManager: ObservableObject {
         activeRecord = nil
         activeDestination = nil
         routeAttribution = nil
+        routeDirectionsNotice = nil
         startedAt = nil
         lastJournalStepIndex = nil
         requestOrigin = nil
@@ -578,7 +584,7 @@ final class WatchNavigationManager: ObservableObject {
             defer { finishRequest(identity) }
             guard isRequestCurrent(identity) else { return }
             do {
-                let routes = try await onlineProvider.routes(for:
+                let options = try await onlineProvider.routes(for:
                     NavigationRouteRequestV1(
                         source: RouteEndpointV1(
                             coordinate: source.coordinate,
@@ -591,7 +597,7 @@ final class WatchNavigationManager: ObservableObject {
                     )
                 )
                 guard isRequestCurrent(identity) else { return }
-                guard let route = routes.first,
+                guard let route = options.first?.route,
                       route.provider == onlineProvider.metadata,
                       route.provider.storageScope == .activeOnly,
                       let currentLocation = lastLocation,
@@ -611,6 +617,7 @@ final class WatchNavigationManager: ObservableObject {
                 pendingFavorite = nil
                 activeDestination = endpoint
                 routeAttribution = route.provider.attribution
+                routeDirectionsNotice = options.first?.notice
                 startedAt = now()
                 onlineStatus = .online
                 guard let snapshot = runtime.snapshot else {
@@ -663,7 +670,7 @@ final class WatchNavigationManager: ObservableObject {
             defer { finishRequest(identity) }
             guard isRequestCurrent(identity) else { return }
             do {
-                let routes = try await onlineProvider.routes(for:
+                let options = try await onlineProvider.routes(for:
                     NavigationRouteRequestV1(
                         source: RouteEndpointV1(
                             coordinate: source.coordinate,
@@ -676,7 +683,7 @@ final class WatchNavigationManager: ObservableObject {
                     )
                 )
                 guard isRequestCurrent(identity) else { return }
-                guard let replacement = routes.first,
+                guard let replacement = options.first?.route,
                       replacement.provider == onlineProvider.metadata,
                       replacement.provider.storageScope == .activeOnly,
                       let currentLocation = lastLocation,
@@ -694,6 +701,7 @@ final class WatchNavigationManager: ObservableObject {
                 try journalStore.clear()
                 runtime = candidate
                 routeAttribution = replacement.provider.attribution
+                routeDirectionsNotice = options.first?.notice
                 if let activeRecord {
                     routeLibrary.deactivate(
                         WatchRouteIdentityV1(archive: activeRecord.archive)

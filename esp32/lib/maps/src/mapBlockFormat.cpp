@@ -586,20 +586,26 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
                           : V3ParseState::LabelFixed;
     }
     return true;
-  case V3ParseState::BuildingHeader:
+  case V3ParseState::BuildingHeader: {
     if (!collect(8) || v3RecordSize_ != 8)
       return true;
     v3RecordsRemaining_ = littleEndian16(v3Record_);
     v4DeclaredBuildingPoints_ = littleEndian32(v3Record_ + 4);
+    const bool dense = kDenseFmb4BuildingsEnabled && binaryVersion_ == 4;
+    const uint32_t maximumRecords =
+        dense ? kMaximumDenseFmb4Buildings : kMaximumBuildings;
+    const uint32_t maximumPoints =
+        dense ? kMaximumDenseFmb4BuildingPoints : kMaximumBuildingPoints;
     if (littleEndian16(v3Record_ + 2) != 0 ||
-        v3RecordsRemaining_ > kMaximumBuildings ||
-        v4DeclaredBuildingPoints_ > kMaximumBuildingPoints)
+        v3RecordsRemaining_ > maximumRecords ||
+        v4DeclaredBuildingPoints_ > maximumPoints)
       return false;
     v3RecordSize_ = 0;
     v3ParseState_ = v3RecordsRemaining_ == 0
                         ? V3ParseState::Complete
                         : V3ParseState::BuildingFixed;
     return true;
+  }
   case V3ParseState::BuildingFixed:
     if (!collect(18) || v3RecordSize_ != 18)
       return true;
@@ -633,7 +639,7 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
     v4WallBytesRemaining_ =
         static_cast<uint16_t>((v4RingPointCount_ + 7U) / 8U);
     if (v4RingPointCount_ < 3 ||
-        v4RingPointCount_ > kMaximumBuildingPoints - v4BuildingPointsSeen_ ||
+        v4RingPointCount_ > v4DeclaredBuildingPoints_ - v4BuildingPointsSeen_ ||
         v3Record_[2] != (v4CurrentRingIndex_ == 0 ? 0 : 1) ||
         v3Record_[3] != 0)
       return false;

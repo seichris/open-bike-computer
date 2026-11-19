@@ -8,10 +8,22 @@ struct NavigationRouteRequestV1: Equatable {
     let requestAlternatives: Bool
 }
 
+/// A route a provider offers and what the rider must be told with it.
+struct NavigationRouteOptionV1: Equatable {
+    let route: NavigationRouteV1
+    /// Set when car directions stand in for unavailable cycling directions
+    /// (`CyclingDirectionsFallback`). The rider still cycles, so the route
+    /// keeps `RouteTransportTypeV1.cycling`; the notice says whether it uses
+    /// highways or toll roads.
+    let notice: String?
+}
+
 @MainActor
 protocol NavigationRouteProvider: AnyObject {
     var metadata: RouteProviderMetadataV1 { get }
-    func routes(for request: NavigationRouteRequestV1) async throws -> [NavigationRouteV1]
+    func routes(
+        for request: NavigationRouteRequestV1
+    ) async throws -> [NavigationRouteOptionV1]
     func cancel()
 }
 

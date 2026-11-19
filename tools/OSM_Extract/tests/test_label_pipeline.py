@@ -176,6 +176,31 @@ class LabelPipelineTests(unittest.TestCase):
         self.assertNotIn("Test Street", repr(diagnostics))
         self.assertTrue(prepared[0]["label_candidates"])
 
+    def test_unsupported_variants_leave_supported_names_and_road_geometry(self):
+        geometry = LineString([(0, 0), (2000, 0)])
+        feature = {
+            "type": "highway.primary",
+            "geom_type": "line",
+            "geom": geometry,
+            "label_tags": {"name": "Unsupported", "name:el": "Οδός Αθηνάς", "ref": "A1"},
+        }
+        diagnostics = {}
+        with_fallback, without_label = prepare_road_labels(
+            [feature, {**feature, "label_tags": {"name": "Unsupported"}}],
+            preferred_languages=["el"],
+            diagnostics=diagnostics,
+            measure_text=lambda text, _language: None if text == "Unsupported" else (35.0,),
+        )
+        self.assertEqual(
+            [variant["text"] for variant in with_fallback["label_variants"]],
+            ["Οδός Αθηνάς", "A1"],
+        )
+        self.assertTrue(with_fallback["label_candidates"])
+        self.assertEqual(without_label["geom"], geometry)
+        self.assertFalse(without_label["label_variants"])
+        self.assertFalse(without_label["label_candidates"])
+        self.assertEqual(diagnostics["unsupportedLabelVariants"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
