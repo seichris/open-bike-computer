@@ -22,6 +22,7 @@ extern Power power;
 #ifndef FIRMWARE_DIAGNOSTICS
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
+#include "ble_advertising_recovery_policy.hpp"
 #include "ble_connection_policy.hpp"
 #include "ble_disconnect_diagnostics.hpp"
 #include "../device_transfer/transfer_link_grace_policy.hpp"
@@ -32,6 +33,7 @@ extern Power power;
 #include "device_screen_protocol.hpp"
 #include "gps_input_freshness.hpp"
 #include "gps_position_protocol.hpp"
+#include "phone_ride_totals.hpp"
 #include "../position_source/position_source.hpp"
 #include "map_setting_packet.hpp"
 #include "map_setting_redraw_policy.hpp"
@@ -1105,6 +1107,20 @@ bool hasCurrentNavigationData() {
   return data.distance > 0 || data.instruction[0] != '\0';
 }
 
+// UI task only: written by handleGpsPayload(), read by the Ride Stats
+// presenter. The session generation is the atomic ride payload generation.
+static phone_ride_totals::Stamp phoneRideTotalsStamp;
+// Host task: when the connected controller's ride lease was last confirmed
+// (a LEASE_OK answer to its claim or heartbeat); zero for never.
+static std::atomic<uint32_t> rideLeaseRenewedAtMs{0};
+
+bool phoneRideTotalsFresh(uint32_t nowMs) {
+  return phone_ride_totals::fresh(
+      phoneRideTotalsStamp, nowMs,
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      rideLeaseRenewedAtMs.load(std::memory_order_acquire));
+}
+
 int16_t getPhoneBatteryLevelPercent() { return phoneBatteryLevelPercent; }
 bool isPhoneBatteryCharging() { return phoneBatteryCharging; }
 
@@ -1750,6 +1766,172 @@ static bool loadOrCreateStableRandomIdentity(BleIdentity &identity) {
   return stored;
 }
 
+// ---------------------------------------------------------------------------
+// Advertising after a NimBLE host reset.
+//
+// A host reset clears the identity addresses the host holds (pinned
+// NimBLE-Arduino 1.4.3: ble_hs_reset() calls ble_hs_id_reset()), and
+// resynchronization re-reads only the controller's public address. This
+// firmware advertises from the static random identity applied once below, so
+// NimBLE-Arduino's own restart after the resync failed with BLE_HS_ENOADDR and
+// the phone could not reconnect until a reboot. The host hooks put the
+// identity back before the library restarts advertising and leave retained
+// evidence of every reset; superviseAdvertising() is the bounded second line
+// (ble_advertising_recovery_policy.hpp). Neither explains the reset itself.
+// ---------------------------------------------------------------------------
+static uint8_t bleRandomIdentityAddress[6] = {};
+// Set once on the init task before the host hooks exist; the release/acquire
+// pair publishes the address to the host task.
+static std::atomic<bool> bleRandomIdentityConfigured{false};
+static ble_hs_reset_fn *nimbleLibraryResetCallback = nullptr;
+static ble_hs_sync_fn *nimbleLibrarySyncCallback = nullptr;
+static std::atomic<bool> bleHostResynced{false};
+static ble_npl_event advertisingRecoveryEvent;
+static std::atomic<bool> advertisingRecoveryReady{false};
+static std::atomic<bool> advertisingRecoveryPosted{false};
+static std::atomic<uint16_t> advertisingRecoveryAttempt{0};
+// Loop task only.
+static ble_advertising_recovery::Supervisor advertisingSupervisor;
+
+static void noteBleRandomIdentity(const uint8_t *address) {
+  std::memcpy(bleRandomIdentityAddress, address,
+              sizeof(bleRandomIdentityAddress));
+  bleRandomIdentityConfigured.store(true, std::memory_order_release);
+}
+
+// Host task. NimBLE's status, or zero when the board advertises from its
+// public address and there is nothing to restore.
+static int restoreBleRandomIdentity() {
+  if (!bleRandomIdentityConfigured.load(std::memory_order_acquire))
+    return 0;
+  return ble_hs_id_set_rnd(bleRandomIdentityAddress);
+}
+
+static void recordAdvertisingRecovery(ride_diagnostics::Level level,
+                                      const char *event, const char *phase,
+                                      uint16_t attempt, int errorCode,
+                                      const char *result,
+                                      uint32_t durationMs) {
+  char fields[160] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"attempt\":%u,\"errorCode\":%d,"
+      "\"result\":\"%s\",\"durationMs\":%lu}",
+      phase, static_cast<unsigned>(attempt), errorCode, result,
+      static_cast<unsigned long>(durationMs));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields))
+    queueProbeRecord(level, "ble", event, fields);
+}
+
+// Host task, inside ble_hs_reset(): every link is already gone.
+static void onNimbleHostReset(int reason) {
+  recordAdvertisingRecovery(ride_diagnostics::Level::Warning, "host_reset",
+                            "reset", 0, reason, "none", 0);
+  if (nimbleLibraryResetCallback != nullptr)
+    nimbleLibraryResetCallback(reason);
+}
+
+// Host task, after a successful resynchronization. The library's handler
+// restarts advertising with the random address type, so the identity must be
+// back first.
+static void onNimbleHostSync() {
+  HostActivityScope activity("host_sync");
+  const int identityResult = restoreBleRandomIdentity();
+  if (nimbleLibrarySyncCallback != nullptr)
+    nimbleLibrarySyncCallback();
+  const bool advertising = ble_gap_adv_active() != 0;
+  bleHostResynced.store(true, std::memory_order_release);
+  recordAdvertisingRecovery(
+      identityResult == 0 && advertising ? ride_diagnostics::Level::Info
+                                         : ride_diagnostics::Level::Warning,
+      "host_reset", "synced", 0, identityResult,
+      advertising ? "advertising" : "not_advertising", 0);
+}
+
+// Host task: one supervised attempt, posted by superviseAdvertising().
+static void advertisingRecoveryEventHandler(struct ble_npl_event *event) {
+  (void)event;
+  HostActivityScope activity("advertising_recovery");
+  const uint16_t attempt =
+      advertisingRecoveryAttempt.load(std::memory_order_acquire);
+  // A central that connected after the post owns the radio now.
+  if (radioConnectionHandle.load(std::memory_order_acquire) !=
+      BLE_HS_CONN_HANDLE_NONE) {
+    advertisingRecoveryPosted.store(false, std::memory_order_release);
+    return;
+  }
+  int identityResult = 0;
+  bool advertising = ble_gap_adv_active() != 0;
+  if (!advertising && ble_hs_synced()) {
+    identityResult = restoreBleRandomIdentity();
+    advertising = NimBLEDevice::startAdvertising();
+  }
+  advertisingRecoveryPosted.store(false, std::memory_order_release);
+  // Slow-phase failures are summarized once, not recorded every minute.
+  if (advertising || attempt <= ble_advertising_recovery::kFastAttempts) {
+    recordAdvertisingRecovery(
+        advertising ? ride_diagnostics::Level::Info
+                    : ride_diagnostics::Level::Warning,
+        "advertising_recovery", "attempt", attempt, identityResult,
+        advertising ? "advertising" : "not_advertising", 0);
+  }
+}
+
+// After NimBLEDevice::init(), which returns only once the host first synced:
+// chain the library's own reset/sync handlers behind the identity hooks.
+static void installNimbleHostHooks() {
+  if (advertisingRecoveryReady.load(std::memory_order_acquire))
+    return;
+  nimbleLibraryResetCallback = ble_hs_cfg.reset_cb;
+  nimbleLibrarySyncCallback = ble_hs_cfg.sync_cb;
+  ble_npl_event_init(&advertisingRecoveryEvent,
+                     advertisingRecoveryEventHandler, nullptr);
+  ble_hs_cfg.reset_cb = onNimbleHostReset;
+  ble_hs_cfg.sync_cb = onNimbleHostSync;
+  advertisingRecoveryReady.store(true, std::memory_order_release);
+}
+
+// Loop task, every pass: notices a synchronized, unconnected host that is not
+// advertising and posts bounded restoration attempts to the host task.
+static void superviseAdvertising(bool serverConnected) {
+  using namespace ble_advertising_recovery;
+  if (!advertisingRecoveryReady.load(std::memory_order_acquire))
+    return;
+  const uint32_t nowMs = millis();
+  if (bleHostResynced.exchange(false, std::memory_order_acq_rel))
+    advertisingSupervisor.noteHostResynced(nowMs);
+  Observation observation;
+  observation.nowMs = nowMs;
+  // NimBLE documents both reads as single-word and lock-free.
+  observation.hostSynced = ble_hs_synced() != 0;
+  observation.connected =
+      serverConnected || radioConnectionHandle.load(
+                             std::memory_order_acquire) !=
+                             BLE_HS_CONN_HANDLE_NONE;
+  observation.advertising = ble_gap_adv_active() != 0;
+  const Decision decision = advertisingSupervisor.update(observation);
+  if (decision.report != Report::None) {
+    const bool restored = decision.report == Report::Restored;
+    recordAdvertisingRecovery(
+        restored ? ride_diagnostics::Level::Info
+                 : ride_diagnostics::Level::Warning,
+        "advertising_recovery", reportPhase(decision.report),
+        decision.attempt, 0, restored ? "advertising" : "not_advertising",
+        decision.outageMs);
+  }
+  if (decision.action != Action::Attempt)
+    return;
+  bool expected = false;
+  if (!advertisingRecoveryPosted.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel,
+          std::memory_order_acquire))
+    return; // The previous attempt has not run yet.
+  advertisingRecoveryAttempt.store(decision.attempt,
+                                   std::memory_order_release);
+  ble_npl_eventq_put(nimble_port_get_dflt_eventq(),
+                     &advertisingRecoveryEvent);
+}
+
 static void initBleIdentityAndSecurity(const char *deviceName) {
   char advertisedAddress[18] = "";
 #ifdef BLE_DEV_RANDOM_IDENTITY
@@ -1759,6 +1941,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
   ble_addr_t randomAddress;
   if (ble_hs_id_gen_rnd(1, &randomAddress) == 0 &&
       ble_hs_id_set_rnd(randomAddress.val) == 0) {
+    noteBleRandomIdentity(randomAddress.val);
     formatBleAddress(randomAddress.val, advertisedAddress,
                      sizeof(advertisedAddress));
     Serial.println(
@@ -1777,6 +1960,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
   NimBLEDevice::init(deviceName);
   NimBLEDevice::setCustomGapHandler(bleGapEventListener);
   if (hasStableIdentity && ble_hs_id_set_rnd(identity.address) == 0) {
+    noteBleRandomIdentity(identity.address);
     formatBleAddress(identity.address, advertisedAddress,
                      sizeof(advertisedAddress));
     Serial.printf("BLE: Using %s persisted random static identity\n",
@@ -1789,6 +1973,7 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
 
   NimBLEDevice::setSecurityAuth(false, false, false);
   NimBLEDevice::deleteAllBonds();
+  installNimbleHostHooks();
   Serial.printf("BLE: Advertising identity address %s (bonding disabled)\n",
                 advertisedAddress[0] == '\0'
                     ? NimBLEDevice::getAddress().toString().c_str()
@@ -2377,27 +2562,38 @@ static void completeBleSessionAuthentication() {
   queueOwnershipUiUpdate();
 }
 
-static bool notifyAuthenticatedPayload(
+// BEGIN authenticated notification admission
+// (compiled on the host by tools/tests/test_ride_acknowledgement_fence.py)
+enum class AuthenticatedNotifyResult : uint8_t {
+  Queued,
+  // The expected session or ride lease no longer holds: the payload belongs
+  // to an earlier controller and must never be sent.
+  Fenced,
+  // Not sendable right now: lock busy, session down or queue full.
+  Unavailable,
+};
+
+static AuthenticatedNotifyResult notifyAuthenticatedPayloadResult(
     NimBLECharacteristic *characteristic,
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
-    size_t length, const char *label,
-    ride_command_admission::Authorization expected = {}) {
-  (void)label;
+    size_t length, ride_command_admission::Authorization expected) {
   if (characteristic == nullptr || data == nullptr ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
       deviceOwnershipMutex == nullptr || notificationTransportMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex,
                      isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
           pdTRUE) {
-    return false;
+    return AuthenticatedNotifyResult::Unavailable;
   }
+  // The fence runs under the same lock that admits the notification, so a
+  // session or lease replaced at any earlier moment is seen here.
   if (expected.sessionGeneration != 0 &&
       !ride_command_admission::mayApply(
           expected, {ridePayloadGeneration.load(std::memory_order_acquire),
                      deviceOwnership.authenticatedRideLeaseGeneration(millis())},
           deviceOwnership.isSessionAuthenticated())) {
     xSemaphoreGive(deviceOwnershipMutex);
-    return false;
+    return AuthenticatedNotifyResult::Fenced;
   }
   std::string frame;
   const std::string payload(reinterpret_cast<const char *>(data), length);
@@ -2405,7 +2601,7 @@ static bool notifyAuthenticatedPayload(
       channel, payload, frame);
   if (!protectedPayload || activeConnHandle == BLE_HS_CONN_HANDLE_NONE) {
     xSemaphoreGive(deviceOwnershipMutex);
-    return false;
+    return AuthenticatedNotifyResult::Unavailable;
   }
   const uint16_t connectionHandle = activeConnHandle;
   const uint8_t *frameData =
@@ -2416,7 +2612,20 @@ static bool notifyAuthenticatedPayload(
   const bool sent = enqueueDeferredNotification(
       characteristic, connectionHandle, frameData, frame.size());
   xSemaphoreGive(deviceOwnershipMutex);
-  return sent;
+  return sent ? AuthenticatedNotifyResult::Queued
+              : AuthenticatedNotifyResult::Unavailable;
+}
+// END authenticated notification admission
+
+static bool notifyAuthenticatedPayload(
+    NimBLECharacteristic *characteristic,
+    device_ownership::AuthenticatedChannel channel, const uint8_t *data,
+    size_t length, const char *label,
+    ride_command_admission::Authorization expected = {}) {
+  (void)label;
+  return notifyAuthenticatedPayloadResult(characteristic, channel, data,
+                                          length, expected) ==
+         AuthenticatedNotifyResult::Queued;
 }
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
@@ -2704,17 +2913,130 @@ static uint32_t currentAuthoritativeRideLeaseGeneration(
   return leaseGeneration;
 }
 
+// BEGIN deferred ride acknowledgement
+// (compiled on the host by tools/tests/test_ride_acknowledgement_fence.py)
+//
+// An acknowledgement whose notification could not be queued: inside NimBLE
+// callbacks the ownership lock is tried without waiting, and the deferred
+// queue is bounded. The phone holds every other write behind a pending
+// acknowledgement and, before its retry fix, reconnected when that retry could
+// not be admitted (GNSS bench, 2026-11-18). The loop task therefore resends the
+// latest failed acknowledgement a few times; the phone ignores a duplicate by
+// command ID.
+//
+// Each resend is fenced by the session and ride lease the acknowledgement was
+// made for, checked under the ownership lock that admits the notification
+// (notifyAuthenticatedPayloadResult). A link or lease replaced at any moment
+// before that lock therefore retires the acknowledgement instead of letting it
+// enter the new session.
+struct PendingRideAcknowledgement {
+  uint8_t payload[ride_delivery_protocol::ACK_SIZE]{};
+  ride_command_admission::Authorization authorization{};
+  uint8_t commandClass = 0;
+  uint8_t attempts = 0;
+  bool pending = false;
+};
+static PendingRideAcknowledgement pendingRideAcknowledgement;
+static portMUX_TYPE pendingRideAcknowledgementMux =
+    portMUX_INITIALIZER_UNLOCKED;
+static constexpr uint8_t kRideAcknowledgementResends = 3;
+
+static void recordRideAcknowledgementResend(const char *phase,
+                                            uint8_t commandClass,
+                                            uint32_t leaseGeneration,
+                                            uint8_t attempt) {
+  char fields[128] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields),
+      "{\"phase\":\"%s\",\"commandClass\":%u,\"leaseGeneration\":%lu,"
+      "\"attempt\":%u}",
+      phase, static_cast<unsigned>(commandClass),
+      static_cast<unsigned long>(leaseGeneration),
+      static_cast<unsigned>(attempt));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(
+        std::strcmp(phase, "resent") == 0 ? ride_diagnostics::Level::Info
+                                          : ride_diagnostics::Level::Warning,
+        "ble", "ride_command_ack_resend", fields);
+  }
+}
+
 static void notifyRideDeliveryAcknowledgement(
     const ride_delivery_protocol::Acknowledgement &acknowledgement) {
   uint8_t payload[ride_delivery_protocol::ACK_SIZE]{};
   const size_t length = ride_delivery_protocol::encodeAcknowledgement(
       acknowledgement, payload, sizeof(payload));
-  if (length == 0 ||
-      !notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, payload,
-                                     length)) {
-    Serial.println("BLE Ride Delivery: acknowledgement queue failed");
+  if (length != ride_delivery_protocol::ACK_SIZE) {
+    Serial.println("BLE Ride Delivery: acknowledgement encoding failed");
+    return;
+  }
+  if (notifyAuthenticatedNavigation(mapTransferStatusCharacteristic, payload,
+                                    length))
+    return;
+  Serial.println("BLE Ride Delivery: acknowledgement queue failed; the loop "
+                 "task resends it");
+  const uint8_t commandClass = static_cast<uint8_t>(acknowledgement.type);
+  // The session and lease this acknowledgement belongs to. The lease is the
+  // one the command was admitted or noted under. The session is read here,
+  // where the outcome is emitted: the host task for most commands, the loop
+  // task for route acknowledgements. A replacement before this read also moves
+  // the lease (a release makes it 0), so the resend fence still rejects it.
+  const ride_command_admission::Authorization authorization{
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      acknowledgement.leaseGeneration};
+  portENTER_CRITICAL(&pendingRideAcknowledgementMux);
+  std::memcpy(pendingRideAcknowledgement.payload, payload, length);
+  pendingRideAcknowledgement.authorization = authorization;
+  pendingRideAcknowledgement.commandClass = commandClass;
+  pendingRideAcknowledgement.attempts = 0;
+  pendingRideAcknowledgement.pending = true;
+  portEXIT_CRITICAL(&pendingRideAcknowledgementMux);
+  recordRideAcknowledgementResend("queue_failed", commandClass,
+                                  acknowledgement.leaseGeneration, 0);
+  ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+}
+
+// Loop task: the ownership lock may be waited for here.
+static void resendPendingRideAcknowledgement() {
+  PendingRideAcknowledgement copy;
+  portENTER_CRITICAL(&pendingRideAcknowledgementMux);
+  copy = pendingRideAcknowledgement;
+  portEXIT_CRITICAL(&pendingRideAcknowledgementMux);
+  if (!copy.pending)
+    return;
+  const AuthenticatedNotifyResult result = notifyAuthenticatedPayloadResult(
+      mapTransferStatusCharacteristic,
+      device_ownership::AuthenticatedChannel::Navigation, copy.payload,
+      sizeof(copy.payload), copy.authorization);
+  const uint8_t attempts = static_cast<uint8_t>(copy.attempts + 1U);
+  const bool finished = result != AuthenticatedNotifyResult::Unavailable ||
+                        attempts >= kRideAcknowledgementResends;
+  bool current = false;
+  portENTER_CRITICAL(&pendingRideAcknowledgementMux);
+  // A newer failure replaced the slot meanwhile: leave that one alone.
+  current = pendingRideAcknowledgement.pending &&
+            pendingRideAcknowledgement.authorization.sessionGeneration ==
+                copy.authorization.sessionGeneration &&
+            pendingRideAcknowledgement.authorization.leaseGeneration ==
+                copy.authorization.leaseGeneration &&
+            std::memcmp(pendingRideAcknowledgement.payload, copy.payload,
+                        sizeof(copy.payload)) == 0;
+  if (current) {
+    if (finished)
+      pendingRideAcknowledgement.pending = false;
+    else
+      pendingRideAcknowledgement.attempts = attempts;
+  }
+  portEXIT_CRITICAL(&pendingRideAcknowledgementMux);
+  if (current && finished) {
+    recordRideAcknowledgementResend(
+        result == AuthenticatedNotifyResult::Queued   ? "resent"
+        : result == AuthenticatedNotifyResult::Fenced ? "fenced"
+                                                      : "dropped",
+        copy.commandClass, copy.authorization.leaseGeneration, attempts);
   }
 }
+// END deferred ride acknowledgement
 
 static void emitRideDeliveryAcknowledgement(
     const ride_delivery_protocol::CommandMember &member,
@@ -2885,6 +3207,13 @@ static void handleAuthPayload(const std::string &frame) {
         xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
       ownershipLockAcquired = true;
       ownershipResult = deviceOwnership.handle(value, millis());
+      // The plaintext answer, before any protection below: the controller
+      // still holds its ride lease, so its last ride totals stay live.
+      if (ownershipResult.matched && ownershipResult.response == "LEASE_OK") {
+        const uint32_t renewedAtMs = millis();
+        rideLeaseRenewedAtMs.store(renewedAtMs == 0 ? 1 : renewedAtMs,
+                                   std::memory_order_release);
+      }
       if (ownershipResult.event == device_ownership::Event::Paired) {
         unauthenticatedWindowStartMs.store(millis(), std::memory_order_release);
       }
@@ -5935,7 +6264,8 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
 
 static void handleGpsPayload(
     const uint8_t *data, size_t len, const char *source,
-    const gps_input_freshness::ArrivalBatch &arrivals) {
+    const gps_input_freshness::ArrivalBatch &arrivals,
+    uint32_t payloadGeneration) {
   gps_position_protocol::Packet packet{};
   // While the board's own receiver holds a valid fix, the phone's position
   // still feeds ride automation and diagnostics but not the shared position
@@ -5950,6 +6280,11 @@ static void handleGpsPayload(
     return;
   }
   gps_position_protocol::apply(packet, appliesToPosition, gps.gpsData);
+  // Every authenticated packet refreshes the totals it just wrote (or
+  // cleared). The stamp carries the packet's own session: a link that ended
+  // after the mailbox check makes these totals stale at once.
+  phoneRideTotalsStamp =
+      phone_ride_totals::received(millis(), payloadGeneration);
 
   bool rtcTimestampSynced = false;
   if (packet.hasUnixTime) {
@@ -6578,7 +6913,8 @@ static void processPendingMapInputs() {
       handleRouteGeometryPayload(input.data, input.length, source);
       break;
     case PendingMapInputType::Gps:
-      handleGpsPayload(input.data, input.length, source, input.gpsArrivals);
+      handleGpsPayload(input.data, input.length, source, input.gpsArrivals,
+                       input.payloadGeneration);
       break;
     case PendingMapInputType::Setting:
       handleMapSettingPayload(input.data, input.length, source);
@@ -8257,6 +8593,9 @@ void BLENavigationServer::process() {
   processCompletedDiagnosticsSessionStart();
   drainProbeRecords();
   scheduleDeferredNotificationEvent();
+  // Maintenance boots need a reachable owner too, so this precedes them.
+  superviseAdvertising(connected);
+  resendPendingRideAcknowledgement();
   // The unauthenticated deadline uses the pairing state read under the
   // ownership lock, never the snapshot another task may have just cleared: a
   // registration clears the pairing and restarts the window together. A busy

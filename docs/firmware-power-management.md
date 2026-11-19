@@ -46,6 +46,7 @@ peripheral transaction part of the correctness boundary.
 | Connected, display off | Configured panel-off delay without meaningful activity (45 seconds by default) | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
 | Transfer or attention hold | Device transfer, activation, pairing, or audio needs immediate feedback | Display stays awake and required PM locks protect the operation | Hold ends when the operation ends |
 | Disconnected countdown | BLE is disconnected and the configured timeout is nonzero | Firmware remains available for reconnection | Reconnection cancels the countdown; expiry enters deep sleep |
+| Standalone GNSS ride hold (GNSS boards) | Disconnected, and the board's own receiver confirms movement now or within the bounded hold | Display held awake while moving; firmware remains available for reconnection | Reconnection, or no movement for max(timeout, 5 minutes) (see [Standalone GNSS movement](#standalone-gnss-movement-gnss-boards)) |
 | Deep sleep | Disconnected timeout expires | Panel is commanded off; buses and radio stop; firmware does not turn off or rewrite AXP2101 output rails | BOOT/PWR button on GPIO0 |
 
 Display-off while connected is not deep sleep. The BLE connection is retained,
@@ -56,7 +57,9 @@ and touch can wake the UI without requiring a reboot or reconnection.
 The disconnected sleep timeout is BLE setting `15`. Supported values are 60,
 120, 300, or 600 seconds; `0` disables automatic disconnected sleep. The
 default is 120 seconds. An unclaimed device receives a minimum 600-second
-registration grace period unless the feature is disabled.
+registration grace period unless the feature is disabled. On a board with its
+own GNSS receiver, confirmed standalone movement holds the countdown; see
+[Standalone GNSS movement](#standalone-gnss-movement-gnss-boards).
 
 Before deep sleep, firmware commands the panel off, stops the SPI and I2C buses,
 and shuts down the radio. It does not rewrite AXP2101 output-enable or voltage
@@ -100,8 +103,54 @@ display awake:
   maneuver;
 - workout requires an authenticated BLE connection plus a live Starting,
   Running, Paused, or Ending workout state;
-- transfer includes the transfer service and device-activation work; and
-- attention includes pairing and audio.
+- transfer includes the transfer service and device-activation work;
+- attention includes pairing and audio; and
+- on a GNSS board without an authenticated phone session, confirmed standalone
+  movement holds the display like navigation (see below).
+
+## Standalone GNSS movement (GNSS boards)
+
+A board with its own receiver (the GNSS 1.75 variant) can be ridden with the
+phone off or out of range. Without the phone it knows it is being ridden only
+from its own fixes, so confirmed movement counts as activity for disconnected
+shutdown and display inactivity. Boards without a receiver are unchanged.
+
+Movement (`gnss_motion_policy.hpp`) uses only the receiver's fixes; phone
+positions, which may be simulated, never count. A stationary receiver still
+reports speed and position jitter, so:
+
+- movement starts after three consecutive valid fixes (no more than 3 s
+  apart) at 9 km/h or more, with at least 15 m of net displacement from the
+  first of them;
+- it continues while valid fixes report at least 4 km/h, the hysteresis band
+  between the stop and start thresholds;
+- it ends when no fix has counted as movement for 10 s (slow, invalid,
+  time-only or missing fixes, such as in a tunnel), and also when the
+  position has progressed less than 30 m in a 30 s window. Speed alone
+  therefore cannot keep it moving.
+
+Disconnected shutdown (`disconnected_shutdown_policy.hpp`): a disconnected
+GNSS board that is moving never sleeps. Once movement ends the shutdown is due
+at max(disconnect + timeout, last movement + max(timeout, 5 minutes)), so a stop
+at a light or a café keeps the board on while a parked board still powers down.
+The hold is bounded: jitter can extend it by at most one 30 s progress window.
+`Never` (timeout `0`) and a connection always win. An unclaimed board keeps its
+600-second registration grace. A shutdown that has already been announced is
+not withdrawn. Explicit power-off by the user is not affected.
+
+Display inactivity (`display_inactivity_policy.hpp`): while no authenticated
+phone session exists, movement holds the display active like navigation. When
+movement starts it wakes a display that had turned off. When movement ends, a
+fresh idle interval begins and the configured dim and off delays apply. With
+an authenticated phone, the phone's navigation and workout state drive the
+screen exactly as before. Disabling automatic display-off keeps the display on
+as before.
+
+Every start and end is recorded as `power gnss_motion` (`phase` `moving` or
+`stationary`, `durationMs` the movement's length), so a phone-off ride leaves
+retained evidence. The thresholds are host-tested
+(`tools/tests/test_gnss_power_policy.cpp`); they still need a physical
+phone-off ride on the GNSS 1.75 before this behavior is qualified.
 
 Meaningful activity includes touch, screen or tile changes, BLE
 connect/authentication, route revisions, audio transitions, pairing and

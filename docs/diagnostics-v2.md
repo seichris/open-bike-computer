@@ -613,6 +613,42 @@ the capture time; `ble probe_dropped` (`droppedCount`) means more than eight
 probe records waited for one pass. The `transfer state_lock` records are
 written by the task that releases the lock, after the release.
 
+A NimBLE host reset (GAP disconnect reason `12` = `BLE_HS_ECONTROLLER`, or
+`11`, `19`, `22`) resets the controller and clears the host's identity
+addresses. `ble host_reset` records it as `phase` `reset` (`errorCode` = the
+NimBLE reason), and records the resynchronization as `phase` `synced`, where
+`errorCode` is the status of restoring the persisted static random address
+and `result` says whether advertising resumed (`advertising` or
+`not_advertising`). `ble advertising_recovery` is the bounded supervisor
+behind it (`ble_advertising_recovery_policy.hpp`), for a synchronized,
+unconnected host that is not advertising:
+- `attempt` (`attempt` = number, `errorCode` = address restore status,
+  `result`): the six fast attempts land about 1, 2, 4, 8, 16 and 32 s into
+  the outage, then attempts repeat once a minute. Slow-phase failures are not
+  recorded individually.
+- `fast_attempts_exhausted`: recorded once.
+- `restored`: `attempt` = attempts made, `durationMs` = the outage.
+- `host_unsynced`: recorded once if the host has not resynchronized after
+  10 s.
+
+These records show whether the board was reachable after a reset. They do not
+explain what made the controller and host disagree.
+
+`ble ride_command_ack_resend` covers a ride-delivery acknowledgement whose
+notification could not be queued: `queue_failed`, with `commandClass` and
+`leaseGeneration`. Inside a NimBLE callback the ownership lock is tried without
+waiting. The loop task resends the acknowledgement up to three times. Each
+resend is checked, under the ownership lock that admits the notification,
+against the session and ride lease the acknowledgement was made for. The loop
+task then records `resent`, `dropped` (still not sendable after three
+attempts) or `fenced` (the session or lease was replaced, so the
+acknowledgement is retired unsent), with `attempt`. The phone ignores a
+duplicate acknowledgement by command ID.
+
+`power gnss_motion` records standalone movement confirmed by a GNSS board's own
+receiver: `phase` `moving` when movement starts, and `stationary` when it ends
+(`durationMs` = the movement's length). See `firmware-power-management.md`.
+
 Read them together: a stalled heartbeat with `state` `notify` and
 `host_activity` `notify` records is the controller refusing packets (the
 radio, not a lock); `state` `settings` with a `state_lock` `wait` from

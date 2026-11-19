@@ -393,6 +393,12 @@ struct NavigationWriteQueue {
     /// Inserts a small control response into a separate bounded lane ahead of
     /// bulk traffic. A newer complete response replaces the older priority
     /// message, without consuming or evicting regular/catalog capacity.
+    ///
+    /// Ordinary priority traffic has its own count and byte capacity: queued
+    /// critical application frames never count against it, so a critical
+    /// backlog cannot starve transfer control or status responses. Frames
+    /// that carry an application command ID must use
+    /// `enqueueCriticalAtomically`.
     @discardableResult
     mutating func enqueuePrioritizedAtomically(_ writes: [NavigationWrite]) -> Bool {
         let writeBytes = writes.reduce(0) { $0 + $1.data.count }
@@ -400,42 +406,36 @@ struct NavigationWriteQueue {
               writes.count <= priorityMaxCount,
               writeBytes <= priorityMaxPendingBytes,
               writes.allSatisfy({
-                  $0.data.count <= Self.maximumFrameBytes
+                  $0.applicationCommandID == nil &&
+                      $0.data.count <= Self.maximumFrameBytes
               }) else {
             recordRejectedFrames(writes.count)
             return false
         }
 
         let replacementKeys = Set(writes.compactMap(\.coalescingKey))
-        if !replacementKeys.isEmpty {
-            let replacementIndices = pendingPriorityWrites.indices.reversed().filter {
-                guard let key = pendingPriorityWrites[$0].coalescingKey else {
+        let replacementIndices = replacementKeys.isEmpty ? [] :
+            pendingPriorityWrites.indices.reversed().filter {
+                guard pendingPriorityWrites[$0].applicationCommandID == nil,
+                      let key = pendingPriorityWrites[$0].coalescingKey else {
                     return false
                 }
                 return replacementKeys.contains(key)
             }
-            let retainedCount = pendingPriorityWrites.count - replacementIndices.count
-            let replacedBytes = replacementIndices.reduce(0) {
-                $0 + pendingPriorityWrites[$1].data.count
-            }
-            let retainedBytes = priorityPendingByteCount - replacedBytes
-            guard retainedCount + writes.count <= priorityMaxCount,
-                  retainedBytes + writeBytes <= priorityMaxPendingBytes else {
-                recordRejectedFrames(writes.count)
-                return false
-            }
-            for index in replacementIndices {
-                let removed = pendingPriorityWrites.remove(at: index)
-                recordCoalesced(write: removed)
-                removed.onDrop?()
-            }
+        let replacedBytes = replacementIndices.reduce(0) {
+            $0 + pendingPriorityWrites[$1].data.count
         }
-
-        if pendingPriorityWrites.count + writes.count > priorityMaxCount ||
-            priorityPendingByteCount + writeBytes >
-                priorityMaxPendingBytes {
+        guard ordinaryPriorityCount - replacementIndices.count + writes.count <=
+                priorityMaxCount,
+              ordinaryPriorityBytes - replacedBytes + writeBytes <=
+                priorityMaxPendingBytes else {
             recordRejectedFrames(writes.count)
             return false
+        }
+        for index in replacementIndices {
+            let removed = pendingPriorityWrites.remove(at: index)
+            recordCoalesced(write: removed)
+            removed.onDrop?()
         }
         beginEnqueueIfEmpty()
         let enqueuedAt = now()
@@ -445,6 +445,123 @@ struct NavigationWriteQueue {
         recordEnqueuedFrames(writes.count)
         recordDepth()
         return true
+    }
+
+    /// Critical commands may together hold this multiple of the lane's count
+    /// and byte limits (for example a sent five-frame workout group awaiting
+    /// its acknowledgement, two newer five-frame groups and a two-frame
+    /// navigation clear).
+    static let criticalCapacityFactor = 3
+
+    private struct CriticalHold {
+        let frames: Int
+        let bytes: Int
+    }
+
+    /// Capacity each admitted critical command holds until its outcome is
+    /// settled: its group size, whether its frames are queued, already sent
+    /// and awaiting the acknowledgement, or queued again as the retry.
+    private var criticalHolds: [UUID: CriticalHold] = [:]
+
+    /// Admits one complete critical application command (an RCM1 group whose
+    /// frames all carry its command ID). The ride writer holds every write
+    /// while a critical acknowledgement is pending, so traffic piles up
+    /// during that wait; a retry that competed for that capacity could not be
+    /// admitted, and one lost acknowledgement became a reconnect (GNSS bench,
+    /// 2026-11-18).
+    ///
+    /// - A group is limited to the lane's own count and bytes, as before.
+    /// - Ordinary priority traffic has its own capacity and neither counts
+    ///   against nor is evicted by critical commands.
+    /// - A new command is admitted only while all held commands, plus this
+    ///   one, fit `criticalCapacityFactor` times the lane's limits. Its hold
+    ///   lasts until the caller no longer lists it in `liveCommandIDs`, so a
+    ///   sent command awaiting its acknowledgement keeps room for its one
+    ///   retry however many newer commands arrive. Commands that are no
+    ///   longer live lose their hold and any frames still queued.
+    /// - The retry of a held command needs no further capacity. It goes to the
+    ///   head of the lane: the device ordered the original before everything
+    ///   queued since, and only one command can await its acknowledgement at
+    ///   a time, so nothing ahead of it is older.
+    @discardableResult
+    mutating func enqueueCriticalAtomically(
+        _ writes: [NavigationWrite],
+        atHead: Bool = false,
+        liveCommandIDs: Set<UUID>
+    ) -> Bool {
+        let writeBytes = writes.reduce(0) { $0 + $1.data.count }
+        guard let commandID = writes.first?.applicationCommandID,
+              liveCommandIDs.contains(commandID),
+              writes.count <= priorityMaxCount,
+              writeBytes <= priorityMaxPendingBytes,
+              writes.allSatisfy({
+                  $0.applicationCommandID == commandID &&
+                      $0.data.count <= Self.maximumFrameBytes
+              }) else {
+            recordRejectedFrames(writes.count)
+            return false
+        }
+        retireSettledCriticalCommands(keeping: liveCommandIDs)
+        if let hold = criticalHolds[commandID] {
+            // A retry: its hold already covers it, provided the original
+            // frames have left the lane.
+            guard writes.count <= hold.frames,
+                  writeBytes <= hold.bytes,
+                  !pendingPriorityWrites.contains(where: {
+                      $0.applicationCommandID == commandID
+                  }) else {
+                recordRejectedFrames(writes.count)
+                return false
+            }
+        } else {
+            let held = criticalHolds.values.reduce(into: (frames: 0, bytes: 0)) {
+                $0.frames += $1.frames
+                $0.bytes += $1.bytes
+            }
+            guard held.frames + writes.count <=
+                    Self.criticalCapacityFactor * priorityMaxCount,
+                  held.bytes + writeBytes <=
+                    Self.criticalCapacityFactor * priorityMaxPendingBytes else {
+                recordRejectedFrames(writes.count)
+                return false
+            }
+            criticalHolds[commandID] = CriticalHold(
+                frames: writes.count,
+                bytes: writeBytes
+            )
+        }
+        beginEnqueueIfEmpty()
+        let enqueuedAt = now()
+        let admitted = writes.map {
+            $0.enqueued(at: enqueuedAt).protectingAtomicBatch()
+        }
+        if atHead {
+            pendingPriorityWrites.insert(contentsOf: admitted, at: 0)
+        } else {
+            pendingPriorityWrites.append(contentsOf: admitted)
+        }
+        recordEnqueuedFrames(writes.count)
+        recordDepth()
+        return true
+    }
+
+    /// Releases holds, and drops frames still queued, of critical commands
+    /// whose outcome the caller has settled. Their frames would be retired
+    /// as invalid at the next flush anyway; doing it here keeps the lane
+    /// within the capacity it grants.
+    private mutating func retireSettledCriticalCommands(keeping live: Set<UUID>) {
+        criticalHolds = criticalHolds.filter { live.contains($0.key) }
+        let settled = pendingPriorityWrites.indices.reversed().filter {
+            guard let id = pendingPriorityWrites[$0].applicationCommandID else {
+                return false
+            }
+            return !live.contains(id)
+        }
+        for index in settled {
+            let removed = pendingPriorityWrites.remove(at: index)
+            recordDropped(write: removed)
+            removed.onDrop?()
+        }
     }
 
     /// Replaces only an unsent, complete route snapshot. Unlike ordinary
@@ -513,13 +630,15 @@ struct NavigationWriteQueue {
             return true
         }
 
-        guard write.data.count <= Self.maximumFrameBytes else {
+        guard write.data.count <= Self.maximumFrameBytes,
+              !prioritized || write.applicationCommandID == nil else {
             recordRejectedFrames(1)
             return false
         }
         if prioritized {
+            // Ordinary priority capacity: critical frames do not count.
             let retainedPriorityWrites = pendingPriorityWrites.filter {
-                $0.coalescingKey != key
+                $0.applicationCommandID == nil && $0.coalescingKey != key
             }
             guard retainedPriorityWrites.count + 1 <= priorityMaxCount,
                   retainedPriorityWrites.reduce(0, {
@@ -562,8 +681,8 @@ struct NavigationWriteQueue {
             resetRetryWhenEmpty: false
         )
         if prioritized {
-            guard pendingPriorityWrites.count < priorityMaxCount,
-                  priorityPendingByteCount + write.data.count <=
+            guard ordinaryPriorityCount < priorityMaxCount,
+                  ordinaryPriorityBytes + write.data.count <=
                     priorityMaxPendingBytes,
                   write.data.count <= Self.maximumFrameBytes else {
                 recordRejectedFrames(1)
@@ -616,6 +735,7 @@ struct NavigationWriteQueue {
         recordClearedFrames(count)
         pendingPriorityWrites.removeAll()
         pendingWrites.removeAll()
+        criticalHolds.removeAll()
         retryStartedAtUptime = nil
         recordDepth()
     }
@@ -794,6 +914,19 @@ struct NavigationWriteQueue {
 
     private var priorityPendingByteCount: Int {
         pendingPriorityWrites.reduce(0) { $0 + $1.data.count }
+    }
+
+    /// Ordinary (non-critical) priority frames, which have their own capacity.
+    private var ordinaryPriorityCount: Int {
+        pendingPriorityWrites.reduce(0) {
+            $0 + ($1.applicationCommandID == nil ? 1 : 0)
+        }
+    }
+
+    private var ordinaryPriorityBytes: Int {
+        pendingPriorityWrites.reduce(0) {
+            $0 + ($1.applicationCommandID == nil ? $1.data.count : 0)
+        }
     }
 
     private mutating func beginEnqueueIfEmpty() {

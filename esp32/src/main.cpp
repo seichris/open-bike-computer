@@ -64,6 +64,7 @@
 #include "display_power.hpp"
 #include "runtime_watchdog_diagnostics.hpp"
 #include "disconnected_shutdown_policy.hpp"
+#include "gnss_motion_policy.hpp"
 #include "ownership_button_policy.hpp"
 #include "power_metrics.hpp"
 #include "guiLayout.hpp"
@@ -853,6 +854,59 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
   return disabled;
 }
 
+// Standalone movement from the board's own receiver (GNSS boards only;
+// docs/firmware-power-management.md). Loop task.
+static gnss_motion::Detector gnssMotion;
+
+static void recordGnssMotionTransition(gnss_motion::Transition transition) {
+  if (transition == gnss_motion::Transition::None)
+    return;
+  const bool started = transition == gnss_motion::Transition::Started;
+  char fields[96] = {};
+  const int written = std::snprintf(
+      fields, sizeof(fields), "{\"phase\":\"%s\",\"durationMs\":%lu}",
+      started ? "moving" : "stationary",
+      static_cast<unsigned long>(
+          started ? 0U
+                  : gnssMotion.lastMovementMs() -
+                        gnssMotion.movementStartedMs()));
+  if (written > 0 && static_cast<size_t>(written) < sizeof(fields)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "power",
+                                   "gnss_motion", fields);
+  }
+  Serial.printf("GNSS motion: %s\n", started ? "moving" : "stationary");
+}
+
+// After applyPendingGnssFix(): `freshFix` means GPSDATA and the presentation
+// sample now hold the receiver's latest fix. Phone positions never reach here.
+static void observeGnssMotion(uint32_t nowMs, bool freshFix) {
+  if (!position_source::gnssFitted())
+    return;
+  if (freshFix &&
+      gps.presentationSample.source == RidePositionSource::HardwareNmea) {
+    gnss_motion::Sample sample;
+    sample.capturedAtMs = gps.presentationSample.capturedAtMs;
+    sample.locationValid = gps.presentationSample.ageKnown;
+    sample.speedValid = gps.presentationSample.speedAvailable;
+    sample.speedKmh = static_cast<float>(gps.gpsData.speed);
+    sample.latitude = gps.gpsData.latitude;
+    sample.longitude = gps.gpsData.longitude;
+    gnssMotion.observe(sample);
+  }
+  gnssMotion.tick(nowMs);
+  recordGnssMotionTransition(gnssMotion.takeTransition());
+}
+
+static disconnected_shutdown_policy::MotionHold currentGnssMotionHold() {
+  disconnected_shutdown_policy::MotionHold hold;
+  if (position_source::gnssFitted()) {
+    hold.moving = gnssMotion.moving();
+    hold.moved = gnssMotion.moved();
+    hold.lastMovementMs = gnssMotion.lastMovementMs();
+  }
+  return hold;
+}
+
 static display_inactivity::Update updateDisplayInactivityPolicy(
     uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
   if (shutdownDeferredNoticeShown) {
@@ -1027,6 +1081,12 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       signals.activationRunning;
   context.attentionActive =
       signals.pairing || audioActive || rideAutomationAttention;
+  // With an authenticated phone, its navigation and workout state drive the
+  // screen as before; without one, standalone movement holds it like
+  // navigation does.
+  context.gnssMoving = position_source::gnssFitted() &&
+                       !(bleStats.connected && bleStats.authenticated) &&
+                       gnssMotion.moving();
   const display_inactivity::Update update =
       displayInactivityPolicy.update(nowMs, context);
   currentDisplayMode = update.current;
@@ -1387,7 +1447,16 @@ static void processDisconnectedShutdown() {
       shutdownTracker.update(
           millis(), connected,
           mapRenderSettings.disconnectedSleepTimeoutSeconds,
-          ownershipClaimed);
+          ownershipClaimed, currentGnssMotionHold());
+
+  static bool reportedMotionHold = false;
+  if (result.heldByMotion != reportedMotionHold) {
+    reportedMotionHold = result.heldByMotion;
+    Serial.println(result.heldByMotion
+                       ? "Power: disconnected timeout reached; GNSS movement "
+                         "holds the board awake"
+                       : "Power: GNSS movement hold ended");
+  }
 
   if (result.action ==
       disconnected_shutdown_policy::Action::CountdownStarted) {
@@ -2331,7 +2400,10 @@ void loop() {
           lastBleHousekeepingMs, bleHousekeepingPeriodMs)) {
     lastBleHousekeepingMs = now;
     bleNavServer.process();
-    if (position_source::applyPendingGnssFix() && noteNavigationInputForMapEntry()) {
+    const bool freshGnssFix = position_source::applyPendingGnssFix();
+    // The fix was captured after `now` was read: tick at the current time.
+    observeGnssMotion(millis(), freshGnssFix);
+    if (freshGnssFix && noteNavigationInputForMapEntry()) {
       Serial.println("GNSS: Fresh device fix received, transitioning to map...");
     }
   }

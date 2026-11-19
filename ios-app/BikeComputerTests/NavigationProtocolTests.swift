@@ -1020,6 +1020,7 @@ struct NavigationProtocolTests {
         testRideApplicationAcknowledgementWaitsForATTCallback()
         testFailedClearRetiresSiblingsAndReplaysIntent()
         testRideRecoveryKeepsSpecificFailureReason()
+        testCriticalCommandAdmissionReserve()
         testPhoneConnectionAdoptionOwnsGeneration()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()

@@ -19,6 +19,10 @@ struct LegacyRideTelemetry {
   uint32_t routeRemainingMeters = 0;
   bool gpsFresh = true;
   bool speedAvailable = true;
+  // Distance, elapsed time and route remaining come only from the phone or
+  // Watch and have their own freshness (phone_ride_totals.hpp): position
+  // freshness may come from the board's receiver instead.
+  bool totalsFresh = true;
 };
 
 struct ViewModel {
@@ -94,8 +98,12 @@ inline ViewModel makeViewModel(
     const workout_telemetry::Snapshot &workout,
     const LegacyRideTelemetry &legacy) {
   ViewModel model{};
-  model.hasActiveNavigation = legacy.hasRouteRemaining;
-  model.routeRemainingMeters = legacy.hasRouteRemaining
+  // Stale phone totals never show Route Left: the route may have ended, or
+  // the rider moved on, while the phone could not say so.
+  const bool routeRemainingLive =
+      legacy.hasRouteRemaining && legacy.totalsFresh;
+  model.hasActiveNavigation = routeRemainingLive;
+  model.routeRemainingMeters = routeRemainingLive
                                    ? workout_telemetry::OptionalMetric<uint32_t>{
                                          true, legacy.routeRemainingMeters}
                                    : workout_telemetry::OptionalMetric<uint32_t>{};
@@ -137,8 +145,12 @@ inline ViewModel makeViewModel(
       legacy.gpsFresh && legacy.speedAvailable,
       static_cast<uint32_t>(legacy.speedKilometersPerHour) * 10U};
   model.altitudeMeters = {true, legacy.altitudeMeters};
-  model.distanceMeters = {true, legacy.distanceMeters};
-  model.elapsedSeconds = {true, legacy.elapsedSeconds};
+  // Without fresh phone totals the values are frozen, not live: show them as
+  // unavailable rather than as a ride that stopped counting.
+  if (legacy.totalsFresh) {
+    model.distanceMeters = {true, legacy.distanceMeters};
+    model.elapsedSeconds = {true, legacy.elapsedSeconds};
+  }
   return model;
 }
 

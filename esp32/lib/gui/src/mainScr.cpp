@@ -240,6 +240,8 @@ uint64_t gpsSignature(uint32_t nowMs) {
   // transition invalidate Ride Stats so its stale status and speed update.
   hashScalar(hash, gps_input_freshness::presentationStatusBits(sourceSample,
                                                                 nowMs));
+  // Phone totals can expire, or lose their session, without a GPSDATA change.
+  hashScalar(hash, phoneRideTotalsFresh(nowMs));
   hashScalar(hash, gps.gpsData.satellites);
   hashScalar(hash, gps.gpsData.fixMode);
   hashScalar(hash, isGpsFixed);

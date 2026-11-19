@@ -934,6 +934,7 @@ ride_telemetry_presenter::ViewModel currentViewModel() {
       gps.gpsData.routeRemaining,
       gpsSource.fresh(millis()),
       gpsSource.speedAvailable,
+      phoneRideTotalsFresh(millis()),
   };
   return ride_telemetry_presenter::makeViewModel(workout, legacy);
 }
