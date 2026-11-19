@@ -67,6 +67,26 @@ class BuildingPipelineTests(unittest.TestCase):
 
             self.assertEqual(load_relation_index(path), value)
 
+    def test_redundant_wrapper_requires_the_tagged_part_to_survive_conversion(self):
+        geometry = box(0, 0, 20, 20)
+        tagged_part = feature(
+            190, geometry, '"building:part"=>"yes","height"=>"65"', relation=True,
+        )
+        untagged_way = feature(10, geometry, "", building=None)
+        relation_index = {"redundantPartSources": ["r190"]}
+
+        buildings, _report, _flat = prepare_buildings(
+            [tagged_part, untagged_way], self.rules, relation_index,
+            strict_relations=True,
+        )
+        self.assertEqual([building.object_key for building in buildings], ["r190"])
+        self.assertEqual(buildings[0].resolved.height_dm, 650)
+
+        with self.assertRaisesRegex(CalibrationCacheError, "tagged building part is missing"):
+            prepare_buildings(
+                [untagged_way], self.rules, relation_index, strict_relations=True,
+            )
+
     def test_load_relation_index_rejects_overlapping_parent_encodings(self):
         value = {
             "schemaVersion": 1,
