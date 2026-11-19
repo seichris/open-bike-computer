@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT.parents[1] / "map-platform" / "backend"))
 
 from map_format import (
     MAX_BLOCK_BUILDINGS,
+    MAX_DENSE_BLOCK_BUILDINGS,
     MAX_BLOCK_POIS,
     MapFormatError,
     MapFormatLimitError,
@@ -530,6 +531,16 @@ class BinaryMapFormatTests(unittest.TestCase):
         ) as raised:
             encode_building_section([building] * (MAX_BLOCK_BUILDINGS + 1))
         self.assertEqual(raised.exception.code, "building_artifact_too_large")
+
+    def test_opt_in_dense_fmb_v4_retains_all_records_with_a_bounded_ceiling(self):
+        _polygon, _road, building = golden_features()
+        records = [building] * MAX_DENSE_BLOCK_BUILDINGS
+        section, metadata = encode_building_section(records, allow_dense=True)
+        self.assertEqual(metadata["buildings"], 20480)
+        self.assertEqual(metadata["buildingPoints"], 4 * len(records))
+        self.assertEqual(metadata["buildingBytes"], len(section))
+        with self.assertRaises(MapFormatLimitError):
+            encode_building_section([*records, building], allow_dense=True)
 
     def test_fmb_v6_retains_prior_sections_and_requires_canonical_pois(self):
         polygon, road, building = golden_features()

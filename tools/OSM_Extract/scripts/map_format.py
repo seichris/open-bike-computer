@@ -19,8 +19,10 @@ MAX_BLOCK_LABELS = 8192
 MAX_BLOCK_CANDIDATES = 16384
 MAX_LABEL_VARIANTS = 8
 MAX_BLOCK_BUILDINGS = 12288
+MAX_DENSE_BLOCK_BUILDINGS = 20480
 MAX_BUILDING_RINGS = 32
 MAX_BUILDING_POINTS = 131072
+MAX_DENSE_BUILDING_POINTS = 147456
 MAX_BLOCK_POIS = 16384
 
 _DIRECTORY_HEADER = struct.Struct("<4sB3x")
@@ -301,9 +303,11 @@ def _label_sections(polylines, min_x, min_y, font_builder):
     }
 
 
-def encode_building_section(records):
-    if len(records) > MAX_BLOCK_BUILDINGS:
+def encode_building_section(records, *, allow_dense=False):
+    maximum_records = MAX_DENSE_BLOCK_BUILDINGS if allow_dense else MAX_BLOCK_BUILDINGS
+    if len(records) > maximum_records:
         raise MapFormatLimitError("building record count exceeds FMB v4 limits")
+    maximum_points = MAX_DENSE_BUILDING_POINTS if allow_dense else MAX_BUILDING_POINTS
     total_points = 0
     section = bytearray(_BUILDING_SECTION_HEADER.pack(len(records), 0, 0))
     for record in records:
@@ -354,7 +358,7 @@ def encode_building_section(records):
             ):
                 raise MapFormatError("building ring is invalid")
             total_points += len(points)
-            if total_points > MAX_BUILDING_POINTS:
+            if total_points > maximum_points:
                 raise MapFormatLimitError("building point count exceeds FMB v4 limits")
             section.extend(_BUILDING_RING.pack(len(points), flags, 0))
             for x, y in points:
@@ -372,7 +376,7 @@ def encode_building_section(records):
     }
 
 
-def _validated_building_section(section, metadata):
+def _validated_building_section(section, metadata, *, allow_dense):
     if not isinstance(section, bytes) or len(section) < _BUILDING_SECTION_HEADER.size:
         raise MapFormatError("preencoded building section is invalid")
     if not isinstance(metadata, dict) or set(metadata) != {
@@ -382,6 +386,12 @@ def _validated_building_section(section, metadata):
     }:
         raise MapFormatError("preencoded building metadata is invalid")
     record_count, reserved, point_count = _BUILDING_SECTION_HEADER.unpack_from(section)
+    maximum_records = MAX_DENSE_BLOCK_BUILDINGS if allow_dense else MAX_BLOCK_BUILDINGS
+    if record_count > maximum_records:
+        raise MapFormatLimitError("building record count exceeds FMB v4 limits")
+    maximum_points = MAX_DENSE_BUILDING_POINTS if allow_dense else MAX_BUILDING_POINTS
+    if point_count > maximum_points:
+        raise MapFormatLimitError("building point count exceeds FMB v4 limits")
     if (
         reserved != 0
         or metadata["buildings"] != record_count
@@ -506,6 +516,7 @@ def write_fmb(
     building_section=None,
     building_metadata=None,
     poi_records=None,
+    allow_dense_buildings=False,
 ):
     """Write vector FMB v2-v4 or combined FMB v6 with empty contour storage.
 
@@ -515,6 +526,8 @@ def write_fmb(
 
     if type(renderer_target) is not int or renderer_target not in {1, 2, 3, 5}:
         raise MapFormatError("renderer target is unsupported")
+    if allow_dense_buildings and renderer_target != 3:
+        raise MapFormatError("dense building blocks require renderer target 3")
     if building_records is not None and building_section is not None:
         raise MapFormatError("building records and preencoded section are mutually exclusive")
     has_buildings = building_records is not None or building_section is not None
@@ -583,12 +596,13 @@ def write_fmb(
         if renderer_target >= 3:
             if building_section is None:
                 encoded_section, encoded_metadata = encode_building_section(
-                    building_records
+                    building_records, allow_dense=allow_dense_buildings
                 )
             else:
                 encoded_section, encoded_metadata = _validated_building_section(
                     building_section,
                     building_metadata,
+                    allow_dense=allow_dense_buildings,
                 )
             sections = (*sections, (FMB_V4_SECTION_BUILDINGS, encoded_section))
             metadata.update(encoded_metadata)

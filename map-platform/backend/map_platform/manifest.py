@@ -47,6 +47,7 @@ ALLOWED_PACK_FILE_RE = re.compile(
     r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bpe]|"
     r"assets/(?:street-labels\.fma|nearby-pois\.fpi))"
 )
+DENSE_BUILDING_MIN_FIRMWARE = (0, 3, 5)
 MAX_PACK_MAP_ID_BYTES = 64
 MAX_PACK_PATH_COMPONENT_BYTES = 64
 MAX_PACK_RELATIVE_PATH_BYTES = 202
@@ -203,6 +204,7 @@ def build_manifest(
     poi_stats: dict[str, Any] | None = None,
     topography: dict[str, Any] | None = None,
     compatibility: dict[str, int] | None = None,
+    allow_dense_buildings: bool = False,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -227,7 +229,20 @@ def build_manifest(
             )
     elif font_asset_path in file_paths:
         raise ValueError("renderer target 1 map pack contains a label font asset")
-    validate_renderer_artifacts(map_root, map_id, files, format_version)
+    dense_buildings = validate_renderer_artifacts(
+        map_root, map_id, files, format_version,
+        allow_dense_buildings=allow_dense_buildings,
+    )
+    firmware_version = str(job.request.get("target", {}).get("firmwareVersion", "0.0.0"))
+    if dense_buildings:
+        # Older readers reject a dense block even though the wire layout and
+        # renderer target are unchanged. Require the new reader before upload.
+        version_parts = DENSE_BUILDING_MIN_FIRMWARE
+        if re.fullmatch(r"(0|[1-9][0-9]{0,9})(\.(0|[1-9][0-9]{0,9})){2}", firmware_version):
+            requested_parts = tuple(int(part) for part in firmware_version.split("."))
+            if all(part <= 0xFFFFFFFF for part in requested_parts):
+                version_parts = max(version_parts, requested_parts)
+        firmware_version = ".".join(str(part) for part in version_parts)
     manifest = {
         "schemaVersion": 1,
         "mapId": map_id,
@@ -242,7 +257,7 @@ def build_manifest(
         "target": {
             "renderer": "esp32-fmb",
             "formatVersion": format_version,
-            "minFirmwareVersion": str(job.request.get("target", {}).get("firmwareVersion", "0.0.0")),
+            "minFirmwareVersion": firmware_version,
         },
         "source": {
             "provider": job.source_region.provider,
@@ -274,7 +289,7 @@ def build_manifest(
     build_identity = build_identity_manifest(job, building_preprocessing)
     if build_identity is not None:
         manifest["buildIdentity"] = build_identity
-    if compatibility is not None:
+    if compatibility is not None and not dense_buildings:
         # Signed with the content, so every copy and reader sees the same
         # durable-contract classification; see map_compatibility.py.
         manifest["compatibility"] = dict(compatibility)
@@ -292,6 +307,7 @@ def build_manifest(
                 if entry["path"].endswith(".fmb")
             ],
             format_version,
+            allow_dense_buildings=allow_dense_buildings,
         )
         if building_stats is not None:
             reported_summary = manifest_building_summary(building_stats)

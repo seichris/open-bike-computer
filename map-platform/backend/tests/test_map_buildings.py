@@ -58,7 +58,11 @@ from map_platform.building_identity import (
 from map_platform.reuse import MapBlock, aligned_projected_extent
 from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
-from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
+from tests.map_label_fixtures import (
+    one_building_fmb4,
+    one_label_fma1,
+    repeated_building_fmb4,
+)
 
 
 class CapturingRunner:
@@ -746,6 +750,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 ),
                 scope_plan=global_plan,
                 calibration_generation=calibration_generation,
+                allow_dense_buildings=True,
             )
             namespace, _section_sha = self._write_cache_block(
                 pipeline.paths.building_cache_root,
@@ -3037,6 +3042,63 @@ class MapBuildingContractTests(unittest.TestCase):
             )
             self.assertLess(observed["source"].min_lon, observed["output"].min_lon)
             self.assertGreater(observed["source"].max_lon, observed["output"].max_lon)
+
+    def test_dense_block_requires_development_and_signs_minimum_firmware(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = self._request()
+            request["target"].pop("firmwareVersion")
+            job = self._service(JobStore(root / "jobs")).create_job(request)
+            job.map_id = stable_map_id(job)
+            map_root = root / "VECTMAP" / job.map_id
+            block = map_root / "+0000+0000" / "1.fmb"
+            asset = map_root / "assets" / "street-labels.fma"
+            block.parent.mkdir(parents=True)
+            asset.parent.mkdir(parents=True)
+            asset.write_bytes(one_label_fma1())
+            block.write_bytes(repeated_building_fmb4(20480))
+
+            with self.assertRaisesRegex(ValueError, "development building limit"):
+                build_manifest(job, root, PipelineMetadata())
+            manifest = build_manifest(
+                job, root, PipelineMetadata(), allow_dense_buildings=True,
+                compatibility={"contract": 1},
+            )
+            self.assertEqual(manifest["target"]["minFirmwareVersion"], "0.3.5")
+            self.assertEqual(manifest["buildings"]["recordCount"], 20480)
+            self.assertNotIn("compatibility", manifest)
+            job.request["target"]["firmwareVersion"] = "1.2.3"
+            manifest = build_manifest(
+                job, root, PipelineMetadata(), allow_dense_buildings=True,
+            )
+            self.assertEqual(manifest["target"]["minFirmwareVersion"], "1.2.3")
+            job.request["target"].pop("firmwareVersion")
+
+            block.write_bytes(repeated_building_fmb4(12000, points_per_ring=12))
+            with self.assertRaisesRegex(ValueError, "development building limit"):
+                build_manifest(job, root, PipelineMetadata())
+            manifest = build_manifest(
+                job, root, PipelineMetadata(), allow_dense_buildings=True,
+                compatibility={"contract": 1},
+            )
+            self.assertEqual(manifest["target"]["minFirmwareVersion"], "0.3.5")
+            self.assertNotIn("compatibility", manifest)
+
+            for oversized_block in (
+                repeated_building_fmb4(20481),
+                repeated_building_fmb4(12000, points_per_ring=13),
+            ):
+                block.write_bytes(oversized_block)
+                with self.assertRaisesRegex(ValueError, "building header is invalid"):
+                    build_manifest(job, root, PipelineMetadata(), allow_dense_buildings=True)
+
+            block.write_bytes(one_building_fmb4())
+            manifest = build_manifest(
+                job, root, PipelineMetadata(), allow_dense_buildings=True,
+                compatibility={"contract": 1},
+            )
+            self.assertEqual(manifest["target"]["minFirmwareVersion"], "0.0.0")
+            self.assertEqual(manifest["compatibility"], {"contract": 1})
 
     def test_manifest_derives_signed_building_summary_from_fmb4(self):
         with tempfile.TemporaryDirectory() as tmp:
