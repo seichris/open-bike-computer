@@ -808,7 +808,7 @@ if args.renderer_format >= 2:
         preferred_languages=preferred_languages,
         international_fallback=args.international_fallback,
         diagnostics=label_diagnostics,
-        measure_text=font_builder.measure_widths,
+        measure_text=font_builder.measure_supported_widths,
     )
     label_phase_timings["labelCandidateGeneration"] = time.perf_counter() - candidate_started
 # polygons = make_all_convex( polygons)
