@@ -49,6 +49,9 @@ class BuildingRelationHandler(osmium.SimpleHandler):
         # source diagnostic actionable without dumping a whole relation/PBF.
         self.incomplete_relation_parts: dict[str, tuple[str, ...]] = {}
         self.standalone_part_keys: set[str] = set()
+        self.single_part_wrappers: set[str] = set()
+        self.exact_part_geometry_sources: set[str] = set()
+        self.redundant_part_sources: set[str] = set()
 
     def node(self, node) -> None:
         key = f"n{node.id}"
@@ -102,6 +105,11 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 self.parent_geometry_source_candidates.setdefault(
                     outer_members[0], set()
                 ).add(relation_key)
+                if (
+                    len(relation.members) == 1
+                    and relation_tags.get("building:part") not in (None, "", "no")
+                ):
+                    self.exact_part_geometry_sources.add(relation_key)
         if relation.tags.get("type") != "building":
             return
         outlines = sorted(
@@ -131,6 +139,8 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             if self.audit_enabled and parts and not outlines:
                 self.parts_without_outline.update(parts)
                 self.incomplete_relation_parts[relation_key] = tuple(parts)
+                if len(relation.members) == 1 and relation_tags == {"type": "building"}:
+                    self.single_part_wrappers.add(relation_key)
             return
         self.relations += 1
         canonical_parent_tags = dict(sorted(relation_tags.items()))
@@ -159,14 +169,12 @@ class BuildingRelationHandler(osmium.SimpleHandler):
                 )
 
     def finalize(self) -> None:
-        """Apply the narrow standalone-part normalization after all ways arrive.
+        """Resolve explicit, standalone and redundant parts after all ways arrive.
 
         OSM objects are normally delivered ways before relations, but the
-        policy must not depend on callback order. Every direct member must be
-        a way with an explicit ``building`` or ``building:part`` tag. Parts
-        shared with another incomplete relation, or already associated with a
-        different building relation, remain fail-closed rather than being
-        silently reinterpreted.
+        result must be independent of callback order. Standalone parts need
+        their own building tags. Redundant wrappers need an exact tagged
+        source for their sole member and no other explicit associations.
         """
 
         if self.audit_enabled:
@@ -255,6 +263,30 @@ class BuildingRelationHandler(osmium.SimpleHandler):
             if part not in unsafe_parts
         }
         self.parts_without_outline.difference_update(self.standalone_part_keys)
+        # An untagged wrapper contributes no building information if its only
+        # member is the complete ring of an explicitly tagged part multipolygon.
+        # Keep that source's identity and require its geometry after conversion.
+        for wrapper in self.single_part_wrappers:
+            (part,) = self.incomplete_relation_parts[wrapper]
+            if (
+                relation_part_counts[part] != 1
+                or part in self.part_parent_candidates
+                or part in self.parent_tags
+                or wrapper in self.part_parent_candidates
+                or wrapper in self.parent_tags
+                or self.way_tags.get(part) != {}
+            ):
+                continue
+            nodes = self.way_nodes[part]
+            if len(nodes) < 4 or nodes[0] != nodes[-1]:
+                continue
+            geometry_sources = self.parent_geometry_source_candidates.get(part, ())
+            if len(geometry_sources) != 1:
+                continue
+            (source,) = geometry_sources
+            if source in self.exact_part_geometry_sources:
+                self.parts_without_outline.remove(part)
+                self.redundant_part_sources.add(source)
 
 
 def load_scope_policy(path: Path) -> dict:
@@ -612,6 +644,8 @@ def main() -> None:
     }
     if handler.standalone_part_keys:
         result["standalonePartKeys"] = sorted(handler.standalone_part_keys)
+    if handler.redundant_part_sources:
+        result["redundantPartSources"] = sorted(handler.redundant_part_sources)
     if handler.deferred_part_parent_candidates:
         result["partParentCandidates"] = dict(
             sorted(handler.deferred_part_parent_candidates.items())

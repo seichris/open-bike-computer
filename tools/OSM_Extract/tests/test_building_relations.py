@@ -209,6 +209,45 @@ class BuildingRelationIngressTests(unittest.TestCase):
         self.assertEqual(handler.parts_without_outline, {"w30"})
         self.assertEqual(handler.incomplete_relation_parts, {"r106": ("w30",)})
 
+    def test_only_a_complete_tagged_part_can_replace_a_redundant_wrapper(self):
+        outer = {"type": "w", "ref": 30, "role": "outer"}
+        part = {"type": "w", "ref": 30, "role": "part"}
+        tagged_part = {"type": "multipolygon", "building:part": "yes", "height": "65"}
+        for case, wrapper_tags, way_tags, closed, sources, expected in (
+            ("exact", {}, {}, True, [(tagged_part, [outer])], {"r110"}),
+            ("missing source", {}, {}, True, [], set()),
+            ("open ring", {}, {}, False, [(tagged_part, [outer])], set()),
+            ("wrapper tags", {"height": "63"}, {}, True, [(tagged_part, [outer])], set()),
+            ("way tags", {}, {"height": "63"}, True, [(tagged_part, [outer])], set()),
+            ("only building", {}, {}, True, [
+                ({"type": "multipolygon", "building": "yes"}, [outer]),
+            ], set()),
+            ("hole", {}, {}, True, [
+                (tagged_part, [outer, {"type": "w", "ref": 31, "role": "inner"}]),
+            ], set()),
+            ("ambiguous source", {}, {}, True, [
+                (tagged_part, [outer]), (tagged_part, [outer]),
+            ], set()),
+        ):
+            with self.subTest(case=case):
+                handler = BuildingRelationHandler(
+                    expected_closure={
+                        "requiredRelationKeys": ["r106", "r110", "r111"],
+                        "requiredWayKeys": ["w30"],
+                    }
+                )
+                handler.way_tags["w30"] = way_tags
+                handler.way_nodes["w30"] = ["n1", "n2", "n3", "n1" if closed else "n4"]
+                handler.relation(self.relation(106, [part], {"type": "building", **wrapper_tags}))
+                for relation_id, (tags, members) in enumerate(sources, 110):
+                    handler.relation(self.relation(relation_id, members, tags))
+                handler.finalize()
+
+                self.assertEqual(handler.redundant_part_sources, expected)
+                self.assertEqual(handler.parts_without_outline, set() if expected else {"w30"})
+                self.assertFalse(handler.standalone_part_keys)
+                self.assertFalse(handler.part_parents)
+
     def test_single_explicit_building_part_is_retained_standalone(self):
         handler = BuildingRelationHandler(
             expected_closure={

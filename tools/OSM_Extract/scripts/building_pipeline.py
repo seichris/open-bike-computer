@@ -203,6 +203,7 @@ def load_relation_index(
         }
     value = json.loads(path.read_text(encoding="utf-8"))
     standalone_part_keys = value.get("standalonePartKeys", [])
+    redundant_part_sources = value.get("redundantPartSources", [])
     part_parent_candidates = value.get("partParentCandidates", {})
     parent_geometry_sources = value.get("parentGeometrySources", {})
     closure = value.get("closureAudit")
@@ -241,6 +242,12 @@ def load_relation_index(
         or not isinstance(part_parent_candidates, dict)
         or not isinstance(parent_geometry_sources, dict)
         or not isinstance(standalone_part_keys, list)
+        or not isinstance(redundant_part_sources, list)
+        or any(
+            not isinstance(key, str) or not key.startswith("r")
+            for key in redundant_part_sources
+        )
+        or redundant_part_sources != sorted(set(redundant_part_sources))
         or any(
             not isinstance(key, str)
             or not key.startswith("w")
@@ -521,6 +528,14 @@ def prepare_buildings(
         raise CalibrationCacheError(
             "building_relation_incomplete",
             "output building relations contain ambiguous explicit parents",
+        )
+    if strict_relations and any(
+        key not in by_key or not by_key[key].is_part
+        for key in (relation_index or {}).get("redundantPartSources", ())
+    ):
+        raise CalibrationCacheError(
+            "building_relation_incomplete",
+            "a tagged building part is missing from converted geometry",
         )
 
     if on_complexity is not None:
