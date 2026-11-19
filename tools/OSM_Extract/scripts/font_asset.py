@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from itertools import chain
 import json
 import math
 import os
 from pathlib import Path
 import struct
 import time
+import unicodedata
 
 import freetype
 import uharfbuzz as hb
@@ -191,6 +191,7 @@ class FontPackBuilder:
         # allocation order.
         self._hb_faces: dict[tuple[int, int], hb.Face] = {}
         self._hb_fonts: dict[tuple[int, int], hb.Font] = {}
+        self._nominal_coverage: dict[tuple[int, int], bool] = {}
         profile = _canonical_profile(self.languages, self.faces)
         self.profile_fingerprint = int.from_bytes(
             hashlib.sha256(profile).digest()[:4], "little"
@@ -288,6 +289,25 @@ class FontPackBuilder:
             sizes.append(glyphs)
         return sizes
 
+    def _candidate_faces(self, primary: FontFaceSpec):
+        yield primary
+        for face_id in sorted(self._used_face_ids - {primary.face_id}):
+            yield self._face_by_id[face_id]
+        if len(self._used_face_ids) < MAX_FONT_FACES and self.glyph_count < MAX_DISTINCT_GLYPHS:
+            for face in self.faces:
+                if face != primary and face.face_id not in self._used_face_ids:
+                    yield face
+
+    def _fallback_covers(self, face: FontFaceSpec, required_codepoints: tuple[int, ...]) -> bool:
+        for codepoint in required_codepoints:
+            key = (face.face_id, codepoint)
+            if key not in self._nominal_coverage:
+                font = self._harfbuzz_font(face, FONT_SIZES[0])
+                self._nominal_coverage[key] = bool(font.get_nominal_glyph(codepoint))
+            if not self._nominal_coverage[key]:
+                return False
+        return True
+
     def shape(self, text: str, language: str | None = None) -> tuple[ShapedRun, ...]:
         self.shape_calls += 1
         cache_key = (text, language)
@@ -302,12 +322,31 @@ class FontPackBuilder:
             codepoints = list(map(ord, text))
             visual_order = visual_runs(text, codepoints)
             primary = self._face_for(text, language)
-            for face in chain((primary,), (face for face in self.faces if face != primary)):
+            required_codepoints = None
+            for face in self._candidate_faces(primary):
                 if (
-                    len(self._used_face_ids) == MAX_FONT_FACES
-                    and face.face_id not in self._used_face_ids
+                    face.face_id not in self._used_face_ids
+                    and (
+                        len(self._used_face_ids) == MAX_FONT_FACES
+                        or self.glyph_count == MAX_DISTINCT_GLYPHS
+                    )
                 ):
                     continue
+                if face != primary:
+                    if required_codepoints is None:
+                        # Leave marks, formatting controls and canonically
+                        # decomposable characters to HarfBuzz's shaping.
+                        required_codepoints = tuple(
+                            ord(char)
+                            for char in dict.fromkeys(unicodedata.normalize("NFC", text))
+                            if (
+                                unicodedata.category(char)[0] in "LNS"
+                                or unicodedata.category(char) == "Co"
+                            )
+                            and unicodedata.normalize("NFD", char) == char
+                        )
+                    if not self._fallback_covers(face, required_codepoints):
+                        continue
                 sizes = self._shape_glyphs(face, codepoints, visual_order, language)
                 if sizes is None:
                     continue

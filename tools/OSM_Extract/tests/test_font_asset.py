@@ -132,6 +132,20 @@ class FontAssetPolicyTests(unittest.TestCase):
             self.assertIsNotNone(builder.measure_supported_widths("AB"))
             self.assertEqual(builder.glyph_count, 2)
 
+    def test_reuses_a_known_fallback_and_checks_coverage_before_shaping(self):
+        self.require_worker_fonts()
+        builder = FontPackBuilder(["en"])
+        self.assertIsNotNone(builder.measure_supported_widths("ถนนสุขุมวิท ๑"))
+        with patch.object(builder, "_shape_glyphs", wraps=builder._shape_glyphs) as shape:
+            self.assertIsNotNone(builder.measure_supported_widths("ถนนสุขุมวิท ๒"))
+            self.assertEqual(
+                [call.args[0].name for call in shape.call_args_list],
+                ["latin", "NotoSansThai"],
+            )
+            shape.reset_mock()
+            self.assertIsNone(builder.measure_supported_widths("ถนนสุขุมวิท \U0010fffd"))
+            self.assertEqual([call.args[0].name for call in shape.call_args_list], ["latin"])
+
 
 @unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")
 class FontAssetTests(unittest.TestCase):
