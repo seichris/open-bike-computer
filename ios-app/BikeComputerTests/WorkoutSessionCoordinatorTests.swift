@@ -678,6 +678,7 @@ struct WorkoutSessionCoordinatorTests {
                   "Only a confirmed segment outcome admits the next mark")
         }
         try await continueOnIPhoneScenarios(check: check)
+        try await siriWorkoutCommandScenarios(check: check)
         print("Workout session coordinator: \(count) assertions passed")
     }
 
@@ -1116,6 +1117,164 @@ struct WorkoutSessionCoordinatorTests {
         check(WorkoutRideContinuationMath.combined(phoneSnapshot,
                 continuation: WorkoutRideContinuation(watch: skewed, handoffAt: date)) == phoneSnapshot,
               "Inconsistent clocks never produce a negative-length ride")
+    }
+
+    /// Siri's ride commands on the real coordinator: an iPhone ride from
+    /// start to a confirmed finish, a Watch ride, the Watch activation wait,
+    /// and the refusals Siri speaks instead of sending a command.
+    @MainActor
+    private static func siriWorkoutCommandScenarios(check: (Bool, String) -> Void) async throws {
+        func harness(phone hasPhone: Bool = true,
+                     availability initial: WorkoutWatchAvailabilityV1 = .noPairedWatch)
+            -> (WorkoutSessionCoordinator, FakeWatch, FakePhone?, FakeAvailability, MemoryRecordingStore) {
+            let disk = MemoryRecordingStore()
+            let watch = FakeWatch()
+            let phone = hasPhone ? FakePhone(disk) : nil
+            let availability = FakeAvailability()
+            availability.availability = initial
+            return (WorkoutSessionCoordinator(watch: watch, watchAvailability: availability,
+                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger()),
+                    watch, phone, availability, disk)
+        }
+        // One scheduler turn per poll: the 3 s budget is 30 turns.
+        let turn: @MainActor (TimeInterval) async -> Void = { _ in await Task.yield() }
+
+        check(BicinoWorkoutCommand.allCases.filter(\.requiresConfirmation) == [.finish],
+              "Only Finish asks before acting")
+        check(BicinoWorkoutReplyText.text(for: .needsConfirmation(.watch))
+                == "Finish and save your ride on Apple Watch?",
+              "The confirmation names the recorder")
+        check(BicinoWorkoutReplyText.text(for: .failed(.start, nil))
+                == "Bicino couldn't start a ride. Open Bicino to check it.",
+              "An unexplained start failure points to the app")
+
+        // iPhone ride, as on an iPhone without a paired Watch.
+        let (coordinator, _, phoneOrNil, _, _) = harness()
+        let phone = try require(phoneOrNil)
+        var routed: [BicinoWorkoutCommand] = []
+        var routedSessions: [UUID] = []
+        let runner = BicinoWorkoutCommandRunner(
+            coordinator: coordinator,
+            control: { command, sessionID in
+                routed.append(command)
+                routedSessions.append(sessionID)
+                switch command {
+                case .pause: coordinator.pause()
+                case .resume: coordinator.resume()
+                case .segment: coordinator.markSegment()
+                case .start, .finish: return false
+                }
+                return true
+            },
+            wait: turn
+        )
+        coordinator.recoverIfNeeded()
+        await spin { coordinator.recoveryComplete }
+        check(await runner.run(.pause) == .noRide, "Pause without a ride says so")
+        check(await runner.run(.finish) == .noRide, "Finish without a ride asks nothing")
+        check(routed.isEmpty, "Nothing is sent without a ride")
+        check(await runner.run(.start) == .done(.start, .iphone) && phone.starts == 1,
+              "Without a paired Watch, Start records on iPhone and waits for it to run")
+        let rideID = try require(coordinator.store.presentation.sessionID)
+        check(await runner.run(.start) == .alreadyRecording(.iphone) && phone.starts == 1,
+              "A second Start never starts another ride")
+        check(await runner.run(.resume) == .notPaused, "Resume on a running ride says so")
+        check(await runner.run(.pause) == .done(.pause, .iphone) && phone.pauses == 1,
+              "Pause is sent and confirmed")
+        check(await runner.run(.pause) == .alreadyPaused && phone.pauses == 1,
+              "A second Pause sends nothing")
+        check(await runner.run(.segment) == .segmentNeedsRunningRide,
+              "A paused ride takes no segment")
+        check(await runner.run(.resume) == .done(.resume, .iphone), "Resume is sent and confirmed")
+        check(await runner.run(.segment) == .done(.segment, .iphone), "Segment is sent")
+        check(routed == [.pause, .resume, .segment] && routedSessions.allSatisfy { $0 == rideID },
+              "Only Pause, Resume and Segment use the control path, for the live session")
+        check(await runner.run(.finish) == .needsConfirmation(.iphone) && phone.saves == 0,
+              "Finish asks before ending the ride")
+        check(await runner.run(.finish, confirmed: true) == .done(.finish, .iphone) && phone.saves == 1,
+              "A confirmed Finish saves the ride once")
+        check(await runner.run(.pause) == .noRide, "A finished ride takes no more controls")
+        check(await runner.run(.start) == .done(.start, .iphone) && phone.starts == 2,
+              "Start after a finish acknowledges the summary and starts the next ride")
+
+        // Apple Watch ride. The fake Watch confirms nothing by itself.
+        let (watchRide, watch, _, _, _) = harness(availability: .ready(isReachable: true))
+        var watchRouted: [BicinoWorkoutCommand] = []
+        let watchRunner = BicinoWorkoutCommandRunner(
+            coordinator: watchRide,
+            control: { command, _ in
+                watchRouted.append(command)
+                guard command == .pause else { return false }
+                watchRide.pause()
+                return watch.store.markPendingControl(.pause, sequence: 7)
+            },
+            wait: turn
+        )
+        watchRide.recoverIfNeeded()
+        await spin { watchRide.recoveryComplete }
+        check(await watchRunner.run(.start) == .sent(.start, .watch) && watch.starts == 1,
+              "A Watch start is reported as starting until the Watch runs it")
+        check(await watchRunner.run(.pause) == .busy(.watch) && watchRouted.isEmpty,
+              "Nothing is sent before the Watch ride is running")
+        let watchRideID = UUID()
+        watch.emit(id: watchRideID, state: .running)
+        check(await watchRunner.run(.start) == .alreadyRecording(.watch) && watch.starts == 1,
+              "Start during a Watch ride starts nothing")
+        check(await watchRunner.run(.pause) == .sent(.pause, .watch) && watch.pauses == 1,
+              "An unconfirmed Watch pause is reported as sent")
+        check(await watchRunner.run(.segment) == .busy(.watch) && watchRouted == [.pause],
+              "A command in flight holds the next one")
+        check(await watchRunner.run(.finish) == .busy(.watch) && watch.saves == 0,
+              "Finish waits for the command in flight")
+        watch.store.disconnect(error: .watchUnavailable)
+        check(await watchRunner.run(.finish) == .unreachable(.watch) && watch.saves == 0,
+              "An unreachable Watch keeps its ride; Siri sends nothing")
+
+        // Apple Watch still activating: the coordinator starts once it answers.
+        let (activating, slowWatch, _, slowAvailability, _) = harness(availability: .activating)
+        activating.recoverIfNeeded()
+        await spin { activating.recoveryComplete }
+        let answeringRunner = BicinoWorkoutCommandRunner(
+            coordinator: activating,
+            control: { _, _ in false },
+            wait: { _ in
+                if slowAvailability.availability == .activating {
+                    slowAvailability.availability = .ready(isReachable: true)
+                }
+                await Task.yield()
+            }
+        )
+        // A notice the app left up earlier must not stop the wait.
+        activating.chooseRecorder()
+        check(activating.notice?.kind == .chooseRecorder, "Fixture leaves the recorder prompt up")
+        check(await answeringRunner.run(.start) == .sent(.start, .watch) && slowWatch.starts == 1,
+              "Start waits for Watch activation and then starts on the Watch")
+        let (silent, silentWatch, _, _, _) = harness(availability: .activating)
+        silent.recoverIfNeeded()
+        await spin { silent.recoveryComplete }
+        let silentRunner = BicinoWorkoutCommandRunner(
+            coordinator: silent, control: { _, _ in false }, wait: turn)
+        check(await silentRunner.run(.start) == .waitingForWatch && silentWatch.starts == 0,
+              "A Watch that hasn't answered yet is reported, and the start stays queued")
+
+        // iPhone can't record here: no paired Watch and no iPhone recorder.
+        let (watchOnly, _, _, _, _) = harness(phone: false)
+        watchOnly.recoverIfNeeded()
+        await spin { watchOnly.recoveryComplete }
+        let watchOnlyRunner = BicinoWorkoutCommandRunner(
+            coordinator: watchOnly, control: { _, _ in false }, wait: turn)
+        check(await watchOnlyRunner.run(.start) == .iPhoneRecordingUnsupported
+                && watchOnly.record == nil,
+              "Without a Watch or iPhone recording, Start explains why")
+
+        // Recovery that can't read the ownership record blocks every command.
+        let (unrecovered, _, _, _, unreadable) = harness()
+        unreadable.fails = true
+        unrecovered.recoverIfNeeded()
+        let unrecoveredRunner = BicinoWorkoutCommandRunner(
+            coordinator: unrecovered, control: { _, _ in false }, wait: turn)
+        check(await unrecoveredRunner.run(.start) == .checkingForRide && unrecovered.record == nil,
+              "Start waits for ownership recovery instead of guessing")
     }
 
     private static func require<T>(_ value: T?) throws -> T {

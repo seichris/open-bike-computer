@@ -41,8 +41,10 @@ The existing `WorkoutMirrorManager` still has no builder or Health write path.
 `PhoneWorkoutRecorder` has a separate builder, metrics store, and local native
 session. A third, source-neutral output store copies only the selected reducer
 and retains the application's own navigation context. App, device Start, dashboard,
-and Live Activity controls target the selected recorder. Session-scoped Lock Screen
-commands retain their existing anti-stale-session checks.
+Live Activity and Siri controls target the selected recorder. Session-scoped Lock Screen
+commands retain their existing anti-stale-session checks. Siri's Start and Finish
+call the coordinator like the app's buttons (Finish asks first); its Pause, Resume
+and Segment go through the Live Activity command router and its checks.
 
 Watch-direct setup must not make a recording phone yield its Bicino connection.
 The existing phone-navigation busy check also receives phone ownership/recovery
@@ -182,6 +184,8 @@ build is not a device validation.
       accuracy, When-In-Use vs Always, and locked-data privacy choices.
 - [ ] Locked two-hour phone ride, GPS quality, background BLE/Live Activity,
       energy/thermal behavior; navigation starts/stops independently.
+- [ ] Siri with the iPhone locked, for a Watch ride and a phone ride: start,
+      pause, resume, segment, and finish after the spoken confirmation.
 - [ ] Crash during running/paused/start/stop/endCollection/finish/tombstone write,
       recovery on lock/unlock, no duplicate saved identity, segment continuity.
 - [ ] Delayed Watch start timeout then late mirror; phone choice after explicit

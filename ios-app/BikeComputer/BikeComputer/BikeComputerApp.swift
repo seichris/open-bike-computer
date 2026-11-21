@@ -400,6 +400,26 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             workoutLiveActivityController = controller
 
             let routePlaceSearch = RoutePlaceSearch()
+            let workoutCommands = BicinoWorkoutCommandRunner(
+                coordinator: workoutSessionCoordinator,
+                control: { [dispatcher] command, sessionID in
+                    // The Live Activity buttons' path: same checks, and the
+                    // Lock Screen shows the change before Siri answers.
+                    let action: WorkoutLiveActivityAction
+                    switch command {
+                    case .pause: action = .pause
+                    case .resume: action = .resume
+                    case .segment: action = .segment
+                    case .start, .finish: return false
+                    }
+                    return await dispatcher.perform(action, sessionID: sessionID)
+                },
+                publish: { [weak controller] sessionID in
+                    _ = await controller?.publishCurrentStateForIntent(
+                        sessionID: sessionID
+                    )
+                }
+            )
             let siriActions = BicinoSiriActions(
                 activateScreen: { [weak self] request in
                     guard let self else { return .notConnected }
@@ -432,6 +452,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                         route: route,
                         location: locationManager.currentLocation
                     )
+                },
+                runWorkoutCommand: { command, confirmed in
+                    await workoutCommands.run(command, confirmed: confirmed)
                 }
             )
             AppDependencyManager.shared.add(dependency: siriActions)
