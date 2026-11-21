@@ -15,8 +15,11 @@ nonisolated enum BicinoWorkoutCommandOutcome: Equatable, Sendable {
     case done(BicinoWorkoutCommand, WorkoutRecordingOwner)
     /// Sent, but not confirmed by the time Siri has to answer.
     case sent(BicinoWorkoutCommand, WorkoutRecordingOwner)
-    /// Finish asks first; nothing has been sent.
-    case needsConfirmation(WorkoutRecordingOwner)
+    /// Finish asks first; nothing has been sent. The rider's yes applies
+    /// only to this session.
+    case needsConfirmation(WorkoutRecordingOwner, sessionID: UUID)
+    /// The confirmed ride is no longer the one recording; nothing was sent.
+    case rideChanged
     case noRide
     case alreadyRecording(WorkoutRecordingOwner)
     /// A start or finish Bicino couldn't confirm still owns the ride.
@@ -63,8 +66,10 @@ nonisolated enum BicinoWorkoutReplyText {
             case .segment: return "Marking a segment on \(owner.displayName)."
             case .finish: return "Finishing and saving your ride on \(owner.displayName)."
             }
-        case .needsConfirmation(let owner):
+        case .needsConfirmation(let owner, _):
             return "Finish and save your ride on \(owner.displayName)?"
+        case .rideChanged:
+            return "Your ride changed before you answered, so Bicino didn't finish it."
         case .noRide:
             return "No ride is recording."
         case .alreadyRecording(let owner):
@@ -147,9 +152,11 @@ final class BicinoWorkoutCommandRunner {
         }
     }
 
+    /// `confirmedSession` is the session the rider said yes to, for a
+    /// command that asks first.
     func run(
         _ command: BicinoWorkoutCommand,
-        confirmed: Bool = false
+        confirmedSession: UUID? = nil
     ) async -> BicinoWorkoutCommandOutcome {
         // Siri may have just launched Bicino: ownership recovery and the
         // mirrored Watch ride attach shortly after launch.
@@ -159,7 +166,7 @@ final class BicinoWorkoutCommandRunner {
         case .start:
             return await start()
         case .pause, .resume, .segment, .finish:
-            return await send(command, confirmed: confirmed)
+            return await send(command, confirmedSession: confirmedSession)
         }
     }
 
@@ -226,7 +233,7 @@ final class BicinoWorkoutCommandRunner {
 
     private func send(
         _ command: BicinoWorkoutCommand,
-        confirmed: Bool
+        confirmedSession: UUID?
     ) async -> BicinoWorkoutCommandOutcome {
         guard let owner = activeOwner else { return .noRide }
         let store = coordinator.store
@@ -240,7 +247,13 @@ final class BicinoWorkoutCommandRunner {
             return refusal
         }
         guard let sessionID = store.presentation.sessionID else { return .unreachable(owner) }
-        if command.requiresConfirmation, !confirmed { return .needsConfirmation(owner) }
+        if command.requiresConfirmation {
+            guard let confirmedSession else {
+                return .needsConfirmation(owner, sessionID: sessionID)
+            }
+            // A yes never carries over to a ride that started meanwhile.
+            guard confirmedSession == sessionID else { return .rideChanged }
+        }
 
         if command == .finish {
             coordinator.endAndSave()

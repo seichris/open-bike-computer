@@ -453,8 +453,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                         location: locationManager.currentLocation
                     )
                 },
-                runWorkoutCommand: { command, confirmed in
-                    await workoutCommands.run(command, confirmed: confirmed)
+                runWorkoutCommand: { command, confirmedSession in
+                    await workoutCommands.run(command, confirmedSession: confirmedSession)
                 }
             )
             AppDependencyManager.shared.add(dependency: siriActions)

@@ -1141,7 +1141,7 @@ struct WorkoutSessionCoordinatorTests {
 
         check(BicinoWorkoutCommand.allCases.filter(\.requiresConfirmation) == [.finish],
               "Only Finish asks before acting")
-        check(BicinoWorkoutReplyText.text(for: .needsConfirmation(.watch))
+        check(BicinoWorkoutReplyText.text(for: .needsConfirmation(.watch, sessionID: UUID()))
                 == "Finish and save your ride on Apple Watch?",
               "The confirmation names the recorder")
         check(BicinoWorkoutReplyText.text(for: .failed(.start, nil))
@@ -1189,9 +1189,13 @@ struct WorkoutSessionCoordinatorTests {
         check(await runner.run(.segment) == .done(.segment, .iphone), "Segment is sent")
         check(routed == [.pause, .resume, .segment] && routedSessions.allSatisfy { $0 == rideID },
               "Only Pause, Resume and Segment use the control path, for the live session")
-        check(await runner.run(.finish) == .needsConfirmation(.iphone) && phone.saves == 0,
-              "Finish asks before ending the ride")
-        check(await runner.run(.finish, confirmed: true) == .done(.finish, .iphone) && phone.saves == 1,
+        check(await runner.run(.finish) == .needsConfirmation(.iphone, sessionID: rideID)
+                && phone.saves == 0,
+              "Finish asks about the live ride before ending it")
+        check(await runner.run(.finish, confirmedSession: UUID()) == .rideChanged && phone.saves == 0,
+              "A yes for another ride finishes nothing")
+        check(await runner.run(.finish, confirmedSession: rideID) == .done(.finish, .iphone)
+                && phone.saves == 1,
               "A confirmed Finish saves the ride once")
         check(await runner.run(.pause) == .noRide, "A finished ride takes no more controls")
         check(await runner.run(.start) == .done(.start, .iphone) && phone.starts == 2,
@@ -1249,11 +1253,11 @@ struct WorkoutSessionCoordinatorTests {
             },
             wait: turn
         )
-        check(await finishingRunner.run(.finish) == .needsConfirmation(.watch)
+        check(await finishingRunner.run(.finish) == .needsConfirmation(.watch, sessionID: finishedID)
                 && finishingWatch.saves == 0 && publishedSessions.isEmpty,
               "A Watch finish asks first and sends nothing")
         watchSaves = true
-        check(await finishingRunner.run(.finish, confirmed: true) == .done(.finish, .watch)
+        check(await finishingRunner.run(.finish, confirmedSession: finishedID) == .done(.finish, .watch)
                 && finishingWatch.saves == 1,
               "A confirmed Watch finish is sent once and reported once the Watch saves")
         check(publishedSessions == [finishedID, finishedID],

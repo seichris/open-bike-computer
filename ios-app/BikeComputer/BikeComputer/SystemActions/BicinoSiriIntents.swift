@@ -17,7 +17,7 @@ final class BicinoSiriActions: @unchecked Sendable {
     private let findPlacesHandler:
         @MainActor @Sendable (RoutePlaceKind) async -> RoutePlaceSearchOutcome
     private let runWorkoutCommandHandler:
-        @MainActor @Sendable (BicinoWorkoutCommand, Bool) async -> BicinoWorkoutCommandOutcome
+        @MainActor @Sendable (BicinoWorkoutCommand, UUID?) async -> BicinoWorkoutCommandOutcome
 
     init(
         activateScreen: @escaping @MainActor @Sendable (
@@ -28,7 +28,7 @@ final class BicinoSiriActions: @unchecked Sendable {
         ) async -> RoutePlaceSearchOutcome,
         runWorkoutCommand: @escaping @MainActor @Sendable (
             BicinoWorkoutCommand,
-            Bool
+            UUID?
         ) async -> BicinoWorkoutCommandOutcome
     ) {
         activateScreenHandler = activateScreen
@@ -44,12 +44,13 @@ final class BicinoSiriActions: @unchecked Sendable {
         await findPlacesHandler(kind)
     }
 
-    /// `confirmed` is the rider's yes for a command that asks first.
+    /// `confirmedSession` is the session the rider said yes to, for a
+    /// command that asks first.
     func runWorkoutCommand(
         _ command: BicinoWorkoutCommand,
-        confirmed: Bool = false
+        confirmedSession: UUID? = nil
     ) async -> BicinoWorkoutCommandOutcome {
-        await runWorkoutCommandHandler(command, confirmed)
+        await runWorkoutCommandHandler(command, confirmedSession)
     }
 
     func workoutReply(_ command: BicinoWorkoutCommand) async -> String {
@@ -306,10 +307,10 @@ struct FinishBicinoWorkoutIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         var outcome = await actions.runWorkoutCommand(.finish)
-        if case .needsConfirmation = outcome {
+        if case .needsConfirmation(_, let sessionID) = outcome {
             // Declining throws, and Siri ends without changing the ride.
             try await confirmFinish(BicinoWorkoutReplyText.text(for: outcome))
-            outcome = await actions.runWorkoutCommand(.finish, confirmed: true)
+            outcome = await actions.runWorkoutCommand(.finish, confirmedSession: sessionID)
         }
         return .result(dialog: "\(BicinoWorkoutReplyText.text(for: outcome))")
     }
