@@ -161,6 +161,8 @@ SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
 )
 # Built by the backend's detour service and decoded by the Swift detour tests.
 SHARED_BICYCLE_DETOUR_FIXTURE_PATHS = ("protocol/fixtures/bicycle-detour-v1/",)
+# RTK1 goldens: the Swift encoder and the firmware decoder assert the same bytes.
+SHARED_ROUTE_REFERENCE_TRACK_FIXTURE_PATHS = ("protocol/fixtures/route-reference-track-v1/",)
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
@@ -375,6 +377,10 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
         if path.startswith(SHARED_BICYCLE_DETOUR_FIXTURE_PATHS):
             selected["ios"] = True
             selected["map_backend"] = True
+
+        if path.startswith(SHARED_ROUTE_REFERENCE_TRACK_FIXTURE_PATHS):
+            selected["firmware_host"] = True
+            selected["ios"] = True
 
         if path in MAP_WORKFLOW_PATHS:
             selected["map_backend"] = True

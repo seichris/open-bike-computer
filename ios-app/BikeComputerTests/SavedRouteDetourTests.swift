@@ -670,6 +670,157 @@ private extension BicycleDetourServiceRequestV1.Rejoin {
     var coordinate: RouteCoordinateV1 { RouteCoordinateV1(latitude: Double(latitudeE6) / 1e6, longitude: Double(longitudeE6) / 1e6) }
 }
 
+// MARK: - Two-line Bicino One mode (RTK1)
+
+private let referenceTrackFixtureFile = repositoryRoot
+    .appendingPathComponent("protocol/fixtures/route-reference-track-v1/frames-v1.txt")
+
+private func referenceTrackFixtures() -> (frames: [String: Data], tracks: [String: [RouteReferenceTrackV1.MicrodegreePoint]]) {
+    let text = try! String(contentsOf: referenceTrackFixtureFile, encoding: .utf8)
+    var frames: [String: Data] = [:]
+    var tracks: [String: [RouteReferenceTrackV1.MicrodegreePoint]] = [:]
+    for line in text.split(separator: "\n") where !line.hasPrefix("#") {
+        let fields = line.split(separator: " ")
+        guard fields.count == 2 else { continue }
+        let name = String(fields[0])
+        if name.hasSuffix("_track") {
+            tracks[String(name.dropLast(6))] = fields[1].split(separator: ";").map { pair in
+                let values = pair.split(separator: ",").map { Int32($0)! }
+                return RouteReferenceTrackV1.MicrodegreePoint(latitude: values[0], longitude: values[1])
+            }
+        } else {
+            var bytes = Data()
+            var index = fields[1].startIndex
+            while index < fields[1].endIndex {
+                let next = fields[1].index(index, offsetBy: 2)
+                bytes.append(UInt8(fields[1][index..<next], radix: 16)!)
+                index = next
+            }
+            frames[name] = bytes
+        }
+    }
+    return (frames, tracks)
+}
+
+private func decodeReferenceTrack(_ frame: Data) -> [RouteReferenceTrackV1.MicrodegreePoint] {
+    let bytes = [UInt8](frame)
+    func int32(_ offset: Int) -> Int32 {
+        Int32(bitPattern: UInt32(bytes[offset]) | UInt32(bytes[offset + 1]) << 8 |
+            UInt32(bytes[offset + 2]) << 16 | UInt32(bytes[offset + 3]) << 24)
+    }
+    func int16(_ offset: Int) -> Int16 { Int16(bitPattern: UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8) }
+    var latitude = int32(6)
+    var longitude = int32(10)
+    var points = [RouteReferenceTrackV1.MicrodegreePoint(latitude: latitude, longitude: longitude)]
+    var offset = 14
+    while offset + 4 <= bytes.count {
+        latitude += Int32(int16(offset))
+        longitude += Int32(int16(offset + 2))
+        points.append(.init(latitude: latitude, longitude: longitude))
+        offset += 4
+    }
+    return points
+}
+
+private func testReferenceTrackFramesMatchFirmwareGoldens() {
+    let fixtures = referenceTrackFixtures()
+    expect(RouteReferenceTrackV1.setFrame(fixtures.tracks["dubai"]!) == fixtures.frames["dubai_set"],
+           "the Swift encoder writes the bytes the firmware decoder is tested with")
+    expect(RouteReferenceTrackV1.setFrame(fixtures.tracks["maximum"]!) == fixtures.frames["maximum_set"],
+           "48 points encode to the largest frame")
+    expect(fixtures.frames["maximum_set"]!.count == RouteReferenceTrackV1.maximumFrameBytes, "largest frame is 202 bytes")
+    expect(RouteReferenceTrackV1.clearFrame() == fixtures.frames["clear"], "clear frame is the bare header")
+    expect(RouteReferenceTrackV1.setFrame(Array(fixtures.tracks["dubai"]!.prefix(1))) == nil, "one point is not a track")
+    expect(RouteReferenceTrackV1.setFrame(fixtures.tracks["maximum"]! + [fixtures.tracks["maximum"]!.last!]) == nil,
+           "more than 48 points are never framed")
+    let farApart = [RouteReferenceTrackV1.MicrodegreePoint(latitude: 25_000_000, longitude: 55_000_000),
+                    RouteReferenceTrackV1.MicrodegreePoint(latitude: 25_040_000, longitude: 55_000_000)]
+    expect(RouteReferenceTrackV1.setFrame(farApart) == nil, "a delta beyond Int16 is refused, never clamped")
+    expect(RideBLEGeneratedProtocolV1.extendedRouteReferenceTrackV1Feature == 1 << 7, "two-line mode is extended bit 7")
+    expect(RideBLEGeneratedProtocolV1.extendedRouteReferenceTrackV1MinimumClientVersion == 37, "and needs client 37")
+}
+
+private func testReferenceTrackSizing() {
+    expect(RouteReferenceTrackV1.maximumPoints(forWriteLength: 512) == 48, "large writes are capped at 48 points")
+    expect(RouteReferenceTrackV1.maximumPoints(forWriteLength: 202) == 48, "202 bytes hold 48 points")
+    expect(RouteReferenceTrackV1.maximumPoints(forWriteLength: 75) == 16, "an MTU-100 session still holds 16 points")
+    expect(RouteReferenceTrackV1.maximumPoints(forWriteLength: 18) == 2, "18 bytes hold the minimum track")
+    expect(RouteReferenceTrackV1.maximumPoints(forWriteLength: 17) == nil, "less than the minimum track is not sent")
+}
+
+private func testReferenceTrackCoversLeavePointToPastRejoin() {
+    // 3 km east, then 3 km north; leave at 1,000 m, rejoin at 1,800 m.
+    let route = savedRoute(track([(0, 0), (3_000, 0), (3_000, 3_000)], spacing: 10))
+    let geometry = SavedRouteGeometryV1(route: route)
+    let coordinates = RouteReferenceTrackV1.coordinates(
+        geometry: geometry, confirmedProgressMeters: 1_000, rejoinAlongMeters: 1_800
+    )
+    func along(_ coordinate: RouteCoordinateV1) -> Double {
+        NavigationGeometryV1.projections(
+            of: coordinate, onto: route.points, cumulativeDistances: geometry.cumulative
+        ).min { $0.crossTrackDistanceMeters < $1.crossTrackDistanceMeters }!.distanceAlongRouteMeters
+    }
+    expect(abs(along(coordinates.first!) - 850) < 1, "starts 150 m behind the leave point")
+    expect(abs(along(coordinates.last!) - 2_100) < 1, "ends 300 m past the rejoin point")
+
+    let frame = RouteReferenceTrackV1.frame(
+        geometry: geometry, confirmedProgressMeters: 1_000, rejoinAlongMeters: 1_800, maximumPoints: 48
+    )!
+    let decoded = decodeReferenceTrack(frame)
+    expect(decoded.count == 2, "a straight stretch simplifies to its two ends")
+    expect(decoded.first == RouteReferenceTrackV1.MicrodegreePoint(coordinates.first!) &&
+           decoded.last == RouteReferenceTrackV1.MicrodegreePoint(coordinates.last!),
+           "the ends are exact")
+
+    // Around the corner, the corner survives simplification.
+    let cornerFrame = RouteReferenceTrackV1.frame(
+        geometry: geometry, confirmedProgressMeters: 2_800, rejoinAlongMeters: 3_400, maximumPoints: 48
+    )!
+    let corner = RouteReferenceTrackV1.MicrodegreePoint(point(3_000, 0))
+    expect(decodeReferenceTrack(cornerFrame).contains { abs($0.latitude - corner.latitude) <= 30 && abs($0.longitude - corner.longitude) <= 30 },
+           "the corner is kept")
+
+    // The track never extends past the finish.
+    let nearFinish = RouteReferenceTrackV1.coordinates(
+        geometry: geometry, confirmedProgressMeters: 5_800, rejoinAlongMeters: 5_950
+    )
+    expect(nearFinish.last == route.points.last, "clamped to the finish")
+}
+
+private func testReferenceTrackFitsSmallWritesAndLongSegments() {
+    // A winding 4 km route with a vertex every 5 m.
+    var corners: [(Double, Double)] = []
+    for index in 0...40 { corners.append((Double(index) * 100, index.isMultiple(of: 2) ? 0 : 60)) }
+    let winding = savedRoute(track(corners, spacing: 5))
+    let windingGeometry = SavedRouteGeometryV1(route: winding)
+    // About 3.1 km east end to end: past one Int16 longitude delta, so the
+    // smallest track that fits has three points.
+    for limit in [48, 16, 5, 3] {
+        let frame = RouteReferenceTrackV1.frame(
+            geometry: windingGeometry, confirmedProgressMeters: 300, rejoinAlongMeters: 3_500, maximumPoints: limit
+        )!
+        let count = decodeReferenceTrack(frame).count
+        expect(count >= 2 && count <= limit, "\(count) points fit a \(limit)-point write")
+    }
+
+    // A straight 9 km road simplifies to its two ends, which are too far apart
+    // for one Int16 delta: intermediate points are added back.
+    let straight = savedRoute(track([(0, 0), (0, 9_000)], spacing: 1_000))
+    let frame = RouteReferenceTrackV1.frame(
+        geometry: SavedRouteGeometryV1(route: straight), confirmedProgressMeters: 150, rejoinAlongMeters: 8_000,
+        maximumPoints: 48
+    )!
+    let decoded = decodeReferenceTrack(frame)
+    expect(decoded.count >= 3, "long segments are split, not clamped")
+    for (a, b) in zip(decoded, decoded.dropFirst()) {
+        expect(abs(Int(b.latitude) - Int(a.latitude)) <= 30_000, "every delta stays inside the Int16 range")
+    }
+    expect(RouteReferenceTrackV1.frame(
+        geometry: SavedRouteGeometryV1(route: straight), confirmedProgressMeters: 150, rejoinAlongMeters: 8_000,
+        maximumPoints: 2
+    ) == nil, "a track that cannot fit is not sent rather than distorted")
+}
+
 @main
 enum SavedRouteDetourTestRunner {
     @MainActor
@@ -692,6 +843,10 @@ enum SavedRouteDetourTestRunner {
         testServiceContract()
         testProviderPolicy()
         await testWatchRelayRoundTrip()
+        testReferenceTrackFramesMatchFirmwareGoldens()
+        testReferenceTrackSizing()
+        testReferenceTrackCoversLeavePointToPastRejoin()
+        testReferenceTrackFitsSmallWritesAndLongSegments()
         print("Saved-route detour tests passed")
     }
 }

@@ -12,6 +12,7 @@
 #include "../maps/src/map_projection.hpp"
 #include "../maps/src/mapSurface.hpp"
 #include "navigation_visual_style.hpp"
+#include "../ble_navigation/route_reference_track_protocol.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
 #include <array>
@@ -148,3 +149,50 @@ private:
 
 // Global route overlay instance
 extern RouteOverlay routeOverlay;
+
+/** Immutable copy of the reference track for one foreground draw. */
+struct RouteReferenceTrackSnapshot {
+  std::array<GeoPoint, route_reference_track_protocol::MAXIMUM_POINTS> points{};
+  uint16_t count = 0;
+  uint32_t revision = 0;
+
+  constexpr bool hasTrack() const { return count >= 2; }
+};
+
+/**
+ * The saved route around a temporary detour (RTK1). It is drawn unanchored,
+ * in a muted style, under the guidance line (the detour window on 2A6F).
+ * Fixed storage: no allocation on the BLE path.
+ */
+class RouteReferenceTrack {
+public:
+  /** Applies a parsed frame; returns true when the stored track changed. */
+  bool apply(const route_reference_track_protocol::Frame &frame);
+  /** Returns true when a track was removed. */
+  bool clear();
+  bool hasTrack() const;
+  uint32_t revision() const;
+  RouteReferenceTrackSnapshot snapshot() const;
+
+  /** Muted line width derived from the guidance line width. */
+  static uint8_t lineWidth(uint8_t routeLineWidth);
+
+  static void drawSnapshot(const RouteReferenceTrackSnapshot &snapshot,
+                           map_surface::Rgb565Surface surface,
+                           const map_projection::Projection &projection,
+                           uint8_t routeLineWidth,
+                           const RoutePresentationTransform *presentation = nullptr);
+  static void drawSnapshot(const RouteReferenceTrackSnapshot &snapshot,
+                           map_surface::Rgb565A8Surface surface,
+                           const map_projection::Projection &projection,
+                           uint8_t routeLineWidth,
+                           const RoutePresentationTransform *presentation = nullptr);
+
+private:
+  mutable portMUX_TYPE trackMutex = portMUX_INITIALIZER_UNLOCKED;
+  std::array<GeoPoint, route_reference_track_protocol::MAXIMUM_POINTS> points{};
+  uint16_t count = 0;
+  uint32_t revisionCounter = 0;
+};
+
+extern RouteReferenceTrack routeReferenceTrack;

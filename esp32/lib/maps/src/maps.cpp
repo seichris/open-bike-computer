@@ -5957,9 +5957,14 @@ void Maps::renderLiveForeground() {
       3.14159265358979323846 / 180.0;
   const uint8_t routeLineWidth = static_cast<uint8_t>(std::min<int>(
       48, std::max<int>(1, currentMapStyleSettings().routeLineWidth)));
+  // The saved route under a detour (RTK1) shares this foreground. Only its
+  // small revision is read here; the points are copied just before drawing.
+  const uint32_t referenceTrackRevision = routeReferenceTrack.revision();
   uint64_t presentationSignature = 1469598103934665603ULL;
   presentationSignature =
       fnvMix64(presentationSignature, route.revision);
+  presentationSignature =
+      fnvMix64(presentationSignature, referenceTrackRevision);
   presentationSignature = fnvMix64(
       presentationSignature, visibleRenderResult.version.sequence);
   presentationSignature =
@@ -6012,6 +6017,10 @@ void Maps::renderLiveForeground() {
   presentation.outputPivotY =
       visibleProjection.anchorY() - visibleRenderResult.overscanPixels;
   presentation.rotationRad = rotationDelta;
+  // Unanchored and muted, under the anchored guidance line.
+  RouteReferenceTrack::drawSnapshot(routeReferenceTrack.snapshot(), surface,
+                                    visibleProjection, routeLineWidth,
+                                    &presentation);
   RouteOverlay::drawSnapshot(route, surface, visibleProjection, routeLineWidth,
                              &presented, &presentation);
 
@@ -7527,6 +7536,12 @@ bool Maps::renderRollingForeground() {
       map_label_rasterizer::makeColorOpaque(
           colors, alpha, width, height, colorStride, colorStride,
           navigation_visual_style::ROUTE_BLUE_RGB565);
+      if constexpr (navigation_visual_style::REFERENCE_TRACK_RGB565 !=
+                    navigation_visual_style::ROUTE_BLUE_RGB565) {
+        map_label_rasterizer::makeColorOpaque(
+            colors, alpha, width, height, colorStride, colorStride,
+            navigation_visual_style::REFERENCE_TRACK_RGB565);
+      }
     }
   }
 

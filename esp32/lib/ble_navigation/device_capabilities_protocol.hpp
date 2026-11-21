@@ -125,6 +125,24 @@ inline bool supportsScreenActivation(uint8_t clientVersion,
          clientVersion >= ride_ble_protocol_generated::
                               EXTENDED_SCREEN_ACTIVATION_V1_MINIMUM_CLIENT_VERSION;
 }
+// The two-line detour display (the saved route drawn under the detour window)
+// stays in development profiles until a physical board check; production
+// keeps the compatible single line.
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+inline constexpr bool ROUTE_REFERENCE_TRACK_ENABLED = true;
+#else
+inline constexpr bool ROUTE_REFERENCE_TRACK_ENABLED = false;
+#endif
+// The largest RTK1 frame is offered only when a smaller track still fits one
+// protected write; the phone sizes the track to the session's write limit.
+inline bool supportsRouteReferenceTrack(uint8_t clientVersion,
+                                        bool implementationEnabled,
+                                        uint16_t peerMtu) {
+  return implementationEnabled &&
+         peerMtu >= ride_ble_protocol_generated::ROUTE_REFERENCE_TRACK_MINIMUM_MTU &&
+         clientVersion >= ride_ble_protocol_generated::
+                              EXTENDED_ROUTE_REFERENCE_TRACK_V1_MINIMUM_CLIENT_VERSION;
+}
 inline bool supportsMapNavigationOrientation(uint8_t clientVersion,
                                               bool implementationEnabled) {
   return implementationEnabled &&
@@ -173,7 +191,9 @@ constexpr uint32_t SUPPORTED_EXTENDED_FEATURES =
     generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE |
     generated::EXTENDED_BOARD_DISPLAY_METADATA_FEATURE |
     generated::EXTENDED_POSITION_SOURCE_METADATA_FEATURE |
-    generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE;
+    generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE |
+    // Drawn as a thin black line under the white-haloed guidance line.
+    generated::EXTENDED_ROUTE_REFERENCE_TRACK_V1_FEATURE;
 static_assert((UNSUPPORTED_FEATURES & SUPPORTED_FEATURES) == 0 &&
                   (UNSUPPORTED_FEATURES | SUPPORTED_FEATURES) ==
                       generated::ALL_FEATURES,

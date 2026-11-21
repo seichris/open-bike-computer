@@ -158,6 +158,22 @@ Production provisioning, image promotion, a Coolify-managed Valhalla service
 for production, and any production lock change are outside this development
 deployment.
 
+## Bicino One display
+
+- **Compatible mode (every firmware today, every Watch-owned ride):** during
+  the detour the route window on `2A6F` follows the detour and the maneuver
+  text guides it; the saved route is not drawn on the device until rejoin,
+  when its window returns. Offline or with no bicycle route, the device keeps
+  the saved route's window and the phone shows "Off route — return to saved
+  route".
+- **Two-line mode (CAP2 extended bit 7, client 37; development firmware
+  profiles until a physical board check):** the detour stays the anchored
+  guidance line and the iPhone also sends the saved route around the detour
+  (`RTK1`, from 150 m behind the leave point to 300 m past the rejoin point,
+  at most 48 points), drawn as a muted line underneath. It is cleared at
+  rejoin, when navigation stops and when the BLE session ends. See
+  [Route reference track](ble-protocol.md#route-reference-track-rtk1).
+
 ## Privacy
 
 When a rider leaves a saved route, Bicino first asks Apple's MapKit for a

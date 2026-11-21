@@ -65,6 +65,10 @@ class NavigationEngine: NSObject, ObservableObject {
     private var lastNavigationSample: NavigationLocationSampleV1?
     private var lastNavigationLocation: CLLocation?
     private var detourNetworkAvailable = true
+    /// Two-line Bicino One mode: the RTK1 set frame last accepted by the
+    /// write queue (nil when the device has no reference track from us).
+    private var sentReferenceTrackFrame: Data?
+    private var referenceTrackCache: (key: ReferenceTrackKey, frame: Data?)?
 
     #if HOST_TESTING
     var offlineSnapshotForTesting: NavigationSnapshotV1? { navigationRuntime.snapshot }
@@ -160,6 +164,21 @@ class NavigationEngine: NSObject, ObservableObject {
                     }
                     self.resendCurrentRouteGeometry()
                     self.resendCurrentNavigationState()
+                    self.resendDeviceReferenceTrack()
+                }
+            }
+            .store(in: &cancellables)
+
+        manager.$supportsRouteReferenceTrack
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak manager] _ in
+                // CAP2 arrives after readiness: offer the reference track
+                // once the extended bit commits (or forget it if withdrawn).
+                DispatchQueue.main.async { [weak self, weak manager] in
+                    guard let self, manager?.isNavigationReady == true else { return }
+                    self.resendDeviceReferenceTrack()
                 }
             }
             .store(in: &cancellables)
@@ -840,7 +859,64 @@ class NavigationEngine: NSObject, ObservableObject {
             }
         }
         detourPhase = detourEngine?.phase
+        syncDeviceReferenceTrack()
         return resumed
+    }
+
+    /// RTK1 inputs: the saved route from the last confirmed progress to past
+    /// the rejoin point, sized for this session's write limit.
+    private struct ReferenceTrackKey: Equatable {
+        let confirmedProgressMeters: Double
+        let rejoinAlongMeters: Double
+        let maximumPoints: Int
+    }
+
+    /// Two-line mode: while a detour is guided, a device with CAP2 extended
+    /// bit 7 also draws the saved route under the detour window. Other
+    /// devices keep the compatible single line.
+    private func syncDeviceReferenceTrack() {
+        guard let bleManager else { return }
+        guard let engine = detourEngine, engine.phase == .following,
+              let target = engine.detourTarget else {
+            // A session that cannot take RTK1 now has already dropped the
+            // track (firmware clears it with the session); otherwise retry
+            // the clear on the next fix until the queue accepts it.
+            if sentReferenceTrackFrame != nil,
+               bleManager.routeReferenceTrackMaximumWriteLength == nil ||
+                bleManager.sendRouteReferenceTrack(RouteReferenceTrackV1.clearFrame()) {
+                sentReferenceTrackFrame = nil
+            }
+            return
+        }
+        guard let writeLength = bleManager.routeReferenceTrackMaximumWriteLength,
+              let maximumPoints = RouteReferenceTrackV1.maximumPoints(forWriteLength: writeLength)
+        else { return }
+        let key = ReferenceTrackKey(
+            confirmedProgressMeters: engine.confirmedProgressMeters,
+            rejoinAlongMeters: target.distanceAlongMeters,
+            maximumPoints: maximumPoints
+        )
+        if referenceTrackCache?.key != key {
+            referenceTrackCache = (key, RouteReferenceTrackV1.frame(
+                geometry: engine.geometry,
+                confirmedProgressMeters: key.confirmedProgressMeters,
+                rejoinAlongMeters: key.rejoinAlongMeters,
+                maximumPoints: key.maximumPoints
+            ))
+        }
+        guard let frame = referenceTrackCache?.frame, frame != sentReferenceTrackFrame else { return }
+        if bleManager.sendRouteReferenceTrack(frame) {
+            sentReferenceTrackFrame = frame
+#if DEBUG
+            print("DETOUR_EVIDENCE referenceTrack bytes=\(frame.count) rejoinAlongM=\(Int(key.rejoinAlongMeters))")
+#endif
+        }
+    }
+
+    /// The device dropped its reference track with the previous session.
+    private func resendDeviceReferenceTrack() {
+        sentReferenceTrackFrame = nil
+        syncDeviceReferenceTrack()
     }
 
     /// The device route window follows the line being guided: the detour
@@ -904,6 +980,8 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resetDetourState() {
         if let request = detourEngine?.request { onDetourCancel?(request.id) }
         detourEngine = nil
+        syncDeviceReferenceTrack()
+        referenceTrackCache = nil
         detourRuntime.stop()
         detourRouteSource = nil
         activeDetourRoute = nil

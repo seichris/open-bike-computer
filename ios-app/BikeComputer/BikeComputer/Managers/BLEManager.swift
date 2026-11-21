@@ -445,6 +445,7 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.topographicContoursFeature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
+    static let routeReferenceTrackCoalescingKey = "route-reference-track"
     static let workoutTelemetryFrameLength = 16
     static let workoutTelemetryOriginFrameLength = 28
     static let workoutTelemetryCoreCoalescingKey = "workout-telemetry-core"
@@ -1117,6 +1118,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsFriendMarkerScale = false
     /// Route elevation profiles (ELV1) and the optional Elevation screen.
     @Published private(set) var supportsRouteElevation = false
+    /// The two-line detour display: the saved route (RTK1) drawn under the
+    /// detour window. Without it a detour replaces the route window.
+    @Published private(set) var supportsRouteReferenceTrack = false
     /// Showing a configured screen on request (SCSW), for Siri and Shortcuts.
     @Published private(set) var supportsScreenActivation = false
     var onRouteElevationAcknowledgement: ((Data) -> Void)?
@@ -5965,6 +5969,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsRouteReferenceTrack = false
         supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -7643,6 +7648,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsRouteReferenceTrack = false
         supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -11213,6 +11219,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
         supportsRouteElevation = false
+        supportsRouteReferenceTrack = false
         supportsScreenActivation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -11424,6 +11431,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature != 0
         supportsRouteElevation = extendedFeatureFlags &
             RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature != 0
+        supportsRouteReferenceTrack = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedRouteReferenceTrackV1Feature != 0
         let hasFriendMarkerScale = extendedFeatureFlags &
             RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature != 0
         if supportsFriendMarkerScale != hasFriendMarkerScale {
@@ -11685,6 +11694,40 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
               authenticatedWriteSession != nil,
               let endpoint = navigationWriteEndpoint else { return nil }
         return min(endpoint.maximumWriteLength, NavigationWriteQueue.maximumFrameBytes)
+    }
+
+    /// Largest plaintext RTK1 frame for this protected session, or nil when
+    /// the device draws only the compatible single detour line.
+    var routeReferenceTrackMaximumWriteLength: Int? {
+        guard supportsRouteReferenceTrack, isNavigationReady,
+              authenticatedWriteSession != nil,
+              let endpoint = navigationWriteEndpoint else { return nil }
+        return min(endpoint.maximumWriteLength, NavigationWriteQueue.maximumFrameBytes)
+    }
+
+    /// Queues one RTK1 frame (set or clear) on the protected navigation
+    /// channel. Replaceable state: a newer frame replaces a pending one.
+    @discardableResult
+    func sendRouteReferenceTrack(_ frame: Data) -> Bool {
+        guard let maximumLength = routeReferenceTrackMaximumWriteLength,
+              let endpoint = navigationWriteEndpoint,
+              frame.count <= maximumLength,
+              frame.starts(with: Data(RideBLEGeneratedProtocolV1.routeReferenceTrackMagic.utf8)),
+              !firmwareMaintenanceActive,
+              !firmwareMaintenanceReconnectExpected else {
+            return false
+        }
+        guard enqueueNavigationWrite(
+            frame,
+            endpoint: endpoint,
+            label: "route reference track",
+            writeClass: .route,
+            coalescingKey: DeviceBLEProtocol.routeReferenceTrackCoalescingKey
+        ) else {
+            log("Route reference track not queued: write queue unavailable")
+            return false
+        }
+        return true
     }
 
     /// Queues one logical ELV1 message on the protected navigation channel: a

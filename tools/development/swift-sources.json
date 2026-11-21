@@ -595,7 +595,8 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DurableMapDownloadCoordinator.swift",
         "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift",
-        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift"
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift",
+        "ios-app/BikeComputer/RideShared/RouteReferenceTrack.swift"
       ],
       "groups": [
         "saved-route-detour-sources"
@@ -952,7 +953,9 @@
     },
     "saved-route-detour-1": {
       "sources": [
-        "ios-app/BikeComputerTests/SavedRouteDetourTests.swift"
+        "ios-app/BikeComputerTests/SavedRouteDetourTests.swift",
+        "ios-app/BikeComputer/RideShared/RouteReferenceTrack.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift"
       ],
       "groups": [
         "saved-route-detour-core"

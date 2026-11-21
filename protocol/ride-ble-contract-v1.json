@@ -44,11 +44,21 @@
     "source_flags": {"phone": 1, "gnss": 2},
     "receiver_modules": {"none": 0, "quectel_lc76g": 1}
   },
+  "route_reference_track": {
+    "magic": "RTK1",
+    "version": 1,
+    "header_bytes": 6,
+    "layout": "magic,u8 version,u8 operation; set adds i32le start latitude, i32le start longitude (microdegrees), then i16le delta latitude, i16le delta longitude per point",
+    "operations": {"clear": 0, "set": 1},
+    "minimum_points": 2,
+    "maximum_points": 48,
+    "minimum_mtu": 100
+  },
   "capabilities": {
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 36,
+    "current_client_version": 37,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -91,7 +101,8 @@
       "map_pois": {"bit": 3, "minimum_client_version": 33},
       "board_display_metadata": {"bit": 4, "minimum_client_version": 34},
       "position_source_metadata": {"bit": 5, "minimum_client_version": 35},
-      "screen_activation_v1": {"bit": 6, "minimum_client_version": 36}
+      "screen_activation_v1": {"bit": 6, "minimum_client_version": 36},
+      "route_reference_track_v1": {"bit": 7, "minimum_client_version": 37}
     }
   },
   "screen_types": {

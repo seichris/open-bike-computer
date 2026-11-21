@@ -350,6 +350,20 @@ class ChangedComponentsTests(unittest.TestCase):
                     changed_components.classify_paths([path]),
                 )
 
+    def test_route_reference_track_fixtures_select_encoder_and_decoder(self) -> None:
+        self.assertEqual(
+            {
+                "firmware_build": False,
+                "firmware_host": True,
+                "ios": True,
+                "map_backend": False,
+                "osm": False,
+            },
+            changed_components.classify_paths(
+                ["protocol/fixtures/route-reference-track-v1/frames-v1.txt"]
+            ),
+        )
+
     def test_contract_documents_select_their_consumers(self) -> None:
         firmware_contracts = (
             "docs/firmware-battery-life-hardware-validation.md",

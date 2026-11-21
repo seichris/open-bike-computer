@@ -454,7 +454,7 @@
       "name": "Device capabilities protocol host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_capabilities_protocol.cpp \\\n  -o ${TMPDIR}/test_device_capabilities_protocol\n${TMPDIR}/test_device_capabilities_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_epaper_display.cpp -o ${TMPDIR}/test_epaper_display\n${TMPDIR}/test_epaper_display\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ssd1677_addressing.cpp -o ${TMPDIR}/test_ssd1677_addressing\n${TMPDIR}/test_ssd1677_addressing",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_capabilities_protocol.cpp \\\n  -o ${TMPDIR}/test_device_capabilities_protocol\n${TMPDIR}/test_device_capabilities_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_route_reference_track_protocol.cpp \\\n  -o ${TMPDIR}/test_route_reference_track_protocol\n${TMPDIR}/test_route_reference_track_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_epaper_display.cpp -o ${TMPDIR}/test_epaper_display\n${TMPDIR}/test_epaper_display\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ssd1677_addressing.cpp -o ${TMPDIR}/test_ssd1677_addressing\n${TMPDIR}/test_ssd1677_addressing",
       "tools": [
         "python3",
         "g++"
