@@ -59,6 +59,27 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .durable
     )
 
+    /// A temporary bicycle detour from Bicino's Valhalla service (OSM data).
+    /// Active only: never stored, shared, sent for elevation or to the Watch.
+    static let valhallaDetour = RouteProviderMetadataV1(
+        providerID: "bicino.valhalla",
+        attribution: "© OpenStreetMap contributors",
+        storageScope: .activeOnly
+    )
+
+    /// Saved routes a temporary bicycle detour may serve, with the provenance
+    /// tag the detour service receives. Strava API imports were approved by
+    /// the maintainer on 2026-11-21 on the same terms as GPX and saved Apple
+    /// Maps routes. Only the rider position and one rejoin point are sent.
+    static func bicycleDetourRouteSource(
+        _ metadata: RouteProviderMetadataV1
+    ) -> String? {
+        if metadata == importedGPX { return "gpx" }
+        if metadata == strava { return "strava" }
+        if metadata == mapKitSavedOnPhone { return "mapkit" }
+        return nil
+    }
+
     /// Explicit saved-route sharing policy requested by the maintainer, 2026-10-22.
     /// Preserve Apple attribution and phoneOnly scope; active MapKit responses and
     /// Strava archives remain ineligible. This is not an Apple license attestation.
@@ -98,6 +119,8 @@ nonisolated enum RouteProviderPolicyV1 {
             metadata == importedGPX
         case strava.providerID:
             metadata == strava
+        case valhallaDetour.providerID:
+            metadata == valhallaDetour
         default:
             true
         }

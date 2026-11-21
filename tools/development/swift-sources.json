@@ -464,6 +464,7 @@
         "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNetworkPathMonitor.swift",
         "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNavigationManager.swift",
         "ios-app/BikeComputer/RideShared/CyclingDirectionsFallback.swift",
+        "ios-app/BikeComputer/RideShared/MapKitNavigationRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchOnlineRouteProvider.swift",
         "ios-app/BikeComputerTests/WatchOnlineNavigationTests.swift"
       ],
@@ -936,6 +937,37 @@
         "ios-app/BikeComputer/BikeComputer/Models/RouteElevationSidecar.swift",
         "ios-app/BikeComputer/BikeComputer/Models/RouteElevationDelivery.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/RouteElevationService.swift"
+      ]
+    },
+    "saved-route-detour-core": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/CyclingDirectionsFallback.swift",
+        "ios-app/BikeComputer/RideShared/MapKitNavigationRouteAdapter.swift",
+        "ios-app/BikeComputer/RideShared/SavedRouteDetour.swift",
+        "ios-app/BikeComputer/RideShared/BicycleDetourServiceContract.swift",
+        "ios-app/BikeComputer/RideShared/BicycleDetourProvider.swift"
+      ],
+      "groups": [
+        "common-2"
+      ]
+    },
+    "saved-route-detour-1": {
+      "sources": [
+        "ios-app/BikeComputerTests/SavedRouteDetourTests.swift"
+      ],
+      "groups": [
+        "saved-route-detour-core"
+      ]
+    },
+    "saved-route-detour-acceptance": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
+        "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
+        "ios-app/tests/saved-route-detour-acceptance/main.swift"
+      ],
+      "groups": [
+        "saved-route-detour-core"
       ]
     }
   }

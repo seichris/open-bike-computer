@@ -1,0 +1,161 @@
+import CoreLocation
+import Foundation
+import MapKit
+
+/// Converts a MapKit route into the shared route contract: coordinates read
+/// back to WGS-84 (mainland China aware), MapKit steps mapped onto the
+/// route's geometry, Apple Maps provider metadata. Used by the Watch's online
+/// routing and by saved-route bicycle detours on iPhone and Watch.
+@MainActor
+enum MapKitNavigationRouteAdapterV1 {
+    static func route(
+        from mapKitRoute: MKRoute,
+        source: RouteCoordinateV1,
+        sourceLabel: String,
+        destinationLabel: String,
+        localeIdentifier: String
+    ) throws -> NavigationRouteV1 {
+        // Read in order from the requested start, so a route near a
+        // mainland-China border keeps to its own side.
+        let points = RouteCoordinateNormalizationV1.mapKitToWGS84(
+            routeCoordinates(from: mapKitRoute.polyline),
+            startingNear: source
+        )
+        guard let first = points.first,
+              let last = points.last,
+              let bounds = RouteBoundsV1.enclosing(points) else {
+            throw NavigationRouteValidationError.emptyGeometry
+        }
+        let cumulative = NavigationGeometryV1.cumulativeDistances(for: points)
+        let measuredDistance = cumulative.last ?? 0
+        let routeDistance = mapKitRoute.distance.isFinite &&
+            mapKitRoute.distance > 0 ? mapKitRoute.distance : measuredDistance
+        let travelTime = mapKitRoute.expectedTravelTime.isFinite &&
+            mapKitRoute.expectedTravelTime > 0
+            ? mapKitRoute.expectedTravelTime
+            : nil
+
+        var priorEnd = 0
+        var steps: [NavigationRouteStepV1] = []
+        for (sourceIndex, mapStep) in mapKitRoute.steps.enumerated() {
+            // A step starts where the previous one ended.
+            let stepPoints = RouteCoordinateNormalizationV1.mapKitToWGS84(
+                routeCoordinates(from: mapStep.polyline),
+                startingNear: points[min(priorEnd, points.count - 1)]
+            )
+            guard let stepStart = stepPoints.first,
+                  let stepEnd = stepPoints.last else {
+                if sourceIndex == mapKitRoute.steps.count - 1 {
+                    let endpoint = points.count - 1
+                    steps.append(NavigationRouteStepV1(
+                        id: UInt32(steps.count + 1),
+                        geometryStartIndex: endpoint,
+                        geometryEndIndex: endpoint,
+                        instruction: "Arrive at destination",
+                        maneuver: .arrive,
+                        distanceMeters: 0
+                    ))
+                }
+                continue
+            }
+            let start = stepPoints.count == 1 ? priorEnd :
+                nearestIndex(to: stepStart, in: points, from: priorEnd)
+            let end = nearestIndex(to: stepEnd, in: points, from: start)
+            priorEnd = end
+            let instruction = normalizedInstruction(mapStep.instructions)
+            steps.append(NavigationRouteStepV1(
+                id: UInt32(steps.count + 1),
+                geometryStartIndex: start,
+                geometryEndIndex: end,
+                instruction: instruction,
+                maneuver: ManeuverV1.infer(from: instruction),
+                distanceMeters: mapStep.distance.isFinite &&
+                    mapStep.distance > 0
+                    ? mapStep.distance
+                    : max(cumulative[end] - cumulative[start], 0)
+            ))
+        }
+        if steps.isEmpty {
+            let instruction = normalizedInstruction(mapKitRoute.name)
+            steps = [NavigationRouteStepV1(
+                id: 1,
+                geometryStartIndex: 0,
+                geometryEndIndex: points.count - 1,
+                instruction: instruction,
+                maneuver: ManeuverV1.infer(from: instruction),
+                distanceMeters: routeDistance
+            )]
+        }
+
+        let route = NavigationRouteV1(
+            id: UUID(),
+            revision: 1,
+            provider: RouteProviderPolicyV1.mapKit,
+            localeIdentifier: localeIdentifier,
+            transportType: .cycling,
+            source: RouteEndpointV1(coordinate: first, label: sourceLabel),
+            destination: RouteEndpointV1(
+                coordinate: last,
+                label: destinationLabel
+            ),
+            bounds: bounds,
+            distanceMeters: routeDistance,
+            expectedTravelTimeSeconds: travelTime,
+            name: mapKitRoute.name.isEmpty ? nil : mapKitRoute.name,
+            points: points,
+            steps: steps,
+            normalizationVersion: RouteCoordinateNormalizationV1.mapKitVersion
+        )
+        try route.validate()
+        return route
+    }
+
+    private static func coordinates(
+        from polyline: MKPolyline
+    ) -> [CLLocationCoordinate2D] {
+        guard polyline.pointCount > 0 else { return [] }
+        var result = [CLLocationCoordinate2D](
+            repeating: CLLocationCoordinate2D(),
+            count: polyline.pointCount
+        )
+        polyline.getCoordinates(
+            &result,
+            range: NSRange(location: 0, length: polyline.pointCount)
+        )
+        return result
+    }
+
+    private static func routeCoordinates(
+        from polyline: MKPolyline
+    ) -> [RouteCoordinateV1] {
+        coordinates(from: polyline).map {
+            RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude)
+        }
+    }
+
+    private static func nearestIndex(
+        to target: RouteCoordinateV1,
+        in points: [RouteCoordinateV1],
+        from lowerBound: Int
+    ) -> Int {
+        var best = min(max(lowerBound, 0), points.count - 1)
+        var bestDistance = Double.infinity
+        for index in best..<points.count {
+            let distance = NavigationGeometryV1.distance(
+                from: target,
+                to: points[index]
+            )
+            if distance < bestDistance {
+                bestDistance = distance
+                best = index
+            }
+            if distance < 0.01 { return index }
+        }
+        return best
+    }
+
+    private static func normalizedInstruction(_ instruction: String) -> String {
+        let value = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "Continue" : value
+    }
+}

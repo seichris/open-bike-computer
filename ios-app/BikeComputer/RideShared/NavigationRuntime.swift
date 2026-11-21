@@ -158,6 +158,39 @@ struct NavigationRuntimeV1 {
         return replacement
     }
 
+    /// Continues the same route at a confirmed rejoin point after a temporary
+    /// detour. Unlike `replaceRoute` it keeps the generation, route identity
+    /// and content hash, and puts progress and the current step exactly at
+    /// `distanceAlongGeometryMeters`, so steps skipped on the detour are not
+    /// replayed one per fix.
+    mutating func resume(
+        atDistanceAlongGeometry distanceAlongGeometryMeters: Double,
+        currentLocation: NavigationLocationSampleV1
+    ) throws -> NavigationSnapshotV1 {
+        guard let route else { throw NavigationRuntimeError.noActiveRoute }
+        guard distanceAlongGeometryMeters.isFinite else { throw NavigationRuntimeError.invalidLocation }
+        let measuredTotal = cumulativeDistances.last ?? 0
+        let along = min(max(distanceAlongGeometryMeters, 0), measuredTotal)
+        let referenceTotal = route.distanceMeters > 0 ? route.distanceMeters : measuredTotal
+        let scale = measuredTotal > 0 ? referenceTotal / measuredTotal : 1
+        var candidate = self
+        var segment = 0
+        while segment + 1 < cumulativeDistances.count - 1, cumulativeDistances[segment + 1] <= along {
+            segment += 1
+        }
+        candidate.lastSegmentIndex = segment
+        candidate.lastDistanceAlongGeometry = along
+        candidate.currentStepIndex = route.steps.firstIndex { step in
+            cumulativeDistances[step.geometryEndIndex] * scale + 0.5 >= along * scale
+        } ?? (route.steps.count - 1)
+        candidate.consecutiveOffRouteSamples = 0
+        candidate.isOffRoute = false
+        candidate.lastProcessedSample = nil
+        let snapshot = try candidate.process(currentLocation)
+        self = candidate
+        return snapshot
+    }
+
     mutating func stop() {
         route = nil
         snapshot = nil
