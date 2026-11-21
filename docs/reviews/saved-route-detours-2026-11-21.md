@@ -42,6 +42,22 @@ authenticated routing proxy, Watch → iPhone relay, navigation runtime change).
   the Valhalla detour was used, rejoin confirmed, saved-route generation and
   content hash preserved (perpendicular leave and missed-turn scenarios).
 
+- `run-navigation-tests.sh map` (NavigationProtocolTests, offline route
+  save/navigation 405 checks, route elevation, saved-route detours, map and
+  contour groups), `run-ride-shared-tests.sh`,
+  `run-watch-offline-navigation-tests.sh`, `.github/scripts` routing tests (47)
+  and `tools/development` tests (74) — passed on the merged head.
+- Signed Debug device build (`LetItRide.BikeComputer.dev`, team `4H5PK8686H`,
+  1.11 (33), identity `dirty-406b56aa` + the DEBUG hook commit) — BUILD
+  SUCCEEDED, `codesign --verify --deep --strict` OK. Not installed: iPhone
+  unavailable.
+- Development deployment (#834 → `e1d89494`, Coolify queue 5482): API image
+  `373328b9…`, `MAP_PLATFORM_BICYCLE_DETOUR_REQUIRE_APP_ATTEST=1`, upstream
+  `http://bicino-valhalla-dev-acceptance:8002`; `/healthz` reports
+  `bicycleDetour.enabled`; unauthenticated requests get 401; a service-level
+  call inside the API container returned the Dubai bicycle route (3,194 m,
+  13 maneuvers). Production containers unchanged.
+
 ## Review ledger
 
 Pass 1 of 3 (author). Findings fixed before commit:
