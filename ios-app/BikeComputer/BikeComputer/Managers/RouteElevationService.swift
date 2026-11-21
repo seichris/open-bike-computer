@@ -120,7 +120,8 @@ nonisolated struct RouteElevationSubjectV1: Equatable {
 }
 
 nonisolated enum RouteElevationUnavailableReasonV1: Equatable, Sendable {
-    /// Apple Maps routes, and Strava routes without usable GPX heights.
+    /// Providers the service may not receive, and Strava routes whose saved
+    /// archive was deleted, replaced, expired or disconnected.
     case sourceNotPermitted
     case offline
     case serviceUnavailable
@@ -262,6 +263,11 @@ nonisolated enum RouteElevationPreparationV1 {
 /// Resolves one canonical profile per route: trusted GPX heights first, then
 /// a profile cached with the saved archive, then the managed service when the
 /// provider policy allows sending the geometry. Navigation never waits on it.
+///
+/// A direct Strava API import reaches the service only while its exact saved
+/// archive is live. Deletion, expiry, replacement and disconnect revoke its
+/// cached profile, and an answer that arrives afterwards is discarded rather
+/// than shown, cached or written to the sidecar.
 @MainActor
 final class RouteElevationService {
     static let memoryCacheLimit = 8
@@ -274,6 +280,10 @@ final class RouteElevationService {
     private var subjectDigests: [String: String] = [:]
     private var failures: [String: (state: RouteElevationStateV1, until: Date)] = [:]
     private var inFlight: [String: Task<RouteElevationStateV1, Never>] = [:]
+    /// Geometry digests resolved for bound Strava subjects.
+    private var stravaDigests: [RouteElevationArchiveBindingV1: String] = [:]
+    /// In-flight Strava answers that must not be remembered when they land.
+    private var revokedDigests: Set<String> = []
 
     init(
         fetcher: RouteElevationProfileFetching?,
@@ -288,11 +298,41 @@ final class RouteElevationService {
     /// The last ready profile for this exact subject, for immediate display.
     func cachedState(for subject: RouteElevationSubjectV1) -> RouteElevationStateV1? {
         guard let digest = subjectDigests[subject.cacheKey], let profile = profiles[digest] else { return nil }
+        if Self.isStrava(subject), !isLiveStravaSubject(subject) { return nil }
         return .ready(profile)
     }
 
     func subject(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSubjectV1? {
         sidecars?.elevationSubject(for: binding)
+    }
+
+    /// Forgets every Strava profile whose archive is no longer among `live`,
+    /// and marks its in-flight answer to be discarded. Called whenever the
+    /// saved-route library changes (deletion, expiry, reload, disconnect).
+    func invalidateStravaSubjects(keeping live: Set<RouteElevationArchiveBindingV1>) {
+        for (binding, digest) in stravaDigests where !live.contains(binding) {
+            stravaDigests[binding] = nil
+            evict(digest: digest)
+            subjectDigests = subjectDigests.filter { !$0.key.hasPrefix(binding.routeID.uuidString + "|") }
+        }
+    }
+
+    private static func isStrava(_ subject: RouteElevationSubjectV1) -> Bool {
+        subject.route.provider == RouteProviderPolicyV1.strava
+    }
+
+    /// A Strava route may use the service only through its exact live archive
+    /// (the binding includes the archive's content hash).
+    private func isLiveStravaSubject(_ subject: RouteElevationSubjectV1) -> Bool {
+        guard let binding = subject.binding else { return false }
+        return sidecars?.elevationSubject(for: binding) != nil
+    }
+
+    private func evict(digest: String) {
+        profiles[digest] = nil
+        recency.removeAll { $0 == digest }
+        failures[digest] = nil
+        if inFlight[digest] != nil { revokedDigests.insert(digest) }
     }
 
     func resolve(_ subject: RouteElevationSubjectV1, retry: Bool = false) async -> RouteElevationStateV1 {
@@ -310,6 +350,17 @@ final class RouteElevationService {
         let geometry = prepared.geometry
         let digest = geometry.digest
         subjectDigests[subject.cacheKey] = digest
+        let isStrava = Self.isStrava(subject)
+        if isStrava {
+            if let binding = subject.binding { stravaDigests[binding] = digest }
+            // Strava's own trusted heights stay on the phone and send nothing.
+            if let local = prepared.localProfile {
+                remember(local)
+                return .ready(local)
+            }
+            // Anything else (cache, sidecar, service) needs the live archive.
+            guard isLiveStravaSubject(subject) else { return .unavailable(.sourceNotPermitted) }
+        }
         if let cached = profiles[digest] {
             remember(cached)
             return .ready(cached)
@@ -338,6 +389,8 @@ final class RouteElevationService {
         }
         let task: Task<RouteElevationStateV1, Never>
         if let existing = inFlight[digest] {
+            // A live subject wants this geometry again; keep its answer.
+            revokedDigests.remove(digest)
             task = existing
         } else {
             let request = RouteElevationPreparationV1.request(
@@ -360,6 +413,12 @@ final class RouteElevationService {
             inFlight[digest] = task
         }
         let state = await task.value
+        // A Strava archive deleted, expired, replaced or disconnected while the
+        // request was in flight: drop the late answer entirely.
+        if isStrava, !isLiveStravaSubject(subject) {
+            evict(digest: digest)
+            return .unavailable(.sourceNotPermitted)
+        }
         if case .ready(let profile) = state, let binding = subject.binding {
             sidecars?.storeElevationProfile(profile, for: binding)
         }
@@ -368,6 +427,7 @@ final class RouteElevationService {
 
     private func finish(digest: String, state: RouteElevationStateV1, error: RouteElevationClientError?) {
         inFlight[digest] = nil
+        if revokedDigests.remove(digest) != nil { return }
         if case .ready(let profile) = state {
             failures[digest] = nil
             remember(profile)

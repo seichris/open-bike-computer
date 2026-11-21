@@ -68,9 +68,11 @@ nonisolated enum RouteProviderPolicyV1 {
 
     /// Whether this route's geometry may be sent to the Bicino route elevation
     /// service, which forwards sample points to its hosted terrain provider.
-    /// The maintainer enabled active and saved Apple Maps routes on 2026-10-23.
-    /// Preserve the route's provenance in the request. Strava API routes use
-    /// their own GPX elevations on the phone.
+    /// The maintainer enabled active and saved Apple Maps routes on 2026-10-23,
+    /// and direct Strava API imports on 2026-11-21 (approved and confirmed as
+    /// permitted under his Strava terms). Preserve the route's provenance in
+    /// the request. A Strava route's own trusted GPX heights are still used on
+    /// the phone first; only a route without them asks the service.
     static func allowsRouteElevationService(
         _ metadata: RouteProviderMetadataV1
     ) -> Bool {
@@ -82,6 +84,7 @@ nonisolated enum RouteProviderPolicyV1 {
     ) -> String? {
         if metadata == importedGPX { return "gpx" }
         if metadata == mapKit || metadata == mapKitSavedOnPhone { return "mapkit" }
+        if metadata == strava { return "strava" }
         return nil
     }
 

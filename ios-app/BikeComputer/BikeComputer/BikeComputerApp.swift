@@ -196,6 +196,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             whenever: routeLibrary.$routes
         )
         .store(in: &cancellables)
+        // Strava elevation profiles and late answers follow the route lease:
+        // deletion, expiry and disconnect revoke them immediately.
+        routeLibrary.$routes.sink { [weak routeElevationService] routes in
+            routeElevationService?.invalidateStravaSubjects(keeping: Set(
+                routes.filter { $0.providerID == RouteProviderPolicyV1.strava.providerID }
+                    .map { RouteElevationArchiveBindingV1(routeID: $0.id, revision: $0.revision,
+                                                          contentHash: $0.contentHash) }
+            ))
+        }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
