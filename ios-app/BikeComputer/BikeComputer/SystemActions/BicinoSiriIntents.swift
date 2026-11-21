@@ -1,20 +1,23 @@
 import AppIntents
 import Foundation
 
-/// Bridges Siri and Shortcuts actions to the app's Bluetooth link and route.
-/// The intents run in the app process, where the bike computer connection
-/// lives, and never open the app.
+/// Bridges Siri and Shortcuts actions to the app's Bluetooth link, route and
+/// workout recording. The intents run in the app process, where the bike
+/// computer connection and the ride live, and never open the app.
 @available(iOS 17.0, *)
 final class BicinoSiriActions: @unchecked Sendable {
     static let unavailable = BicinoSiriActions(
         activateScreen: { _ in .notConnected },
-        findPlaces: { _ in .unavailable }
+        findPlaces: { _ in .unavailable },
+        runWorkoutCommand: { _, _ in .unavailable }
     )
 
     private let activateScreenHandler:
         @MainActor @Sendable (DeviceScreenActivationRequest) async -> DeviceScreenActivationOutcome
     private let findPlacesHandler:
         @MainActor @Sendable (RoutePlaceKind) async -> RoutePlaceSearchOutcome
+    private let runWorkoutCommandHandler:
+        @MainActor @Sendable (BicinoWorkoutCommand, UUID?) async -> BicinoWorkoutCommandOutcome
 
     init(
         activateScreen: @escaping @MainActor @Sendable (
@@ -22,10 +25,15 @@ final class BicinoSiriActions: @unchecked Sendable {
         ) async -> DeviceScreenActivationOutcome,
         findPlaces: @escaping @MainActor @Sendable (
             RoutePlaceKind
-        ) async -> RoutePlaceSearchOutcome
+        ) async -> RoutePlaceSearchOutcome,
+        runWorkoutCommand: @escaping @MainActor @Sendable (
+            BicinoWorkoutCommand,
+            UUID?
+        ) async -> BicinoWorkoutCommandOutcome
     ) {
         activateScreenHandler = activateScreen
         findPlacesHandler = findPlaces
+        runWorkoutCommandHandler = runWorkoutCommand
     }
 
     func activateScreen(_ request: DeviceScreenActivationRequest) async -> DeviceScreenActivationOutcome {
@@ -34,6 +42,19 @@ final class BicinoSiriActions: @unchecked Sendable {
 
     func findPlaces(_ kind: RoutePlaceKind) async -> RoutePlaceSearchOutcome {
         await findPlacesHandler(kind)
+    }
+
+    /// `confirmedSession` is the session the rider said yes to, for a
+    /// command that asks first.
+    func runWorkoutCommand(
+        _ command: BicinoWorkoutCommand,
+        confirmedSession: UUID? = nil
+    ) async -> BicinoWorkoutCommandOutcome {
+        await runWorkoutCommandHandler(command, confirmedSession)
+    }
+
+    func workoutReply(_ command: BicinoWorkoutCommand) async -> String {
+        BicinoWorkoutReplyText.text(for: await runWorkoutCommand(command))
     }
 }
 
@@ -194,6 +215,124 @@ struct FindPlaceOnRouteIntent: AppIntent {
     }
 }
 
+@available(iOS 17.0, *)
+struct StartBicinoWorkoutIntent: AppIntent {
+    static let title: LocalizedStringResource = "Start Bicino Workout"
+    static let description = IntentDescription(
+        "Starts recording an outdoor ride, on Apple Watch when one is paired and otherwise on iPhone, like the app's Start button."
+    )
+    static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+    @AppDependency(default: .unavailable)
+    private var actions: BicinoSiriActions
+
+    init() {}
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let reply = await actions.workoutReply(.start)
+        return .result(dialog: "\(reply)")
+    }
+}
+
+@available(iOS 17.0, *)
+struct PauseBicinoWorkoutIntent: AppIntent {
+    static let title: LocalizedStringResource = "Pause Bicino Workout"
+    static let description = IntentDescription("Pauses the ride Bicino is recording.")
+    static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+    @AppDependency(default: .unavailable)
+    private var actions: BicinoSiriActions
+
+    init() {}
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let reply = await actions.workoutReply(.pause)
+        return .result(dialog: "\(reply)")
+    }
+}
+
+@available(iOS 17.0, *)
+struct ResumeBicinoWorkoutIntent: AppIntent {
+    static let title: LocalizedStringResource = "Resume Bicino Workout"
+    static let description = IntentDescription("Resumes the paused ride.")
+    static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+    @AppDependency(default: .unavailable)
+    private var actions: BicinoSiriActions
+
+    init() {}
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let reply = await actions.workoutReply(.resume)
+        return .result(dialog: "\(reply)")
+    }
+}
+
+@available(iOS 17.0, *)
+struct MarkBicinoSegmentIntent: AppIntent {
+    static let title: LocalizedStringResource = "Mark Bicino Segment"
+    static let description = IntentDescription(
+        "Ends the current segment and starts the next one in the ride Bicino is recording."
+    )
+    static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+    @AppDependency(default: .unavailable)
+    private var actions: BicinoSiriActions
+
+    init() {}
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let reply = await actions.workoutReply(.segment)
+        return .result(dialog: "\(reply)")
+    }
+}
+
+@available(iOS 17.0, *)
+struct FinishBicinoWorkoutIntent: AppIntent {
+    static let title: LocalizedStringResource = "Finish Bicino Workout"
+    static let description = IntentDescription(
+        "Ends and saves the ride Bicino is recording, after you confirm."
+    )
+    static let openAppWhenRun = false
+    static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+    @AppDependency(default: .unavailable)
+    private var actions: BicinoSiriActions
+
+    init() {}
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        var outcome = await actions.runWorkoutCommand(.finish)
+        if case .needsConfirmation(_, let sessionID) = outcome {
+            // Declining throws, and Siri ends without changing the ride.
+            try await confirmFinish(BicinoWorkoutReplyText.text(for: outcome))
+            outcome = await actions.runWorkoutCommand(.finish, confirmedSession: sessionID)
+        }
+        return .result(dialog: "\(BicinoWorkoutReplyText.text(for: outcome))")
+    }
+
+    private func confirmFinish(_ question: String) async throws {
+        if #available(iOS 18.0, *) {
+            try await requestConfirmation(
+                actionName: .custom(
+                    acceptLabel: "Finish",
+                    // "Stop" and "End" stay out: riders say them to back out.
+                    acceptAlternatives: ["Yes", "Finish ride", "Save"],
+                    denyLabel: "Keep Riding",
+                    denyAlternatives: ["No", "Cancel", "Stop", "Keep going"]
+                ),
+                dialog: "\(question)"
+            )
+        } else {
+            try await requestConfirmation()
+        }
+    }
+}
+
 /// Phrases must name the app, so Siri says "Bicino" ("Bicino Dev" for
 /// Debug builds) in each.
 @available(iOS 17.0, *)
@@ -240,6 +379,62 @@ struct BicinoAppShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Find on Route",
             systemImageName: "mappin.and.ellipse"
+        )
+        AppShortcut(
+            intent: StartBicinoWorkoutIntent(),
+            phrases: [
+                "\(.applicationName) start workout",
+                "\(.applicationName) start ride",
+                "Start a workout with \(.applicationName)",
+                "Start a ride with \(.applicationName)",
+            ],
+            shortTitle: "Start Workout",
+            systemImageName: "figure.outdoor.cycle"
+        )
+        AppShortcut(
+            intent: PauseBicinoWorkoutIntent(),
+            phrases: [
+                "\(.applicationName) pause workout",
+                "\(.applicationName) pause ride",
+                "Pause my ride on \(.applicationName)",
+            ],
+            shortTitle: "Pause Workout",
+            systemImageName: "pause.circle"
+        )
+        AppShortcut(
+            intent: ResumeBicinoWorkoutIntent(),
+            phrases: [
+                "\(.applicationName) resume workout",
+                "\(.applicationName) resume ride",
+                "Resume my ride on \(.applicationName)",
+            ],
+            shortTitle: "Resume Workout",
+            systemImageName: "play.circle"
+        )
+        AppShortcut(
+            intent: MarkBicinoSegmentIntent(),
+            phrases: [
+                "\(.applicationName) segment",
+                "\(.applicationName) mark segment",
+                "\(.applicationName) new segment",
+                "\(.applicationName) lap",
+                "Mark a segment with \(.applicationName)",
+            ],
+            shortTitle: "Mark Segment",
+            systemImageName: "flag.checkered"
+        )
+        AppShortcut(
+            intent: FinishBicinoWorkoutIntent(),
+            phrases: [
+                "\(.applicationName) stop workout",
+                "\(.applicationName) end workout",
+                "\(.applicationName) finish workout",
+                "\(.applicationName) stop ride",
+                "\(.applicationName) end ride",
+                "\(.applicationName) finish ride",
+            ],
+            shortTitle: "Finish Workout",
+            systemImageName: "stop.circle"
         )
     }
 }
