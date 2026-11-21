@@ -60,8 +60,8 @@ position and one selected rejoin point. The saved route's provenance (`gpx`,
 Configuration (`MAP_PLATFORM_*`): `BICYCLE_ROUTING_UPSTREAM_URL` (internal
 Valhalla origin; unset disables the endpoint), `BICYCLE_ROUTING_TIMEOUT_SECONDS`
 (8), `BICYCLE_DETOUR_MAX_CONCURRENT` (4), `BICYCLE_DETOUR_MAX_SEPARATION_METERS`
-(15000), `BICYCLE_DETOUR_REQUIRE_APP_ATTEST` (code default true; the
-development lock sets false for operator-issued acceptance installations),
+(15000), `BICYCLE_DETOUR_REQUIRE_APP_ATTEST` (true in the code and in the
+development lock; acceptance uses a normally enrolled Bicino Dev installation),
 `BICYCLE_DETOUR_IP_LIMIT_PER_HOUR` (120), `BICYCLE_DETOUR_LIMIT_PER_HOUR` (60),
 `BICYCLE_DETOUR_LIMIT_PER_DAY` (300).
 
