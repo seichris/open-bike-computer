@@ -319,9 +319,10 @@ struct FinishBicinoWorkoutIntent: AppIntent {
             try await requestConfirmation(
                 actionName: .custom(
                     acceptLabel: "Finish",
-                    acceptAlternatives: ["Yes", "Finish ride", "End", "Stop", "Save"],
+                    // "Stop" and "End" stay out: riders say them to back out.
+                    acceptAlternatives: ["Yes", "Finish ride", "Save"],
                     denyLabel: "Keep Riding",
-                    denyAlternatives: ["No", "Cancel"]
+                    denyAlternatives: ["No", "Cancel", "Stop", "Keep going"]
                 ),
                 dialog: "\(question)"
             )

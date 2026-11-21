@@ -92,7 +92,8 @@ nonisolated enum BicinoWorkoutReplyText {
         case .previousRideSaving:
             return "Bicino is still saving your last ride. Try again in a moment."
         case .checkingForRide:
-            return "Bicino is still checking for an unfinished ride. Try again in a moment."
+            // Recovery can also fail until the iPhone is unlocked.
+            return "Bicino is still checking for an unfinished ride. If this keeps happening, unlock iPhone and open Bicino."
         case .waitingForWatch:
             return "Bicino is checking your Apple Watch and will start the ride when it answers."
         case .iPhoneRecordingUnsupported:

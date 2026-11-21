@@ -1230,6 +1230,36 @@ struct WorkoutSessionCoordinatorTests {
         check(await watchRunner.run(.finish) == .unreachable(.watch) && watch.saves == 0,
               "An unreachable Watch keeps its ride; Siri sends nothing")
 
+        // Finishing a Watch ride: sent to the Watch, done once it reports the save.
+        let (finishing, finishingWatch, _, _, _) = harness(availability: .ready(isReachable: true))
+        finishing.recoverIfNeeded()
+        await spin { finishing.recoveryComplete }
+        let finishedID = UUID()
+        finishingWatch.emit(id: finishedID, state: .running)
+        var publishedSessions: [UUID] = []
+        var watchSaves = false
+        let finishingRunner = BicinoWorkoutCommandRunner(
+            coordinator: finishing,
+            control: { _, _ in false },
+            publish: { sessionID in
+                publishedSessions.append(sessionID)
+                if watchSaves, finishingWatch.saves == 1, publishedSessions.count == 1 {
+                    finishingWatch.emit(id: finishedID, state: .ended, outcome: .saved)
+                }
+            },
+            wait: turn
+        )
+        check(await finishingRunner.run(.finish) == .needsConfirmation(.watch)
+                && finishingWatch.saves == 0 && publishedSessions.isEmpty,
+              "A Watch finish asks first and sends nothing")
+        watchSaves = true
+        check(await finishingRunner.run(.finish, confirmed: true) == .done(.finish, .watch)
+                && finishingWatch.saves == 1,
+              "A confirmed Watch finish is sent once and reported once the Watch saves")
+        check(publishedSessions == [finishedID, finishedID],
+              "The Lock Screen is updated after sending and after the result")
+        check(finishing.record?.phase == .finished, "The coordinator records the finished ride")
+
         // Apple Watch still activating: the coordinator starts once it answers.
         let (activating, slowWatch, _, slowAvailability, _) = harness(availability: .activating)
         activating.recoverIfNeeded()
