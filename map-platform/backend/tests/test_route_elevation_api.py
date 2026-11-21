@@ -157,6 +157,20 @@ class RouteElevationEndpointTests(RouteElevationAPITests):
         self.assertEqual(self.post(retry).json()["status"], "ready")
         self.assertEqual(len(self.transport.requests), 1)
 
+    def test_strava_route_without_usable_heights_uses_the_terrain_provider(self):
+        # Approved 2026-11-21: direct Strava imports fall back to the service
+        # with their explicit provenance when their own heights are unusable.
+        payload = route_payload(source="strava")
+        response = self.post(payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["profile"]["geometry"]["digest"], payload["geometry"]["digest"])
+        self.assertEqual(body["attempts"][0]["provider"], "geoapify")
+        self.assertEqual(len(self.transport.requests), 1)
+        self.assertNotIn("coordinatesE6", response.text)
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
     def test_mapkit_route_without_heights_uses_the_terrain_provider(self):
         payload = route_payload(source="mapkit")
         response = self.post(payload)
@@ -181,7 +195,6 @@ class RouteElevationEndpointTests(RouteElevationAPITests):
         self.assertEqual(unenrolled.status_code, 401)
         self.assertEqual(unenrolled.json()["detail"]["code"], "installation_attestation_required")
         invalid = [
-            route_payload(source="strava"),
             route_payload(source="unknown"),
             route_payload(schema="v0"),
             route_payload(requestId="not-a-uuid"),
