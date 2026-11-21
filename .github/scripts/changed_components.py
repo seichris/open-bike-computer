@@ -159,6 +159,8 @@ SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
     "protocol/fixtures/route-elevation-v1/",
     "tools/generate_route_elevation_fixtures.py",
 )
+# Built by the backend's detour service and decoded by the Swift detour tests.
+SHARED_BICYCLE_DETOUR_FIXTURE_PATHS = ("protocol/fixtures/bicycle-detour-v1/",)
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
@@ -367,6 +369,10 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             # Backend processing, the Swift codec and the firmware decoder all
             # assert the same route elevation fixtures.
             selected["firmware_host"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path.startswith(SHARED_BICYCLE_DETOUR_FIXTURE_PATHS):
             selected["ios"] = True
             selected["map_backend"] = True
 

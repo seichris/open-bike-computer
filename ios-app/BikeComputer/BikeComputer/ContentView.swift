@@ -2430,6 +2430,7 @@ struct ContentView: View {
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
             topographyOverlay: offlineMapManager.topographyOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline,
+            detourPolyline: coordinator.detourPolyline,
             socialRiders: social.visibleRiders.filter { $0.id != social.profile?.id },
             socialPhotos: social.photos,
             socialMarkerStyle: SocialMapMarkerStyle(

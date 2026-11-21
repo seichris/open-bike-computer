@@ -613,6 +613,63 @@ private func testProviderPolicy() {
            RouteProviderPolicyV1.routeElevationServiceSource(valhalla) == nil, "detours are never stored, shared or sent for elevation")
 }
 
+// MARK: - Watch relay
+
+@MainActor
+private func testWatchRelayRoundTrip() async {
+    let body = try! Data(contentsOf: fixtureDirectory.appendingPathComponent("dubai-ready-response.json"))
+    let request = BicycleDetourServiceRequestV1(
+        origin: RouteCoordinateV1(latitude: 25.2066, longitude: 55.2692), courseDegrees: nil,
+        rejoin: RouteCoordinateV1(latitude: 25.2258, longitude: 55.2631), routeSource: "strava", localeIdentifier: "en_AE"
+    )
+    let message = try! WatchBicycleDetourRelayV1.encode(request)
+    expect(WatchBicycleDetourRelayV1.isRequest(message) && WatchBicycleDetourRelayV1.decodeRequest(message) == request,
+           "the relayed request is exactly the two-point request")
+    var tampered = try! JSONSerialization.jsonObject(with: message.dropFirst(4)) as! [String: Any]
+    tampered["routeSource"] = "unknown"
+    expect(WatchBicycleDetourRelayV1.decodeRequest(WatchBicycleDetourRelayV1.requestTag +
+           (try! JSONSerialization.data(withJSONObject: tampered))) == nil, "the phone forwards only valid requests")
+    expect(!WatchBicycleDetourRelayV1.isRequest(Data("prep".utf8)), "other message data is not a relay request")
+
+    // The phone answers with the service's HTTP response; the Watch decodes it like the iPhone.
+    var relayed: [Data] = []
+    let transport = WatchBicycleDetourRelayTransport { data in
+        relayed.append(data)
+        return WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.response(BicycleDetourHTTPResponseV1(
+            statusCode: 200, cacheControl: "private, no-store", contentType: "application/json", retryAfter: nil, body: body
+        )))
+    }
+    let outcome = await BicinoBicycleDetourProvider(transport: transport).detour(for: BicycleDetourQueryV1(
+        origin: request.origin.coordinate, originCourseDegrees: nil, rejoin: request.rejoin.coordinate,
+        routeSource: "strava", localeIdentifier: "en_AE"
+    ))
+    guard case .route(let route) = outcome else { fatalError("FAILED: a relayed Valhalla answer becomes a detour") }
+    expect(route.provider == RouteProviderPolicyV1.valhallaDetour && relayed.count == 1, "one relay round trip")
+
+    let unreachable = WatchBicycleDetourRelayTransport { _ in throw URLError(.notConnectedToInternet) }
+    let offline = await BicinoBicycleDetourProvider(transport: unreachable).detour(for: BicycleDetourQueryV1(
+        origin: request.origin.coordinate, originCourseDegrees: nil, rejoin: request.rejoin.coordinate,
+        routeSource: "strava", localeIdentifier: "en_AE"
+    ))
+    expect(offline == .unavailable(.offline, retryAfterSeconds: nil), "an unreachable iPhone means no Valhalla leg")
+    let failed = WatchBicycleDetourRelayTransport { _ in
+        WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.failure(offline: false))
+    }
+    let failure = await BicinoBicycleDetourProvider(transport: failed).detour(for: BicycleDetourQueryV1(
+        origin: request.origin.coordinate, originCourseDegrees: nil, rejoin: request.rejoin.coordinate,
+        routeSource: "strava", localeIdentifier: "en_AE"
+    ))
+    expect(failure == .unavailable(.serviceError, retryAfterSeconds: nil), "a phone-side failure is a service error")
+}
+
+private extension BicycleDetourServiceRequestV1.Origin {
+    var coordinate: RouteCoordinateV1 { RouteCoordinateV1(latitude: Double(latitudeE6) / 1e6, longitude: Double(longitudeE6) / 1e6) }
+}
+
+private extension BicycleDetourServiceRequestV1.Rejoin {
+    var coordinate: RouteCoordinateV1 { RouteCoordinateV1(latitude: Double(latitudeE6) / 1e6, longitude: Double(longitudeE6) / 1e6) }
+}
+
 @main
 enum SavedRouteDetourTestRunner {
     @MainActor
@@ -634,6 +691,7 @@ enum SavedRouteDetourTestRunner {
         await testProviderChain()
         testServiceContract()
         testProviderPolicy()
+        await testWatchRelayRoundTrip()
         print("Saved-route detour tests passed")
     }
 }

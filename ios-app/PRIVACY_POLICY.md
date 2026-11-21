@@ -66,9 +66,27 @@ When you explicitly enable online Watch routing and choose a coordinate-backed
 favorite, the Watch sends the current coordinate and destination to Apple's
 MapKit service for a real-time cycling-route request. The resulting Watch route
 is kept only for the active navigation session. Bicino does not upload that
-request or route to its own servers. When the setting is off, Watch navigation
-uses only a route you previously transferred for offline use and does not make
-an online route request.
+favorite request or route to its own servers. When the setting is off, Watch
+navigation uses only a route you previously transferred for offline use and
+does not make an online route request.
+
+### Detours back to a saved route
+
+When you navigate a saved route (an imported GPX file, a Strava route or a
+route saved from Apple Maps) and clearly leave it while online, Bicino can
+calculate a temporary bicycle detour back to it. The app first asks Apple's
+MapKit for cycling directions from your current location to one selected point
+on your saved route. Only if MapKit has no cycling route for that request (for
+example where Apple Maps offers no cycling directions) does the app send your
+current location and that one point to the Bicino service with your
+installation credential. The service calculates a bicycle route on Bicino's own
+routing server, built from OpenStreetMap data, and neither stores nor logs the
+coordinates; the rest of your saved route is not sent. On a Watch-owned ride
+with online routing enabled, the Watch passes the same two points to your
+paired iPhone when it is reachable, and the iPhone sends them with its own
+credential. The detour is kept only for the active ride and is discarded when
+you rejoin the saved route or navigation stops. Offline, or when no bicycle
+route is found, nothing is sent to Bicino and the saved route stays on screen.
 
 Saved offline routes and coordinate-backed favorite names and coordinates are
 transferred between your paired iPhone and Watch using Apple's WatchConnectivity
@@ -163,8 +181,15 @@ not repeat the lookup. To enforce daily limits it keeps a usage count keyed by a
 pseudonym of your installation identifier, deleted no later than 48 hours after
 the day it counts.
 
-Strava routes are never sent for elevation. A Strava route's own GPX elevation
-values may be used on your iPhone. A saved route keeps
+For a route imported directly from Strava, the app uses the route's own GPX
+elevation values on your iPhone when they are present and pass the app's
+quality check, and sends nothing. Only when they are missing or unusable does
+it send that route's coordinates, marked as a Strava route, to the Bicino
+service in the same way, so the terrain provider (Geoapify) can receive sample
+coordinates from our server. The resulting profile is kept with the Strava
+route on your iPhone only while that route is: it is deleted when the route
+expires, when you delete it, or when you disconnect Strava, and an answer that
+arrives after that is discarded. A saved route keeps
 its profile and any GPX elevation values in a companion file on your iPhone,
 excluded from backups and deleted with the route. The phone sends a compact
 copy of the profile and your progress along the route to a connected bike
@@ -196,7 +221,9 @@ connected device and is not used for tracking.
 We do not share personal data with advertisers or data brokers. Information may
 be processed by infrastructure providers only as needed to operate requested
 functionality, such as building and delivering an offline map or looking up
-terrain heights for a route elevation profile. Workout and
+terrain heights for a route elevation profile. Bicycle detours are calculated
+on Bicino's own routing server and are not shared with a routing provider.
+Workout and
 HealthKit information is not sent to those providers. We require service
 providers that process information for us to use it only on our instructions
 and to provide the same or equivalent privacy protection described in this

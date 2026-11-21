@@ -94,6 +94,16 @@ final class WatchNavigationManager: ObservableObject {
     /// unavailable cycling directions, and whether it uses highways or toll
     /// roads. Each new route or reroute brings its own.
     @Published private(set) var routeDirectionsNotice: String?
+    /// Saved-route bicycle detours on installed GPX/Strava rides with online
+    /// routing on; nil when the ride cannot use them.
+    @Published private(set) var detourPhase: SavedRouteDetourPhaseV1?
+    /// MapKit cycling on the Watch, then the Valhalla leg relayed through the
+    /// paired iPhone. Set by the app delegate.
+    var detourProviders: (any BicycleDetourProviding)?
+    private var detourEngine: SavedRouteDetourEngineV1?
+    private var detourRuntime = NavigationRuntimeV1()
+    private var detourTask: Task<Void, Never>?
+    private var detourRequestID: UInt64?
 
     var canRecalculateOnline: Bool {
         settingsStore.policy == .onlineAllowed &&
@@ -315,6 +325,7 @@ final class WatchNavigationManager: ObservableObject {
     @discardableResult
     func stopNavigation() -> Bool {
         cancelRequest()
+        resetDetour()
         do {
             try journalStore.clear()
         } catch {
@@ -406,6 +417,18 @@ final class WatchNavigationManager: ObservableObject {
             }
             activeDestination = record.archive.route.destination
             routeAttribution = record.archive.route.provider.attribution
+            resetDetour()
+            if allowsOnlineRerouting,
+               RouteProviderPolicyV1.bicycleDetourRouteSource(record.archive.route.provider) != nil {
+                // Non-destructive: the installed route, its journal and its
+                // attribution stay; a detour only leads back to it.
+                var engine = SavedRouteDetourEngineV1(route: record.archive.route)
+                _ = engine.networkChanged(
+                    available: networkMonitor.availability != .unavailable, latestSample: nil, now: now()
+                )
+                detourEngine = engine
+                detourPhase = engine.phase
+            }
             onlineStatus = allowsOnlineRerouting
                 ? (networkMonitor.availability == .unavailable
                     ? .continuingCachedRoute
@@ -422,6 +445,99 @@ final class WatchNavigationManager: ObservableObject {
         } catch {
             state = .unavailable("Route not installed on this Watch")
         }
+    }
+
+    // MARK: - Saved-route detours
+
+    private func receiveDetourFix(_ sample: NavigationLocationSampleV1) {
+        guard var engine = detourEngine else { return }
+        let saved = engine.isHoldingSavedRoute ? nil : try? runtime.process(sample)
+        let detour = engine.phase == .following ? try? detourRuntime.process(sample) : nil
+        let effects = engine.observe(sample, savedRouteSnapshot: saved, detourSnapshot: detour, now: now())
+        detourEngine = engine
+        let resumed = handleDetourEffects(effects, sample: sample)
+        publishDetourGuidance(sample: sample, savedSnapshot: resumed ?? saved)
+    }
+
+    private func publishDetourGuidance(sample: NavigationLocationSampleV1, savedSnapshot: NavigationSnapshotV1?) {
+        if detourEngine?.phase == .following, let detour = detourRuntime.snapshot {
+            // Detour guidance goes to the screen and the bike computer; the
+            // journal keeps describing the installed route.
+            snapshot = detour
+            state = .navigating(routeID: detour.routeID)
+            deviceLink.updateNavigation(location: sample, snapshot: detour)
+        } else if let saved = savedSnapshot ?? runtime.snapshot {
+            publish(snapshot: saved, location: sample)
+        }
+        detourPhase = detourEngine?.phase
+    }
+
+    private func handleDetourEffects(
+        _ effects: [SavedRouteDetourEffectV1],
+        sample: NavigationLocationSampleV1
+    ) -> NavigationSnapshotV1? {
+        var resumed: NavigationSnapshotV1?
+        for effect in effects {
+            switch effect {
+            case .requestDetour(let request):
+                runDetourRequest(request)
+            case .cancelRequest(let id):
+                guard detourRequestID == id else { continue }
+                detourRequestID = nil
+                detourTask?.cancel()
+                detourTask = nil
+                detourProviders?.cancel()
+            case .startDetour(let route):
+                _ = try? detourRuntime.start(route: route, mode: .online, initialStepStrategy: .first,
+                                             initialLocation: sample)
+            case .endDetour:
+                detourRuntime.stop()
+            case .resumeSavedRoute(let rejoin):
+                resumed = try? runtime.resume(atDistanceAlongGeometry: rejoin.distanceAlongMeters,
+                                              currentLocation: sample)
+            }
+        }
+        detourPhase = detourEngine?.phase
+        return resumed
+    }
+
+    private func runDetourRequest(_ request: SavedRouteDetourRequestV1) {
+        guard let providers = detourProviders,
+              let route = detourEngine?.geometry.route,
+              let source = RouteProviderPolicyV1.bicycleDetourRouteSource(route.provider) else {
+            completeDetour(id: request.id, outcome: .unavailable(.serviceError, retryAfterSeconds: nil))
+            return
+        }
+        detourTask?.cancel()
+        providers.cancel()
+        detourRequestID = request.id
+        let query = BicycleDetourQueryV1(request: request, routeSource: source,
+                                         localeIdentifier: Locale.current.identifier)
+        detourTask = Task { [weak self] in
+            let outcome = await providers.detour(for: query)
+            guard let self, !Task.isCancelled, self.detourRequestID == request.id else { return }
+            self.detourRequestID = nil
+            self.detourTask = nil
+            self.completeDetour(id: request.id, outcome: outcome)
+        }
+    }
+
+    private func completeDetour(id: UInt64, outcome: BicycleDetourOutcomeV1) {
+        guard var engine = detourEngine, let sample = lastLocation else { return }
+        let effects = engine.complete(requestID: id, outcome: outcome, latestSample: sample, now: now())
+        detourEngine = engine
+        let resumed = handleDetourEffects(effects, sample: sample)
+        publishDetourGuidance(sample: sample, savedSnapshot: resumed)
+    }
+
+    private func resetDetour() {
+        detourTask?.cancel()
+        detourTask = nil
+        detourRequestID = nil
+        detourProviders?.cancel()
+        detourEngine = nil
+        detourRuntime.stop()
+        detourPhase = nil
     }
 
     private func beginLocationDemand() {
@@ -477,6 +593,10 @@ final class WatchNavigationManager: ObservableObject {
             break
         }
         guard runtime.route != nil else { return }
+        if detourEngine != nil {
+            receiveDetourFix(sample)
+            return
+        }
         do {
             let snapshot = try runtime.process(sample)
             publish(snapshot: snapshot, location: sample)
@@ -646,6 +766,8 @@ final class WatchNavigationManager: ObservableObject {
     }
 
     private func requestReroute(explicit: Bool) {
+        // Saved rides with detours never replace their route.
+        guard detourEngine == nil else { return }
         guard requestTask == nil,
               settingsStore.policy == .onlineAllowed,
               let activeDestination,
@@ -829,6 +951,14 @@ final class WatchNavigationManager: ObservableObject {
     }
 
     private func networkDidChange(_ availability: WatchNetworkAvailabilityV1) {
+        if var engine = detourEngine {
+            let effects = engine.networkChanged(
+                available: availability != .unavailable, latestSample: lastLocation, now: now()
+            )
+            detourEngine = engine
+            if let lastLocation { _ = handleDetourEffects(effects, sample: lastLocation) }
+            detourPhase = engine.phase
+        }
         guard settingsStore.policy == .onlineAllowed else { return }
         guard runtime.route != nil else {
             if pendingFavorite != nil, availability == .available {

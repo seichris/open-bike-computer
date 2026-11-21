@@ -8,8 +8,20 @@
       "cwd": ".",
       "level": "full",
       "command": "python3 tools/generate_ride_stats_preview.py --lvgl-source \"${EPAPER_LVGL_SOURCE:?Set EPAPER_LVGL_SOURCE to the pinned LVGL checkout}\" --test-epaper",
-      "tools": ["python3", "cmake", "g++"],
-      "probes": [{"command": ["bash", "-c", "test -f \"${EPAPER_LVGL_SOURCE:-}/lvgl.h\" || { echo 'Set EPAPER_LVGL_SOURCE to the pinned LVGL checkout' >&2; exit 1; }"]}]
+      "tools": [
+        "python3",
+        "cmake",
+        "g++"
+      ],
+      "probes": [
+        {
+          "command": [
+            "bash",
+            "-c",
+            "test -f \"${EPAPER_LVGL_SOURCE:-}/lvgl.h\" || { echo 'Set EPAPER_LVGL_SOURCE to the pinned LVGL checkout' >&2; exit 1; }"
+          ]
+        }
+      ]
     },
     {
       "id": "ios-fast-test-generated-app-build-identity",
@@ -61,17 +73,22 @@
           "saved-route-map-1",
           "saved-route-map-2",
           "route-elevation-1",
-          "bluetooth-restoration-corebluetooth-double"
+          "bluetooth-restoration-corebluetooth-double",
+          "saved-route-detour-1",
+          "saved-route-detour-acceptance"
         ],
         "inputPrefixes": [
           "ios-app/tests/contour-companion-host/",
           "ios-app/tests/durable-download-host/",
-          "ios-app/tests/map-upload-binding-host/"
+          "ios-app/tests/map-upload-binding-host/",
+          "ios-app/tests/saved-route-detour-acceptance/",
+          "protocol/fixtures/bicycle-detour-v1/"
         ],
         "inputs": [
           "ios-app/BikeComputerTests/DeviceMapOperationTests.swift",
           "ios-app/BikeComputerTests/DeviceOperationCoordinatorTests.swift",
-          "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt"
+          "map-platform/backend/tests/fixtures/map_contour_companion_v1.txt",
+          "ios-app/scripts/run-saved-route-detour-tests.sh"
         ]
       }
     },

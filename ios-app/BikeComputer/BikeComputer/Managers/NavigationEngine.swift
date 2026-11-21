@@ -43,12 +43,28 @@ class NavigationEngine: NSObject, ObservableObject {
     @Published var expectedArrivalDate: Date?
     @Published private(set) var elevationRoute: NavigationElevationRouteV1?
     @Published private(set) var elevationProgress: NavigationElevationProgressV1?
+    /// Saved-route bicycle detours: nil when the active ride cannot use them.
+    @Published private(set) var detourPhase: SavedRouteDetourPhaseV1?
+    /// The temporary detour being followed; the saved route stays drawn.
+    @Published private(set) var activeDetourRoute: NavigationRouteV1?
+    /// Planned stops passed during an accepted far rejoin, by label.
+    @Published private(set) var skippedStopLabels: [String] = []
+    /// Asks the owner to run the provider chain for one engine request.
+    var onDetourRequest: ((SavedRouteDetourRequestV1, String) -> Void)?
+    /// Tells the owner a pending request is no longer wanted.
+    var onDetourCancel: ((UInt64) -> Void)?
     
     // MARK: - Private Properties
     private var currentRoute: NavigationRouteV1?
     private var navigationRuntime = NavigationRuntimeV1()
     private var offlineDeleteAfter: Date?
     private var usesOfflineArchive = false
+    private var detourEngine: SavedRouteDetourEngineV1?
+    private var detourRuntime = NavigationRuntimeV1()
+    private var detourRouteSource: String?
+    private var lastNavigationSample: NavigationLocationSampleV1?
+    private var lastNavigationLocation: CLLocation?
+    private var detourNetworkAvailable = true
 
     #if HOST_TESTING
     var offlineSnapshotForTesting: NavigationSnapshotV1? { navigationRuntime.snapshot }
@@ -307,6 +323,16 @@ class NavigationEngine: NSObject, ObservableObject {
             remainingDistance: sharedRoute.distanceMeters
         )
         
+        resetDetourState()
+        if mode == .offline, !isTestMode,
+           let source = RouteProviderPolicyV1.bicycleDetourRouteSource(sharedRoute.provider) {
+            var engine = SavedRouteDetourEngineV1(route: sharedRoute)
+            _ = engine.networkChanged(available: detourNetworkAvailable, latestSample: nil, now: now())
+            detourEngine = engine
+            detourRouteSource = source
+            detourPhase = engine.phase
+        }
+
         print("Navigation started with \(sharedRoute.steps.count) steps (Test Mode: \(isTestMode))")
         
         if isTestMode {
@@ -438,6 +464,7 @@ class NavigationEngine: NSObject, ObservableObject {
         stopRideTelemetryTimer()
         bleManager?.clearRouteGeometry()
         isNavigating = false
+        resetDetourState()
         navigationRuntime.stop()
         offlineDeleteAfter = nil
         usesOfflineArchive = false
@@ -646,6 +673,10 @@ class NavigationEngine: NSObject, ObservableObject {
     /// Process location update and extract navigation data
     private func processLocation(_ location: CLLocation) {
         guard let route = currentRoute, isNavigating else { return }
+        if detourEngine != nil {
+            processSavedRouteDetourLocation(location, route: route)
+            return
+        }
         let runtimeSnapshot: NavigationSnapshotV1
         do {
             runtimeSnapshot = try navigationRuntime.process(
@@ -719,6 +750,148 @@ class NavigationEngine: NSObject, ObservableObject {
         }
 
         sendRouteGeometryIfNeeded(currentLocation: currentLocation)
+    }
+
+    // MARK: - Saved-route detours
+
+    /// One fix on a saved-route ride that may use temporary bicycle detours.
+    /// The saved route's runtime is held (not fed) while the rider is off it.
+    private func processSavedRouteDetourLocation(_ location: CLLocation, route: NavigationRouteV1) {
+        guard var engine = detourEngine else { return }
+        let sample = NavigationLocationSampleV1(location: location)
+        guard sample.coordinate.isValid else { return }
+        lastNavigationSample = sample
+        lastNavigationLocation = location
+        let saved = engine.isHoldingSavedRoute ? nil : try? navigationRuntime.process(sample)
+        let detour = engine.phase == .following ? try? detourRuntime.process(sample) : nil
+        let effects = engine.observe(sample, savedRouteSnapshot: saved, detourSnapshot: detour, now: now())
+        detourEngine = engine
+        let resumed = handleDetourEffects(effects, sample: sample)
+        applyDetourGuidance(route: route, location: location, savedSnapshot: resumed ?? saved)
+    }
+
+    /// The owner's answer to a detour request.
+    func completeDetourRequest(id: UInt64, outcome: BicycleDetourOutcomeV1) {
+        guard isNavigating, var engine = detourEngine, let sample = lastNavigationSample,
+              let location = lastNavigationLocation, let route = currentRoute else { return }
+        let effects = engine.complete(requestID: id, outcome: outcome, latestSample: sample, now: now())
+        detourEngine = engine
+        let resumed = handleDetourEffects(effects, sample: sample)
+        applyDetourGuidance(route: route, location: location, savedSnapshot: resumed)
+    }
+
+    /// Network path changes; coming back online while off route asks at once.
+    func detourNetworkChanged(available: Bool) {
+        detourNetworkAvailable = available
+        guard var engine = detourEngine else { return }
+        let effects = engine.networkChanged(available: available, latestSample: lastNavigationSample, now: now())
+        detourEngine = engine
+        if let sample = lastNavigationSample { _ = handleDetourEffects(effects, sample: sample) }
+        detourPhase = engine.phase
+    }
+
+    private func handleDetourEffects(
+        _ effects: [SavedRouteDetourEffectV1],
+        sample: NavigationLocationSampleV1
+    ) -> NavigationSnapshotV1? {
+        var resumed: NavigationSnapshotV1?
+        for effect in effects {
+            switch effect {
+            case .requestDetour(let request):
+                if let source = detourRouteSource { onDetourRequest?(request, source) }
+            case .cancelRequest(let id):
+                onDetourCancel?(id)
+            case .startDetour(let route):
+                guard (try? detourRuntime.start(
+                    route: route, mode: .online, initialStepStrategy: .first, initialLocation: sample
+                )) != nil else { continue }
+                activeDetourRoute = route
+                switchDeviceGeometry(to: route)
+            case .endDetour:
+                detourRuntime.stop()
+                activeDetourRoute = nil
+                if let currentRoute { switchDeviceGeometry(to: currentRoute) }
+            case .resumeSavedRoute(let rejoin):
+                resumed = try? navigationRuntime.resume(
+                    atDistanceAlongGeometry: rejoin.distanceAlongMeters, currentLocation: sample
+                )
+                if let geometry = detourEngine?.geometry {
+                    skippedStopLabels = rejoin.skippedStopDistances.compactMap { geometry.stopLabel(at: $0) }
+                }
+            }
+        }
+        detourPhase = detourEngine?.phase
+        return resumed
+    }
+
+    /// The device route window follows the line being guided: the detour
+    /// while detouring (all firmware), the saved route otherwise.
+    private func switchDeviceGeometry(to route: NavigationRouteV1) {
+        cacheRouteCoordinates(from: route)
+        lastSentGeometrySegmentIndex = nil
+        lastGeometrySendTime = .distantPast
+        sendTracker.reset()
+    }
+
+    private func applyDetourGuidance(
+        route: NavigationRouteV1,
+        location: CLLocation,
+        savedSnapshot: NavigationSnapshotV1?
+    ) {
+        if detourEngine?.phase == .following, let detour = detourRuntime.snapshot {
+            applyDetourSnapshot(detour, savedRoute: route, currentLocation: location)
+        } else if let snapshot = savedSnapshot ?? navigationRuntime.snapshot {
+            applyRuntimeSnapshot(snapshot, route: route, currentLocation: location)
+        }
+    }
+
+    private func applyDetourSnapshot(
+        _ detour: NavigationSnapshotV1,
+        savedRoute: NavigationRouteV1,
+        currentLocation: CLLocation
+    ) {
+        let maneuverSnapshot = NavigationManeuverSnapshot(
+            iconID: detour.maneuver.deviceIconID,
+            distance: Int(detour.distanceToManeuverMeters),
+            instruction: displayInstruction(detour.instruction)
+        )
+        currentSnapshot = maneuverSnapshot
+        currentInstruction = maneuverSnapshot.instruction
+        distanceToManeuver = maneuverSnapshot.distance
+        currentIconID = maneuverSnapshot.iconID
+        // Remaining = rest of the detour + saved route beyond the rejoin point.
+        let geometryTotal = detourEngine?.geometry.totalMeters ?? savedRoute.distanceMeters
+        let scale = geometryTotal > 0 ? savedRoute.distanceMeters / geometryTotal : 1
+        let rejoinAlong = (detourEngine?.detourTarget?.distanceAlongMeters ?? 0) * scale
+        let remaining = detour.routeRemainingDistanceMeters + max(savedRoute.distanceMeters - rejoinAlong, 0)
+        lastRouteRemainingMeters = remaining
+        updateNavigationSummary(route: savedRoute, remainingDistance: remaining)
+        if let held = navigationRuntime.snapshot, let along = held.distanceAlongGeometryMeters {
+            let progress = NavigationElevationProgressV1(
+                navigationGeneration: held.navigationGeneration,
+                routeID: held.routeID,
+                revision: held.revision,
+                distanceAlongGeometryMeters: along,
+                onRoute: false
+            )
+            if progress != elevationProgress { elevationProgress = progress }
+        }
+        if sendTracker.shouldSend(maneuverSnapshot) {
+            sendNavigationDataToESP32(maneuverSnapshot)
+        }
+        sendRouteGeometryIfNeeded(currentLocation: currentLocation)
+    }
+
+    private func resetDetourState() {
+        if let request = detourEngine?.request { onDetourCancel?(request.id) }
+        detourEngine = nil
+        detourRuntime.stop()
+        detourRouteSource = nil
+        activeDetourRoute = nil
+        detourPhase = nil
+        skippedStopLabels = []
+        lastNavigationSample = nil
+        lastNavigationLocation = nil
     }
 
     private func displayInstruction(_ instruction: String) -> String {

@@ -254,6 +254,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = coordinator
         _ = rideAutomationCoordinator
         coordinator.configureRouteElevation(routeElevationService)
+        let bicycleDetourClient = BicycleDetourClient(serviceSession: bicinoServiceSession)
+        coordinator.configureBicycleDetours(transport: bicycleDetourClient)
+        watchConnectivityCoordinator.bicycleDetourTransport = bicycleDetourClient
         let bleManager = coordinator.bleManager
         social.bindBLE(bleManager)
 

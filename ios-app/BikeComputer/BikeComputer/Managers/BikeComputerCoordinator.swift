@@ -11,6 +11,7 @@ import SwiftUI
 import MapKit
 import Combine
 import CoreLocation
+import Network
 
 @MainActor
 protocol NavigationDirectionsTask: AnyObject {
@@ -192,10 +193,14 @@ class BikeComputerCoordinator: ObservableObject {
     /// Shown while navigating a car route that stands in for unavailable
     /// cycling directions, whether it came from planning or a reroute.
     var activeRouteNotice: String? {
-        (currentRoute as? CyclingFallbackCarRoute)?.advisoryNotices.first
+        (currentRoute as? CyclingFallbackCarRoute)?.advisoryNotices.first ?? detourNotice
     }
     @Published private(set) var offlineRouteSummary: PlannedRouteSummaryV1?
     @Published private(set) var offlineRoutePolyline: MKPolyline?
+    /// A temporary bicycle detour back to the saved route (MapKit space).
+    @Published private(set) var detourPolyline: MKPolyline?
+    /// What the rider is told about saved-route detours, if anything.
+    @Published private(set) var detourNotice: String?
 
     var selectedRouteCanSaveOffline: Bool {
         !isNavigating && !routeCalculation.isCalculating && selectedRouteAlternative?.canSaveOffline == true
@@ -256,6 +261,10 @@ class BikeComputerCoordinator: ObservableObject {
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
     private var deviceCapabilityRefreshGeneration: UInt = 0
     private var routeCalculationGeneration: UInt = 0
+    private var detourProviders: (any BicycleDetourProviding)?
+    private var detourTask: Task<Void, Never>?
+    private var detourRequestID: UInt64?
+    private var detourPathMonitor: NWPathMonitor?
     private var pendingNavigationStart: (
         generation: UInt,
         completion: (NavigationStartOutcome) -> Void
@@ -407,6 +416,28 @@ class BikeComputerCoordinator: ObservableObject {
 
         navEngine.$simulatedPosition
             .assign(to: &$simulatedPosition)
+
+        navEngine.onDetourRequest = { [weak self] request, routeSource in
+            self?.runDetourRequest(request, routeSource: routeSource)
+        }
+        navEngine.onDetourCancel = { [weak self] id in
+            self?.cancelDetourRequest(id)
+        }
+        navEngine.$activeDetourRoute
+            .map { route -> MKPolyline? in
+                guard let route else { return nil }
+                let coordinates = route.points.map {
+                    CoordinateConverter.wgs84ToGCJ02(coordinate: CLLocationCoordinate2D(
+                        latitude: $0.latitude, longitude: $0.longitude
+                    ))
+                }
+                return MKPolyline(coordinates: coordinates, count: coordinates.count)
+            }
+            .assign(to: &$detourPolyline)
+        Publishers.CombineLatest3(navEngine.$detourPhase, navEngine.$activeDetourRoute, navEngine.$skippedStopLabels)
+            .map { Self.detourNotice(phase: $0, route: $1, skippedStops: $2) }
+            .removeDuplicates()
+            .assign(to: &$detourNotice)
 
         navEngine.$currentInstruction
             .assign(to: &$currentInstruction)
@@ -1110,6 +1141,80 @@ class BikeComputerCoordinator: ObservableObject {
 
     func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
         startNavigation(from: .query(source), to: .query(destination), transportType: transportType, isTestMode: isTestMode)
+    }
+
+    // MARK: - Saved-route bicycle detours
+
+    /// MapKit cycling first; the Bicino Valhalla bicycle service only when
+    /// MapKit has no cycling route. Without a transport MapKit alone is used.
+    func configureBicycleDetours(transport: BicycleDetourServiceTransporting?) {
+        detourProviders = BicycleDetourProviderChainV1(
+            mapKit: MapKitCyclingDetourProvider(),
+            fallback: transport.map { BicinoBicycleDetourProvider(transport: $0) }
+        )
+        guard startServices, detourPathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let available = path.status == .satisfied
+            Task { @MainActor [weak self] in self?.navEngine.detourNetworkChanged(available: available) }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.bicino.saved-route-detour-network"))
+        detourPathMonitor = monitor
+    }
+
+    func configureBicycleDetoursForTesting(_ providers: any BicycleDetourProviding) {
+        detourProviders = providers
+    }
+
+    private func runDetourRequest(_ request: SavedRouteDetourRequestV1, routeSource: String) {
+        guard let providers = detourProviders else {
+            navEngine.completeDetourRequest(id: request.id, outcome: .unavailable(.serviceError, retryAfterSeconds: nil))
+            return
+        }
+        detourTask?.cancel()
+        providers.cancel()
+        detourRequestID = request.id
+        let query = BicycleDetourQueryV1(
+            request: request, routeSource: routeSource, localeIdentifier: Locale.current.identifier
+        )
+        detourTask = Task { @MainActor [weak self] in
+            let outcome = await providers.detour(for: query)
+            guard let self, !Task.isCancelled, self.detourRequestID == request.id else { return }
+            self.detourRequestID = nil
+            self.detourTask = nil
+            self.navEngine.completeDetourRequest(id: request.id, outcome: outcome)
+        }
+    }
+
+    private func cancelDetourRequest(_ id: UInt64) {
+        guard detourRequestID == id else { return }
+        detourRequestID = nil
+        detourTask?.cancel()
+        detourTask = nil
+        detourProviders?.cancel()
+    }
+
+    nonisolated static func detourNotice(
+        phase: SavedRouteDetourPhaseV1?,
+        route: NavigationRouteV1?,
+        skippedStops: [String]
+    ) -> String? {
+        switch phase {
+        case .requesting?:
+            return "Finding a bike detour back to the saved route"
+        case .following?:
+            return "Bike detour to the saved route · \(route?.provider.attribution ?? "Apple Maps")"
+        case .unavailable(.offline)?:
+            return "Offline: no bike detour, follow the saved route"
+        case .unavailable(.noBicycleRoute)?:
+            return "No bike detour found: follow the saved route"
+        case .unavailable(.serviceError)?:
+            return "Bike detour unavailable right now: follow the saved route"
+        case .onRoute? where !skippedStops.isEmpty:
+            return "Back on the saved route after skipping \(skippedStops.joined(separator: ", "))"
+        default:
+            return nil
+        }
     }
 
     func stopNavigation() {

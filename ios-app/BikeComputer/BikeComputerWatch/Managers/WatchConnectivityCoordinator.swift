@@ -63,6 +63,21 @@ final class WatchConnectivityCoordinator: NSObject {
     /// activated and every queued background payload has reached its delegate.
     /// An activation failure is terminal for this wake and should release the
     /// task instead of making watchOS expire it.
+    /// Sends a saved-route detour relay request to the reachable paired
+    /// iPhone and returns its reply. Unreachable means no Valhalla leg.
+    func sendBicycleDetourRelay(_ data: Data) async throws -> Data {
+        guard let session, session.activationState == .activated, session.isReachable else {
+            throw URLError(.notConnectedToInternet)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            session.sendMessageData(data, replyHandler: { reply in
+                continuation.resume(returning: reply)
+            }, errorHandler: { _ in
+                continuation.resume(throwing: URLError(.cannotConnectToHost))
+            })
+        }
+    }
+
     var canCompleteBackgroundDelivery: Bool {
         guard let session else { return true }
         if activationFailed { return true }

@@ -10,6 +10,26 @@ import WatchConnectivity
 @MainActor
 final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     PhoneWatchControllerTransporting, WorkoutWatchConnectivityCoordinating {
+    /// Sends a Watch-owned ride's detour request with this iPhone's
+    /// App Attest-enrolled installation (set by the app delegate).
+    var bicycleDetourTransport: BicycleDetourServiceTransporting?
+
+    /// Valhalla leg of a Watch-owned saved-route detour: only a well-formed
+    /// two-point request is forwarded; the HTTP answer goes back unchanged.
+    func relayBicycleDetour(_ data: Data) async -> Data {
+        guard let request = WatchBicycleDetourRelayV1.decodeRequest(data),
+              let transport = bicycleDetourTransport else {
+            return WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.failure(offline: false))
+        }
+        do {
+            return WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.response(try await transport.post(request)))
+        } catch let error as URLError where [.notConnectedToInternet, .networkConnectionLost, .dataNotAllowed].contains(error.code) {
+            return WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.failure(offline: true))
+        } catch {
+            return WatchBicycleDetourRelayV1.encode(WatchBicycleDetourRelayV1.failure(offline: false))
+        }
+    }
+
     @Published private(set) var state: PhoneWatchConnectivityStateV1
     @Published private(set) var workoutHealthSetupSnapshot:
         WorkoutHealthSetupSnapshotV1?
@@ -1053,6 +1073,10 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
         Task { @MainActor [weak self] in
             guard let self else {
                 replyHandler(Data())
+                return
+            }
+            if WatchBicycleDetourRelayV1.isRequest(messageData) {
+                replyHandler(await self.relayBicycleDetour(messageData))
                 return
             }
             replyHandler(

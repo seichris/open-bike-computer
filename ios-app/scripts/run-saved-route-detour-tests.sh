@@ -11,4 +11,8 @@ python3 "${DEV_SWIFT_COMPILER}" saved-route-detour-1 -- \
   -default-isolation MainActor -D HOST_TESTING -parse-as-library \
   -warnings-as-errors \
   -o "${OUT_DIR}/tests"
+# The live acceptance harness must keep building (it is run by hand).
+python3 "${DEV_SWIFT_COMPILER}" saved-route-detour-acceptance -- \
+  -swift-version 6 -default-isolation MainActor -warnings-as-errors \
+  -o "${OUT_DIR}/acceptance"
 "${OUT_DIR}/tests"

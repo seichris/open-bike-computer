@@ -26,8 +26,13 @@ The iPhone resolves a profile for a route in this order:
    maintainer explicitly enabled Apple Maps elevation lookup on 23 October
    2026; requests preserve `routeSource: "mapkit"` and use the same transient
    processing and retention limits as GPX. See the implementation-policy record
-   in `docs/reviews/mapkit-route-storage-2026-09-15.md`. Strava API routes stay
-   on the phone and use only their own GPX heights.
+   in `docs/reviews/mapkit-route-storage-2026-09-15.md`. Direct Strava API
+   imports use their own trusted GPX heights on the phone; only when those are
+   missing or fail the trust check do they ask the service with
+   `routeSource: "strava"` (maintainer approval, 2026-11-21, confirmed as
+   permitted under his Strava terms). The request is made only while the exact
+   saved archive is live; deletion, expiry and disconnect revoke the cached
+   profile and discard a late answer, and the sidecar follows the route.
 
 The service tries providers in order and never mixes providers inside one
 profile:
@@ -133,8 +138,9 @@ them.
 }
 ```
 
-The app sends `routeSource: "gpx"` for imported GPX and `"mapkit"` for active
-or saved Apple Maps routes. `strava` is rejected server-side. The answer has
+The app sends `routeSource: "gpx"` for imported GPX, `"mapkit"` for active
+or saved Apple Maps routes and `"strava"` for direct Strava imports without
+usable heights. The answer has
 `Cache-Control: private, no-store`:
 
 ```json
@@ -248,5 +254,4 @@ the secret.
 - Physical qualification of transfer, reconnect, readability and power on
   each board's exact production image; the existing 2.06-inch layout is enabled
   under the maintainer's accepted assumption above.
-- A product decision before Apple Maps or Strava geometry may use the service.
 - Per-climb segmentation and statistics from issue #98 are not part of v1.
