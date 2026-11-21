@@ -132,6 +132,10 @@ final class MapKitCyclingDetourProvider: BicycleDetourProviding {
             }
             return .route(route)
         } catch {
+#if DEBUG
+            let debugError = error as NSError
+            print("DETOUR_EVIDENCE mapkit cycling error domain=\(debugError.domain) code=\(debugError.code) MKDirectionsErrorCode=\((debugError.userInfo[CyclingDirectionsFallback.directionsErrorCodeKey] as? NSNumber)?.intValue ?? -1)")
+#endif
             guard generation == cancellationGeneration, !Task.isCancelled else { return .cancelled }
             if Self.meansNoCyclingRoute(error) { return .noBicycleRoute }
             let nsError = error as NSError

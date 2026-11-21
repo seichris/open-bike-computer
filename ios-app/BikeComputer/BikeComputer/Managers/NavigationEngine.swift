@@ -796,6 +796,20 @@ class NavigationEngine: NSObject, ObservableObject {
     ) -> NavigationSnapshotV1? {
         var resumed: NavigationSnapshotV1?
         for effect in effects {
+#if DEBUG
+            switch effect {
+            case .requestDetour(let request):
+                print("DETOUR_EVIDENCE request id=\(request.id) target=\(request.target.kind) alongM=\(Int(request.target.distanceAlongMeters)) windowUpperM=\(Int(request.target.windowUpperMeters))")
+            case .startDetour(let route):
+                print("DETOUR_EVIDENCE startDetour provider=\(route.provider.providerID) steps=\(route.steps.count) distanceM=\(Int(route.distanceMeters)) last=\(route.steps.last?.instruction ?? "")")
+            case .resumeSavedRoute(let rejoin):
+                print("DETOUR_EVIDENCE rejoin alongM=\(Int(rejoin.distanceAlongMeters)) beyondWindow=\(rejoin.isBeyondWindow)")
+            case .endDetour:
+                print("DETOUR_EVIDENCE endDetour")
+            case .cancelRequest(let id):
+                print("DETOUR_EVIDENCE cancel id=\(id)")
+            }
+#endif
             switch effect {
             case .requestDetour(let request):
                 if let source = detourRouteSource { onDetourRequest?(request, source) }
@@ -815,6 +829,11 @@ class NavigationEngine: NSObject, ObservableObject {
                 resumed = try? navigationRuntime.resume(
                     atDistanceAlongGeometry: rejoin.distanceAlongMeters, currentLocation: sample
                 )
+#if DEBUG
+                if let resumed {
+                    print("DETOUR_EVIDENCE resumed generation=\(resumed.navigationGeneration) step=\(resumed.currentStepIndex) offRoute=\(resumed.offRouteDistanceMeters != nil) instruction=\(resumed.instruction)")
+                }
+#endif
                 if let geometry = detourEngine?.geometry {
                     skippedStopLabels = rejoin.skippedStopDistances.compactMap { geometry.stopLabel(at: $0) }
                 }

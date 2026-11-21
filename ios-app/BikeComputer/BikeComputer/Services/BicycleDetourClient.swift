@@ -55,6 +55,9 @@ final class BicycleDetourClient: BicycleDetourServiceTransporting {
               responseComponents.password == nil else {
             throw URLError(.badServerResponse)
         }
+#if DEBUG
+        print("DETOUR_EVIDENCE service status=\(http.statusCode) refresh=\(refreshCredential) host=\(responseComponents.host ?? "") bytes=\(data.count)")
+#endif
         return BicycleDetourHTTPResponseV1(
             statusCode: http.statusCode,
             cacheControl: http.value(forHTTPHeaderField: "Cache-Control"),

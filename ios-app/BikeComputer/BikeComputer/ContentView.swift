@@ -507,6 +507,11 @@ struct ContentView: View {
         .onChange(of: savedRouteMapPreview?.identity) { identity in
             if identity == nil { synchronizeRideMetricsSheet() }
         }
+        .task {
+#if DEBUG
+            await runSavedRouteDetourAcceptanceIfRequested()
+#endif
+        }
         .onAppear {
             reconcileIPhoneOnlyPreference()
             onApplicationActiveChange(scenePhase == .active)
@@ -780,6 +785,31 @@ struct ContentView: View {
         isSearchPanelExpanded = false
         presentedSheet = nil
     }
+
+#if DEBUG
+    /// DEBUG only: `--saved-route-acceptance-gpx=<file in Documents>` imports
+    /// that GPX and starts it as a saved route, for scripted on-device detour
+    /// acceptance with simulated location. Release builds never compile it.
+    private func runSavedRouteDetourAcceptanceIfRequested() async {
+        let prefix = "--saved-route-acceptance-gpx="
+        guard let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else { return }
+        let name = String(argument.dropFirst(prefix.count))
+        guard !name.isEmpty, !name.contains("/"),
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        do {
+            let data = try Data(contentsOf: documents.appendingPathComponent(name))
+            let summary = try routeLibrary.importGPX(data, fileName: name)
+            print("DETOUR_ACCEPTANCE imported provider=\(summary.providerID) hash=\(summary.contentHash.prefix(12))")
+            for _ in 0..<60 where coordinator.currentLocation == nil {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            try startOfflineRouteFromLibrary(summary)
+            print("DETOUR_ACCEPTANCE navigating=\(coordinator.isNavigating)")
+        } catch {
+            print("DETOUR_ACCEPTANCE failed: \(error)")
+        }
+    }
+#endif
 
     private func startPreviewedOfflineRoute(_ preview: SavedRouteMapPreview) {
         do {

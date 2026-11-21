@@ -1179,6 +1179,14 @@ class BikeComputerCoordinator: ObservableObject {
         )
         detourTask = Task { @MainActor [weak self] in
             let outcome = await providers.detour(for: query)
+#if DEBUG
+            let mapKit = (providers as? BicycleDetourProviderChainV1)?.lastMapKitOutcome
+            let summary: String = {
+                if case .route(let route) = outcome { return "route provider=\(route.provider.providerID)" }
+                return String(describing: outcome)
+            }()
+            print("DETOUR_EVIDENCE outcome id=\(request.id) source=\(routeSource) mapKit=\(mapKit.map { String(describing: $0).prefix(40) } ?? "nil") result=\(summary)")
+#endif
             guard let self, !Task.isCancelled, self.detourRequestID == request.id else { return }
             self.detourRequestID = nil
             self.detourTask = nil

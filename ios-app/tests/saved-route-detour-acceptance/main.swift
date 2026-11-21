@@ -186,10 +186,12 @@ func run() async -> Int32 {
     var detourRoute: NavigationRouteV1?
     var pendingRequest: SavedRouteDetourRequestV1?
     var savedSnapshotAfterResume: NavigationSnapshotV1?
+    var trace: [[Double]] = []
     var detourInstructions: [String] = []
 
     func feed(_ fix: NavigationLocationSampleV1) {
         lastSample = fix
+        trace.append([fix.coordinate.latitude, fix.coordinate.longitude])
         let savedSnapshot = engine.isHoldingSavedRoute ? nil : try? runtime.process(fix)
         let detourSnapshot = engine.phase == .following ? try? detourRuntime.process(fix) : nil
         if let detourSnapshot, detourInstructions.last != detourSnapshot.instruction {
@@ -313,6 +315,11 @@ func run() async -> Int32 {
     let passed = resumed.navigationGeneration == generation && resumed.offRouteDistanceMeters == nil &&
         engine.phase == .onRoute && engine.detour == nil
     evidence["result"] = passed ? "PASSED" : "FAILED: resume state"
+    if let traceOut = environment["TRACE_OUT"] {
+        // The ridden positions, for replaying the same ride on a device.
+        let data = try! JSONSerialization.data(withJSONObject: trace)
+        try! data.write(to: URL(fileURLWithPath: traceOut))
+    }
     write(evidence, to: arguments[2])
     return passed ? 0 : 1
 }
