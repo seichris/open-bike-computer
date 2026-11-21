@@ -415,11 +415,7 @@ RouteReferenceTrackSnapshot RouteReferenceTrack::snapshot() const {
 }
 
 uint8_t RouteReferenceTrack::lineWidth(uint8_t routeLineWidth) {
-#ifdef WAVESHARE_EPAPER_397
-  return static_cast<uint8_t>(std::max<int>(2, routeLineWidth / 3));
-#else
-  return static_cast<uint8_t>(std::max<int>(2, (routeLineWidth * 3) / 5));
-#endif
+  return navigation_visual_style::referenceTrackLineWidth(routeLineWidth);
 }
 
 void RouteReferenceTrack::drawSnapshot(

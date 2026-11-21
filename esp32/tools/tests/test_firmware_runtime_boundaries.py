@@ -122,6 +122,10 @@ struct Overlay {
     return accept;
   }
 } routeOverlay;
+struct ReferenceTrack {
+  int clearCalls = 0;
+  bool clear() { ++clearCalls; return true; }
+} routeReferenceTrack;
 ''' + handler + r'''
 int main() {
   const int32_t points[] = {30000000, 40000000, 0};
@@ -145,6 +149,11 @@ int main() {
   handleRouteGeometryPayload(colliding, sizeof(colliding), "fallback");
   assert(lastRouteHash == collisionHash);
   assert(routeOverlay.parseCalls == 4);
+  // Route windows never touch the saved route drawn under a detour; only the
+  // explicit empty packet (navigation stopped) clears it with the route.
+  assert(routeReferenceTrack.clearCalls == 0);
+  handleRouteGeometryPayload(nullptr, 0, "native");
+  assert(routeReferenceTrack.clearCalls == 1);
 }
 ''')
 

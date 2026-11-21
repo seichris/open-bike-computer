@@ -14,6 +14,8 @@ constexpr uint16_t ROUTE_BLUE_RGB565 = 0x0000;
 // One-bit panel: the saved route under a detour is a thin black line; the
 // guidance line's white halo separates the two where they meet.
 constexpr uint16_t REFERENCE_TRACK_RGB565 = 0x0000;
+constexpr int REFERENCE_TRACK_WIDTH_NUMERATOR = 1;
+constexpr int REFERENCE_TRACK_WIDTH_DENOMINATOR = 3;
 #else
 constexpr uint32_t ROUTE_BLUE_RGB888 =
     bicino_visual_style::NAVIGATION_BLUE_RGB888;
@@ -24,8 +26,20 @@ constexpr uint16_t ROUTE_BLUE_RGB565 =
 constexpr uint32_t REFERENCE_TRACK_RGB888 = 0x7A9CC6;
 constexpr uint16_t REFERENCE_TRACK_RGB565 =
     bicino_visual_style::rgb888ToRgb565(REFERENCE_TRACK_RGB888);
+constexpr int REFERENCE_TRACK_WIDTH_NUMERATOR = 3;
+constexpr int REFERENCE_TRACK_WIDTH_DENOMINATOR = 5;
 
 #endif
+
+/** Muted reference-track width for a guidance line width, at least 2 px. */
+constexpr uint8_t referenceTrackLineWidth(uint8_t routeLineWidth) {
+  return static_cast<uint8_t>(
+      (routeLineWidth * REFERENCE_TRACK_WIDTH_NUMERATOR) /
+                  REFERENCE_TRACK_WIDTH_DENOMINATOR < 2
+          ? 2
+          : (routeLineWidth * REFERENCE_TRACK_WIDTH_NUMERATOR) /
+                REFERENCE_TRACK_WIDTH_DENOMINATOR);
+}
 
 constexpr int16_t POSITION_MARKER_BASE_SIZE = 48;
 
