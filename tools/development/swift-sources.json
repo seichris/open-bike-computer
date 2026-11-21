@@ -724,6 +724,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/WorkoutRecordingStore.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/WorkoutSessionCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/SystemActions/BicinoWorkoutCommands.swift",
         "ios-app/BikeComputerTests/WorkoutSessionCoordinatorTests.swift"
       ],
       "groups": [
