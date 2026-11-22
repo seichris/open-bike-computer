@@ -11,40 +11,72 @@ extension EnvironmentValues {
     }
 }
 
-/// Explicit choices and recovery actions. A disconnected Watch is never treated
-/// as an invitation to silently start recording on a second device.
+struct WorkoutRecorderChoices: View {
+    @ObservedObject var coordinator: WorkoutSessionCoordinator
+
+    var body: some View {
+        if coordinator.watchAvailability.availability == .ready(isReachable: true) {
+            startButton(.watch)
+            if coordinator.phoneSupported { startButton(.iphone) }
+        } else {
+            if coordinator.phoneSupported { startButton(.iphone) }
+            if coordinator.watchAvailability.availability != .noPairedWatch,
+               coordinator.watchAvailability.availability != .unsupported {
+                startButton(.watch)
+            }
+        }
+    }
+
+    private func startButton(_ owner: WorkoutRecordingOwner) -> some View {
+        Button {
+            _ = coordinator.requestStart(explicitOwner: owner)
+        } label: {
+            Label("Start on \(owner.displayName)",
+                  systemImage: owner == .watch ? "applewatch" : "iphone")
+        }
+        .disabled(!coordinator.canOfferNewWorkout)
+    }
+}
+
 struct WorkoutRecordingStatusView: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator
     @ObservedObject var store: WorkoutMetricsStore
-    @State private var confirmsWatchIdle = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Group {
+            if let record = coordinator.record,
+               record.owner == .watch, record.phase == .unresolved,
+               !coordinator.canContinueOnIPhone {
+                UnconfirmedWatchWorkoutView(coordinator: coordinator, sessionID: record.sessionID)
+                    .id(record.sessionID)
+            } else {
+                recordingStatus
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.background, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var recordingStatus: some View {
+        VStack(alignment: .leading, spacing: 10) {
             if let record = coordinator.record {
                 Label("Recorder: \(record.owner.displayName)",
                       systemImage: record.owner == .iphone ? "iphone" : "applewatch")
                     .font(.subheadline.weight(.semibold))
-                if record.phase != .finished {
-                    Text("This recorder stays selected if devices disconnect or reconnect.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
                 if let continuation = record.continuation {
                     Text("Continued from Apple Watch at \(continuation.handoffAt.formatted(date: .omitted, time: .shortened)).")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if coordinator.canContinueOnIPhone {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Bicino isn’t receiving this ride from Apple Watch. Apple Watch stays the recorder and keeps the ride if it reconnects. To keep recording now, continue on iPhone.")
-                        .font(.subheadline)
-                    WorkoutContinueOnIPhoneButton(coordinator: coordinator)
-                }
+                WorkoutContinueOnIPhoneButton(coordinator: coordinator)
             }
-            if let notice = coordinator.notice {
+            if coordinator.notice?.kind == .chooseRecorder {
+                WorkoutRecorderChoices(coordinator: coordinator)
+                    .buttonStyle(.bordered)
+            } else if let notice = coordinator.notice {
                 Text(notice.message).font(.subheadline)
-                if notice.kind == .chooseRecorder {
-                    recorderChoices
-                }
             }
             WorkoutFitnessCheckView(coordinator: coordinator)
             if let message = store.recordingMessage {
@@ -53,16 +85,6 @@ struct WorkoutRecordingStatusView: View {
             if !coordinator.recoveryComplete {
                 Button("Retry Recovery") { coordinator.retryRecovery() }
                     .buttonStyle(.bordered)
-            } else if coordinator.record == nil, coordinator.notice?.kind != .chooseRecorder {
-                Button("Choose Recorder") { coordinator.chooseRecorder() }
-                    .buttonStyle(.bordered)
-            }
-            if let record = coordinator.record, record.owner == .watch,
-               record.phase == .unresolved {
-                Button("Retry on Apple Watch") { coordinator.retryWatchStart() }
-                    .buttonStyle(.bordered)
-                Button("I checked Watch — no workout is running") { confirmsWatchIdle = true }
-                    .font(.footnote)
             }
             if let record = coordinator.record, record.owner == .iphone,
                record.phase != .finished {
@@ -82,37 +104,50 @@ struct WorkoutRecordingStatusView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.background, in: RoundedRectangle(cornerRadius: 14))
-        .confirmationDialog("Confirm Apple Watch is idle", isPresented: $confirmsWatchIdle) {
-            Button("No Watch Workout Is Running") { coordinator.confirmNoWorkoutOnWatch() }
-            Button("Keep Checking", role: .cancel) {}
-        } message: {
-            Text("Check Bicino on your Watch first. This clears only the iPhone's unresolved ownership record; it does not end or discard a Watch workout. A late Watch recording would remain a separate ride.")
-        }
-    }
-
-    private var recorderChoices: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if coordinator.watchAvailability.availability != .unsupported {
-                Button("Record with Apple Watch") { _ = coordinator.requestStart(explicitOwner: .watch) }
-                    .buttonStyle(.bordered)
-            }
-            if coordinator.phoneSupported {
-                Button("Record with iPhone") { _ = coordinator.requestStart(explicitOwner: .iphone) }
-                    .buttonStyle(.borderedProminent)
-                Text("iPhone GPS records route and distance. Heart rate requires a compatible external monitor; cadence and power are not collected in this mode.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("iPhone-only recording requires iOS 26 or later.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .disabled(!coordinator.recoveryComplete || coordinator.record != nil)
     }
 }
 
+private struct UnconfirmedWatchWorkoutView: View {
+    @ObservedObject var coordinator: WorkoutSessionCoordinator
+    let sessionID: UUID
+    @State private var showsConfirmation = false
+
+    private var resolutionTitle: String {
+        coordinator.phoneSupported ? "Start on iPhone" : "Clear Watch Attempt"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Watch workout unconfirmed", systemImage: "applewatch")
+                .font(.subheadline.weight(.semibold))
+            ViewThatFits(in: .horizontal) {
+                HStack { actions }
+                VStack(alignment: .leading) { actions }
+            }
+            .buttonStyle(.bordered)
+        }
+        .confirmationDialog(
+            coordinator.phoneSupported ? "Start a separate iPhone workout?" : "Clear this Watch attempt?",
+            isPresented: $showsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(resolutionTitle) {
+                coordinator.resolveUnconfirmedWatchWorkout(
+                    sessionID: sessionID,
+                    startOnIPhone: coordinator.phoneSupported
+                )
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Any workout started on Apple Watch will stay separate.")
+        }
+    }
+
+    @ViewBuilder private var actions: some View {
+        Button("Retry on Watch") { coordinator.retryWatchStart() }
+        Button(resolutionTitle) { showsConfirmation = true }
+    }
+}
 
 struct WorkoutFitnessCheckView: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator

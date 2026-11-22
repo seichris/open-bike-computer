@@ -290,12 +290,12 @@ nonisolated enum WorkoutRecordingStartPolicy {
             return .waitForWatchActivation
         case .noPairedWatch:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
-        case .ready, .companionAppNotInstalled, .activationFailed:
-            // WatchConnectivity's reachability, activation, and companion-app
-            // catalogue can all lag the actual Watch installation. HealthKit's
-            // Watch launch callback is the authoritative result, so transient
-            // WCSession state must not force a recorder-selection sheet.
+        case .ready(isReachable: true):
             return .start(.watch)
+        case .ready(isReachable: false), .companionAppNotInstalled, .activationFailed:
+            // WatchConnectivity can lag. Keep an explicit Watch attempt
+            // available, but let riders with an iPhone recorder choose.
+            return phoneSupported ? .chooseRecorder : .start(.watch)
         case .unsupported:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
         }

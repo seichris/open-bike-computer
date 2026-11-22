@@ -25,12 +25,15 @@ struct WorkoutRecordingOwnershipTests {
         check(decision(.noPairedWatch) == .start(.iphone), "Unpaired iPhone default")
         check(decision(.noPairedWatch, phone: false) == .phoneUnsupported, "Old OS has no phone recorder")
         check(decision(.ready(isReachable: true)) == .start(.watch), "Ready Watch remains default")
-        check(decision(.ready(isReachable: false)) == .start(.watch),
-              "Interactive reachability does not block HealthKit Watch launch")
-        check(decision(.companionAppNotInstalled) == .start(.watch),
-              "Stale companion catalogue defers to HealthKit Watch launch")
-        check(decision(.activationFailed) == .start(.watch),
-              "Transient WatchConnectivity activation failure defers to HealthKit")
+        let unconfirmedWatches: [WorkoutWatchAvailabilityV1] = [
+            .ready(isReachable: false), .companionAppNotInstalled, .activationFailed
+        ]
+        for unconfirmedWatch in unconfirmedWatches {
+            check(decision(unconfirmedWatch) == .chooseRecorder,
+                  "An uncertain Watch prompts for a recorder before launching either device")
+            check(decision(unconfirmedWatch, phone: false) == .start(.watch),
+                  "An older iPhone preserves native Watch launch")
+        }
         check(decision(.unsupported) == .start(.iphone),
               "Unsupported WatchConnectivity uses the available phone recorder")
         check(decision(.unsupported, phone: false) == .phoneUnsupported,

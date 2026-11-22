@@ -54,10 +54,25 @@ struct WorkoutStartButton<Label: View>: View {
     @State private var presentedAlert: WorkoutStartAvailabilityAlert?
 
     var body: some View {
-        Button {
-            requestStart()
-        } label: {
-            label()
+        Group {
+            if let recordingCoordinator,
+               recordingCoordinator.phoneSupported,
+               watchAvailability.availability != .noPairedWatch,
+               watchAvailability.availability != .unsupported {
+                Menu {
+                    WorkoutRecorderChoices(coordinator: recordingCoordinator)
+                } label: {
+                    label()
+                }
+                .menuOrder(.fixed)
+                .accessibilityHint("Choose Apple Watch or iPhone")
+            } else {
+                Button {
+                    requestStart()
+                } label: {
+                    label()
+                }
+            }
         }
         .alert(item: $presentedAlert) { alert in
             availabilityAlert(alert)
@@ -538,18 +553,24 @@ struct WorkoutDashboardView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
-                    connectionBanner
                     if let recordingCoordinator,
-                       recordingCoordinator.record?.phase != .finished {
+                       recordingCoordinator.record?.owner == .watch,
+                       recordingCoordinator.record?.phase == .unresolved {
                         WorkoutRecordingStatusView(coordinator: recordingCoordinator, store: store)
-                    }
-
-                    if store.presentation.connectionState == .idle {
-                        idleContent
-                    } else if store.presentation.connectionState == .unsupported {
-                        unavailableContent
                     } else {
-                        liveOrSummaryContent
+                        connectionBanner
+                        if let recordingCoordinator,
+                           recordingCoordinator.record?.phase != .finished {
+                            WorkoutRecordingStatusView(coordinator: recordingCoordinator, store: store)
+                        }
+
+                        if store.presentation.connectionState == .idle {
+                            idleContent
+                        } else if store.presentation.connectionState == .unsupported {
+                            unavailableContent
+                        } else {
+                            liveOrSummaryContent
+                        }
                     }
                 }
                 .padding()

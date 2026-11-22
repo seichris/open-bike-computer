@@ -298,26 +298,26 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         Publishers.CombineLatest(
             coordinator.$isNavigating.removeDuplicates(),
             workoutSessionCoordinator.store.$presentation
-                .map(\.isWorkoutActive)
-                .removeDuplicates()
         )
-            .map { navigating, workoutActive in
-                RideDiagnosticsRideLifecyclePolicy.isRideActive(
+            .map { navigating, workout in
+                let state = workout.sessionState
+                return RideDiagnosticsRideLifecyclePolicy.activity(
                     navigating: navigating,
-                    workoutActive: workoutActive
+                    workoutActive: workout.isWorkoutActive,
+                    workoutConfirmed: state == .running || state == .paused
+                        || (state == .ending && workout.snapshot.startDate != nil)
                 )
             }
             .removeDuplicates()
-            .scan((previous: false, current: false)) { state, active in
-                (previous: state.current, current: active)
+            .scan(RideDiagnosticsRideLifecyclePolicy()) { lifecycle, activity in
+                lifecycle.transitioning(to: activity)
             }
-            .sink { [weak rideDiagnosticsRecorder, weak social] state in
-                // Snapshot the finished ride's original identities BEFORE the
-                // recorder rotates its capture. Delivery may occur much later.
-                DiagnosticsCollectionCoordinator.shared.observeRide(active: state.current)
-                if RideDiagnosticsRideLifecyclePolicy.didEndRide(
-                    previous: state.previous, current: state.current
-                ) {
+            .sink { [weak rideDiagnosticsRecorder, weak social] lifecycle in
+                // Save the finished ride's original identities before the
+                // recorder rotates its capture. Launch attempts pause any
+                // collection but do not create a post-ride request.
+                DiagnosticsCollectionCoordinator.shared.observeRide(lifecycle.activity)
+                if lifecycle.didEndRide {
                     rideDiagnosticsRecorder?.endRideCapture()
                     Task { @MainActor in await social?.live.stopSharing() }
                 }

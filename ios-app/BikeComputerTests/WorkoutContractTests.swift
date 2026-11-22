@@ -8464,8 +8464,9 @@ private struct WorkoutContractTestSuite {
                     "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
+                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"StartWorkout\")"
                 )
+                && compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
                 && startRowFitsScreenWidth,
             "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
         )

@@ -479,10 +479,6 @@ struct ContentView: View {
             }
         }
         .environment(\.workoutSessionCoordinator, workoutSessionCoordinator)
-        .onChange(of: workoutSessionCoordinator.notice) { notice in
-            guard notice != nil else { return }
-            presentWorkoutAttention()
-        }
         .onChange(of: coordinator.selectedRouteAlternativeID) { _ in
             plannedRouteSaveFeedback = nil
         }
@@ -525,9 +521,6 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
             presentPendingBicinoSetupAppLinkIfEligible()
-            if workoutSessionCoordinator.notice != nil {
-                presentWorkoutAttention()
-            }
         }
         .onOpenURL { url in
             if social.session.handleURL(url) { return }
@@ -591,11 +584,7 @@ struct ContentView: View {
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
             workoutSessionCoordinator.refreshFreshness()
-            if workoutSessionCoordinator.notice != nil {
-                presentWorkoutAttention(for: newValue)
-            } else {
-                synchronizeRideMetricsSheet(for: newValue)
-            }
+            synchronizeRideMetricsSheet(for: newValue)
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
@@ -1207,19 +1196,6 @@ struct ContentView: View {
             activeSheetDestination = .rideMetrics
             presentedSheet = .rideMetrics
             isSheetDismissalInFlight = false
-        }
-    }
-
-    private func presentWorkoutAttention(for phase: ScenePhase? = nil) {
-        guard (phase ?? scenePhase) == .active else { return }
-        guard presentedSheet != .workoutDashboard else { return }
-        if presentedSheet != nil {
-            queuedSheetAfterDismiss = .workoutDashboard
-            presentedSheet = nil
-        } else if isSheetDismissalInFlight {
-            queuedSheetAfterDismiss = .workoutDashboard
-        } else {
-            presentedSheet = .workoutDashboard
         }
     }
 
@@ -2150,14 +2126,9 @@ struct ContentView: View {
                             )
                         )
                 }
-                .contextMenu {
-                    Button("Choose Recorder") {
-                        workoutSessionCoordinator.chooseRecorder()
-                    }
-                }
                 .buttonStyle(.plain)
                 .layoutPriority(1)
-                .accessibilityLabel("Start workout with the selected recorder")
+                .accessibilityLabel("Start Workout")
             }
         }
     }
@@ -2277,6 +2248,7 @@ struct ContentView: View {
             && workoutSessionCoordinator.record?.phase == .unresolved)
             // An unreachable Watch ride offers the explicit iPhone handoff.
             || workoutSessionCoordinator.canContinueOnIPhone
+            || workoutSessionCoordinator.notice != nil
     }
 
     private var shouldShowWorkoutStatusCard: Bool {
