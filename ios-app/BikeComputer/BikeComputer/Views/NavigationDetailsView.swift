@@ -190,7 +190,7 @@ struct RideMetricsPanel: View {
 
     let isCompactHeight: Bool
     let onStopNavigation: () -> Void
-    let onStartWorkout: () -> Void
+    let onStartWorkout: (UUID?) -> Void
     let onMarkSegment: () -> Void
     let onPauseWorkout: () -> Void
     let onResumeWorkout: () -> Void

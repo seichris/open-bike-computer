@@ -24,7 +24,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     private var selectionTask: Task<Void, Never>?
     private var operationGeneration: UInt64 = 0
     private var lastResumeBlockReason: String?
-    private var rideIsActive = false
+    private var rideActivity: RideDiagnosticsRideLifecyclePolicy.Activity = .idle
     private var deleting = false
     private struct RideContext {
         let requestID: UUID
@@ -87,15 +87,17 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     }
 
     func observeConnectedDeviceDuringRide() {
-        if rideIsActive { observeRide(active: true) }
+        if rideActivity == .riding { observeRide(.riding) }
     }
 
     /// Called for ride transitions and authenticated reconnect/capture changes.
     /// Recording itself never depends on this opt-in delivery convenience.
-    func observeRide(active: Bool) {
+    func observeRide(_ activity: RideDiagnosticsRideLifecyclePolicy.Activity) {
         guard !deleting else { return }
-        if active {
-            if !rideIsActive {
+        let previousActivity = rideActivity
+        rideActivity = activity
+        if activity != .idle {
+            if previousActivity == .idle {
                 operationGeneration &+= 1
                 selectionTask?.cancel()
                 if isRunning {
@@ -103,8 +105,8 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                     task?.cancel()
                 }
             }
-            rideIsActive = true
-            guard automaticPostRideCollection, let recorder, let bleManager,
+            guard activity == .riding, automaticPostRideCollection,
+                  let recorder, let bleManager,
                   bleManager.isNavigationReady, let device = bleManager.connectedDeviceID,
                   let capture = recorder.currentCaptureID else { return }
             let digest = recorder.deviceDigest(for: device)
@@ -117,8 +119,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
             rideContexts[key] = RideContext(requestID: UUID(), captureID: capture, deviceDigest: digest)
             return
         }
-        guard rideIsActive else { return }
-        rideIsActive = false
+        guard previousActivity != .idle else { return }
         // A manual job paused by riding must resume even when automatic
         // post-ride capture is disabled and there are no new ride contexts.
         // The caller may be inside Published.willSet: defer the canCollect
