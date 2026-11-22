@@ -47,16 +47,28 @@ nonisolated enum RideDiagnosticCategory: String, Codable, CaseIterable {
     case workout
 }
 
-enum RideDiagnosticsRideLifecyclePolicy {
-    static func isRideActive(
-        navigating: Bool,
-        workoutActive: Bool
-    ) -> Bool {
-        navigating || workoutActive
+struct RideDiagnosticsRideLifecyclePolicy {
+    enum Activity: Equatable {
+        case idle
+        case preparingWorkout
+        case riding
     }
 
-    static func didEndRide(previous: Bool, current: Bool) -> Bool {
-        previous && !current
+    private(set) var activity: Activity = .idle
+    private(set) var didEndRide = false
+    private var hasConfirmedRide = false
+
+    static func activity(navigating: Bool, workoutActive: Bool, workoutConfirmed: Bool) -> Activity {
+        if navigating || workoutConfirmed { return .riding }
+        return workoutActive ? .preparingWorkout : .idle
+    }
+
+    func transitioning(to activity: Activity) -> Self {
+        var next = self
+        next.activity = activity
+        next.didEndRide = activity == .idle && hasConfirmedRide
+        next.hasConfirmedRide = activity == .riding || (activity == .preparingWorkout && hasConfirmedRide)
+        return next
     }
 }
 

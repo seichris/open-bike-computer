@@ -256,13 +256,14 @@ struct WorkoutSessionCoordinatorTests {
         func check(_ condition: Bool, _ message: String) {
             precondition(condition, message); count += 1
         }
-        func harness() -> (WorkoutSessionCoordinator, FakeWatch, FakePhone, FakeAvailability, MemoryRecordingStore) {
+        func harness(uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime })
+            -> (WorkoutSessionCoordinator, FakeWatch, FakePhone, FakeAvailability, MemoryRecordingStore) {
             let disk = MemoryRecordingStore()
             let watch = FakeWatch()
             let phone = FakePhone(disk)
             let availability = FakeAvailability()
             return (WorkoutSessionCoordinator(watch: watch, watchAvailability: availability,
-                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger()),
+                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger(), uptime: uptime),
                     watch, phone, availability, disk)
         }
         let (coordinator, watch, phone, availability, disk) = harness()
@@ -414,10 +415,24 @@ struct WorkoutSessionCoordinatorTests {
                 _ = checkedWatch.store.completeWatchLaunch(id: checkedWatch.launchID,
                     succeeded: false, error: .watchUnavailable)
             }
-            check(checked.record?.phase == .unresolved, "Failed native launch remains unresolved")
-            checked.confirmNoWorkoutOnWatch()
+            check(checked.record?.phase == .unresolved && checked.notice == nil,
+                  "A failed Watch launch uses the dedicated recovery card without a second notice")
+            check(!checked.requestStart(explicitOwner: .iphone) && checked.notice == nil,
+                  "A blocked recorder change keeps the same recovery card")
+            checked.retryWatchStart()
+            check(checked.record?.phase == .starting && checked.notice == nil,
+                  "Starting a retry shows no unconfirmed-workout notice")
+            _ = checkedWatch.store.completeWatchLaunch(id: checkedWatch.launchID,
+                succeeded: false, error: .watchUnavailable)
+            guard let unresolvedID = checked.record?.sessionID else {
+                preconditionFailure("Expected an unresolved Watch attempt")
+            }
+            checked.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: UUID(), startOnIPhone: true)
+            check(checked.record?.sessionID == unresolvedID,
+                  "A stale confirmation cannot replace a different Watch attempt")
+            checked.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: unresolvedID, startOnIPhone: false)
             check(checked.record == nil && checkedDisk.record == nil,
-                  "Checked-idle acknowledgement clears actual failed launch without restarting")
+                  "A confirmed clear resolves the failed launch without restarting")
             check(checked.canOfferNewWorkout, "Checked idle restores new-ride admission")
         }
 
@@ -432,7 +447,8 @@ struct WorkoutSessionCoordinatorTests {
         check(watchCoordinator.record?.phase == .unresolved, "Watch timeout retains reservation")
         availability2.availability = .noPairedWatch
         check(!watchCoordinator.requestStart(explicitOwner: .iphone) && phone2.starts == 0, "Timeout/unpair cannot silently fall back")
-        watchCoordinator.confirmNoWorkoutOnWatch()
+        watchCoordinator.confirmWatchIdleAndResolveUnconfirmedWorkout(
+            sessionID: watchCoordinator.record!.sessionID, startOnIPhone: false)
         check(watchCoordinator.record == nil, "Explicit checked-idle confirmation can clear unresolved Watch launch")
         let id2 = UUID()
         watch2.emit(id: id2, state: .running)
@@ -455,18 +471,14 @@ struct WorkoutSessionCoordinatorTests {
         let completedWatchID = UUID()
         chooserWatch.emit(id: completedWatchID, state: .running)
         chooserWatch.emit(id: completedWatchID, state: .ended, outcome: .saved)
-        chooser.chooseRecorder()
-        check(chooser.record == nil && chooserDisk.record == nil
-                  && chooser.notice?.kind == .chooseRecorder,
-              "Choosing after a completed ride acknowledges its tombstone and opens the chooser")
-        check(chooserWatch.starts == 0 && chooserPhone.starts == 0,
-              "Opening the recorder chooser must not start the default Watch")
+        check(chooser.canOfferNewWorkout && chooserDisk.record?.phase == .finished,
+              "Offering recorder choices leaves the completed workout intact")
         check(chooser.requestStart(explicitOwner: .iphone),
-              "A paired Watch does not prevent an explicit phone choice")
+              "Choosing iPhone acknowledges a completed Watch ride and starts on iPhone")
         await spin { chooserPhone.starts == 1 }
         let explicitlySelectedPhoneID = chooser.record!.sessionID
-        chooser.chooseRecorder()
-        check(chooser.record?.sessionID == explicitlySelectedPhoneID
+        check(!chooser.requestStart(explicitOwner: .watch)
+                  && chooser.record?.sessionID == explicitlySelectedPhoneID
                   && chooser.record?.owner == .iphone
                   && chooserPhone.starts == 1 && chooserWatch.starts == 0,
               "Choosing during a running ride cannot switch or start another recorder")
@@ -475,12 +487,91 @@ struct WorkoutSessionCoordinatorTests {
         availability3.availability = .ready(isReachable: false)
         unreachable.recoverIfNeeded()
         await spin { unreachable.recoveryComplete }
-        check(unreachable.requestStart(),
-              "Paired installed Watch starts through HealthKit when WCSession is unreachable")
-        check(watch3.starts == 1 && phone3.starts == 0,
-              "Transient Watch reachability never redirects recording to iPhone")
-        check(unreachable.record?.owner == .watch && unreachable.notice == nil,
-              "HealthKit Watch launch reserves Watch ownership without an attention sheet")
+        let startButtonAnchor = UUID()
+        check(!unreachable.requestStart(recorderChoiceAnchor: startButtonAnchor)
+                  && unreachable.notice?.kind == .chooseRecorder
+                  && unreachable.notice?.recorderChoiceAnchor == startButtonAnchor,
+              "Unreachable paired Watch offers the choice at the tapped button without sending a launch")
+        check(watch3.starts == 0 && phone3.starts == 0, "No recorder starts until chosen")
+
+        unreachable.dismissNotice()
+        availability3.availability = .activating
+        check(!unreachable.requestStart(recorderChoiceAnchor: startButtonAnchor)
+                  && unreachable.notice == nil,
+              "Watch activation delays presenting the choice")
+        availability3.availability = .ready(isReachable: false)
+        check(unreachable.notice?.kind == .chooseRecorder
+                  && unreachable.notice?.recorderChoiceAnchor == startButtonAnchor
+                  && watch3.starts == 0 && phone3.starts == 0,
+              "A deferred choice returns to the tapped button")
+        check(unreachable.requestStart(explicitOwner: .watch),
+              "An explicit Watch choice can still use the HealthKit wake path")
+        _ = watch3.store.timeOutWatchLaunch(id: watch3.launchID, at: Date().addingTimeInterval(20))
+        let failedStartID = unreachable.record!.sessionID
+        unreachable.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: failedStartID, startOnIPhone: true)
+        await spin { phone3.starts == 1 }
+        check(unreachable.record?.owner == .iphone && watch3.starts == 1,
+              "Confirming iPhone after a failed Watch launch starts exactly one iPhone recording")
+        unreachable.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: failedStartID, startOnIPhone: true)
+        check(phone3.starts == 1, "Repeated confirmation cannot start another recording")
+
+        let (lateMirrorCoordinator, lateWatch, latePhone, lateAvailability, _) = harness()
+        lateAvailability.availability = .ready(isReachable: true)
+        lateMirrorCoordinator.recoverIfNeeded()
+        await spin { lateMirrorCoordinator.recoveryComplete }
+        check(lateMirrorCoordinator.requestStart(), "Reserve the Watch while testing a late mirror")
+        _ = lateWatch.store.timeOutWatchLaunch(id: lateWatch.launchID, at: Date().addingTimeInterval(20))
+        let lateID = try require(lateMirrorCoordinator.record?.sessionID)
+        lateWatch.emit(id: lateID, state: .running)
+        lateMirrorCoordinator.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: lateID, startOnIPhone: true)
+        check(lateMirrorCoordinator.record?.sessionID == lateID
+                  && lateMirrorCoordinator.record?.phase == .running && latePhone.starts == 0,
+              "A late Watch snapshot invalidates an open idle confirmation")
+
+        var watchClock = 100.0
+        let (sleeping, sleepingWatch, _, sleepingAvailability, _) = harness(uptime: { watchClock })
+        sleeping.recoverIfNeeded()
+        await spin { sleeping.recoveryComplete }
+        sleepingAvailability.availability = .ready(isReachable: true)
+        watchClock += 600
+        sleepingAvailability.availability = .ready(isReachable: false)
+        watchClock += 59
+        check(sleeping.requestStart(recorderChoiceAnchor: UUID()) && sleepingWatch.starts == 1,
+              "A Watch can still start after live reachability drops when its display sleeps")
+        _ = sleepingWatch.store.timeOutWatchLaunch(id: sleepingWatch.launchID, at: Date().addingTimeInterval(20))
+        sleeping.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: sleeping.record!.sessionID, startOnIPhone: false)
+        check(!sleeping.requestStart(recorderChoiceAnchor: UUID()) && sleeping.notice?.kind == .chooseRecorder,
+              "A failed launch clears the grace period for later starts")
+
+        let (expired, expiredWatch, _, expiredAvailability, _) = harness(uptime: { watchClock })
+        expired.recoverIfNeeded()
+        await spin { expired.recoveryComplete }
+        expiredAvailability.availability = .ready(isReachable: true)
+        expiredAvailability.availability = .ready(isReachable: false)
+        watchClock += 60
+        check(!expired.requestStart(recorderChoiceAnchor: UUID()) && expiredWatch.starts == 0 && expired.notice?.kind == .chooseRecorder,
+              "After the grace period the rider chooses a recorder")
+
+        let (override, overrideWatch, overridePhone, overrideAvailability, _) = harness(uptime: { watchClock })
+        override.recoverIfNeeded()
+        await spin { override.recoveryComplete }
+        overrideAvailability.availability = .ready(isReachable: true)
+        overrideAvailability.availability = .ready(isReachable: false)
+        check(override.requestStart(explicitOwner: .iphone), "iPhone choice overrides the Watch default")
+        await spin { overridePhone.starts == 1 }
+        check(overrideWatch.starts == 0, "An explicit iPhone start leaves the Watch idle")
+
+        let (cold, _, coldPhone, _, coldDisk) = harness()
+        var oldAttempt = WorkoutRecordingRecord(owner: .watch, sessionID: UUID(), requestedAt: Date())
+        oldAttempt.phase = .unresolved
+        try coldDisk.save(oldAttempt)
+        cold.recoverIfNeeded()
+        await spin { cold.recoveryComplete }
+        check(coldPhone.recoveries == 0, "A retained Watch attempt defers native iPhone recovery")
+        cold.confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: oldAttempt.sessionID, startOnIPhone: true)
+        await spin { coldPhone.starts == 1 }
+        check(coldPhone.recoveries == 1 && cold.record?.owner == .iphone,
+              "The explicit iPhone choice survives the deferred recovery check")
 
         let (transient, watch4, phone4, availability4, _) = harness()
         let diagnostics = WorkoutStartDiagnosticsProbe()
@@ -488,12 +579,9 @@ struct WorkoutSessionCoordinatorTests {
         availability4.availability = .activationFailed
         transient.recoverIfNeeded()
         await spin { transient.recoveryComplete }
-        check(transient.requestStart(),
-              "Transient Watch activation failure attempts authoritative HealthKit launch")
-        check(watch4.starts == 1 && phone4.starts == 0,
-              "Transient Watch state never opens recorder selection or redirects to iPhone")
-        check(transient.notice == nil,
-              "Accepted HealthKit Watch launch does not present a recorder sheet")
+        check(!transient.requestStart(recorderChoiceAnchor: UUID()) && transient.notice?.kind == .chooseRecorder,
+              "Transient activation failure presents a choice")
+        check(watch4.starts == 0 && phone4.starts == 0, "An uncertain Watch does not start implicitly")
         check(diagnostics.events.contains {
             $0.name == "watch_availability_changed"
                 && $0.fields["state"] == "activationFailed"
@@ -504,19 +592,17 @@ struct WorkoutSessionCoordinatorTests {
         }, "Start request records the observed Watch availability")
         check(diagnostics.events.contains {
             $0.name == "start_decision"
-                && $0.fields["outcome"] == "start"
-                && $0.fields["role"] == "watch"
-        }, "Start decision records the selected recorder")
+                && $0.fields["outcome"] == "chooseRecorder"
+        }, "Start decision records the need for a recorder choice")
 
         let (catalogue, watch5, phone5, availability5, _) = harness()
         availability5.availability = .companionAppNotInstalled
         catalogue.recoverIfNeeded()
         await spin { catalogue.recoveryComplete }
-        check(catalogue.requestStart(),
-              "Stale companion catalogue attempts authoritative HealthKit launch")
-        check(watch5.starts == 1 && phone5.starts == 0
-                && catalogue.notice == nil,
-              "Companion registration lag does not open recorder selection")
+        check(!catalogue.requestStart(recorderChoiceAnchor: UUID()) && catalogue.notice?.kind == .chooseRecorder,
+              "A missing companion catalogue entry offers the recorder choice")
+        check(catalogue.requestStart(explicitOwner: .watch) && watch5.starts == 1 && phone5.starts == 0,
+              "Explicit Watch can still try HealthKit with a stale catalogue")
 
         let finishedDisk = MemoryRecordingStore()
         var finishedWatchRecord = WorkoutRecordingRecord(
@@ -569,8 +655,8 @@ struct WorkoutSessionCoordinatorTests {
             watchAvailability: FakeAvailability(), persistence: watchRecoveryDisk,
             phone: deferredPhone, handoffLedger: MemoryHandoffLedger())
         check(watchRecovery.record?.phase == .unresolved
-                && watchRecovery.notice?.kind == .watchUnresolved,
-              "A cold-launch unresolved Watch owner exposes its recovery actions")
+                && watchRecovery.notice == nil,
+              "A cold-launch unresolved Watch owner drives recovery directly from its record")
         check(!watchRecovery.canOfferNewWorkout,
               "Exposing checked-idle recovery does not admit a replacement ride")
         recoveredWatch.emit(id: recoveredWatchID, state: .paused)
@@ -1264,6 +1350,15 @@ struct WorkoutSessionCoordinatorTests {
               "The Lock Screen is updated after sending and after the result")
         check(finishing.record?.phase == .finished, "The coordinator records the finished ride")
 
+        let (pocket, sleepingWatch, pocketPhone, _, _) = harness(availability: .ready(isReachable: false))
+        pocket.recoverIfNeeded()
+        await spin { pocket.recoveryComplete }
+        let pocketRunner = BicinoWorkoutCommandRunner(
+            coordinator: pocket, control: { _, _ in false }, wait: turn)
+        check(await pocketRunner.run(.start) == .sent(.start, .watch)
+                && sleepingWatch.starts == 1 && pocketPhone?.starts == 0 && pocket.notice == nil,
+              "A command to start with a sleeping paired Watch sends one Watch launch without a chooser")
+
         // Apple Watch still activating: the coordinator starts once it answers.
         let (activating, slowWatch, _, slowAvailability, _) = harness(availability: .activating)
         activating.recoverIfNeeded()
@@ -1279,8 +1374,10 @@ struct WorkoutSessionCoordinatorTests {
             }
         )
         // A notice the app left up earlier must not stop the wait.
-        activating.chooseRecorder()
-        check(activating.notice?.kind == .chooseRecorder, "Fixture leaves the recorder prompt up")
+        slowAvailability.availability = .ready(isReachable: false)
+        check(!activating.requestStart(recorderChoiceAnchor: UUID()) && activating.notice?.kind == .chooseRecorder,
+              "Fixture leaves the recorder prompt up")
+        slowAvailability.availability = .activating
         check(await answeringRunner.run(.start) == .sent(.start, .watch) && slowWatch.starts == 1,
               "Start waits for Watch activation and then starts on the Watch")
         let (silent, silentWatch, _, _, _) = harness(availability: .activating)

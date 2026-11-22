@@ -348,9 +348,8 @@ struct ContentView: View {
                         WorkoutCompactCard(
                             store: workoutStore,
                             watchAvailability: watchAvailability,
-                            onStart: {
-                                _ = workoutSessionCoordinator
-                                    .requestStart()
+                            onStart: { anchor in
+                                workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                             },
                             onOpen: {
                                 presentedSheet = .workoutDashboard
@@ -479,10 +478,6 @@ struct ContentView: View {
             }
         }
         .environment(\.workoutSessionCoordinator, workoutSessionCoordinator)
-        .onChange(of: workoutSessionCoordinator.notice) { notice in
-            guard notice != nil else { return }
-            presentWorkoutAttention()
-        }
         .onChange(of: coordinator.selectedRouteAlternativeID) { _ in
             plannedRouteSaveFeedback = nil
         }
@@ -530,9 +525,6 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
             presentPendingBicinoSetupAppLinkIfEligible()
-            if workoutSessionCoordinator.notice != nil {
-                presentWorkoutAttention()
-            }
         }
         .onOpenURL { url in
             if social.session.handleURL(url) { return }
@@ -596,11 +588,7 @@ struct ContentView: View {
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
             workoutSessionCoordinator.refreshFreshness()
-            if workoutSessionCoordinator.notice != nil {
-                presentWorkoutAttention(for: newValue)
-            } else {
-                synchronizeRideMetricsSheet(for: newValue)
-            }
+            synchronizeRideMetricsSheet(for: newValue)
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
@@ -1099,8 +1087,8 @@ struct ContentView: View {
             WorkoutDashboardView(
                 store: workoutStore,
                 watchAvailability: watchAvailability,
-                onStart: {
-                    _ = workoutSessionCoordinator.requestStart()
+                onStart: { anchor in
+                    workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                 },
                 onPause: workoutSessionCoordinator.pause,
                 onResume: workoutSessionCoordinator.resume,
@@ -1237,19 +1225,6 @@ struct ContentView: View {
             activeSheetDestination = .rideMetrics
             presentedSheet = .rideMetrics
             isSheetDismissalInFlight = false
-        }
-    }
-
-    private func presentWorkoutAttention(for phase: ScenePhase? = nil) {
-        guard (phase ?? scenePhase) == .active else { return }
-        guard presentedSheet != .workoutDashboard else { return }
-        if presentedSheet != nil {
-            queuedSheetAfterDismiss = .workoutDashboard
-            presentedSheet = nil
-        } else if isSheetDismissalInFlight {
-            queuedSheetAfterDismiss = .workoutDashboard
-        } else {
-            presentedSheet = .workoutDashboard
         }
     }
 
@@ -2039,8 +2014,8 @@ struct ContentView: View {
             recordingCoordinator: workoutSessionCoordinator,
             isCompactHeight: isCompactHeight,
             onStopNavigation: { coordinator.stopNavigation() },
-            onStartWorkout: {
-                _ = workoutSessionCoordinator.requestStart()
+            onStartWorkout: { anchor in
+                workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
             },
             onMarkSegment: workoutSessionCoordinator.markSegment,
             onPauseWorkout: workoutSessionCoordinator.pause,
@@ -2152,8 +2127,8 @@ struct ContentView: View {
                workoutSessionCoordinator.canOfferNewWorkout {
                 WorkoutStartButton(
                     watchAvailability: watchAvailability,
-                    action: {
-                        _ = workoutSessionCoordinator.requestStart()
+                    action: { anchor in
+                        workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                     }
                 ) {
                     // The full label keeps its width whenever it fits beside
@@ -2166,6 +2141,7 @@ struct ContentView: View {
                         Label("Start Workout", systemImage: "figure.outdoor.cycle")
                             .labelStyle(.iconOnly)
                     }
+                        .accessibilityLabel("Start Workout")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
@@ -2180,14 +2156,8 @@ struct ContentView: View {
                             )
                         )
                 }
-                .contextMenu {
-                    Button("Choose Recorder") {
-                        workoutSessionCoordinator.chooseRecorder()
-                    }
-                }
                 .buttonStyle(.plain)
                 .layoutPriority(1)
-                .accessibilityLabel("Start workout with the selected recorder")
             }
         }
     }
@@ -2301,12 +2271,14 @@ struct ContentView: View {
     }
 
     private var shouldShowWorkoutRecoveryStatus: Bool {
+        let notice = workoutSessionCoordinator.notice
         // A reserved Watch ride can have no native mirror at all after a
         // restart. Keep its recovery actions visible even with an idle store.
-        (workoutSessionCoordinator.record?.owner == .watch
+        return (workoutSessionCoordinator.record?.owner == .watch
             && workoutSessionCoordinator.record?.phase == .unresolved)
             // An unreachable Watch ride offers the explicit iPhone handoff.
             || workoutSessionCoordinator.canContinueOnIPhone
+            || (notice != nil && notice?.recorderChoiceAnchor == nil)
     }
 
     private var shouldShowWorkoutStatusCard: Bool {

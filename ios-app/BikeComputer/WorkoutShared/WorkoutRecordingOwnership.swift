@@ -270,12 +270,17 @@ nonisolated enum WorkoutRecordingStartDecision: Equatable, Sendable {
 }
 
 nonisolated enum WorkoutRecordingStartPolicy {
+    // The Watch display can sleep while the companion can still be woken by HealthKit.
+    static let watchReachabilityGrace: TimeInterval = 60
+
     static func resolve(
         recoveryComplete: Bool,
         existingRecording: WorkoutRecordingRecord?,
         watchAvailability: WorkoutWatchAvailabilityV1,
         phoneSupported: Bool,
-        explicitOwner: WorkoutRecordingOwner? = nil
+        canPresentRecorderChoice: Bool,
+        explicitOwner: WorkoutRecordingOwner? = nil,
+        watchWasRecentlyReachable: Bool = false
     ) -> WorkoutRecordingStartDecision {
         guard recoveryComplete else { return .waitForRecovery }
         // Even an unresolved launch/finish owns the ride until reconciliation.
@@ -290,12 +295,14 @@ nonisolated enum WorkoutRecordingStartPolicy {
             return .waitForWatchActivation
         case .noPairedWatch:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
-        case .ready, .companionAppNotInstalled, .activationFailed:
-            // WatchConnectivity's reachability, activation, and companion-app
-            // catalogue can all lag the actual Watch installation. HealthKit's
-            // Watch launch callback is the authoritative result, so transient
-            // WCSession state must not force a recorder-selection sheet.
+        case .ready(isReachable: true):
             return .start(.watch)
+        case .ready(isReachable: false) where watchWasRecentlyReachable:
+            return .start(.watch)
+        case .ready(isReachable: false), .companionAppNotInstalled, .activationFailed:
+            // Bike and voice starts have no menu. HealthKit can still wake
+            // the Watch when WatchConnectivity can't immediately reach it.
+            return phoneSupported && canPresentRecorderChoice ? .chooseRecorder : .start(.watch)
         case .unsupported:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
         }
