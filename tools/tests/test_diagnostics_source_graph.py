@@ -83,7 +83,7 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
         self.assertRegex(coordinator,
                          r"DiagnosticsPostRideJournal\.Request\(id:\s*\$0\.requestID,\s*"
                          r"captureID:\s*\$0\.captureID,\s*deviceDigest:\s*\$0\.deviceDigest\)")
-        self.assertLess(app.index("observeRide(active: state.current)"), app.index("rideDiagnosticsRecorder?.endRideCapture()"))
+        self.assertLess(app.index("observeRide(lifecycle.activity)"), app.index("rideDiagnosticsRecorder?.endRideCapture()"))
         self.assertIn("$0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest", coordinator)
 
     def test_resume_rereads_committed_state_and_runs_after_cleanup(self):
