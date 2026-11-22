@@ -298,6 +298,13 @@ struct SettingsView: View {
                         Label("Privacy Policy", systemImage: "hand.raised")
                     }
                     .listRowBackground(Color.clear)
+                    Link(destination: URL(string: "https://www.openstreetmap.org/copyright")!) {
+                        Label(
+                            "Routing data \(RouteProviderPolicyV1.valhallaDetour.attribution)",
+                            systemImage: "map"
+                        )
+                    }
+                    .listRowBackground(Color.clear)
                 }
             }
             .navigationTitle(social.session.state == .unavailable ? "Settings" : "")
