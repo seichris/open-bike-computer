@@ -7556,7 +7556,7 @@ private struct WorkoutContractTestSuite {
                 "healthSetup: watchAvailability.healthSetupSnapshot"
             )
                 && iPhoneConfirmationComponent.contains(
-                    "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action()"
+                    "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action(nil)"
                 )
                 && iPhoneConfirmationComponent.contains(
                     "case .healthAccessDenied:\n            pendingStart = false\n            presentedAlert = .healthAccessDenied"
@@ -7565,7 +7565,7 @@ private struct WorkoutContractTestSuite {
                     "primaryButton: .default(Text(\"Check Again\"))"
                 )
                 && iPhoneConfirmationComponent.contains(
-                    "primaryButton: .default(Text(\"Check Again\")) {\n                    action()"
+                    "primaryButton: .default(Text(\"Check Again\")) {\n                    action(nil)"
                 ),
             "the iPhone component must gate launch on Watch Health setup and provide an explicit denied-state recheck"
         )
@@ -8212,10 +8212,10 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
@@ -8371,6 +8371,8 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent("BikeComputer/Views/RouteInputView.swift")
         let workoutURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let recordingChoicesURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/WorkoutRecordingViews.swift")
         let heartRateZoneStripURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/HeartRateZoneStrip.swift")
         let liveActivityURL = iosAppDirectory
@@ -8385,6 +8387,7 @@ private struct WorkoutContractTestSuite {
               let navigation = try? String(contentsOf: navigationURL, encoding: .utf8),
               let route = try? String(contentsOf: routeURL, encoding: .utf8),
               let workout = try? String(contentsOf: workoutURL, encoding: .utf8),
+              let recordingChoices = try? String(contentsOf: recordingChoicesURL, encoding: .utf8),
               let liveActivity = try? String(
                 contentsOf: liveActivityURL,
                 encoding: .utf8
@@ -8404,6 +8407,26 @@ private struct WorkoutContractTestSuite {
         let compactContent = content.filter { !$0.isWhitespace }
         let compactNavigation = navigation.filter { !$0.isWhitespace }
         let compactWorkout = workout.filter { !$0.isWhitespace }
+        let compactRecorderChoices = recordingChoices
+            .split(separator: "struct WorkoutRecordingStatusView:", maxSplits: 1)[0]
+            .filter { !$0.isWhitespace }
+        expect(
+            compactRecorderChoices.contains("ifcoordinator.phoneSupported{startButton(.iphone)}")
+                && !compactRecorderChoices.contains("isReachable")
+                && compactRecorderChoices.contains("startButton(.watch)")
+                && compactRecorderChoices.contains("WorkoutRecorderChoices(coordinator:coordinator,menuRows:true)")
+                && compactWorkout.contains("startButton.modifier(WorkoutRecorderChoicePopover("),
+            "the Start Workout popover must reuse the recorder choices in a fixed order"
+        )
+        let watchRecovery = recordingChoices.components(separatedBy: "private struct UnconfirmedWatchWorkoutView:")
+            .last?.components(separatedBy: "struct WorkoutFitnessCheckView:").first ?? ""
+        let compactWatchRecovery = watchRecovery.filter { !$0.isWhitespace }
+        expect(
+            compactWatchRecovery.contains(
+                "Button(\"NoWorkoutIsRunningonWatch\"){coordinator.confirmWatchIdleAndResolveUnconfirmedWorkout("
+            ) && watchRecovery.contains("Open Bicino on Apple Watch and check that no workout is running"),
+            "Only the explicit Watch-idle confirmation can resolve an unconfirmed session from the card"
+        )
         let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
         let compactWatchWorkoutManager =
             watchWorkoutManager.filter { !$0.isWhitespace }
@@ -8458,14 +8481,18 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)})"
                 )
                 && compactContent.contains(
                     "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
+                    ".accessibilityLabel(\"StartWorkout\")"
                 )
+                && compactContent.contains(".buttonStyle(.plain).layoutPriority(1)")
+                && compactWorkout.contains("Button{requestStart()}label:{label()}")
+                && !compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
+                && !compactWorkout.contains(".accessibilityLabel(\"Chooseworkoutrecorder\")")
                 && startRowFitsScreenWidth,
             "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
         )

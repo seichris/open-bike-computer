@@ -660,22 +660,19 @@ enum RideDiagnosticsHostTests {
             now: { now },
             userDefaults: defaults
         )
-        precondition(RideDiagnosticsRideLifecyclePolicy.isRideActive(
-            navigating: true,
-            workoutActive: false
-        ))
-        precondition(RideDiagnosticsRideLifecyclePolicy.isRideActive(
-            navigating: false,
-            workoutActive: true
-        ))
-        precondition(RideDiagnosticsRideLifecyclePolicy.didEndRide(
-            previous: true,
-            current: false
-        ))
-        precondition(!RideDiagnosticsRideLifecyclePolicy.didEndRide(
-            previous: true,
-            current: true
-        ))
+        typealias RideLifecycle = RideDiagnosticsRideLifecyclePolicy
+        let startup = RideLifecycle.activity(navigating: false, workoutActive: true, workoutConfirmed: false)
+        let workout = RideLifecycle.activity(navigating: false, workoutActive: true, workoutConfirmed: true)
+        let navigation = RideLifecycle.activity(navigating: true, workoutActive: false, workoutConfirmed: false)
+        precondition(startup == .preparingWorkout)
+        precondition(workout == .riding && navigation == .riding)
+        let starting = RideLifecycle().transitioning(to: startup)
+        precondition(!starting.transitioning(to: .idle).didEndRide, "Failed starts cannot complete a ride")
+        let confirmed = starting.transitioning(to: workout)
+        precondition(confirmed.transitioning(to: .idle).didEndRide)
+        precondition(confirmed.transitioning(to: startup).transitioning(to: .idle).didEndRide)
+        let endedNavigation = RideLifecycle().transitioning(to: navigation).transitioning(to: .idle)
+        precondition(endedNavigation.didEndRide && !endedNavigation.transitioning(to: .idle).didEndRide)
 
         let stableIdentifier = "28:84:85:3A:D7:80"
         let saltedDigest = recorder.deviceDigest(for: stableIdentifier)

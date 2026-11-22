@@ -16,21 +16,28 @@ struct WorkoutRecordingOwnershipTests {
         ]
         func decision(_ watch: WorkoutWatchAvailabilityV1, recovery: Bool = true,
                       record: WorkoutRecordingRecord? = nil, phone: Bool = true,
-                      explicit: WorkoutRecordingOwner? = nil) -> WorkoutRecordingStartDecision {
+                      explicit: WorkoutRecordingOwner? = nil,
+                      canPresentRecorderChoice: Bool = true) -> WorkoutRecordingStartDecision {
             WorkoutRecordingStartPolicy.resolve(recoveryComplete: recovery,
                 existingRecording: record, watchAvailability: watch,
-                phoneSupported: phone, explicitOwner: explicit)
+                phoneSupported: phone, canPresentRecorderChoice: canPresentRecorderChoice,
+                explicitOwner: explicit)
         }
         check(decision(.activating) == .waitForWatchActivation, "Activation is not absence")
         check(decision(.noPairedWatch) == .start(.iphone), "Unpaired iPhone default")
         check(decision(.noPairedWatch, phone: false) == .phoneUnsupported, "Old OS has no phone recorder")
         check(decision(.ready(isReachable: true)) == .start(.watch), "Ready Watch remains default")
-        check(decision(.ready(isReachable: false)) == .start(.watch),
-              "Interactive reachability does not block HealthKit Watch launch")
-        check(decision(.companionAppNotInstalled) == .start(.watch),
-              "Stale companion catalogue defers to HealthKit Watch launch")
-        check(decision(.activationFailed) == .start(.watch),
-              "Transient WatchConnectivity activation failure defers to HealthKit")
+        let unconfirmedWatches: [WorkoutWatchAvailabilityV1] = [
+            .ready(isReachable: false), .companionAppNotInstalled, .activationFailed
+        ]
+        for unconfirmedWatch in unconfirmedWatches {
+            check(decision(unconfirmedWatch) == .chooseRecorder,
+                  "An uncertain Watch prompts for a recorder before launching either device")
+            check(decision(unconfirmedWatch, phone: false) == .start(.watch),
+                  "An older iPhone preserves native Watch launch")
+            check(decision(unconfirmedWatch, canPresentRecorderChoice: false) == .start(.watch),
+                  "Starts without a menu still try to launch the paired Watch")
+        }
         check(decision(.unsupported) == .start(.iphone),
               "Unsupported WatchConnectivity uses the available phone recorder")
         check(decision(.unsupported, phone: false) == .phoneUnsupported,
