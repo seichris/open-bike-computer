@@ -15,15 +15,11 @@ struct WorkoutRecorderChoices: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator
 
     var body: some View {
-        if coordinator.watchAvailability.availability == .ready(isReachable: true) {
+        // Keep the override menu stable while the Watch wakes or sleeps.
+        if coordinator.phoneSupported { startButton(.iphone) }
+        if coordinator.watchAvailability.availability != .noPairedWatch,
+           coordinator.watchAvailability.availability != .unsupported {
             startButton(.watch)
-            if coordinator.phoneSupported { startButton(.iphone) }
-        } else {
-            if coordinator.phoneSupported { startButton(.iphone) }
-            if coordinator.watchAvailability.availability != .noPairedWatch,
-               coordinator.watchAvailability.availability != .unsupported {
-                startButton(.watch)
-            }
         }
     }
 

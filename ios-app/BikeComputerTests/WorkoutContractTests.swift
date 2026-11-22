@@ -8371,6 +8371,8 @@ private struct WorkoutContractTestSuite {
             .appendingPathComponent("BikeComputer/Views/RouteInputView.swift")
         let workoutURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/WorkoutViews.swift")
+        let recordingChoicesURL = iosAppDirectory
+            .appendingPathComponent("BikeComputer/Views/WorkoutRecordingViews.swift")
         let heartRateZoneStripURL = iosAppDirectory
             .appendingPathComponent("BikeComputer/Views/HeartRateZoneStrip.swift")
         let liveActivityURL = iosAppDirectory
@@ -8385,6 +8387,7 @@ private struct WorkoutContractTestSuite {
               let navigation = try? String(contentsOf: navigationURL, encoding: .utf8),
               let route = try? String(contentsOf: routeURL, encoding: .utf8),
               let workout = try? String(contentsOf: workoutURL, encoding: .utf8),
+              let recordingChoices = try? String(contentsOf: recordingChoicesURL, encoding: .utf8),
               let liveActivity = try? String(
                 contentsOf: liveActivityURL,
                 encoding: .utf8
@@ -8404,6 +8407,14 @@ private struct WorkoutContractTestSuite {
         let compactContent = content.filter { !$0.isWhitespace }
         let compactNavigation = navigation.filter { !$0.isWhitespace }
         let compactWorkout = workout.filter { !$0.isWhitespace }
+        let compactRecorderChoices = recordingChoices
+            .split(separator: "struct WorkoutRecordingStatusView:", maxSplits: 1)[0]
+            .filter { !$0.isWhitespace }
+        expect(
+            compactRecorderChoices.contains("ifcoordinator.phoneSupported{startButton(.iphone)}")
+                && !compactRecorderChoices.contains("isReachable"),
+            "the recorder choices must retain the same order as Watch reachability changes"
+        )
         let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
         let compactWatchWorkoutManager =
             watchWorkoutManager.filter { !$0.isWhitespace }
