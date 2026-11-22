@@ -133,13 +133,10 @@ artifact before rebuilding.
 
 ## Recording without Apple Watch (iOS 26+)
 
-**Start Workout** uses iPhone when WatchConnectivity has finished activation and
-confirmed that no Watch is paired. With a configured reachable Watch, the default
-is still Watch recording. Touch and hold **Start Workout**, then select
-**Choose Recorder**, or use the chooser in the workout dashboard, for an explicit
-**Record with iPhone** choice. Opening the chooser after a completed ride does not
-start another recording. A transient Watch connection problem never silently
-changes the recorder to iPhone.
+When Bicino on Apple Watch is reachable, **Start Workout** starts on the Watch.
+Tap the adjacent arrow to choose **Start on iPhone**. If a paired Watch is
+unreachable, **Start Workout** opens the recorder choices. If WatchConnectivity
+confirms that no Watch is paired, **Start Workout** starts on iPhone.
 
 The recorder is fixed for the ride. Reconnection cannot migrate it, change which
 device saves, or start another workout. Finish and acknowledge the current ride
@@ -169,9 +166,9 @@ for recovery behavior, conflict handling, and physical release gates.
 3. Allow location while using the Watch app if you want a workout route,
    elevation, and GPS fallback speed.
 4. To start on Watch, return to its start screen and select **Start Ride**.
-5. To start on iPhone, select **Start workout**. When a Watch is paired and the
-   BikeComputer companion is installed, the iPhone starts the Watch-owned
-   workout directly. Otherwise it explains the required Watch setup.
+5. On iPhone, tap **Start Workout** while Bicino on Apple Watch is reachable
+   to start a Watch-recorded workout. To record on iPhone, use the adjacent
+   arrow or choose **Start on iPhone** when the recorder menu opens.
 
 Watch and iPhone start immediately after their setup checks. Apple Watch permits
 one active workout session, and public APIs do not reveal whether another app

@@ -2112,6 +2112,7 @@ struct ContentView: View {
                         Label("Start Workout", systemImage: "figure.outdoor.cycle")
                             .labelStyle(.iconOnly)
                     }
+                        .accessibilityLabel("Start Workout")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
@@ -2128,7 +2129,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .layoutPriority(1)
-                .accessibilityLabel("Start Workout")
             }
         }
     }

@@ -59,19 +59,30 @@ struct WorkoutStartButton<Label: View>: View {
                recordingCoordinator.phoneSupported,
                watchAvailability.availability != .noPairedWatch,
                watchAvailability.availability != .unsupported {
-                Menu {
-                    WorkoutRecorderChoices(coordinator: recordingCoordinator)
-                } label: {
-                    label()
+                let watchIsReachable = watchAvailability.availability == .ready(isReachable: true)
+                HStack(spacing: 4) {
+                    if watchIsReachable {
+                        startButton
+                            .accessibilityHint("Starts on Apple Watch")
+                    }
+                    Menu {
+                        WorkoutRecorderChoices(coordinator: recordingCoordinator)
+                    } label: {
+                        if watchIsReachable {
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .frame(width: 44, height: 44)
+                                .background(.regularMaterial, in: Capsule())
+                                .accessibilityLabel("Choose workout recorder")
+                        } else {
+                            label()
+                        }
+                    }
+                    .menuOrder(.fixed)
+                    .accessibilityHint("Choose Apple Watch or iPhone")
                 }
-                .menuOrder(.fixed)
-                .accessibilityHint("Choose Apple Watch or iPhone")
             } else {
-                Button {
-                    requestStart()
-                } label: {
-                    label()
-                }
+                startButton
             }
         }
         .alert(item: $presentedAlert) { alert in
@@ -83,6 +94,14 @@ struct WorkoutStartButton<Label: View>: View {
         }
         .onChange(of: watchAvailability.healthSetupSnapshot) { _ in
             refreshSetupAlert()
+        }
+    }
+
+    private var startButton: some View {
+        Button {
+            requestStart()
+        } label: {
+            label()
         }
     }
 

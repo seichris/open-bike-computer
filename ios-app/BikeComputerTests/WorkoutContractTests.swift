@@ -8464,9 +8464,13 @@ private struct WorkoutContractTestSuite {
                     "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).layoutPriority(1).accessibilityLabel(\"StartWorkout\")"
+                    ".accessibilityLabel(\"StartWorkout\")"
                 )
+                && compactContent.contains(".buttonStyle(.plain).layoutPriority(1)")
+                && compactWorkout.contains("letwatchIsReachable=watchAvailability.availability==.ready(isReachable:true)")
+                && compactWorkout.contains("ifwatchIsReachable{startButton.accessibilityHint(\"StartsonAppleWatch\")}")
                 && compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
+                && compactWorkout.contains(".accessibilityLabel(\"Chooseworkoutrecorder\")")
                 && startRowFitsScreenWidth,
             "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
         )
