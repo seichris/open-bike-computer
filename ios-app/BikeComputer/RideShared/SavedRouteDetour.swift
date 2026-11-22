@@ -555,6 +555,19 @@ nonisolated struct SavedRouteDetourEngineV1 {
         pendingTarget = nil
         switch outcome {
         case .route(let route):
+            if let first = route.points.first,
+               NavigationGeometryV1.distance(from: first, to: latestSample.coordinate) >
+                policy.maximumStartOffsetMeters,
+               NavigationGeometryV1.distance(from: first, to: request.origin) <=
+                policy.maximumStartOffsetMeters {
+                // The answer starts where the rider asked from, but the rider
+                // moved on while it was computed (a request is cancelled only
+                // after more motion than a route start may be off). Ask again
+                // for the same rejoin candidate from here; this is not "no route".
+                phase = .offRoute
+                nextAllowedAt = now
+                return issueIfWarranted(latestSample, now: now)
+            }
             guard let prepared = validatedDetour(route, target: target, latestSample: latestSample) else {
                 return noRoute(now: now)
             }
@@ -576,6 +589,39 @@ nonisolated struct SavedRouteDetourEngineV1 {
             phase = .offRoute
             return []
         }
+    }
+
+    /// The host could not start guidance on the detour it was given. Forget
+    /// it and back off like a service error, so the ride is never held with no
+    /// detour guidance until a rejoin.
+    mutating func detourStartFailed(now: Date) {
+        guard phase == .following else { return }
+        detour = nil
+        detourTarget = nil
+        serviceFailures += 1
+        nextAllowedAt = now.addingTimeInterval(policy.backoff(afterFailures: serviceFailures))
+        phase = .unavailable(.serviceError)
+    }
+
+    /// Online routing was turned off during the ride: stop asking at once,
+    /// drop the pending answer and any detour, and keep holding the saved
+    /// route until a confirmed rejoin, as while the network is gone.
+    /// `networkChanged(available: true, ...)` asks again once it is back on.
+    mutating func disableRequests() -> [SavedRouteDetourEffectV1] {
+        var effects: [SavedRouteDetourEffectV1] = []
+        if let request {
+            effects.append(.cancelRequest(request.id))
+            self.request = nil
+            pendingTarget = nil
+        }
+        if detour != nil {
+            effects.append(.endDetour)
+            detour = nil
+            detourTarget = nil
+        }
+        networkAvailable = false
+        if phase != .onRoute { phase = .unavailable(.offline) }
+        return effects
     }
 
     /// Path changes from the network monitor. Coming back online while still

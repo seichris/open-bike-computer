@@ -818,7 +818,11 @@ class NavigationEngine: NSObject, ObservableObject {
             case .startDetour(let route):
                 guard (try? detourRuntime.start(
                     route: route, mode: .online, initialStepStrategy: .first, initialLocation: sample
-                )) != nil else { continue }
+                )) != nil else {
+                    // Never hold the saved route without detour guidance.
+                    detourEngine?.detourStartFailed(now: now())
+                    continue
+                }
                 activeDetourRoute = route
                 switchDeviceGeometry(to: route)
             case .endDetour:

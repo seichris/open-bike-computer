@@ -85,8 +85,10 @@ coordinates; the rest of your saved route is not sent. On a Watch-owned ride
 with online routing enabled, the Watch passes the same two points to your
 paired iPhone when it is reachable, and the iPhone sends them with its own
 credential. The detour is kept only for the active ride and is discarded when
-you rejoin the saved route or navigation stops. Offline, or when no bicycle
-route is found, nothing is sent to Bicino and the saved route stays on screen.
+you rejoin the saved route or navigation stops. Nothing is sent to Bicino while
+you are offline, when online routing is turned off for a Watch ride, or when
+Apple Maps returns a cycling route. If no bicycle route is found at all, the
+saved route stays on screen.
 
 Saved offline routes and coordinate-backed favorite names and coordinates are
 transferred between your paired iPhone and Watch using Apple's WatchConnectivity

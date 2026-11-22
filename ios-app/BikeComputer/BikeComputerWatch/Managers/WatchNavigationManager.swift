@@ -100,6 +100,9 @@ final class WatchNavigationManager: ObservableObject {
     /// MapKit cycling on the Watch, then the Valhalla leg relayed through the
     /// paired iPhone. Set by the app delegate.
     var detourProviders: (any BicycleDetourProviding)?
+    /// Online routing as last published for this ride's detours. Kept here
+    /// because the settings store publishes a policy before storing it.
+    private var detourOnlineAllowed = false
     private var detourEngine: SavedRouteDetourEngineV1?
     private var detourRuntime = NavigationRuntimeV1()
     private var detourTask: Task<Void, Never>?
@@ -423,6 +426,7 @@ final class WatchNavigationManager: ObservableObject {
                 // Non-destructive: the installed route, its journal and its
                 // attribution stay; a detour only leads back to it.
                 var engine = SavedRouteDetourEngineV1(route: record.archive.route)
+                detourOnlineAllowed = true
                 _ = engine.networkChanged(
                     available: networkMonitor.availability != .unavailable, latestSample: nil, now: now()
                 )
@@ -488,8 +492,11 @@ final class WatchNavigationManager: ObservableObject {
                 detourTask = nil
                 detourProviders?.cancel()
             case .startDetour(let route):
-                _ = try? detourRuntime.start(route: route, mode: .online, initialStepStrategy: .first,
-                                             initialLocation: sample)
+                if (try? detourRuntime.start(route: route, mode: .online, initialStepStrategy: .first,
+                                             initialLocation: sample)) == nil {
+                    // Never hold the saved route without detour guidance.
+                    detourEngine?.detourStartFailed(now: now())
+                }
             case .endDetour:
                 detourRuntime.stop()
             case .resumeSavedRoute(let rejoin):
@@ -502,6 +509,10 @@ final class WatchNavigationManager: ObservableObject {
     }
 
     private func runDetourRequest(_ request: SavedRouteDetourRequestV1) {
+        guard detourOnlineAllowed else {
+            completeDetour(id: request.id, outcome: .unavailable(.offline, retryAfterSeconds: nil))
+            return
+        }
         guard let providers = detourProviders,
               let route = detourEngine?.geometry.route,
               let source = RouteProviderPolicyV1.bicycleDetourRouteSource(route.provider) else {
@@ -536,6 +547,7 @@ final class WatchNavigationManager: ObservableObject {
         detourRequestID = nil
         detourProviders?.cancel()
         detourEngine = nil
+        detourOnlineAllowed = false
         detourRuntime.stop()
         detourPhase = nil
     }
@@ -917,6 +929,20 @@ final class WatchNavigationManager: ObservableObject {
 
     private func policyDidChange(_ policy: RouteNetworkPolicyV1) {
         cancelRequest()
+        if var engine = detourEngine {
+            // Offline-only stops detour requests at once (nothing more goes to
+            // MapKit or through the iPhone); turning it back on asks again.
+            detourOnlineAllowed = policy == .onlineAllowed
+            let effects = policy == .onlineAllowed
+                ? engine.networkChanged(
+                    available: networkMonitor.availability != .unavailable,
+                    latestSample: lastLocation, now: now()
+                )
+                : engine.disableRequests()
+            detourEngine = engine
+            if let lastLocation { _ = handleDetourEffects(effects, sample: lastLocation) }
+            detourPhase = engine.phase
+        }
         guard runtime.route != nil else {
             if policy == .offlineOnly, pendingFavorite != nil {
                 state = .unavailable("Online routing is disabled")
@@ -952,8 +978,10 @@ final class WatchNavigationManager: ObservableObject {
 
     private func networkDidChange(_ availability: WatchNetworkAvailabilityV1) {
         if var engine = detourEngine {
+            // Offline-only keeps detours off whatever the network does.
             let effects = engine.networkChanged(
-                available: availability != .unavailable, latestSample: lastLocation, now: now()
+                available: availability != .unavailable && detourOnlineAllowed,
+                latestSample: lastLocation, now: now()
             )
             detourEngine = engine
             if let lastLocation { _ = handleDetourEffects(effects, sample: lastLocation) }
