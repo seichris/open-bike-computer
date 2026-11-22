@@ -59,24 +59,16 @@ struct WorkoutStartButton<Label: View>: View {
                recordingCoordinator.phoneSupported,
                watchAvailability.availability != .noPairedWatch,
                watchAvailability.availability != .unsupported {
-                let watchIsReachable = watchAvailability.availability == .ready(isReachable: true)
                 HStack(spacing: 4) {
-                    if watchIsReachable {
-                        startButton
-                            .accessibilityHint("Starts on Apple Watch")
-                    }
+                    startButton
                     Menu {
                         WorkoutRecorderChoices(coordinator: recordingCoordinator)
                     } label: {
-                        if watchIsReachable {
-                            Image(systemName: "chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .frame(width: 44, height: 44)
-                                .background(.regularMaterial, in: Capsule())
-                                .accessibilityLabel("Choose workout recorder")
-                        } else {
-                            label()
-                        }
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                            .background(.regularMaterial, in: Capsule())
+                            .accessibilityLabel("Choose workout recorder")
                     }
                     .menuOrder(.fixed)
                     .accessibilityHint("Choose Apple Watch or iPhone")

@@ -270,12 +270,16 @@ nonisolated enum WorkoutRecordingStartDecision: Equatable, Sendable {
 }
 
 nonisolated enum WorkoutRecordingStartPolicy {
+    // The Watch display can sleep while the companion can still be woken by HealthKit.
+    static let watchReachabilityGrace: TimeInterval = 60
+
     static func resolve(
         recoveryComplete: Bool,
         existingRecording: WorkoutRecordingRecord?,
         watchAvailability: WorkoutWatchAvailabilityV1,
         phoneSupported: Bool,
-        explicitOwner: WorkoutRecordingOwner? = nil
+        explicitOwner: WorkoutRecordingOwner? = nil,
+        watchWasRecentlyReachable: Bool = false
     ) -> WorkoutRecordingStartDecision {
         guard recoveryComplete else { return .waitForRecovery }
         // Even an unresolved launch/finish owns the ride until reconciliation.
@@ -291,6 +295,8 @@ nonisolated enum WorkoutRecordingStartPolicy {
         case .noPairedWatch:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
         case .ready(isReachable: true):
+            return .start(.watch)
+        case .ready(isReachable: false) where watchWasRecentlyReachable:
             return .start(.watch)
         case .ready(isReachable: false), .companionAppNotInstalled, .activationFailed:
             // WatchConnectivity can lag. Keep an explicit Watch attempt

@@ -134,9 +134,10 @@ artifact before rebuilding.
 ## Recording without Apple Watch (iOS 26+)
 
 When Bicino on Apple Watch is reachable, **Start Workout** starts on the Watch.
-Tap the adjacent arrow to choose **Start on iPhone**. If a paired Watch is
-unreachable, **Start Workout** opens the recorder choices. If WatchConnectivity
-confirms that no Watch is paired, **Start Workout** starts on iPhone.
+This default continues for one minute after live contact drops, so the Watch
+display can sleep. The adjacent recorder arrow stays available for a paired
+Watch. After a minute without live contact, **Start Workout** asks which recorder
+to use. If WatchConnectivity confirms that no Watch is paired, it starts on iPhone.
 
 The recorder is fixed for the ride. Reconnection cannot migrate it, change which
 device saves, or start another workout. Finish and acknowledge the current ride

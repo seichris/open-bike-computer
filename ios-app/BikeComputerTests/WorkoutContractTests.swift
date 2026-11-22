@@ -8467,8 +8467,7 @@ private struct WorkoutContractTestSuite {
                     ".accessibilityLabel(\"StartWorkout\")"
                 )
                 && compactContent.contains(".buttonStyle(.plain).layoutPriority(1)")
-                && compactWorkout.contains("letwatchIsReachable=watchAvailability.availability==.ready(isReachable:true)")
-                && compactWorkout.contains("ifwatchIsReachable{startButton.accessibilityHint(\"StartsonAppleWatch\")}")
+                && compactWorkout.contains("HStack(spacing:4){startButtonMenu{")
                 && compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
                 && compactWorkout.contains(".accessibilityLabel(\"Chooseworkoutrecorder\")")
                 && startRowFitsScreenWidth,

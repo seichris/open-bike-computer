@@ -256,13 +256,14 @@ struct WorkoutSessionCoordinatorTests {
         func check(_ condition: Bool, _ message: String) {
             precondition(condition, message); count += 1
         }
-        func harness() -> (WorkoutSessionCoordinator, FakeWatch, FakePhone, FakeAvailability, MemoryRecordingStore) {
+        func harness(uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime })
+            -> (WorkoutSessionCoordinator, FakeWatch, FakePhone, FakeAvailability, MemoryRecordingStore) {
             let disk = MemoryRecordingStore()
             let watch = FakeWatch()
             let phone = FakePhone(disk)
             let availability = FakeAvailability()
             return (WorkoutSessionCoordinator(watch: watch, watchAvailability: availability,
-                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger()),
+                persistence: disk, phone: phone, handoffLedger: MemoryHandoffLedger(), uptime: uptime),
                     watch, phone, availability, disk)
         }
         let (coordinator, watch, phone, availability, disk) = harness()
@@ -491,6 +492,39 @@ struct WorkoutSessionCoordinatorTests {
               "Confirming iPhone after a failed Watch launch starts exactly one iPhone recording")
         unreachable.resolveUnconfirmedWatchWorkout(sessionID: failedStartID, startOnIPhone: true)
         check(phone3.starts == 1, "Repeated confirmation cannot start another recording")
+
+        var watchClock = 100.0
+        let (sleeping, sleepingWatch, _, sleepingAvailability, _) = harness(uptime: { watchClock })
+        sleeping.recoverIfNeeded()
+        await spin { sleeping.recoveryComplete }
+        sleepingAvailability.availability = .ready(isReachable: true)
+        watchClock += 600
+        sleepingAvailability.availability = .ready(isReachable: false)
+        watchClock += 59
+        check(sleeping.requestStart() && sleepingWatch.starts == 1,
+              "A Watch can still start after live reachability drops when its display sleeps")
+        _ = sleepingWatch.store.timeOutWatchLaunch(id: sleepingWatch.launchID, at: Date().addingTimeInterval(20))
+        sleeping.resolveUnconfirmedWatchWorkout(sessionID: sleeping.record!.sessionID, startOnIPhone: false)
+        check(!sleeping.requestStart() && sleeping.notice?.kind == .chooseRecorder,
+              "A failed launch clears the grace period for later starts")
+
+        let (expired, expiredWatch, _, expiredAvailability, _) = harness(uptime: { watchClock })
+        expired.recoverIfNeeded()
+        await spin { expired.recoveryComplete }
+        expiredAvailability.availability = .ready(isReachable: true)
+        expiredAvailability.availability = .ready(isReachable: false)
+        watchClock += 60
+        check(!expired.requestStart() && expiredWatch.starts == 0 && expired.notice?.kind == .chooseRecorder,
+              "After the grace period the rider chooses a recorder")
+
+        let (override, overrideWatch, overridePhone, overrideAvailability, _) = harness(uptime: { watchClock })
+        override.recoverIfNeeded()
+        await spin { override.recoveryComplete }
+        overrideAvailability.availability = .ready(isReachable: true)
+        overrideAvailability.availability = .ready(isReachable: false)
+        check(override.requestStart(explicitOwner: .iphone), "iPhone choice overrides the Watch default")
+        await spin { overridePhone.starts == 1 }
+        check(overrideWatch.starts == 0, "An explicit iPhone start leaves the Watch idle")
 
         let (cold, _, coldPhone, _, coldDisk) = harness()
         var oldAttempt = WorkoutRecordingRecord(owner: .watch, sessionID: UUID(), requestedAt: Date())

@@ -102,6 +102,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
 
     private let persistence: any WorkoutRecordingPersisting
     private let handoffPersistence: any WorkoutHandoffLedgerPersisting
+    private let uptime: () -> TimeInterval
+    private var previousWatchAvailability: WorkoutWatchAvailabilityV1?
+    private var watchReachabilityLostAt: TimeInterval?
     private var handoffLedger = WorkoutHandoffLedger()
     /// False while the ledger file could not be read (for example before
     /// first unlock). An unread ledger is never written over.
@@ -130,10 +133,12 @@ final class WorkoutSessionCoordinator: ObservableObject {
         watchAvailability: any WorkoutRecordingWatchAvailability,
         persistence: (any WorkoutRecordingPersisting)? = nil,
         phone: (any PhoneWorkoutRecording)? = nil,
-        handoffLedger: (any WorkoutHandoffLedgerPersisting)? = nil
+        handoffLedger: (any WorkoutHandoffLedgerPersisting)? = nil,
+        uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.watch = watch
         self.watchAvailability = watchAvailability
+        self.uptime = uptime
         let persistence = persistence ?? WorkoutRecordingStore()
         self.persistence = persistence
         handoffPersistence = handoffLedger ?? WorkoutHandoffLedgerStore()
@@ -193,6 +198,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
         }
         watchAvailability.recordingAvailabilityPublisher.removeDuplicates().sink { [weak self] availability in
             guard let self else { return }
+            if availability == .ready(isReachable: false) {
+                if previousWatchAvailability == .ready(isReachable: true) {
+                    watchReachabilityLostAt = uptime()
+                }
+            } else {
+                watchReachabilityLostAt = nil
+            }
+            previousWatchAvailability = availability
             recordWatchAvailability(availability)
             objectWillChange.send()
             guard pendingAutomaticChoice, availability != .activating else { return }
@@ -685,7 +698,10 @@ final class WorkoutSessionCoordinator: ObservableObject {
         let decision = WorkoutRecordingStartPolicy.resolve(
             recoveryComplete: recoveryComplete, existingRecording: record,
             watchAvailability: availability, phoneSupported: phoneSupported,
-            explicitOwner: explicitOwner
+            explicitOwner: explicitOwner,
+            watchWasRecentlyReachable: watchReachabilityLostAt.map {
+                uptime() - $0 < WorkoutRecordingStartPolicy.watchReachabilityGrace
+            } ?? false
         )
         recordStartDecision(
             availability: availability,
@@ -702,7 +718,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         case .chooseRecorder:
             pendingAutomaticChoice = false
             notice = WorkoutRecordingNotice(kind: .chooseRecorder,
-                message: "Apple Watch is not ready for an immediate connection. You can try starting on Watch, or explicitly record this ride with iPhone. Check that no ride is already running on Watch.")
+                message: "Choose where to record this workout.")
         case .phoneUnsupported:
             notice = WorkoutRecordingNotice(kind: .information, message: "Recording without Apple Watch requires iOS 26 or later. Watch workouts and navigation keep their existing requirements.")
         case .blockedByExistingRecording:
@@ -932,6 +948,8 @@ final class WorkoutSessionCoordinator: ObservableObject {
             }
         }
         if record?.phase == .unresolved, record?.owner == .watch {
+            // A failed Watch start invalidates the evidence for a wake attempt.
+            watchReachabilityLostAt = nil
             let unresolved = WorkoutRecordingNotice(kind: .watchUnresolved,
                 message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
             if notice != unresolved { notice = unresolved }
