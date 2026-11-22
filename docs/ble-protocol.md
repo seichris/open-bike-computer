@@ -1275,10 +1275,29 @@ Clients at version `36` can negotiate CAP2 extended feature bit `6`
 activation selects configured instances and uses the same owner-only protected
 channel `8` and characteristic. It shows a screen immediately and never edits
 the document, its revision or the default screen. The iPhone uses it for Siri
-and Shortcuts actions such as "Open Map screen" and "Next screen". Until a
-physical board check, firmware advertises bit `6` and decodes `SCSW` only in
-development profiles (`FIRMWARE_DIAGNOSTICS=1`); production keeps the bit
-clear and ignores `SCSW` frames, so its screens change only by button or tap.
+and Shortcuts actions such as "Open Map screen" and "Next screen". Every
+firmware profile advertises bit `6` and decodes `SCSW`. Before 2026-11-22 only
+development profiles (`FIRMWARE_DIAGNOSTICS=1`) did. Older production firmware
+keeps the bit clear and ignores `SCSW` frames, so its screens change only by
+button or tap, and the iPhone answers that the firmware can't switch screens
+from Siri yet.
+
+Physical board checks:
+
+- 1.75-inch developer profile: passed on 2026-11-22 on `waveshare-175-b`,
+  running the `WAVESHARE_AMOLED_175` developer profile from `381e07c8`
+  (attested flash). `BOOT_META` was not captured, so the running image's
+  identity was not confirmed independently. Siri on an iPhone with Bicino Dev
+  `8a001ed6` switched the board's screen with "Open Map screen" or "Next
+  screen". This qualifies only that developer image.
+- 1.75-inch production profile: open. No production image with activation has
+  run on a board yet. The maintainer chose to enable it on the strength of the
+  developer-profile check. Repeat the check on a production image before the
+  next 1.75 factory image.
+- 2.06-inch and ePaper 3.97: not checked on any profile. On 2026-11-22 the
+  maintainer accepted the residual risk of enabling it in their production
+  profiles before that check, so it does not block their images. Repeat the
+  check on each board when it is next on the bench.
 
 ```text
 Request: "SCSW" | RequestID: UInt32LE | Action: UInt8 | TypeCount: UInt8 |

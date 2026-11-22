@@ -109,13 +109,12 @@ inline bool supportsMapPois(uint8_t clientVersion, bool runtimeEnabled,
   return runtimeEnabled && screenConfigurationReady &&
          clientVersion >= MAP_POIS_CLIENT_VERSION;
 }
-// Remote screen activation (Siri and Shortcuts) stays in development profiles
-// until a physical board check; production keeps only the button/tap cycle.
-#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+// Remote screen activation (Siri and Shortcuts) is on in every profile. Only
+// a 1.75 developer image has been checked on a board. The 1.75 production
+// check is open; the 2.06 and e-paper checks are open with their residual
+// risk accepted (docs/ble-protocol.md, "Screen activation"). False restores
+// the button/tap-only cycle and makes SCSW an ignored frame again.
 inline constexpr bool SCREEN_ACTIVATION_ENABLED = true;
-#else
-inline constexpr bool SCREEN_ACTIVATION_ENABLED = false;
-#endif
 // Activation travels on the screen-configuration characteristic and selects
 // configured instances, so it is offered only alongside that feature.
 inline bool supportsScreenActivation(uint8_t clientVersion,
