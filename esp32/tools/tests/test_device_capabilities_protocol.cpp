@@ -170,8 +170,8 @@ int main() {
   assert(!device_capabilities_protocol::supportsScreenActivation(36, true, false));
   assert(!device_capabilities_protocol::supportsScreenActivation(36, false, true));
   assert(device_capabilities_protocol::supportsScreenActivation(36, true, true));
-  // Production offers activation too since the 1.75 board check
-  // (docs/ble-protocol.md, "Screen activation").
+  // Every profile offers activation, production included. Board checks are
+  // recorded in docs/ble-protocol.md, "Screen activation".
   static_assert(device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED,
                 "remote screen activation is on in every profile");
   assert(device_capabilities_protocol::encodeCap2(

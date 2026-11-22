@@ -1284,14 +1284,20 @@ from Siri yet.
 
 Physical board checks:
 
-- 1.75-inch: passed on 2026-11-22 on `waveshare-175-b`, running the
-  `WAVESHARE_AMOLED_175` developer profile from `381e07c8` (attested flash;
-  `BOOT_META` was not captured). Siri on an iPhone with Bicino Dev `8a001ed6`
-  switched the board's screen with "Open Map screen" or "Next screen".
-- 2.06-inch and ePaper 3.97: not yet checked on a board. On 2026-11-22 the
+- 1.75-inch developer profile: passed on 2026-11-22 on `waveshare-175-b`,
+  running the `WAVESHARE_AMOLED_175` developer profile from `381e07c8`
+  (attested flash). `BOOT_META` was not captured, so the running image's
+  identity was not confirmed independently. Siri on an iPhone with Bicino Dev
+  `8a001ed6` switched the board's screen with "Open Map screen" or "Next
+  screen". This qualifies only that developer image.
+- 1.75-inch production profile: open. No production image with activation has
+  run on a board yet. The maintainer chose to enable it on the strength of the
+  developer-profile check. Repeat the check on a production image before the
+  next 1.75 factory image.
+- 2.06-inch and ePaper 3.97: not checked on any profile. On 2026-11-22 the
   maintainer accepted the residual risk of enabling it in their production
   profiles before that check, so it does not block their images. Repeat the
-  1.75 check on each board when it is next on the bench.
+  check on each board when it is next on the bench.
 
 ```text
 Request: "SCSW" | RequestID: UInt32LE | Action: UInt8 | TypeCount: UInt8 |
