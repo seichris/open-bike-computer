@@ -1,0 +1,6 @@
+{
+ "reason": "no_bicycle_route",
+ "route": null,
+ "schema": "bicino-bicycle-detour-response-v1",
+ "status": "unavailable"
+}

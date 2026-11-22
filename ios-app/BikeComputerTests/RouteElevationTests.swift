@@ -393,9 +393,12 @@ private func testPolicy() {
                RouteProviderPolicyV1.routeElevationServiceSource(metadata) == "mapkit",
                "active and saved Apple Maps routes may request terrain heights")
     }
-    for metadata in [RouteProviderPolicyV1.strava,
-                     RouteProviderMetadataV1(providerID: "unknown", attribution: "Unknown", storageScope: .durable),
-                     RouteProviderMetadataV1(providerID: "apple.mapkit", attribution: "Unknown", storageScope: .durable)] {
+    expect(RouteProviderPolicyV1.allowsRouteElevationService(RouteProviderPolicyV1.strava) &&
+           RouteProviderPolicyV1.routeElevationServiceSource(RouteProviderPolicyV1.strava) == "strava",
+           "direct Strava imports may request terrain heights with explicit Strava provenance")
+    for metadata in [RouteProviderMetadataV1(providerID: "unknown", attribution: "Unknown", storageScope: .durable),
+                     RouteProviderMetadataV1(providerID: "apple.mapkit", attribution: "Unknown", storageScope: .durable),
+                     RouteProviderMetadataV1(providerID: "strava.route", attribution: "Strava", storageScope: .activeOnly)] {
         expect(!RouteProviderPolicyV1.allowsRouteElevationService(metadata) &&
                RouteProviderPolicyV1.routeElevationServiceSource(metadata) == nil,
                "unapproved or inconsistent providers cannot request terrain heights")
@@ -525,19 +528,139 @@ private final class FakeFetcher: RouteElevationProfileFetching {
 private final class FakeSidecars: RouteElevationSidecarProviding {
     var sidecars: [RouteElevationArchiveBindingV1: RouteElevationSidecarV1] = [:]
     var stored: [RouteElevationArchiveBindingV1] = []
+    /// Live saved archives, as the route library would return them.
+    var live: [RouteElevationArchiveBindingV1: NavigationRouteV1] = [:]
 
     func elevationSidecar(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSidecarV1? {
         sidecars[binding]
     }
 
     func storeElevationProfile(_ profile: RouteElevationProfileV1, for binding: RouteElevationArchiveBindingV1) {
+        // Mirrors PhoneRouteLibrary: only a live archive keeps a profile.
+        if live[binding] == nil && !live.isEmpty { return }
         stored.append(binding)
         sidecars[binding] = (sidecars[binding] ?? RouteElevationSidecarV1(
             binding: binding, geometryDigest: profile.geometry.digest, gpxVertexElevations: nil, serviceProfile: nil
         )).replacingServiceProfile(profile)
     }
 
-    func elevationSubject(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSubjectV1? { nil }
+    func elevationSubject(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSubjectV1? {
+        live[binding].map { RouteElevationSubjectV1(route: $0, binding: binding) }
+    }
+
+    /// Removes an archive and its sidecar, like deletion, expiry or disconnect.
+    func remove(_ binding: RouteElevationArchiveBindingV1) {
+        live[binding] = nil
+        sidecars[binding] = nil
+    }
+}
+
+/// A fetcher that holds each request until the test releases it.
+@MainActor
+private final class GatedFetcher: RouteElevationProfileFetching {
+    let inner = FakeFetcher()
+    var released = false
+    var onRequest: (() -> Void)?
+
+    var requests: [RouteElevationServiceRequestV1] { inner.requests }
+
+    func fetchProfile(_ request: RouteElevationServiceRequestV1) async throws -> RouteElevationServiceResponseV1 {
+        onRequest?()
+        while !released { await Task.yield() }
+        return try await inner.fetchProfile(request)
+    }
+}
+
+/// Strava elevation fallback: trusted heights stay local; otherwise the
+/// service is asked with explicit Strava provenance, only while the exact
+/// archive is live, and a late answer after deletion is discarded.
+@MainActor
+private func testStravaService() async {
+    let imported = try! GPXRouteImporterV1.importRoute(data: gpxData(hillPoints()), fallbackName: "Hill",
+                                                       source: .local(createdAt: Date()))
+    let stravaRoute = withProvider(imported.archive.route, RouteProviderPolicyV1.strava)
+    let binding = RouteElevationArchiveBindingV1(routeID: stravaRoute.id, revision: stravaRoute.revision,
+                                                 contentHash: "strava-hash")
+
+    // 1. Usable Strava heights: profile on the phone, no request at all.
+    do {
+        let fetcher = FakeFetcher()
+        let sidecars = FakeSidecars()
+        sidecars.live[binding] = stravaRoute
+        sidecars.sidecars[binding] = RouteElevationSidecarV1(
+            binding: binding, geometryDigest: try! RouteElevationProcessorV1.geometry(points: stravaRoute.points).digest,
+            gpxVertexElevations: imported.vertexElevations, serviceProfile: nil
+        )
+        let service = RouteElevationService(fetcher: fetcher, sidecars: sidecars)
+        guard case .ready(let local) = await service.resolve(RouteElevationSubjectV1(route: stravaRoute, binding: binding)),
+              local.source.kind == "gpx" else {
+            fatalError("FAILED: trusted Strava heights become the profile on the phone")
+        }
+        expect(fetcher.requests.isEmpty, "trusted Strava heights never call the service")
+    }
+
+    // 2. Untrusted heights (a flat zero track fails the trust check): fallback request tagged strava.
+    do {
+        let fetcher = FakeFetcher()
+        let sidecars = FakeSidecars()
+        sidecars.live[binding] = stravaRoute
+        let zeros = [Double?](repeating: 0, count: stravaRoute.points.count)
+        let subject = RouteElevationSubjectV1(route: stravaRoute, binding: binding, gpxVertexElevations: zeros)
+        let service = RouteElevationService(fetcher: fetcher, sidecars: sidecars)
+        async let first = service.resolve(subject)
+        async let second = service.resolve(subject)
+        let (one, two) = await (first, second)
+        guard case .ready(let profile) = one, one == two else {
+            fatalError("FAILED: a Strava route without usable heights falls back to the service")
+        }
+        expect(fetcher.requests.count == 1 && fetcher.requests[0].routeSource == "strava",
+               "one deduplicated request carries explicit Strava provenance")
+        expect(Set(sidecars.stored) == [binding] && sidecars.sidecars[binding]?.serviceProfile == profile,
+               "the live Strava archive keeps the profile in its sidecar")
+        expect(service.cachedState(for: subject) == .ready(profile), "the live Strava profile is cached")
+
+        // Deletion, expiry or disconnect revokes the cached profile.
+        sidecars.remove(binding)
+        service.invalidateStravaSubjects(keeping: [])
+        expect(service.cachedState(for: subject) == nil, "a removed Strava archive loses its cached profile")
+        expect(await service.resolve(subject) == .unavailable(.sourceNotPermitted) && fetcher.requests.count == 1,
+               "a removed Strava archive never reaches the service again")
+    }
+
+    // 3. No heights at all, no binding: never sent.
+    do {
+        let fetcher = FakeFetcher()
+        let service = RouteElevationService(fetcher: fetcher, sidecars: FakeSidecars())
+        expect(await service.resolve(RouteElevationSubjectV1(route: stravaRoute)) == .unavailable(.sourceNotPermitted),
+               "an unsaved Strava route is never sent")
+        expect(fetcher.requests.isEmpty, "unbound Strava geometry stays on the phone")
+    }
+
+    // 4. Late answer after deletion: discarded, not stored, not cached.
+    do {
+        let fetcher = GatedFetcher()
+        let sidecars = FakeSidecars()
+        sidecars.live[binding] = stravaRoute
+        let other = makeRoute(provider: RouteProviderPolicyV1.importedGPX, count: 90)
+        let otherBinding = RouteElevationArchiveBindingV1(routeID: other.id, revision: 1, contentHash: "gpx")
+        sidecars.live[otherBinding] = other
+        let service = RouteElevationService(fetcher: fetcher, sidecars: sidecars)
+        let subject = RouteElevationSubjectV1(route: stravaRoute, binding: binding)
+        var started = false
+        fetcher.onRequest = { started = true }
+        let pending = Task { await service.resolve(subject) }
+        while !started { await Task.yield() }
+        sidecars.remove(binding)
+        service.invalidateStravaSubjects(keeping: [])
+        fetcher.released = true
+        expect(await pending.value == .unavailable(.sourceNotPermitted),
+               "an answer for a deleted Strava archive is discarded")
+        expect(!sidecars.stored.contains(binding) && sidecars.sidecars[binding] == nil,
+               "a late answer never writes the deleted route's sidecar")
+        expect(service.cachedState(for: subject) == nil, "a late answer is not cached")
+        expect(fetcher.requests.count == 1 && fetcher.requests[0].routeSource == "strava",
+               "the request itself kept Strava provenance")
+    }
 }
 
 @MainActor
@@ -789,6 +912,7 @@ enum RouteElevationTestRunner {
         testRequestUsesWGS84GeoJSONOrder()
         await testMapKitService()
         await testService()
+        await testStravaService()
         let hill = fixtureProfile(fixture.cases.first { $0.name == "ordinary-hill" }!)
         testPlannerHappyPath(hill)
         testPlannerRetries(hill)

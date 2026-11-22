@@ -146,7 +146,23 @@ int main() {
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
   static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 36);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 37);
+  // The two-line detour display is extended bit 7; it needs room for a
+  // useful RTK1 track in one protected write.
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_REFERENCE_TRACK_V1_FEATURE == 128);
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_REFERENCE_TRACK_V1_MINIMUM_CLIENT_VERSION == 37);
+  assert(!device_capabilities_protocol::supportsRouteReferenceTrack(36, true, 517));
+  assert(!device_capabilities_protocol::supportsRouteReferenceTrack(37, false, 517));
+  assert(!device_capabilities_protocol::supportsRouteReferenceTrack(37, true, 99));
+  assert(device_capabilities_protocol::supportsRouteReferenceTrack(37, true, 100));
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  static_assert(device_capabilities_protocol::ROUTE_REFERENCE_TRACK_ENABLED);
+#else
+  static_assert(!device_capabilities_protocol::ROUTE_REFERENCE_TRACK_ENABLED,
+                "production keeps the single detour line until a board check");
+#endif
+  static_assert((device_capabilities_protocol::epaper_policy::SUPPORTED_EXTENDED_FEATURES &
+                 ride_ble_protocol_generated::EXTENDED_ROUTE_REFERENCE_TRACK_V1_FEATURE) != 0);
   // Screen activation is extended bit 6 and rides on screen configuration.
   static_assert(ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE == 64);
   static_assert(ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_MINIMUM_CLIENT_VERSION == 36);

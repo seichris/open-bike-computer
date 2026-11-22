@@ -568,6 +568,54 @@ A zero-length route geometry packet clears the route overlay on the ESP32. The
 iOS app sends this when navigation stops so stale route geometry is not used for
 route-overlay rendering or Course Up rotation.
 
+## Route reference track (`RTK1`)
+
+While the iPhone guides a temporary bicycle detour on a saved route (see
+[Saved-route detours](saved-route-detours.md)), the anchored route window on
+`2A6F` carries the detour. A device that advertises CAP2 extended bit `7`
+(`route_reference_track_v1`, client version `37`) also receives the saved
+route around the detour and draws it as a second, unanchored line in a muted
+style under the guidance line: a desaturated blue (`0x7A9CC6`) on the AMOLED
+boards, a thin black line under the guidance line's white halo on the e-paper
+board.
+
+Frames travel on the protected navigation characteristic (`2A6E`), owner
+session only; scoped Watch sessions are rejected and keep the single line.
+All fields are little endian:
+
+| Field | Bytes | Meaning |
+| --- | --- | --- |
+| magic | 4 | `RTK1` |
+| version | 1 | `1`; another version is ignored |
+| operation | 1 | `0` clear (nothing follows), `1` set |
+| start | 8 | set only: latitude, longitude as Int32 microdegrees (WGS-84) |
+| deltas | 4 each | set only: Int16 latitude, longitude deltas per further point |
+
+A set frame holds 2–48 points (at most 202 bytes). The iPhone takes the saved
+route from 150 m behind the last confirmed progress to 300 m past the rejoin
+point, simplifies it (Douglas–Peucker) until it fits the session's protected
+write limit, and splits any segment whose delta would not fit an Int16. It
+never clamps. Firmware validates the whole frame before replacing the stored
+track; a malformed frame keeps the previous track.
+
+The track is replaceable state without an acknowledgement. The iPhone sends a
+set frame when a detour starts and a clear frame at rejoin, when the detour is
+dropped and when navigation stops; it resends the current track after every
+navigation readiness and when bit `7` is negotiated. Firmware clears the track
+when the route window is cleared (zero-length `2A6F`), on disconnect and
+whenever the authenticated owner session ends. It advertises bit `7` only with
+an ATT MTU of at least 100.
+
+Until a physical board check, firmware advertises bit `7` and decodes `RTK1`
+only in development profiles (`FIRMWARE_DIAGNOSTICS=1`). Production firmware,
+older firmware (release 15 and earlier) and every Watch-owned ride use the
+compatible single line: the detour window replaces the route window during the
+detour and the original window returns at rejoin.
+
+`protocol/fixtures/route-reference-track-v1/frames-v1.txt` holds golden set,
+clear and rejected frames; the Swift encoder and the C++ parser are both
+checked against them.
+
 ## GPS Position (`2A72`)
 
 Little-endian binary packet:
@@ -1489,8 +1537,10 @@ and cannot negotiate POIs. Version `34` requests extended bit `4`, board
 display/input metadata (TLV type `4`, below). Version `35` requests extended
 bit `5`, the position-source record (TLV type `5`, below). Version `36`
 requests extended bit `6`, screen activation (see
-[Screen activation](#screen-activation)).
-The current iPhone client negotiates version `36`; older direct Watch clients
+[Screen activation](#screen-activation)). Version `37` requests extended bit
+`7`, the two-line detour display (see
+[Route reference track](#route-reference-track-rtk1)).
+The current iPhone client negotiates version `37`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
@@ -1599,8 +1649,8 @@ carries exactly four bytes of little-endian extended feature flags, independentl
 numbered from the first word. Its bit `0` is `group_riders_v1`, bit `1` is
 `friend_marker_scale_v1`, bit `2` is `route_elevation_v1`, bit `3` is
 `map_pois`, bit `4` is `board_display_metadata`, bit `5` is
-`position_source_metadata`, and bit `6` is `screen_activation_v1`; absent means
-zero. Firmware sets bit `1` whenever it
+`position_source_metadata`, bit `6` is `screen_activation_v1`, and bit `7` is
+`route_reference_track_v1`; absent means zero. Firmware sets bit `1` whenever it
 can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
 independent of this session's group-rider relay, so a stored size can be
 changed before friends appear. Firmware without bit `1` ignores setting `39`.

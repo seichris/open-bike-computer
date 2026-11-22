@@ -63,6 +63,7 @@ bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
 
 
 bash "${SCRIPT_DIR}/run-route-elevation-tests.sh"
+bash "${SCRIPT_DIR}/run-saved-route-detour-tests.sh"
 
 CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"

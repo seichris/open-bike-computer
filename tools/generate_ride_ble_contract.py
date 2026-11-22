@@ -92,6 +92,25 @@ def load_contract() -> dict:
     for key, value in requests.items():
         if len(value.encode("ascii")) != 4:
             raise SystemExit(f"{key} must be exactly four ASCII bytes")
+    reference_track = contract["route_reference_track"]
+    if len(reference_track["magic"].encode("ascii")) != 4:
+        raise SystemExit("route_reference_track.magic must be four ASCII bytes")
+    if reference_track["magic"] in requests.values():
+        raise SystemExit("route reference track frames need their own magic")
+    if reference_track["version"] != 1 or reference_track["header_bytes"] != 6:
+        raise SystemExit("route reference track v1 requires a six-byte header")
+    if reference_track["operations"] != {"clear": 0, "set": 1}:
+        raise SystemExit("route reference track operations must be clear=0, set=1")
+    if not 2 <= reference_track["minimum_points"] <= reference_track["maximum_points"] <= 64:
+        raise SystemExit("route reference track points must be 2...64")
+    largest_frame = (reference_track["header_bytes"] + 8 +
+                     4 * (reference_track["maximum_points"] - 1))
+    if largest_frame > 512 - contract["protected_frame_overhead"]:
+        raise SystemExit("the largest route reference track frame must fit one protected write")
+    if not 23 <= reference_track["minimum_mtu"] <= 517:
+        raise SystemExit("route reference track minimum MTU must be a valid ATT MTU")
+    if "route_reference_track_v1" not in caps["extended_features"]:
+        raise SystemExit("route reference track needs its extended capability bit")
     delivery = contract["application_delivery"]
     for key in ("command_magic", "ack_magic"):
         if len(delivery[key].encode("ascii")) != 4:
@@ -269,6 +288,12 @@ def render_swift(contract: dict) -> str:
             f"    static let completedApplicationReplayWindow = {delivery['completed_replay_window']}",
             f'    static let applicationCommandGoldenHex = "{delivery["golden"]["command_hex"]}"',
             f'    static let applicationAcknowledgementGoldenHex = "{delivery["golden"]["ack_hex"]}"',
+            f'    static let routeReferenceTrackMagic = "{contract["route_reference_track"]["magic"]}"',
+            f"    static let routeReferenceTrackVersion: UInt8 = {contract['route_reference_track']['version']}",
+            f"    static let routeReferenceTrackHeaderBytes = {contract['route_reference_track']['header_bytes']}",
+            f"    static let routeReferenceTrackMinimumPoints = {contract['route_reference_track']['minimum_points']}",
+            f"    static let routeReferenceTrackMaximumPoints = {contract['route_reference_track']['maximum_points']}",
+            f"    static let routeReferenceTrackMinimumMTU = {contract['route_reference_track']['minimum_mtu']}",
             "}",
             "",
             "enum RideBLEGeneratedProtectedChannelV1: UInt8, Sendable {",
@@ -293,6 +318,9 @@ def render_swift(contract: dict) -> str:
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", "", "nonisolated enum RideBLEScreenActivationResultV1: UInt8, Equatable, Sendable {"])
     for name, value in screen_configuration["activation_results"].items():
+        lines.append(f"    case {camel(name)} = {value}")
+    lines.extend(["}", "", "nonisolated enum RideBLERouteReferenceTrackOperationV1: UInt8, Equatable, Sendable {"])
+    for name, value in contract["route_reference_track"]["operations"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
     # The legacy screen-settings channel carries the released screens through
@@ -418,6 +446,12 @@ def render_cpp(contract: dict) -> str:
             f"inline constexpr std::size_t COMPLETED_APPLICATION_REPLAY_WINDOW = {delivery['completed_replay_window']};",
             f'inline constexpr char APPLICATION_COMMAND_GOLDEN_HEX[] = "{delivery["golden"]["command_hex"]}";',
             f'inline constexpr char APPLICATION_ACK_GOLDEN_HEX[] = "{delivery["golden"]["ack_hex"]}";',
+            f'inline constexpr char ROUTE_REFERENCE_TRACK_MAGIC[] = "{contract["route_reference_track"]["magic"]}";',
+            f"inline constexpr uint8_t ROUTE_REFERENCE_TRACK_VERSION = {contract['route_reference_track']['version']};",
+            f"inline constexpr std::size_t ROUTE_REFERENCE_TRACK_HEADER_BYTES = {contract['route_reference_track']['header_bytes']};",
+            f"inline constexpr std::size_t ROUTE_REFERENCE_TRACK_MINIMUM_POINTS = {contract['route_reference_track']['minimum_points']};",
+            f"inline constexpr std::size_t ROUTE_REFERENCE_TRACK_MAXIMUM_POINTS = {contract['route_reference_track']['maximum_points']};",
+            f"inline constexpr uint16_t ROUTE_REFERENCE_TRACK_MINIMUM_MTU = {contract['route_reference_track']['minimum_mtu']};",
             "",
             "enum class ProtectedChannel : uint8_t {",
         ]
@@ -441,6 +475,9 @@ def render_cpp(contract: dict) -> str:
         lines.append(f"  {pascal(name)} = {value},")
     lines.extend(["};", "", "enum class ScreenActivationResult : uint8_t {"])
     for name, value in screen_configuration["activation_results"].items():
+        lines.append(f"  {pascal(name)} = {value},")
+    lines.extend(["};", "", "enum class RouteReferenceTrackOperation : uint8_t {"])
+    for name, value in contract["route_reference_track"]["operations"].items():
         lines.append(f"  {pascal(name)} = {value},")
     lines.extend(["};", "", "enum class ScreenType : uint8_t {"])
     for name, value in contract["screen_types"].items():

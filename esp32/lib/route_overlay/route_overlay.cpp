@@ -24,8 +24,9 @@
 #include <cstring>
 #include <utility>
 
-// Global instance
+// Global instances
 RouteOverlay routeOverlay;
+RouteReferenceTrack routeReferenceTrack;
 
 bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
   // Only the explicit empty packet clears a route. Reject incomplete points
@@ -220,16 +221,18 @@ RouteSnapshot RouteOverlay::snapshot() const {
 
 namespace {
 
-template <typename DrawSegment>
+template <typename Snapshot, typename DrawSegment>
 void drawRouteSnapshotImpl(
-    const RouteSnapshot &snapshot,
+    const Snapshot &snapshot,
     const map_projection::Projection &projection, uint8_t baseLineWidth,
     const map_transform::WorldPoint *presentedWorld,
     const RoutePresentationTransform *presentation, DrawSegment drawSegment) {
-  if (!snapshot.hasRoute())
+  if (snapshot.count < 2)
     return;
 
-  std::array<map_transform::WorldPoint, ROUTE_SNAPSHOT_MAX_POINTS + 1> path{};
+  constexpr size_t capacity =
+      sizeof(snapshot.points) / sizeof(snapshot.points[0]);
+  std::array<map_transform::WorldPoint, capacity + 1> path{};
   size_t pathCount = 0;
   const auto pointAt = [&](size_t index) {
     return routeWorldPoint(snapshot.points[index]);
@@ -351,20 +354,130 @@ void RouteOverlay::drawSnapshot(
       });
 }
 
-void RouteOverlay::drawRoute(
+bool RouteReferenceTrack::apply(
+    const route_reference_track_protocol::Frame &frame) {
+  using route_reference_track_protocol::FrameKind;
+  if (frame.kind == FrameKind::Clear)
+    return clear();
+  if (frame.kind != FrameKind::Set || frame.count < 2 ||
+      frame.count > route_reference_track_protocol::MAXIMUM_POINTS)
+    return false;
+  bool changed = false;
+  portENTER_CRITICAL(&trackMutex);
+  changed = count != frame.count;
+  for (uint16_t index = 0; index < frame.count; ++index) {
+    const GeoPoint point{frame.points[index].lat, frame.points[index].lon};
+    if (!changed &&
+        (points[index].lat != point.lat || points[index].lon != point.lon))
+      changed = true;
+    points[index] = point;
+  }
+  count = frame.count;
+  if (changed)
+    ++revisionCounter;
+  portEXIT_CRITICAL(&trackMutex);
+  return changed;
+}
+
+bool RouteReferenceTrack::clear() {
+  portENTER_CRITICAL(&trackMutex);
+  const bool changed = count != 0;
+  count = 0;
+  if (changed)
+    ++revisionCounter;
+  portEXIT_CRITICAL(&trackMutex);
+  return changed;
+}
+
+bool RouteReferenceTrack::hasTrack() const {
+  portENTER_CRITICAL(&trackMutex);
+  const bool result = count >= 2;
+  portEXIT_CRITICAL(&trackMutex);
+  return result;
+}
+
+uint32_t RouteReferenceTrack::revision() const {
+  portENTER_CRITICAL(&trackMutex);
+  const uint32_t result = revisionCounter;
+  portEXIT_CRITICAL(&trackMutex);
+  return result;
+}
+
+RouteReferenceTrackSnapshot RouteReferenceTrack::snapshot() const {
+  RouteReferenceTrackSnapshot result;
+  portENTER_CRITICAL(&trackMutex);
+  result.revision = revisionCounter;
+  result.count = count;
+  for (uint16_t index = 0; index < count; ++index)
+    result.points[index] = points[index];
+  portEXIT_CRITICAL(&trackMutex);
+  return result;
+}
+
+uint8_t RouteReferenceTrack::lineWidth(uint8_t routeLineWidth) {
+  return navigation_visual_style::referenceTrackLineWidth(routeLineWidth);
+}
+
+void RouteReferenceTrack::drawSnapshot(
+    const RouteReferenceTrackSnapshot &snapshot,
+    map_surface::Rgb565Surface surface,
+    const map_projection::Projection &projection, uint8_t routeLineWidth,
+    const RoutePresentationTransform *presentation) {
+  if (!surface.valid() || !snapshot.hasTrack())
+    return;
+  drawRouteSnapshotImpl(
+      snapshot, projection, lineWidth(routeLineWidth), nullptr, presentation,
+      [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t width) {
+        line_rasterizer::drawFilledLine(
+            surface.pixels, surface.width, surface.height,
+            static_cast<uint32_t>(surface.stridePixels), x1, y1, x2, y2,
+            navigation_visual_style::REFERENCE_TRACK_RGB565, width);
+      });
+}
+
+void RouteReferenceTrack::drawSnapshot(
+    const RouteReferenceTrackSnapshot &snapshot,
+    map_surface::Rgb565A8Surface surface,
+    const map_projection::Projection &projection, uint8_t routeLineWidth,
+    const RoutePresentationTransform *presentation) {
+  if (!surface.valid() || !snapshot.hasTrack())
+    return;
+  drawRouteSnapshotImpl(
+      snapshot, projection, lineWidth(routeLineWidth), nullptr, presentation,
+      [&](int16_t x1, int16_t y1, int16_t x2, int16_t y2, uint8_t width) {
+        line_rasterizer::drawFilledLine(
+            surface.pixels, surface.width, surface.height,
+            static_cast<uint32_t>(surface.colorStridePixels), x1, y1, x2, y2,
+            navigation_visual_style::REFERENCE_TRACK_RGB565, width);
+        line_rasterizer::drawFilledLine(
+            surface.alpha, surface.width, surface.height,
+            static_cast<uint32_t>(surface.alphaStrideBytes), x1, y1, x2, y2,
+            uint8_t{255}, width);
+      });
+}
+
+bool RouteOverlay::drawRoute(
     lv_obj_t *canvas, const map_projection::Projection &projection) {
   if (canvas == nullptr)
-    return;
+    return false;
   lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
   if (drawBuffer == nullptr)
-    return;
+    return false;
   map_surface::Rgb565Surface surface{
       reinterpret_cast<uint16_t *>(drawBuffer->data),
       static_cast<int32_t>(drawBuffer->header.w),
       static_cast<int32_t>(drawBuffer->header.h),
       static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t))};
-  drawSnapshot(snapshot(), surface, projection,
-               static_cast<uint8_t>(std::min<int>(
-                   48, std::max<int>(1,
-                       currentMapStyleSettings().routeLineWidth))));
+  const uint8_t routeLineWidth = static_cast<uint8_t>(std::min<int>(
+      48, std::max<int>(1, currentMapStyleSettings().routeLineWidth)));
+  bool referenceTrackDrawn = false;
+  if constexpr (RouteReferenceTrack::ENABLED) {
+    // The saved route under a detour goes down first, below the guidance line.
+    const RouteReferenceTrackSnapshot reference = routeReferenceTrack.snapshot();
+    referenceTrackDrawn = reference.hasTrack();
+    RouteReferenceTrack::drawSnapshot(reference, surface, projection,
+                                      routeLineWidth);
+  }
+  drawSnapshot(snapshot(), surface, projection, routeLineWidth);
+  return referenceTrackDrawn;
 }

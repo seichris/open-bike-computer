@@ -47,6 +47,14 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             routeLibrary: routeLibrary,
             controllerCredentialStore: controllerCredentialStore
         )
+        navigationManager.detourProviders = BicycleDetourProviderChainV1(
+            mapKit: MapKitCyclingDetourProvider(),
+            fallback: BicinoBicycleDetourProvider(transport: WatchBicycleDetourRelayTransport {
+                [weak connectivityCoordinator] data in
+                guard let connectivityCoordinator else { throw URLError(.cannotConnectToHost) }
+                return try await connectivityCoordinator.sendBicycleDetourRelay(data)
+            })
+        )
         self.workoutManager = workoutManager
         self.routeLibrary = routeLibrary
         self.connectivityCoordinator = connectivityCoordinator

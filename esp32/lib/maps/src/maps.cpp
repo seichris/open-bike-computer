@@ -5960,6 +5960,11 @@ void Maps::renderLiveForeground() {
   uint64_t presentationSignature = 1469598103934665603ULL;
   presentationSignature =
       fnvMix64(presentationSignature, route.revision);
+  // The saved route under a detour (RTK1) shares this foreground. Only its
+  // small revision is read here; the points are copied just before drawing.
+  if constexpr (RouteReferenceTrack::ENABLED)
+    presentationSignature =
+        fnvMix64(presentationSignature, routeReferenceTrack.revision());
   presentationSignature = fnvMix64(
       presentationSignature, visibleRenderResult.version.sequence);
   presentationSignature =
@@ -6012,6 +6017,11 @@ void Maps::renderLiveForeground() {
   presentation.outputPivotY =
       visibleProjection.anchorY() - visibleRenderResult.overscanPixels;
   presentation.rotationRad = rotationDelta;
+  // Unanchored and muted, under the anchored guidance line.
+  if constexpr (RouteReferenceTrack::ENABLED)
+    RouteReferenceTrack::drawSnapshot(routeReferenceTrack.snapshot(), surface,
+                                      visibleProjection, routeLineWidth,
+                                      &presentation);
   RouteOverlay::drawSnapshot(route, surface, visibleProjection, routeLineWidth,
                              &presented, &presentation);
 
@@ -7514,7 +7524,8 @@ bool Maps::renderRollingForeground() {
       rollingRasterWindow.zoom, rollingRasterWindow.rotation, width, height,
       map_projection::Mode::Flat);
   if (routeOverlay.hasRoute() && isRouteOverlayVisible(mapRenderSettings)) {
-    routeOverlay.drawRoute(Maps::canvasForeground, foregroundProjection);
+    const bool referenceTrackDrawn =
+        routeOverlay.drawRoute(Maps::canvasForeground, foregroundProjection);
     lv_draw_buf_t *drawBuffer =
         lv_canvas_get_draw_buf(Maps::canvasForeground);
     if (drawBuffer != nullptr && drawBuffer->data != nullptr &&
@@ -7527,6 +7538,15 @@ bool Maps::renderRollingForeground() {
       map_label_rasterizer::makeColorOpaque(
           colors, alpha, width, height, colorStride, colorStride,
           navigation_visual_style::ROUTE_BLUE_RGB565);
+      // A second full pass only when a reference track was drawn this frame
+      // (never in builds without RTK1, where drawRoute always returns false).
+      if constexpr (navigation_visual_style::REFERENCE_TRACK_RGB565 !=
+                    navigation_visual_style::ROUTE_BLUE_RGB565) {
+        if (referenceTrackDrawn)
+          map_label_rasterizer::makeColorOpaque(
+              colors, alpha, width, height, colorStride, colorStride,
+              navigation_visual_style::REFERENCE_TRACK_RGB565);
+      }
     }
   }
 

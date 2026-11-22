@@ -63,6 +63,13 @@ other identifier as linked even when the app has no account or real-world name.
 - Confirm Watch online-routing origin/destination and returned MapKit route are
   used only for the rider's real-time request, remain absent from Bicino backend
   traffic and logs, and are not written to the offline route store.
+- Confirm saved-route bicycle detours (`POST /v1/bicycle-detours`) are asked
+  only after MapKit had no cycling route, carry exactly the rider position and
+  one rejoin point (also when relayed from a Watch-owned ride through the
+  iPhone), require an App Attest-enrolled installation, are served by Bicino's
+  own Valhalla server, and leave no coordinates in storage or logs. On a Watch
+  ride they stop, including any request in flight, as soon as online routing
+  is turned off.
 - Confirm paired-device coordinate favorites and offline route archives remain
   inside WatchConnectivity/local device storage, and that expired archives and
   rider-requested deletions follow the documented retention behavior.
@@ -103,7 +110,8 @@ other identifier as linked even when the app has no account or real-world name.
   Geoapify request carries only sample coordinates from the server, and the
   credit ledger keeps only installation pseudonyms with day-scoped counts that
   expire within 48 hours. Imported GPX and selected active or saved Apple Maps
-  routes may reach this endpoint; Strava geometry remains excluded. This adds
+  routes may reach this endpoint, and so may direct Strava imports whose own
+  heights are missing or unusable (approved 2026-11-21, tagged `strava`). This adds
   Apple Maps route coordinates to the same real-time-only elevation processing
   described above; recheck these retention guarantees against the Precise
   Location answer before publishing.

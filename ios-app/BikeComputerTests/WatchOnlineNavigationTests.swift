@@ -11,6 +11,7 @@ enum WatchOnlineNavigationTests {
         try testFavoriteRevisionReconciliation()
         try await testOfflinePolicyMakesNoRequest()
         try await testAdvisoryNetworkAndPolicyGeneration()
+        try await testSavedRouteDetourStopsWhenOnlineRoutingTurnsOff()
         try await testRerouteFailurePreservesLoadedRoute()
         try await testNavigationPresentationAndIndependentRecovery()
         try await testProviderFallsBackToCarWhereCyclingIsUnavailable()
@@ -491,6 +492,76 @@ enum WatchOnlineNavigationTests {
             offlineHarness.provider.requests.isEmpty &&
                 offlineHarness.manager.snapshot?.offRouteDistanceMeters != nil,
             "offline deviation never invokes a provider"
+        )
+    }
+
+    private static func testSavedRouteDetourStopsWhenOnlineRoutingTurnsOff() async throws {
+        let clock = TestClock()
+        let harness = try Harness(network: .available, now: { clock.now })
+        defer { harness.cleanup() }
+        harness.settings.setUseWatchCellularConnection(true)
+        let saved = route(
+            provider: RouteProviderPolicyV1.importedGPX,
+            points: [
+                RouteCoordinateV1(latitude: 0, longitude: 0),
+                RouteCoordinateV1(latitude: 0, longitude: 0.009),
+            ],
+            distanceMeters: 1_002
+        )
+        let archive = try NavigationRouteArchiveV1.create(route: saved, purpose: .offlineNavigation)
+        _ = try harness.library.install(
+            try archive.encoded(purpose: .offlineNavigation),
+            expectedIdentity: WatchRouteIdentityV1(archive: archive)
+        )
+        let detours = TestDetourProvider()
+        harness.manager.detourProviders = detours
+        harness.manager.startInstalledRoute(routeID: saved.id)
+        await settle()
+
+        func ride(_ latitude: Double, _ longitude: Double, course: Double) {
+            clock.now.addTimeInterval(2)
+            harness.location.emit(CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                altitude: 0,
+                horizontalAccuracy: 5,
+                verticalAccuracy: 5,
+                course: course,
+                speed: 5,
+                timestamp: clock.now
+            ))
+        }
+        // 200 m along the saved route, then 67 m north of it riding on east.
+        for step in 0...20 { ride(0, Double(step) * 0.00009, course: 90) }
+        for step in 1...10 {
+            ride(min(0.0006, Double(step) * 0.00012), 0.0018 + Double(step) * 0.0001, course: 45)
+        }
+        await settle()
+        expect(
+            detours.queries.count == 1 && harness.manager.detourPhase == .requesting,
+            "leaving an installed GPX route with online routing asks for a bike detour"
+        )
+
+        let cancelsBefore = detours.cancelCount
+        harness.settings.setUseWatchCellularConnection(false)
+        await settle()
+        expect(
+            detours.cancelCount > cancelsBefore &&
+                harness.manager.detourPhase == .unavailable(.offline),
+            "turning online routing off cancels the in-flight detour request"
+        )
+        for step in 1...8 { ride(0.0006, 0.0028 + Double(step) * 0.0002, course: 90) }
+        harness.network.send(.available)
+        await settle()
+        expect(
+            detours.queries.count == 1,
+            "no detour request goes out while online routing is off, whatever the network does"
+        )
+
+        harness.settings.setUseWatchCellularConnection(true)
+        await settle()
+        expect(
+            detours.queries.count == 2 && harness.manager.detourPhase == .requesting,
+            "turning online routing back on asks again"
         )
     }
 
@@ -1070,6 +1141,30 @@ private final class TestNetworkMonitor: WatchNetworkAvailabilityProviding {
 }
 
 @MainActor
+private final class TestClock {
+    var now = Date()
+}
+
+/// Records detour queries and keeps each one in flight until cancelled.
+@MainActor
+private final class TestDetourProvider: BicycleDetourProviding {
+    private(set) var queries: [BicycleDetourQueryV1] = []
+    private(set) var cancelCount = 0
+    private var pending: CheckedContinuation<BicycleDetourOutcomeV1, Never>?
+
+    func detour(for query: BicycleDetourQueryV1) async -> BicycleDetourOutcomeV1 {
+        queries.append(query)
+        return await withCheckedContinuation { pending = $0 }
+    }
+
+    func cancel() {
+        cancelCount += 1
+        pending?.resume(returning: .cancelled)
+        pending = nil
+    }
+}
+
+@MainActor
 private final class Harness {
     let root: URL
     let defaults: UserDefaults
@@ -1083,7 +1178,10 @@ private final class Harness {
     let manager: WatchNavigationManager
     private let suite: String
 
-    init(network availability: WatchNetworkAvailabilityV1) throws {
+    init(
+        network availability: WatchNetworkAvailabilityV1,
+        now: @escaping () -> Date = Date.init
+    ) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "watch-online-manager-\(UUID().uuidString)",
             isDirectory: true
@@ -1109,7 +1207,8 @@ private final class Harness {
             journalStore: journal,
             settingsStore: settings,
             onlineProvider: provider,
-            networkMonitor: network
+            networkMonitor: network,
+            now: now
         )
     }
 

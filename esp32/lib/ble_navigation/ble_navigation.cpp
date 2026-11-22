@@ -168,6 +168,40 @@ static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
 static std::atomic<bool> bleSessionSupportsGroupRiders{false};
 static std::atomic<bool> bleSessionSupportsRouteElevation{false};
+static std::atomic<bool> bleSessionSupportsRouteReferenceTrack{false};
+
+// RTK1 belongs to one authenticated owner session. Whenever that session
+// ends, the track goes with it: the phone resends the current track after it
+// reconnects, so a stale saved-route line never outlives its detour.
+static void resetRouteReferenceTrackSession() {
+  bleSessionSupportsRouteReferenceTrack.store(false, std::memory_order_release);
+  if constexpr (RouteReferenceTrack::ENABLED) {
+    if (routeReferenceTrack.clear())
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  }
+}
+
+// Writes arrive one at a time on the NimBLE host task, so one static frame
+// keeps the 392-byte decode off that task's 8 KiB stack and out of every
+// other packet's onWrite frame. Builds without the feature never call it.
+[[maybe_unused]] [[gnu::noinline]] static void
+applyRouteReferenceTrackFrame(const uint8_t *data, size_t len) {
+  static route_reference_track_protocol::Frame frame;
+  route_reference_track_protocol::parseInto(data, len, frame);
+  if (frame.kind != route_reference_track_protocol::FrameKind::Clear &&
+      frame.kind != route_reference_track_protocol::FrameKind::Set) {
+    // Malformed or unknown-version frames keep the previous track.
+    Serial.println("BLE: Rejected route reference track frame");
+    return;
+  }
+  if (routeReferenceTrack.apply(frame)) {
+    Serial.printf("BLE: route reference track %s (%u points)\n",
+                  frame.kind == route_reference_track_protocol::FrameKind::Clear
+                      ? "cleared" : "set",
+                  static_cast<unsigned>(frame.count));
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+  }
+}
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -2112,6 +2146,7 @@ static bool decodeSessionPayload(
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -3253,6 +3288,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
@@ -3304,6 +3340,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
                 rideDeliveryLeaseGenerationSnapshot.store(
                     0, std::memory_order_release);
                 advanceRidePayloadGeneration();
@@ -3321,6 +3358,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
@@ -3397,6 +3435,7 @@ static void handleAuthPayload(const std::string &frame) {
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -5476,6 +5515,16 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
              device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE) != 0))
       extendedFeatureFlags |=
           ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE;
+    const bool supportsReferenceTrack =
+        device_capabilities_protocol::supportsRouteReferenceTrack(
+            clientVersion,
+            device_capabilities_protocol::ROUTE_REFERENCE_TRACK_ENABLED,
+            activePeerMtu.load(std::memory_order_acquire));
+    bleSessionSupportsRouteReferenceTrack.store(supportsReferenceTrack,
+                                                std::memory_order_release);
+    if (supportsReferenceTrack)
+      extendedFeatureFlags |= ride_ble_protocol_generated::
+          EXTENDED_ROUTE_REFERENCE_TRACK_V1_FEATURE;
     if (board_traits::epaper) {
       // Last, so no feature computed above can reach the one-bit renderer.
       featureFlags &=
@@ -6194,6 +6243,9 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
       stats.lastRoutePacketMs = millis();
     });
     routeOverlay.clear();
+    // Navigation stopped: the saved route under a detour goes too.
+    if constexpr (RouteReferenceTrack::ENABLED)
+      routeReferenceTrack.clear();
     clearCurrentNavigationData();
     requestMapRender(map_render_policy::Reason::Route);
     return;
@@ -7185,6 +7237,7 @@ public:
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
     resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
@@ -7388,6 +7441,7 @@ public:
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -7572,6 +7626,22 @@ public:
           notifyAuthenticatedNavigation(pChar, acknowledgement.data(), acknowledgement.size());
         }
         ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+      return;
+    }
+
+    if (route_reference_track_protocol::hasFrameMagic(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      // Owner-only replaceable state: scoped Watch rides keep the single
+      // guidance line. Builds without the feature never advertise it and
+      // compile none of it; their frames end here.
+      if constexpr (device_capabilities_protocol::ROUTE_REFERENCE_TRACK_ENABLED) {
+        if (scopedWatchSession || !requireAuthenticated("route reference track") ||
+            !bleSessionSupportsRouteReferenceTrack.load(std::memory_order_acquire))
+          return;
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Route);
+        applyRouteReferenceTrackFrame(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size());
       }
       return;
     }
@@ -9004,6 +9074,7 @@ bool BLENavigationServer::forgetOwner() {
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     route_elevation_runtime::reset();
     bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
+    resetRouteReferenceTrackSession();
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.authenticated = false;
   });

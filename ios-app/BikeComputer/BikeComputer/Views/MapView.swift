@@ -303,6 +303,8 @@ struct MapViewContainer: UIViewRepresentable {
     var isRouteCalculationActive = false
     var topographyOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
+    /// A temporary bicycle detour back to the saved route, drawn on top of it.
+    var detourPolyline: MKPolyline? = nil
     var socialRiders: [SocialRider] = []
     var socialPhotos: [String: UIImage] = [:]
     var socialMarkerStyle = SocialMapMarkerStyle()
@@ -454,6 +456,7 @@ struct MapViewContainer: UIViewRepresentable {
             isRouteCalculationActive: isRouteCalculationActive,
             offlineNavigationPolyline: offlineNavigationPolyline
         )
+        context.coordinator.updateDetourOverlay(isNavigating ? detourPolyline : nil, on: uiView)
         
         // Update simulated position
         let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
@@ -618,6 +621,16 @@ struct MapViewContainer: UIViewRepresentable {
 
         var lastRoute: MKRoute?
         private(set) var lastOfflineNavigationPolyline: MKPolyline?
+        private(set) var displayedDetourOverlay: MKPolyline?
+
+        /// The saved route stays drawn; the detour is a separate dashed line
+        /// above it, removed as soon as the rider rejoins.
+        func updateDetourOverlay(_ polyline: MKPolyline?, on mapView: MKMapView) {
+            guard displayedDetourOverlay !== polyline else { return }
+            if let displayedDetourOverlay { mapView.removeOverlay(displayedDetourOverlay) }
+            displayedDetourOverlay = polyline
+            if let polyline { mapView.addOverlay(polyline, level: .aboveRoads) }
+        }
         var lastRouteAlternatives: [MapRouteAlternative] = []
         var selectedRouteAlternativeID: UUID?
         var mapView: MKMapView?
@@ -1505,6 +1518,13 @@ struct MapViewContainer: UIViewRepresentable {
                 renderer.strokeColor = .systemBlue
                 renderer.lineWidth = 4
                 renderer.alpha = 0.65
+                return
+            }
+            if let detour = displayedDetourOverlay, overlay === detour {
+                renderer.strokeColor = .systemOrange
+                renderer.lineWidth = 6
+                renderer.lineDashPattern = [10, 8]
+                renderer.alpha = 1
                 return
             }
             guard let alternativeID = routeAlternativeID(for: overlay) else {

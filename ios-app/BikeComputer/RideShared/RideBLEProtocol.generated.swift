@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 36
+    static let currentClientVersion: UInt8 = 37
     static let extendedFeatureTLVType: UInt8 = 3
     static let boardDisplayTLVType: UInt8 = 4
     static let boardDisplayVersion: UInt8 = 1
@@ -101,6 +101,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let extendedPositionSourceMetadataMinimumClientVersion: UInt8 = 35
     static let extendedScreenActivationV1Feature: UInt32 = 1 << 6
     static let extendedScreenActivationV1MinimumClientVersion: UInt8 = 36
+    static let extendedRouteReferenceTrackV1Feature: UInt32 = 1 << 7
+    static let extendedRouteReferenceTrackV1MinimumClientVersion: UInt8 = 37
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16
@@ -129,6 +131,12 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let completedApplicationReplayWindow = 8
     static let applicationCommandGoldenHex = "52434d310102010300112233445566778899aabbccddeeff78563412aabb"
     static let applicationAcknowledgementGoldenHex = "52414b310102000000112233445566778899aabbccddeeff7856341209000000"
+    static let routeReferenceTrackMagic = "RTK1"
+    static let routeReferenceTrackVersion: UInt8 = 1
+    static let routeReferenceTrackHeaderBytes = 6
+    static let routeReferenceTrackMinimumPoints = 2
+    static let routeReferenceTrackMaximumPoints = 48
+    static let routeReferenceTrackMinimumMTU = 100
 }
 
 enum RideBLEGeneratedProtectedChannelV1: UInt8, Sendable {
@@ -185,6 +193,11 @@ nonisolated enum RideBLEScreenActivationResultV1: UInt8, Equatable, Sendable {
     case unavailable = 3
     case malformed = 4
     case busy = 5
+}
+
+nonisolated enum RideBLERouteReferenceTrackOperationV1: UInt8, Equatable, Sendable {
+    case clear = 0
+    case set = 1
 }
 
 nonisolated enum RideBLEScreenTypeV1: UInt8, CaseIterable, Codable, Sendable {
