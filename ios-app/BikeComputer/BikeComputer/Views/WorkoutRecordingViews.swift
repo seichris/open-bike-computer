@@ -114,7 +114,7 @@ private struct UnconfirmedWatchWorkoutView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Watch workout unconfirmed", systemImage: "applewatch")
+            Label("Could not connect to your watch", systemImage: "applewatch")
                 .font(.subheadline.weight(.semibold))
             ViewThatFits(in: .horizontal) {
                 HStack { actions }
@@ -140,8 +140,16 @@ private struct UnconfirmedWatchWorkoutView: View {
     }
 
     @ViewBuilder private var actions: some View {
-        Button("Retry on Watch") { coordinator.retryWatchStart() }
-        Button(resolutionTitle) { showsConfirmation = true }
+        Button {
+            coordinator.retryWatchStart()
+        } label: {
+            Label("Retry on Watch", systemImage: "applewatch")
+        }
+        Button {
+            showsConfirmation = true
+        } label: {
+            Label(resolutionTitle, systemImage: coordinator.phoneSupported ? "iphone" : "applewatch")
+        }
     }
 }
 
