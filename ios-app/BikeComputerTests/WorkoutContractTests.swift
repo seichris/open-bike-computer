@@ -8412,7 +8412,10 @@ private struct WorkoutContractTestSuite {
             .filter { !$0.isWhitespace }
         expect(
             compactRecorderChoices.contains("ifcoordinator.phoneSupported{startButton(.iphone)}")
-                && !compactRecorderChoices.contains("isReachable"),
+                && !compactRecorderChoices.contains("isReachable")
+                && recordingChoices.filter { !$0.isWhitespace }.contains(
+                    "ifcoordinator.notice?.kind==.chooseRecorder{WorkoutRecorderChoices(coordinator:coordinator)"
+                ),
             "the recorder choices must retain the same order as Watch reachability changes"
         )
         let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
@@ -8478,9 +8481,9 @@ private struct WorkoutContractTestSuite {
                     ".accessibilityLabel(\"StartWorkout\")"
                 )
                 && compactContent.contains(".buttonStyle(.plain).layoutPriority(1)")
-                && compactWorkout.contains("HStack(spacing:4){startButtonMenu{")
-                && compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
-                && compactWorkout.contains(".accessibilityLabel(\"Chooseworkoutrecorder\")")
+                && compactWorkout.contains("Button{requestStart()}label:{label()}")
+                && !compactWorkout.contains("Menu{WorkoutRecorderChoices(coordinator:recordingCoordinator)")
+                && !compactWorkout.contains(".accessibilityLabel(\"Chooseworkoutrecorder\")")
                 && startRowFitsScreenWidth,
             "the collapsed destination row must show the full blue Start Workout label whenever it fits, fall back to its icon instead of overflowing at large text sizes, and honor recording ownership"
         )

@@ -54,28 +54,10 @@ struct WorkoutStartButton<Label: View>: View {
     @State private var presentedAlert: WorkoutStartAvailabilityAlert?
 
     var body: some View {
-        Group {
-            if let recordingCoordinator,
-               recordingCoordinator.phoneSupported,
-               watchAvailability.availability != .noPairedWatch,
-               watchAvailability.availability != .unsupported {
-                HStack(spacing: 4) {
-                    startButton
-                    Menu {
-                        WorkoutRecorderChoices(coordinator: recordingCoordinator)
-                    } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .frame(width: 44, height: 44)
-                            .background(.regularMaterial, in: Capsule())
-                            .accessibilityLabel("Choose workout recorder")
-                    }
-                    .menuOrder(.fixed)
-                    .accessibilityHint("Choose Apple Watch or iPhone")
-                }
-            } else {
-                startButton
-            }
+        Button {
+            requestStart()
+        } label: {
+            label()
         }
         .alert(item: $presentedAlert) { alert in
             availabilityAlert(alert)
@@ -86,14 +68,6 @@ struct WorkoutStartButton<Label: View>: View {
         }
         .onChange(of: watchAvailability.healthSetupSnapshot) { _ in
             refreshSetupAlert()
-        }
-    }
-
-    private var startButton: some View {
-        Button {
-            requestStart()
-        } label: {
-            label()
         }
     }
 

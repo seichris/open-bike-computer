@@ -15,7 +15,7 @@ struct WorkoutRecorderChoices: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator
 
     var body: some View {
-        // Keep the override menu stable while the Watch wakes or sleeps.
+        // Keep the choices in place while the Watch wakes or sleeps.
         if coordinator.phoneSupported { startButton(.iphone) }
         if coordinator.watchAvailability.availability != .noPairedWatch,
            coordinator.watchAvailability.availability != .unsupported {
