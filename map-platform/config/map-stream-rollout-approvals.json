@@ -598,6 +598,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261122-gcc-routing",
+      "candidateGitSha": "e30a59762471e30b6237cb8553ab96f84a16a5ae",
+      "producerBuildSha256": "10805bb76af1a42b8b43814cc3f3f7798d782caad474b87c55daef9c9893d0d2",
+      "workerImageDigest": "sha256:373328b9bcac4137dc3aa291269c231bba7a369e42b9af5c63413ee9b0ab468c",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 107,
+      "firmwareGitSha": "5f76f445d4943c0984ed08eb299bba14a8b12cfd",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "cb7f22bd8c7e6ce902dde9f17b878be59051093f1b6f1152e8bf910f7bade69a",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-22T18:35:12Z",
+      "approvedBy": "Chris, 2026-11-22, requested “now promote everything to production” after Siri PR #842 merges.",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
