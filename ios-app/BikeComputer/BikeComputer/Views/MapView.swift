@@ -622,6 +622,7 @@ struct MapViewContainer: UIViewRepresentable {
         var lastRoute: MKRoute?
         private(set) var lastOfflineNavigationPolyline: MKPolyline?
         private(set) var displayedDetourOverlay: MKPolyline?
+        private let navigationRouteLineWidth: CGFloat = 6
 
         /// The saved route stays drawn; the detour is a separate dashed line
         /// above it, removed as soon as the rider rejoins.
@@ -1084,7 +1085,7 @@ struct MapViewContainer: UIViewRepresentable {
                     as? MKPolylineRenderer else {
                     continue
                 }
-                applyRouteStyle(renderer, for: overlay)
+                applyRouteStyle(renderer, for: overlay, displayScale: mapView.traitCollection.displayScale)
                 renderer.setNeedsDisplay()
             }
         }
@@ -1502,7 +1503,7 @@ struct MapViewContainer: UIViewRepresentable {
             }
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)
-                applyRouteStyle(renderer, for: overlay)
+                applyRouteStyle(renderer, for: overlay, displayScale: mapView.traitCollection.displayScale)
                 renderer.lineCap = .round
                 renderer.lineJoin = .round
                 return renderer
@@ -1512,7 +1513,8 @@ struct MapViewContainer: UIViewRepresentable {
 
         private func applyRouteStyle(
             _ renderer: MKPolylineRenderer,
-            for overlay: MKOverlay
+            for overlay: MKOverlay,
+            displayScale: CGFloat
         ) {
             if let saved = displayedSavedRouteOverlay, overlay === saved {
                 renderer.strokeColor = .systemBlue
@@ -1522,14 +1524,15 @@ struct MapViewContainer: UIViewRepresentable {
             }
             if let detour = displayedDetourOverlay, overlay === detour {
                 renderer.strokeColor = .systemOrange
-                renderer.lineWidth = 6
+                // The dashed renderer scales its stroke with the display density.
+                renderer.lineWidth = navigationRouteLineWidth / max(displayScale, 1)
                 renderer.lineDashPattern = [10, 8]
                 renderer.alpha = 1
                 return
             }
             guard let alternativeID = routeAlternativeID(for: overlay) else {
                 renderer.strokeColor = .systemBlue
-                renderer.lineWidth = 6
+                renderer.lineWidth = navigationRouteLineWidth
                 renderer.alpha = 1
                 return
             }

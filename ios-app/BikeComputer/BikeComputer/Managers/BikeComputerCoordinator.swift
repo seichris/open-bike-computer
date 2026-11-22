@@ -190,8 +190,7 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
-    /// Shown while navigating a car route that stands in for unavailable
-    /// cycling directions, whether it came from planning or a reroute.
+    /// Advisories for car fallback and saved-route detour status.
     var activeRouteNotice: String? {
         (currentRoute as? CyclingFallbackCarRoute)?.advisoryNotices.first ?? detourNotice
     }
@@ -434,8 +433,8 @@ class BikeComputerCoordinator: ObservableObject {
                 return MKPolyline(coordinates: coordinates, count: coordinates.count)
             }
             .assign(to: &$detourPolyline)
-        Publishers.CombineLatest3(navEngine.$detourPhase, navEngine.$activeDetourRoute, navEngine.$skippedStopLabels)
-            .map { Self.detourNotice(phase: $0, route: $1, skippedStops: $2) }
+        navEngine.$detourPhase.combineLatest(navEngine.$skippedStopLabels)
+            .map { Self.detourNotice(phase: $0, skippedStops: $1) }
             .removeDuplicates()
             .assign(to: &$detourNotice)
 
@@ -1204,14 +1203,11 @@ class BikeComputerCoordinator: ObservableObject {
 
     nonisolated static func detourNotice(
         phase: SavedRouteDetourPhaseV1?,
-        route: NavigationRouteV1?,
         skippedStops: [String]
     ) -> String? {
         switch phase {
         case .requesting?:
             return "Finding a bike detour back to the saved route"
-        case .following?:
-            return "Bike detour to the saved route · \(route?.provider.attribution ?? "Apple Maps")"
         case .unavailable(.offline)?:
             return "Offline: no bike detour, follow the saved route"
         case .unavailable(.noBicycleRoute)?:
