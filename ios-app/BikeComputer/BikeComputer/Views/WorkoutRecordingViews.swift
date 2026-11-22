@@ -161,19 +161,19 @@ private struct UnconfirmedWatchWorkoutView: View {
             .buttonStyle(.bordered)
         }
         .confirmationDialog(
-            coordinator.phoneSupported ? "Start a separate iPhone workout?" : "Clear this Watch attempt?",
+            "Check your Apple Watch",
             isPresented: $showsConfirmation,
             titleVisibility: .visible
         ) {
-            Button(resolutionTitle) {
-                coordinator.resolveUnconfirmedWatchWorkout(
+            Button("No Workout Is Running on Watch") {
+                coordinator.confirmWatchIdleAndResolveUnconfirmedWorkout(
                     sessionID: sessionID,
                     startOnIPhone: coordinator.phoneSupported
                 )
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Any workout started on Apple Watch will stay separate.")
+            Text("Your Watch may already be recording. Open Bicino on Apple Watch and check that no workout is running before continuing.")
         }
     }
 

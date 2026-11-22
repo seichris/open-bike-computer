@@ -706,6 +706,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         let decision = WorkoutRecordingStartPolicy.resolve(
             recoveryComplete: recoveryComplete, existingRecording: record,
             watchAvailability: availability, phoneSupported: phoneSupported,
+            canPresentRecorderChoice: recorderChoiceAnchor != nil,
             explicitOwner: explicitOwner,
             watchWasRecentlyReachable: watchReachabilityLostAt.map {
                 uptime() - $0 < WorkoutRecordingStartPolicy.watchReachabilityGrace
@@ -1002,9 +1003,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
             message: "Recording ownership could not be stored. Existing workouts are left untouched. Unlock iPhone and retry recovery before starting another.")
     }
 
-    /// Resolve only the Watch attempt shown by the confirmation. The Watch
-    /// remains responsible for any workout it may have recorded.
-    func resolveUnconfirmedWatchWorkout(sessionID: UUID, startOnIPhone: Bool) {
+    /// Call after the rider checks Bicino on Apple Watch and confirms it is idle.
+    /// A failed launch or an expired wait can leave the Watch session unknown.
+    func confirmWatchIdleAndResolveUnconfirmedWorkout(sessionID: UUID, startOnIPhone: Bool) {
         guard let record, record.sessionID == sessionID,
               record.owner == .watch, record.phase == .unresolved,
               !startOnIPhone || phoneSupported,

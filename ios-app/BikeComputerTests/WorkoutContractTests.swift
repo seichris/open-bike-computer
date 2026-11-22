@@ -8418,6 +8418,15 @@ private struct WorkoutContractTestSuite {
                 && compactWorkout.contains("startButton.modifier(WorkoutRecorderChoicePopover("),
             "the Start Workout popover must reuse the recorder choices in a fixed order"
         )
+        let watchRecovery = recordingChoices.components(separatedBy: "private struct UnconfirmedWatchWorkoutView:")
+            .last?.components(separatedBy: "struct WorkoutFitnessCheckView:").first ?? ""
+        let compactWatchRecovery = watchRecovery.filter { !$0.isWhitespace }
+        expect(
+            compactWatchRecovery.contains(
+                "Button(\"NoWorkoutIsRunningonWatch\"){coordinator.confirmWatchIdleAndResolveUnconfirmedWorkout("
+            ) && watchRecovery.contains("Open Bicino on Apple Watch and check that no workout is running"),
+            "Only the explicit Watch-idle confirmation can resolve an unconfirmed session from the card"
+        )
         let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
         let compactWatchWorkoutManager =
             watchWorkoutManager.filter { !$0.isWhitespace }

@@ -278,6 +278,7 @@ nonisolated enum WorkoutRecordingStartPolicy {
         existingRecording: WorkoutRecordingRecord?,
         watchAvailability: WorkoutWatchAvailabilityV1,
         phoneSupported: Bool,
+        canPresentRecorderChoice: Bool,
         explicitOwner: WorkoutRecordingOwner? = nil,
         watchWasRecentlyReachable: Bool = false
     ) -> WorkoutRecordingStartDecision {
@@ -299,9 +300,9 @@ nonisolated enum WorkoutRecordingStartPolicy {
         case .ready(isReachable: false) where watchWasRecentlyReachable:
             return .start(.watch)
         case .ready(isReachable: false), .companionAppNotInstalled, .activationFailed:
-            // WatchConnectivity can lag. Keep an explicit Watch attempt
-            // available, but let riders with an iPhone recorder choose.
-            return phoneSupported ? .chooseRecorder : .start(.watch)
+            // Bike and voice starts have no menu. HealthKit can still wake
+            // the Watch when WatchConnectivity can't immediately reach it.
+            return phoneSupported && canPresentRecorderChoice ? .chooseRecorder : .start(.watch)
         case .unsupported:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
         }

@@ -136,13 +136,15 @@ artifact before rebuilding.
 When Bicino on Apple Watch is reachable, **Start Workout** starts on the Watch.
 This default continues for 60 seconds after live contact drops. If a paired
 Watch has had no live contact in that window, **Start Workout** offers both
-recorders. If WatchConnectivity confirms that no Watch is paired, it starts
-on iPhone.
+recorders. Bike-computer and Siri starts still try the paired Watch through
+HealthKit when the menu is unavailable. If WatchConnectivity confirms that no Watch
+is paired, Start Workout uses iPhone.
 
 The recorder is fixed for the ride. Reconnection cannot migrate it, change which
 device saves, or start another workout. Finish and acknowledge the current ride
-before choosing another recorder. Recovery and unresolved Watch starts are checked
-before a new recording is admitted.
+before choosing another recorder. If a Watch start or finish is unconfirmed,
+check in Bicino on Apple Watch that no workout is running before starting a
+separate workout on iPhone.
 
 Phone recording supports outdoor cycling, pause/resume, segments, elapsed/active
 time, GPS route/distance/speed, available HealthKit heart rate/energy, and

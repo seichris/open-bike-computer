@@ -16,10 +16,12 @@ struct WorkoutRecordingOwnershipTests {
         ]
         func decision(_ watch: WorkoutWatchAvailabilityV1, recovery: Bool = true,
                       record: WorkoutRecordingRecord? = nil, phone: Bool = true,
-                      explicit: WorkoutRecordingOwner? = nil) -> WorkoutRecordingStartDecision {
+                      explicit: WorkoutRecordingOwner? = nil,
+                      canPresentRecorderChoice: Bool = true) -> WorkoutRecordingStartDecision {
             WorkoutRecordingStartPolicy.resolve(recoveryComplete: recovery,
                 existingRecording: record, watchAvailability: watch,
-                phoneSupported: phone, explicitOwner: explicit)
+                phoneSupported: phone, canPresentRecorderChoice: canPresentRecorderChoice,
+                explicitOwner: explicit)
         }
         check(decision(.activating) == .waitForWatchActivation, "Activation is not absence")
         check(decision(.noPairedWatch) == .start(.iphone), "Unpaired iPhone default")
@@ -33,6 +35,8 @@ struct WorkoutRecordingOwnershipTests {
                   "An uncertain Watch prompts for a recorder before launching either device")
             check(decision(unconfirmedWatch, phone: false) == .start(.watch),
                   "An older iPhone preserves native Watch launch")
+            check(decision(unconfirmedWatch, canPresentRecorderChoice: false) == .start(.watch),
+                  "Starts without a menu still try to launch the paired Watch")
         }
         check(decision(.unsupported) == .start(.iphone),
               "Unsupported WatchConnectivity uses the available phone recorder")
