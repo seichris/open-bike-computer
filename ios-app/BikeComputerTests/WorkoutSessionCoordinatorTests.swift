@@ -487,9 +487,23 @@ struct WorkoutSessionCoordinatorTests {
         availability3.availability = .ready(isReachable: false)
         unreachable.recoverIfNeeded()
         await spin { unreachable.recoveryComplete }
-        check(!unreachable.requestStart() && unreachable.notice?.kind == .chooseRecorder,
-              "Unreachable paired Watch offers the choice without sending a launch")
+        let startButtonAnchor = UUID()
+        check(!unreachable.requestStart(recorderChoiceAnchor: startButtonAnchor)
+                  && unreachable.notice?.kind == .chooseRecorder
+                  && unreachable.notice?.recorderChoiceAnchor == startButtonAnchor,
+              "Unreachable paired Watch offers the choice at the tapped button without sending a launch")
         check(watch3.starts == 0 && phone3.starts == 0, "No recorder starts until chosen")
+
+        unreachable.dismissNotice()
+        availability3.availability = .activating
+        check(!unreachable.requestStart(recorderChoiceAnchor: startButtonAnchor)
+                  && unreachable.notice == nil,
+              "Watch activation delays presenting the choice")
+        availability3.availability = .ready(isReachable: false)
+        check(unreachable.notice?.kind == .chooseRecorder
+                  && unreachable.notice?.recorderChoiceAnchor == startButtonAnchor
+                  && watch3.starts == 0 && phone3.starts == 0,
+              "A deferred choice returns to the tapped button")
         check(unreachable.requestStart(explicitOwner: .watch),
               "An explicit Watch choice can still use the HealthKit wake path")
         _ = watch3.store.timeOutWatchLaunch(id: watch3.launchID, at: Date().addingTimeInterval(20))

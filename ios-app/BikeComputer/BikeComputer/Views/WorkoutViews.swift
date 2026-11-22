@@ -47,13 +47,24 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
 struct WorkoutStartButton<Label: View>: View {
     @Environment(\.workoutSessionCoordinator) private var recordingCoordinator
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
-    let action: () -> Void
+    let action: (UUID?) -> Void
     @ViewBuilder let label: () -> Label
 
     @State private var pendingStart = false
     @State private var presentedAlert: WorkoutStartAvailabilityAlert?
+    @State private var recorderChoiceAnchor = UUID()
 
     var body: some View {
+        if let recordingCoordinator {
+            startButton.modifier(WorkoutRecorderChoicePopover(
+                coordinator: recordingCoordinator, anchor: recorderChoiceAnchor
+            ))
+        } else {
+            startButton
+        }
+    }
+
+    private var startButton: some View {
         Button {
             requestStart()
         } label: {
@@ -72,8 +83,11 @@ struct WorkoutStartButton<Label: View>: View {
     }
 
     private func requestStart() {
-        if recordingCoordinator != nil { action(); return }
-        handle(watchAvailability.availability)
+        if recordingCoordinator != nil {
+            action(recorderChoiceAnchor)
+        } else {
+            handle(watchAvailability.availability)
+        }
     }
 
     private func handle(_ availability: WorkoutWatchAvailabilityV1) {
@@ -86,10 +100,10 @@ struct WorkoutStartButton<Label: View>: View {
             watchAvailability.activate()
         case .attemptHealthKitLaunch:
             pendingStart = false
-            action()
+            action(nil)
         case .continueSetupOnWatch:
             pendingStart = false
-            action()
+            action(nil)
             presentedAlert = .continueOnWatch
         case .healthAccessDenied:
             pendingStart = false
@@ -146,7 +160,7 @@ struct WorkoutStartButton<Label: View>: View {
                 title: Text(alert.title),
                 message: Text(alert.message),
                 primaryButton: .default(Text("Check Again")) {
-                    action()
+                    action(nil)
                 },
                 secondaryButton: .cancel()
             )
@@ -288,7 +302,7 @@ struct WorkoutFinishButton<Label: View>: View {
 struct WorkoutCompactCard: View {
     @ObservedObject var store: WorkoutMetricsStore
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
-    let onStart: () -> Void
+    let onStart: (UUID?) -> Void
     let onOpen: () -> Void
 
     var body: some View {
@@ -522,7 +536,7 @@ struct WorkoutDashboardView: View {
     @Environment(\.workoutSessionCoordinator) private var recordingCoordinator
     @ObservedObject var store: WorkoutMetricsStore
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
-    let onStart: () -> Void
+    let onStart: (UUID?) -> Void
     let onPause: () -> Void
     let onResume: () -> Void
     let onMarkSegment: () -> Void

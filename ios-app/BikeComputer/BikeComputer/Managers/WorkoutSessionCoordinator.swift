@@ -83,6 +83,7 @@ nonisolated struct WorkoutRecordingNotice: Equatable {
     enum Kind: Equatable { case chooseRecorder, information, recovery, conflict }
     let kind: Kind
     let message: String
+    var recorderChoiceAnchor: UUID? = nil
 }
 
 /// Routes app/device/Lock Screen commands to one recorder for the entire ride.
@@ -118,7 +119,11 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var fitnessCheckAttemptID: UUID?
     private var watchPartFitnessTask: Task<Void, Never>?
     private var watchPartFitnessAttemptID: UUID?
-    private var pendingAutomaticChoice = false
+    private struct PendingAutomaticStart {
+        let recorderChoiceAnchor: UUID?
+    }
+
+    private var pendingAutomaticChoice: PendingAutomaticStart?
     private var storageFailed = false
     private var isResetting = false
     private var phoneRecoveryDeferredForWatch = false
@@ -208,9 +213,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
             previousWatchAvailability = availability
             recordWatchAvailability(availability)
             objectWillChange.send()
-            guard pendingAutomaticChoice, availability != .activating else { return }
+            guard let pending = pendingAutomaticChoice, availability != .activating else { return }
             // @Published emits before storage changes; use this emitted value.
-            requestStart(using: availability)
+            requestStart(using: availability, recorderChoiceAnchor: pending.recorderChoiceAnchor)
         }.store(in: &subscriptions)
     }
 
@@ -631,7 +636,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 synchronizeWatchPartFitnessCheck()
                 if let retryID = pendingWatchRetrySessionID {
                     pendingWatchRetrySessionID = nil
-                    pendingAutomaticChoice = false
+                    pendingAutomaticChoice = nil
                     if record?.owner == .watch, record?.sessionID == retryID,
                        record?.phase == .unresolved, phone?.record == nil {
                         _ = watch.startOutdoorCyclingOnWatch()
@@ -639,9 +644,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 }
                 if startOnIPhoneAfterRecovery, record == nil {
                     requestStart(explicitOwner: .iphone)
-                } else if pendingAutomaticChoice {
-                    pendingAutomaticChoice = false
-                    requestStart()
+                } else if let pending = pendingAutomaticChoice {
+                    pendingAutomaticChoice = nil
+                    requestStart(recorderChoiceAnchor: pending.recorderChoiceAnchor)
                 }
             } catch {
                 if let phoneRecord = phone?.record {
@@ -651,7 +656,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 notice = WorkoutRecordingNotice(kind: .recovery,
                     message: phone?.message ?? "Bicino could not reconcile the existing workout. Unlock iPhone and retry; no new recording has been started.")
                 recoveryComplete = false
-                pendingAutomaticChoice = false
+                pendingAutomaticChoice = nil
                 pendingWatchRetrySessionID = nil
             }
         }
@@ -665,13 +670,16 @@ final class WorkoutSessionCoordinator: ObservableObject {
 
     /// Manual app or authenticated bike-computer start request.
     @discardableResult
-    func requestStart(explicitOwner: WorkoutRecordingOwner? = nil) -> Bool {
-        requestStart(using: watchAvailability.availability, explicitOwner: explicitOwner)
+    func requestStart(explicitOwner: WorkoutRecordingOwner? = nil,
+                      recorderChoiceAnchor: UUID? = nil) -> Bool {
+        requestStart(using: watchAvailability.availability, explicitOwner: explicitOwner,
+                     recorderChoiceAnchor: recorderChoiceAnchor)
     }
 
     @discardableResult
     private func requestStart(using availability: WorkoutWatchAvailabilityV1,
-                              explicitOwner: WorkoutRecordingOwner? = nil) -> Bool {
+                              explicitOwner: WorkoutRecordingOwner? = nil,
+                              recorderChoiceAnchor: UUID? = nil) -> Bool {
         recordStartRequest(
             availability: availability,
             explicitOwner: explicitOwner
@@ -710,15 +718,16 @@ final class WorkoutSessionCoordinator: ObservableObject {
         switch decision {
         case .waitForRecovery:
             pendingAutomaticChoice = explicitOwner == nil
+                ? PendingAutomaticStart(recorderChoiceAnchor: recorderChoiceAnchor) : nil
             notice = WorkoutRecordingNotice(kind: .recovery, message: "Checking for an existing workout before starting another.")
             recoverIfNeeded()
         case .waitForWatchActivation:
-            pendingAutomaticChoice = true
+            pendingAutomaticChoice = PendingAutomaticStart(recorderChoiceAnchor: recorderChoiceAnchor)
             watchAvailability.activate()
         case .chooseRecorder:
-            pendingAutomaticChoice = false
+            pendingAutomaticChoice = nil
             notice = WorkoutRecordingNotice(kind: .chooseRecorder,
-                message: "Choose where to record this workout.")
+                message: "Choose where to record this workout.", recorderChoiceAnchor: recorderChoiceAnchor)
         case .phoneUnsupported:
             notice = WorkoutRecordingNotice(kind: .information, message: "Recording without Apple Watch requires iOS 26 or later. Watch workouts and navigation keep their existing requirements.")
         case .blockedByExistingRecording:
@@ -727,7 +736,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
                     message: "This ride belongs to \(record?.owner.displayName ?? "its selected recorder"). Finish or recover it before starting another.")
             }
         case .start(let owner):
-            pendingAutomaticChoice = false
+            pendingAutomaticChoice = nil
             return start(owner)
         }
         return false
@@ -1005,7 +1014,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         do {
             try persistence.clear(sessionID: record.sessionID)
             self.record = nil
-            pendingAutomaticChoice = false
+            pendingAutomaticChoice = nil
             _ = watch.resetTerminalPresentation()
             notice = nil
             publishWatch()

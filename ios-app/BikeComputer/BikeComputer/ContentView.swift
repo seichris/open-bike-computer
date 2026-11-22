@@ -348,9 +348,8 @@ struct ContentView: View {
                         WorkoutCompactCard(
                             store: workoutStore,
                             watchAvailability: watchAvailability,
-                            onStart: {
-                                _ = workoutSessionCoordinator
-                                    .requestStart()
+                            onStart: { anchor in
+                                workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                             },
                             onOpen: {
                                 presentedSheet = .workoutDashboard
@@ -1058,8 +1057,8 @@ struct ContentView: View {
             WorkoutDashboardView(
                 store: workoutStore,
                 watchAvailability: watchAvailability,
-                onStart: {
-                    _ = workoutSessionCoordinator.requestStart()
+                onStart: { anchor in
+                    workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                 },
                 onPause: workoutSessionCoordinator.pause,
                 onResume: workoutSessionCoordinator.resume,
@@ -1985,8 +1984,8 @@ struct ContentView: View {
             recordingCoordinator: workoutSessionCoordinator,
             isCompactHeight: isCompactHeight,
             onStopNavigation: { coordinator.stopNavigation() },
-            onStartWorkout: {
-                _ = workoutSessionCoordinator.requestStart()
+            onStartWorkout: { anchor in
+                workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
             },
             onMarkSegment: workoutSessionCoordinator.markSegment,
             onPauseWorkout: workoutSessionCoordinator.pause,
@@ -2098,8 +2097,8 @@ struct ContentView: View {
                workoutSessionCoordinator.canOfferNewWorkout {
                 WorkoutStartButton(
                     watchAvailability: watchAvailability,
-                    action: {
-                        _ = workoutSessionCoordinator.requestStart()
+                    action: { anchor in
+                        workoutSessionCoordinator.requestStart(recorderChoiceAnchor: anchor)
                     }
                 ) {
                     // The full label keeps its width whenever it fits beside
@@ -2242,13 +2241,14 @@ struct ContentView: View {
     }
 
     private var shouldShowWorkoutRecoveryStatus: Bool {
+        let notice = workoutSessionCoordinator.notice
         // A reserved Watch ride can have no native mirror at all after a
         // restart. Keep its recovery actions visible even with an idle store.
-        (workoutSessionCoordinator.record?.owner == .watch
+        return (workoutSessionCoordinator.record?.owner == .watch
             && workoutSessionCoordinator.record?.phase == .unresolved)
             // An unreachable Watch ride offers the explicit iPhone handoff.
             || workoutSessionCoordinator.canContinueOnIPhone
-            || workoutSessionCoordinator.notice != nil
+            || (notice != nil && notice?.recorderChoiceAnchor == nil)
     }
 
     private var shouldShowWorkoutStatusCard: Bool {

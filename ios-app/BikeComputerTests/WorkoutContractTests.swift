@@ -7556,7 +7556,7 @@ private struct WorkoutContractTestSuite {
                 "healthSetup: watchAvailability.healthSetupSnapshot"
             )
                 && iPhoneConfirmationComponent.contains(
-                    "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action()"
+                    "case .attemptHealthKitLaunch:\n            pendingStart = false\n            action(nil)"
                 )
                 && iPhoneConfirmationComponent.contains(
                     "case .healthAccessDenied:\n            pendingStart = false\n            presentedAlert = .healthAccessDenied"
@@ -7565,7 +7565,7 @@ private struct WorkoutContractTestSuite {
                     "primaryButton: .default(Text(\"Check Again\"))"
                 )
                 && iPhoneConfirmationComponent.contains(
-                    "primaryButton: .default(Text(\"Check Again\")) {\n                    action()"
+                    "primaryButton: .default(Text(\"Check Again\")) {\n                    action(nil)"
                 ),
             "the iPhone component must gate launch on Watch Health setup and provide an explicit denied-state recheck"
         )
@@ -8212,10 +8212,10 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
@@ -8413,10 +8413,10 @@ private struct WorkoutContractTestSuite {
         expect(
             compactRecorderChoices.contains("ifcoordinator.phoneSupported{startButton(.iphone)}")
                 && !compactRecorderChoices.contains("isReachable")
-                && recordingChoices.filter { !$0.isWhitespace }.contains(
-                    "ifcoordinator.notice?.kind==.chooseRecorder{WorkoutRecorderChoices(coordinator:coordinator)"
-                ),
-            "the recorder choices must retain the same order as Watch reachability changes"
+                && compactRecorderChoices.contains("startButton(.watch)")
+                && compactRecorderChoices.contains("WorkoutRecorderChoices(coordinator:coordinator,menuRows:true)")
+                && compactWorkout.contains("startButton.modifier(WorkoutRecorderChoicePopover("),
+            "the Start Workout popover must reuse the recorder choices in a fixed order"
         )
         let compactLiveActivity = liveActivity.filter { !$0.isWhitespace }
         let compactWatchWorkoutManager =
@@ -8472,7 +8472,7 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{anchorinworkoutSessionCoordinator.requestStart(recorderChoiceAnchor:anchor)})"
                 )
                 && compactContent.contains(
                     "ViewThatFits(in:.horizontal){Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.iconOnly)}"

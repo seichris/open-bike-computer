@@ -11,8 +11,36 @@ extension EnvironmentValues {
     }
 }
 
+struct WorkoutRecorderChoicePopover: ViewModifier {
+    @ObservedObject var coordinator: WorkoutSessionCoordinator
+    let anchor: UUID
+
+    private var isPresented: Bool { coordinator.notice?.recorderChoiceAnchor == anchor }
+
+    func body(content: Content) -> some View {
+        content
+            .popover(isPresented: Binding(
+                get: { isPresented },
+                set: { if !$0 { dismissChoice() } }
+            ), arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 0) {
+                    WorkoutRecorderChoices(coordinator: coordinator, menuRows: true)
+                }
+                .buttonStyle(.plain)
+                .padding(6)
+                .presentationCompactAdaptation(.popover)
+            }
+            .onDisappear(perform: dismissChoice)
+    }
+
+    private func dismissChoice() {
+        if isPresented { coordinator.dismissNotice() }
+    }
+}
+
 struct WorkoutRecorderChoices: View {
     @ObservedObject var coordinator: WorkoutSessionCoordinator
+    var menuRows = false
 
     var body: some View {
         // Keep the choices in place while the Watch wakes or sleeps.
@@ -27,8 +55,16 @@ struct WorkoutRecorderChoices: View {
         Button {
             _ = coordinator.requestStart(explicitOwner: owner)
         } label: {
-            Label("Start on \(owner.displayName)",
-                  systemImage: owner == .watch ? "applewatch" : "iphone")
+            let label = Label("Start on \(owner.displayName)",
+                              systemImage: owner == .watch ? "applewatch" : "iphone")
+            if menuRows {
+                label
+                    .padding(.horizontal, 10)
+                    .frame(minWidth: 192, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+            } else {
+                label
+            }
         }
         .disabled(!coordinator.canOfferNewWorkout)
     }
@@ -68,11 +104,13 @@ struct WorkoutRecordingStatusView: View {
             if coordinator.canContinueOnIPhone {
                 WorkoutContinueOnIPhoneButton(coordinator: coordinator)
             }
-            if coordinator.notice?.kind == .chooseRecorder {
-                WorkoutRecorderChoices(coordinator: coordinator)
-                    .buttonStyle(.bordered)
-            } else if let notice = coordinator.notice {
-                Text(notice.message).font(.subheadline)
+            if let notice = coordinator.notice, notice.recorderChoiceAnchor == nil {
+                if notice.kind == .chooseRecorder {
+                    WorkoutRecorderChoices(coordinator: coordinator)
+                        .buttonStyle(.bordered)
+                } else {
+                    Text(notice.message).font(.subheadline)
+                }
             }
             WorkoutFitnessCheckView(coordinator: coordinator)
             if let message = store.recordingMessage {
