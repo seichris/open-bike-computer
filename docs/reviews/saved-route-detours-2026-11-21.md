@@ -91,9 +91,84 @@ rejects paths. #839 overlaps this branch only in `BikeComputerApp.swift` and
 `ContentView.swift`, in separate hunks (workout recorder choice versus detour
 wiring); the merge was clean. No new findings.
 
-State: clean, 0 active findings (DET-1 and DET-2 fixed and verified by tests).
-Not verified: Watch detours on a real Watch (host tests and the Watch type
-check cover the Watch paths; REVIEW.md asks for behavioural helpers and
-simulator tests, not a physical Watch). Recovery: revert the merge commit; the
-app keeps no detour state on disk, and the Watch journal keeps the saved route,
-not the detour.
+Pass 3 of 3: `bicino-pr-agent` review of `84f5078e` (complete diff, in two
+chunks), 2026-11-22. Not clean. Chris asked for the review comments to be
+addressed. These IDs continue this ledger; the bot's own labels are in brackets.
+- DET-3 (P2) [bot DET-1] An answer that arrived after 75–100 m of rider
+  motion failed the 75 m start check and counted as "no bicycle route": the
+  candidate advanced and the rider saw "No bike detour found". Fixed: if the
+  route starts within 75 m of the request origin, the same candidate is asked
+  again from the current fix. A route far from both still counts as no route.
+  `testEngineStaleOriginAnswerAsksAgainForSameCandidate` covers both cases.
+- DET-4 (P2, privacy) [bot DET-2] Turning the Watch's online routing off
+  mid-ride did not stop detours, so fixes could still reach MapKit and, through
+  the iPhone relay, the Bicino service. Fixed:
+  - offline-only cancels the in-flight request and ends any detour
+    (`SavedRouteDetourEngineV1.disableRequests`);
+  - network changes no longer re-enable requests while it is off;
+  - `runDetourRequest` refuses while it is off;
+  - turning it back on asks again.
+  The policy is tracked in the manager because the settings store publishes a
+  new policy before storing it. `testSavedRouteDetourStopsWhenOnlineRoutingTurnsOff`
+  (Watch manager with a fake clock and a pending provider) covers it.
+- DET-5 (P2) [bot privacy disclosure] The privacy policy said nothing goes to
+  Bicino "when no bicycle route is found", but the request precedes that
+  answer. Reworded: nothing is sent offline, with Watch online routing off, or
+  when Apple Maps returns a cycling route. The App Store checklist now also
+  records the Watch offline-only stop.
+- DET-6 (P2) [bot recovery gap] The record's recovery was only "revert".
+  Fixed: see "Recovery for shipped builds" below.
+- DET-7 (P3, hardening) [reviewer guide] A failed `detourRuntime.start` left
+  the engine `.following` with no guidance until a rejoin. Start practically
+  cannot fail for a route the engine already validated, but both hosts now
+  call `detourStartFailed`, which backs off like a service error.
+  `testEngineFailedDetourStartBacksOff` covers it.
+- Invalidated [reviewer guide, Watch route identity] While a detour is
+  followed, the Watch `state` carries the detour's route ID. Nothing reads that
+  value: `WatchNavigationStatusView` matches `.navigating` without binding it,
+  and the journal is keyed by the installed archive's identity and is not
+  written during a detour. The bike computer is meant to get the detour
+  window (compatible mode).
+
+The repository's three-pass limit is reached. Further review findings need
+Chris's direction before more automatic fix rounds.
+
+## Recovery for shipped builds
+
+Reverting this change does not recall TestFlight or App Store builds. The
+recovery for shipped apps is server-side, and each switch degrades the app
+cleanly:
+
+- **Detours:** set `MAP_PLATFORM_BICYCLE_DETOUR_ENABLED=0` (or unset
+  `MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL`) on the map API and redeploy.
+  - The endpoint then answers `status: "unavailable"`, `reason:
+    "service_disabled"` without routing (`bicycle_detour_service.py`; backend
+    test `test_unconfigured_service_reports_unavailable_without_routing`).
+  - `BicycleDetourServiceDecoderV1` maps that, and every non-200, to a service
+    error. The rider sees "Bike detour unavailable right now: follow the saved
+    route".
+  - The engine backs off 15/30/60/120 s (or `Retry-After`) and asks at most 4
+    times per off-route episode until 250 m more travel. There is no retry
+    loop, and MapKit cycling detours keep working.
+  - Shipped apps still send the two coordinates to the API, which neither
+    stores nor logs them. Only an app update stops that transmission.
+  - Today the production map service has no `/v1/bicycle-detours` at all
+    (404), which degrades the same way.
+- **Strava elevation fallback:** put `strava` back into
+  `REJECTED_ROUTE_SOURCES` (backend PR, image promotion).
+  - The request is rejected before any provider call, so nothing goes to
+    Geoapify. The app maps the 400 to `.unavailable(.routeNotSupported)`.
+  - There is no automatic retry (`automaticRetryDelay` is nil); the service is
+    asked again only when the rider opens the route again.
+  - Profiles already stored in a route's sidecar stay until that route is
+    deleted, expires or Strava is disconnected, which follows the Strava
+    retention rules.
+- **Recovering the app** needs a new build through TestFlight or App Store
+  review. Production firmware is not involved.
+
+State: needs Chris's direction on any further review round. DET-1 to DET-7 are
+fixed and verified by host tests. Not verified: Watch detours on a real Watch.
+The host tests and the Watch type check cover the Watch paths, and REVIEW.md
+asks for behavioural helpers and simulator tests, not a physical Watch.
+Recovery for source: revert the merge commit. The app keeps no detour state on
+disk, and the Watch journal keeps the saved route, not the detour.

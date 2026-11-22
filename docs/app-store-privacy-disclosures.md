@@ -67,7 +67,9 @@ other identifier as linked even when the app has no account or real-world name.
   only after MapKit had no cycling route, carry exactly the rider position and
   one rejoin point (also when relayed from a Watch-owned ride through the
   iPhone), require an App Attest-enrolled installation, are served by Bicino's
-  own Valhalla server, and leave no coordinates in storage or logs.
+  own Valhalla server, and leave no coordinates in storage or logs. On a Watch
+  ride they stop, including any request in flight, as soon as online routing
+  is turned off.
 - Confirm paired-device coordinate favorites and offline route archives remain
   inside WatchConnectivity/local device storage, and that expired archives and
   rider-requested deletions follow the documented retention behavior.

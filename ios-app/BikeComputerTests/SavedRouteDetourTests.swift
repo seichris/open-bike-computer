@@ -392,6 +392,86 @@ private func testEngineNoRouteMovesToNextCandidateAndMotionCancels() {
                                 now: time).isEmpty, "a cancelled request's answer is discarded")
 }
 
+private func requestCount(_ ride: Ride) -> Int {
+    ride.effects.filter { if case .requestDetour = $0 { return true }; return false }.count
+}
+
+private func testEngineStaleOriginAnswerAsksAgainForSameCandidate() {
+    var ride = Ride(route: northRoute())
+    let time = leaveRoute(&ride)
+    let first = ride.lastRequest!
+    // 80 m further on (under the 100 m motion cancel) when the answer, which
+    // starts where the request was made, arrives: ask again, not "no route".
+    let answer = syntheticDetour(from: first.origin, riderEast: 120, riderNorth: 996,
+                                 to: first.target.distanceAlongMeters)
+    let moved = RouteCoordinateV1(latitude: first.origin.latitude + 80 / 111_320,
+                                  longitude: first.origin.longitude)
+    ride.feed(sample(moved, course: 0, at: time.addingTimeInterval(12)))
+    expect(ride.engine.phase == .requesting && requestCount(ride) == 1, "80 m of motion keeps the request")
+    ride.complete(.route(answer), now: time.addingTimeInterval(12))
+    let second = ride.lastRequest!
+    expect(second.id != first.id && second.target.kind == first.target.kind,
+           "a stale-origin answer asks again for the same candidate from the new position")
+    expect(ride.engine.phase == .requesting && ride.engine.detour == nil, "not counted as no bicycle route")
+
+    // A route that starts far from both the request and the rider is still
+    // rejected as no route (no loop on a badly snapped answer).
+    var far = Ride(route: northRoute())
+    let farTime = leaveRoute(&far)
+    let request = far.lastRequest!
+    let snapped = syntheticDetour(from: point(320, 996), riderEast: 320, riderNorth: 996,
+                                  to: request.target.distanceAlongMeters)
+    far.complete(.route(snapped), now: farTime)
+    expect(far.engine.phase == .unavailable(.noBicycleRoute) && requestCount(far) == 1,
+           "a route starting 200 m from the request is rejected")
+}
+
+private func testEngineFailedDetourStartBacksOff() {
+    var ride = Ride(route: northRoute())
+    let time = leaveRoute(&ride)
+    let request = ride.lastRequest!
+    let detour = syntheticDetour(from: ride.lastSample!.coordinate, riderEast: 120, riderNorth: 996,
+                                 to: request.target.distanceAlongMeters)
+    // The host fails to start guidance on the accepted detour.
+    _ = ride.engine.complete(requestID: request.id, outcome: .route(detour), latestSample: ride.lastSample!, now: time)
+    expect(ride.engine.phase == .following, "accepted")
+    ride.engine.detourStartFailed(now: time)
+    expect(ride.engine.phase == .unavailable(.serviceError) && ride.engine.detour == nil &&
+           ride.engine.isHoldingSavedRoute, "an unguidable detour is dropped; the saved route stays held")
+    ride.feed(sample(point(121, 1_000), course: 0, at: time.addingTimeInterval(5)))
+    expect(requestCount(ride) == 1, "backs off")
+    ride.feed(sample(point(122, 1_010), course: 0, at: time.addingTimeInterval(16)))
+    expect(requestCount(ride) == 2, "asks again after the back-off")
+}
+
+private func testEngineDisableRequestsStopsAndResumes() {
+    var ride = Ride(route: northRoute())
+    var time = leaveRoute(&ride)
+    let request = ride.lastRequest!
+    let cancelled = ride.engine.disableRequests()
+    expect(cancelled == [.cancelRequest(request.id)] && ride.engine.phase == .unavailable(.offline),
+           "turning online routing off cancels the pending request")
+    ride.apply(cancelled)
+    for step in 1...6 {
+        time.addTimeInterval(20)
+        ride.feed(sample(point(120, 996 + Double(step) * 20), course: 0, at: time))
+    }
+    expect(requestCount(ride) == 1, "no request while online routing is off")
+    ride.apply(ride.engine.networkChanged(available: true, latestSample: ride.lastSample, now: time))
+    expect(requestCount(ride) == 2 && ride.engine.phase == .requesting, "turning it back on asks again")
+
+    // While following: the detour ends too.
+    let next = ride.lastRequest!
+    let detour = syntheticDetour(from: ride.lastSample!.coordinate, riderEast: 120, riderNorth: 996 + 120,
+                                 to: next.target.distanceAlongMeters)
+    ride.complete(.route(detour), now: time)
+    expect(ride.engine.phase == .following, "following")
+    let ended = ride.engine.disableRequests()
+    ride.apply(ended)
+    expect(ended == [.endDetour] && ride.engine.detour == nil && ride.detourRuntime.snapshot == nil &&
+           ride.engine.isHoldingSavedRoute, "the detour is dropped and the saved route stays held")
+}
+
 private func testEngineRejectsImplausibleDetourAndBacksOff() {
     var ride = Ride(route: northRoute())
     let time = leaveRoute(&ride)
@@ -838,6 +918,9 @@ enum SavedRouteDetourTestRunner {
         testEngineTriggerNeedsTimeAndDisplacement()
         testEngineNoRouteMovesToNextCandidateAndMotionCancels()
         testEngineRejectsImplausibleDetourAndBacksOff()
+        testEngineStaleOriginAnswerAsksAgainForSameCandidate()
+        testEngineFailedDetourStartBacksOff()
+        testEngineDisableRequestsStopsAndResumes()
         testRuntimeResumeKeepsIdentityAndJumpsSteps()
         await testProviderChain()
         testServiceContract()
