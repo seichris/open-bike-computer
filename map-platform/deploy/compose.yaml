@@ -1,5 +1,5 @@
-# control-plane-source-commit: 5c8e9c131e16eab769975170ee8b652cbe1d7fd8
-# worker-source-commit: 8baaf9804ebba273cfce3a7397ec6db341f49260
+# control-plane-source-commit: 09e2dc6f4071619b10edeb9b45e2bbe7b36514a4
+# worker-source-commit: e30a59762471e30b6237cb8553ab96f84a16a5ae
 # promotion-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
 # These digest-pinned images are the production deployment manifest. The API
@@ -11,10 +11,39 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:f415ab9321774b33a076fb5b11499f43668eda30cc2f1448443b3eb4d49ae8d9
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:d43949528703c4e7319ce0907f16ca00c9dde425ee085e90ef2bc183bbf85e00
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:c0ebd4335c3d6cafa2f58a7bf417b8dd78737d4f89ce140b3af06a1d5560e372
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:373328b9bcac4137dc3aa291269c231bba7a369e42b9af5c63413ee9b0ab468c
 
 services:
+  map-platform-valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228
+    entrypoint: ["/bin/bash", "-ec"]
+    command:
+      - |
+        valhalla_build_config --mjolnir-tile-extract /graph/valhalla_tiles.tar > /tmp/valhalla.json
+        exec valhalla_service /tmp/valhalla.json 2
+    mem_limit: 2g
+    cpus: 2
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # GCC States archive built from the map backend's cached OSM extract.
+      - type: bind
+        source: /var/lib/bicino-valhalla-production/graphs/a1911ad2d013f43bc1595a9fdd40e7caa4b88075db4b86f4ddfc8f0b3150bfff
+        target: /graph
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8002/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   map-platform-promotion:
     image: ghcr.io/seichris/open-bike-computer-map-platform@sha256:259f065e57770b3fcea1311c646cbd53fba0df9d4743e928017147ad5c873bda
     mem_limit: 2g
@@ -81,6 +110,8 @@ services:
       MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR: ${MAP_PLATFORM_STRAVA_ROUTE_LIST_LIMIT_PER_HOUR:-120}
       MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR: ${MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR:-60}
       MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR: ${MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR:-30}
+      MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL: http://map-platform-valhalla:8002
+      MAP_PLATFORM_BICYCLE_DETOUR_REQUIRE_APP_ATTEST: '1'
       MAP_PLATFORM_TRUSTED_PROXY_CIDRS: ${MAP_PLATFORM_TRUSTED_PROXY_CIDRS:?set MAP_PLATFORM_TRUSTED_PROXY_CIDRS to the Coolify proxy CIDRs}
       MAP_PLATFORM_MAX_REQUEST_BODY_BYTES: ${MAP_PLATFORM_MAX_REQUEST_BODY_BYTES:-2097152}
       MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE: ${MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE:-240}
@@ -143,7 +174,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       # Keep the approval identity atomic with the image pins in this lock.
-      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261108-firmware-build107
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261122-gcc-routing
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
