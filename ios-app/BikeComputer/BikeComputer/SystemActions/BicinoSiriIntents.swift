@@ -219,7 +219,7 @@ struct FindPlaceOnRouteIntent: AppIntent {
 struct StartBicinoWorkoutIntent: AppIntent {
     static let title: LocalizedStringResource = "Start Bicino Workout"
     static let description = IntentDescription(
-        "Starts recording an outdoor ride, on Apple Watch when one is paired and otherwise on iPhone, like the app's Start button."
+        "Starts recording an outdoor cycling workout."
     )
     static let openAppWhenRun = false
     static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
