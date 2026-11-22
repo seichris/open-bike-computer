@@ -456,13 +456,13 @@ void RouteReferenceTrack::drawSnapshot(
       });
 }
 
-void RouteOverlay::drawRoute(
+bool RouteOverlay::drawRoute(
     lv_obj_t *canvas, const map_projection::Projection &projection) {
   if (canvas == nullptr)
-    return;
+    return false;
   lv_draw_buf_t *drawBuffer = lv_canvas_get_draw_buf(canvas);
   if (drawBuffer == nullptr)
-    return;
+    return false;
   map_surface::Rgb565Surface surface{
       reinterpret_cast<uint16_t *>(drawBuffer->data),
       static_cast<int32_t>(drawBuffer->header.w),
@@ -470,8 +470,14 @@ void RouteOverlay::drawRoute(
       static_cast<size_t>(drawBuffer->header.stride / sizeof(uint16_t))};
   const uint8_t routeLineWidth = static_cast<uint8_t>(std::min<int>(
       48, std::max<int>(1, currentMapStyleSettings().routeLineWidth)));
-  // The saved route under a detour goes down first, below the guidance line.
-  RouteReferenceTrack::drawSnapshot(routeReferenceTrack.snapshot(), surface,
-                                    projection, routeLineWidth);
+  bool referenceTrackDrawn = false;
+  if constexpr (RouteReferenceTrack::ENABLED) {
+    // The saved route under a detour goes down first, below the guidance line.
+    const RouteReferenceTrackSnapshot reference = routeReferenceTrack.snapshot();
+    referenceTrackDrawn = reference.hasTrack();
+    RouteReferenceTrack::drawSnapshot(reference, surface, projection,
+                                      routeLineWidth);
+  }
   drawSnapshot(snapshot(), surface, projection, routeLineWidth);
+  return referenceTrackDrawn;
 }

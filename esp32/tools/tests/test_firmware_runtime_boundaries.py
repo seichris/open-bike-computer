@@ -122,7 +122,9 @@ struct Overlay {
     return accept;
   }
 } routeOverlay;
-struct ReferenceTrack {
+// Development profiles (RTK1 compiled in); production compiles the clear out.
+struct RouteReferenceTrack {
+  static constexpr bool ENABLED = true;
   int clearCalls = 0;
   bool clear() { ++clearCalls; return true; }
 } routeReferenceTrack;

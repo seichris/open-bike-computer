@@ -101,6 +101,25 @@ int main(int argc, char **argv) {
   const uint8_t headerOnly[] = {'R', 'T', 'K', '1', 1};
   assert(parse(headerOnly, sizeof(headerOnly)).kind == FrameKind::Malformed);
 
+  // The firmware reuses one static frame: every result resets kind and count,
+  // so a rejected frame after a full one never looks like a stored track.
+  Frame reused;
+  const Bytes &full = fixtures.frames.at("maximum_set");
+  parseInto(full.data(), full.size(), reused);
+  assert(reused.kind == FrameKind::Set && reused.count == MAXIMUM_POINTS);
+  for (const char *name : {"partial_delta", "latitude_out_of_range", "unsupported_version"}) {
+    const Bytes &bad = fixtures.frames.at(name);
+    parseInto(full.data(), full.size(), reused);
+    parseInto(bad.data(), bad.size(), reused);
+    assert(reused.kind != FrameKind::Set && reused.count == 0);
+  }
+  const Bytes &clearBytes = fixtures.frames.at("clear");
+  parseInto(clearBytes.data(), clearBytes.size(), reused);
+  assert(reused.kind == FrameKind::Clear && reused.count == 0);
+  const Bytes &dubai = fixtures.frames.at("dubai_set");
+  parseInto(dubai.data(), dubai.size(), reused);
+  expectPoints(reused, fixtures.points.at("dubai"));
+
   std::puts("route reference track protocol tests passed");
   return 0;
 }

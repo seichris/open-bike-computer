@@ -71,13 +71,18 @@ inline bool validCoordinate(int64_t lat, int64_t lon) {
          lon <= 180'000'000;
 }
 
-inline Frame parse(const uint8_t *data, size_t len) {
-  Frame frame;
+/**
+ * Decodes into a caller-owned frame, which avoids a 392-byte temporary on
+ * the NimBLE host task. A rejected frame leaves kind != Set and count 0.
+ */
+inline void parseInto(const uint8_t *data, size_t len, Frame &frame) {
+  frame.kind = FrameKind::Malformed;
+  frame.count = 0;
   if (!hasFrameMagic(data, len) || len < HEADER_BYTES)
-    return frame;
+    return;
   if (data[4] != generated::ROUTE_REFERENCE_TRACK_VERSION) {
     frame.kind = FrameKind::Unsupported;
-    return frame;
+    return;
   }
   const uint8_t operation = data[5];
   const size_t body = len - HEADER_BYTES;
@@ -85,15 +90,15 @@ inline Frame parse(const uint8_t *data, size_t len) {
       static_cast<uint8_t>(generated::RouteReferenceTrackOperation::Clear)) {
     if (body == 0)
       frame.kind = FrameKind::Clear;
-    return frame;
+    return;
   }
   if (operation !=
           static_cast<uint8_t>(generated::RouteReferenceTrackOperation::Set) ||
       body < START_POINT_BYTES || (body - START_POINT_BYTES) % DELTA_BYTES != 0)
-    return frame;
+    return;
   const size_t count = 1 + (body - START_POINT_BYTES) / DELTA_BYTES;
   if (count < MINIMUM_POINTS || count > MAXIMUM_POINTS)
-    return frame;
+    return;
 
   const uint8_t *geometry = data + HEADER_BYTES;
   int32_t lat = 0;
@@ -101,7 +106,7 @@ inline Frame parse(const uint8_t *data, size_t len) {
   std::memcpy(&lat, geometry, 4);
   std::memcpy(&lon, geometry + 4, 4);
   if (!validCoordinate(lat, lon))
-    return frame;
+    return;
   frame.points[0] = {lat, lon};
   for (size_t index = 1; index < count; ++index) {
     const size_t offset = START_POINT_BYTES + (index - 1) * DELTA_BYTES;
@@ -112,13 +117,18 @@ inline Frame parse(const uint8_t *data, size_t len) {
     const int64_t nextLat = static_cast<int64_t>(lat) + dLat;
     const int64_t nextLon = static_cast<int64_t>(lon) + dLon;
     if (!validCoordinate(nextLat, nextLon))
-      return frame;
+      return;
     lat = static_cast<int32_t>(nextLat);
     lon = static_cast<int32_t>(nextLon);
     frame.points[index] = {lat, lon};
   }
   frame.count = static_cast<uint8_t>(count);
   frame.kind = FrameKind::Set;
+}
+
+inline Frame parse(const uint8_t *data, size_t len) {
+  Frame frame;
+  parseInto(data, len, frame);
   return frame;
 }
 

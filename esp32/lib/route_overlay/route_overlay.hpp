@@ -13,6 +13,7 @@
 #include "../maps/src/mapSurface.hpp"
 #include "navigation_visual_style.hpp"
 #include "../ble_navigation/route_reference_track_protocol.hpp"
+#include "../ble_navigation/device_capabilities_protocol.hpp"
 #include "lvgl.h"
 #include <Arduino.h>
 #include <array>
@@ -79,8 +80,9 @@ public:
    *
    * @param canvas LVGL canvas object to draw on
    * @param projection Projection snapshot used for the current map frame
+   * @return true when the saved route under a detour was drawn as well
    */
-  void drawRoute(lv_obj_t *canvas,
+  bool drawRoute(lv_obj_t *canvas,
                  const map_projection::Projection &projection);
 
   /** Capture a fixed-size immutable route for a worker or UI presentation. */
@@ -166,6 +168,14 @@ struct RouteReferenceTrackSnapshot {
  */
 class RouteReferenceTrack {
 public:
+  /**
+   * False in builds that never advertise RTK1 (every production profile):
+   * renderers then compile out the reference-track snapshot, draw and opacity
+   * pass, so those frames match a build without the feature.
+   */
+  static constexpr bool ENABLED =
+      device_capabilities_protocol::ROUTE_REFERENCE_TRACK_ENABLED;
+
   /** Applies a parsed frame; returns true when the stored track changed. */
   bool apply(const route_reference_track_protocol::Frame &frame);
   /** Returns true when a track was removed. */
