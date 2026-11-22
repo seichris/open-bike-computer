@@ -8124,7 +8124,7 @@ public:
       ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
       return;
     }
-    // Without the feature (production), SCSW stays an ignored frame exactly
+    // With SCREEN_ACTIVATION_ENABLED off, SCSW stays an ignored frame exactly
     // as it was before activation existed.
     screen_configuration_protocol::ActivationRequest activation{};
     const auto activationDecode =

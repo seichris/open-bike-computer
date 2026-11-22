@@ -170,12 +170,10 @@ int main() {
   assert(!device_capabilities_protocol::supportsScreenActivation(36, true, false));
   assert(!device_capabilities_protocol::supportsScreenActivation(36, false, true));
   assert(device_capabilities_protocol::supportsScreenActivation(36, true, true));
-#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
-  static_assert(device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED);
-#else
-  static_assert(!device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED,
-                "production keeps remote screen activation off until a board check");
-#endif
+  // Production offers activation too since the 1.75 board check
+  // (docs/ble-protocol.md, "Screen activation").
+  static_assert(device_capabilities_protocol::SCREEN_ACTIVATION_ENABLED,
+                "remote screen activation is on in every profile");
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
       ride_ble_protocol_generated::EXTENDED_SCREEN_ACTIVATION_V1_FEATURE) == extendedSize);

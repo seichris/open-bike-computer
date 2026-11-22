@@ -186,6 +186,9 @@ build is not a device validation.
       energy/thermal behavior; navigation starts/stops independently.
 - [ ] Siri with the iPhone locked, for a Watch ride and a phone ride: start,
       pause, resume, segment, and finish after the spoken confirmation.
+      On 2026-11-22 the maintainer reported the workout commands working for a
+      Watch ride and a phone ride (Bicino Dev `8a001ed6`, iOS 27.2.1). The
+      locked case and each command were not itemized, so the gate stays open.
 - [ ] Crash during running/paused/start/stop/endCollection/finish/tombstone write,
       recovery on lock/unlock, no duplicate saved identity, segment continuity.
 - [ ] Delayed Watch start timeout then late mirror; phone choice after explicit
