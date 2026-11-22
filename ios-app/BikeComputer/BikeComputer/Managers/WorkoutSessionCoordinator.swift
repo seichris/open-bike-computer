@@ -80,7 +80,7 @@ protocol WorkoutRecordingWatchAvailability: AnyObject {
 }
 
 nonisolated struct WorkoutRecordingNotice: Equatable {
-    enum Kind: Equatable { case chooseRecorder, information, recovery, watchUnresolved, conflict }
+    enum Kind: Equatable { case chooseRecorder, information, recovery, conflict }
     let kind: Kind
     let message: String
 }
@@ -722,10 +722,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         case .phoneUnsupported:
             notice = WorkoutRecordingNotice(kind: .information, message: "Recording without Apple Watch requires iOS 26 or later. Watch workouts and navigation keep their existing requirements.")
         case .blockedByExistingRecording:
-            if record?.owner == .watch, record?.phase == .unresolved {
-                notice = WorkoutRecordingNotice(kind: .watchUnresolved,
-                    message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
-            } else {
+            if record?.owner != .watch || record?.phase != .unresolved {
                 notice = WorkoutRecordingNotice(kind: .information,
                     message: "This ride belongs to \(record?.owner.displayName ?? "its selected recorder"). Finish or recover it before starting another.")
             }
@@ -950,12 +947,6 @@ final class WorkoutSessionCoordinator: ObservableObject {
         if record?.phase == .unresolved, record?.owner == .watch {
             // A failed Watch start invalidates the evidence for a wake attempt.
             watchReachabilityLostAt = nil
-            let unresolved = WorkoutRecordingNotice(kind: .watchUnresolved,
-                message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
-            if notice != unresolved { notice = unresolved }
-        } else if notice?.kind == .watchUnresolved,
-                  let record, presentation.sessionID == record.sessionID {
-            notice = nil
         }
         publishWatch()
     }

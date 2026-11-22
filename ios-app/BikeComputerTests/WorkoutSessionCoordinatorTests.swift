@@ -415,7 +415,15 @@ struct WorkoutSessionCoordinatorTests {
                 _ = checkedWatch.store.completeWatchLaunch(id: checkedWatch.launchID,
                     succeeded: false, error: .watchUnavailable)
             }
-            check(checked.record?.phase == .unresolved, "Failed native launch remains unresolved")
+            check(checked.record?.phase == .unresolved && checked.notice == nil,
+                  "A failed Watch launch uses the dedicated recovery card without a second notice")
+            check(!checked.requestStart(explicitOwner: .iphone) && checked.notice == nil,
+                  "A blocked recorder change keeps the same recovery card")
+            checked.retryWatchStart()
+            check(checked.record?.phase == .starting && checked.notice == nil,
+                  "Starting a retry shows no unconfirmed-workout notice")
+            _ = checkedWatch.store.completeWatchLaunch(id: checkedWatch.launchID,
+                succeeded: false, error: .watchUnavailable)
             guard let unresolvedID = checked.record?.sessionID else {
                 preconditionFailure("Expected an unresolved Watch attempt")
             }
@@ -620,8 +628,8 @@ struct WorkoutSessionCoordinatorTests {
             watchAvailability: FakeAvailability(), persistence: watchRecoveryDisk,
             phone: deferredPhone, handoffLedger: MemoryHandoffLedger())
         check(watchRecovery.record?.phase == .unresolved
-                && watchRecovery.notice?.kind == .watchUnresolved,
-              "A cold-launch unresolved Watch owner exposes its recovery actions")
+                && watchRecovery.notice == nil,
+              "A cold-launch unresolved Watch owner drives recovery directly from its record")
         check(!watchRecovery.canOfferNewWorkout,
               "Exposing checked-idle recovery does not admit a replacement ride")
         recoveredWatch.emit(id: recoveredWatchID, state: .paused)
