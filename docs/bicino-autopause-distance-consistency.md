@@ -31,7 +31,7 @@ whether an automatic transition was safe to reverse.
 | Available evidence | Pause rule |
 | --- | --- |
 | Qualified raw Watch workout GPS | Primary path: below `0.8 m/s` across distinct location samples spanning five seconds, with no gap over three seconds. |
-| Fresh, definitively stopped wheel speed | Five continuous seconds on the short path. |
+| Fresh, definitively stopped wheel speed | Five continuous seconds on the short path, accumulated beside a Watch feed that is stopped or not fresh. |
 | Wheel moving | Movement veto; cancel/reset a stopped candidate. |
 | Cadence moving | Movement veto; may start/resume. |
 | Cadence zero or cadence only | Not stopped evidence; require GPS plus IMU fallback. |

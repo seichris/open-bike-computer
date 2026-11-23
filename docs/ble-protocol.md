@@ -1054,8 +1054,10 @@ The origin of the running state a pause decision started from is not evidence:
 it describes an older transition, such as the rider's manual start. Watch
 reports `unknown` while it durably writes the marker for an automatic
 transition it has been asked to apply, and a state change clears the origin
-until its frame arrives. For those five seconds the device treats a paused
-session with an absent or `unknown` origin as confirmation pending. It keeps
+until its frame arrives. The device treats a paused session with an absent or
+`unknown` origin as confirmation pending for five seconds from when it first
+sees that state, and restarts that wait once, when the origin first reads
+`unknown`, because the origin frame can arrive late. It keeps
 its previous confirmed lifecycle, so the window is read neither as the rider's
 pause nor as a state to resume from. An absent origin never contradicts on its
 own; the 30-second decision deadline bounds that wait. A start decision is

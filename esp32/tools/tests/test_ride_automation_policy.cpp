@@ -208,6 +208,37 @@ void testOutstandingDecisionTracker() {
   assert(!absentOrigin.pauseOriginPending());
   assert(!absentOrigin.observe(pausedNoOrigin, 29'000));
 
+  // The origin frame can lag the state change. The Watch's marker window only
+  // begins when it reports unknown, so that first sighting gets a full grace
+  // even if the wait for the frame already used one up.
+  auto lateOriginFrame = began(WireTransition::Pause);
+  assert(!lateOriginFrame.observe(pausedNoOrigin, 1'000));
+  assert(!lateOriginFrame.observe(pausedNoOrigin, 1'000 + grace - 1));
+  assert(lateOriginFrame.pauseOriginPending());
+  assert(!lateOriginFrame.observe(pausedUnknown, 1'000 + grace));
+  assert(lateOriginFrame.pauseOriginPending());
+  assert(!lateOriginFrame.observe(pausedUnknown, 1'000 + 2 * grace - 1));
+  assert(lateOriginFrame.pauseOriginPending());
+  assert(lateOriginFrame.observe(pausedUnknown, 1'000 + 2 * grace));
+  assert(!lateOriginFrame.pauseOriginPending());
+  auto lateOriginThenAutomatic = began(WireTransition::Pause);
+  assert(!lateOriginThenAutomatic.observe(pausedNoOrigin, 1'000));
+  assert(!lateOriginThenAutomatic.observe(pausedUnknown, 1'000 + grace));
+  assert(!lateOriginThenAutomatic.observe(
+      workout(SessionState::Paused, PauseOrigin::Automatic,
+              PauseOrigin::Automatic),
+      2'000 + grace));
+
+  // The grace restarts only for the first unknown sighting in a state: an
+  // origin that alternates between unknown and absent cannot extend it.
+  auto alternatingOrigin = began(WireTransition::Pause);
+  const ObservedWorkout pausedOriginCleared = workout(
+      SessionState::Paused, PauseOrigin::None, PauseOrigin::None);
+  assert(!alternatingOrigin.observe(pausedUnknown, 0));
+  assert(!alternatingOrigin.observe(pausedOriginCleared, grace - 2));
+  assert(!alternatingOrigin.observe(pausedUnknown, grace - 1));
+  assert(alternatingOrigin.observe(pausedUnknown, grace));
+
   // A pause that landed and was then undone is spent, whoever resumed it. A
   // retry must not pause the ride a second time.
   for (PauseOrigin resumedBy :
@@ -515,11 +546,75 @@ void testWatchGpsDeliveryTolerance() {
                           ConfirmedLifecycle::AutomaticallyPaused, ask));
 }
 
+// A wheel sensor's stop candidate runs beside a Watch feed that also reports
+// stopped. Fresh Watch GPS between the thresholds still outranks it.
+void testWheelBesideWatchGps() {
+  Settings ask;
+  Decision decision;
+  const auto wheelWithWatch = [](float wheelSpeed, uint32_t nowMs,
+                                 const RideEvidenceObservation &watch) {
+    return withWatchGps(wheel(wheelSpeed, nowMs), watch);
+  };
+
+  // Both sources stopped with an unbroken Watch span: one pause, at the five
+  // seconds either source needs on its own.
+  RideAutomationPolicy bothStopped;
+  for (uint32_t nowMs = 0; nowMs <= 5'000; nowMs += 1'000) {
+    decision = bothStopped.update(
+        nowMs,
+        wheelWithWatch(0.0F, nowMs, watchGps(0.1F, nowMs, nowMs / 1'000 + 1)),
+        ConfirmedLifecycle::Running, ask);
+    assert((decision.transition == Transition::Pause) == (nowMs == 5'000));
+  }
+  assert((decision.evidenceMask & EvidenceWheelStopped) != 0);
+  assert((decision.evidenceMask & EvidenceWatchGpsStopped) != 0);
+  assert(bothStopped.counters().pause == 1);
+
+  // Watch samples too far apart to build a span, each still fresh and
+  // stopped: the wheel candidate completes instead of being cleared by them.
+  RideAutomationPolicy brokenWatchSpan;
+  for (uint32_t nowMs = 0; nowMs <= 5'000; nowMs += 1'000) {
+    const uint32_t sampleIndex = nowMs / 4'000;
+    decision = brokenWatchSpan.update(
+        nowMs,
+        wheelWithWatch(0.0F, nowMs,
+                       watchGps(0.1F, sampleIndex * 4'000, sampleIndex + 1)),
+        ConfirmedLifecycle::Running, ask);
+    assert((decision.transition == Transition::Pause) == (nowMs == 5'000));
+  }
+  assert(decision.candidateBeganAtMs == 0);
+
+  // Fresh Watch GPS between the stopped and moving thresholds outranks a
+  // stopped wheel.
+  RideAutomationPolicy watchCrawl;
+  for (uint32_t nowMs = 0; nowMs <= 15'000; nowMs += 1'000) {
+    assert(!watchCrawl.update(
+        nowMs,
+        wheelWithWatch(0.0F, nowMs, watchGps(1.2F, nowMs, nowMs / 1'000 + 1)),
+        ConfirmedLifecycle::Running, ask));
+  }
+
+  // One such Watch sample restarts both candidates: the wheel candidate
+  // still needs its own uninterrupted five seconds.
+  RideAutomationPolicy interrupted;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    const float watchSpeed = nowMs == 4'000 ? 1.2F : 0.1F;
+    decision = interrupted.update(
+        nowMs,
+        wheelWithWatch(0.0F, nowMs,
+                       watchGps(watchSpeed, nowMs, nowMs / 1'000 + 1)),
+        ConfirmedLifecycle::Running, ask);
+    assert((decision.transition == Transition::Pause) == (nowMs == 10'000));
+  }
+  assert(decision.candidateBeganAtMs == 5'000);
+}
+
 } // namespace
 
 int main() {
   testOutstandingDecisionTracker();
   testWatchGpsDeliveryTolerance();
+  testWheelBesideWatchGps();
   assert(!ride_automation_runtime::decisionTransportExpired(30'999, 1'000));
   assert(ride_automation_runtime::decisionTransportExpired(31'000, 1'000));
   assert(ride_automation_runtime::decisionTransportExpired(29'999, UINT32_MAX));
