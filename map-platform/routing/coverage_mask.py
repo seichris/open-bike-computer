@@ -130,6 +130,11 @@ def build_mask(policy, boundaries, corridors=None):
     return inclusion, inventory
 
 
+def mask_feature(geometry):
+    # Osmium 1.16 (Ubuntu 24.04) requires a Feature rather than a bare geometry.
+    return {"type": "Feature", "properties": {}, "geometry": mapping(geometry)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
@@ -144,7 +149,7 @@ def main():
         check_apple_list(args.apple_html.read_text(), policy["appleCyclingMapUnits"])
     corridors = json.loads(args.corridors.read_text()) if args.corridors else None
     mask, inventory = build_mask(policy, args.boundaries, corridors)
-    args.output.write_text(json.dumps(mapping(mask), separators=(",", ":")) + "\n")
+    args.output.write_text(json.dumps(mask_feature(mask), separators=(",", ":")) + "\n")
     args.inventory.write_text(json.dumps(inventory, indent=2) + "\n")
 
 

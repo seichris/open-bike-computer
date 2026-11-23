@@ -12,7 +12,7 @@ from unittest.mock import patch
 from shapely.geometry import Point, box, mapping
 
 from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, file_identity, prepare_inputs
-from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list
+from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
 
 
@@ -76,7 +76,7 @@ class CoverageTests(unittest.TestCase):
                 '<tag k="type" v="route"/><tag k="route" v="ferry"/></relation></osm>'
             )
             mask = directory / "mask.geojson"
-            mask.write_text(json.dumps(mapping(box(0, 0, 1, 1))))
+            mask.write_text(json.dumps(mask_feature(box(0, 0, 1, 1))))
             _, roads = prepare_inputs(source, directory, mask)
             result = subprocess.check_output(["osmium", "cat", roads, "-f", "opl"], text=True)
             self.assertIn("w11 ", result)
