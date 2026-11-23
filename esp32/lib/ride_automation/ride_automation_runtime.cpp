@@ -15,6 +15,7 @@
 #include "ride_automation_trace.hpp"
 #endif
 #include "ride_automation_protocol.hpp"
+#include "outstanding_decision_tracker.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "speaker.hpp"
 #include "workout_telemetry_runtime.hpp"
@@ -40,6 +41,7 @@ ride_automation_protocol::Frame lastInboundFrame;
 bool hasInboundFrame = false;
 ride_automation_protocol::Frame outstandingDecision;
 bool hasOutstandingDecision = false;
+ride_automation_runtime::OutstandingDecisionTracker outstandingDecisionTracker;
 uint32_t rideGeneration = 1;
 ride_automation::Settings configuredSettings;
 uint8_t configuredAlertMode = 0;
@@ -306,7 +308,8 @@ void playConfirmedTransitionAlert() {
 
 ride_automation::ConfirmedLifecycle confirmedLifecycle(
     const workout_telemetry::Snapshot &workout,
-    ride_automation::ConfirmedLifecycle fallback) {
+    ride_automation::ConfirmedLifecycle fallback,
+    bool pauseOriginPending) {
   using ride_automation::ConfirmedLifecycle;
   using workout_telemetry_protocol::SessionState;
   if (workout.stale || !workout.state.coreReceived)
@@ -316,11 +319,11 @@ ride_automation::ConfirmedLifecycle confirmedLifecycle(
   case SessionState::Running:
     return ConfirmedLifecycle::Running;
   case SessionState::Paused:
-    return workout.state.originReceived &&
-                   workout.state.pauseOrigin ==
-                       workout_telemetry_protocol::PauseOrigin::Automatic
-               ? ConfirmedLifecycle::AutomaticallyPaused
-               : ConfirmedLifecycle::ManuallyPaused;
+    return ride_automation_runtime::pausedSessionLifecycle(
+        workout.state.originReceived &&
+            workout.state.pauseOrigin ==
+                workout_telemetry_protocol::PauseOrigin::Automatic,
+        pauseOriginPending, fallback);
   case SessionState::Ending:
   case SessionState::Ended:
   case SessionState::Failed:
@@ -331,51 +334,17 @@ ride_automation::ConfirmedLifecycle confirmedLifecycle(
   return ConfirmedLifecycle::Idle;
 }
 
-bool workoutContradictsOutstandingDecision(
+ride_automation_runtime::ObservedWorkout observedWorkout(
     const workout_telemetry::Snapshot &workout) {
-  using ride_automation_protocol::Transition;
-  using workout_telemetry_protocol::PauseOrigin;
-  using workout_telemetry_protocol::SessionState;
-  if (!hasOutstandingDecision || workout.stale ||
-      !workout.state.coreReceived) {
-    return false;
-  }
-  const SessionState state = workout.state.sessionState;
-  if (state == SessionState::Ending || state == SessionState::Ended ||
-      state == SessionState::Failed) {
-    return true;
-  }
-  if (outstandingDecision.transition != Transition::Start &&
-      state == SessionState::Idle) {
-    return true;
-  }
-  if (!workout.state.originReceived)
-    return false;
-  if (outstandingDecision.transition != Transition::Start &&
+  ride_automation_runtime::ObservedWorkout observed;
+  observed.sessionState = workout.state.sessionState;
+  observed.originReceived = workout.state.originReceived;
+  observed.sessionMismatch =
       ride_automation_protocol::hasSessionID(outstandingDecision.sessionID) &&
-      workout.state.sessionID != outstandingDecision.sessionID) {
-    return true;
-  }
-  const auto isConfirmedNonAutomatic = [](PauseOrigin origin) {
-    return origin != PauseOrigin::None && origin != PauseOrigin::Automatic;
-  };
-  switch (outstandingDecision.transition) {
-  case Transition::Start:
-    return isConfirmedNonAutomatic(workout.state.lastTransitionOrigin);
-  case Transition::Pause:
-    return (state == SessionState::Paused &&
-            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
-           (state == SessionState::Running &&
-            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
-  case Transition::Resume:
-    return (state == SessionState::Paused &&
-            isConfirmedNonAutomatic(workout.state.pauseOrigin)) ||
-           (state == SessionState::Running &&
-            isConfirmedNonAutomatic(workout.state.lastTransitionOrigin));
-  case Transition::None:
-    return false;
-  }
-  return false;
+      workout.state.sessionID != outstandingDecision.sessionID;
+  observed.pauseOrigin = workout.state.pauseOrigin;
+  observed.lastTransitionOrigin = workout.state.lastTransitionOrigin;
+  return observed;
 }
 
 void appendWorkoutSensorEvidence(uint32_t nowMs,
@@ -733,6 +702,7 @@ void beginFirmwareShadow() {
   hasInboundFrame = false;
   outstandingDecision = {};
   hasOutstandingDecision = false;
+  outstandingDecisionTracker = {};
   configuredSettings = {};
   configuredAlertMode = 0;
   configGeneration = 0;
@@ -887,10 +857,21 @@ void processFirmwareShadow(uint32_t nowMs) {
   const ride_automation::Settings settings = configuredSettings;
   const workout_telemetry::Snapshot workout =
       workout_telemetry_runtime::snapshot(nowMs);
+  // Reconcile the decision the device is waiting on against live telemetry
+  // before the lifecycle is derived: a paused session whose origin the Watch
+  // is still confirming keeps the previous lifecycle for this tick.
+  bool decisionContradicted = false;
+  bool pauseOriginPending = false;
+  if (hasOutstandingDecision && !workout.stale &&
+      workout.state.coreReceived) {
+    decisionContradicted = outstandingDecisionTracker.observe(
+        observedWorkout(workout), nowMs);
+    pauseOriginPending = outstandingDecisionTracker.pauseOriginPending();
+  }
   const ride_automation::ConfirmedLifecycle previousLifecycle =
       retainedLifecycle;
   const ride_automation::ConfirmedLifecycle lifecycle =
-      confirmedLifecycle(workout, retainedLifecycle);
+      confirmedLifecycle(workout, retainedLifecycle, pauseOriginPending);
 #if defined(RIDE_AUTOMATION_TRACE)
   if (!workout.stale && workout.state.coreReceived) {
     // A detailed capture is consented for one ride. End it from the device's
@@ -929,8 +910,7 @@ void processFirmwareShadow(uint32_t nowMs) {
   const ride_automation::Decision decision =
       runtime.update(nowMs, observation, lifecycle, settings);
 
-  if (runtime.policy().takePendingCancellation() ||
-      workoutContradictsOutstandingDecision(workout)) {
+  if (runtime.policy().takePendingCancellation() || decisionContradicted) {
     if (hasOutstandingDecision) {
       ride_automation_protocol::Frame cancellation = outstandingDecision;
       cancellation.kind = ride_automation_protocol::Kind::Cancellation;
@@ -943,6 +923,13 @@ void processFirmwareShadow(uint32_t nowMs) {
     decisionAcknowledged = false;
     promptResponded = false;
     promptAccepted = false;
+    // A contradiction that leaves the lifecycle unchanged (for example a
+    // different session that is also running) would otherwise leave the
+    // detector waiting on a decision nobody is delivering any more.
+    if (!decision && runtime.policy().pendingTransition() !=
+                         ride_automation::Transition::None) {
+      runtime.policy().rejectPending(nowMs);
+    }
   }
 
   if (decision) {
@@ -979,6 +966,7 @@ void processFirmwareShadow(uint32_t nowMs) {
     queueTransportFrame(frame, nowMs);
     outstandingDecision = frame;
     hasOutstandingDecision = true;
+    outstandingDecisionTracker.begin(frame.transition);
     decisionAcknowledged = false;
     outstandingDecisionBeganAtMs = nowMs;
     lastAcknowledgedDecisionRetryAtMs = nowMs;

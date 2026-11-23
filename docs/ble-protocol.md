@@ -1038,12 +1038,37 @@ that HealthKit changed state:
    device sends kind `8` with result `stale`. The phone stops the pending flow,
    but never ends or discards a workout that may already have started.
 
+Workout telemetry contradicts an unconfirmed pause or resume decision only
+when it describes the requested change itself:
+
+- a terminal or idle session, or an origin frame naming a different Watch
+  session;
+- the requested state, or the paused state a resume started from, with a
+  `manual` or `system` origin;
+- the session returning to the state the decision started from after the
+  device has seen it reach the requested state, whatever the origin; or
+- an origin that is still `unknown` five seconds after the device first saw it
+  for that state.
+
+The origin of the running state a pause decision started from is not evidence:
+it describes an older transition, such as the rider's manual start. Watch
+reports `unknown` while it durably writes the marker for an automatic
+transition it has been asked to apply, and a state change clears the origin
+until its frame arrives. For those five seconds the device treats a paused
+session with an absent or `unknown` origin as confirmation pending. It keeps
+its previous confirmed lifecycle, so the window is read neither as the rider's
+pause nor as a state to resume from. An absent origin never contradicts on its
+own; the 30-second decision deadline bounds that wait. A start decision is
+contradicted by any confirmed `manual`, `system`, or `unknown` start.
+
 The device retries its current decision or prompt response at bounded
 exponential intervals. A matching ACK stops transport retry but retains the
-logical decision until confirmation. A matching rejection, a contradictory
-manual/terminal state, or retry exhaustion clears it and applies detector
-suppression. An automatic resume is accepted only for an automatically paused
-matching Watch session; a manual pause cannot be crossed.
+logical decision until confirmation. A matching rejection or retry exhaustion
+clears it and applies detector suppression. A contradiction clears it; when
+the confirmed lifecycle did not change, it also applies that suppression so
+the detector does not keep waiting on a decision nobody is delivering. An
+automatic resume is accepted only for an automatically paused matching Watch
+session; a manual pause cannot be crossed.
 
 ### Configuration and reconnect
 
