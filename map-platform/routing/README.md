@@ -1,0 +1,107 @@
+# Worldwide bicycle-detour graph
+
+Build and qualify the graph off the serving host. The versioned policy maps Apple’s
+published Maps Cycling entries to Natural Earth map units. Mainland mappings for
+France, the Netherlands, and Portugal intentionally leave separately mapped
+overseas areas eligible. Unlisted units and the disputed-area layer are retained.
+The mask keeps a nominal 30 km band at excluded boundaries. Add explicit
+bike-accessible ferry links and crossings as retained polygons if probes show a
+route needs more space. The mask is a build input. No country list participates in
+the iPhone’s MapKit-first decision.
+
+## Build and release
+
+1. Use an on-demand Linux amd64 builder with Docker, Osmium, and Python 3.11 or
+   later. The first worldwide run is sized for a Compute Engine
+   `c4-highmem-24-lssd` with 1,500 GiB of scratch spread across four local SSDs.
+   Confirm the credit-backed project and CPU and SSD quotas before provisioning.
+   Stripe the temporary SSDs, keep the boot disk separate, and use a VM lifetime
+   limit. The Linux builder only needs access to public inputs.
+2. Download the exact two files named in [coverage.json](coverage.json) from
+   its pinned boundary base URL. For a policy refresh, fetch the official Apple
+   page and run the mask tool with `--apple-html`. A difference must be reviewed
+   before updating the versioned mappings. A reproducible rebuild can use the
+   existing committed policy. Pass reviewed additional corridor polygons with
+   `--corridors` when needed.
+
+   ```sh
+   python coverage_mask.py --boundaries "$build_scratch/boundaries" \
+     --apple-html "$build_scratch/apple.html" \
+     --output "$build_scratch/mask.geojson" --inventory "$build_scratch/inventory.json"
+   ```
+
+   This step requires the same Shapely and PyProj versions as the map platform
+   Python environment. The inventory records geometric coverage for each unit.
+   It does not establish that a routable network exists there.
+
+3. Fetch a dated planet PBF and its published checksum. Verify it and record the
+   source SHA-256. Use verified cache extracts for regional development samples.
+   Build the worldwide graph from one immutable snapshot. The builder completes
+   member references for selected bicycle routes, turn restrictions, and ferries
+   against that snapshot and builds the administrative database from the
+   unclipped input. It writes a seekable indexed tar and a separate manifest.
+
+   ```sh
+   python build_graph.py --source "$planet_pbf" --source-sha256 "$planet_sha" \
+     --source-url "$planet_url" --mask "$build_scratch/mask.geojson" \
+     --work "$build_scratch/candidate" --threads 8
+   ```
+
+   Use `--sample` for development input. Sample results are never worldwide
+   release evidence. Record peak scratch and memory, phase times, output size,
+   the policy and inventory, source and configuration hashes, and probe results.
+
+4. Run [probes.json](probes.json) with the pinned build image against the archive
+   alone. Add probes for the full release across continents and territories and
+   for shortlisted road and ferry crossings in both directions. Check the
+   inventory against routable OSM coverage and record any territory without a
+   bicycle network. Rehearse cold and warm runs with four requests and measure
+   memory, I/O, and latency alongside map-worker activity. The following
+   command exercises the Valhalla archive and keeps the container off-network.
+
+   ```sh
+   docker run --rm --network none --platform linux/amd64 --cpus 2 --memory 2g \
+     --read-only --tmpfs /tmp:size=64m \
+     -v "$candidate/valhalla_tiles.tar:/graph/valhalla_tiles.tar:ro" \
+     -v "$routing_tools:/probe:ro" --entrypoint /bin/bash "$valhalla_image" -ec '
+       valhalla_build_config --mjolnir-tile-extract /graph/valhalla_tiles.tar > /tmp/valhalla.json
+       valhalla_service /tmp/valhalla.json 2 &
+       exec python3 /probe/probe_graph.py --concurrency 4
+     '
+   ```
+
+5. From the Coolify VPS, pull the approved archive over SSH using a temporary,
+   read-only builder identity and a verified host key. Keep the production
+   credential on the serving side. The staged file and active file paths are
+   separate. The script checks the SHA-256, tar index, and tile count before
+   installing the candidate in a digest directory. The default free-space
+   reserve is 50 GB. Use one immutable copy across the serving environments.
+
+   ```sh
+   python stage_graph.py --root /var/lib/bicino-valhalla/graphs \
+     --manifest "$approved_manifest" --expected-sha256 "$approved_archive_sha" \
+     --source "$builder_host:$builder_archive"
+   ```
+
+6. Qualify the exact staged bytes in development, including the App Attest API
+   and enrolled iPhone replays. Reuse the Dubai acceptance harness. Add Buenos
+   Aires, a live Amsterdam MapKit success, a Paris interior Valhalla miss,
+   offline behavior, and confirmed rejoin. Confirm both original and temporary
+   routes are visible during detours. Map downloads use the existing separate
+   service.
+7. Advance the Coolify production graph lock through reviewed deployment after
+   development qualification and CI. Preserve the existing API and map worker
+   image pins. Retain the previous verified graph on the VPS and the original
+   small GCC archive. Roll back by remounting the prior digest and restarting
+   Valhalla. Keep the manifest in version control so disk loss can be recovered
+   by rebuilding. Cancel the builder after the VPS archive and development
+   probes pass. Refresh monthly or following a reviewed coverage change.
+
+## Focused checks
+
+```sh
+tools/dev-env --map-backend python -m unittest discover -s map-platform/routing -v
+```
+
+See [Saved-route bicycle detours](../../docs/saved-route-detours.md) for the
+existing provider contract and GCC baseline.
