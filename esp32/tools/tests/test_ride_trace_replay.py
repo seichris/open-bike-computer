@@ -115,6 +115,37 @@ class RideTraceReplayTests(unittest.TestCase):
         self.assertEqual(summary["pause_latency_ms_total"], 5_000)
         self.assertEqual(summary["resume_latency_ms_total"], 2_000)
 
+    def test_watch_gps_delayed_delivery_keeps_candidate_span(self):
+        # Synthetic. The newest Watch sample ages past the three-second
+        # decision limit before its successor is delivered, once while
+        # stopped and once while moving again. The span must survive that
+        # tick and the transition must be emitted on the next fresh sample.
+        trace = (
+            Path(__file__).parent
+            / "fixtures"
+            / "ride_automation"
+            / "watch-gps-delayed-delivery-regression.jsonl"
+        )
+        records = replay_module.load_trace(trace)
+        aged_out = [
+            record["label"]
+            for record in records
+            if record["evidence"]["watch_gps_mps"]["age_ms"] > 3_000
+        ]
+        self.assertEqual(
+            aged_out,
+            ["watch-stop-sample-aged-out", "watch-resume-sample-aged-out"],
+        )
+        outputs = replay_module.replay(records, self.binary)
+        summary = replay_module.validate_expectations(trace, records, outputs)
+        self.assertEqual(summary["mismatches"], 0)
+        self.assertEqual(summary["decisions"], 2)
+        self.assertEqual(summary["false_pauses"], 0)
+        self.assertEqual(summary["missed_transitions"], 0)
+        # Measured from the first sample of each span, in capture time.
+        self.assertEqual(summary["pause_latency_ms_total"], 7_500)
+        self.assertEqual(summary["resume_latency_ms_total"], 4_500)
+
     def test_rejects_private_and_raw_sensor_fields(self):
         for forbidden in sorted(replay_module.FORBIDDEN_KEYS):
             with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as directory:

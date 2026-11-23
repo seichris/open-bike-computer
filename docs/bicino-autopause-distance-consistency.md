@@ -35,7 +35,8 @@ whether an automatic transition was safe to reverse.
 | Wheel moving | Movement veto; cancel/reset a stopped candidate. |
 | Cadence moving | Movement veto; may start/resume. |
 | Cadence zero or cadence only | Not stopped evidence; require GPS plus IMU fallback. |
-| Watch GPS unavailable and no cycling sensor | Require ten continuous seconds of trustworthy device GPS plus IMU stopped evidence. |
+| No cycling sensor, and Watch GPS stopped, not fresh, or unavailable | Ten continuous seconds of trustworthy device GPS plus IMU stopped evidence, accumulated beside the Watch candidate. |
+| Fresh Watch GPS between `0.8` and `2.0 m/s` | Slow crawl; reset every pause candidate. |
 | Wheel dropout | Reset the short candidate; require a new qualified fallback window. |
 | Trustworthy GPS plus IMU movement | Movement veto, including while cadence is zero. |
 | Missing, stale, conflicting, or poor-quality evidence | Reset the candidate; never convert unavailable to zero. |
@@ -49,9 +50,19 @@ Profile 4 retains profile 3's direct/fallback thresholds and adds qualified raw
 Watch workout GPS as the normal active-workout source. Watch GPS is fresh for
 three seconds, requires horizontal accuracy no worse than `12.5 m`, pauses
 below `0.8 m/s` after a five-second source-sample span, and resumes at or above
-`2.0 m/s` after two seconds. A new sample epoch, stale/poor-quality data, a gap
-over three seconds, or a regressing sequence resets the Watch candidate; BLE
-heartbeats and retries cannot advance it. Wheel stopped remains below
+`2.0 m/s` after two seconds. A new sample epoch, poor-quality data, a gap over
+three seconds between samples, or a regressing sequence resets the Watch
+candidate; BLE heartbeats and retries cannot advance it.
+
+Freshness gates the decision, not the span. The detector runs once a second
+while samples arrive on their own clock, so the newest sample can age past
+three seconds before its successor is delivered. That sample stays in the
+candidate span for one further sample gap (six seconds in all), and a pause or
+resume is emitted only on a tick whose newest sample is fresh. A late sample
+that is not stopped (or, for resume, not moving) still ends the span even
+though it is too old to veto the fallback sources. Those sources keep
+accumulating beside a Watch feed that is stopped or not fresh, so an irregular
+Watch feed cannot erase their progress. Wheel stopped remains below
 `0.5 m/s`, wheel/cadence movement at or above `1.5 m/s`/`20 rpm`, qualified
 GPS stopped below `0.8 m/s`, and GPS resume at or above `2.0 m/s` with moving
 IMU evidence.
@@ -98,7 +109,16 @@ to the reported failure class; it is not a capture from the historical ride.
 It covers cadence-zero coasting, wheel dropout, and a genuine fallback stopped
 control. `watch-gps-sensorless-regression.jsonl` simulates a sensorless Watch
 ride and proves the five-second pause and two-second resume paths from distinct
-source samples.
+source samples. `watch-gps-delayed-delivery-regression.jsonl` is also
+synthetic: one Watch sample ages past three seconds before its successor is
+delivered, once while stopped and once while moving again, and the pause and
+resume must still be emitted on the next fresh sample.
+
+An unconfirmed pause or resume decision is reconciled against workout
+telemetry as described under "Decision and confirmation lifecycle" in
+[the BLE protocol](ble-protocol.md). The origin of the running state a pause
+started from, and the `unknown` origin Watch reports while it writes a
+transition marker, do not cancel the decision.
 
 Host acceptance covers the sensor matrix, trace replay, wire origin values,
 HealthKit-versus-paired provenance, transition recovery diagnostics, paused
@@ -114,3 +134,15 @@ Before merge, the owner must test a real Watch and supported Bicino board with:
 - automatic versus manual pause/resume and interrupted recovery; and
 - route/distance continuity across false-pause movement with stationary drift
   excluded.
+
+The decision-reconciliation and delayed-delivery rules above are verified on
+the host only. On each board's production image, separately for the 1.75-inch
+and 2.06-inch boards, a ride with a real Watch must still show:
+
+- an automatic pause as the first transition after a manual start, and again
+  after a manual resume, each ending with the device's confirmation alert and
+  no cancellation (kind `8`) frame for that decision;
+- an automatic resume followed within fifteen seconds by a new stop that
+  pauses again; and
+- a rider pause or resume that races an automatic decision winning, with no
+  later automatic pause from the retired decision.

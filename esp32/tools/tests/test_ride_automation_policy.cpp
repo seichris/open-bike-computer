@@ -1,3 +1,4 @@
+#include "../../lib/ride_automation/outstanding_decision_tracker.hpp"
 #include "../../lib/ride_automation/ride_automation_runtime.hpp"
 #include "../../lib/ride_automation/ride_automation_trace.hpp"
 #include "../../lib/ride_automation/ride_automation_protocol.hpp"
@@ -84,9 +85,441 @@ Decision runSeconds(RideAutomationPolicy &policy, uint32_t startMs,
   return result;
 }
 
+RideEvidenceObservation withWatchGps(RideEvidenceObservation observation,
+                                     const RideEvidenceObservation &watch) {
+  observation.watchGpsSpeedMetersPerSecond =
+      watch.watchGpsSpeedMetersPerSecond;
+  observation.watchGpsHorizontalUncertaintyMeters =
+      watch.watchGpsHorizontalUncertaintyMeters;
+  observation.watchGpsFixValid = watch.watchGpsFixValid;
+  observation.watchGpsSampleIdentityAvailable =
+      watch.watchGpsSampleIdentityAvailable;
+  observation.watchGpsSampleEpoch = watch.watchGpsSampleEpoch;
+  observation.watchGpsSampleSequence = watch.watchGpsSampleSequence;
+  return observation;
+}
+
+// The device reconciles the one decision it is waiting on against workout
+// telemetry. These cases model what the Watch reports around a transition.
+void testOutstandingDecisionTracker() {
+  using ride_automation_runtime::kOriginConfirmationGraceMs;
+  using ride_automation_runtime::ObservedWorkout;
+  using ride_automation_runtime::OutstandingDecisionTracker;
+  using workout_telemetry_protocol::PauseOrigin;
+  using workout_telemetry_protocol::SessionState;
+  using WireTransition = ride_automation_protocol::Transition;
+
+  const auto workout = [](SessionState state, PauseOrigin pauseOrigin,
+                          PauseOrigin lastTransitionOrigin,
+                          bool originReceived = true) {
+    ObservedWorkout observed;
+    observed.sessionState = state;
+    observed.originReceived = originReceived;
+    observed.pauseOrigin = pauseOrigin;
+    observed.lastTransitionOrigin = lastTransitionOrigin;
+    return observed;
+  };
+  const auto began = [](WireTransition transition) {
+    OutstandingDecisionTracker tracker;
+    tracker.begin(transition);
+    return tracker;
+  };
+  constexpr uint32_t grace = kOriginConfirmationGraceMs;
+
+  // No decision, nothing to contradict.
+  OutstandingDecisionTracker idle;
+  assert(!idle.observe(
+      workout(SessionState::Ended, PauseOrigin::None, PauseOrigin::Manual),
+      0));
+
+  // A pause decision is never contradicted by the origin of the running state
+  // it started from: that origin describes an older transition, such as the
+  // rider's manual start, or the Watch's marker for this very request.
+  for (PauseOrigin earlier :
+       {PauseOrigin::Manual, PauseOrigin::System, PauseOrigin::Unknown,
+        PauseOrigin::Automatic, PauseOrigin::None}) {
+    auto pause = began(WireTransition::Pause);
+    for (uint32_t nowMs = 0; nowMs < 30'000; nowMs += 1'000) {
+      assert(!pause.observe(
+          workout(SessionState::Running, PauseOrigin::None, earlier), nowMs));
+      assert(!pause.pauseOriginPending());
+    }
+  }
+
+  // The pause lands. The origin is absent, then unknown while the Watch
+  // writes its marker, then automatic. Nothing in that sequence contradicts,
+  // and the unconfirmed pause is reported as pending.
+  auto pauseLands = began(WireTransition::Pause);
+  assert(!pauseLands.observe(
+      workout(SessionState::Running, PauseOrigin::None, PauseOrigin::Manual),
+      0));
+  assert(!pauseLands.observe(
+      workout(SessionState::Running, PauseOrigin::None, PauseOrigin::Unknown),
+      1'000));
+  assert(!pauseLands.observe(
+      workout(SessionState::Paused, PauseOrigin::None, PauseOrigin::None,
+              false),
+      2'000));
+  assert(pauseLands.pauseOriginPending());
+  assert(!pauseLands.observe(
+      workout(SessionState::Paused, PauseOrigin::Unknown,
+              PauseOrigin::Unknown),
+      3'000));
+  assert(pauseLands.pauseOriginPending());
+  assert(!pauseLands.observe(
+      workout(SessionState::Paused, PauseOrigin::Automatic,
+              PauseOrigin::Automatic),
+      4'000));
+  assert(!pauseLands.pauseOriginPending());
+
+  // The rider's own pause retires the decision at once.
+  for (PauseOrigin riders : {PauseOrigin::Manual, PauseOrigin::System}) {
+    auto pause = began(WireTransition::Pause);
+    assert(pause.observe(workout(SessionState::Paused, riders, riders),
+                         1'000));
+    assert(!pause.pauseOriginPending());
+  }
+
+  // An origin that is still unknown after the grace was not the detector's.
+  auto unknownPause = began(WireTransition::Pause);
+  const ObservedWorkout pausedUnknown = workout(
+      SessionState::Paused, PauseOrigin::Unknown, PauseOrigin::Unknown);
+  assert(!unknownPause.observe(pausedUnknown, 1'000));
+  assert(!unknownPause.observe(pausedUnknown, 1'000 + grace - 1));
+  assert(unknownPause.pauseOriginPending());
+  assert(unknownPause.observe(pausedUnknown, 1'000 + grace));
+  assert(!unknownPause.pauseOriginPending());
+
+  // The grace is measured on the wrapping millisecond clock.
+  auto wrappingPause = began(WireTransition::Pause);
+  const uint32_t beforeWrap = std::numeric_limits<uint32_t>::max() - 1'000;
+  assert(!wrappingPause.observe(pausedUnknown, beforeWrap));
+  assert(!wrappingPause.observe(pausedUnknown, beforeWrap + grace - 1));
+  assert(wrappingPause.observe(pausedUnknown, beforeWrap + grace));
+
+  // An absent origin never contradicts by itself, but after the grace it no
+  // longer holds the lifecycle either.
+  auto absentOrigin = began(WireTransition::Pause);
+  const ObservedWorkout pausedNoOrigin = workout(
+      SessionState::Paused, PauseOrigin::None, PauseOrigin::None, false);
+  assert(!absentOrigin.observe(pausedNoOrigin, 1'000));
+  assert(absentOrigin.pauseOriginPending());
+  assert(!absentOrigin.observe(pausedNoOrigin, 1'000 + grace));
+  assert(!absentOrigin.pauseOriginPending());
+  assert(!absentOrigin.observe(pausedNoOrigin, 29'000));
+
+  // A pause that landed and was then undone is spent, whoever resumed it. A
+  // retry must not pause the ride a second time.
+  for (PauseOrigin resumedBy :
+       {PauseOrigin::Manual, PauseOrigin::System, PauseOrigin::Unknown,
+        PauseOrigin::Automatic, PauseOrigin::None}) {
+    auto pause = began(WireTransition::Pause);
+    assert(!pause.observe(
+        workout(SessionState::Paused, PauseOrigin::Automatic,
+                PauseOrigin::Automatic),
+        1'000));
+    assert(pause.observe(
+        workout(SessionState::Running, PauseOrigin::None, resumedBy), 2'000));
+  }
+
+  // A resume decision starts from an automatic pause. The Watch reports
+  // unknown from the moment it records the request until the marker for the
+  // resumed session is written.
+  auto resumeLands = began(WireTransition::Resume);
+  assert(!resumeLands.observe(
+      workout(SessionState::Paused, PauseOrigin::Automatic,
+              PauseOrigin::Automatic),
+      0));
+  assert(!resumeLands.pauseOriginPending());
+  assert(!resumeLands.observe(pausedUnknown, 1'000));
+  assert(resumeLands.pauseOriginPending());
+  assert(!resumeLands.observe(
+      workout(SessionState::Running, PauseOrigin::None, PauseOrigin::Unknown),
+      2'000));
+  assert(!resumeLands.pauseOriginPending());
+  assert(!resumeLands.observe(
+      workout(SessionState::Running, PauseOrigin::None,
+              PauseOrigin::Automatic),
+      3'000));
+
+  // Each state gets its own grace: a slow resume is not cut short by the time
+  // already spent waiting in the paused state.
+  auto slowResume = began(WireTransition::Resume);
+  const ObservedWorkout runningUnknown = workout(
+      SessionState::Running, PauseOrigin::None, PauseOrigin::Unknown);
+  assert(!slowResume.observe(pausedUnknown, 0));
+  assert(!slowResume.observe(pausedUnknown, grace - 1));
+  assert(!slowResume.observe(runningUnknown, grace));
+  assert(!slowResume.observe(runningUnknown, 2 * grace - 1));
+  assert(slowResume.observe(runningUnknown, 2 * grace));
+
+  // The rider resumed, or re-attributed the pause, before the detector's
+  // resume was confirmed.
+  for (PauseOrigin riders : {PauseOrigin::Manual, PauseOrigin::System}) {
+    auto resumed = began(WireTransition::Resume);
+    assert(resumed.observe(
+        workout(SessionState::Running, PauseOrigin::None, riders), 1'000));
+    auto repaused = began(WireTransition::Resume);
+    assert(repaused.observe(workout(SessionState::Paused, riders, riders),
+                            1'000));
+  }
+
+  // A resume that landed and was followed by another pause is spent.
+  auto resumeUndone = began(WireTransition::Resume);
+  assert(!resumeUndone.observe(
+      workout(SessionState::Running, PauseOrigin::None,
+              PauseOrigin::Automatic),
+      1'000));
+  assert(resumeUndone.observe(
+      workout(SessionState::Paused, PauseOrigin::Automatic,
+              PauseOrigin::Automatic),
+      2'000));
+
+  // Terminal, idle and foreign-session telemetry retire a decision as before.
+  for (SessionState terminal :
+       {SessionState::Ending, SessionState::Ended, SessionState::Failed}) {
+    for (WireTransition transition :
+         {WireTransition::Start, WireTransition::Pause,
+          WireTransition::Resume}) {
+      auto tracker = began(transition);
+      assert(tracker.observe(
+          workout(terminal, PauseOrigin::None, PauseOrigin::Automatic), 0));
+    }
+  }
+  const ObservedWorkout noWorkout = workout(
+      SessionState::Idle, PauseOrigin::None, PauseOrigin::None, false);
+  assert(began(WireTransition::Pause).observe(noWorkout, 0));
+  assert(began(WireTransition::Resume).observe(noWorkout, 0));
+  assert(!began(WireTransition::Start).observe(noWorkout, 0));
+  ObservedWorkout otherSession = workout(
+      SessionState::Running, PauseOrigin::None, PauseOrigin::Automatic);
+  otherSession.sessionMismatch = true;
+  assert(began(WireTransition::Pause).observe(otherSession, 0));
+  // The session ID travels in the origin frame; without one there is no
+  // mismatch to act on yet.
+  otherSession.originReceived = false;
+  assert(!began(WireTransition::Pause).observe(otherSession, 0));
+
+  // A start decision still loses to any start it did not make.
+  auto start = began(WireTransition::Start);
+  assert(!start.observe(
+      workout(SessionState::Running, PauseOrigin::None, PauseOrigin::None,
+              false),
+      0));
+  assert(!start.observe(
+      workout(SessionState::Running, PauseOrigin::None,
+              PauseOrigin::Automatic),
+      1'000));
+  for (PauseOrigin other :
+       {PauseOrigin::Manual, PauseOrigin::System, PauseOrigin::Unknown}) {
+    assert(began(WireTransition::Start)
+               .observe(workout(SessionState::Running, PauseOrigin::None,
+                                other),
+                        2'000));
+  }
+
+  // A paused session is the rider's unless its origin is confirmed automatic.
+  // While that confirmation is pending for a transition the device asked for,
+  // the previous lifecycle is kept, and only if it was one the pending
+  // decision could have started from.
+  using ride_automation_runtime::pausedSessionLifecycle;
+  for (ConfirmedLifecycle previous :
+       {ConfirmedLifecycle::Idle, ConfirmedLifecycle::Running,
+        ConfirmedLifecycle::AutomaticallyPaused,
+        ConfirmedLifecycle::ManuallyPaused, ConfirmedLifecycle::Finished}) {
+    assert(pausedSessionLifecycle(true, false, previous) ==
+           ConfirmedLifecycle::AutomaticallyPaused);
+    assert(pausedSessionLifecycle(true, true, previous) ==
+           ConfirmedLifecycle::AutomaticallyPaused);
+    assert(pausedSessionLifecycle(false, false, previous) ==
+           ConfirmedLifecycle::ManuallyPaused);
+    const bool held = previous == ConfirmedLifecycle::Running ||
+                      previous == ConfirmedLifecycle::AutomaticallyPaused;
+    assert(pausedSessionLifecycle(false, true, previous) ==
+           (held ? previous : ConfirmedLifecycle::ManuallyPaused));
+  }
+
+  // The reason the lifecycle is held: an automatic resume whose paused state
+  // was briefly read as the rider's would get the manual-resume grace, and a
+  // stop right after it would not pause.
+  Settings ask;
+  const auto stoppedFor = [&](RideAutomationPolicy &policy, uint32_t fromMs,
+                              uint32_t toMs) {
+    Decision last;
+    for (uint32_t nowMs = fromMs; nowMs <= toMs; nowMs += 1'000) {
+      last = policy.update(nowMs, wheel(0.0F, nowMs),
+                           ConfirmedLifecycle::Running, ask);
+    }
+    return last;
+  };
+  RideAutomationPolicy heldResume;
+  assert(!heldResume.update(0, wheel(4.0F, 0),
+                            ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!heldResume.update(
+      1'000, wheel(4.0F, 1'000),
+      pausedSessionLifecycle(false, true,
+                             ConfirmedLifecycle::AutomaticallyPaused),
+      ask));
+  assert(stoppedFor(heldResume, 2'000, 7'000).transition ==
+         Transition::Pause);
+  RideAutomationPolicy misreadResume;
+  assert(!misreadResume.update(0, wheel(4.0F, 0),
+                               ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!misreadResume.update(
+      1'000, wheel(4.0F, 1'000),
+      pausedSessionLifecycle(false, false,
+                             ConfirmedLifecycle::AutomaticallyPaused),
+      ask));
+  assert(!stoppedFor(misreadResume, 2'000, 7'000));
+}
+
+// Watch samples reach the device on their own clock. The candidate span must
+// tolerate a sample that is late or briefly missing without acting on data
+// that is too old.
+void testWatchGpsDeliveryTolerance() {
+  Settings ask;
+  Decision decision;
+
+  // The newest sample ages past the decision limit before its successor is
+  // delivered. The span continues, and the pause is emitted once a fresh
+  // sample completes it.
+  RideAutomationPolicy lateSuccessor;
+  for (uint32_t second = 0; second <= 2; ++second) {
+    assert(!lateSuccessor.update(
+        second * 1'000, watchGps(0.1F, second * 1'000, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(!lateSuccessor.update(5'500, watchGps(0.1F, 2'000, 3),
+                               ConfirmedLifecycle::Running, ask));
+  assert(lateSuccessor.detectorStatus().phase ==
+         DetectorPhase::PauseCandidate);
+  assert(!lateSuccessor.update(6'000, watchGps(0.1F, 4'500, 4),
+                               ConfirmedLifecycle::Running, ask));
+  decision = lateSuccessor.update(7'000, watchGps(0.1F, 5'500, 5),
+                                  ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+  assert(decision.candidateBeganAtMs == 0);
+
+  // A complete span cannot pause on a sample that is too old to act on.
+  RideAutomationPolicy staleSpan;
+  for (uint32_t second = 0; second <= 5; ++second) {
+    assert(!staleSpan.update(
+        second * 1'000 + 3'500, watchGps(0.1F, second * 1'000, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(staleSpan.detectorStatus().progressPercent == 100);
+  decision = staleSpan.update(9'000, watchGps(0.1F, 7'000, 7),
+                              ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+
+  // A late sample that is not stopped still ends the span, even though it is
+  // too old to act as a movement veto. Without that, samples 5 and 6 below
+  // would complete the five-second span begun at sample 1.
+  RideAutomationPolicy lateMovement;
+  for (uint32_t second = 0; second <= 2; ++second) {
+    assert(!lateMovement.update(
+        second * 1'000, watchGps(0.1F, second * 1'000, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(!lateMovement.update(6'200, watchGps(3.0F, 3'000, 4),
+                              ConfirmedLifecycle::Running, ask));
+  assert(!lateMovement.update(6'400, watchGps(0.1F, 4'500, 5),
+                              ConfirmedLifecycle::Running, ask));
+  assert(!lateMovement.update(6'600, watchGps(0.1F, 5'000, 6),
+                              ConfirmedLifecycle::Running, ask));
+  for (uint32_t second = 6; second <= 9; ++second) {
+    assert(!lateMovement.update(
+        second * 1'000 + 1'000, watchGps(0.1F, second * 1'000, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  decision = lateMovement.update(11'000, watchGps(0.1F, 9'500, 11),
+                                 ConfirmedLifecycle::Running, ask);
+  assert(decision.transition == Transition::Pause);
+  assert(decision.candidateBeganAtMs == 4'500);
+
+  // The span is kept only while a successor could still follow within the
+  // sample-gap limit: the decision freshness limit plus one sample gap.
+  RideAutomationPolicy abandoned;
+  for (uint32_t second = 0; second <= 4; ++second) {
+    assert(!abandoned.update(
+        second * 1'000, watchGps(0.1F, second * 1'000, second + 1),
+        ConfirmedLifecycle::Running, ask));
+  }
+  assert(!abandoned.update(10'000, watchGps(0.1F, 4'000, 5),
+                           ConfirmedLifecycle::Running, ask));
+  assert(abandoned.detectorStatus().phase == DetectorPhase::PauseCandidate);
+  assert(!abandoned.update(10'001, watchGps(0.1F, 4'000, 5),
+                           ConfirmedLifecycle::Running, ask));
+  assert(abandoned.detectorStatus().phase == DetectorPhase::Quiet);
+  // A sample delivered after that starts a new span instead of extending it.
+  assert(!abandoned.update(10'500, watchGps(0.1F, 9'000, 6),
+                           ConfirmedLifecycle::Running, ask));
+  assert(abandoned.detectorStatus().progressPercent == 0);
+
+  // The fallback sources keep accumulating beside a Watch feed whose samples
+  // are too far apart to build a span, instead of being cleared every time
+  // the Watch feed is fresh.
+  RideAutomationPolicy irregularWatch;
+  for (uint32_t nowMs = 0; nowMs <= 10'000; nowMs += 1'000) {
+    const uint32_t sampleIndex = nowMs / 4'000;
+    decision = irregularWatch.update(
+        nowMs,
+        withWatchGps(gpsImu(0.1F, 0.1F, 0.0F, nowMs, true),
+                     watchGps(0.1F, sampleIndex * 4'000, sampleIndex + 1)),
+        ConfirmedLifecycle::Running, ask);
+    assert((decision.transition == Transition::Pause) == (nowMs == 10'000));
+  }
+  assert((decision.evidenceMask & EvidenceGpsStopped) != 0);
+  assert((decision.evidenceMask & EvidenceWatchGpsStopped) != 0);
+  assert(decision.candidateBeganAtMs == 0);
+
+  // Fresh Watch GPS between the stopped and moving thresholds still outranks
+  // a fallback that looks stopped.
+  RideAutomationPolicy watchCrawl;
+  for (uint32_t nowMs = 0; nowMs <= 20'000; nowMs += 1'000) {
+    assert(!watchCrawl.update(
+        nowMs,
+        withWatchGps(gpsImu(0.1F, 0.1F, 0.0F, nowMs, true),
+                     watchGps(1.2F, nowMs, nowMs / 1'000 + 1)),
+        ConfirmedLifecycle::Running, ask));
+  }
+
+  // Resume follows the same rules: the span survives a late successor, and
+  // the resume is emitted only on a fresh sample.
+  RideAutomationPolicy lateResume;
+  assert(!lateResume.update(0, watchGps(3.0F, 0, 1),
+                            ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!lateResume.update(1'000, watchGps(3.0F, 1'000, 2),
+                            ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!lateResume.update(4'500, watchGps(3.0F, 1'000, 2),
+                            ConfirmedLifecycle::AutomaticallyPaused, ask));
+  decision = lateResume.update(5'000, watchGps(3.0F, 3'500, 3),
+                               ConfirmedLifecycle::AutomaticallyPaused, ask);
+  assert(decision.transition == Transition::Resume);
+
+  RideAutomationPolicy staleResume;
+  assert(!staleResume.update(3'200, watchGps(3.0F, 0, 1),
+                             ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!staleResume.update(5'200, watchGps(3.0F, 2'000, 2),
+                             ConfirmedLifecycle::AutomaticallyPaused, ask));
+  decision = staleResume.update(5'400, watchGps(3.0F, 4'500, 3),
+                                ConfirmedLifecycle::AutomaticallyPaused, ask);
+  assert(decision.transition == Transition::Resume);
+
+  RideAutomationPolicy lateStop;
+  assert(!lateStop.update(0, watchGps(3.0F, 0, 1),
+                          ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!lateStop.update(4'200, watchGps(0.1F, 1'000, 2),
+                          ConfirmedLifecycle::AutomaticallyPaused, ask));
+  assert(!lateStop.update(4'400, watchGps(3.0F, 2'500, 3),
+                          ConfirmedLifecycle::AutomaticallyPaused, ask));
+}
+
 } // namespace
 
 int main() {
+  testOutstandingDecisionTracker();
+  testWatchGpsDeliveryTolerance();
   assert(!ride_automation_runtime::decisionTransportExpired(30'999, 1'000));
   assert(ride_automation_runtime::decisionTransportExpired(31'000, 1'000));
   assert(ride_automation_runtime::decisionTransportExpired(29'999, UINT32_MAX));
