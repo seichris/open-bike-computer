@@ -38,19 +38,23 @@ def stage(root, manifest, source, reserve, bandwidth, ssh_config=None, *, compre
         required = max(0, expected["bytes"] - already_allocated)
         if shutil.disk_usage(root).free < required + reserve:
             raise ValueError("Staging the candidate would violate the required disk reserve")
-        ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
-        if ssh_config is not None:
-            ssh.extend(["-F", str(ssh_config)])
-        compression = ["--compress", "--compress-choice=zstd"] if compress_transfer else []
-        subprocess.run(
-            [
-                "rsync", "--partial", "--inplace", "--ignore-times", *compression, f"--bwlimit={bandwidth}",
-                f"--max-size={expected['bytes']}",
-                "-e", shlex.join(ssh),
-                "--", source, str(destination),
-            ],
-            check=True,
-        )
+        if source is None:
+            if not destination.is_file():
+                raise ValueError("Expected an existing incoming archive")
+        else:
+            ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+            if ssh_config is not None:
+                ssh.extend(["-F", str(ssh_config)])
+            compression = ["--compress", "--compress-choice=zstd"] if compress_transfer else []
+            subprocess.run(
+                [
+                    "rsync", "--partial", "--inplace", "--ignore-times", *compression, f"--bwlimit={bandwidth}",
+                    f"--max-size={expected['bytes']}",
+                    "-e", shlex.join(ssh),
+                    "--", source, str(destination),
+                ],
+                check=True,
+            )
         if shutil.disk_usage(root).free < reserve:
             raise ValueError("Shared disk free space fell below the reserve during transfer")
         try:
@@ -82,7 +86,9 @@ def stage(root, manifest, source, reserve, bandwidth, ssh_config=None, *, compre
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True, help="Shared directory of graph digests")
-    parser.add_argument("--source", required=True, help="Builder's rsync source, user@host:/path/archive")
+    transfer = parser.add_mutually_exclusive_group(required=True)
+    transfer.add_argument("--source", help="Builder's rsync source, user@host:/path/archive")
+    transfer.add_argument("--verify-incoming", action="store_true", help="Verify an archive already transferred into the incoming directory")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--expected-sha256", required=True, help="Archive digest from the reviewed release")
     parser.add_argument("--ssh-config", type=Path, help="Isolated SSH configuration for pulling from the builder")

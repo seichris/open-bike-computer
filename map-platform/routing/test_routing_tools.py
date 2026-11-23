@@ -112,6 +112,21 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn("--compress-choice=zstd", transfer.call_args.args[0])
             self.assertEqual(file_identity(receipt / ARCHIVE_NAME), file_identity(source))
 
+    def test_already_transferred_archive_is_verified_without_retransferring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / ARCHIVE_NAME
+            write_archive(source)
+            expected = {**file_identity(source), "tiles": 1}
+            incoming = root / f".{expected['sha256']}.incoming"
+            incoming.mkdir()
+            shutil.copyfile(source, incoming / ARCHIVE_NAME)
+            with patch("stage_graph.subprocess.run") as transfer:
+                receipt = stage(root, {"archive": expected}, None, 0, 20_480)
+            transfer.assert_not_called()
+            self.assertEqual(receipt, root / expected["sha256"])
+            self.assertEqual(file_identity(receipt / ARCHIVE_NAME), file_identity(source))
+
 
 if __name__ == "__main__":
     unittest.main()
