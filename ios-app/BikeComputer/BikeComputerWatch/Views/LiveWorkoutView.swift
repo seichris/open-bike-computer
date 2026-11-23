@@ -252,17 +252,23 @@ struct LiveWorkoutView: View {
                     }
                 }
 
-                HStack(spacing: 8) {
+                // One full-width row per control, in riding order. A whole
+                // row is a far easier target on a moving wrist than a third
+                // of one.
+                VStack(spacing: 6) {
                     Button {
                         manager.markSegment()
                     } label: {
-                        if manager.isMarkingSegment {
-                            ProgressView()
-                        } else {
-                            WatchSegmentNumberBadge(
-                                number: manager.snapshot.currentSegmentIndex
-                            )
+                        Group {
+                            if manager.isMarkingSegment {
+                                ProgressView()
+                            } else {
+                                WatchSegmentNumberBadge(
+                                    number: manager.snapshot.currentSegmentIndex
+                                )
+                            }
                         }
+                        .workoutControlRow()
                     }
                     .tint(.green)
                     .disabled(
@@ -274,6 +280,7 @@ struct LiveWorkoutView: View {
                     .accessibilityValue(
                         "Current segment \(manager.snapshot.currentSegmentIndex)"
                     )
+                    .accessibilityIdentifier("workout-segment")
 
                     Button {
                         if manager.state == .paused {
@@ -283,17 +290,20 @@ struct LiveWorkoutView: View {
                         }
                     } label: {
                         Image(systemName: manager.state == .paused ? "play.fill" : "pause.fill")
+                            .workoutControlRow()
                     }
                     .tint(manager.state == .paused ? .green : .orange)
                     .disabled(
                         ![.running, .paused].contains(manager.state)
                     )
                     .accessibilityLabel(manager.state == .paused ? "Resume ride" : "Pause ride")
+                    .accessibilityIdentifier("workout-pause-resume")
 
                     Button(role: .destructive) {
                         manager.endAndSave()
                     } label: {
                         Image(systemName: "stop.fill")
+                            .workoutControlRow()
                     }
                     .disabled(
                         manager.state == .ending
@@ -548,6 +558,15 @@ struct LiveWorkoutView: View {
         case .confirmationPending:
             "Still confirming that segment. You can pause or end the ride."
         }
+    }
+}
+
+private extension View {
+    /// Stretches a control's label across the row and gives the three rows
+    /// one height, so the Segment row does not resize when its number badge
+    /// gives way to the pending spinner.
+    func workoutControlRow() -> some View {
+        frame(maxWidth: .infinity, minHeight: 25)
     }
 }
 

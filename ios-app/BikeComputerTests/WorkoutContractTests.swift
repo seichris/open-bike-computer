@@ -152,6 +152,7 @@ private struct WorkoutContractTestSuite {
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testMainRideControlsComposition()
+        testWatchWorkoutControlsStackInFullWidthRows()
         testWorkoutRecordersCreateNoMarkerEvents()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
         testWatchWorkoutLaunchRequest()
@@ -5738,6 +5739,79 @@ private struct WorkoutContractTestSuite {
         )
     }
 
+    private mutating func testWatchWorkoutControlsStackInFullWidthRows() {
+        let liveViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift"
+            )
+        guard let source = try? String(contentsOf: liveViewURL, encoding: .utf8)
+        else {
+            expect(false, "Watch live workout source must be available")
+            return
+        }
+        let compact = source.filter { !$0.isWhitespace }
+        let rowsStart = "VStack(spacing:6){Button{manager.markSegment()}label:{"
+        let rowsEnd = ".accessibilityIdentifier(\"workout-stop-and-save\")}"
+        guard let startRange = compact.range(of: rowsStart),
+              let endRange = compact.range(
+                of: rowsEnd,
+                range: startRange.upperBound..<compact.endIndex
+              ) else {
+            expect(false, "Watch workout controls must be one vertical stack from Segment to Stop")
+            return
+        }
+        let rows = String(compact[startRange.lowerBound..<endRange.upperBound])
+        func position(of needle: String) -> String.Index? {
+            rows.range(of: needle)?.lowerBound
+        }
+        let segment = position(of: "manager.markSegment()")
+        let pause = position(of: "manager.pause()")
+        let stop = position(of: "manager.endAndSave()")
+        expect(
+            segment != nil && pause != nil && stop != nil
+                && segment! < pause! && pause! < stop!,
+            "Watch workout rows must read Segment, Pause/Resume, Stop"
+        )
+        expect(
+            rows.contains(
+                "ifmanager.isMarkingSegment{ProgressView()}else{WatchSegmentNumberBadge(number:manager.snapshot.currentSegmentIndex)}"
+            )
+                && rows.contains(
+                    ".disabled(manager.state!=.running||manager.isMarkingSegment||manager.segmentError==.confirmationPending)"
+                )
+                && rows.contains(".accessibilityLabel(\"Markworkoutsegment\")")
+                && rows.contains(
+                    ".accessibilityValue(\"Currentsegment\\(manager.snapshot.currentSegmentIndex)\")"
+                ),
+            "the Segment row must keep its number, pending state, enablement and accessibility"
+        )
+        expect(
+            rows.contains(
+                "ifmanager.state==.paused{manager.resume()}else{manager.pause()}"
+            )
+                && rows.contains(
+                    ".disabled(![.running,.paused].contains(manager.state))"
+                )
+                && rows.contains(
+                    ".accessibilityLabel(manager.state==.paused?\"Resumeride\":\"Pauseride\")"
+                )
+                && rows.contains(
+                    "Button(role:.destructive){manager.endAndSave()}"
+                )
+                && rows.contains(".disabled(manager.state==.ending)")
+                && rows.contains(".accessibilityLabel(\"Endandsaveride\")"),
+            "the Pause/Resume and Stop rows must keep their actions, enablement and accessibility"
+        )
+        expect(
+            compact.contains(
+                "Button(\"DiscardWorkout\"){guardletsessionID=manager.activeSessionIDelse{return}requestDiscardConfirmation(for:sessionID)}"
+            ),
+            "discarding must still go through its confirmation"
+        )
+    }
+
     private mutating func testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery() {
         for disposition in [
             WorkoutFinishDisposition.save,
@@ -8642,17 +8716,42 @@ private struct WorkoutContractTestSuite {
            let timerIndex = compactLiveWatchView.range(
             of: "workoutTime(\"Elapsed\",manager.snapshot.wallElapsedTime?.value??manager.snapshot.elapsedTime?.value)"
            )?.lowerBound,
-           let controlsIndex = compactLiveWatchView.range(
-            of: "HStack(spacing:8){Button{manager.markSegment()"
-           )?.lowerBound {
+           let controlsStart = compactLiveWatchView.range(
+            of: "VStack(spacing:6){Button{manager.markSegment()}label:{"
+           ),
+           let controlsEnd = compactLiveWatchView.range(
+            of: ".accessibilityIdentifier(\"workout-stop-and-save\")}",
+            range: controlsStart.upperBound..<compactLiveWatchView.endIndex
+           ) {
+            let controls = compactLiveWatchView[
+                controlsStart.lowerBound..<controlsEnd.upperBound
+            ]
             expect(
-                gridIndex < timerIndex && timerIndex < controlsIndex,
+                gridIndex < timerIndex
+                    && timerIndex < controlsStart.lowerBound,
                 "Watch elapsed timer must appear below the stat grid and above workout controls"
+            )
+            // The controls used to share one horizontal row. Each is now a
+            // full-width row of its own, stacked below the metrics.
+            expect(
+                !controls.contains("HStack(")
+                    && !compactLiveWatchView.contains(
+                        "HStack(spacing:8){Button{manager.markSegment()"
+                    )
+                    && controls.components(separatedBy: "Button").count - 1
+                        == 3
+                    && controls.components(
+                        separatedBy: ".workoutControlRow()"
+                    ).count - 1 == 3
+                    && compactLiveWatchView.contains(
+                        "funcworkoutControlRow()->someView{frame(maxWidth:.infinity,minHeight:25)}"
+                    ),
+                "Watch workout controls must be three stacked full-width rows, not one horizontal row"
             )
         } else {
             expect(
                 false,
-                "Watch live workout grid, timer, and controls must remain discoverable"
+                "Watch live workout grid, timer, and stacked controls must remain discoverable"
             )
         }
         expect(
