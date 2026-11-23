@@ -3374,6 +3374,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
 
+        let finalizingSessionID = (recoveryStore.recoveredIdentity ?? identity)?.sessionID
         do {
             let saveMode = recoveredSaveMode ?? .full
             var savedWorkout: HKWorkout?
@@ -3453,7 +3454,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     discardedAt: endDate
                 )
             case .saved(let route):
-                guard self.builder === builder else { return }
+                guard (recoveryStore.recoveredIdentity ?? identity)?.sessionID == finalizingSessionID else {
+                    return
+                }
                 let summary: WatchWorkoutSummary
                 if let reconciledSavedWorkout {
                     summary = makeSummary(
@@ -3478,7 +3481,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                         endDate: endDate,
                         routeDistanceMeters: route.distanceMeters,
                         routeStatus: route.routeStatus,
-                        savedWorkout: savedWorkout
+                        savedWorkout: savedWorkout,
+                        finalizedBuilder: builder
                     )
                 }
                 completeConfirmedSave(
@@ -7075,7 +7079,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         endDate: Date,
         routeDistanceMeters: Double?,
         routeStatus: WorkoutRouteSaveStatus,
-        savedWorkout: HKWorkout? = nil
+        savedWorkout: HKWorkout? = nil,
+        finalizedBuilder: HKLiveWorkoutBuilder? = nil
     ) -> WatchWorkoutSummary {
         if outcome == .discarded {
             return WatchWorkoutSummary(
@@ -7098,7 +7103,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         // Match Fitness using the saved workout's active duration. HealthKit
         // can confirm a save without returning the workout while locked.
-        let duration = savedWorkout?.duration ?? builder?.elapsedTime(at: endDate)
+        let duration = savedWorkout?.duration ?? finalizedBuilder?.elapsedTime(at: endDate)
         return WatchWorkoutSummary(
             outcome: outcome,
             endedAt: savedWorkout?.endDate ?? endDate,

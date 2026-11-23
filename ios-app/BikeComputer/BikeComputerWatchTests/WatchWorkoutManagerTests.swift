@@ -9020,6 +9020,14 @@ final class WatchWorkoutManagerTests: XCTestCase {
     }
 
     func testFinishCallbackPublishesSavedActiveTimeAndDistanceToDevice() async throws {
+        try await assertFinishCallbackPublishesSavedWorkout()
+    }
+
+    func testFinishCallbackCompletesSaveAfterBuilderRebind() async throws {
+        try await assertFinishCallbackPublishesSavedWorkout(rebindBuilder: true)
+    }
+
+    private func assertFinishCallbackPublishesSavedWorkout(rebindBuilder: Bool = false) async throws {
         let wallSeconds: TimeInterval = 4_914
         let activeSeconds: TimeInterval = 4_633
         let distanceMeters = 39_150.0
@@ -9040,6 +9048,10 @@ final class WatchWorkoutManagerTests: XCTestCase {
         configuration.locationType = .outdoor
         let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
         let builder = session.associatedWorkoutBuilder()
+        let replacementSession = rebindBuilder
+            ? try HKWorkoutSession(healthStore: healthStore, configuration: configuration) : nil
+        let identity = try XCTUnwrap(store.recoveredIdentity)
+        weak var callbackManager: WatchWorkoutManager?
         let manager = WatchWorkoutManager(
             healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
             recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
@@ -9047,10 +9059,18 @@ final class WatchWorkoutManagerTests: XCTestCase {
             ),
             builderElapsedTime: { _ in wallSeconds },
             endCollectionOperation: { _, _ in },
-            finishWorkoutCallback: { _, completion in completion(savedWorkout, nil) },
+            finishWorkoutCallback: { _, completion in
+                if let replacementSession {
+                    callbackManager?.configureMirrorRuntimeForTesting(
+                        session: replacementSession, identity: identity, state: .ending,
+                        builder: replacementSession.associatedWorkoutBuilder()
+                    )
+                }
+                completion(savedWorkout, nil)
+            },
             initializeOnLaunch: false
         )
-        let identity = try XCTUnwrap(store.recoveredIdentity)
+        callbackManager = manager
         manager.configureMirrorRuntimeForTesting(session: session, identity: identity, state: .ending)
         manager.setCumulativeMetricsForTesting(
             averageHeartRateBPM: 159, activeEnergyKilocalories: 1_137.9,
@@ -9060,6 +9080,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
 
         XCTAssertEqual(manager.summary?.duration, activeSeconds)
         XCTAssertEqual(manager.summary?.distanceMeters, distanceMeters)
+        XCTAssertNil(store.recoveredIdentity)
+        XCTAssertEqual(store.terminalTombstone(externalUUID: identity.sessionID.uuidString)?.disposition, .save)
         let snapshot = try XCTUnwrap(manager.latestEnvelope?.snapshot)
         XCTAssertEqual(snapshot.state, .ended)
         XCTAssertEqual(snapshot.wallElapsedTime?.value, wallSeconds)
