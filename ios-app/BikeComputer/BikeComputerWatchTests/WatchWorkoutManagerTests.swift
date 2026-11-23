@@ -9133,87 +9133,1103 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(store.terminalTombstone(externalUUID: identity.sessionID.uuidString)?.disposition, .save)
     }
 
-    func testDelayedTransitionCannotMutateConsecutiveRideOrCorruptRecovery() async throws {
-        for failOldWrite in [false, true] {
-            let persistence = ToggleRecoveryPersistence()
-            let store = WatchWorkoutRecoveryStore(persistence: persistence)
-            let start = Date().addingTimeInterval(-120)
-            let oldIdentity = try store.begin(startDate: start)
-            let healthStore = HKHealthStore()
-            let configuration = HKWorkoutConfiguration()
-            configuration.activityType = .cycling
-            configuration.locationType = .outdoor
-            let oldSession = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
-            let oldBuilder = oldSession.associatedWorkoutBuilder()
-            let probe = AsyncThrowingVoidProbe()
-            let manager = WatchWorkoutManager(
-                healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
-                recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
-                    session: oldSession, builder: oldBuilder, sessionState: { .running }
-                ),
-                rideTransitionEventOperation: { _ in try await probe.run() },
-                initializeOnLaunch: false
+    // MARK: - Ride transition provenance
+
+    /// Apple Fitness draws a segment boundary at every `.marker` workout
+    /// event. A ride with pauses used to export one marker per transition and
+    /// showed a phantom 00:00 segment for each pause. Everything Bicino adds
+    /// to the HealthKit builder passes through the segment event operation
+    /// (the host contract tests pin that there is no other builder write),
+    /// so this ride must export exactly its manual marks and the closing
+    /// segment, and nothing for its six pauses and resumes.
+    func testRideWithPausesAndManualMarksExportsOnlySegmentBoundaries()
+        async throws {
+        let startDate = Date().addingTimeInterval(-3_600)
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try store.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var activeSeconds: TimeInterval = 0
+        var segmentDate = startDate
+        var exportedEvents: [HKWorkoutEvent] = []
+        var nativePauseRequests = 0
+        var nativeResumeRequests = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            builderElapsedTime: { _ in activeSeconds },
+            remotePauseOperation: { _ in nativePauseRequests += 1 },
+            remoteResumeOperation: { _ in nativeResumeRequests += 1 },
+            segmentEventOperation: { exportedEvents.append($0) },
+            segmentNow: { segmentDate },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: builder
+        )
+        let senderID = UUID()
+        func control(
+            _ control: WorkoutControlV1,
+            sequence: UInt64,
+            context: WorkoutControlContextV1? = nil
+        ) -> WorkoutEnvelopeV1 {
+            WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: identity.sessionID,
+                sessionToken: identity.sessionToken,
+                transportGenerationID:
+                    identity.transportGenerationID ?? identity.sessionID,
+                sequence: sequence,
+                capturedAt: Date(),
+                controlSenderID: senderID,
+                controlContext: context,
+                control: control
             )
-            manager.configureMirrorRuntimeForTesting(session: oldSession, identity: oldIdentity, state: .running)
-            let delayed = Task { await manager.applySessionState(oldSession, to: .paused, from: .running, date: start.addingTimeInterval(30)) }
-            try await waitUntil { probe.callCount == 1 }
-            manager.discard()
-            await manager.finalizeForTesting(disposition: .discard, endDate: start.addingTimeInterval(60))
-            XCTAssertNil(store.recoveredIdentity)
-            let next = try store.begin(startDate: start.addingTimeInterval(90))
-            let newSession = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
-            manager.configureMirrorRuntimeForTesting(
-                session: newSession, identity: next, state: .running,
-                builder: newSession.associatedWorkoutBuilder()
-            )
-            if failOldWrite { probe.fail() } else { probe.complete() }
-            await delayed.value
-            XCTAssertEqual(store.recoveredIdentity?.sessionID, next.sessionID)
-            XCTAssertNil(store.recoveredIdentity?.lastTransitionAt)
-            XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
-            XCTAssertEqual(WatchWorkoutRecoveryStore(persistence: persistence).loadState, .valid)
-            XCTAssertNil(manager.snapshot.errorCode)
         }
+        func at(_ seconds: TimeInterval) -> Date {
+            startDate.addingTimeInterval(seconds)
+        }
+
+        // First manual mark after five minutes of riding.
+        activeSeconds = 300
+        segmentDate = at(300)
+        manager.markSegment()
+        try await waitUntil {
+            exportedEvents.count == 1 && !manager.isMarkingSegment
+        }
+
+        // The rider pauses for a minute. HealthKit's own pause and resume
+        // events account for the stopped time.
+        manager.handleRemoteWorkoutEnvelopes(
+            [control(.pause, sequence: 1)],
+            from: session
+        )
+        XCTAssertEqual(nativePauseRequests, 1)
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: at(400)
+        )
+        manager.handleRemoteWorkoutEnvelopes(
+            [control(.resume, sequence: 2)],
+            from: session
+        )
+        XCTAssertEqual(nativeResumeRequests, 1)
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: at(460)
+        )
+
+        // The detector pauses and resumes the ride at a traffic light.
+        let automaticPause = Self.automaticDecision(sequence: 11)
+        let automaticResume = Self.automaticDecision(sequence: 12)
+        manager.handleRemoteWorkoutEnvelopes(
+            [control(.pause, sequence: 3, context: automaticPause)],
+            from: session
+        )
+        XCTAssertEqual(nativePauseRequests, 2)
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: at(700)
+        )
+        manager.handleRemoteWorkoutEnvelopes(
+            [control(.resume, sequence: 4, context: automaticResume)],
+            from: session
+        )
+        XCTAssertEqual(nativeResumeRequests, 2)
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: at(760)
+        )
+
+        // Second manual mark.
+        activeSeconds = 780
+        segmentDate = at(900)
+        manager.markSegment()
+        try await waitUntil {
+            exportedEvents.count == 2 && !manager.isMarkingSegment
+        }
+
+        // A pause nobody in Bicino asked for, such as one made in the system
+        // workout controls.
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: at(1_000)
+        )
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: at(1_030)
+        )
+
+        // Finishing closes the open segment.
+        activeSeconds = 1_050
+        let didCloseFinalSegment = await manager.closeFinalSegmentForTesting(
+            at: at(1_200)
+        )
+        XCTAssertTrue(didCloseFinalSegment)
+
+        XCTAssertEqual(
+            exportedEvents.map(\.type),
+            [.segment, .segment, .segment],
+            "only manual marks and the final closure may reach HealthKit"
+        )
+        XCTAssertEqual(
+            exportedEvents.map(\.dateInterval),
+            [
+                DateInterval(start: at(0), end: at(300)),
+                DateInterval(start: at(300), end: at(900)),
+                DateInterval(start: at(900), end: at(1_200)),
+            ],
+            "segments must abut from the workout start to its end"
+        )
+        XCTAssertFalse(exportedEvents.contains { $0.type == .marker })
+        XCTAssertFalse(exportedEvents.contains {
+            $0.dateInterval.duration == 0
+        })
+        XCTAssertEqual(
+            exportedEvents.map {
+                ($0.metadata?[
+                    "com.openbikecomputer.workout.segment.index"
+                ] as? NSNumber)?.intValue
+            },
+            [1, 2, 3]
+        )
+        XCTAssertEqual(
+            exportedEvents.map {
+                ($0.metadata?[
+                    "com.openbikecomputer.workout.segment.activeDuration"
+                ] as? NSNumber)?.doubleValue
+            },
+            [300, 480, 270],
+            "segment durations must keep excluding paused time"
+        )
+
+        // Who caused each transition is still durable, in the recovery file.
+        let journal = try XCTUnwrap(
+            store.recoveredIdentity?.rideTransitionJournal
+        )
+        XCTAssertEqual(
+            journal.map(\.transition),
+            [.pause, .resume, .pause, .resume, .pause, .resume]
+        )
+        XCTAssertEqual(
+            journal.map(\.origin),
+            [.manual, .manual, .automatic, .automatic, .unknown, .unknown]
+        )
+        XCTAssertEqual(
+            journal.map(\.at),
+            [at(400), at(460), at(700), at(760), at(1_000), at(1_030)]
+        )
+        XCTAssertTrue(journal[2].confirms(automaticPause, transition: .pause))
+        XCTAssertTrue(
+            journal[3].confirms(automaticResume, transition: .resume)
+        )
+        XCTAssertEqual(journal[2].evidenceMask, automaticPause.evidenceMask)
+        XCTAssertEqual(
+            journal[3].decidedAtSeconds,
+            automaticResume.decidedAtSeconds
+        )
+        XCTAssertNil(journal[0].detectorProfileVersion)
+        XCTAssertEqual(manager.state, .running)
+        XCTAssertNil(manager.snapshot.errorCode)
     }
 
-    func testOutOfOrderTransitionWritesKeepNewestNativeTransition() async throws {
-        let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
+    /// The journal replaces the marker as recovery evidence, so it has to
+    /// outlive the process on disk and be honoured when the Watch app
+    /// reattaches to the session.
+    func testRideTransitionProvenanceSurvivesInterruptionAndReattachment()
+        async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ride-transition-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = WorkoutRecoveryFilePersistence(
+            fileURL: directory.appendingPathComponent("active-workout.plist")
+        )
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try store.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var exportedEvents: [HKWorkoutEvent] = []
+        var nativePauseRequests = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            remotePauseOperation: { _ in nativePauseRequests += 1 },
+            segmentEventOperation: { exportedEvents.append($0) },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: builder
+        )
+        let decision = Self.automaticDecision(sequence: 21)
+        let pauseControl = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID:
+                identity.transportGenerationID ?? identity.sessionID,
+            sequence: 5,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            controlContext: decision,
+            control: .pause
+        )
+        manager.handleRemoteWorkoutEnvelopes([pauseControl], from: session)
+        XCTAssertEqual(nativePauseRequests, 1)
+        let pausedAt = Date()
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: pausedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.pauseOrigin, .automatic)
+
+        // The process dies. A new one reads the file and reattaches to the
+        // still-paused session, whose builder holds no Bicino marker.
+        let relaunchedStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        XCTAssertEqual(relaunchedStore.loadState, .valid)
+        let recoveredIdentity = try XCTUnwrap(
+            relaunchedStore.recoveredIdentity
+        )
+        XCTAssertEqual(
+            recoveredIdentity.rideTransitionJournal,
+            store.recoveredIdentity?.rideTransitionJournal
+        )
+        var relaunchedPauseRequests = 0
+        let mirrorProbe = WatchMirrorTransportProbe()
+        let relaunched = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: relaunchedStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: builder,
+                sessionState: { .paused }
+            ),
+            remotePauseOperation: { _ in relaunchedPauseRequests += 1 },
+            segmentEventOperation: { exportedEvents.append($0) },
+            mirrorStartOperation: mirrorProbe.start,
+            mirrorSendOperation: mirrorProbe.send,
+            mirrorShutdownEndSession: mirrorProbe.endSession,
+            mirrorRetryDelay: 0.01,
+            initializeOnLaunch: false
+        )
+        relaunched.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: recoveredIdentity,
+            state: .paused
+        )
+        relaunched.startMirroringForTesting()
+        mirrorProbe.completeNextStart(succeeded: true)
+        // Let the launch-time restoration run.
+        try await Task.sleep(for: .milliseconds(50))
+
+        let restored = try XCTUnwrap(relaunchedStore.recoveredIdentity)
+        XCTAssertEqual(restored.pauseOrigin, .automatic)
+        XCTAssertEqual(restored.lastTransitionOrigin, .automatic)
+        XCTAssertEqual(restored.lastTransitionAt, pausedAt)
+        XCTAssertEqual(
+            restored.detectorProfileVersion,
+            decision.detectorProfileVersion
+        )
+        XCTAssertEqual(
+            restored.rideTransitionJournal?.count,
+            1,
+            "restoring from the journal must not journal the pause twice"
+        )
+
+        // The iPhone retries the decision it never saw acknowledged. It is
+        // recognised from the journal: acknowledged, not applied again.
+        relaunched.handleRemoteWorkoutEnvelopes([pauseControl], from: session)
+        let acknowledgement = try await waitForAcknowledgement(
+            of: .pause,
+            sequence: pauseControl.sequence,
+            via: mirrorProbe
+        )
+        XCTAssertEqual(acknowledgement?.resultingState, .paused)
+        XCTAssertNil(acknowledgement?.errorCode)
+        XCTAssertEqual(relaunchedPauseRequests, 0)
+        XCTAssertEqual(
+            relaunchedStore.recoveredIdentity?.rideTransitionJournal?.count,
+            1
+        )
+        XCTAssertEqual(relaunched.state, .paused)
+        XCTAssertTrue(exportedEvents.isEmpty)
+    }
+
+    /// A crash between HealthKit pausing the session and the Watch recording
+    /// why must still recover the pause as the detector's, from the request
+    /// that was durable before HealthKit was asked.
+    func testInterruptedAutomaticPauseRecoversFromDurableRequest()
+        async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        _ = try store.begin(startDate: startDate)
+        try store.confirmRideTransition(
+            origin: .manual,
+            paused: false,
+            at: startDate,
+            detectorProfileVersion: nil,
+            transition: .start
+        )
+        let decision = Self.automaticDecision(sequence: 31)
+        let requestedAt = startDate.addingTimeInterval(120)
+        try store.persistAutomaticTransitionRequest(
+            context: decision,
+            paused: true,
+            requestedAt: requestedAt,
+            deviceID: "bicino-175"
+        )
+
+        let relaunchedStore = WatchWorkoutRecoveryStore(
+            persistence: persistence
+        )
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        var exportedEvents: [HKWorkoutEvent] = []
+        let relaunched = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: relaunchedStore,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: session.associatedWorkoutBuilder(),
+                sessionState: { .paused }
+            ),
+            segmentEventOperation: { exportedEvents.append($0) },
+            initializeOnLaunch: false
+        )
+        relaunched.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: try XCTUnwrap(relaunchedStore.recoveredIdentity),
+            state: .paused
+        )
+        try await waitUntil {
+            relaunchedStore.recoveredIdentity?.pauseOrigin == .automatic
+        }
+
+        let restored = try XCTUnwrap(relaunchedStore.recoveredIdentity)
+        XCTAssertEqual(restored.pauseOrigin, .automatic)
+        XCTAssertEqual(restored.lastTransitionAt, requestedAt)
+        XCTAssertNil(restored.pendingTransitionContext)
+        let journal = try XCTUnwrap(restored.rideTransitionJournal)
+        XCTAssertEqual(journal.map(\.transition), [.start, .pause])
+        XCTAssertEqual(journal.map(\.origin), [.manual, .automatic])
+        XCTAssertTrue(journal[1].confirms(decision, transition: .pause))
+        XCTAssertTrue(exportedEvents.isEmpty)
+    }
+
+    /// A ride that began under a build that wrote markers can be recovered by
+    /// this one. Its markers stay readable, so the pause keeps its automatic
+    /// origin and the retried decision is recognised, but no marker is added.
+    func testInFlightRideWithLegacyMarkersRecoversProvenance() async throws {
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let beganIdentity = try store.begin(startDate: startDate)
+        let decision = Self.automaticDecision(sequence: 41)
+        let requestedAt = startDate.addingTimeInterval(199)
+        let pausedAt = startDate.addingTimeInterval(200)
+        // The earlier build made the iPhone's automatic pause durable, wrote
+        // its marker once HealthKit paused, and died before recording the
+        // confirmation or acknowledging the control.
+        let pauseControl = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: beganIdentity.sessionID,
+            sessionToken: beganIdentity.sessionToken,
+            transportGenerationID: beganIdentity.transportGenerationID
+                ?? beganIdentity.sessionID,
+            sequence: 9,
+            capturedAt: requestedAt,
+            controlSenderID: UUID(),
+            controlContext: decision,
+            control: .pause
+        )
+        var earlierGate = WorkoutRemoteControlSequenceGate()
+        XCTAssertTrue(try earlierGate.ingest(pauseControl, receivedAt: Date()))
+        _ = try store.persistRemoteControlCheckpoint(
+            earlierGate.checkpoint,
+            pendingTransitionContext: decision,
+            pendingTransitionPaused: true,
+            pendingTransitionRequestedAt: requestedAt
+        )
+        let identity = try XCTUnwrap(store.recoveredIdentity)
+        XCTAssertNil(identity.rideTransitionJournal)
+        let legacyEvents = [
+            Self.legacyRideTransitionMarker(
+                transition: "start",
+                origin: "manual",
+                at: startDate
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "manual",
+                at: startDate.addingTimeInterval(60)
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "resume",
+                origin: "manual",
+                at: startDate.addingTimeInterval(90)
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: pausedAt,
+                decision: decision
+            ),
+            // A marker Bicino did not write is never read as provenance.
+            HKWorkoutEvent(
+                type: .marker,
+                dateInterval: DateInterval(
+                    start: startDate.addingTimeInterval(300),
+                    duration: 0
+                ),
+                metadata: nil
+            ),
+        ]
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        var exportedEvents: [HKWorkoutEvent] = []
+        var pauseRequests = 0
+        let mirrorProbe = WatchMirrorTransportProbe()
+        let relaunched = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: session.associatedWorkoutBuilder(),
+                sessionState: { .paused }
+            ),
+            builderWorkoutEvents: { _ in legacyEvents },
+            remotePauseOperation: { _ in pauseRequests += 1 },
+            segmentEventOperation: { exportedEvents.append($0) },
+            mirrorStartOperation: mirrorProbe.start,
+            mirrorSendOperation: mirrorProbe.send,
+            mirrorShutdownEndSession: mirrorProbe.endSession,
+            mirrorRetryDelay: 0.01,
+            initializeOnLaunch: false
+        )
+        relaunched.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .paused
+        )
+        relaunched.startMirroringForTesting()
+        mirrorProbe.completeNextStart(succeeded: true)
+        try await waitUntil {
+            store.recoveredIdentity?.pauseOrigin == .automatic
+        }
+
+        let restored = try XCTUnwrap(store.recoveredIdentity)
+        XCTAssertEqual(restored.pauseOrigin, .automatic)
+        XCTAssertEqual(restored.lastTransitionOrigin, .automatic)
+        XCTAssertEqual(restored.lastTransitionAt, pausedAt)
+        XCTAssertEqual(
+            restored.detectorProfileVersion,
+            decision.detectorProfileVersion
+        )
+        XCTAssertNil(restored.pendingTransitionContext)
+        let migrated = try XCTUnwrap(restored.rideTransitionJournal)
+        XCTAssertEqual(migrated.count, 1)
+        XCTAssertTrue(migrated[0].confirms(decision, transition: .pause))
+        XCTAssertEqual(migrated[0].at, pausedAt)
+
+        // The iPhone retries the control it never saw acknowledged. The
+        // legacy marker confirms it: acknowledged, not applied again.
+        relaunched.handleRemoteWorkoutEnvelopes([pauseControl], from: session)
+        let acknowledgement = try await waitForAcknowledgement(
+            of: .pause,
+            sequence: pauseControl.sequence,
+            via: mirrorProbe
+        )
+        XCTAssertEqual(acknowledgement?.resultingState, .paused)
+        XCTAssertNil(acknowledgement?.errorCode)
+        XCTAssertEqual(pauseRequests, 0)
+        XCTAssertEqual(store.recoveredIdentity?.pauseOrigin, .automatic)
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, pausedAt)
+
+        // The rider resumes: recorded in the journal, never as a new marker.
+        relaunched.applySessionState(
+            session,
+            to: .running,
+            from: .paused,
+            date: startDate.addingTimeInterval(400)
+        )
+        XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
+        XCTAssertEqual(
+            store.recoveredIdentity?.rideTransitionJournal?.map(\.transition),
+            [.pause, .resume]
+        )
+        XCTAssertTrue(exportedEvents.isEmpty)
+    }
+
+    /// An automatic start arrives from the iPhone as a snapshot request that
+    /// carries the detector decision. It is journaled once, and a replay of
+    /// the same request is acknowledged without moving the start.
+    func testAutomaticStartIsJournaledOnceAndAcknowledgedOnReplay()
+        async throws {
+        let startDate = Date().addingTimeInterval(-60)
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try store.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        var exportedEvents: [HKWorkoutEvent] = []
+        let mirrorProbe = WatchMirrorTransportProbe()
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            segmentEventOperation: { exportedEvents.append($0) },
+            mirrorStartOperation: mirrorProbe.start,
+            mirrorSendOperation: mirrorProbe.send,
+            mirrorShutdownEndSession: mirrorProbe.endSession,
+            mirrorRetryDelay: 0.01,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: session.associatedWorkoutBuilder()
+        )
+        manager.startMirroringForTesting()
+        mirrorProbe.completeNextStart(succeeded: true)
+        await Task.yield()
+        let decision = Self.automaticDecision(sequence: 51)
+        let request = WorkoutEnvelopeV1(
+            kind: .control,
+            sessionID: identity.sessionID,
+            sessionToken: identity.sessionToken,
+            transportGenerationID:
+                identity.transportGenerationID ?? identity.sessionID,
+            sequence: 1,
+            capturedAt: Date(),
+            controlSenderID: UUID(),
+            controlContext: decision,
+            control: .requestCurrentSnapshot
+        )
+
+        manager.handleRemoteWorkoutEnvelopes([request], from: session)
+
+        let confirmed = try XCTUnwrap(store.recoveredIdentity)
+        XCTAssertEqual(confirmed.lastTransitionOrigin, .automatic)
+        XCTAssertNil(confirmed.pauseOrigin)
+        XCTAssertEqual(
+            confirmed.detectorProfileVersion,
+            decision.detectorProfileVersion
+        )
+        let journal = try XCTUnwrap(confirmed.rideTransitionJournal)
+        XCTAssertEqual(journal.map(\.transition), [.start])
+        XCTAssertEqual(journal.map(\.origin), [.automatic])
+        XCTAssertTrue(journal[0].confirms(decision, transition: .start))
+        XCTAssertFalse(journal[0].confirms(decision, transition: .resume))
+        let first = try await waitForAcknowledgement(
+            of: .requestCurrentSnapshot,
+            sequence: request.sequence,
+            via: mirrorProbe
+        )
+        XCTAssertEqual(first?.resultingState, .running)
+
+        // The iPhone did not see the acknowledgement and asks again.
+        manager.handleRemoteWorkoutEnvelopes([request], from: session)
+        let second = try await waitForAcknowledgement(
+            of: .requestCurrentSnapshot,
+            sequence: request.sequence,
+            via: mirrorProbe,
+            occurrence: 2
+        )
+        XCTAssertNotNil(second)
+        XCTAssertEqual(
+            store.recoveredIdentity?.lastTransitionAt,
+            confirmed.lastTransitionAt,
+            "a replayed start must not be confirmed at a later time"
+        )
+        XCTAssertEqual(store.recoveredIdentity?.rideTransitionJournal, journal)
+        XCTAssertTrue(exportedEvents.isEmpty)
+    }
+
+    /// HealthKit reports a system pause and the rider's own request as
+    /// builder events, sometimes just after the state callback. Each one
+    /// corrects the recorded origin in the journal and adds no event.
+    func testBuilderEventsCorrectTransitionOriginInTheJournal() async throws {
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try store.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var builderEvents: [HKWorkoutEvent] = []
+        var exportedEvents: [HKWorkoutEvent] = []
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            builderWorkoutEvents: { _ in builderEvents },
+            segmentEventOperation: { exportedEvents.append($0) },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: builder
+        )
+        func event(
+            _ type: HKWorkoutEventType,
+            at date: Date
+        ) -> HKWorkoutEvent {
+            HKWorkoutEvent(
+                type: type,
+                dateInterval: DateInterval(start: date, duration: 0),
+                metadata: nil
+            )
+        }
+
+        // The Watch pauses by itself: state callback, then the motion event.
+        let pausedAt = startDate.addingTimeInterval(100)
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: pausedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.pauseOrigin, .unknown)
+        let motionPausedAt = pausedAt.addingTimeInterval(0.5)
+        builderEvents.append(event(.motionPaused, at: motionPausedAt))
+        manager.workoutBuilderDidCollectEvent(builder)
+        try await waitUntil {
+            store.recoveredIdentity?.pauseOrigin == .system
+        }
+        XCTAssertEqual(
+            store.recoveredIdentity?.lastTransitionAt,
+            motionPausedAt
+        )
+
+        // The rider resumes on the Watch: state callback, then the request.
+        let resumedAt = startDate.addingTimeInterval(160)
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: resumedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionOrigin, .unknown)
+        let requestedAt = resumedAt.addingTimeInterval(-0.5)
+        builderEvents.append(event(.pauseOrResumeRequest, at: requestedAt))
+        manager.workoutBuilderDidCollectEvent(builder)
+        try await waitUntil {
+            store.recoveredIdentity?.lastTransitionOrigin == .manual
+        }
+
+        let recovered = try XCTUnwrap(store.recoveredIdentity)
+        XCTAssertNil(recovered.pauseOrigin)
+        XCTAssertEqual(recovered.lastTransitionAt, requestedAt)
+        let journal = try XCTUnwrap(recovered.rideTransitionJournal)
+        XCTAssertEqual(
+            journal.map(\.transition),
+            [.pause, .pause, .resume, .resume]
+        )
+        XCTAssertEqual(
+            journal.map(\.origin),
+            [.unknown, .system, .unknown, .manual]
+        )
+        XCTAssertEqual(
+            journal.map(\.at),
+            [pausedAt, motionPausedAt, resumedAt, requestedAt]
+        )
+        XCTAssertTrue(exportedEvents.isEmpty)
+        XCTAssertNil(manager.snapshot.errorCode)
+    }
+
+    /// Recovery reads a legacy marker under the rules the earlier build used
+    /// for it: a schema 1 marker stands for a decision without diagnostics,
+    /// and malformed or foreign markers are never provenance.
+    func testLegacyMarkerRecoveryKeepsItsValidationRules() async throws {
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(
+            persistence: ToggleRecoveryPersistence()
+        )
+        let identity = try store.begin(startDate: startDate)
+        let plainDecision = WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: 7,
+            decisionSequence: 61,
+            detectorProfileVersion: 3
+        )
+        let detailedDecision = Self.automaticDecision(sequence: 61)
+        var invalidHealthDecision = [String: NSNumber]()
+        invalidHealthDecision["sourceHealthMask"] = NSNumber(
+            value: ~RideAutomationFrame.validSourceHealthMask
+        )
+        let acceptedAt = startDate.addingTimeInterval(200)
+        let legacyEvents = [
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: acceptedAt,
+                decision: plainDecision,
+                schema: 1
+            ),
+            // Later markers that must all be ignored.
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: startDate.addingTimeInterval(250),
+                decision: plainDecision,
+                schema: 2
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: startDate.addingTimeInterval(260),
+                decision: plainDecision,
+                schema: 1,
+                omitting: ["profileVersion"]
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: startDate.addingTimeInterval(270),
+                decision: detailedDecision,
+                schema: 3
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "automatic",
+                at: startDate.addingTimeInterval(280),
+                decision: detailedDecision,
+                schema: 2,
+                overriding: invalidHealthDecision
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "rider",
+                at: startDate.addingTimeInterval(290)
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "resume",
+                origin: "manual",
+                at: startDate.addingTimeInterval(300)
+            ),
+            Self.legacyRideTransitionMarker(
+                transition: "pause",
+                origin: "manual",
+                at: startDate.addingTimeInterval(-10)
+            ),
+        ]
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let relaunched = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session,
+                builder: session.associatedWorkoutBuilder(),
+                sessionState: { .paused }
+            ),
+            builderWorkoutEvents: { _ in legacyEvents },
+            initializeOnLaunch: false
+        )
+        relaunched.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .paused
+        )
+        try await waitUntil {
+            store.recoveredIdentity?.pauseOrigin == .automatic
+        }
+
+        let restored = try XCTUnwrap(store.recoveredIdentity)
+        XCTAssertEqual(
+            restored.lastTransitionAt,
+            acceptedAt,
+            "only the well-formed schema 1 pause may be recovered"
+        )
+        XCTAssertEqual(restored.detectorProfileVersion, 3)
+        let migrated = try XCTUnwrap(restored.rideTransitionJournal)
+        XCTAssertEqual(migrated.count, 1)
+        XCTAssertNil(migrated[0].evidenceMask)
+        XCTAssertTrue(migrated[0].confirms(plainDecision, transition: .pause))
+        XCTAssertFalse(
+            migrated[0].confirms(detailedDecision, transition: .pause),
+            "a schema 1 marker must not confirm a decision with diagnostics"
+        )
+    }
+
+    /// Provenance is recorded only for the ride the recovery store holds and
+    /// only for the session that is attached.
+    func testTransitionCannotLabelAnotherRide() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        let start = Date().addingTimeInterval(-300)
+        let oldIdentity = try store.begin(startDate: start)
+        let healthStore = HKHealthStore()
+        let configuration = Self.outdoorCyclingConfiguration()
+        let oldSession = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: oldSession,
+            identity: oldIdentity,
+            state: .running,
+            builder: oldSession.associatedWorkoutBuilder()
+        )
+
+        // The store already holds the next ride while the earlier session is
+        // still attached. Its pause must not be written into that ride.
+        try store.clear()
+        let next = try store.begin(startDate: start.addingTimeInterval(90))
+        manager.applySessionState(
+            oldSession,
+            to: .paused,
+            from: .running,
+            date: start.addingTimeInterval(100)
+        )
+        XCTAssertEqual(store.recoveredIdentity?.sessionID, next.sessionID)
+        XCTAssertNil(store.recoveredIdentity?.lastTransitionAt)
+        XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
+        XCTAssertNil(store.recoveredIdentity?.rideTransitionJournal)
+
+        // Once the next session is attached, a late callback for the earlier
+        // session is ignored altogether.
+        let newSession = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: configuration
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: newSession,
+            identity: next,
+            state: .running,
+            builder: newSession.associatedWorkoutBuilder()
+        )
+        manager.applySessionState(
+            oldSession,
+            to: .paused,
+            from: .running,
+            date: start.addingTimeInterval(110)
+        )
+        XCTAssertNil(store.recoveredIdentity?.lastTransitionAt)
+        XCTAssertNil(store.recoveredIdentity?.rideTransitionJournal)
+        XCTAssertEqual(manager.state, .running)
+
+        // The attached ride's own pause is recorded.
+        let pausedAt = start.addingTimeInterval(120)
+        manager.applySessionState(
+            newSession, to: .paused, from: .running, date: pausedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.sessionID, next.sessionID)
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, pausedAt)
+        XCTAssertEqual(
+            store.recoveredIdentity?.rideTransitionJournal?.count,
+            1
+        )
+        XCTAssertEqual(
+            WatchWorkoutRecoveryStore(persistence: persistence).loadState,
+            .valid
+        )
+        XCTAssertNil(manager.snapshot.errorCode)
+    }
+
+    func testTransitionProvenanceIsDurableBeforeTheSessionCallbackReturns()
+        throws {
+        let persistence = ToggleRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
         let start = Date().addingTimeInterval(-120)
         let identity = try store.begin(startDate: start)
         let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: session.associatedWorkoutBuilder()
+        )
+        let pauseDate = start.addingTimeInterval(30)
+        let resumeDate = start.addingTimeInterval(40)
+
+        // No HealthKit write stands between the callback and the record, so
+        // each transition is on disk as soon as its callback returns and two
+        // consecutive callbacks can never be recorded out of order.
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: pauseDate
+        )
+        let afterPause = WatchWorkoutRecoveryStore(persistence: persistence)
+        XCTAssertEqual(afterPause.recoveredIdentity?.lastTransitionAt, pauseDate)
+        XCTAssertEqual(afterPause.recoveredIdentity?.pauseOrigin, .unknown)
+
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: resumeDate
+        )
+        let afterResume = WatchWorkoutRecoveryStore(persistence: persistence)
+        XCTAssertEqual(
+            afterResume.recoveredIdentity?.lastTransitionAt,
+            resumeDate
+        )
+        XCTAssertNil(afterResume.recoveredIdentity?.pauseOrigin)
+        XCTAssertEqual(
+            afterResume.recoveredIdentity?.rideTransitionJournal?
+                .map(\.transition),
+            [.pause, .resume]
+        )
+        XCTAssertEqual(manager.state, .running)
+
+        // A failed write is reported and leaves the previous record intact.
+        persistence.failsSave = true
+        manager.applySessionState(
+            session,
+            to: .paused,
+            from: .running,
+            date: start.addingTimeInterval(50)
+        )
+        XCTAssertEqual(manager.snapshot.errorCode, .sessionFailed)
+        XCTAssertEqual(
+            WatchWorkoutRecoveryStore(persistence: persistence)
+                .recoveredIdentity?.lastTransitionAt,
+            resumeDate
+        )
+    }
+
+    /// Completes mirrored sends until the acknowledgement of one control has
+    /// been sent to the iPhone, or gives up.
+    private func waitForAcknowledgement(
+        of control: WorkoutControlV1,
+        sequence: UInt64,
+        via probe: WatchMirrorTransportProbe,
+        occurrence: Int = 1
+    ) async throws -> WorkoutAcknowledgementV1? {
+        for _ in 0..<100 {
+            let acknowledgements = probe.sentData
+                .compactMap { try? WorkoutContractCodec.decode($0) }
+                .compactMap(\.acknowledgement)
+                .filter {
+                    $0.control == control
+                        && $0.acknowledgedSequence == sequence
+                }
+            if acknowledgements.count >= occurrence {
+                return acknowledgements[occurrence - 1]
+            }
+            probe.completeNextSend(succeeded: true)
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
+    }
+
+    private static func outdoorCyclingConfiguration()
+        -> HKWorkoutConfiguration {
         let configuration = HKWorkoutConfiguration()
         configuration.activityType = .cycling
         configuration.locationType = .outdoor
-        let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
-        let first = AsyncThrowingVoidProbe()
-        let second = AsyncThrowingVoidProbe()
-        var calls = 0
-        let manager = WatchWorkoutManager(
-            healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
-            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
-                session: session, builder: session.associatedWorkoutBuilder(), sessionState: { .running }
-            ),
-            rideTransitionEventOperation: { _ in
-                calls += 1
-                if calls == 1 { try await first.run() } else { try await second.run() }
-            },
-            initializeOnLaunch: false
+        return configuration
+    }
+
+    private static func automaticDecision(
+        sequence: UInt32
+    ) -> WorkoutControlContextV1 {
+        WorkoutControlContextV1(
+            origin: .automatic,
+            automaticReason: .rideDetection,
+            rideGeneration: 7,
+            decisionSequence: sequence,
+            detectorProfileVersion: 3,
+            evidenceMask: 0x0005,
+            sourceHealthMask: 0,
+            candidateBeganSeconds: 1_000 + sequence,
+            decidedAtSeconds: 1_005 + sequence
         )
-        manager.configureMirrorRuntimeForTesting(session: session, identity: identity, state: .running)
-        let pauseDate = start.addingTimeInterval(30)
-        let resumeDate = start.addingTimeInterval(40)
-        let pausedTask = Task { await manager.applySessionState(session, to: .paused, from: .running, date: pauseDate) }
-        try await waitUntil { first.callCount == 1 }
-        let resumedTask = Task { await manager.applySessionState(session, to: .running, from: .paused, date: resumeDate) }
-        try await waitUntil { second.callCount == 1 }
-        second.complete()
-        await resumedTask.value
-        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, resumeDate)
-        first.complete()
-        await pausedTask.value
-        XCTAssertEqual(store.recoveredIdentity?.lastTransitionAt, resumeDate)
-        XCTAssertNil(store.recoveredIdentity?.pauseOrigin)
-        XCTAssertEqual(manager.state, .running)
+    }
+
+    /// The exact event an earlier build added to the HealthKit builder. The
+    /// keys are spelled out because they are a storage format this build
+    /// must keep reading. As in that build, a decision field is written only
+    /// when the decision carries it.
+    private static func legacyRideTransitionMarker(
+        transition: String,
+        origin: String,
+        at date: Date,
+        decision: WorkoutControlContextV1? = nil,
+        schema: Int = 2,
+        omitting omittedFields: Set<String> = [],
+        overriding overriddenFields: [String: NSNumber] = [:]
+    ) -> HKWorkoutEvent {
+        let prefix = "com.openbikecomputer.workout.rideTransition"
+        var metadata: [String: Any] = [
+            prefix: true,
+            "\(prefix).schema": schema,
+            "\(prefix).transition": transition,
+            "\(prefix).origin": origin,
+        ]
+        var fields: [String: NSNumber] = [:]
+        if let decision {
+            fields["rideGeneration"] =
+                decision.rideGeneration.map { NSNumber(value: $0) }
+            fields["decisionSequence"] =
+                decision.decisionSequence.map { NSNumber(value: $0) }
+            fields["profileVersion"] =
+                decision.detectorProfileVersion.map { NSNumber(value: $0) }
+            fields["evidenceMask"] =
+                decision.evidenceMask.map { NSNumber(value: $0) }
+            fields["sourceHealthMask"] =
+                decision.sourceHealthMask.map { NSNumber(value: $0) }
+            fields["candidateBeganSeconds"] =
+                decision.candidateBeganSeconds.map { NSNumber(value: $0) }
+            fields["decidedAtSeconds"] =
+                decision.decidedAtSeconds.map { NSNumber(value: $0) }
+        }
+        fields.merge(overriddenFields) { _, overridden in overridden }
+        for (name, value) in fields where !omittedFields.contains(name) {
+            metadata["\(prefix).\(name)"] = value
+        }
+        return HKWorkoutEvent(
+            type: .marker,
+            dateInterval: DateInterval(start: date, end: date),
+            metadata: metadata
+        )
     }
 
     private func makeMirrorRuntime(

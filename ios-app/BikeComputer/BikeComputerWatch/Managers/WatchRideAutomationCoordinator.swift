@@ -4,7 +4,7 @@ import Foundation
 /// Consumes detector decisions only while Apple Watch owns the scoped Bicino
 /// lease. Phone-owned rides continue to use RideAutomationCoordinator; both
 /// paths share the same wire frame, admission policy, full HealthKit session
-/// UUID, and durable Watch transition markers.
+/// UUID, and durable Watch transition records.
 @MainActor
 final class WatchRideAutomationCoordinator {
     private struct PendingDecision {

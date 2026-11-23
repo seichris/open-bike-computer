@@ -284,15 +284,20 @@ Detection** on iPhone:
 
 The Watch remains authoritative. Device/iPhone screens say **Starting**,
 **Pausing**, or **Resuming** until the Watch session callback confirms the
-change. A confirmed automatic transition is written to Watch recovery metadata
-and a HealthKit marker while standard HealthKit pause/resume events continue to
-define active duration.
+change. A confirmed transition is written to the Watch recovery record only;
+standard HealthKit pause/resume events continue to define active duration.
+Bicino adds no other workout event for a transition: Apple Fitness draws a
+segment boundary at every HealthKit `.marker` event, so the markers earlier
+builds wrote showed a 00:00 segment for each pause. The only workout events
+Bicino writes are the `.segment` events for manual marks and the final closure.
 
 Transition provenance is `manual`, `automatic`, `system`, or `unknown`.
 Uncorroborated session callbacks remain unknown and fail closed for automatic
-resume; only an explicit user action is manual. Privacy-safe automatic markers
-also retain the detector profile, evidence/source-health masks, candidate time,
-and decision time so recovery cannot relabel the transition.
+resume; only an explicit user action is manual. The privacy-safe record of an
+automatic transition also retains the detector profile, evidence/source-health
+masks, candidate time, and decision time so recovery cannot relabel the
+transition. A ride that was already in progress under an earlier build keeps
+its markers; they are still read during recovery, and none is added.
 
 Location recording remains active during a reported pause. Quality points that
 prove physical movement preserve route geometry and route-distance fallback
