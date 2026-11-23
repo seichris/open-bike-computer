@@ -585,7 +585,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var heartRateZoneRuntimeSessionID: UUID?
     private var heartRateZoneRuntimeMaximumHeartRateBPM: Int?
     private var nativeZoneLiveState = WorkoutNativeZoneLiveState()
-    private var finishedWorkoutNativeZones: WorkoutNativeZonesV1?
 
     override convenience init() {
         self.init(locationService: WatchLocationService())
@@ -3377,6 +3376,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
         do {
             let saveMode = recoveredSaveMode ?? .full
+            var savedWorkout: HKWorkout?
             let outcome = try await WorkoutFinalizationOrchestrator.run(
                 disposition: disposition,
                 saveMode: saveMode,
@@ -3425,7 +3425,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 },
                 finishWorkout: { [weak self] in
                     guard let self else { throw WorkoutFinalizationError.managerReleased }
-                    try await finishWorkout(builder)
+                    savedWorkout = try await finishWorkout(builder)
                 },
                 markFinishFailed: { [recoveryStore] in
                     try recoveryStore.markFinishFailed()
@@ -3453,6 +3453,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     discardedAt: endDate
                 )
             case .saved(let route):
+                guard self.builder === builder else { return }
                 let summary: WatchWorkoutSummary
                 if let reconciledSavedWorkout {
                     summary = makeSummary(
@@ -3465,11 +3466,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                         distanceMeters: route.distanceMeters,
                         capturedAt: endDate
                     )
+                    if let savedWorkout, let distance = savedCyclingDistance(from: savedWorkout) {
+                        healthKitDistance = WorkoutMetricCandidate(
+                            value: distance,
+                            capturedAt: savedWorkout.endDate,
+                            source: .healthKit
+                        )
+                    }
                     summary = makeSummary(
                         outcome: .saved,
                         endDate: endDate,
                         routeDistanceMeters: route.distanceMeters,
-                        routeStatus: route.routeStatus
+                        routeStatus: route.routeStatus,
+                        savedWorkout: savedWorkout
                     )
                 }
                 completeConfirmedSave(
@@ -3690,17 +3699,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         let base = makeSnapshot(capturedAt: capturedAt)
         var availability = base.availability
-
-        let elapsedTime = summary.duration.flatMap { value in
-            guard value.isFinite, value >= 0 else { return nil }
-            availability.insert(.elapsedTime)
-            return WorkoutMetricV1(
-                value: value,
-                unit: .seconds,
-                capturedAt: capturedAt,
-                source: .healthKit
-            )
-        } ?? base.elapsedTime
         let summaryAverageHeartRate = summary.averageHeartRate.flatMap {
             positiveMetric(
                 $0,
@@ -3752,7 +3750,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         return WorkoutSnapshotV1(
             state: base.state,
             startDate: base.startDate,
-            elapsedTime: elapsedTime,
+            elapsedTime: base.elapsedTime,
             currentHeartRate: base.currentHeartRate,
             averageHeartRate: averageHeartRate,
             activeEnergy: activeEnergy,
@@ -5375,7 +5373,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         identity = recoveredIdentity
         if heartRateZoneRuntimeSessionID != recoveredIdentity.sessionID {
             nativeZoneLiveState.reset()
-            finishedWorkoutNativeZones = nil
             heartRateZoneRuntimeSessionID = recoveredIdentity.sessionID
             heartRateZoneRuntimeMaximumHeartRateBPM =
                 recoveredIdentity.heartRateZoneMaximumHeartRateBPM
@@ -6800,10 +6797,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func makeSnapshot(capturedAt: Date) -> WorkoutSnapshotV1 {
+        let activeDuration: TimeInterval
+        if lifecycle.state == .ended, summary?.outcome == .saved {
+            activeDuration = summary?.duration ?? .nan
+        } else {
+            activeDuration = injectedBuilderElapsedTime?(builder) ?? builder?.elapsedTime ?? .nan
+        }
         let elapsedTime = WorkoutElapsedTimePolicy.metric(
-            builderElapsedTime: injectedBuilderElapsedTime?(builder)
-                ?? builder?.elapsedTime
-                ?? .nan,
+            builderElapsedTime: activeDuration,
             startDate: identity?.startDate,
             capturedAt: capturedAt
         )
@@ -7073,7 +7074,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         outcome: WatchWorkoutSummary.Outcome,
         endDate: Date,
         routeDistanceMeters: Double?,
-        routeStatus: WorkoutRouteSaveStatus
+        routeStatus: WorkoutRouteSaveStatus,
+        savedWorkout: HKWorkout? = nil
     ) -> WatchWorkoutSummary {
         if outcome == .discarded {
             return WatchWorkoutSummary(
@@ -7094,10 +7096,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 source: .watchRoute
             )
         }
+        // Match Fitness using the saved workout's active duration. HealthKit
+        // can confirm a save without returning the workout while locked.
+        let duration = savedWorkout?.duration ?? builder?.elapsedTime(at: endDate)
         return WatchWorkoutSummary(
             outcome: outcome,
-            endedAt: endDate,
-            duration: max(0, builder?.elapsedTime ?? 0),
+            endedAt: savedWorkout?.endDate ?? endDate,
+            duration: duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil },
             distanceMeters: WorkoutMetricPrecedence.cyclingDistance(
                 healthKit: healthKitDistance,
                 watchRoute: routeDistance
@@ -7106,18 +7111,21 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             averageHeartRate: averageHeartRate?.value,
             routeStatus: routeStatus,
             terminalErrorCode: durableTerminalErrorCode,
-            nativeZones: finishedWorkoutNativeZones
+            nativeZones: savedWorkout.flatMap { nativeZones(from: $0) }
         )
+    }
+
+    private func savedCyclingDistance(from workout: HKWorkout) -> Double? {
+        HKObjectType.quantityType(forIdentifier: .distanceCycling)
+            .flatMap { workout.statistics(for: $0)?.sumQuantity() }
+            .map { $0.doubleValue(for: .meter()) }
+            .flatMap { value in value.isFinite && value >= 0 ? value : nil }
     }
 
     private func makeSummary(
         from workout: HKWorkout,
         routeStatus: WorkoutRouteSaveStatus
     ) -> WatchWorkoutSummary {
-        let distance = HKObjectType.quantityType(forIdentifier: .distanceCycling)
-            .flatMap { workout.statistics(for: $0)?.sumQuantity() }
-            .map { $0.doubleValue(for: .meter()) }
-            .flatMap { value in value.isFinite && value >= 0 ? value : nil }
         let energy = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned)
             .flatMap { workout.statistics(for: $0)?.sumQuantity() }
             .map { $0.doubleValue(for: .kilocalorie()) }
@@ -7132,7 +7140,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             outcome: .saved,
             endedAt: workout.endDate,
             duration: duration.isFinite ? max(0, duration) : 0,
-            distanceMeters: distance,
+            distanceMeters: savedCyclingDistance(from: workout),
             activeEnergyKilocalories: energy,
             averageHeartRate: averageHeartRate,
             routeStatus: routeStatus,
@@ -7205,7 +7213,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func clearMetrics() {
         nativeZoneLiveState.reset()
-        finishedWorkoutNativeZones = nil
         currentHeartRate = nil
         averageHeartRate = nil
         activeEnergy = nil
@@ -7354,12 +7361,12 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func finishWorkout(
         _ builder: HKLiveWorkoutBuilder
-    ) async throws {
+    ) async throws -> HKWorkout? {
         if let injectedFinishWorkoutOperation {
             try await injectedFinishWorkoutOperation(builder)
-            return
+            return nil
         }
-        let workout: HKWorkout? = try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { continuation in
             finishWorkoutCallback(builder) { workout, error in
                 switch WorkoutFinishCallbackPolicy.outcome(
                     workoutReturned: workout != nil,
@@ -7379,11 +7386,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     continuation.resume(throwing: error)
                 }
             }
-        }
-        // The continuation resumes on MainActor. An old builder must never
-        // populate a later ride's final zone summary.
-        if self.builder === builder, let workout {
-            finishedWorkoutNativeZones = nativeZones(from: workout)
         }
     }
 
