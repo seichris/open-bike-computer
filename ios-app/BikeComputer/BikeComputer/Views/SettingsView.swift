@@ -300,9 +300,26 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                     Link(destination: URL(string: "https://www.openstreetmap.org/copyright")!) {
                         Label(
-                            "Routing data \(RouteProviderPolicyV1.valhallaDetour.attribution)",
+                            "Thanks to \(RouteProviderPolicyV1.valhallaDetour.attribution)",
                             systemImage: "map"
                         )
+                    }
+                    .listRowBackground(Color.clear)
+                    Link(destination: URL(string: "mailto:hi@bicino.com")!) {
+                        Label("Send Feedback", systemImage: "envelope")
+                    }
+                    .listRowBackground(Color.clear)
+                    Link(destination: URL(string: "https://x.com/Bicino_cycling")!) {
+                        Label {
+                            Text("Bicino on X")
+                        } icon: {
+                            Image("XLogo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 18, height: 18)
+                                .foregroundStyle(Color.primary)
+                                .accessibilityHidden(true)
+                        }
                     }
                     .listRowBackground(Color.clear)
                 }
