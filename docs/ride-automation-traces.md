@@ -70,6 +70,10 @@ inputs; profile 3 keeps the ride running and pauses only after ten continuous
 seconds of qualified GPS-plus-IMU stopped evidence.
 `watch-gps-sensorless-regression.jsonl` covers profile 4's primary five-second
 Watch stop and two-second Watch resume without wheel, cadence, power, or IMU.
+`watch-gps-delayed-delivery-regression.jsonl` is a synthetic model of delayed
+Watch delivery: a sample ages past the three-second decision limit before its
+successor arrives, and the candidate span must survive that tick. It changes
+no profile-4 threshold.
 
 ## Physical trace gate
 

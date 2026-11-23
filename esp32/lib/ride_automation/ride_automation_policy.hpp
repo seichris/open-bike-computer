@@ -135,22 +135,36 @@ struct ShadowCounters {
   uint32_t sourceConflict = 0;
 };
 
-constexpr bool metricFresh(const TimedMetric &metric, uint32_t nowMs,
-                           uint32_t profileMaximumAgeMs) {
+// The age limit for one measurement: the tighter of the source's own limit
+// and the profile's, optionally extended for evidence that may be somewhat
+// older than a decision is allowed to rest on.
+constexpr uint32_t evidenceAgeLimitMs(uint32_t sourceMaximumAgeMs,
+                                      uint32_t profileMaximumAgeMs,
+                                      uint32_t extensionMs) {
   const uint32_t maximumAge =
-      metric.maximumAgeMs > 0 && metric.maximumAgeMs < profileMaximumAgeMs
-          ? metric.maximumAgeMs
+      sourceMaximumAgeMs > 0 && sourceMaximumAgeMs < profileMaximumAgeMs
+          ? sourceMaximumAgeMs
           : profileMaximumAgeMs;
+  if (maximumAge == 0)
+    return 0;
+  return maximumAge > UINT32_MAX - extensionMs ? UINT32_MAX
+                                               : maximumAge + extensionMs;
+}
+
+constexpr bool metricFresh(const TimedMetric &metric, uint32_t nowMs,
+                           uint32_t profileMaximumAgeMs,
+                           uint32_t extensionMs = 0) {
+  const uint32_t maximumAge = evidenceAgeLimitMs(
+      metric.maximumAgeMs, profileMaximumAgeMs, extensionMs);
   return metric.available && maximumAge > 0 &&
          elapsedMs(nowMs, metric.capturedAtMs) <= maximumAge;
 }
 
 constexpr bool flagFresh(const TimedFlag &flag, uint32_t nowMs,
-                         uint32_t profileMaximumAgeMs) {
-  const uint32_t maximumAge =
-      flag.maximumAgeMs > 0 && flag.maximumAgeMs < profileMaximumAgeMs
-          ? flag.maximumAgeMs
-          : profileMaximumAgeMs;
+                         uint32_t profileMaximumAgeMs,
+                         uint32_t extensionMs = 0) {
+  const uint32_t maximumAge = evidenceAgeLimitMs(
+      flag.maximumAgeMs, profileMaximumAgeMs, extensionMs);
   return flag.available && maximumAge > 0 &&
          elapsedMs(nowMs, flag.capturedAtMs) <= maximumAge;
 }
@@ -291,6 +305,11 @@ private:
     bool watchGpsKnown = false;
     bool watchGpsMoving = false;
     bool watchGpsStopped = false;
+    // The same qualified sample, allowed to be one permitted sample gap older
+    // than a decision may rest on. It feeds the Watch candidate spans only.
+    bool watchGpsCandidateKnown = false;
+    bool watchGpsCandidateMoving = false;
+    bool watchGpsCandidateStopped = false;
     uint16_t watchGpsSampleEpoch = 0;
     uint32_t watchGpsSampleSequence = 0;
     uint32_t watchGpsCapturedAtMs = 0;
@@ -299,7 +318,9 @@ private:
     uint16_t sourceHealthMask = SourceHealthNone;
   };
 
-  enum class PausePath : uint8_t { None = 0, WatchGps, Direct, GpsImu };
+  // Which fallback source the duration candidate is accumulating from. The
+  // Watch GPS candidate has its own sample-span latch.
+  enum class PausePath : uint8_t { None = 0, Direct, GpsImu };
 
   bool pendingEvidenceContradicted(const Normalized &evidence) const {
     switch (pendingTransition_) {
@@ -514,20 +535,17 @@ private:
                         observation.imuMotionScore.value <=
                             profile_.imuStoppedScore;
 
-    const bool watchSpeedFresh = metricFresh(
-        observation.watchGpsSpeedMetersPerSecond, nowMs,
-        profile_.watchGpsFreshnessMs);
-    const bool watchFixFresh = flagFresh(
-        observation.watchGpsFixValid, nowMs,
-        profile_.watchGpsFreshnessMs);
-    const bool watchAccuracyFresh = metricFresh(
-        observation.watchGpsHorizontalUncertaintyMeters, nowMs,
-        profile_.watchGpsFreshnessMs);
-    result.watchGpsKnown =
-        watchSpeedFresh &&
+    const auto watchGpsWithinAge = [&](uint32_t extensionMs) {
+      return metricFresh(observation.watchGpsSpeedMetersPerSecond, nowMs,
+                         profile_.watchGpsFreshnessMs, extensionMs) &&
+             flagFresh(observation.watchGpsFixValid, nowMs,
+                       profile_.watchGpsFreshnessMs, extensionMs) &&
+             metricFresh(observation.watchGpsHorizontalUncertaintyMeters,
+                         nowMs, profile_.watchGpsFreshnessMs, extensionMs);
+    };
+    const bool watchGpsQualified =
         nonnegativeFinite(observation.watchGpsSpeedMetersPerSecond.value) &&
-        watchFixFresh && observation.watchGpsFixValid.value &&
-        watchAccuracyFresh &&
+        observation.watchGpsFixValid.value &&
         nonnegativeFinite(
             observation.watchGpsHorizontalUncertaintyMeters.value) &&
         observation.watchGpsHorizontalUncertaintyMeters.value <=
@@ -535,14 +553,27 @@ private:
         observation.watchGpsSampleIdentityAvailable &&
         observation.watchGpsSampleEpoch != 0 &&
         observation.watchGpsSampleSequence != 0;
-    result.watchGpsMoving =
-        result.watchGpsKnown &&
+    const bool watchGpsMovingSpeed =
         observation.watchGpsSpeedMetersPerSecond.value >=
-            profile_.watchGpsResumeMetersPerSecond;
-    result.watchGpsStopped =
-        result.watchGpsKnown &&
+        profile_.watchGpsResumeMetersPerSecond;
+    const bool watchGpsStoppedSpeed =
         observation.watchGpsSpeedMetersPerSecond.value <
-            profile_.watchGpsStoppedMetersPerSecond;
+        profile_.watchGpsStoppedMetersPerSecond;
+    result.watchGpsKnown = watchGpsQualified && watchGpsWithinAge(0);
+    result.watchGpsMoving = result.watchGpsKnown && watchGpsMovingSpeed;
+    result.watchGpsStopped = result.watchGpsKnown && watchGpsStoppedSpeed;
+    // The policy runs once a second while samples arrive on their own clock,
+    // so the newest sample can age past the decision limit before its
+    // successor is delivered. That sample still belongs to the candidate
+    // span until a successor could no longer arrive within the sample-gap
+    // limit; it just cannot carry a decision by itself.
+    result.watchGpsCandidateKnown =
+        watchGpsQualified &&
+        watchGpsWithinAge(profile_.watchGpsMaximumSampleGapMs);
+    result.watchGpsCandidateMoving =
+        result.watchGpsCandidateKnown && watchGpsMovingSpeed;
+    result.watchGpsCandidateStopped =
+        result.watchGpsCandidateKnown && watchGpsStoppedSpeed;
     result.watchGpsSampleEpoch = observation.watchGpsSampleEpoch;
     result.watchGpsSampleSequence = observation.watchGpsSampleSequence;
     result.watchGpsCapturedAtMs =
@@ -703,29 +734,37 @@ private:
       return {};
     }
 
-    bool condition = false;
-    uint32_t requiredMs = 0;
-    if (evidence.watchGpsKnown) {
-      pauseLatch_.reset();
-      pausePath_ = PausePath::WatchGps;
-      const bool ready = watchPauseLatch_.update(
-          true, evidence.watchGpsStopped, evidence.watchGpsSampleEpoch,
-          evidence.watchGpsSampleSequence, evidence.watchGpsCapturedAtMs,
-          profile_.watchGpsPauseMs, profile_.watchGpsMaximumSampleGapMs);
-      if (!ready) {
-        if (watchPauseLatch_.active()) {
-          detectorStatus_ = {
-              DetectorPhase::PauseCandidate,
-              progressPercent(watchPauseLatch_.spanMs(),
-                              profile_.watchGpsPauseMs)};
-        }
-        return {};
-      }
+    // Watch GPS is the primary stop evidence. Its span is built from distinct
+    // source samples, so a tick on which the newest sample has only aged past
+    // the decision limit defers the decision instead of discarding the span.
+    // A recent sample that is not stopped, a sample older than its successor
+    // could follow, or a broken sample sequence still ends the candidate.
+    const bool watchSpanReady = watchPauseLatch_.update(
+        evidence.watchGpsCandidateKnown, evidence.watchGpsCandidateStopped,
+        evidence.watchGpsSampleEpoch, evidence.watchGpsSampleSequence,
+        evidence.watchGpsCapturedAtMs, profile_.watchGpsPauseMs,
+        profile_.watchGpsMaximumSampleGapMs);
+    if (watchSpanReady && evidence.watchGpsKnown) {
       return emit(Transition::Pause, nowMs, evidence.mask,
                   evidence.sourceHealthMask,
                   watchPauseLatch_.beganAtMs());
     }
-    watchPauseLatch_.reset();
+    const uint8_t watchProgress = progressPercent(
+        watchPauseLatch_.spanMs(), profile_.watchGpsPauseMs);
+
+    if (evidence.watchGpsKnown && !evidence.watchGpsStopped) {
+      // Fresh Watch GPS between the stopped and moving thresholds outranks
+      // the fallback sources: a slow crawl is not a stop.
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
+      return {};
+    }
+
+    // The fallback sources keep accumulating beside a Watch feed that is
+    // stopped or temporarily not fresh, so an irregular Watch feed cannot
+    // erase their progress on every tick it reappears.
+    bool condition = false;
+    uint32_t requiredMs = 0;
     if (evidence.wheelKnown) {
       if (pausePath_ != PausePath::Direct) {
         pauseLatch_.reset();
@@ -734,31 +773,33 @@ private:
       condition = evidence.wheelStopped &&
                   (!evidence.cadenceKnown || evidence.cadenceStopped);
       requiredMs = profile_.sensorPauseMs;
-    } else {
-      if (!evidence.gpsKnown || !evidence.imuKnown) {
-        pauseLatch_.reset();
-        pausePath_ = PausePath::None;
-        return {};
-      }
+    } else if (evidence.gpsKnown && evidence.imuKnown) {
       if (pausePath_ != PausePath::GpsImu) {
         pauseLatch_.reset();
         pausePath_ = PausePath::GpsImu;
       }
       condition = evidence.gpsStopped && evidence.imuStopped;
       requiredMs = profile_.gpsImuPauseMs;
+    } else {
+      pauseLatch_.reset();
+      pausePath_ = PausePath::None;
     }
-    if (!pauseLatch_.update(nowMs, condition, requiredMs))
-    {
-      if (pauseLatch_.active()) {
-        detectorStatus_ = {
-            DetectorPhase::PauseCandidate,
-            progressPercent(pauseLatch_.accumulatedMs(nowMs), requiredMs)};
-      }
-      return {};
+    if (pausePath_ != PausePath::None &&
+        pauseLatch_.update(nowMs, condition, requiredMs)) {
+      return emit(Transition::Pause, nowMs, evidence.mask,
+                  evidence.sourceHealthMask,
+                  pauseLatch_.beganAtMs());
     }
-    return emit(Transition::Pause, nowMs, evidence.mask,
-                evidence.sourceHealthMask,
-                pauseLatch_.beganAtMs());
+    if (watchPauseLatch_.active() || pauseLatch_.active()) {
+      const uint8_t fallbackProgress = pauseLatch_.active()
+          ? progressPercent(pauseLatch_.accumulatedMs(nowMs), requiredMs)
+          : 0;
+      detectorStatus_ = {
+          DetectorPhase::PauseCandidate,
+          watchProgress > fallbackProgress ? watchProgress
+                                           : fallbackProgress};
+    }
+    return {};
   }
 
   Decision evaluateResume(uint32_t nowMs, const Normalized &evidence) {
@@ -770,11 +811,14 @@ private:
       return {};
     }
     const bool directPath = evidence.directMoving;
-    const bool watchReady = watchResumeLatch_.update(
-        evidence.watchGpsKnown, evidence.watchGpsMoving,
+    // As for pause: the span survives a tick without a fresh sample, but the
+    // resume itself is only emitted on a fresh one.
+    const bool watchSpanReady = watchResumeLatch_.update(
+        evidence.watchGpsCandidateKnown, evidence.watchGpsCandidateMoving,
         evidence.watchGpsSampleEpoch, evidence.watchGpsSampleSequence,
         evidence.watchGpsCapturedAtMs, profile_.watchGpsResumeMs,
         profile_.watchGpsMaximumSampleGapMs);
+    const bool watchReady = watchSpanReady && evidence.watchGpsKnown;
     const bool gpsPath = !evidence.watchGpsKnown && !evidence.wheelKnown &&
                          !evidence.cadenceMoving &&
                          evidence.gpsResumeMoving && evidence.imuMoving;
