@@ -89,8 +89,10 @@ the iPhone’s MapKit-first decision.
 
 6. Qualify the exact staged bytes in development, including the App Attest API
    and enrolled iPhone replays. Reuse the Dubai acceptance harness. Add Buenos
-   Aires, a live Amsterdam MapKit success, a Paris interior Valhalla miss,
-   offline behavior, and confirmed rejoin. Confirm both original and temporary
+   Aires, a live Amsterdam MapKit success, a Valhalla miss in the Apple-listed
+   interior of Oklahoma, offline behavior, and confirmed rejoin. International
+   route relations can retain small corridors in otherwise excluded interiors,
+   so choose the miss fixture away from those retained roads. Confirm both original and temporary
    routes are visible during detours. Map downloads use the existing separate
    service.
 7. Advance the Coolify production graph lock through reviewed deployment after
