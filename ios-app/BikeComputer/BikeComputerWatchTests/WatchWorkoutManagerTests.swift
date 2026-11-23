@@ -9866,6 +9866,154 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertNil(manager.snapshot.errorCode)
     }
 
+    /// A rider's request can be dated just before the state callback it
+    /// corrects, so the correction is the later confirmation with the earlier
+    /// time. Recovery follows confirmation order: after a relaunch the
+    /// rider's action still wins over the unknown or automatic record.
+    func testRiderCorrectionOutlivesRelaunch() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let startDate = Date().addingTimeInterval(-600)
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try store.begin(startDate: startDate)
+        let healthStore = HKHealthStore()
+        let session = try HKWorkoutSession(
+            healthStore: healthStore,
+            configuration: Self.outdoorCyclingConfiguration()
+        )
+        let builder = session.associatedWorkoutBuilder()
+        var builderEvents: [HKWorkoutEvent] = []
+        var nativePauseRequests = 0
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore,
+            routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            builderWorkoutEvents: { _ in builderEvents },
+            remotePauseOperation: { _ in nativePauseRequests += 1 },
+            initializeOnLaunch: false
+        )
+        manager.configureMirrorRuntimeForTesting(
+            session: session,
+            identity: identity,
+            state: .running,
+            builder: builder
+        )
+        func request(at date: Date) -> HKWorkoutEvent {
+            HKWorkoutEvent(
+                type: .pauseOrResumeRequest,
+                dateInterval: DateInterval(start: date, duration: 0),
+                metadata: nil
+            )
+        }
+        /// A new process that reattaches to the same session and builder.
+        func relaunch(
+            sessionState: HKWorkoutSessionState
+        ) async throws -> WatchWorkoutRecoveryStore {
+            let relaunchedStore = WatchWorkoutRecoveryStore(
+                persistence: persistence
+            )
+            let relaunched = WatchWorkoutManager(
+                healthStore: healthStore,
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: relaunchedStore,
+                recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                    session: session,
+                    builder: builder,
+                    sessionState: { sessionState }
+                ),
+                builderWorkoutEvents: { _ in builderEvents },
+                initializeOnLaunch: false
+            )
+            relaunched.configureMirrorRuntimeForTesting(
+                session: session,
+                identity: try XCTUnwrap(relaunchedStore.recoveredIdentity),
+                state: sessionState == .paused ? .paused : .running
+            )
+            // The launch-time restoration publishes a snapshot when it is
+            // done, which is the first one to carry a transition origin.
+            try await waitUntil {
+                relaunched.snapshot.lastTransitionOrigin != nil
+            }
+            return relaunchedStore
+        }
+
+        // The detector pauses the ride in the same moment the rider presses
+        // the Watch buttons. The callback is attributed to the detector, and
+        // the rider's request, dated half a second earlier, corrects it.
+        let decision = Self.automaticDecision(sequence: 71)
+        manager.handleRemoteWorkoutEnvelopes(
+            [WorkoutEnvelopeV1(
+                kind: .control,
+                sessionID: identity.sessionID,
+                sessionToken: identity.sessionToken,
+                transportGenerationID:
+                    identity.transportGenerationID ?? identity.sessionID,
+                sequence: 1,
+                capturedAt: Date(),
+                controlSenderID: UUID(),
+                controlContext: decision,
+                control: .pause
+            )],
+            from: session
+        )
+        XCTAssertEqual(nativePauseRequests, 1)
+        let pausedAt = Date()
+        manager.applySessionState(
+            session, to: .paused, from: .running, date: pausedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.pauseOrigin, .automatic)
+        let pauseRequestedAt = pausedAt.addingTimeInterval(-0.5)
+        builderEvents.append(request(at: pauseRequestedAt))
+        manager.workoutBuilderDidCollectEvent(builder)
+        try await waitUntil {
+            store.recoveredIdentity?.pauseOrigin == .manual
+        }
+        XCTAssertEqual(
+            store.recoveredIdentity?.rideTransitionJournal?.map(\.origin),
+            [.automatic, .manual]
+        )
+
+        let afterPause = try await relaunch(sessionState: .paused)
+        XCTAssertEqual(
+            afterPause.recoveredIdentity?.pauseOrigin,
+            .manual,
+            "a relaunch must not hand the rider's pause back to the detector"
+        )
+        XCTAssertEqual(
+            afterPause.recoveredIdentity?.lastTransitionAt,
+            pauseRequestedAt
+        )
+
+        // The same ordering on resume, where the callback had no origin.
+        let resumedAt = Date()
+        manager.applySessionState(
+            session, to: .running, from: .paused, date: resumedAt
+        )
+        XCTAssertEqual(store.recoveredIdentity?.lastTransitionOrigin, .unknown)
+        let resumeRequestedAt = resumedAt.addingTimeInterval(-0.5)
+        builderEvents.append(request(at: resumeRequestedAt))
+        manager.workoutBuilderDidCollectEvent(builder)
+        try await waitUntil {
+            store.recoveredIdentity?.lastTransitionOrigin == .manual
+        }
+
+        let afterResume = try await relaunch(sessionState: .running)
+        XCTAssertEqual(
+            afterResume.recoveredIdentity?.lastTransitionOrigin,
+            .manual
+        )
+        XCTAssertNil(afterResume.recoveredIdentity?.pauseOrigin)
+        XCTAssertEqual(
+            afterResume.recoveredIdentity?.lastTransitionAt,
+            resumeRequestedAt
+        )
+        XCTAssertEqual(
+            afterResume.recoveredIdentity?.rideTransitionJournal?
+                .map(\.origin),
+            [.automatic, .manual, .unknown, .manual],
+            "restoring must not add or reorder journal records"
+        )
+    }
+
     /// Recovery reads a legacy marker under the rules the earlier build used
     /// for it: a schema 1 marker stands for a decision without diagnostics,
     /// and malformed or foreign markers are never provenance.

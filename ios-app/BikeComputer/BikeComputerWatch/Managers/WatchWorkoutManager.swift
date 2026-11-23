@@ -4458,18 +4458,28 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func confirmedRideTransitions(
         in builder: HKLiveWorkoutBuilder?
     ) -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
-        var journal: [WatchWorkoutRecoveryStore.RideTransitionRecord] = []
-        if let identity {
-            if let durableIdentity = recoveryStore.recoveredIdentity,
-               durableIdentity.sessionID == identity.sessionID {
-                journal = durableIdentity.rideTransitionJournal ?? []
-            } else {
-                journal = identity.rideTransitionJournal ?? []
-            }
+        journaledRideTransitions() + legacyRideTransitions(in: builder)
+    }
+
+    /// The durable journal of the attached ride, in the order its
+    /// transitions were confirmed.
+    private func journaledRideTransitions()
+        -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
+        guard let identity else { return [] }
+        if let durableIdentity = recoveryStore.recoveredIdentity,
+           durableIdentity.sessionID == identity.sessionID {
+            return durableIdentity.rideTransitionJournal ?? []
         }
-        let legacyMarkers = builder.map { workoutEvents(in: $0) }?
+        return identity.rideTransitionJournal ?? []
+    }
+
+    /// Transition markers an earlier build left in the builder, in whatever
+    /// order HealthKit returns them.
+    private func legacyRideTransitions(
+        in builder: HKLiveWorkoutBuilder?
+    ) -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
+        builder.map { workoutEvents(in: $0) }?
             .compactMap { Self.legacyRideTransitionRecord(from: $0) } ?? []
-        return journal + legacyMarkers
     }
 
     /// Decodes a transition marker written by an earlier build. Returns nil
@@ -4597,12 +4607,24 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let expectedTransitions:
             Set<WatchWorkoutRecoveryStore.RideTransitionRecord.Transition> =
                 paused ? [.pause] : [.start, .resume]
-        let latestRecord = confirmedRideTransitions(in: builder)
-            .filter { record in
-                record.at >= workoutStart
-                    && expectedTransitions.contains(record.transition)
-                    && Self.isRecoverableRideTransition(record)
-            }
+        let isCandidate = {
+            (record: WatchWorkoutRecoveryStore.RideTransitionRecord) in
+            record.at >= workoutStart
+                && expectedTransitions.contains(record.transition)
+                && Self.isRecoverableRideTransition(record)
+        }
+        // The journal is in confirmation order, so its last matching record
+        // is the one confirmed last. That is not always the one with the
+        // latest time: a rider's request can be dated just before the state
+        // callback it corrects, and the correction has to survive a
+        // relaunch. Legacy markers carry no such order, so for them the
+        // latest time is all there is.
+        let journaledRecord = journaledRideTransitions().last(where: isCandidate)
+        let legacyRecord = legacyRideTransitions(in: builder)
+            .filter(isCandidate)
+            .max { $0.at < $1.at }
+        let latestRecord = [journaledRecord, legacyRecord]
+            .compactMap { $0 }
             .max { $0.at < $1.at }
         let pendingRequestedAt = identity?.pendingTransitionContext == nil
             ? nil

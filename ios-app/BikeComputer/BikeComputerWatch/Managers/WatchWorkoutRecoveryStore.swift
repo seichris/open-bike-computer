@@ -194,7 +194,8 @@ nonisolated final class WatchWorkoutRecoveryStore {
         /// Provenance of every confirmed start, pause and resume, written in
         /// the same durable transaction as the fields above. It replaces the
         /// HealthKit `.marker` events earlier builds wrote for this purpose;
-        /// see `RideTransitionRecord`.
+        /// see `RideTransitionRecord`. Records stay in the order they were
+        /// confirmed, which recovery relies on.
         var rideTransitionJournal: [RideTransitionRecord]? = nil
         /// Durable direct-BLE admission watermark. This prevents a decision
         /// whose confirmation was lost from crossing a Watch app restart and
