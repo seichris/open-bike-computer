@@ -9019,6 +9019,86 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(reloaded.recoveredIdentity?.sessionID, identity.sessionID)
     }
 
+    func testFinishCallbackPublishesSavedActiveTimeAndDistanceToDevice() async throws {
+        try await assertFinishCallbackPublishesSavedWorkout()
+    }
+
+    func testFinishCallbackCompletesSaveAfterBuilderRebind() async throws {
+        try await assertFinishCallbackPublishesSavedWorkout(rebindBuilder: true)
+    }
+
+    private func assertFinishCallbackPublishesSavedWorkout(rebindBuilder: Bool = false) async throws {
+        let wallSeconds: TimeInterval = 4_914
+        let activeSeconds: TimeInterval = 4_633
+        let distanceMeters = 39_150.0
+        let end = Date()
+        let start = end.addingTimeInterval(-wallSeconds)
+        let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
+        _ = try store.begin(startDate: start)
+        try store.markFinishing(disposition: .save, requestedAt: end)
+        let savedWorkout = HKWorkout(
+            activityType: .cycling, start: start, end: end, duration: activeSeconds,
+            totalEnergyBurned: nil,
+            totalDistance: HKQuantity(unit: .meter(), doubleValue: distanceMeters),
+            metadata: nil
+        )
+        let healthStore = HKHealthStore()
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .cycling
+        configuration.locationType = .outdoor
+        let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+        let builder = session.associatedWorkoutBuilder()
+        let replacementSession = rebindBuilder
+            ? try HKWorkoutSession(healthStore: healthStore, configuration: configuration) : nil
+        let identity = try XCTUnwrap(store.recoveredIdentity)
+        weak var callbackManager: WatchWorkoutManager?
+        let manager = WatchWorkoutManager(
+            healthStore: healthStore, routeRecorder: WatchRouteRecorder(), recoveryStore: store,
+            recoveredSaveRuntimeAdapter: WatchRecoveredSaveRuntimeAdapter(
+                session: session, builder: builder, sessionState: { .stopped }
+            ),
+            builderElapsedTime: { _ in wallSeconds },
+            endCollectionOperation: { _, _ in },
+            finishWorkoutCallback: { _, completion in
+                if let replacementSession {
+                    callbackManager?.configureMirrorRuntimeForTesting(
+                        session: replacementSession, identity: identity, state: .ending,
+                        builder: replacementSession.associatedWorkoutBuilder()
+                    )
+                }
+                completion(savedWorkout, nil)
+            },
+            initializeOnLaunch: false
+        )
+        callbackManager = manager
+        manager.configureMirrorRuntimeForTesting(session: session, identity: identity, state: .ending)
+        manager.setCumulativeMetricsForTesting(
+            averageHeartRateBPM: 159, activeEnergyKilocalories: 1_137.9,
+            distanceMeters: 39_000, capturedAt: end
+        )
+        await manager.finalizeForTesting(disposition: .save, endDate: end)
+
+        XCTAssertEqual(manager.summary?.duration, activeSeconds)
+        XCTAssertEqual(manager.summary?.distanceMeters, distanceMeters)
+        XCTAssertNil(store.recoveredIdentity)
+        XCTAssertEqual(store.terminalTombstone(externalUUID: identity.sessionID.uuidString)?.disposition, .save)
+        let snapshot = try XCTUnwrap(manager.latestEnvelope?.snapshot)
+        XCTAssertEqual(snapshot.state, .ended)
+        XCTAssertEqual(snapshot.wallElapsedTime?.value, wallSeconds)
+        let telemetry = try XCTUnwrap(WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
+            snapshot: snapshot, sessionToken: identity.sessionToken, sessionID: identity.sessionID
+        ))
+        XCTAssertEqual(telemetry.elapsedSeconds, activeSeconds)
+        XCTAssertEqual(telemetry.distanceMeters, distanceMeters)
+        XCTAssertEqual(
+            WorkoutValueFormatter.averageSpeed(
+                distanceMeters: telemetry.distanceMeters,
+                elapsedSeconds: telemetry.elapsedSeconds
+            ),
+            "30.4"
+        )
+    }
+
     func testLockedFinishCallbackArchivesSavedWorkoutWithoutReturnedObject() async throws {
         let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
         let start = Date().addingTimeInterval(-60)
