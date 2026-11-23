@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,7 +21,7 @@ def verify_archive(archive, expected):
         raise ValueError("Valhalla tile count differs from the approved manifest")
 
 
-def stage(root, manifest, source, reserve, bandwidth):
+def stage(root, manifest, source, reserve, bandwidth, ssh_config=None):
     root.mkdir(parents=True, exist_ok=True)
     expected = manifest["archive"]
     digest = expected["sha256"]
@@ -37,11 +38,14 @@ def stage(root, manifest, source, reserve, bandwidth):
         required = max(0, expected["bytes"] - already_allocated)
         if shutil.disk_usage(root).free < required + reserve:
             raise ValueError("Staging the candidate would violate the required disk reserve")
+        ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+        if ssh_config is not None:
+            ssh.extend(["-F", str(ssh_config)])
         subprocess.run(
             [
                 "rsync", "--partial", "--inplace", "--ignore-times", f"--bwlimit={bandwidth}",
                 f"--max-size={expected['bytes']}",
-                "-e", "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+                "-e", shlex.join(ssh),
                 "--", source, str(destination),
             ],
             check=True,
@@ -80,6 +84,7 @@ def main():
     parser.add_argument("--source", required=True, help="Builder's rsync source, user@host:/path/archive")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--expected-sha256", required=True, help="Archive digest from the reviewed release")
+    parser.add_argument("--ssh-config", type=Path, help="Isolated SSH configuration for pulling from the builder")
     parser.add_argument("--reserve-bytes", type=int, default=50_000_000_000)
     parser.add_argument("--bandwidth-kib", type=int, default=20_480)
     args = parser.parse_args()
@@ -97,7 +102,7 @@ def main():
         or args.bandwidth_kib <= 0
     ):
         parser.error("Invalid manifest, approved digest, disk reserve, or transfer limit")
-    print(stage(args.root, manifest, args.source, args.reserve_bytes, args.bandwidth_kib))
+    print(stage(args.root, manifest, args.source, args.reserve_bytes, args.bandwidth_kib, args.ssh_config))
 
 
 if __name__ == "__main__":
