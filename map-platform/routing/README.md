@@ -80,6 +80,8 @@ the iPhone’s MapKit-first decision.
    separate. The script checks the SHA-256, tar index, and tile count before
    installing the candidate in a digest directory. The default free-space
    reserve is 50 GB. Use one immutable copy across the serving environments.
+   Use `--compress-transfer` when both rsync installations support Zstandard.
+   Transfer compression preserves the checksum of the staged archive.
 
    ```sh
    python stage_graph.py --root /var/lib/bicino-valhalla/graphs \
@@ -92,9 +94,9 @@ the iPhone’s MapKit-first decision.
    Aires, a live Amsterdam MapKit success, a Valhalla miss in the Apple-listed
    interior of Oklahoma, offline behavior, and confirmed rejoin. International
    route relations can retain small corridors in otherwise excluded interiors,
-   so choose the miss fixture away from those retained roads. Confirm both original and temporary
-   routes are visible during detours. Map downloads use the existing separate
-   service.
+   so choose the miss fixture away from those retained roads. Confirm both the
+   original and temporary routes are visible during detours. Map downloads use
+   the existing separate service.
 7. Advance the Coolify production graph lock through reviewed deployment after
    development qualification and CI. Preserve the existing API and map worker
    image pins. Retain the previous verified graph on the VPS and the original

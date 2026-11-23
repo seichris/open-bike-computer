@@ -104,8 +104,12 @@ class ArchiveTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SHA-256"):
                     stage(root, {"archive": expected}, str(source), 0, 20_480)
             self.assertFalse((root / expected["sha256"]).exists())
-            with patch("stage_graph.subprocess.run", side_effect=lambda args, **kw: shutil.copyfile(source, args[-1])):
-                receipt = stage(root, {"archive": expected}, str(source), 0, 20_480)
+            with patch(
+                "stage_graph.subprocess.run",
+                side_effect=lambda args, **kw: shutil.copyfile(source, args[-1]),
+            ) as transfer:
+                receipt = stage(root, {"archive": expected}, str(source), 0, 20_480, compress_transfer=True)
+            self.assertIn("--compress-choice=zstd", transfer.call_args.args[0])
             self.assertEqual(file_identity(receipt / ARCHIVE_NAME), file_identity(source))
 
 

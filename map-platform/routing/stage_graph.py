@@ -21,7 +21,7 @@ def verify_archive(archive, expected):
         raise ValueError("Valhalla tile count differs from the approved manifest")
 
 
-def stage(root, manifest, source, reserve, bandwidth, ssh_config=None):
+def stage(root, manifest, source, reserve, bandwidth, ssh_config=None, *, compress_transfer=False):
     root.mkdir(parents=True, exist_ok=True)
     expected = manifest["archive"]
     digest = expected["sha256"]
@@ -41,9 +41,10 @@ def stage(root, manifest, source, reserve, bandwidth, ssh_config=None):
         ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
         if ssh_config is not None:
             ssh.extend(["-F", str(ssh_config)])
+        compression = ["--compress", "--compress-choice=zstd"] if compress_transfer else []
         subprocess.run(
             [
-                "rsync", "--partial", "--inplace", "--ignore-times", f"--bwlimit={bandwidth}",
+                "rsync", "--partial", "--inplace", "--ignore-times", *compression, f"--bwlimit={bandwidth}",
                 f"--max-size={expected['bytes']}",
                 "-e", shlex.join(ssh),
                 "--", source, str(destination),
@@ -87,6 +88,7 @@ def main():
     parser.add_argument("--ssh-config", type=Path, help="Isolated SSH configuration for pulling from the builder")
     parser.add_argument("--reserve-bytes", type=int, default=50_000_000_000)
     parser.add_argument("--bandwidth-kib", type=int, default=20_480)
+    parser.add_argument("--compress-transfer", action="store_true", help="Use rsync Zstandard compression")
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
     expected = manifest["archive"]
@@ -102,7 +104,10 @@ def main():
         or args.bandwidth_kib <= 0
     ):
         parser.error("Invalid manifest, approved digest, disk reserve, or transfer limit")
-    print(stage(args.root, manifest, args.source, args.reserve_bytes, args.bandwidth_kib, args.ssh_config))
+    print(stage(
+        args.root, manifest, args.source, args.reserve_bytes, args.bandwidth_kib, args.ssh_config,
+        compress_transfer=args.compress_transfer,
+    ))
 
 
 if __name__ == "__main__":
