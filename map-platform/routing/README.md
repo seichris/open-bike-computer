@@ -55,7 +55,11 @@ the iPhone’s MapKit-first decision.
    alone. Add probes for the full release across continents and territories and
    for shortlisted road and ferry crossings in both directions. Check the
    inventory against routable OSM coverage and record any territory without a
-   bicycle network. Rehearse cold and warm runs with four requests and measure
+   bicycle network. For the first pass, generate routing fixtures with
+   `coverage_audit.py generate` and the pinned Natural Earth populated-places
+   layer. Run `coverage_audit.py check` against the private candidate. Its
+   review states require follow-up, including for territories without a
+   generated fixture. Rehearse cold and warm runs with four requests and measure
    memory, I/O, and latency alongside map-worker activity. The following
    command exercises the Valhalla archive and keeps the container off-network.
 
