@@ -117,8 +117,8 @@ resume must still be emitted on the next fresh sample.
 An unconfirmed pause or resume decision is reconciled against workout
 telemetry as described under "Decision and confirmation lifecycle" in
 [the BLE protocol](ble-protocol.md). The origin of the running state a pause
-started from, and the `unknown` origin Watch reports while it writes a
-transition marker, do not cancel the decision.
+started from, and the `unknown` origin Watch reports before it has recorded
+who caused a transition, do not cancel the decision.
 
 Host acceptance covers the sensor matrix, trace replay, wire origin values,
 HealthKit-versus-paired provenance, transition recovery diagnostics, paused

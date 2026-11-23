@@ -191,6 +191,12 @@ nonisolated final class WatchWorkoutRecoveryStore {
         var pendingTransitionContext: WorkoutControlContextV1? = nil
         var pendingTransitionPaused: Bool? = nil
         var pendingTransitionRequestedAt: Date? = nil
+        /// Provenance of every confirmed start, pause and resume, written in
+        /// the same durable transaction as the fields above. It replaces the
+        /// HealthKit `.marker` events earlier builds wrote for this purpose;
+        /// see `RideTransitionRecord`. Records stay in the order they were
+        /// confirmed, which recovery relies on.
+        var rideTransitionJournal: [RideTransitionRecord]? = nil
         /// Durable direct-BLE admission watermark. This prevents a decision
         /// whose confirmation was lost from crossing a Watch app restart and
         /// overriding a newer manual workout transition.
@@ -215,6 +221,138 @@ nonisolated final class WatchWorkoutRecoveryStore {
         /// metadata-less recovered builder. It may later bind once to the
         /// builder's genuine validated UUID, but can never become saveable.
         var corruptResetSyntheticCleanupIdentity: Bool?
+    }
+
+    /// One confirmed ride transition and who caused it.
+    ///
+    /// Earlier builds stored this as a zero-length HealthKit `.marker` workout
+    /// event. Apple Fitness treats every marker as a segment boundary, so a
+    /// ride showed one extra row per moving interval and a 00:00 row for each
+    /// pause. The record now lives only in the Watch recovery file: it is
+    /// never exported to HealthKit, and the native pause and resume events
+    /// alone continue to define active time.
+    struct RideTransitionRecord: Codable, Equatable {
+        enum Transition: String, Codable {
+            case start
+            case pause
+            case resume
+        }
+
+        let transition: Transition
+        let origin: WorkoutTransitionOrigin
+        let at: Date
+        /// Detector decision identity and diagnostics. Present only for an
+        /// automatic transition that carried a decision context.
+        var rideGeneration: UInt32? = nil
+        var decisionSequence: UInt32? = nil
+        var detectorProfileVersion: UInt16? = nil
+        var evidenceMask: UInt16? = nil
+        var sourceHealthMask: UInt16? = nil
+        var candidateBeganSeconds: UInt32? = nil
+        var decidedAtSeconds: UInt32? = nil
+
+        var paused: Bool { transition == .pause }
+
+        init(
+            transition: Transition,
+            origin: WorkoutTransitionOrigin,
+            at: Date,
+            decision context: WorkoutControlContextV1? = nil,
+            detectorProfileVersion: UInt16? = nil
+        ) {
+            self.transition = transition
+            self.origin = origin
+            self.at = at
+            guard origin == .automatic else { return }
+            rideGeneration = context?.rideGeneration
+            decisionSequence = context?.decisionSequence
+            self.detectorProfileVersion = context?.detectorProfileVersion
+                ?? detectorProfileVersion
+            evidenceMask = context?.evidenceMask
+            sourceHealthMask = context?.sourceHealthMask
+            candidateBeganSeconds = context?.candidateBeganSeconds
+            decidedAtSeconds = context?.decidedAtSeconds
+        }
+
+        /// True when this record confirms exactly the given detector decision.
+        /// The comparison covers the same fields the legacy marker did, so a
+        /// retried decision is recognised and a different one never is.
+        func confirms(
+            _ context: WorkoutControlContextV1,
+            transition: Transition
+        ) -> Bool {
+            guard origin == .automatic,
+                  self.transition == transition,
+                  let rideGeneration = context.rideGeneration,
+                  let decisionSequence = context.decisionSequence,
+                  self.rideGeneration == rideGeneration,
+                  self.decisionSequence == decisionSequence,
+                  let detectorProfileVersion,
+                  detectorProfileVersion == context.detectorProfileVersion
+            else {
+                return false
+            }
+            return evidenceMask == context.evidenceMask
+                && sourceHealthMask == context.sourceHealthMask
+                && candidateBeganSeconds == context.candidateBeganSeconds
+                && decidedAtSeconds == context.decidedAtSeconds
+        }
+
+        func isValid(startDate: Date) -> Bool {
+            at.timeIntervalSinceReferenceDate.isFinite
+                && at >= startDate
+                && detectorProfileVersion.map({ $0 > 0 }) ?? true
+                && (origin != .automatic || detectorProfileVersion != nil)
+        }
+
+        /// A long stop-and-go ride must not grow the recovery file without
+        /// bound. Recovery reads only the newest record for the current state
+        /// and replayed decisions refer to recent ones, so the oldest pause
+        /// and resume records are dropped first. Start records are kept.
+        static let maximumJournaledPauseAndResumeRecords = 256
+
+        static func appending(
+            _ record: RideTransitionRecord,
+            to journal: [RideTransitionRecord]
+        ) -> [RideTransitionRecord] {
+            let isDuplicate: Bool
+            if record.origin == .automatic,
+               record.rideGeneration != nil,
+               record.decisionSequence != nil {
+                // A decision is journaled once, however often it is retried.
+                isDuplicate = journal.contains { existing in
+                    existing.origin == .automatic
+                        && existing.transition == record.transition
+                        && existing.rideGeneration == record.rideGeneration
+                        && existing.decisionSequence == record.decisionSequence
+                        && existing.detectorProfileVersion
+                            == record.detectorProfileVersion
+                        && existing.evidenceMask == record.evidenceMask
+                        && existing.sourceHealthMask == record.sourceHealthMask
+                        && existing.candidateBeganSeconds
+                            == record.candidateBeganSeconds
+                        && existing.decidedAtSeconds == record.decidedAtSeconds
+                }
+            } else {
+                isDuplicate = journal.contains(record)
+            }
+            guard !isDuplicate else { return journal }
+            var updated = journal
+            updated.append(record)
+            var excess = updated.filter({ $0.transition != .start }).count
+                - maximumJournaledPauseAndResumeRecords
+            guard excess > 0 else { return updated }
+            var kept: [RideTransitionRecord] = []
+            kept.reserveCapacity(updated.count - excess)
+            for existing in updated {
+                if excess > 0, existing.transition != .start {
+                    excess -= 1
+                } else {
+                    kept.append(existing)
+                }
+            }
+            return kept
+        }
     }
 
     struct RemoteSegmentIntent: Codable, Equatable {
@@ -725,26 +863,61 @@ nonisolated final class WatchWorkoutRecoveryStore {
         return effectiveDisposition
     }
 
+    /// Confirms a pause or resume, or the workout start when `transition` is
+    /// `.start`. `context` is the detector decision behind an automatic
+    /// transition; its identity and diagnostics are journaled with the
+    /// transition so recovery cannot relabel it.
     func confirmRideTransition(
         origin: WorkoutTransitionOrigin,
         paused: Bool,
         at date: Date,
-        detectorProfileVersion: UInt16?
+        detectorProfileVersion: UInt16?,
+        transition: RideTransitionRecord.Transition? = nil,
+        context: WorkoutControlContextV1? = nil
     ) throws {
-        guard date.timeIntervalSinceReferenceDate.isFinite,
+        let record = RideTransitionRecord(
+            transition: transition ?? (paused ? .pause : .resume),
+            origin: origin,
+            at: date,
+            decision: context,
+            detectorProfileVersion: detectorProfileVersion
+        )
+        guard record.paused == paused,
               detectorProfileVersion.map({ $0 > 0 }) ?? true,
-              origin != .automatic || detectorProfileVersion != nil,
-              var identity, date >= identity.startDate else {
+              origin != .automatic || detectorProfileVersion != nil else {
             throw RecoveryStoreError.missingOrInvalidIdentity
         }
-        identity.pauseOrigin = paused ? origin : nil
-        identity.lastTransitionOrigin = origin
-        identity.lastTransitionAt = date
-        identity.detectorProfileVersion = detectorProfileVersion
+        try confirmRideTransition(
+            record,
+            carriedDetectorProfileVersion: detectorProfileVersion
+        )
+    }
+
+    /// Updates the latest-transition fields, retires any pending automatic
+    /// request and journals the record, all in one durable write. Nothing is
+    /// written to HealthKit.
+    func confirmRideTransition(
+        _ record: RideTransitionRecord,
+        carriedDetectorProfileVersion: UInt16? = nil
+    ) throws {
+        guard var identity,
+              record.isValid(startDate: identity.startDate),
+              carriedDetectorProfileVersion.map({ $0 > 0 }) ?? true else {
+            throw RecoveryStoreError.missingOrInvalidIdentity
+        }
+        identity.pauseOrigin = record.paused ? record.origin : nil
+        identity.lastTransitionOrigin = record.origin
+        identity.lastTransitionAt = record.at
+        identity.detectorProfileVersion = record.detectorProfileVersion
+            ?? carriedDetectorProfileVersion
             ?? identity.detectorProfileVersion
         identity.pendingTransitionContext = nil
         identity.pendingTransitionPaused = nil
         identity.pendingTransitionRequestedAt = nil
+        identity.rideTransitionJournal = RideTransitionRecord.appending(
+            record,
+            to: identity.rideTransitionJournal ?? []
+        )
         try persist(identity)
         self.identity = identity
     }
@@ -1390,6 +1563,9 @@ nonisolated final class WatchWorkoutRecoveryStore {
               identity.pendingTransitionRequestedAt.map({
                   $0.timeIntervalSinceReferenceDate.isFinite
                     && $0 >= identity.startDate
+              }) ?? true,
+              identity.rideTransitionJournal?.allSatisfy({
+                  $0.isValid(startDate: identity.startDate)
               }) ?? true,
               [
                 identity.rideAutomationDeviceID != nil,

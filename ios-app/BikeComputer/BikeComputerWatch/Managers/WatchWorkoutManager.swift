@@ -338,7 +338,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         static let originValue = "BikeComputer"
     }
 
-    private enum RideTransitionMetadataKey {
+    /// Metadata of the `.marker` workout events earlier builds wrote for each
+    /// ride transition. Nothing writes them any more: Apple Fitness shows
+    /// every marker as a segment boundary. They are still read so a ride that
+    /// was already in progress under an earlier build recovers its provenance.
+    private enum LegacyRideTransitionMarkerKey {
         static let marker = "com.openbikecomputer.workout.rideTransition"
         static let schema = "com.openbikecomputer.workout.rideTransition.schema"
         static let transition =
@@ -439,6 +443,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     )?
     private let injectedBuilderElapsedTime:
         (@MainActor (HKLiveWorkoutBuilder?) -> TimeInterval)?
+    private let injectedBuilderWorkoutEvents:
+        (@MainActor (HKLiveWorkoutBuilder) -> [HKWorkoutEvent])?
     private let injectedFinalizationClaimObserver:
         ((WorkoutSaveFinalizationMode?) -> Void)?
     private let injectedRecoveredDiscardFinalizationAdapter:
@@ -452,8 +458,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private let injectedRemoteResumeOperation:
         (@MainActor (HKWorkoutSession) -> Void)?
     private let injectedSegmentEventOperation: WatchSegmentEventOperation?
-    private let injectedRideTransitionEventOperation:
-        WatchSegmentEventOperation?
     private let injectedEndCollectionOperation:
         (@MainActor (HKLiveWorkoutBuilder, Date) async throws -> Void)?
     private let finishWorkoutCallback: @MainActor (HKLiveWorkoutBuilder, @escaping @Sendable (HKWorkout?, Error?) -> Void) -> Void
@@ -525,16 +529,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         sequence: UInt64,
         context: WorkoutControlContextV1?
     )?
-    private struct RideTransitionWriteContext {
-        let sessionID: UUID
-        let builder: HKLiveWorkoutBuilder
-        let revision: UInt64
-    }
-    private var rideTransitionWriteRevision: UInt64 = 0
-
-    private var pendingAutomaticStartAnnotation: WorkoutControlContextV1?
-    private var pendingAutomaticTransitionAnnotation:
-        WorkoutControlContextV1?
     private var localStartOriginPending = false
     private var suppliedConfigurationStartOriginPending = false
     private var suppliedConfigurationStartOriginTask: Task<Void, Never>?
@@ -621,7 +615,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             remotePauseOperation: nil,
             remoteResumeOperation: nil,
             segmentEventOperation: nil,
-            rideTransitionEventOperation: nil,
             segmentWriteTimeout: 10,
             mirrorStartOperation: nil,
             mirrorSendOperation: nil,
@@ -668,6 +661,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )? = nil,
         builderElapsedTime:
             (@MainActor (HKLiveWorkoutBuilder?) -> TimeInterval)? = nil,
+        builderWorkoutEvents:
+            (@MainActor (HKLiveWorkoutBuilder) -> [HKWorkoutEvent])? = nil,
         initialFinishFailureRollbackPending: Bool = false,
         finalizationClaimObserver:
             ((WorkoutSaveFinalizationMode?) -> Void)? = nil,
@@ -682,7 +677,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         remoteResumeOperation:
             (@MainActor (HKWorkoutSession) -> Void)? = nil,
         segmentEventOperation: WatchSegmentEventOperation? = nil,
-        rideTransitionEventOperation: WatchSegmentEventOperation? = nil,
         endCollectionOperation:
             (@MainActor (HKLiveWorkoutBuilder, Date) async throws -> Void)?
                 = nil,
@@ -739,6 +733,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedRecoveredSaveResolver = recoveredSaveResolver
         self.injectedSavedWorkoutLookup = savedWorkoutLookup
         self.injectedBuilderElapsedTime = builderElapsedTime
+        self.injectedBuilderWorkoutEvents = builderWorkoutEvents
         self.injectedFinalizationClaimObserver = finalizationClaimObserver
         self.injectedRecoveredDiscardFinalizationAdapter =
             recoveredDiscardFinalizationAdapter
@@ -747,8 +742,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedRemotePauseOperation = remotePauseOperation
         self.injectedRemoteResumeOperation = remoteResumeOperation
         self.injectedSegmentEventOperation = segmentEventOperation
-        self.injectedRideTransitionEventOperation =
-            rideTransitionEventOperation
         self.injectedEndCollectionOperation = endCollectionOperation
         self.injectedFinishWorkoutOperation = finishWorkoutOperation
         self.finishWorkoutCallback = finishWorkoutCallback
@@ -790,12 +783,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 )
                 Task { @MainActor [weak self] in
                     guard let self, builder === recoveredSaveRuntimeAdapter.builder else { return }
-                    await restoreRideTransition(
+                    restoreRideTransition(
                         from: recoveredSaveRuntimeAdapter.builder,
                         sessionState: recoveredSaveRuntimeAdapter.sessionState(),
                         workoutStart: workoutStart
                     )
-                    guard builder === recoveredSaveRuntimeAdapter.builder else { return }
                     publishSnapshotImmediately()
                 }
             }
@@ -1148,9 +1140,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         } catch {
             return .rejected
         }
-        if pendingAutomaticTransitionAnnotation != nil {
-            return .accepted
-        }
         if paused {
             if let injectedRemotePauseOperation {
                 injectedRemotePauseOperation(session)
@@ -1480,7 +1469,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             if lifecycle.state == .running {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    let confirmed = await confirmLaunchAutomaticStart(
+                    let confirmed = confirmLaunchAutomaticStart(
                         context: context,
                         at: identity?.startDate ?? Date()
                     )
@@ -2241,7 +2230,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             endMirrorShutdownSession(failedSession)
         }
         resetMirrorTransport()
-        resetRideTransitionWrites()
+        resetRideTransitionRuntime()
         session = nil
         identity = nil
         try? recoveryStore.clear()
@@ -2442,13 +2431,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             from: recoveredBuilder,
             workoutStart: recoveredIdentity.startDate
         )
-        await restoreRideTransition(
+        restoreRideTransition(
             from: recoveredBuilder,
             sessionState: recoveredState,
             workoutStart: recoveredIdentity.startDate
         )
-        guard session === recoveredSession, builder === recoveredBuilder,
-              identity?.sessionID == recoveredIdentity.sessionID else { return .failed }
         isBuilderReadyForFinalization = true
         isIdentityMetadataRetryPending = false
         isTerminalPublicationPending = false
@@ -3855,7 +3842,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             session?.end()
         }
         resetMirrorTransport()
-        resetRideTransitionWrites()
+        resetRideTransitionRuntime()
         session = nil
         builder = nil
         authoritativeFinalizationEndDate = nil
@@ -3894,7 +3881,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         discardFinalizationRetryTask = nil
         discardFinalizationRetryAttemptCount = 0
         resetMirrorTransport()
-        resetRideTransitionWrites()
+        resetRideTransitionRuntime()
         session = nil
         builder = nil
         identity = nil
@@ -4418,11 +4405,19 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         finalSegmentOperationTask = nil
     }
 
+    /// Events HealthKit already holds for a builder. Tests supply them,
+    /// because a builder that never began collection accepts none.
+    private func workoutEvents(
+        in builder: HKLiveWorkoutBuilder
+    ) -> [HKWorkoutEvent] {
+        injectedBuilderWorkoutEvents?(builder) ?? builder.workoutEvents
+    }
+
     private func restoreSegmentAccumulator(
         from builder: HKLiveWorkoutBuilder,
         workoutStart: Date
     ) {
-        let restored = builder.workoutEvents.compactMap {
+        let restored = workoutEvents(in: builder).compactMap {
             completedSegment(from: $0, workoutStart: workoutStart)
         }.max { lhs, rhs in
             lhs.segment.index < rhs.segment.index
@@ -4440,14 +4435,15 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         from builder: HKLiveWorkoutBuilder,
         workoutStart: Date
     ) {
-        lastProcessedManualTransitionRequestAt = builder.workoutEvents
+        let events = workoutEvents(in: builder)
+        lastProcessedManualTransitionRequestAt = events
             .filter {
                 $0.type == .pauseOrResumeRequest
                     && $0.dateInterval.start >= workoutStart
             }
             .map(\.dateInterval.start)
             .max() ?? .distantPast
-        lastProcessedSystemTransitionAt = builder.workoutEvents
+        lastProcessedSystemTransitionAt = events
             .filter {
                 ($0.type == .motionPaused || $0.type == .motionResumed)
                     && $0.dateInterval.start >= workoutStart
@@ -4456,103 +4452,184 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             .max() ?? .distantPast
     }
 
+    /// Every confirmed transition known for the attached ride: the durable
+    /// journal, plus markers a build before the journal existed left in the
+    /// builder of a ride that is still in progress.
+    private func confirmedRideTransitions(
+        in builder: HKLiveWorkoutBuilder?
+    ) -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
+        journaledRideTransitions() + legacyRideTransitions(in: builder)
+    }
+
+    /// The durable journal of the attached ride, in the order its
+    /// transitions were confirmed.
+    private func journaledRideTransitions()
+        -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
+        guard let identity else { return [] }
+        if let durableIdentity = recoveryStore.recoveredIdentity,
+           durableIdentity.sessionID == identity.sessionID {
+            return durableIdentity.rideTransitionJournal ?? []
+        }
+        return identity.rideTransitionJournal ?? []
+    }
+
+    /// Transition markers an earlier build left in the builder, in whatever
+    /// order HealthKit returns them.
+    private func legacyRideTransitions(
+        in builder: HKLiveWorkoutBuilder?
+    ) -> [WatchWorkoutRecoveryStore.RideTransitionRecord] {
+        builder.map { workoutEvents(in: $0) }?
+            .compactMap { Self.legacyRideTransitionRecord(from: $0) } ?? []
+    }
+
+    /// Decodes a transition marker written by an earlier build. Returns nil
+    /// for any other workout event, including a marker Bicino did not write.
+    private static func legacyRideTransitionRecord(
+        from event: HKWorkoutEvent
+    ) -> WatchWorkoutRecoveryStore.RideTransitionRecord? {
+        guard event.type == .marker,
+              let metadata = event.metadata,
+              metadata[LegacyRideTransitionMarkerKey.marker] as? Bool == true,
+              let schemaNumber = metadata[
+                LegacyRideTransitionMarkerKey.schema
+              ] as? NSNumber,
+              let markerSchema = exactUnsignedMetadata(
+                schemaNumber,
+                as: UInt8.self
+              ),
+              markerSchema == 1 || markerSchema == 2,
+              let transitionValue = metadata[
+                LegacyRideTransitionMarkerKey.transition
+              ] as? String,
+              let transition = WatchWorkoutRecoveryStore.RideTransitionRecord
+                .Transition(rawValue: transitionValue),
+              let originValue = metadata[
+                LegacyRideTransitionMarkerKey.origin
+              ] as? String else {
+            return nil
+        }
+        let origin: WorkoutTransitionOrigin
+        switch originValue {
+        case "automatic": origin = .automatic
+        case "manual": origin = .manual
+        case "system": origin = .system
+        case "unknown": origin = .unknown
+        default: return nil
+        }
+        var record = WatchWorkoutRecoveryStore.RideTransitionRecord(
+            transition: transition,
+            origin: origin,
+            at: event.dateInterval.start
+        )
+        func unsigned<T: FixedWidthInteger & UnsignedInteger>(
+            _ key: String,
+            as type: T.Type
+        ) -> T? {
+            (metadata[key] as? NSNumber).flatMap {
+                exactUnsignedMetadata($0, as: type)
+            }
+        }
+        // Only an automatic marker ever carried a decision. A manual, system
+        // or unknown record keeps no detector fields, as in the journal.
+        guard origin == .automatic else { return record }
+        record.rideGeneration = unsigned(
+            LegacyRideTransitionMarkerKey.rideGeneration,
+            as: UInt32.self
+        )
+        record.decisionSequence = unsigned(
+            LegacyRideTransitionMarkerKey.decisionSequence,
+            as: UInt32.self
+        )
+        record.detectorProfileVersion = unsigned(
+            LegacyRideTransitionMarkerKey.profileVersion,
+            as: UInt16.self
+        )
+        // Schema 1 markers were written without decision diagnostics and were
+        // matched only against a decision that had none.
+        guard markerSchema == 2 else { return record }
+        guard let evidenceMask = unsigned(
+                LegacyRideTransitionMarkerKey.evidenceMask,
+                as: UInt16.self
+              ),
+              let sourceHealthMask = unsigned(
+                LegacyRideTransitionMarkerKey.sourceHealthMask,
+                as: UInt16.self
+              ),
+              let candidateBeganSeconds = unsigned(
+                LegacyRideTransitionMarkerKey.candidateBeganSeconds,
+                as: UInt32.self
+              ),
+              let decidedAtSeconds = unsigned(
+                LegacyRideTransitionMarkerKey.decidedAtSeconds,
+                as: UInt32.self
+              ) else {
+            return nil
+        }
+        record.evidenceMask = evidenceMask
+        record.sourceHealthMask = sourceHealthMask
+        record.candidateBeganSeconds = candidateBeganSeconds
+        record.decidedAtSeconds = decidedAtSeconds
+        return record
+    }
+
+    /// Recovery never trusts an automatic record it could not have written:
+    /// one without a detector profile, or with diagnostics outside the wire
+    /// contract.
+    private static func isRecoverableRideTransition(
+        _ record: WatchWorkoutRecoveryStore.RideTransitionRecord
+    ) -> Bool {
+        guard record.origin == .automatic else { return true }
+        guard let profileVersion = record.detectorProfileVersion,
+              profileVersion != 0 else {
+            return false
+        }
+        if let evidenceMask = record.evidenceMask,
+           evidenceMask & ~RideAutomationFrame.validEvidenceMask != 0 {
+            return false
+        }
+        if let sourceHealthMask = record.sourceHealthMask,
+           sourceHealthMask & ~RideAutomationFrame.validSourceHealthMask != 0 {
+            return false
+        }
+        return true
+    }
+
     private func restoreRideTransition(
         from builder: HKLiveWorkoutBuilder,
         sessionState: HKWorkoutSessionState,
         workoutStart: Date
-    ) async {
+    ) {
         guard sessionState == .running || sessionState == .paused else {
             return
         }
-        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
+        guard canRecordRideTransition(for: builder) else { return }
         let paused = sessionState == .paused
-        let expectedTransitions: Set<String> = paused
-            ? ["pause"]
-            : ["start", "resume"]
-        let latestMarker = builder.workoutEvents.compactMap { event -> (
-            origin: WorkoutTransitionOrigin,
-            at: Date,
-            profileVersion: UInt16?
-        )? in
-            guard event.type == .marker,
-                  event.dateInterval.start >= workoutStart,
-                  let metadata = event.metadata,
-                  metadata[RideTransitionMetadataKey.marker] as? Bool == true,
-                  let schemaNumber = metadata[
-                    RideTransitionMetadataKey.schema
-                  ] as? NSNumber,
-                  let markerSchema = Self.exactUnsignedMetadata(
-                    schemaNumber,
-                    as: UInt8.self
-                  ),
-                  markerSchema == 1 || markerSchema == 2,
-                  let transition = metadata[
-                    RideTransitionMetadataKey.transition
-                  ] as? String,
-                  expectedTransitions.contains(transition),
-                  let originValue = metadata[
-                    RideTransitionMetadataKey.origin
-                  ] as? String else {
-                return nil
-            }
-            let origin: WorkoutTransitionOrigin
-            switch originValue {
-            case "automatic": origin = .automatic
-            case "manual": origin = .manual
-            case "system": origin = .system
-            case "unknown": origin = .unknown
-            default: return nil
-            }
-            let profile = (
-                metadata[RideTransitionMetadataKey.profileVersion]
-                    as? NSNumber
-            ).flatMap {
-                Self.exactUnsignedMetadata($0, as: UInt16.self)
-            }
-            if origin == .automatic, profile == nil || profile == 0 {
-                return nil
-            }
-            if markerSchema == 2, origin == .automatic {
-                guard let evidenceNumber = metadata[
-                        RideTransitionMetadataKey.evidenceMask
-                      ] as? NSNumber,
-                      let evidenceMask = Self.exactUnsignedMetadata(
-                        evidenceNumber,
-                        as: UInt16.self
-                      ),
-                      evidenceMask & ~RideAutomationFrame.validEvidenceMask == 0,
-                      let sourceHealthNumber = metadata[
-                        RideTransitionMetadataKey.sourceHealthMask
-                      ] as? NSNumber,
-                      let sourceHealthMask = Self.exactUnsignedMetadata(
-                        sourceHealthNumber,
-                        as: UInt16.self
-                      ),
-                      sourceHealthMask
-                        & ~RideAutomationFrame.validSourceHealthMask == 0,
-                      let candidateNumber = metadata[
-                        RideTransitionMetadataKey.candidateBeganSeconds
-                      ] as? NSNumber,
-                      Self.exactUnsignedMetadata(
-                        candidateNumber,
-                        as: UInt32.self
-                      ) != nil,
-                      let decidedNumber = metadata[
-                        RideTransitionMetadataKey.decidedAtSeconds
-                      ] as? NSNumber,
-                      Self.exactUnsignedMetadata(
-                        decidedNumber,
-                        as: UInt32.self
-                      ) != nil else {
-                    return nil
-                }
-            }
-            return (origin, event.dateInterval.start, profile)
-        }.max { $0.at < $1.at }
+        let expectedTransitions:
+            Set<WatchWorkoutRecoveryStore.RideTransitionRecord.Transition> =
+                paused ? [.pause] : [.start, .resume]
+        let isCandidate = {
+            (record: WatchWorkoutRecoveryStore.RideTransitionRecord) in
+            record.at >= workoutStart
+                && expectedTransitions.contains(record.transition)
+                && Self.isRecoverableRideTransition(record)
+        }
+        // The journal is in confirmation order, so its last matching record
+        // is the one confirmed last. That is not always the one with the
+        // latest time: a rider's request can be dated just before the state
+        // callback it corrects, and the correction has to survive a
+        // relaunch. Legacy markers carry no such order, so for them the
+        // latest time is all there is.
+        let journaledRecord = journaledRideTransitions().last(where: isCandidate)
+        let legacyRecord = legacyRideTransitions(in: builder)
+            .filter(isCandidate)
+            .max { $0.at < $1.at }
+        let latestRecord = [journaledRecord, legacyRecord]
+            .compactMap { $0 }
+            .max { $0.at < $1.at }
         let pendingRequestedAt = identity?.pendingTransitionContext == nil
             ? nil
             : identity?.pendingTransitionRequestedAt
-        let marker = latestMarker.flatMap { candidate in
+        let confirmedRecord = latestRecord.flatMap { candidate in
             RideAutomationRecoveryControlPolicy
                 .markerConfirmsPendingTransition(
                     markerAt: candidate.at,
@@ -4561,33 +4638,20 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 ? candidate
                 : nil
         }
-        if marker == nil,
+        if confirmedRecord == nil,
            let context = identity?.pendingTransitionContext,
            identity?.pendingTransitionPaused == paused {
+            // The automatic request was durable before HealthKit changed
+            // state, and the session is now in the requested state.
             let date = identity?.pendingTransitionRequestedAt
                 ?? workoutStart
-            let event = makeRideTransitionMarker(
-                paused: paused,
-                origin: .automatic,
-                context: context,
-                at: date
-            )
-            let outcome = await Self.segmentEventWriteOutcome(
-                event,
-                to: builder,
-                injectedOperation: injectedRideTransitionEventOperation
-            )
-            guard isCurrentRideTransitionWrite(writeContext) else { return }
-            guard outcome == .success else {
-                lastErrorCode = .sessionFailed
-                return
-            }
             do {
                 try recoveryStore.confirmRideTransition(
                     origin: .automatic,
                     paused: paused,
                     at: date,
-                    detectorProfileVersion: context.detectorProfileVersion
+                    detectorProfileVersion: context.detectorProfileVersion,
+                    context: context
                 )
                 identity = recoveryStore.recoveredIdentity ?? identity
             } catch {
@@ -4598,7 +4662,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let systemEventType: HKWorkoutEventType = paused
             ? .motionPaused
             : .motionResumed
-        let latestSystemEvent = builder.workoutEvents
+        let latestSystemEvent = workoutEvents(in: builder)
             .filter {
                 $0.type == systemEventType
                     && $0.dateInterval.start >= workoutStart
@@ -4610,26 +4674,24 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 )
             }
             .max { $0.capturedAt < $1.capturedAt }
-        let recoveredTransition: (
-            origin: WorkoutTransitionOrigin,
-            at: Date,
-            profileVersion: UInt16?
-        )?
+        let recoveredTransition:
+            WatchWorkoutRecoveryStore.RideTransitionRecord?
         if let latestSystemEvent,
            WorkoutSystemTransitionEventPolicy.matches(
              latestSystemEvent,
              paused: paused,
-             transitionAt: marker?.at ?? latestSystemEvent.capturedAt,
+             transitionAt: confirmedRecord?.at
+                ?? latestSystemEvent.capturedAt,
              lastManualRequestAt: lastProcessedManualTransitionRequestAt,
-             currentOrigin: marker?.origin
+             currentOrigin: confirmedRecord?.origin
            ) {
-            recoveredTransition = (
-                .system,
-                latestSystemEvent.capturedAt,
-                nil
+            recoveredTransition = .init(
+                transition: paused ? .pause : .resume,
+                origin: .system,
+                at: latestSystemEvent.capturedAt
             )
         } else {
-            recoveredTransition = marker
+            recoveredTransition = confirmedRecord
         }
         guard let recoveredTransition,
               identity?.lastTransitionAt.map({
@@ -4638,12 +4700,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
         do {
-            try recoveryStore.confirmRideTransition(
-                origin: recoveredTransition.origin,
-                paused: paused,
-                at: recoveredTransition.at,
-                detectorProfileVersion: recoveredTransition.profileVersion
-            )
+            try recoveryStore.confirmRideTransition(recoveredTransition)
             identity = recoveryStore.recoveredIdentity ?? identity
         } catch {
             lastErrorCode = .sessionFailed
@@ -4722,7 +4779,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         matching envelope: WorkoutEnvelopeV1
     ) -> Bool {
         guard let senderID = envelope.controlSenderID else { return false }
-        return builder?.workoutEvents.contains { event in
+        return builder.map { workoutEvents(in: $0) }?.contains { event in
             guard event.type == .segment,
                   let metadata = event.metadata,
                   metadata[SegmentMetadataKey.controlSenderID] as? String
@@ -5373,7 +5430,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func adoptRecoveredIdentityForRuntime(
         _ recoveredIdentity: WatchWorkoutRecoveryStore.Identity
     ) {
-        if identity?.sessionID != recoveredIdentity.sessionID { resetRideTransitionWrites() }
+        if identity?.sessionID != recoveredIdentity.sessionID { resetRideTransitionRuntime() }
         identity = recoveredIdentity
         if heartRateZoneRuntimeSessionID != recoveredIdentity.sessionID {
             nativeZoneLiveState.reset()
@@ -5475,11 +5532,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                                 acknowledgedSequence: envelope.sequence
                             )
                             publishSnapshotImmediately()
-                        } else if pendingAutomaticStartAnnotation == nil {
+                        } else {
                             // The gate checkpoint is intentionally durable
-                            // before the HealthKit marker. Retrying the same
-                            // sequence must therefore retry the marker write,
-                            // not silently strand the decision.
+                            // before the start provenance. Retrying the same
+                            // sequence must therefore retry that record, not
+                            // silently strand the decision.
                             beginAutomaticStartConfirmation(
                                 context: context,
                                 acknowledgedSequence: envelope.sequence,
@@ -5490,16 +5547,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     if (control == .pause || control == .resume),
                        let context = envelope.controlContext,
                        context.origin == .automatic {
-                        let transition = control == .pause
-                            ? "pause"
-                            : "resume"
                         let isAtTarget = control == .pause
                             ? lifecycle.state == .paused
                             : lifecycle.state == .running
                         if isAtTarget,
-                           containsRideTransitionMarker(
+                           containsConfirmedRideTransition(
                             context: context,
-                            transition: transition
+                            transition: control == .pause ? .pause : .resume
                            ) {
                             publishAcknowledgement(
                                 for: control,
@@ -5940,39 +5994,32 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
-    private func beginRideTransitionWrite(
-        to builder: HKLiveWorkoutBuilder
-    ) -> RideTransitionWriteContext? {
-        guard self.builder === builder, let identity,
-              recoveryStore.recoveredIdentity?.sessionID == identity.sessionID else { return nil }
-        rideTransitionWriteRevision &+= 1
-        return RideTransitionWriteContext(sessionID: identity.sessionID,
-            builder: builder, revision: rideTransitionWriteRevision)
+    /// Transition provenance is recorded only for the attached runtime whose
+    /// identity is the one the recovery store currently holds, so a callback
+    /// for an earlier ride can never label a later one.
+    private func canRecordRideTransition(
+        for builder: HKLiveWorkoutBuilder
+    ) -> Bool {
+        guard self.builder === builder, let identity else { return false }
+        return recoveryStore.recoveredIdentity?.sessionID == identity.sessionID
     }
 
-    private func ownsRideTransitionRuntime(_ context: RideTransitionWriteContext) -> Bool {
-        builder === context.builder && identity?.sessionID == context.sessionID
-            && recoveryStore.recoveredIdentity?.sessionID == context.sessionID
-    }
-
-    private func isCurrentRideTransitionWrite(_ context: RideTransitionWriteContext) -> Bool {
-        ownsRideTransitionRuntime(context) && rideTransitionWriteRevision == context.revision
-    }
-
-    private func resetRideTransitionWrites() {
-        rideTransitionWriteRevision &+= 1
-        pendingAutomaticStartAnnotation = nil
-        pendingAutomaticTransitionAnnotation = nil
+    private func resetRideTransitionRuntime() {
         pendingSystemTransitionEvent = nil
         clearManualTransitionOverride()
     }
 
+    /// Records who caused a native pause or resume. The record is one durable
+    /// recovery-store write made in the same main-actor turn as the session
+    /// callback. It is deliberately not a HealthKit workout event: Fitness
+    /// reads `.marker` events as segment boundaries, and the native pause and
+    /// resume events already define active time.
     @discardableResult
     private func confirmRideTransition(
         paused: Bool,
         at date: Date,
         remoteContext: WorkoutControlContextV1?
-    ) async -> Bool {
+    ) -> Bool {
         let persistedContext = identity?.pendingTransitionContext
         let automaticContext = manualTransitionOverridePending
             ? nil
@@ -5993,87 +6040,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             hasExplicitManualRequest: manualTransitionOverridePending,
             hasConfirmedSystemRequest: systemEvent != nil
         )
-        let profileVersion = automaticContext?.detectorProfileVersion
-        // A duplicate automatic retry must not supersede the write it awaits.
-        // A rider request can supersede that automatic write immediately.
-        if automaticContext != nil, pendingAutomaticTransitionAnnotation != nil { return false }
-        guard let currentBuilder = builder else {
+        guard let builder else {
             lastErrorCode = .sessionFailed
             return false
         }
-        guard let writeContext = beginRideTransitionWrite(to: currentBuilder) else { return false }
-
-        if let automaticContext {
-            let transition = paused ? "pause" : "resume"
-            if !containsRideTransitionMarker(
-                context: automaticContext,
-                transition: transition
-            ) {
-                guard let builder else {
-                    lastErrorCode = .sessionFailed
-                    return false
-                }
-                let event = makeRideTransitionMarker(
-                    paused: paused,
-                    origin: .automatic,
-                    context: automaticContext,
-                    at: date
-                )
-                pendingAutomaticTransitionAnnotation = automaticContext
-                defer {
-                    if ownsRideTransitionRuntime(writeContext),
-                       pendingAutomaticTransitionAnnotation == automaticContext {
-                        pendingAutomaticTransitionAnnotation = nil
-                    }
-                }
-                let outcome = await Self.segmentEventWriteOutcome(
-                    event,
-                    to: builder,
-                    injectedOperation:
-                        injectedRideTransitionEventOperation
-                )
-                guard isCurrentRideTransitionWrite(writeContext) else { return false }
-                guard pendingAutomaticTransitionAnnotation
-                        == automaticContext else {
-                    return false
-                }
-                pendingAutomaticTransitionAnnotation = nil
-                guard outcome == .success else {
-                    lastErrorCode = .sessionFailed
-                    return false
-                }
-            }
-
-            // A Watch-side rider action can arrive while the HealthKit marker
-            // write is suspended. Manual intent is authoritative even if the
-            // automatic marker completed first.
-            guard !manualTransitionOverridePending,
-                  (recoveryStore.recoveredIdentity ?? identity)?
-                    .pendingTransitionContext == automaticContext else {
-                return false
-            }
-        } else {
-            guard let builder else {
-                lastErrorCode = .sessionFailed
-                return false
-            }
-            let event = makeRideTransitionMarker(
-                paused: paused,
-                origin: origin,
-                context: nil,
-                at: date
-            )
-            let outcome = await Self.segmentEventWriteOutcome(
-                event,
-                to: builder,
-                injectedOperation: injectedRideTransitionEventOperation
-            )
-            guard isCurrentRideTransitionWrite(writeContext) else { return false }
-            guard outcome == .success else {
-                lastErrorCode = .sessionFailed
-                clearManualTransitionOverride()
-                return false
-            }
+        guard canRecordRideTransition(for: builder) else { return false }
+        // Only the decision that was made durable before HealthKit changed
+        // state may label the transition automatic. A rider request retires
+        // that durable decision first, so manual intent stays authoritative.
+        if let automaticContext,
+           (recoveryStore.recoveredIdentity ?? identity)?
+            .pendingTransitionContext != automaticContext {
+            return false
         }
 
         var transitionPersisted = false
@@ -6082,7 +6060,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 origin: origin,
                 paused: paused,
                 at: date,
-                detectorProfileVersion: profileVersion
+                detectorProfileVersion:
+                    automaticContext?.detectorProfileVersion,
+                context: automaticContext
             )
             identity = recoveryStore.recoveredIdentity ?? identity
             transitionPersisted = true
@@ -6097,73 +6077,6 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         return transitionPersisted
     }
 
-    private func makeRideTransitionMarker(
-        paused: Bool,
-        origin: WorkoutTransitionOrigin,
-        context: WorkoutControlContextV1?,
-        at date: Date,
-        transition: String? = nil
-    ) -> HKWorkoutEvent {
-        let hasCompleteDiagnostics = context?.evidenceMask != nil
-            && context?.sourceHealthMask != nil
-            && context?.candidateBeganSeconds != nil
-            && context?.decidedAtSeconds != nil
-        var metadata: [String: Any] = [
-            RideTransitionMetadataKey.marker: true,
-            RideTransitionMetadataKey.schema:
-                origin == .automatic && !hasCompleteDiagnostics ? 1 : 2,
-            RideTransitionMetadataKey.transition:
-                transition ?? (paused ? "pause" : "resume"),
-            RideTransitionMetadataKey.origin:
-                rideTransitionOriginName(origin),
-        ]
-        if let rideGeneration = context?.rideGeneration {
-            metadata[RideTransitionMetadataKey.rideGeneration] =
-                NSNumber(value: rideGeneration)
-        }
-        if let decisionSequence = context?.decisionSequence {
-            metadata[RideTransitionMetadataKey.decisionSequence] =
-                NSNumber(value: decisionSequence)
-        }
-        if let profileVersion = context?.detectorProfileVersion {
-            metadata[RideTransitionMetadataKey.profileVersion] =
-                NSNumber(value: profileVersion)
-        }
-        if let evidenceMask = context?.evidenceMask {
-            metadata[RideTransitionMetadataKey.evidenceMask] =
-                NSNumber(value: evidenceMask)
-        }
-        if let sourceHealthMask = context?.sourceHealthMask {
-            metadata[RideTransitionMetadataKey.sourceHealthMask] =
-                NSNumber(value: sourceHealthMask)
-        }
-        if let candidateBeganSeconds = context?.candidateBeganSeconds {
-            metadata[RideTransitionMetadataKey.candidateBeganSeconds] =
-                NSNumber(value: candidateBeganSeconds)
-        }
-        if let decidedAtSeconds = context?.decidedAtSeconds {
-            metadata[RideTransitionMetadataKey.decidedAtSeconds] =
-                NSNumber(value: decidedAtSeconds)
-        }
-        let event = HKWorkoutEvent(
-            type: .marker,
-            dateInterval: DateInterval(start: date, end: date),
-            metadata: metadata
-        )
-        return event
-    }
-
-    private func rideTransitionOriginName(
-        _ origin: WorkoutTransitionOrigin
-    ) -> String {
-        switch origin {
-        case .manual: "manual"
-        case .automatic: "automatic"
-        case .system: "system"
-        case .unknown: "unknown"
-        }
-    }
-
     private func beginAutomaticStartConfirmation(
         context: WorkoutControlContextV1,
         acknowledgedSequence: UInt64,
@@ -6173,63 +6086,26 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         suppliedConfigurationStartOriginTask = nil
         suppliedConfigurationStartOriginPending = false
         localStartOriginPending = false
-        guard context.origin == .automatic,
-              pendingAutomaticStartAnnotation == nil,
-              let builder else {
+        guard context.origin == .automatic, let builder else {
             return
         }
-        if isAutomaticStartConfirmed(context: context) {
-            publishAcknowledgement(
-                for: .requestCurrentSnapshot,
-                acknowledgedSequence: acknowledgedSequence
-            )
-            publishSnapshotImmediately()
-            return
-        }
-        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
-        let event = makeRideTransitionMarker(
-            paused: false,
-            origin: .automatic,
-            context: context,
-            at: date,
-            transition: "start"
-        )
-        pendingAutomaticStartAnnotation = context
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                if ownsRideTransitionRuntime(writeContext), pendingAutomaticStartAnnotation == context {
-                    pendingAutomaticStartAnnotation = nil
-                }
-            }
-            guard isCurrentRideTransitionWrite(writeContext) else { return }
-            let outcome = await Self.segmentEventWriteOutcome(
-                event,
-                to: builder,
-                injectedOperation:
-                    self.injectedRideTransitionEventOperation
-            )
-            guard isCurrentRideTransitionWrite(writeContext) else { return }
-            guard pendingAutomaticStartAnnotation == context else {
-                return
-            }
-            pendingAutomaticStartAnnotation = nil
-            guard outcome == .success,
-                  persistAutomaticStartConfirmation(
-                    context: context,
-                    at: date
-                  ) else {
+        if !isAutomaticStartConfirmed(context: context) {
+            guard canRecordRideTransition(for: builder) else { return }
+            guard persistAutomaticStartConfirmation(
+                context: context,
+                at: date
+            ) else {
                 lastErrorCode = .sessionFailed
                 publishSnapshotImmediately()
                 return
             }
             playAutomaticTransitionFeedback()
-            publishAcknowledgement(
-                for: .requestCurrentSnapshot,
-                acknowledgedSequence: acknowledgedSequence
-            )
-            publishSnapshotImmediately()
         }
+        publishAcknowledgement(
+            for: .requestCurrentSnapshot,
+            acknowledgedSequence: acknowledgedSequence
+        )
+        publishSnapshotImmediately()
     }
 
     private func persistAutomaticStartConfirmation(
@@ -6241,7 +6117,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 origin: .automatic,
                 paused: false,
                 at: date,
-                detectorProfileVersion: context.detectorProfileVersion
+                detectorProfileVersion: context.detectorProfileVersion,
+                transition: .start,
+                context: context
             )
             identity = recoveryStore.recoveredIdentity ?? identity
             return true
@@ -6253,29 +6131,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func confirmLaunchAutomaticStart(
         context: WorkoutControlContextV1,
         at date: Date
-    ) async -> Bool {
-        guard let builder, let writeContext = beginRideTransitionWrite(to: builder) else { return false }
-        if !containsRideTransitionMarker(
-            context: context,
-            transition: "start"
-        ) {
-            let event = makeRideTransitionMarker(
-                paused: false,
-                origin: .automatic,
-                context: context,
-                at: date,
-                transition: "start"
-            )
-            let outcome = await Self.segmentEventWriteOutcome(
-                event,
-                to: builder,
-                injectedOperation: injectedRideTransitionEventOperation
-            )
-            guard isCurrentRideTransitionWrite(writeContext) else { return false }
-            guard outcome == .success else {
-                lastErrorCode = .sessionFailed
-                return false
-            }
+    ) -> Bool {
+        guard let builder, canRecordRideTransition(for: builder) else {
+            return false
         }
         guard persistAutomaticStartConfirmation(
             context: context,
@@ -6289,42 +6147,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         return true
     }
 
-    private func confirmManualStart(at date: Date) async {
+    private func confirmManualStart(at date: Date) {
         guard localStartOriginPending else { return }
-        guard let builder else {
-            lastErrorCode = .sessionFailed
-            return
-        }
-        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
-        let event = makeRideTransitionMarker(
-            paused: false,
-            origin: .manual,
-            context: nil,
-            at: date,
-            transition: "start"
-        )
-        let outcome = await Self.segmentEventWriteOutcome(
-            event,
-            to: builder,
-            injectedOperation: injectedRideTransitionEventOperation
-        )
-        guard isCurrentRideTransitionWrite(writeContext) else { return }
-        guard outcome == .success else {
-            lastErrorCode = .sessionFailed
-            return
-        }
-        do {
-            try recoveryStore.confirmRideTransition(
-                origin: .manual,
-                paused: false,
-                at: date,
-                detectorProfileVersion: nil
-            )
-            identity = recoveryStore.recoveredIdentity ?? identity
-        } catch {
-            lastErrorCode = .sessionFailed
-            return
-        }
+        guard confirmStart(origin: .manual, at: date) else { return }
         localStartOriginPending = false
     }
 
@@ -6350,45 +6175,35 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                   identity?.lastTransitionOrigin == nil else { return }
             suppliedConfigurationStartOriginPending = false
             suppliedConfigurationStartOriginTask = nil
-            await confirmUnknownStart(at: transitionDate)
-            guard builder === originalBuilder, identity?.sessionID == sessionID else { return }
+            confirmStart(origin: .unknown, at: transitionDate)
             publishSnapshotImmediately()
         }
     }
 
-    private func confirmUnknownStart(at date: Date) async {
+    /// Records a start that no detector decision accounts for.
+    @discardableResult
+    private func confirmStart(
+        origin: WorkoutTransitionOrigin,
+        at date: Date
+    ) -> Bool {
         guard let builder else {
             lastErrorCode = .sessionFailed
-            return
+            return false
         }
-        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
-        let event = makeRideTransitionMarker(
-            paused: false,
-            origin: .unknown,
-            context: nil,
-            at: date,
-            transition: "start"
-        )
-        let outcome = await Self.segmentEventWriteOutcome(
-            event,
-            to: builder,
-            injectedOperation: injectedRideTransitionEventOperation
-        )
-        guard isCurrentRideTransitionWrite(writeContext) else { return }
-        guard outcome == .success else {
-            lastErrorCode = .sessionFailed
-            return
-        }
+        guard canRecordRideTransition(for: builder) else { return false }
         do {
             try recoveryStore.confirmRideTransition(
-                origin: .unknown,
+                origin: origin,
                 paused: false,
                 at: date,
-                detectorProfileVersion: nil
+                detectorProfileVersion: nil,
+                transition: .start
             )
             identity = recoveryStore.recoveredIdentity ?? identity
+            return true
         } catch {
             lastErrorCode = .sessionFailed
+            return false
         }
     }
 
@@ -6400,9 +6215,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private func isAutomaticStartConfirmed(
         context: WorkoutControlContextV1
     ) -> Bool {
-        guard containsRideTransitionMarker(
+        guard containsConfirmedRideTransition(
             context: context,
-            transition: "start"
+            transition: .start
         ) else {
             return false
         }
@@ -6413,91 +6228,16 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         return persistAutomaticStartConfirmation(context: context, at: Date())
     }
 
-    private func containsRideTransitionMarker(
+    /// True when this exact detector decision is already confirmed for the
+    /// attached ride, in the durable journal or in a marker left by an
+    /// earlier build.
+    private func containsConfirmedRideTransition(
         context: WorkoutControlContextV1,
-        transition: String
+        transition: WatchWorkoutRecoveryStore.RideTransitionRecord.Transition
     ) -> Bool {
-        guard let rideGeneration = context.rideGeneration,
-              let decisionSequence = context.decisionSequence else {
-            return false
+        confirmedRideTransitions(in: builder).contains {
+            $0.confirms(context, transition: transition)
         }
-        return builder?.workoutEvents.contains { event in
-            guard event.type == .marker,
-                  let metadata = event.metadata,
-                  metadata[RideTransitionMetadataKey.marker] as? Bool == true,
-                  let schemaNumber = metadata[
-                    RideTransitionMetadataKey.schema
-                  ] as? NSNumber,
-                  let markerSchema = Self.exactUnsignedMetadata(
-                    schemaNumber,
-                    as: UInt8.self
-                  ),
-                  markerSchema == 1 || markerSchema == 2,
-                  metadata[RideTransitionMetadataKey.transition] as? String
-                    == transition,
-                  metadata[RideTransitionMetadataKey.origin] as? String
-                    == "automatic",
-                  let generationNumber = metadata[
-                    RideTransitionMetadataKey.rideGeneration
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    generationNumber,
-                    as: UInt32.self
-                  ) == rideGeneration,
-                  let sequenceNumber = metadata[
-                    RideTransitionMetadataKey.decisionSequence
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    sequenceNumber,
-                    as: UInt32.self
-                  ) == decisionSequence,
-                  let profileNumber = metadata[
-                    RideTransitionMetadataKey.profileVersion
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    profileNumber,
-                    as: UInt16.self
-                  ) == context.detectorProfileVersion else {
-                return false
-            }
-            if markerSchema == 1 {
-                return context.evidenceMask == nil
-                    && context.sourceHealthMask == nil
-                    && context.candidateBeganSeconds == nil
-                    && context.decidedAtSeconds == nil
-            }
-            guard let evidenceNumber = metadata[
-                    RideTransitionMetadataKey.evidenceMask
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    evidenceNumber,
-                    as: UInt16.self
-                  ) == context.evidenceMask,
-                  let sourceHealthNumber = metadata[
-                    RideTransitionMetadataKey.sourceHealthMask
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    sourceHealthNumber,
-                    as: UInt16.self
-                  ) == context.sourceHealthMask,
-                  let candidateNumber = metadata[
-                    RideTransitionMetadataKey.candidateBeganSeconds
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    candidateNumber,
-                    as: UInt32.self
-                  ) == context.candidateBeganSeconds,
-                  let decidedNumber = metadata[
-                    RideTransitionMetadataKey.decidedAtSeconds
-                  ] as? NSNumber,
-                  Self.exactUnsignedMetadata(
-                    decidedNumber,
-                    as: UInt32.self
-                  ) == context.decidedAtSeconds else {
-                return false
-            }
-            return true
-        } ?? false
     }
 
     private static func exactUnsignedMetadata<
@@ -6518,8 +6258,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         context: WorkoutControlContextV1,
         at date: Date
     ) {
-        guard pendingAutomaticTransitionAnnotation == nil,
-              let control = envelope.control,
+        guard let control = envelope.control,
               control == .pause || control == .resume else {
             return
         }
@@ -6552,12 +6291,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
         Task { @MainActor [weak self] in
             guard let self, identity?.sessionID == envelope.sessionID else { return }
-            let didConfirm = await confirmRideTransition(
+            let didConfirm = confirmRideTransition(
                 paused: control == .pause,
                 at: date,
                 remoteContext: context
             )
-            guard identity?.sessionID == envelope.sessionID else { return }
             publishSnapshotImmediately()
             if didConfirm {
                 publishPendingRemoteStateAcknowledgementIfConfirmed()
@@ -6600,7 +6338,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func noteSystemPauseOrResumeEvent(
         _ event: WorkoutSystemTransitionEvent
-    ) async {
+    ) {
         pendingSystemTransitionEvent = event
         let stateMatches = event.paused
             ? lifecycle.state == .paused
@@ -6623,23 +6361,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             lastErrorCode = .sessionFailed
             return
         }
-        guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
-        let marker = makeRideTransitionMarker(
-            paused: event.paused,
-            origin: .system,
-            context: nil,
-            at: event.capturedAt
-        )
-        let outcome = await Self.segmentEventWriteOutcome(
-            marker,
-            to: builder,
-            injectedOperation: injectedRideTransitionEventOperation
-        )
-        guard isCurrentRideTransitionWrite(writeContext) else { return }
-        guard outcome == .success else {
-            lastErrorCode = .sessionFailed
-            return
-        }
+        guard canRecordRideTransition(for: builder) else { return }
         do {
             try recoveryStore.confirmRideTransition(
                 origin: .system,
@@ -6654,7 +6376,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         }
     }
 
-    private func noteManualPauseOrResumeRequest(at date: Date) async {
+    private func noteManualPauseOrResumeRequest(at date: Date) {
         do {
             try beginManualTransitionOverride()
         } catch {
@@ -6662,33 +6384,17 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             return
         }
 
-        // HealthKit can deliver the marker callback immediately after the
-        // state callback. Correct a same-transition automatic attribution so
-        // the rider's Watch-button action always wins.
+        // HealthKit can deliver the rider's request event immediately after
+        // the state callback. Correct a same-transition automatic attribution
+        // so the rider's Watch-button action always wins.
         if let lastTransitionAt = identity?.lastTransitionAt,
            abs(date.timeIntervalSince(lastTransitionAt)) <= 2 {
             guard let builder else {
                 lastErrorCode = .sessionFailed
                 return
             }
-            guard let writeContext = beginRideTransitionWrite(to: builder) else { return }
+            guard canRecordRideTransition(for: builder) else { return }
             let paused = lifecycle.state == .paused
-            let event = makeRideTransitionMarker(
-                paused: paused,
-                origin: .manual,
-                context: nil,
-                at: date
-            )
-            let outcome = await Self.segmentEventWriteOutcome(
-                event,
-                to: builder,
-                injectedOperation: injectedRideTransitionEventOperation
-            )
-            guard isCurrentRideTransitionWrite(writeContext) else { return }
-            guard outcome == .success else {
-                lastErrorCode = .sessionFailed
-                return
-            }
             do {
                 try recoveryStore.confirmRideTransition(
                     origin: .manual,
@@ -7563,14 +7269,17 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
         date: Date
     ) {
         Task { @MainActor [weak self] in
-            await self?.applySessionState(workoutSession, to: toState, from: fromState, date: date)
+            self?.applySessionState(workoutSession, to: toState, from: fromState, date: date)
         }
     }
 
+    /// Applies a native session state. Transition provenance is recorded
+    /// before this returns, so nothing can interleave between HealthKit's
+    /// callback and the durable record of who caused it.
     func applySessionState(
         _ workoutSession: HKWorkoutSession, to toState: HKWorkoutSessionState,
         from fromState: HKWorkoutSessionState, date: Date
-    ) async {
+    ) {
         guard workoutSession === session else { return }
         if let terminalCleanupSessionID,
            let terminalCleanupDisposition,
@@ -7608,27 +7317,25 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                 startPeriodicSnapshots()
                 let didConfirmTransition: Bool
                 if fromState == .paused {
-                    didConfirmTransition = await confirmRideTransition(
+                    didConfirmTransition = confirmRideTransition(
                         paused: false,
                         at: date,
                         remoteContext: automaticContext
                     )
                 } else {
                     if let context = activeLaunchAutomaticStartContext {
-                        didConfirmTransition =
-                            await confirmLaunchAutomaticStart(
-                                context: context,
-                                at: date
-                            )
+                        didConfirmTransition = confirmLaunchAutomaticStart(
+                            context: context,
+                            at: date
+                        )
                     } else if localStartOriginPending {
-                        await confirmManualStart(at: date)
+                        confirmManualStart(at: date)
                         didConfirmTransition = true
                     } else {
                         scheduleSuppliedConfigurationUnknownStart(at: date)
                         didConfirmTransition = true
                     }
                 }
-                guard session === workoutSession else { return }
                 publishSnapshotImmediately()
                 if didConfirmTransition {
                     publishPendingRemoteStateAcknowledgementIfConfirmed()
@@ -7653,12 +7360,11 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
                 pendingRemoteStateAcknowledgement?.context
             _ = lifecycle.apply(.sessionPaused)
             routeRecorder.setPaused(true, at: date)
-            let didConfirmTransition = await confirmRideTransition(
+            let didConfirmTransition = confirmRideTransition(
                 paused: true,
                 at: date,
                 remoteContext: automaticContext
             )
-            guard session === workoutSession else { return }
             publishSnapshotImmediately()
             if didConfirmTransition {
                 publishPendingRemoteStateAcknowledgementIfConfirmed()
@@ -7817,7 +7523,8 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
     ) {
         Task { @MainActor [weak self] in
             guard let self, workoutBuilder === builder else { return }
-            if let request = workoutBuilder.workoutEvents
+            let events = workoutEvents(in: workoutBuilder)
+            if let request = events
                 .filter({ $0.type == .pauseOrResumeRequest })
                 .max(by: {
                     $0.dateInterval.start < $1.dateInterval.start
@@ -7826,12 +7533,11 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
                     > lastProcessedManualTransitionRequestAt {
                 lastProcessedManualTransitionRequestAt =
                     request.dateInterval.start
-                await noteManualPauseOrResumeRequest(
+                noteManualPauseOrResumeRequest(
                     at: request.dateInterval.start
                 )
-                guard builder === workoutBuilder else { return }
             }
-            if let event = workoutBuilder.workoutEvents
+            if let event = events
                 .filter({
                     $0.type == .motionPaused || $0.type == .motionResumed
                 })
@@ -7840,14 +7546,13 @@ extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
                 }),
                event.dateInterval.start > lastProcessedSystemTransitionAt {
                 lastProcessedSystemTransitionAt = event.dateInterval.start
-                await noteSystemPauseOrResumeEvent(
+                noteSystemPauseOrResumeEvent(
                     WorkoutSystemTransitionEvent(
                         paused: event.type == .motionPaused,
                         capturedAt: event.dateInterval.start
                     )
                 )
             }
-            guard builder === workoutBuilder else { return }
             scheduleCoalescedSnapshot()
         }
     }

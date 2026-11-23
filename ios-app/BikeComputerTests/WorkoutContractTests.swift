@@ -120,6 +120,7 @@ private struct WorkoutContractTestSuite {
         testRecoverySequenceLeasesNeverReuseReservedValues()
         testRecoveryStorePersistsIdentityAndLeases()
         testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery()
+        testRideTransitionJournalReplacesHealthKitMarkers()
 #if WORKOUT_CONTRACT_HOST
         testRecoveryStoreSurvivesProcessRelaunch()
 #endif
@@ -151,6 +152,8 @@ private struct WorkoutContractTestSuite {
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
         testMainRideControlsComposition()
+        testWatchWorkoutControlsStackInFullWidthRows()
+        testWorkoutRecordersCreateNoMarkerEvents()
         testWorkoutFormattingKeepsUnavailableValuesDistinctFromZero()
         testWatchWorkoutLaunchRequest()
     }
@@ -5416,6 +5419,399 @@ private struct WorkoutContractTestSuite {
         }
     }
 
+    private mutating func testRideTransitionJournalReplacesHealthKitMarkers() {
+        typealias Record = WatchWorkoutRecoveryStore.RideTransitionRecord
+        let persistence = ControllableRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        let start = Date(timeIntervalSinceReferenceDate: 800_500_000)
+        func decision(
+            sequence: UInt32,
+            evidenceMask: UInt16? = 0x0005
+        ) -> WorkoutControlContextV1 {
+            WorkoutControlContextV1(
+                origin: .automatic,
+                automaticReason: .rideDetection,
+                rideGeneration: 4,
+                decisionSequence: sequence,
+                detectorProfileVersion: 2,
+                evidenceMask: evidenceMask,
+                sourceHealthMask: evidenceMask == nil ? nil : 0,
+                candidateBeganSeconds: evidenceMask == nil ? nil : 90,
+                decidedAtSeconds: evidenceMask == nil ? nil : 95
+            )
+        }
+        do {
+            _ = try store.begin(startDate: start)
+            expect(
+                store.recoveredIdentity?.rideTransitionJournal == nil,
+                "a new ride starts without transition records"
+            )
+            try store.confirmRideTransition(
+                origin: .manual,
+                paused: false,
+                at: start,
+                detectorProfileVersion: nil,
+                transition: .start
+            )
+            let pause = decision(sequence: 7)
+            try store.confirmRideTransition(
+                origin: .automatic,
+                paused: true,
+                at: start.addingTimeInterval(100),
+                detectorProfileVersion: pause.detectorProfileVersion,
+                context: pause
+            )
+            // The same decision is confirmed again when its acknowledgement
+            // is retried. It moves the latest-transition time, as before, but
+            // is journaled once.
+            try store.confirmRideTransition(
+                origin: .automatic,
+                paused: true,
+                at: start.addingTimeInterval(103),
+                detectorProfileVersion: pause.detectorProfileVersion,
+                context: pause
+            )
+            try store.confirmRideTransition(
+                origin: .manual,
+                paused: false,
+                at: start.addingTimeInterval(160),
+                detectorProfileVersion: nil
+            )
+
+            let reloaded = WatchWorkoutRecoveryStore(persistence: persistence)
+            let journal = reloaded.recoveredIdentity?.rideTransitionJournal
+                ?? []
+            expect(
+                reloaded.loadState == .valid
+                    && journal.map(\.transition) == [.start, .pause, .resume]
+                    && journal.map(\.origin) == [.manual, .automatic, .manual]
+                    && journal.map(\.at) == [
+                        start,
+                        start.addingTimeInterval(100),
+                        start.addingTimeInterval(160),
+                    ],
+                "confirmed transitions must be journaled once, in order, and survive a reload"
+            )
+            expect(
+                reloaded.recoveredIdentity?.lastTransitionOrigin == .manual
+                    && reloaded.recoveredIdentity?.pauseOrigin == nil
+                    && reloaded.recoveredIdentity?.detectorProfileVersion == 2,
+                "journaling must not change the latest-transition fields"
+            )
+            if journal.count == 3 {
+                let automatic = journal[1]
+                expect(
+                    automatic.confirms(pause, transition: .pause)
+                        && automatic.rideGeneration == 4
+                        && automatic.decisionSequence == 7
+                        && automatic.detectorProfileVersion == 2
+                        && automatic.evidenceMask == 0x0005
+                        && automatic.sourceHealthMask == 0
+                        && automatic.candidateBeganSeconds == 90
+                        && automatic.decidedAtSeconds == 95,
+                    "an automatic record must retain the decision identity and diagnostics the marker carried"
+                )
+                expect(
+                    !automatic.confirms(pause, transition: .resume)
+                        && !automatic.confirms(
+                            decision(sequence: 8),
+                            transition: .pause
+                        )
+                        && !automatic.confirms(
+                            decision(sequence: 7, evidenceMask: 0x0004),
+                            transition: .pause
+                        )
+                        && !automatic.confirms(
+                            decision(sequence: 7, evidenceMask: nil),
+                            transition: .pause
+                        )
+                        && !journal[0].confirms(pause, transition: .start)
+                        && !journal[2].confirms(pause, transition: .resume),
+                    "a record must confirm only its own decision and transition"
+                )
+                expect(
+                    journal[0].detectorProfileVersion == nil
+                        && journal[2].rideGeneration == nil,
+                    "manual records must carry no detector fields"
+                )
+            }
+
+            // A file written before the journal existed, or by an older
+            // build after a downgrade, has no journal key and stays valid.
+            if let data = persistence.data,
+               var plist = try PropertyListSerialization.propertyList(
+                from: data,
+                format: nil
+               ) as? [String: Any],
+               var active = plist["activeIdentity"] as? [String: Any] {
+                expect(
+                    active["rideTransitionJournal"] != nil,
+                    "the journal must be stored inside the active identity"
+                )
+                active["rideTransitionJournal"] = nil
+                plist["activeIdentity"] = active
+                let legacyPersistence = ControllableRecoveryPersistence()
+                legacyPersistence.data = try PropertyListSerialization.data(
+                    fromPropertyList: plist,
+                    format: .binary,
+                    options: 0
+                )
+                let legacy = WatchWorkoutRecoveryStore(
+                    persistence: legacyPersistence
+                )
+                expect(
+                    legacy.loadState == .valid
+                        && legacy.recoveredIdentity?.rideTransitionJournal == nil
+                        && legacy.recoveredIdentity?.lastTransitionAt
+                            == start.addingTimeInterval(160),
+                    "a recovery file without a journal must still load"
+                )
+                try legacy.confirmRideTransition(
+                    origin: .manual,
+                    paused: true,
+                    at: start.addingTimeInterval(200),
+                    detectorProfileVersion: nil
+                )
+                expect(
+                    WatchWorkoutRecoveryStore(persistence: legacyPersistence)
+                        .recoveredIdentity?.rideTransitionJournal?.count == 1,
+                    "a ride recovered from an older file must journal its next transition"
+                )
+            } else {
+                expect(false, "the recovery file must be an inspectable property list")
+            }
+
+            // A rejected or failed write leaves the durable journal intact.
+            do {
+                try store.confirmRideTransition(
+                    origin: .manual,
+                    paused: true,
+                    at: start.addingTimeInterval(-1),
+                    detectorProfileVersion: nil
+                )
+                expect(false, "a transition before the workout start must be rejected")
+            } catch {}
+            do {
+                try store.confirmRideTransition(
+                    origin: .manual,
+                    paused: true,
+                    at: start.addingTimeInterval(170),
+                    detectorProfileVersion: nil,
+                    transition: .start
+                )
+                expect(false, "a start cannot be recorded as a pause")
+            } catch {}
+            persistence.failsSave = true
+            do {
+                try store.confirmRideTransition(
+                    origin: .manual,
+                    paused: true,
+                    at: start.addingTimeInterval(180),
+                    detectorProfileVersion: nil
+                )
+                expect(false, "a failed durable write must be reported")
+            } catch {}
+            persistence.failsSave = false
+            expect(
+                store.recoveredIdentity?.rideTransitionJournal == journal
+                    && WatchWorkoutRecoveryStore(persistence: persistence)
+                        .recoveredIdentity?.rideTransitionJournal == journal,
+                "a rejected or failed transition must not reach the journal"
+            )
+        } catch {
+            expect(false, "ride-transition journal fixture threw \(error)")
+        }
+
+        // The journal is bounded: the oldest pause and resume records go
+        // first, and the start record is never dropped.
+        var bounded: [Record] = []
+        bounded = Record.appending(
+            Record(transition: .start, origin: .manual, at: start),
+            to: bounded
+        )
+        let pairs = Record.maximumJournaledPauseAndResumeRecords
+        for index in 0..<(pairs * 2) {
+            bounded = Record.appending(
+                Record(
+                    transition: index.isMultiple(of: 2) ? .pause : .resume,
+                    origin: .unknown,
+                    at: start.addingTimeInterval(TimeInterval(index + 1))
+                ),
+                to: bounded
+            )
+        }
+        expect(
+            bounded.count == pairs + 1
+                && bounded.first?.transition == .start
+                && bounded.dropFirst().first?.at
+                    == start.addingTimeInterval(TimeInterval(pairs + 1))
+                && bounded.last?.at
+                    == start.addingTimeInterval(TimeInterval(pairs * 2)),
+            "the journal must keep the start and the newest pause and resume records"
+        )
+        expect(
+            Record.appending(bounded[bounded.count - 1], to: bounded) == bounded,
+            "an identical record must not be journaled twice"
+        )
+    }
+
+    /// Apple Fitness draws a segment boundary at every `.marker` workout
+    /// event, so one marker per pause and resume produced phantom 00:00
+    /// segments. Neither recorder may create one, and the Watch may add
+    /// events to its builder only through the single segment write.
+    private mutating func testWorkoutRecordersCreateNoMarkerEvents() {
+        let appDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer")
+        var compactSources: [String: String] = [:]
+        for directory in [
+            "BikeComputer", "BikeComputerWatch", "WorkoutShared", "RideShared",
+        ] {
+            let root = appDirectory.appendingPathComponent(directory)
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil
+            ) else {
+                expect(false, "workout sources must be available: \(directory)")
+                return
+            }
+            for case let url as URL in enumerator
+            where url.pathExtension == "swift" {
+                guard let source = try? String(
+                    contentsOf: url,
+                    encoding: .utf8
+                ) else {
+                    expect(false, "unreadable source: \(url.lastPathComponent)")
+                    return
+                }
+                let relativePath = url.path.replacingOccurrences(
+                    of: appDirectory.path + "/",
+                    with: ""
+                )
+                compactSources[relativePath] = source.filter {
+                    !$0.isWhitespace
+                }
+            }
+        }
+        func occurrences(of needle: String, in source: String) -> Int {
+            source.components(separatedBy: needle).count - 1
+        }
+        guard let watch = compactSources[
+                "BikeComputerWatch/Managers/WatchWorkoutManager.swift"
+              ],
+              let phone = compactSources[
+                "BikeComputer/Managers/PhoneWorkoutRecorder.swift"
+              ] else {
+            expect(false, "both workout recorders must be scanned")
+            return
+        }
+        let markerWriters = compactSources
+            .filter { $0.value.contains("type:.marker") }
+            .keys
+            .sorted()
+        expect(
+            markerWriters.isEmpty,
+            "no source may create a HealthKit marker event: \(markerWriters)"
+        )
+        expect(
+            occurrences(of: "HKWorkoutEvent(", in: watch) == 1
+                && watch.contains("returnHKWorkoutEvent(type:.segment,")
+                && occurrences(of: "addWorkoutEvents(", in: watch) == 1
+                && watch.contains("builder.addWorkoutEvents([event])"),
+            "the Watch may write only segment events, through one builder call"
+        )
+        expect(
+            occurrences(of: "HKWorkoutEvent(", in: phone) == 2
+                && phone.contains("HKWorkoutEvent(type:.segment,")
+                && phone.contains(
+                    "lettype:HKWorkoutEventType=intent.paused?.pause:.resume"
+                )
+                && phone.contains("HKWorkoutEvent(type:type,"),
+            "the iPhone may write only segment events and native pause and resume events"
+        )
+        expect(
+            watch.contains("guardevent.type==.marker,")
+                && watch.contains(
+                    "staticletmarker=\"com.openbikecomputer.workout.rideTransition\""
+                ),
+            "markers left by an earlier build must stay readable during recovery"
+        )
+    }
+
+    private mutating func testWatchWorkoutControlsStackInFullWidthRows() {
+        let liveViewURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "BikeComputer/BikeComputerWatch/Views/LiveWorkoutView.swift"
+            )
+        guard let source = try? String(contentsOf: liveViewURL, encoding: .utf8)
+        else {
+            expect(false, "Watch live workout source must be available")
+            return
+        }
+        let compact = source.filter { !$0.isWhitespace }
+        let rowsStart = "VStack(spacing:6){Button{manager.markSegment()}label:{"
+        let rowsEnd = ".accessibilityIdentifier(\"workout-stop-and-save\")}"
+        guard let startRange = compact.range(of: rowsStart),
+              let endRange = compact.range(
+                of: rowsEnd,
+                range: startRange.upperBound..<compact.endIndex
+              ) else {
+            expect(false, "Watch workout controls must be one vertical stack from Segment to Stop")
+            return
+        }
+        let rows = String(compact[startRange.lowerBound..<endRange.upperBound])
+        func position(of needle: String) -> String.Index? {
+            rows.range(of: needle)?.lowerBound
+        }
+        let segment = position(of: "manager.markSegment()")
+        let pause = position(of: "manager.pause()")
+        let stop = position(of: "manager.endAndSave()")
+        expect(
+            segment != nil && pause != nil && stop != nil
+                && segment! < pause! && pause! < stop!,
+            "Watch workout rows must read Segment, Pause/Resume, Stop"
+        )
+        expect(
+            rows.contains(
+                "ifmanager.isMarkingSegment{ProgressView()}else{WatchSegmentNumberBadge(number:manager.snapshot.currentSegmentIndex)}"
+            )
+                && rows.contains(
+                    ".disabled(manager.state!=.running||manager.isMarkingSegment||manager.segmentError==.confirmationPending)"
+                )
+                && rows.contains(".accessibilityLabel(\"Markworkoutsegment\")")
+                && rows.contains(
+                    ".accessibilityValue(\"Currentsegment\\(manager.snapshot.currentSegmentIndex)\")"
+                ),
+            "the Segment row must keep its number, pending state, enablement and accessibility"
+        )
+        expect(
+            rows.contains(
+                "ifmanager.state==.paused{manager.resume()}else{manager.pause()}"
+            )
+                && rows.contains(
+                    ".disabled(![.running,.paused].contains(manager.state))"
+                )
+                && rows.contains(
+                    ".accessibilityLabel(manager.state==.paused?\"Resumeride\":\"Pauseride\")"
+                )
+                && rows.contains(
+                    "Button(role:.destructive){manager.endAndSave()}"
+                )
+                && rows.contains(".disabled(manager.state==.ending)")
+                && rows.contains(".accessibilityLabel(\"Endandsaveride\")"),
+            "the Pause/Resume and Stop rows must keep their actions, enablement and accessibility"
+        )
+        expect(
+            compact.contains(
+                "Button(\"DiscardWorkout\"){guardletsessionID=manager.activeSessionIDelse{return}requestDiscardConfirmation(for:sessionID)}"
+            ),
+            "discarding must still go through its confirmation"
+        )
+    }
+
     private mutating func testTerminalErrorUpdatePreservesFinishRequestAndSurvivesRecovery() {
         for disposition in [
             WorkoutFinishDisposition.save,
@@ -8320,17 +8716,42 @@ private struct WorkoutContractTestSuite {
            let timerIndex = compactLiveWatchView.range(
             of: "workoutTime(\"Elapsed\",manager.snapshot.wallElapsedTime?.value??manager.snapshot.elapsedTime?.value)"
            )?.lowerBound,
-           let controlsIndex = compactLiveWatchView.range(
-            of: "HStack(spacing:8){Button{manager.markSegment()"
-           )?.lowerBound {
+           let controlsStart = compactLiveWatchView.range(
+            of: "VStack(spacing:6){Button{manager.markSegment()}label:{"
+           ),
+           let controlsEnd = compactLiveWatchView.range(
+            of: ".accessibilityIdentifier(\"workout-stop-and-save\")}",
+            range: controlsStart.upperBound..<compactLiveWatchView.endIndex
+           ) {
+            let controls = compactLiveWatchView[
+                controlsStart.lowerBound..<controlsEnd.upperBound
+            ]
             expect(
-                gridIndex < timerIndex && timerIndex < controlsIndex,
+                gridIndex < timerIndex
+                    && timerIndex < controlsStart.lowerBound,
                 "Watch elapsed timer must appear below the stat grid and above workout controls"
+            )
+            // The controls used to share one horizontal row. Each is now a
+            // full-width row of its own, stacked below the metrics.
+            expect(
+                !controls.contains("HStack(")
+                    && !compactLiveWatchView.contains(
+                        "HStack(spacing:8){Button{manager.markSegment()"
+                    )
+                    && controls.components(separatedBy: "Button").count - 1
+                        == 3
+                    && controls.components(
+                        separatedBy: ".workoutControlRow()"
+                    ).count - 1 == 3
+                    && compactLiveWatchView.contains(
+                        "funcworkoutControlRow()->someView{frame(maxWidth:.infinity,minHeight:25)}"
+                    ),
+                "Watch workout controls must be three stacked full-width rows, not one horizontal row"
             )
         } else {
             expect(
                 false,
-                "Watch live workout grid, timer, and controls must remain discoverable"
+                "Watch live workout grid, timer, and stacked controls must remain discoverable"
             )
         }
         expect(

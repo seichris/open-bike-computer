@@ -1032,8 +1032,7 @@ that HealthKit changed state:
    acceptance, so rejection cannot be crossed by the launch handshake.
 4. iPhone sends a later confirmation only after the authoritative Watch
    snapshot reports the requested state and automatic origin. A detected start
-   is annotated with a durable Watch recovery record and HealthKit marker
-   before it is confirmed.
+   is annotated with a durable Watch recovery record before it is confirmed.
 5. If fresh evidence contradicts an admitted decision before confirmation, the
    device sends kind `8` with result `stale`. The phone stops the pending flow,
    but never ends or discards a workout that may already have started.
