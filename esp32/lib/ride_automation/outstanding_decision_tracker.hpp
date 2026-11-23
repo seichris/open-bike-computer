@@ -31,7 +31,8 @@ inline ride_automation::ConfirmedLifecycle pausedSessionLifecycle(
 // marker for a pause or resume it has already been asked to apply, and a
 // state change clears the origin until its frame arrives. For this long an
 // unconfirmed origin means "confirmation pending"; after it, an origin that
-// is still `unknown` is a transition the detector did not make.
+// is still `unknown` is a transition the detector did not make. An absent
+// origin and a following `unknown` origin each get this long.
 constexpr uint32_t kOriginConfirmationGraceMs = 5'000U;
 
 struct ObservedWorkout {
@@ -124,9 +125,17 @@ public:
       break;
     }
 
-    if (!originUnconfirmed_ || unconfirmedState_ != state) {
+    // The grace starts when the state is first seen unconfirmed, and once
+    // more when its origin first reads `unknown`: the origin frame can lag
+    // the state change, and the Watch's marker window only begins when it
+    // reports `unknown`. Without the second start, a late origin frame would
+    // spend the grace before that window opened.
+    const bool unknown = origin == PauseOrigin::Unknown;
+    if (!originUnconfirmed_ || unconfirmedState_ != state ||
+        (unknown && !unknownOriginSeen_)) {
       originUnconfirmed_ = true;
       unconfirmedState_ = state;
+      unknownOriginSeen_ = unknown;
       unconfirmedSinceMs_ = nowMs;
     }
     if (static_cast<uint32_t>(nowMs - unconfirmedSinceMs_) <
@@ -136,7 +145,7 @@ public:
     }
     // An absent origin never contradicts on its own; the decision's transport
     // deadline bounds that wait.
-    return origin == PauseOrigin::Unknown;
+    return unknown;
   }
 
   // True when the last observation was a paused session whose origin may
@@ -149,6 +158,7 @@ private:
       ride_automation_protocol::Transition::None;
   bool targetStateObserved_ = false;
   bool originUnconfirmed_ = false;
+  bool unknownOriginSeen_ = false;
   workout_telemetry_protocol::SessionState unconfirmedState_ =
       workout_telemetry_protocol::SessionState::Idle;
   uint32_t unconfirmedSinceMs_ = 0;
