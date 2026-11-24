@@ -161,20 +161,50 @@ struct RouteCreatorPanel: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Picker("Travel Mode", selection: $session.travelMode) {
-                ForEach(RouteCreatorTravelMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            travelModePicker
             routeStatus
-            Text("Calculated with Apple Maps. Save keeps the route and its instructions on this iPhone for offline navigation. Offline map tiles and Watch transfer are not included.")
+            Text(sourceFooter)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Five segments; a menu from larger text sizes, where five segments
+    /// would truncate their titles.
+    @ViewBuilder
+    private var travelModePicker: some View {
+        let picker = Picker("Travel Mode", selection: $session.travelMode) {
+            ForEach(RouteCreatorTravelMode.allCases) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        Group {
+            if dynamicTypeSize > .xLarge {
+                picker
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity)
+            } else {
+                picker
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+            }
+        }
+        .accessibilityIdentifier("routeCreatorTravelMode")
+    }
+
+    /// Where the route comes from: Bicino's bicycle route service for a bike
+    /// profile, unless this plan fell back to Apple Maps.
+    private var usesBicycleRouteService: Bool {
+        guard session.travelMode.bicycleProfile != nil else { return false }
+        return session.currentPlan?.usesBicycleRouteService ?? true
+    }
+
+    private var sourceFooter: String {
+        usesBicycleRouteService
+            ? "Bike routes come from Bicino's route service with OpenStreetMap data (© OpenStreetMap contributors). It receives the start and end of each leg. Save keeps the route and its instructions on this iPhone for offline navigation. Offline map tiles and Watch transfer are not included."
+            : "Calculated with Apple Maps. Save keeps the route and its instructions on this iPhone for offline navigation. Offline map tiles and Watch transfer are not included."
     }
 
     private var header: some View {
@@ -299,6 +329,11 @@ struct RouteCreatorPanel: View {
                 Text("\(plan.legs.count) \(plan.legs.count == 1 ? "leg" : "legs") · \(plan.route.steps.count) instructions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let notice = plan.bicycleProfileNotice {
+                    Label(notice, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let notice = plan.carDirectionsNotice {
                     Label(notice, systemImage: "exclamationmark.triangle")
                         .font(.caption)
