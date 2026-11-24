@@ -141,6 +141,12 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
   -L "${IOS_SUPPORT}/usr/lib/swift" \
   -o "${CONTOUR_LABEL_OUT}"
 "${CONTOUR_LABEL_OUT}"
+
+SPOKEN_DIRECTIONS_OUT="${TMPDIR:-/tmp}/open-bike-spoken-directions-tests"
+python3 "${DEV_SWIFT_COMPILER}" spoken-directions-1 -- \
+  -D HOST_TESTING -parse-as-library \
+  -o "${SPOKEN_DIRECTIONS_OUT}"
+"${SPOKEN_DIRECTIONS_OUT}"
 fi
 if [[ "$group" == all || "$group" == sensors ]]; then
   bash "$SCRIPT_DIR/run-cycling-sensor-observation-tests.sh"

@@ -519,6 +519,8 @@ private struct RideDetectionSettingsView: View {
 
     var body: some View {
         Form {
+            SpokenDirectionsSettingsSection()
+
             Section {
                 Picker(
                     "Detect Ride Start",
