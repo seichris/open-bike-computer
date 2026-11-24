@@ -239,10 +239,25 @@ def file_identity(path):
     return {"name": path.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def write_manifest(out, policy_path, policy, indexes, chosen, cells):
+def current_receipt(out, cell, chosen):
+    """The cell's receipt if it was built from the source the policy picks now."""
+    path = out / "receipts" / f"{hgt_name(*cell)}.json"
+    if not path.exists():
+        return None
+    receipt = json.loads(path.read_text())
+    source = chosen[cell]
+    if receipt.get("source") != source.id or receipt.get("url") != source.tile_url(*cell):
+        return None
+    return receipt
+
+
+def write_manifest(out, policy_path, policy, chosen, cells, bounds=None):
+    """`bounds` and `catalogCells` tell a partial run from a complete one."""
     import rasterio
 
-    receipts = [json.loads((out / "receipts" / f"{hgt_name(*cell)}.json").read_text()) for cell in cells]
+    receipts = [current_receipt(out, cell, chosen) for cell in cells]
+    if not all(receipts):
+        raise ValueError("a cell has no receipt for its current source")
     listing = "".join(f"{r['cell']} {r['hgtSha256']}\n" for r in sorted(receipts, key=lambda r: r["cell"]))
     manifest = {
         "schema": "bicino-valhalla-elevation-v1",
@@ -254,10 +269,12 @@ def write_manifest(out, policy_path, policy, indexes, chosen, cells):
         "sources": [
             {"id": s.id, "indexSha256": s.index_sha256, "termsUrl": s.terms_url,
              "attributionUrl": s.attribution_url,
-             "cells": sum(1 for cell in cells if chosen[cell].id == s.id)}
+             "cells": sum(1 for r in receipts if r["source"] == s.id)}
             for s in policy.sources
         ],
         "runtime": {"rasterio": rasterio.__version__, "gdal": rasterio.__gdal_version__},
+        "bounds": bounds,
+        "catalogCells": len(chosen),
         "cells": len(receipts),
         "cellListSha256": hashlib.sha256(listing.encode()).hexdigest(),
         "sourceBytes": sum(r["bytes"] for r in receipts),
@@ -292,7 +309,7 @@ def main():
     if args.bounds:
         west, south, east, north = args.bounds
         cells = [(x, y) for x, y in cells if west <= x < east and south <= y < north]
-    pending = [cell for cell in cells if not (out / "receipts" / f"{hgt_name(*cell)}.json").exists()]
+    pending = [cell for cell in cells if current_receipt(out, cell, chosen) is None]
     print(f"{len(cells)} cells, {len(pending)} to build", flush=True)
     started = time.monotonic()
     with ProcessPoolExecutor(args.jobs, initializer=_start_worker, initargs=(chosen, out)) as pool:
@@ -302,7 +319,8 @@ def main():
             if done % 100 == 0 or done == len(futures):
                 rate = done / max(time.monotonic() - started, 1)
                 print(f"{done}/{len(futures)} cells, {rate:.2f}/s", flush=True)
-    print(f"Elevation manifest: {write_manifest(out, args.policy, policy, indexes, chosen, cells)}", flush=True)
+    manifest = write_manifest(out, args.policy, policy, chosen, cells, args.bounds)
+    print(f"Elevation manifest: {manifest}", flush=True)
 
 
 if __name__ == "__main__":

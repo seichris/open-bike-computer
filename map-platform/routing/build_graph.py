@@ -123,11 +123,14 @@ valhalla_build_extract -c /work/valhalla.json
         raise ValueError("Valhalla administrative database contains no boundaries")
 
 
-def elevation_identity(elevation):
+def elevation_identity(elevation, sample=False):
+    """The elevation manifest's identity; only a sample may use a partial run."""
     path = elevation / "elevation-manifest.json"
     manifest = json.loads(path.read_text())
     if manifest.get("schema") != "bicino-valhalla-elevation-v1" or not manifest.get("cells"):
         raise ValueError(f"Not a Valhalla elevation manifest: {path}")
+    if not sample and (manifest.get("bounds") is not None or manifest.get("catalogCells") != manifest["cells"]):
+        raise ValueError(f"Elevation tiles cover only part of the source catalog: {path}")
     return {
         "manifest": file_identity(path),
         "cells": manifest["cells"],
@@ -201,7 +204,7 @@ def main():
     mask = args.mask.resolve(strict=True) if args.mask else None
     mask_identity = file_identity(mask) if mask else None
     policy_identity = file_identity(args.policy) if mask else None
-    elevation_record = elevation_identity(elevation) if elevation else None
+    elevation_record = elevation_identity(elevation, args.sample) if elevation else None
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)

@@ -203,16 +203,68 @@ class ElevationTileTests(unittest.TestCase):
                     self.assertLessEqual(array.size, 3 * 360)
 
 
+class ElevationReceiptTests(unittest.TestCase):
+    class Source:
+        def __init__(self, id):
+            self.id = id
+
+        def tile_url(self, longitude, latitude):
+            return f"https://{self.id}/{longitude}/{latitude}.tif"
+
+    def test_resume_rebuilds_cells_whose_source_changed(self):
+        glo30, glo90 = self.Source("glo30"), self.Source("glo90")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            receipt = {"source": "glo90", "url": glo90.tile_url(8, 47)}
+            (out / "receipts" / "N47E008.json").write_text(json.dumps(receipt))
+            self.assertEqual(build_elevation.current_receipt(out, (8, 47), {(8, 47): glo90}), receipt)
+            self.assertIsNone(build_elevation.current_receipt(out, (8, 47), {(8, 47): glo30}))
+            self.assertIsNone(build_elevation.current_receipt(out, (9, 47), {(9, 47): glo30}))
+
+    def test_manifest_counts_sources_from_receipts_and_marks_partial_runs(self):
+        class Policy:
+            version = 2
+            sources = [type("S", (), {"id": "glo30", "index_sha256": "i", "terms_url": "t", "attribution_url": "a"}),
+                       type("S", (), {"id": "glo90", "index_sha256": "j", "terms_url": "t", "attribution_url": "a"})]
+
+        glo30, glo90 = self.Source("glo30"), self.Source("glo90")
+        chosen = {(8, 47): glo30, (9, 47): glo90, (10, 47): glo30}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            policy_path = out / "policy.json"
+            policy_path.write_text("{}")
+            for cell, source in list(chosen.items())[:2]:
+                name = build_elevation.hgt_name(*cell)
+                (out / "receipts" / f"{name}.json").write_text(json.dumps({
+                    "cell": name, "source": source.id, "url": source.tile_url(*cell), "hgtSha256": name,
+                    "bytes": 1, "fileBytes": 1, "noDataPosts": 0}))
+            path = build_elevation.write_manifest(out, policy_path, Policy, chosen, [(8, 47), (9, 47)], [8, 47, 10, 48])
+            manifest = json.loads(path.read_text())
+            self.assertEqual((manifest["bounds"], manifest["catalogCells"], manifest["cells"]), ([8, 47, 10, 48], 3, 2))
+            self.assertEqual([s["cells"] for s in manifest["sources"]], [1, 1])
+            with self.assertRaises(ValueError):
+                build_elevation.write_manifest(out, policy_path, Policy, chosen, list(chosen))
+
+
 class ElevationManifestTests(unittest.TestCase):
     def test_graph_manifest_records_the_elevation_tiles_used(self):
         with tempfile.TemporaryDirectory() as tmp:
             elevation = Path(tmp)
-            (elevation / "elevation-manifest.json").write_text(json.dumps({
-                "schema": "bicino-valhalla-elevation-v1", "cells": 2, "cellListSha256": "ab",
-                "sources": [{"id": "glo30", "cells": 2}, {"id": "glo90", "cells": 0}],
-            }))
+            manifest = {
+                "schema": "bicino-valhalla-elevation-v1", "bounds": None, "catalogCells": 2, "cells": 2,
+                "cellListSha256": "ab", "sources": [{"id": "glo30", "cells": 2}, {"id": "glo90", "cells": 0}],
+            }
+            (elevation / "elevation-manifest.json").write_text(json.dumps(manifest))
             identity = elevation_identity(elevation)
             self.assertEqual((identity["cells"], identity["cellListSha256"], identity["sources"]), (2, "ab", ["glo30"]))
+            for partial in ({"bounds": [9, 46, 11, 48]}, {"catalogCells": 3}, {"catalogCells": None}):
+                (elevation / "elevation-manifest.json").write_text(json.dumps({**manifest, **partial}))
+                with self.subTest(partial=partial), self.assertRaisesRegex(ValueError, "part of the source"):
+                    elevation_identity(elevation)
+            (elevation / "elevation-manifest.json").write_text(json.dumps({**manifest, "bounds": [9, 46, 11, 48]}))
+            self.assertEqual(elevation_identity(elevation, sample=True)["cells"], 2)
             (elevation / "elevation-manifest.json").write_text(json.dumps({"schema": "other", "cells": 2}))
             with self.assertRaises(ValueError):
                 elevation_identity(elevation)
