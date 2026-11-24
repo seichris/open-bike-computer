@@ -17,8 +17,11 @@ original guidance resumes from there.
    list. Apple currently omits the United Arab Emirates from Maps: Cycling, and
    live MapKit cycling requests in Dubai return code 8.
 3. **Never driving directions** for a saved-route detour. The server forces
-   Valhalla's `bicycle` costing and refuses any maneuver whose `travel_mode`
-   is not `bicycle`.
+   Valhalla's `bicycle` costing (`bicycle_type` `hybrid`; Valhalla 3.9.2
+   lowercases the type and treats unknown values as hybrid) and refuses any
+   maneuver whose `travel_mode` is not `bicycle`. Create a Route's bicycle legs
+   use the same service with rider-chosen profiles; see
+   [Bicycle routes](bicycle-routes.md).
 4. Offline, or no bicycle route from either provider: the original route and
    the off-route status stay on screen.
 
@@ -48,7 +51,8 @@ position and one selected rejoin point. The saved route's provenance (`gpx`,
   bearings). The app converts them into a `.activeOnly` `NavigationRouteV1`
   whose last step is "Rejoin saved route", never an arrival.
 - `unavailable` with `reason`: `no_bicycle_route` (Valhalla 170/171/442/443,
-  which includes points outside the loaded graph), `request_too_long` (154),
+  which includes points outside the loaded graph), `request_too_long` (154,
+  or an answer over 2 MiB, 20,000 shape points or 1,000 maneuvers),
   `service_disabled` (no upstream configured).
 - `400 bicycle_detour_invalid_request`, `429` (per-IP and per-installation
   hourly/daily limits), `503 bicycle_detour_busy|bicycle_detour_unavailable`
@@ -58,7 +62,8 @@ position and one selected rejoin point. The saved route's provenance (`gpx`,
   appears in a response.
 
 Configuration (`MAP_PLATFORM_*`): `BICYCLE_ROUTING_UPSTREAM_URL` (internal
-Valhalla origin; unset disables the endpoint), `BICYCLE_ROUTING_TIMEOUT_SECONDS`
+Valhalla origin shared with [bicycle routes](bicycle-routes.md); unset disables
+both endpoints), `BICYCLE_ROUTING_TIMEOUT_SECONDS`
 (8), `BICYCLE_DETOUR_MAX_CONCURRENT` (4), `BICYCLE_DETOUR_MAX_SEPARATION_METERS`
 (15000), `BICYCLE_DETOUR_REQUIRE_APP_ATTEST` (true in the code and in the
 development lock; acceptance uses a normally enrolled Bicino Dev installation),
