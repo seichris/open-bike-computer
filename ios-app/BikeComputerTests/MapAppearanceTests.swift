@@ -37,6 +37,8 @@ struct MapAppearanceTests {
         testMapPitchControlTargets()
         testInitialCamera()
         testUserTrackingChoicePersists()
+        testRealisticTerrainOverlayPolicy()
+        testBikeLanesTileTemplate()
 
         print("MapAppearanceTests passed")
     }
@@ -255,5 +257,129 @@ struct MapAppearanceTests {
             ),
             "stopping navigation restores the browsing default"
         )
+    }
+
+    private struct TerrainOverlays {
+        var bikeLanes = false
+        var contours = false
+        var savedRoute = false
+        var navigating = false
+        var calculatedRoute = false
+        var offlineRoute = false
+        var detour = false
+
+        var isPaused: Bool {
+            RealisticTerrainOverlayPolicy.isPaused(
+                showsBikeLanes: bikeLanes,
+                showsContours: contours,
+                showsSavedRoutePreview: savedRoute,
+                isNavigating: navigating,
+                hasCalculatedRoute: calculatedRoute,
+                hasOfflineRoute: offlineRoute,
+                hasDetour: detour
+            )
+        }
+    }
+
+    private static func testRealisticTerrainOverlayPolicy() {
+        precondition(!TerrainOverlays().isPaused, "an empty map keeps realistic ground")
+        precondition(TerrainOverlays(bikeLanes: true).isPaused, "bike lanes flatten the ground")
+        precondition(TerrainOverlays(contours: true).isPaused, "contours flatten the ground")
+        precondition(TerrainOverlays(savedRoute: true).isPaused, "a saved-route preview flattens the ground")
+        precondition(
+            TerrainOverlays(navigating: true, offlineRoute: true).isPaused,
+            "an offline route being navigated flattens the ground"
+        )
+        precondition(
+            TerrainOverlays(navigating: true, detour: true).isPaused,
+            "a detour during navigation flattens the ground"
+        )
+        precondition(
+            !TerrainOverlays(navigating: true, calculatedRoute: true).isPaused,
+            "a MapKit Directions route follows the terrain"
+        )
+        precondition(
+            !TerrainOverlays(offlineRoute: true).isPaused &&
+                !TerrainOverlays(detour: true).isPaused,
+            "the map draws offline and detour lines only while navigating"
+        )
+        precondition(
+            !TerrainOverlays(navigating: true, calculatedRoute: true, offlineRoute: true).isPaused,
+            "the map draws the offline line only without a calculated route"
+        )
+
+        for preference in [true, false] {
+            precondition(
+                !RealisticTerrainOverlayPolicy.displayedValue(preference: preference, isPaused: true),
+                "a paused row reads unchecked"
+            )
+            precondition(
+                RealisticTerrainOverlayPolicy.displayedValue(preference: preference, isPaused: false)
+                    == preference,
+                "removing the last overlay shows the saved preference, including off"
+            )
+            for requested in [true, false] {
+                precondition(
+                    RealisticTerrainOverlayPolicy.preference(
+                        afterRequesting: requested, current: preference, isPaused: true
+                    ) == preference,
+                    "a write while paused keeps the saved preference"
+                )
+                precondition(
+                    RealisticTerrainOverlayPolicy.preference(
+                        afterRequesting: requested, current: preference, isPaused: false
+                    ) == requested,
+                    "an unpaused row saves the rider's choice"
+                )
+            }
+        }
+    }
+
+    private static func testBikeLanesTileTemplate() {
+        let path = "/cyclosm-lite/{z}/{x}/{y}.png"
+        precondition(
+            BikeLanesTileSource.urlTemplate(host: " Tiles.Example.com\n", path: " \(path) ")
+                == "https://tiles.example.com/cyclosm-lite/{z}/{x}/{y}.png"
+        )
+        precondition(
+            BikeLanesTileSource.urlTemplate(host: "tiles.example.com", path: "/{z}/{x}/{y}@{scale}x.png?v=2")
+                == "https://tiles.example.com/{z}/{x}/{y}@{scale}x.png?v=2"
+        )
+        let rejectedHosts: [String?] = [
+            nil, "", "https:", "https://tiles.example.com", "tiles.example.com/x",
+            "tiles.example.com:8443", "user@tiles.example.com", "localhost",
+            "127.0.0.1", "-tiles.example.com", "tiles..example.com", "tiles example.com",
+        ]
+        for host in rejectedHosts {
+            precondition(
+                BikeLanesTileSource.urlTemplate(host: host, path: path) == nil,
+                "rejects tile host \(host ?? "nil")"
+            )
+        }
+        let rejectedPaths: [String?] = [
+            nil, "", "{z}/{x}/{y}.png", "/{z}/{x}.png", "//{z}/{x}/{y}.png",
+            "/a//{z}/{x}/{y}.png", "/{z}/{x}/{y}.png#tile",
+        ]
+        for rejected in rejectedPaths {
+            precondition(
+                BikeLanesTileSource.urlTemplate(host: "tiles.example.com", path: rejected) == nil,
+                "rejects tile path \(rejected ?? "nil")"
+            )
+        }
+
+        precondition(BikeLanesTileSource.make(infoDictionary: [:]) == nil, "no tile service hides the layer")
+        precondition(
+            BikeLanesTileSource.make(infoDictionary: [
+                BikeLanesTileSource.infoDictionaryHostKey: "",
+                BikeLanesTileSource.infoDictionaryPathKey: "",
+            ]) == nil,
+            "the empty build settings hide the layer"
+        )
+        guard let overlay = BikeLanesTileSource.make(infoDictionary: [
+            BikeLanesTileSource.infoDictionaryHostKey: "tiles.example.com",
+            BikeLanesTileSource.infoDictionaryPathKey: path,
+        ]) else { preconditionFailure("a valid tile service shows the layer") }
+        precondition(overlay.urlTemplate == "https://tiles.example.com\(path)")
+        precondition(!overlay.canReplaceMapContent && overlay.minimumZ == 13 && overlay.maximumZ == 18)
     }
 }

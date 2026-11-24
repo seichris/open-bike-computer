@@ -364,18 +364,16 @@ struct ContentView: View {
 
                     Spacer()
 
-                    if showsSupplementaryMapChrome || bikeLanesOverlay != nil {
-                        HStack(alignment: .bottom) {
-                            if bikeLanesOverlay != nil {
-                                Link("CyclOSM · © OpenStreetMap",
-                                     destination: URL(string: "https://www.openstreetmap.org/copyright")!)
-                                    .font(.caption2)
-                                    .padding(5)
-                                    .background(.regularMaterial, in: Capsule())
-                                    .padding(.leading, 12)
-                            }
+                    if showsSupplementaryMapChrome {
+                        HStack {
                             Spacer()
-                            if showsSupplementaryMapChrome { mapControlCluster }
+                            mapControlCluster
+                        }
+                        // An overlay adds no height, so expanded destination
+                        // search keeps its layout. The attribution hides with
+                        // the rest of the map chrome, like MapKit's legal label.
+                        .overlay(alignment: .bottomLeading) {
+                            if bikeLanesOverlay != nil { bikeLanesAttribution }
                         }
                         .padding(.trailing, 12)
                         .padding(
@@ -2407,24 +2405,51 @@ struct ContentView: View {
     // MARK: - Map View
 
     private var pausesRealisticTerrain: Bool {
-        bikeLanesOverlay != nil ||
-            offlineMapManager.topographyOverlay != nil ||
-            visibleSavedRouteMapPreview != nil ||
-            coordinator.offlineRoutePolyline != nil ||
-            (coordinator.isNavigating && coordinator.detourPolyline != nil)
+        RealisticTerrainOverlayPolicy.isPaused(
+            showsBikeLanes: bikeLanesOverlay != nil,
+            showsContours: offlineMapManager.topographyOverlay != nil,
+            showsSavedRoutePreview: visibleSavedRouteMapPreview != nil,
+            isNavigating: coordinator.isNavigating,
+            hasCalculatedRoute: coordinator.currentRoute != nil,
+            hasOfflineRoute: coordinator.offlineRoutePolyline != nil,
+            hasDetour: coordinator.detourPolyline != nil
+        )
     }
 
     private var realisticTerrainBinding: Binding<Bool> {
         Binding(
-            get: { usesRealisticMapElevation && !pausesRealisticTerrain },
-            set: { value in
-                if !pausesRealisticTerrain { usesRealisticMapElevation = value }
+            get: {
+                RealisticTerrainOverlayPolicy.displayedValue(
+                    preference: usesRealisticMapElevation,
+                    isPaused: pausesRealisticTerrain
+                )
+            },
+            set: { requested in
+                let preference = RealisticTerrainOverlayPolicy.preference(
+                    afterRequesting: requested,
+                    current: usesRealisticMapElevation,
+                    isPaused: pausesRealisticTerrain
+                )
+                if preference != usesRealisticMapElevation {
+                    usesRealisticMapElevation = preference
+                }
             }
         )
     }
 
     private var bikeLanesOverlay: MKTileOverlay? {
         showsBikeLanes ? bikeLanesTileSource : nil
+    }
+
+    private var bikeLanesAttribution: some View {
+        Link("CyclOSM · © OpenStreetMap",
+             destination: URL(string: "https://www.openstreetmap.org/copyright")!)
+            .font(.caption2)
+            .padding(5)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.leading, 12)
+            // Stay clear of the 52-point control rail at large text sizes.
+            .padding(.trailing, 64)
     }
 
     private func mapView(

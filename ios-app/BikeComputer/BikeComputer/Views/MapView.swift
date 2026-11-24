@@ -618,11 +618,19 @@ struct MapViewContainer: UIViewRepresentable {
             // Navigation and saved-route overlays retain their own ownership.
             // No camera, tracking, selection or route state changes here.
         }
+        /// Bike lanes sit above contours and below every route, whichever
+        /// layer was turned on first. Contours always go in at index 0.
         func updateBikeLanesOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
             guard displayedBikeLanesOverlay !== overlay else { return }
             if let displayedBikeLanesOverlay { mapView.removeOverlay(displayedBikeLanesOverlay) }
             displayedBikeLanesOverlay = overlay
-            if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
+            guard let overlay else { return }
+            if let contours = displayedTopographyOverlay,
+               mapView.overlays.contains(where: { $0 === contours }) {
+                mapView.insertOverlay(overlay, above: contours)
+            } else {
+                mapView.insertOverlay(overlay, at: 0, level: .aboveRoads)
+            }
         }
 
         func refreshContourLabels(on mapView: MKMapView) {
