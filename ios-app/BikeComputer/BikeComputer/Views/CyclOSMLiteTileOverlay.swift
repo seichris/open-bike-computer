@@ -5,15 +5,18 @@ enum BikeLanesTileSource {
     nonisolated static let infoDictionaryHostKey = "BicinoBikeLanesTileHost"
     nonisolated static let infoDictionaryPathKey = "BicinoBikeLanesTilePath"
 
-    static func make(infoDictionary: [String: Any] = Bundle.main.infoDictionary ?? [:]) -> MKTileOverlay? {
+    /// The overlay is configured in `BikeLanesTileOverlay`: tiles z12 to z18,
+    /// shown from `BikeLanesZoomRange.minimumVisibleZoom`, cached in memory
+    /// and on disk.
+    static func make(infoDictionary: [String: Any] = Bundle.main.infoDictionary ?? [:]) -> BikeLanesTileOverlay? {
 #if DEBUG && targetEnvironment(simulator)
-        if let local = CyclOSMLiteTileOverlay.openFixture() { return configure(local) }
+        if let local = CyclOSMLiteTileOverlay.openFixture() { return local }
 #endif
         guard let template = urlTemplate(
             host: infoDictionary[infoDictionaryHostKey] as? String,
             path: infoDictionary[infoDictionaryPathKey] as? String
         ) else { return nil }
-        return configure(MKTileOverlay(urlTemplate: template))
+        return BikeLanesTileOverlay(urlTemplate: template)
     }
 
     /// The HTTPS XYZ template for the configured tile service, or nil when the
@@ -38,18 +41,11 @@ enum BikeLanesTileSource {
               url.fragment == nil else { return nil }
         return template
     }
-
-    private static func configure(_ overlay: MKTileOverlay) -> MKTileOverlay {
-        overlay.canReplaceMapContent = false
-        overlay.minimumZ = 13
-        overlay.maximumZ = 18
-        return overlay
-    }
 }
 
 #if DEBUG && targetEnvironment(simulator)
 /// Reads a small, locally supplied set of CyclOSM Lite XYZ tiles for Simulator QA.
-nonisolated final class CyclOSMLiteTileOverlay: MKTileOverlay, @unchecked Sendable {
+nonisolated final class CyclOSMLiteTileOverlay: BikeLanesTileOverlay, @unchecked Sendable {
     private let directory: URL
 
     private init(directory: URL) {

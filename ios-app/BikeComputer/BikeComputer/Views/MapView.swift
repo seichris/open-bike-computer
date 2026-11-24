@@ -666,12 +666,24 @@ struct MapViewContainer: UIViewRepresentable {
             if let displayedBikeLanesOverlay { mapView.removeOverlay(displayedBikeLanesOverlay) }
             displayedBikeLanesOverlay = overlay
             guard let overlay else { return }
+            // Set the zoom state before MapKit asks for the renderer.
+            (overlay as? BikeLanesTileOverlay)?.updateZoom(BikeLanesZoomRange.centerZoomLevel(of: mapView))
             if let contours = displayedTopographyOverlay,
                mapView.overlays.contains(where: { $0 === contours }) {
                 mapView.insertOverlay(overlay, above: contours)
             } else {
                 mapView.insertOverlay(overlay, at: 0, level: .aboveRoads)
             }
+        }
+
+        /// Shows or hides bike lanes as the map crosses the zoom threshold.
+        /// The overlay stays on the map either way.
+        func updateBikeLanesZoom(on mapView: MKMapView) {
+            guard let overlay = displayedBikeLanesOverlay as? BikeLanesTileOverlay else { return }
+            let zoom = BikeLanesZoomRange.centerZoomLevel(of: mapView)
+            guard overlay.updateZoom(zoom) else { return }
+            BikeLanesTileDiagnostics.noteZoom(zoom, shown: overlay.isShownAtCurrentZoom)
+            (mapView.renderer(for: overlay) as? BikeLanesTileRenderer)?.zoomVisibilityChanged()
         }
 
         func refreshContourLabels(on mapView: MKMapView) {
@@ -1322,8 +1334,13 @@ struct MapViewContainer: UIViewRepresentable {
             lastNavigationHeading = 0
         }
 
+        func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
+            updateBikeLanesZoom(on: mapView)
+        }
+
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             socialLayer.layout()
+            updateBikeLanesZoom(on: mapView)
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics"),
                contourDiagnosticCount < 32, mapView.visibleMapRect.width > 0 {
@@ -1587,6 +1604,9 @@ struct MapViewContainer: UIViewRepresentable {
         }
         
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let bikeLanes = overlay as? BikeLanesTileOverlay {
+                return BikeLanesTileRenderer.make(for: bikeLanes)
+            }
             if let tileOverlay = overlay as? MKTileOverlay {
                 return MKTileOverlayRenderer(tileOverlay: tileOverlay)
             }
