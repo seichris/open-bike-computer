@@ -29,11 +29,19 @@ The request needs an App Attest–enrolled installation
   "origin": {"latitudeE6": 25206600, "longitudeE6": 55269200},
   "destination": {"latitudeE6": 25225800, "longitudeE6": 55263100},
   "profile": "road",
-  "locale": "en-AE"
+  "locale": "en-AE",
+  "alternatives": 2,
+  "surfaces": true
 }
 ```
 
-- `profile` is `road`, `gravel` or `everyday`, matched exactly.
+- `profile` is `road`, `gravel`, `everyday` or `mountain`, matched exactly.
+- `alternatives` (optional, integer 0–2, default 0) asks Valhalla for up to
+  that many alternative routes as well (`alternates`).
+- `surfaces` (optional, boolean, default false) adds a surface breakdown to
+  each route. It is read from Valhalla `trace_attributes` with
+  `shape_match: edge_walk` over the route's own shape, so it costs one extra
+  upstream call per route but no new search.
 - `locale` is a BCP 47 tag; `en_AE` is normalised to `en-AE`. It is optional
   and defaults to `en-US`.
 - Unknown fields are rejected.
@@ -52,8 +60,10 @@ The request needs an App Attest–enrolled installation
     "pointsE6": [[25206617, 55269262], "…"],
     "maneuvers": [{"type": 2, "instruction": "Bike south on 91b شارع.", "beginShapeIndex": 0,
                    "endShapeIndex": 3, "lengthMeters": 13.0, "timeSeconds": 2.0, "bearingAfter": 180}, "…"],
-    "profile": "road"
+    "profile": "road",
+    "surfaces": {"pavedMeters": 3051.0, "gravelMeters": 0.0, "unpavedMeters": 147.0, "unknownMeters": 0.0}
   },
+  "alternatives": [{"…": "same shape as route"}],
   "reason": null
 }
 ```
@@ -63,6 +73,22 @@ longitudeE6]` in travel order) and `maneuvers` (Valhalla `type`,
 `instruction`, contiguous `beginShapeIndex`/`endShapeIndex` that cover the
 whole shape, length, time and optional bearings). It also carries `profile`,
 which echoes the request.
+
+- `alternatives` appears only when the request asked for them. It holds up to
+  that many routes of the same shape, in Valhalla's order. An alternative that
+  fails the checks (for example a walking push segment) is left out rather
+  than failing the answer, so the list can be shorter or empty. If the
+  alternatives make Valhalla's answer larger than the size limit, the route is
+  asked for again without them and the list is empty.
+- `surfaces` appears on each route only when requested and when the lookup
+  succeeded. If the lookup fails, the route is served without it. The lookups
+  of one request share a 5-second budget, and after the first failed lookup
+  the remaining routes are served without surfaces instead of being looked up.
+  - **Paved:** Valhalla `paved_smooth`, `paved` and `paved_rough`.
+  - **Gravel:** `compacted` and `gravel`.
+  - **Unpaved:** `dirt`, `path` and `impassable`.
+  - **Unknown:** edges without a surface.
+  - The groups add up to the route length within rounding.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -85,7 +111,9 @@ which echoes the request.
   "schema": "bicino-bicycle-route-request-v1",
   "provider": "bicino.valhalla",
   "attribution": "© OpenStreetMap contributors",
-  "profiles": ["road", "gravel", "everyday"],
+  "profiles": ["road", "gravel", "everyday", "mountain"],
+  "maximumAlternatives": 2,
+  "surfaces": true,
   "maximumSeparationMeters": 150000
 }
 ```
@@ -101,6 +129,7 @@ When the service is disabled, `available` is `false` and `provider` and
 | `road` | `road` | 0.5 | 0.5 | 0.9 | 0 |
 | `gravel` | `cross` | 0.2 | 0.5 | 0.0 | 0 |
 | `everyday` | `hybrid` | 0.25 | 0.25 | 0.5 | 0 |
+| `mountain` | `mountain` | 0.1 | 0.5 | 0.0 | 0 |
 
 - **Road** favours smooth surfaces. `avoid_bad_surfaces` 0.9 weighs unpaved
   surfaces heavily without making them impassable; 1.0 would, and a leg that
@@ -109,11 +138,13 @@ When the service is disabled, `available` is `false` and `provider` and
   and prefers quieter ways to roads.
 - **Everyday** is a city or hybrid bike: low-stress streets, a mild dislike of
   hills, and moderate avoidance of rough surfaces.
+- **Mountain** accepts any surface the graph allows bicycles on and prefers
+  paths and tracks to roads.
 - Ferries are never used. `use_hills` has no effect on the current graphs,
   which are built without elevation.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
-25 km/h, cross 20, hybrid 18), its per-surface speed factors, and the worst
+25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst
 surface each bike tolerates before `avoid_bad_surfaces` applies.
 
 **How Valhalla parses the type.** Valhalla 3.9.2 lowercases `bicycle_type`
