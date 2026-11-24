@@ -139,8 +139,14 @@ final class SystemSpokenDirectionsSpeaker: NSObject, SpokenDirectionsSpeaking, A
 
     func speak(_ announcement: SpokenDirectionsAnnouncementV1) {
         let synthesizer = activeSynthesizer()
-        if synthesizer.isSpeaking,
-           SpokenDirectionsQueuePolicyV1.shouldInterrupt(speaking: speakingKind, with: announcement) {
+        if !synthesizer.isSpeaking {
+            // Nothing is queued. Forget entries whose callbacks never came,
+            // and activate again: iOS can end the session without notice,
+            // for example when a Release build moves to the background.
+            queued.removeAll()
+            speakingKind = nil
+            sessionActive = false
+        } else if SpokenDirectionsQueuePolicyV1.shouldInterrupt(speaking: speakingKind, with: announcement) {
             queued.removeAll()
             speakingKind = nil
             synthesizer.stopSpeaking(at: .immediate)
