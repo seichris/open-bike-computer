@@ -29,10 +29,42 @@ Set two build settings to choose a tile source:
 The app joins them as `https://<host><path>`. A full URL cannot go in an
 xcconfig file, because `//` starts a comment there and would cut the value to
 `https:`. The service should return transparent, 256-pixel XYZ PNG tiles
-at zooms 13–18. With either setting empty or invalid, the Bike
+at zooms 12–18. With either setting empty or invalid, the Bike
 Lanes option is hidden. The app shows attribution with the map controls while
 the layer is enabled; like the other map chrome, it hides while destination
 search is expanded.
+
+## Zoom range and caching
+
+MapKit draws a level-z tile from map zoom z − 1 up to z: it shrinks tiles but
+never enlarges them. With z13 as its lowest tile level, the layer disappeared
+at zoom 12.0. It now stays visible until zoom 11.415, which is 1.5 times
+further out. Tile levels are whole numbers, so the overlay requests z12 tiles,
+which cover zoom 11 to 12, and the renderer hides the layer below
+`BikeLanesZoomRange.minimumVisibleZoom`. That zoom is measured across the
+middle of the map, so tilting the map does not change it. While the layer is
+hidden it neither draws nor downloads tiles, and the overlay stays on the map,
+so the 3D Terrain behavior above is unchanged.
+
+Tiles load through `BikeLanesTileStore`:
+
+- An in-memory cache of up to 12 MiB and 1,024 tiles, with the least recently
+  used tiles evicted first and everything dropped on a memory warning. A tile
+  seen earlier in the session appears at once after a zoom or drag.
+- A 64 MiB `URLCache` in `Caches/BikeLanesTiles`. It follows the server's
+  `Cache-Control` and `ETag` headers: CyclOSM sends `max-age=86400`, so a tile
+  comes from disk for a day and is then revalidated with `If-None-Match`.
+- Only HTTP 200 image responses are cached. Errors, empty bodies and non-image
+  pages are not kept in memory or on disk. When the network fails or the server
+  returns a 5xx error, an expired tile on disk is shown rather than an empty
+  map; it is not added to memory, so the next load retries the network.
+- Concurrent requests for the same tile share one download. Tiles are not
+  prefetched, which keeps load on the public tile server to what the map shows.
+
+Debug builds launched with `--bike-lanes-tile-diagnostics` log each tile's zoom
+and source (`memory`, `disk`, `revalidated`, `network`, `stale` or `failed`)
+with running totals, and each time the layer is shown or hidden. The log leaves
+out tile coordinates.
 
 For a Debug Simulator trial, place a small styled sample in the app's
 `Documents/CyclOSMLiteTeal/<z>/<x>/<y>.png` folder before launch. The local

@@ -209,6 +209,7 @@
     "navigation-8": {
       "sources": [
         "ios-app/BikeComputerTests/MapAppearanceTests.swift",
+        "ios-app/BikeComputerTests/BikeLanesTileCacheTests.swift",
         "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
@@ -633,6 +634,7 @@
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
         "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
         "ios-app/BikeComputer/BikeComputer/Views/CyclOSMLiteTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/BikeLanesTileCache.swift",
         "ios-app/BikeComputer/BikeComputer/Views/RouteCreationMapLayer.swift",
         "ios-app/BikeComputer/BikeComputer/Views/SocialMapLayer.swift",
         "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
