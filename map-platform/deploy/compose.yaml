@@ -32,7 +32,7 @@ services:
     volumes:
       # Worldwide Apple Maps Cycling coverage gaps, built from OSM planet-261116.
       - type: bind
-        source: /var/lib/bicino-valhalla/graphs/b1f74e965a5687130c7500db0bccd060e7086b1f88e41fd579cf776cd9da969d
+        source: /var/lib/bicino-valhalla-production/graphs/b1f74e965a5687130c7500db0bccd060e7086b1f88e41fd579cf776cd9da969d
         target: /graph
         read_only: true
         bind:
