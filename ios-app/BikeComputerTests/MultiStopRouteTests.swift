@@ -680,6 +680,19 @@ extension OfflineRouteSaveTests {
             preconditionFailure("Expected a route")
         }
         check(plain.count == 1 && plain[0].surfaces == nil, "Alternatives and surfaces nobody asked for are ignored")
+        var partial = body
+        var mainRoute = partial["route"] as! [String: Any]
+        mainRoute["surfaces"] = ["pavedMeters": 10.0, "gravelMeters": "a lot"]
+        partial["route"] = mainRoute
+        let partialHTTP = BicycleDetourHTTPResponseV1(
+            statusCode: 200, cacheControl: "private, no-store", contentType: "application/json",
+            retryAfter: nil, body: try JSONSerialization.data(withJSONObject: partial)
+        )
+        guard case .routes(let partialOptions) = BicycleRouteServiceDecoderV1.outcome(for: partialHTTP, query: query) else {
+            preconditionFailure("Expected routes despite malformed surfaces")
+        }
+        check(partialOptions.count == 2 && partialOptions[0].surfaces == nil,
+            "A structurally malformed surface breakdown is dropped, not the route")
         check(options[0].surfaces?.summary == "77% paved · 15% gravel · 8% unpaved" &&
             RouteSurfaceBreakdownV1(pavedMeters: 995, gravelMeters: 0, unpavedMeters: 0, unknownMeters: 4).summary ==
                 "100% paved · <1% unknown" &&
@@ -752,6 +765,36 @@ extension OfflineRouteSaveTests {
         check(mapKitPlanner.readyPlan?.legs[0].expectedTravelTimeSeconds == 400 &&
             mapKitPlanner.readyPlan?.route.provider == RouteProviderPolicyV1.mapKit,
             "A MapKit alternative can be picked the same way")
+
+        // ALT-1: an alternative too big to save never replaces a good plan.
+        let tight = f.makePlanner(limits: NavigationRouteLimitsV1(
+            maximumPoints: 3, maximumSteps: 2_000, maximumEncodedBytes: 4 * 1_024 * 1_024))
+        let tightTasks = f.factory.tasks.count
+        tight.plan(Stops.request([Stops.home, Stops.office]))
+        let winding = TestRoute(steps: [
+            TestRouteStep(instructions: "", coordinates: [Stops.homePoint]),
+            TestRouteStep(instructions: "Turn right onto Bakery Lane",
+                          coordinates: [Stops.homePoint, Stops.canalPoint, Stops.bakeryPoint, Stops.stationPoint]),
+            TestRouteStep(instructions: "Arrive at the destination", coordinates: [Stops.stationPoint, Stops.officePoint])
+        ], coordinates: [Stops.homePoint, Stops.canalPoint, Stops.bakeryPoint, Stops.stationPoint, Stops.officePoint],
+           expectedTravelTime: 500)
+        f.factory.tasks[tightTasks].succeed(with: [Stops.homeToOffice, winding])
+        guard let good = tight.readyPlan, good.legOptions[0].count == 2 else {
+            preconditionFailure("Expected a plan with an oversized alternative")
+        }
+        let failure = tight.selectAlternative(routeID: good.legOptions[0][1].id)
+        check(failure == .route(message: MultiStopRouteStitchError.tooLong.localizedDescription) &&
+            tight.readyPlan?.route.id == good.route.id && tight.readyPlan?.selectedOptions == [0],
+            "Picking an alternative too long to save keeps the current plan")
+        tight.plan(Stops.request([Stops.office, Stops.home]))
+        tight.plan(Stops.request([Stops.home, Stops.office]))
+        check(tight.readyPlan?.selectedOptions == [0], "The refused pick is not remembered for the leg")
+
+        let session = RouteCreationSession(planner: tight, defaults: f.defaults)
+        session.begin(currentLocation: nil)
+        session.selectAlternative(routeID: good.legOptions[0][1].id)
+        check(session.notice == nil, "A session only picks routes of its own plan")
+        session.end()
     }
 
     /// Shortest Path keeps the start and destination; the modes are Road,

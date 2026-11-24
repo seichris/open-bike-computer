@@ -57,7 +57,7 @@ struct MultiStopRoutePlan: Identifiable {
     }
 }
 
-enum MultiStopRoutePlanFailure: Equatable {
+enum MultiStopRoutePlanFailure: Equatable, Error {
     case leg(index: Int, message: String)
     case route(message: String)
 
@@ -212,19 +212,27 @@ final class MultiStopRoutePlanner: ObservableObject {
 
     /// Uses the leg option with this route ID instead of the leg's current
     /// one. Only the ready plan's legs are searched; the choice is kept for
-    /// that leg while it stays cached.
-    func selectAlternative(routeID: UUID) {
-        guard case .ready = state, let context = readyLegs else { return }
-        for key in context.keys {
-            guard var leg = cachedLegs[key],
-                  let option = leg.options.firstIndex(where: { $0.route.id == routeID }) else { continue }
-            guard option != leg.selected else { return }
-            leg.selected = option
-            cachedLegs[key] = leg
-            let legs = context.keys.compactMap { cachedLegs[$0] }
-            guard legs.count == context.keys.count else { return }
-            finish(request: context.request, source: context.source, keys: context.keys, legs: legs)
-            return
+    /// that leg while it stays cached. An option whose plan could not be
+    /// stitched or stored leaves the ready plan and the cache as they were and
+    /// returns why.
+    @discardableResult
+    func selectAlternative(routeID: UUID) -> MultiStopRoutePlanFailure? {
+        guard case .ready = state, let context = readyLegs else { return nil }
+        guard let index = context.keys.firstIndex(where: { key in
+            cachedLegs[key]?.options.contains { $0.route.id == routeID } == true
+        }) else { return nil }
+        var legs = context.keys.compactMap { cachedLegs[$0] }
+        guard legs.count == context.keys.count,
+              let option = legs[index].options.firstIndex(where: { $0.route.id == routeID }),
+              option != legs[index].selected else { return nil }
+        legs[index].selected = option
+        switch makePlan(request: context.request, source: context.source, legs: legs) {
+        case .success(let plan):
+            cachedLegs[context.keys[index]] = legs[index]
+            state = .ready(plan)
+            return nil
+        case .failure(let failure):
+            return failure
         }
     }
 
@@ -498,6 +506,22 @@ final class MultiStopRoutePlanner: ObservableObject {
         keys: [LegKey],
         legs plannedLegs: [PlannedLeg]
     ) {
+        switch makePlan(request: request, source: source, legs: plannedLegs) {
+        case .success(let plan):
+            readyLegs = (request, source, keys)
+            state = .ready(plan)
+        case .failure(let failure):
+            state = .failed(failure)
+        }
+    }
+
+    /// Stitches the legs' chosen options and checks the library could store
+    /// the result, without touching the planner's state.
+    private func makePlan(
+        request: MultiStopRouteRequest,
+        source: LegSource,
+        legs plannedLegs: [PlannedLeg]
+    ) -> Result<MultiStopRoutePlan, MultiStopRoutePlanFailure> {
         let chosen = plannedLegs.map(\.chosen)
         let legs = chosen.map(\.route)
         do {
@@ -515,8 +539,7 @@ final class MultiStopRoutePlanner: ObservableObject {
                 limits: limits
             )
             let surfaces = chosen.map(\.surfaces)
-            readyLegs = (request, source, keys)
-            state = .ready(MultiStopRoutePlan(
+            return .success(MultiStopRoutePlan(
                 request: request,
                 legs: legs,
                 legOptions: plannedLegs.map { $0.options.map(\.route) },
@@ -533,15 +556,11 @@ final class MultiStopRoutePlanner: ObservableObject {
                 bicycleProfileNotice: bicycleProfileNotice(for: request, source: source)
             ))
         } catch let error as MultiStopRouteStitchError {
-            state = .failed(.route(message: error.localizedDescription))
+            return .failure(.route(message: error.localizedDescription))
         } catch NavigationRouteArchiveError.encodedSizeExceeded {
-            state = .failed(.route(
-                message: MultiStopRouteStitchError.tooLong.localizedDescription
-            ))
+            return .failure(.route(message: MultiStopRouteStitchError.tooLong.localizedDescription))
         } catch {
-            state = .failed(.route(
-                message: MultiStopRouteStitchError.invalidLegs.localizedDescription
-            ))
+            return .failure(.route(message: MultiStopRouteStitchError.invalidLegs.localizedDescription))
         }
     }
 

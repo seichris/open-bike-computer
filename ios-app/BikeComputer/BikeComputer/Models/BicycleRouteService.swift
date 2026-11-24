@@ -158,9 +158,21 @@ nonisolated struct BicycleRouteServiceRequestV1: Codable, Equatable, Sendable {
 nonisolated struct BicycleRouteServiceResponseV1: Decodable, Equatable {
     /// One route object: the shared detour route shape and its extra fields.
     nonisolated struct Route: Decodable, Equatable {
+        /// The profile is required; a malformed surface breakdown is
+        /// dropped rather than failing the route.
         nonisolated private struct Extras: Decodable {
+            private enum CodingKeys: String, CodingKey {
+                case profile, surfaces
+            }
+
             let profile: String
             let surfaces: RouteSurfaceBreakdownV1?
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                profile = try container.decode(String.self, forKey: .profile)
+                surfaces = try? container.decodeIfPresent(RouteSurfaceBreakdownV1.self, forKey: .surfaces)
+            }
         }
 
         let route: BicycleDetourServiceResponseV1.Route

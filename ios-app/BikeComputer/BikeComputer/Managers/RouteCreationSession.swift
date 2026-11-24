@@ -262,11 +262,14 @@ final class RouteCreationSession: ObservableObject {
 
     static let alreadyShortestNotice = "The stops are already in the shortest order."
 
-    /// Tapping a lighter route on the map uses it for its leg.
+    /// Tapping a lighter route on the map uses it for its leg. One that
+    /// would make the route too long to save keeps the current route.
     func selectAlternative(routeID: UUID) {
         guard isActive else { return }
-        planner.selectAlternative(routeID: routeID)
+        notice = planner.selectAlternative(routeID: routeID) == nil ? nil : Self.unusableAlternativeNotice
     }
+
+    static let unusableAlternativeNotice = "That route can't be saved, so the current route is kept."
 
     func retry() {
         planner.retry()

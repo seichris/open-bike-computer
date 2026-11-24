@@ -269,7 +269,9 @@ profile and locale, so editing one stop re-asks only the legs that changed.
   routes (fastest first) for Walk and the fallback. The map draws the chosen
   legs in blue and the others in a lighter blue beneath them. Tapping a
   lighter line uses it for its leg and re-stitches the plan without a new
-  request; the choice stays with that leg while it is cached.
+  request; the choice stays with that leg while it is cached. An alternative
+  that would make the route too long to save is refused with a notice, and the
+  current route stays.
 - **Surfaces:** when every chosen leg has a breakdown, the panel adds them up
   under the leg count as a bar and "81% paved · 13% gravel · 5% unpaved".
   Apple Maps legs have no breakdown, so the line is hidden for them.
