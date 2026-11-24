@@ -81,7 +81,7 @@ retains the exact clipping input.
    alone, passing `probe_graph.py --coverage planet` for a planet graph. A
    fixture's `route` is its worldwide-gap expectation. `planet` overrides it,
    `coverages` limits where it runs, and `pushAllowed` accepts pedestrian
-   push segments of at most 100 m each, the bicycle route service's rule. On a planet graph, generate the audit inventory
+   push stretches of at most 100 m each, the bicycle route service's rule. On a planet graph, generate the audit inventory
    with `coverage_audit.py generate --all-units`. Add probes for the full release across continents and territories and
    for shortlisted road and ferry crossings in both directions. Check the
    inventory against routable OSM coverage and record any territory without a

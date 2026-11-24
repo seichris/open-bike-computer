@@ -29,11 +29,19 @@ The request needs an App Attest–enrolled installation
   "origin": {"latitudeE6": 25206600, "longitudeE6": 55269200},
   "destination": {"latitudeE6": 25225800, "longitudeE6": 55263100},
   "profile": "road",
-  "locale": "en-AE"
+  "locale": "en-AE",
+  "alternatives": 2,
+  "surfaces": true
 }
 ```
 
-- `profile` is `road`, `gravel` or `everyday`, matched exactly.
+- `profile` is `road`, `gravel`, `everyday` or `mountain`, matched exactly.
+- `alternatives` (optional, integer 0–2, default 0) asks Valhalla for up to
+  that many alternative routes as well (`alternates`).
+- `surfaces` (optional, boolean, default false) adds a surface breakdown to
+  each route. It is read from Valhalla `trace_attributes` with
+  `shape_match: edge_walk` over the route's own shape, so it costs one extra
+  upstream call per route but no new search.
 - `locale` is a BCP 47 tag; `en_AE` is normalised to `en-AE`. It is optional
   and defaults to `en-US`.
 - Unknown fields are rejected.
@@ -52,8 +60,10 @@ The request needs an App Attest–enrolled installation
     "pointsE6": [[25206617, 55269262], "…"],
     "maneuvers": [{"type": 2, "instruction": "Bike south on 91b شارع.", "beginShapeIndex": 0,
                    "endShapeIndex": 3, "lengthMeters": 13.0, "timeSeconds": 2.0, "bearingAfter": 180}, "…"],
-    "profile": "road"
+    "profile": "road",
+    "surfaces": {"pavedMeters": 3051.0, "gravelMeters": 0.0, "unpavedMeters": 147.0, "unknownMeters": 0.0}
   },
+  "alternatives": [{"…": "same shape as route"}],
   "reason": null
 }
 ```
@@ -64,10 +74,26 @@ longitudeE6]` in travel order) and `maneuvers` (Valhalla `type`,
 whole shape, length, time and optional bearings). It also carries `profile`,
 which echoes the request.
 
+- `alternatives` appears only when the request asked for them. It holds up to
+  that many routes of the same shape, in Valhalla's order. An alternative that
+  fails the checks (for example a walking push segment) is left out rather
+  than failing the answer, so the list can be shorter or empty. If the
+  alternatives make Valhalla's answer larger than the size limit, the route is
+  asked for again without them and the list is empty.
+- `surfaces` appears on each route only when requested and when the lookup
+  succeeded. If the lookup fails, the route is served without it. The lookups
+  of one request share a 5-second budget, and after the first failed lookup
+  the remaining routes are served without surfaces instead of being looked up.
+  - **Paved:** Valhalla `paved_smooth`, `paved` and `paved_rough`.
+  - **Gravel:** `compacted` and `gravel`.
+  - **Unpaved:** `dirt`, `path` and `impassable`.
+  - **Unknown:** edges without a surface.
+  - The groups add up to the route length within rounding.
+
 | Outcome | Meaning |
 | --- | --- |
 | `200` `ready` | `route` as above, `reason: null`. |
-| `200` `unavailable`, `no_bicycle_route` | Valhalla 170/171/442/443 (no path, or a point outside the loaded graph), or Valhalla answered with any maneuver whose `travel_mode` is not `bicycle`. |
+| `200` `unavailable`, `no_bicycle_route` | Valhalla 170/171/442/443 (no path, or a point outside the loaded graph), or Valhalla answered with a maneuver that is neither `bicycle` nor a short pedestrian push stretch (see below). |
 | `200` `unavailable`, `request_too_long` | Valhalla 154 (beyond its bicycle distance limit), or the answer exceeds the size caps below. Asking again cannot help. |
 | `200` `unavailable`, `service_disabled` | No upstream configured, or `MAP_PLATFORM_BICYCLE_ROUTE_ENABLED=0`. |
 | `400` `bicycle_route_invalid_request` | Schema, field, profile, locale or separation error. |
@@ -85,7 +111,9 @@ which echoes the request.
   "schema": "bicino-bicycle-route-request-v1",
   "provider": "bicino.valhalla",
   "attribution": "© OpenStreetMap contributors",
-  "profiles": ["road", "gravel", "everyday"],
+  "profiles": ["road", "gravel", "everyday", "mountain"],
+  "maximumAlternatives": 2,
+  "surfaces": true,
   "maximumSeparationMeters": 150000
 }
 ```
@@ -101,6 +129,7 @@ When the service is disabled, `available` is `false` and `provider` and
 | `road` | `road` | 0.5 | 0.5 | 0.9 | 0 |
 | `gravel` | `cross` | 0.2 | 0.5 | 0.0 | 0 |
 | `everyday` | `hybrid` | 0.25 | 0.25 | 0.5 | 0 |
+| `mountain` | `mountain` | 0.1 | 0.5 | 0.0 | 0 |
 
 - **Road** favours smooth surfaces. `avoid_bad_surfaces` 0.9 weighs unpaved
   surfaces heavily without making them impassable; 1.0 would, and a leg that
@@ -109,11 +138,13 @@ When the service is disabled, `available` is `false` and `provider` and
   and prefers quieter ways to roads.
 - **Everyday** is a city or hybrid bike: low-stress streets, a mild dislike of
   hills, and moderate avoidance of rough surfaces.
+- **Mountain** accepts any surface the graph allows bicycles on and prefers
+  paths and tracks to roads.
 - Ferries are never used. `use_hills` has no effect on the current graphs,
   which are built without elevation.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
-25 km/h, cross 20, hybrid 18), its per-surface speed factors, and the worst
+25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst
 surface each bike tolerates before `avoid_bad_surfaces` applies.
 
 **How Valhalla parses the type.** Valhalla 3.9.2 lowercases `bicycle_type`
@@ -171,12 +202,20 @@ tools/dev-env --map-backend python map-platform/routing/probe_profiles.py \
 Valhalla's bicycle routes can include short stretches where the rider walks
 the bike. These come back as `travel_mode: "pedestrian"` /
 `travel_type: "foot"` maneuvers, typically 12–60 m on a footway or a cycle-path
-connector. The server never returns a non-bicycle maneuver, so such a route is
-`unavailable` / `no_bicycle_route` for every profile. In the UAE sweep this
-affected 11 of 73 routes, mostly routes longer than 25 km (7 of the 18 routes
-over 100 km), each with 17–173 m of walking in total. Treat a
-`no_bicycle_route` on a long leg as possibly this case rather than proof that
-no rideable route exists.
+connector.
+
+- **Bicycle routes:** a push stretch of at most
+  `MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS` (default 100 m, `0` turns it
+  off) stays in the route with Valhalla's own instructions. Valhalla starts a
+  new maneuver at each turn, so back-to-back pedestrian maneuvers are summed
+  as one stretch. Chris approved this on 2026-11-24.
+- **Refused:** a longer walk, any other mode, or a route with no bicycle
+  maneuver at all is `no_bicycle_route`.
+- **Detours:** saved-route detours never accept push stretches.
+
+In the UAE sweep with the old all-strict rule, 11 of 73 routes failed this
+way. Most were longer than 25 km (7 of the 18 routes over 100 km), each with
+17–173 m of walking in total, spread over 12–60 m stretches.
 
 ## Limits and configuration
 

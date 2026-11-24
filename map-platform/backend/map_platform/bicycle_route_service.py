@@ -1,12 +1,14 @@
 """General point-to-point bicycle routes with a rider-chosen profile.
 
 Create a Route builds a multi-stop route one leg at a time. For bicycle legs
-the app offers three Valhalla bicycle profiles (road, gravel, everyday); each
-leg is one request to this endpoint carrying exactly two coordinates, the
-leg's origin and destination. They are forwarded to Bicino's internal Valhalla
-service with the ``bicycle`` costing and the profile's costing options; the
-response is a bicycle route whose maneuvers are all ``travel_mode ==
-"bicycle"``.
+the app offers four Valhalla bicycle profiles (road, gravel, everyday,
+mountain); each leg is one request to this endpoint carrying exactly two
+coordinates, the leg's origin and destination. A request may also ask for up
+to two alternative routes and a surface breakdown of each route. The points
+are forwarded to Bicino's internal Valhalla service with the ``bicycle``
+costing and the profile's costing options; the response is a bicycle route
+whose maneuvers are all ``travel_mode == "bicycle"``, except short pedestrian push stretches of at most
+``MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS`` each (100 m by default).
 
 The service shares the upstream with saved-route detours but has its own
 concurrency slots, timeout and rate limits, so leg planning cannot take the
@@ -22,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -49,7 +52,10 @@ from .valhalla_bicycle import (
 
 REQUEST_SCHEMA = "bicino-bicycle-route-request-v1"
 RESPONSE_SCHEMA = "bicino-bicycle-route-response-v1"
-REQUEST_FIELDS = frozenset({"schema", "requestId", "origin", "destination", "profile", "locale"})
+REQUEST_FIELDS = frozenset({
+    "schema", "requestId", "origin", "destination", "profile", "locale", "alternatives", "surfaces",
+})
+MAXIMUM_ALTERNATIVES = 2
 POINT_FIELDS = frozenset({"latitudeE6", "longitudeE6"})
 
 # Rider-facing profile -> Valhalla bicycle costing options. Valhalla 3.9.2
@@ -65,6 +71,8 @@ POINT_FIELDS = frozenset({"latitudeE6", "longitudeE6"})
 #   prefers quieter ways over roads.
 # - everyday: a city/hybrid bike, low-stress streets, mild hill avoidance,
 #   moderate dislike of rough surfaces.
+# - mountain: a mountain bike (default 16 km/h) that accepts any surface the
+#   graph allows bicycles on and prefers paths and tracks over roads.
 # Ferries are never used. use_hills has no effect on graphs built without
 # elevation (the current graphs).
 PROFILES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
@@ -89,11 +97,25 @@ PROFILES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
         "use_ferry": 0.0,
         "avoid_bad_surfaces": 0.5,
     }),
+    "mountain": MappingProxyType({
+        "bicycle_type": "mountain",
+        "use_roads": 0.1,
+        "use_hills": 0.5,
+        "use_ferry": 0.0,
+        "avoid_bad_surfaces": 0.0,
+    }),
 })
-PROFILE_NAMES = ("road", "gravel", "everyday")
+PROFILE_NAMES = ("road", "gravel", "everyday", "mountain")
 DEFAULT_MAXIMUM_SEPARATION_METERS = 150_000
 DEFAULT_TIMEOUT_SECONDS = 15
+# All surface lookups of one request share this budget, so a slow
+# /trace_attributes adds seconds, not one full timeout per route.
+SURFACE_BUDGET_SECONDS = 5.0
+MINIMUM_SURFACE_TIMEOUT_SECONDS = 1.0
 DEFAULT_MAXIMUM_CONCURRENT = 2
+# A pedestrian maneuver up to this length is pushing the bike (walkways and
+# path connectors); a longer one makes the leg no_bicycle_route. Detours keep 0.
+DEFAULT_MAXIMUM_PUSH_METERS = 100
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -143,6 +165,8 @@ class BicycleRouteRequest:
     destination: MapPoint
     profile: str
     locale: str
+    alternatives: int = 0
+    surfaces: bool = False
 
 
 def parse_request(payload: Any, *, maximum_separation_meters: float) -> BicycleRouteRequest:
@@ -161,6 +185,12 @@ def parse_request(payload: Any, *, maximum_separation_meters: float) -> BicycleR
     if not isinstance(profile, str) or profile not in PROFILES:
         raise error("profile must be one of " + ", ".join(PROFILE_NAMES))
     locale = parse_locale(payload, error)
+    alternatives = payload.get("alternatives", 0)
+    if type(alternatives) is not int or not 0 <= alternatives <= MAXIMUM_ALTERNATIVES:
+        raise error(f"alternatives must be an integer from 0 to {MAXIMUM_ALTERNATIVES}")
+    surfaces = payload.get("surfaces", False)
+    if type(surfaces) is not bool:
+        raise error("surfaces must be true or false")
     separation = haversine_meters(origin, destination)
     if separation < MINIMUM_SEPARATION_METERS:
         raise error("origin and destination are too close for a route")
@@ -172,15 +202,18 @@ def parse_request(payload: Any, *, maximum_separation_meters: float) -> BicycleR
         destination=destination,
         profile=profile,
         locale=locale,
+        alternatives=alternatives,
+        surfaces=surfaces,
     )
 
 
-def upstream_body(request: BicycleRouteRequest) -> bytes:
+def upstream_body(request: BicycleRouteRequest, *, alternates: int | None = None) -> bytes:
     return bicycle_route_body(
         break_location(request.origin),
         request.destination,
         PROFILES[request.profile],
         request.locale,
+        alternates=request.alternatives if alternates is None else alternates,
     )
 
 
@@ -193,6 +226,7 @@ class BicycleRouteService:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         maximum_concurrent: int = DEFAULT_MAXIMUM_CONCURRENT,
         maximum_separation_meters: float = DEFAULT_MAXIMUM_SEPARATION_METERS,
+        maximum_push_meters: float = DEFAULT_MAXIMUM_PUSH_METERS,
     ):
         route_url = upstream_route_url(upstream_url) if upstream_url else None
         self._router = (
@@ -203,6 +237,7 @@ class BicycleRouteService:
                 logger=_LOGGER,
                 log_label="bicycle route",
                 size_limits=route_size_limits(maximum_separation_meters),
+                maximum_push_meters=maximum_push_meters,
             )
             if route_url is not None
             else None
@@ -228,6 +263,9 @@ class BicycleRouteService:
                 "MAP_PLATFORM_BICYCLE_ROUTE_MAX_SEPARATION_METERS",
                 DEFAULT_MAXIMUM_SEPARATION_METERS, 1_000, 500_000,
             )),
+            maximum_push_meters=float(environment_integer(
+                "MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS", DEFAULT_MAXIMUM_PUSH_METERS, 0, 500,
+            )),
         )
 
     @property
@@ -241,6 +279,8 @@ class BicycleRouteService:
             "provider": PROVIDER_ID if self.enabled else None,
             "attribution": ATTRIBUTION if self.enabled else None,
             "profiles": list(PROFILE_NAMES),
+            "maximumAlternatives": MAXIMUM_ALTERNATIVES,
+            "surfaces": True,
             "maximumSeparationMeters": int(self._maximum_separation_meters),
         }
 
@@ -262,17 +302,47 @@ class BicycleRouteService:
         assert self._router is not None
         try:
             outcome = self._router.route(upstream_body(request))
+            if outcome.route is None and outcome.response_too_large and request.alternatives:
+                # Alternatives made the answer too big; the route alone may fit.
+                _LOGGER.info("bicycle route retry without alternatives reason=response-too-large")
+                outcome = self._router.route(upstream_body(request, alternates=0))
         except ValhallaUnavailableError as exc:
             raise BicycleRouteUnavailableError(exc.reason) from None
         if outcome.route is None:
             return _unavailable(outcome.reason or "no_bicycle_route")
-        route = {**outcome.route, "profile": request.profile}
+        routes = [outcome.route, *outcome.alternatives[: request.alternatives]]
+        answered = []
+        deadline = time.monotonic() + SURFACE_BUDGET_SECONDS
+        looking_up_surfaces = request.surfaces
+        for route, shape in zip(routes, outcome.shapes):
+            item = {**route, "profile": request.profile}
+            remaining = deadline - time.monotonic()
+            if looking_up_surfaces and remaining < MINIMUM_SURFACE_TIMEOUT_SECONDS:
+                _LOGGER.info("bicycle route surfaces skipped reason=budget")
+                looking_up_surfaces = False
+            if looking_up_surfaces:
+                try:
+                    breakdown = self._router.surface_breakdown(
+                        shape, timeout_seconds=min(remaining, self._router.timeout_seconds),
+                    )
+                except ValhallaUnavailableError:
+                    # One failed lookup means the others would fail too.
+                    looking_up_surfaces = False
+                    breakdown = None
+                if breakdown is not None:
+                    item["surfaces"] = breakdown
+            answered.append(item)
         _LOGGER.info(
-            "bicycle route outcome=ready profile=%s maneuvers=%d",
+            "bicycle route outcome=ready profile=%s maneuvers=%d alternatives=%d surfaces=%d",
             request.profile,
-            len(route["maneuvers"]),
+            len(answered[0]["maneuvers"]),
+            len(answered) - 1,
+            sum(1 for item in answered if "surfaces" in item),
         )
-        return {"schema": RESPONSE_SCHEMA, "status": "ready", "route": route, "reason": None}
+        body: dict[str, Any] = {"schema": RESPONSE_SCHEMA, "status": "ready", "route": answered[0], "reason": None}
+        if request.alternatives:
+            body["alternatives"] = answered[1:]
+        return body
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

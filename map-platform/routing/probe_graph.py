@@ -3,9 +3,9 @@
 
 A fixture's `route` is its expectation on the worldwide-gap graph; an optional
 `planet` value overrides it on a planet graph, and `coverages` limits where it
-runs. `pushAllowed` accepts pedestrian push segments of at most
-`PUSH_LIMIT_METERS` each alongside bicycle, the same rule the bicycle route
-service applies.
+runs. `pushAllowed` accepts pedestrian push stretches (back-to-back pedestrian
+maneuvers) of at most `PUSH_LIMIT_METERS` each alongside bicycle, the same rule
+the bicycle route service applies.
 """
 
 import argparse
@@ -42,13 +42,22 @@ def expects_route(fixture, coverage):
     return fixture.get(coverage, fixture["route"]) if coverage == "planet" else fixture["route"]
 
 
-def passed(fixture, coverage, legs, modes, length, error_code, longest_push_meters=0.0):
+def longest_push_meters(maneuvers):
+    """Longest run of back-to-back pedestrian maneuvers, in metres."""
+    longest = stretch = 0.0
+    for step in maneuvers:
+        stretch = stretch + step.get("length", 0) * 1000 if step.get("travel_mode") == "pedestrian" else 0.0
+        longest = max(longest, stretch)
+    return longest
+
+
+def passed(fixture, coverage, legs, modes, length, error_code, longest_push=0.0):
     if not expects_route(fixture, coverage):
         return error_code in NO_ROUTE
     allowed = {"bicycle", "pedestrian"} if fixture.get("pushAllowed") else {"bicycle"}
     return (
         length > 0 and "bicycle" in modes and set(modes) <= allowed
-        and longest_push_meters <= PUSH_LIMIT_METERS
+        and longest_push <= PUSH_LIMIT_METERS
         and bool(legs) and all(leg.get("shape") for leg in legs)
     )
 
@@ -72,10 +81,7 @@ def probe(origin, fixture, coverage="worldwide-gap"):
     legs = trip.get("legs", [])
     maneuvers = [step for leg in legs for step in leg.get("maneuvers", [])]
     modes = sorted({step.get("travel_mode", "missing") for step in maneuvers})
-    longest_push = max(
-        (step.get("length", 0) * 1000 for step in maneuvers if step.get("travel_mode") == "pedestrian"),
-        default=0.0,
-    )
+    longest_push = longest_push_meters(maneuvers)
     length = trip.get("summary", {}).get("length", 0)
     error_code = result.get("error_code")
     return {
