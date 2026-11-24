@@ -120,8 +120,13 @@ class ArchiveTests(unittest.TestCase):
             expected = {**file_identity(source), "tiles": 1}
             incoming = root / f".{expected['sha256']}.incoming"
             incoming.mkdir()
-            shutil.copyfile(source, incoming / ARCHIVE_NAME)
+            incoming_archive = incoming / ARCHIVE_NAME
+            incoming_archive.write_bytes(b"incorrectly assembled")
             with patch("stage_graph.subprocess.run") as transfer:
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    stage(root, {"archive": expected}, None, 0, 20_480)
+                self.assertEqual(incoming_archive.read_bytes(), b"incorrectly assembled")
+                shutil.copyfile(source, incoming_archive)
                 receipt = stage(root, {"archive": expected}, None, 0, 20_480)
             transfer.assert_not_called()
             self.assertEqual(receipt, root / expected["sha256"])

@@ -30,8 +30,13 @@ the infrastructure, transfer, and deployment that passed qualification.
    snapshot with a resumable transfer, verify the published checksum, and
    record SHA-256. Keep the verified PBF during retries. Run the pinned Valhalla
    container offline with eight build threads, verify the archive, and retain
-   the manifest. See the [first release manifest](releases/2026-11-23.json) for
-   the exact inputs and output.
+   the manifest and exact mask bytes with the release. The
+   [first release manifest](releases/2026-11-23.json) and
+   [compressed mask](releases/2026-11-23-mask.geojson.gz) preserve the original
+   PBF identity, clipping input, and archive identity. For a recovery build,
+   decompress the mask with `gzip -dc` and verify the uncompressed bytes
+   against the manifest before building. Verify and qualify the rebuilt graph
+   before deploying it.
 
 The first successful attempt took 3 hours 9 minutes from build start through
 archive verification. Observed builder scratch use reached about 499 GB before
@@ -101,8 +106,9 @@ that finished the first transfer.
 4. Finalize the assembled file locally. The stager rechecks the full
    SHA-256, tar index, tile count, and disk reserve before installing.
    `--verify-incoming` avoids sending the completed archive through rsync
-   again. Delete the segment files after the installed archive passes
-   the offline VPS probes.
+   again. If verification fails, the assembled file remains in the incoming
+   directory for repair. Delete the segment files after the installed archive
+   passes the offline VPS probes.
 
 ```sh
 python3 stage_graph.py --root "$root" --manifest "$manifest" \

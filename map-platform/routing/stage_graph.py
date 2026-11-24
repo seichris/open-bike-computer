@@ -60,8 +60,9 @@ def stage(root, manifest, source, reserve, bandwidth, ssh_config=None, *, compre
         try:
             verify_archive(destination, expected)
         except (ValueError, OSError):
-            # Discard only the invalid staging copy so a retry starts clean.
-            destination.unlink(missing_ok=True)
+            # Keep a locally assembled archive available for a delta repair.
+            if source is not None:
+                destination.unlink(missing_ok=True)
             raise
         destination.chmod(0o444)
         with destination.open("rb") as archive:

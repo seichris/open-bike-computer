@@ -12,7 +12,8 @@ the iPhone’s MapKit-first decision.
 For the procedure used for the first production rollout, see
 [Refresh and rollback](refresh-runbook.md). The
 [first release manifest](releases/2026-11-23.json) records the source and
-graph identities needed to trace or reproduce the build.
+graph identities. The [archived mask](releases/2026-11-23-mask.geojson.gz)
+retains the exact clipping input.
 
 ## Build and release
 
