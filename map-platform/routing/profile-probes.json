@@ -1,0 +1,7 @@
+[
+  {"name": "Dubai, Al Satwa to Al Wasl (detour fixture pair)", "origin": [25.2066, 55.2692], "destination": [25.2258, 55.2631], "ready": true},
+  {"name": "Hatta", "origin": [24.7995, 56.1027], "destination": [24.8300, 56.0883], "ready": true},
+  {"name": "Al Awir, Dubai", "origin": [25.2653, 55.4398], "destination": [25.2690, 55.4832], "ready": true},
+  {"name": "Dubai to Ras Al Khaimah", "origin": [25.1718, 55.2487], "destination": [25.7791, 55.9771], "ready": true},
+  {"name": "Buenos Aires", "origin": [-34.6083, -58.3712], "destination": [-34.5697, -58.4116], "ready": true}
+]
