@@ -45,6 +45,9 @@ nonisolated struct SavedRouteDetourPolicyV1: Equatable, Sendable {
     var maximumContinuityJumpMeters = 150.0
     var maximumStartOffsetMeters = 75.0
     var maximumEndOffsetMeters = 60.0
+    var detourEndRadiusMeters = 15.0
+    /// Leave time for the GPS rejoin tracker to confirm a merge at the end.
+    var detourEndGraceSeconds: TimeInterval = 4
     var minimumMaximumDetourMeters = 3_000.0
     var maximumDetourLengthFactor = 4.0
     var requestMotionCancelMeters = 100.0
@@ -463,11 +466,14 @@ nonisolated struct SavedRouteDetourEngineV1 {
     private var offRouteOrigin: RouteCoordinateV1?
     private var attempt = 0
     private var requestsThisEpisode = 0
-    private var lastRequestOrigin: RouteCoordinateV1?
+    private var episodeResetAnchor: RouteCoordinateV1?
     private var nextAllowedAt: Date = .distantPast
     private var serviceFailures = 0
     private var pendingTarget: SavedRouteRejoinTargetV1?
     private var tracker = SavedRouteRejoinTrackerV1()
+    private var detourLengthMeters = 0.0
+    private var detourEndSince: Date?
+    private var recoveringFromDetourEnd = false
 
     init(route: NavigationRouteV1, policy: SavedRouteDetourPolicyV1 = .production) {
         self.policy = policy
@@ -509,6 +515,7 @@ nonisolated struct SavedRouteDetourEngineV1 {
             detourTarget = nil
             pendingTarget = nil
             phase = .onRoute
+            recoveringFromDetourEnd = false
             confirmedProgressMeters = rejoin.distanceAlongMeters
             serviceFailures = 0
             effects.append(.resumeSavedRoute(rejoin))
@@ -523,6 +530,15 @@ nonisolated struct SavedRouteDetourEngineV1 {
                 detourTarget = nil
                 enterOffRoute(at: sample, episodeStart: false)
                 return [.endDetour]
+            }
+            if reachedDetourEnd(sample, snapshot: detourSnapshot, now: now) {
+                detour = nil
+                detourTarget = nil
+                recoveringFromDetourEnd = true
+                // A long detour is not travel away from an exhausted endpoint.
+                episodeResetAnchor = sample.coordinate
+                advanceCandidate(now: now)
+                return [.endDetour] + issueIfWarranted(sample, now: now)
             }
             return []
         case .requesting:
@@ -568,16 +584,20 @@ nonisolated struct SavedRouteDetourEngineV1 {
                 nextAllowedAt = now
                 return issueIfWarranted(latestSample, now: now)
             }
-            guard let prepared = validatedDetour(route, target: target, latestSample: latestSample) else {
-                return noRoute(now: now)
+            guard let accepted = validatedDetour(route, target: target, latestSample: latestSample) else {
+                advanceCandidate(now: now)
+                return []
             }
             serviceFailures = 0
-            detour = prepared
+            detour = accepted.route
             detourTarget = target
+            detourLengthMeters = accepted.lengthMeters
+            detourEndSince = nil
             phase = .following
-            return [.startDetour(prepared)]
+            return [.startDetour(accepted.route)]
         case .noBicycleRoute:
-            return noRoute(now: now)
+            advanceCandidate(now: now)
+            return []
         case .unavailable(let reason, let retryAfterSeconds):
             serviceFailures += 1
             let backoff = max(policy.backoff(afterFailures: serviceFailures),
@@ -651,6 +671,7 @@ nonisolated struct SavedRouteDetourEngineV1 {
         offRouteOrigin = sample.coordinate
         attempt = 0
         requestsThisEpisode = 0
+        recoveringFromDetourEnd = false
         tracker.reset()
         if episodeStart {
             episode &+= 1
@@ -658,43 +679,74 @@ nonisolated struct SavedRouteDetourEngineV1 {
         }
     }
 
-    private mutating func noRoute(now: Date) -> [SavedRouteDetourEffectV1] {
+    private mutating func advanceCandidate(now: Date) {
         attempt += 1
         phase = .unavailable(.noBicycleRoute)
         // The next candidate is a different point; it may be asked at once.
         nextAllowedAt = now
-        return []
+    }
+
+    private func hasUsableFix(_ sample: NavigationLocationSampleV1, now: Date) -> Bool {
+        let age = now.timeIntervalSince(sample.timestamp)
+        return age >= -1 && age <= policy.maximumFixAgeSeconds &&
+            sample.horizontalAccuracyMeters >= 0 &&
+            sample.horizontalAccuracyMeters <= policy.maximumAccuracyMeters
+    }
+
+    private mutating func reachedDetourEnd(
+        _ sample: NavigationLocationSampleV1,
+        snapshot: NavigationSnapshotV1?,
+        now: Date
+    ) -> Bool {
+        // The continuity cursor can trail a GPS fix within the runtime's
+        // projection ambiguity band, even when the rider is at the endpoint.
+        let progressTolerance = policy.detourEndRadiusMeters +
+            max(sample.horizontalAccuracyMeters, NavigationRuntimeV1.minimumProjectionAmbiguityMeters)
+        guard let detour, let endpoint = detour.points.last,
+              let snapshot, snapshot.routeID == detour.id,
+              let along = snapshot.distanceAlongGeometryMeters,
+              hasUsableFix(sample, now: now),
+              detourLengthMeters - along <= progressTolerance,
+              NavigationGeometryV1.distance(from: sample.coordinate, to: endpoint) <= policy.detourEndRadiusMeters
+        else {
+            detourEndSince = nil
+            return false
+        }
+        if let since = detourEndSince {
+            return sample.timestamp.timeIntervalSince(since) >= policy.detourEndGraceSeconds
+        }
+        detourEndSince = sample.timestamp
+        return false
     }
 
     private mutating func issueIfWarranted(
         _ sample: NavigationLocationSampleV1,
         now: Date
     ) -> [SavedRouteDetourEffectV1] {
-        guard request == nil, detour == nil else { return [] }
-        let age = now.timeIntervalSince(sample.timestamp)
-        guard age >= -1, age <= policy.maximumFixAgeSeconds,
-              sample.horizontalAccuracyMeters >= 0,
-              sample.horizontalAccuracyMeters <= policy.maximumAccuracyMeters else { return [] }
+        guard request == nil, detour == nil, hasUsableFix(sample, now: now) else { return [] }
         guard networkAvailable else {
             phase = .unavailable(.offline)
             return []
         }
-        guard let since = offRouteSince, let origin = offRouteOrigin,
-              sample.timestamp.timeIntervalSince(since) >= policy.minimumOffRouteSeconds,
-              NavigationGeometryV1.distance(from: origin, to: sample.coordinate) >=
-                policy.minimumDisplacementMeters,
-              now >= nextAllowedAt else { return [] }
-        let window = SavedRouteRejoinPlannerV1.window(
-            confirmedProgress: confirmedProgressMeters, geometry: geometry, policy: policy
-        )
-        guard let nearest = SavedRouteRejoinPlannerV1.nearest(
-            to: sample.coordinate, geometry: geometry, window: window, policy: policy
-        ), nearest.crossTrackDistanceMeters >= max(
-            policy.requestCrossTrackMinimumMeters,
-            sample.horizontalAccuracyMeters * 2
-        ) else { return [] }
+        guard now >= nextAllowedAt else { return [] }
+        // A rider who already followed a detour can ask again while stopped.
+        if !recoveringFromDetourEnd {
+            guard let since = offRouteSince, let origin = offRouteOrigin,
+                  sample.timestamp.timeIntervalSince(since) >= policy.minimumOffRouteSeconds,
+                  NavigationGeometryV1.distance(from: origin, to: sample.coordinate) >=
+                    policy.minimumDisplacementMeters else { return [] }
+            let window = SavedRouteRejoinPlannerV1.window(
+                confirmedProgress: confirmedProgressMeters, geometry: geometry, policy: policy
+            )
+            guard let nearest = SavedRouteRejoinPlannerV1.nearest(
+                to: sample.coordinate, geometry: geometry, window: window, policy: policy
+            ), nearest.crossTrackDistanceMeters >= max(
+                policy.requestCrossTrackMinimumMeters,
+                sample.horizontalAccuracyMeters * 2
+            ) else { return [] }
+        }
         if requestsThisEpisode >= policy.maximumRequestsPerEpisode || attempt > SavedRouteRejoinTargetV1.Kind.leavePoint.rawValue {
-            guard let last = lastRequestOrigin,
+            guard let last = episodeResetAnchor,
                   NavigationGeometryV1.distance(from: last, to: sample.coordinate) >=
                     policy.episodeResetDistanceMeters else {
                 if case .unavailable = phase {} else { phase = .unavailable(.noBicycleRoute) }
@@ -728,7 +780,7 @@ nonisolated struct SavedRouteDetourEngineV1 {
         )
         request = issued
         pendingTarget = target
-        lastRequestOrigin = sample.coordinate
+        episodeResetAnchor = sample.coordinate
         nextAllowedAt = now.addingTimeInterval(policy.cooldownSeconds)
         phase = .requesting
         return [.requestDetour(issued)]
@@ -741,7 +793,7 @@ nonisolated struct SavedRouteDetourEngineV1 {
         _ route: NavigationRouteV1,
         target: SavedRouteRejoinTargetV1,
         latestSample: NavigationLocationSampleV1
-    ) -> NavigationRouteV1? {
+    ) -> (route: NavigationRouteV1, lengthMeters: Double)? {
         guard route.transportType == .cycling, (try? route.validate()) != nil,
               let first = route.points.first, let last = route.points.last,
               NavigationGeometryV1.distance(from: first, to: latestSample.coordinate) <=
@@ -758,10 +810,10 @@ nonisolated struct SavedRouteDetourEngineV1 {
         guard measured <= max(policy.minimumMaximumDetourMeters, straight * policy.maximumDetourLengthFactor) else {
             return nil
         }
-        return SavedRouteDetourRouteV1.prepared(
-            route,
-            savedRouteBearing: geometry.bearing(ofSegment: end.segmentIndex)
+        let prepared = SavedRouteDetourRouteV1.prepared(
+            route, savedRouteBearing: geometry.bearing(ofSegment: end.segmentIndex)
         )
+        return (prepared, measured)
     }
 }
 
