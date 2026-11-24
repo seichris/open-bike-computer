@@ -39,6 +39,7 @@ struct MapAppearanceTests {
         testUserTrackingChoicePersists()
         testRealisticTerrainOverlayPolicy()
         testBikeLanesTileTemplate()
+        BikeLanesTileCacheTests.run()
 
         print("MapAppearanceTests passed")
     }
@@ -390,6 +391,6 @@ struct MapAppearanceTests {
             BikeLanesTileSource.infoDictionaryPathKey: path,
         ]) else { preconditionFailure("a valid tile service shows the layer") }
         precondition(overlay.urlTemplate == "https://tiles.example.com\(path)")
-        precondition(!overlay.canReplaceMapContent && overlay.minimumZ == 13 && overlay.maximumZ == 18)
+        precondition(!overlay.canReplaceMapContent && overlay.minimumZ == 12 && overlay.maximumZ == 18)
     }
 }
