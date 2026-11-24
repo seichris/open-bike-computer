@@ -221,6 +221,14 @@ In the UAE sweep with the old all-strict rule, 11 of 73 routes failed this
 way. Most were longer than 25 km (7 of the 18 routes over 100 km), each with
 17–173 m of walking in total, spread over 12–60 m stretches.
 
+**Points above stations.** Valhalla snaps a point to the nearest edge in any
+layer. On the 2026-11-24 planet graph a destination right above Oxford Circus
+snapped 3 m onto an escalator two levels underground (`highway=steps`,
+`indoor=yes`), which bicycles cannot reach, so the leg was
+`no_bicycle_route` (Valhalla 442) one way and fine the other way. Valhalla's
+`exclude_tunnel` search filter did not help. The London probe therefore ends
+on Oxford Street west of the circus.
+
 ## Limits and configuration
 
 Bicycle routes share the Valhalla upstream with detours but never their
