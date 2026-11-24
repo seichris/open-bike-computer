@@ -2,21 +2,25 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// One place picked in Settings > Saved Routes > Create a Route.
+/// One place picked in Create a Route.
 ///
 /// `mapCoordinate` is in MapKit's routing space (GCJ-02 inside mainland China),
-/// exactly as MapKit search, a saved map pin or a converted GPS fix supplies
-/// it. Canonical WGS-84 geometry only exists after MapKitRouteAdapter has
+/// exactly as MapKit search, a saved map pin, a pin dropped on the main map or
+/// a converted GPS fix supplies it. Canonical WGS-84 geometry only exists after MapKitRouteAdapter has
 /// normalized a calculated leg; this value is never written to an archive.
 struct MultiStopRoutePlace: Equatable {
     enum Origin: Equatable {
         case currentLocation
         case search
         case saved(SavedDestination)
+        /// Touch and hold on the main map.
+        case droppedPin
     }
 
     static let maximumLabelBytes = 256
     static let currentLocationLabel = "Current Location"
+    /// A dropped pin's name until reverse geocoding answers.
+    static let droppedPinLabel = "Dropped Pin"
 
     let label: String
     let subtitle: String?

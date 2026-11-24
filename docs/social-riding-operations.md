@@ -74,7 +74,8 @@ link. The account's notification preference still controls server delivery.
 
 ## Saved routes and group creation
 
-Saved Routes uses Create a Route for online planning. A favorite destination's
+Saved Routes uses Create a Route for online planning; it closes Settings and
+plans on the main map, where touch and hold adds stops. A favorite destination's
 map icon opens the selected-destination controls (From/To, transport, favorite
 state and Go), preserving its saved coordinate rather than performing a new
 address search. An archived route's map icon continues to preview that archive.

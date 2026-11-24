@@ -313,6 +313,12 @@ struct MapViewContainer: UIViewRepresentable {
     var selectedOnlinePOI: MKMapItem? = nil
     var isOnlinePOISearchActive = false
     var onOnlinePOISelected: ((MKMapItem?) -> Void)? = nil
+    /// Create a Route on the main map: its stops and planned route.
+    var routeCreation: MapRouteCreation? = nil
+    var routeCreationBottomPadding: CGFloat? = nil
+    /// While creating a route, touch and hold adds a stop instead of a pin.
+    var onRouteCreationLongPress: ((CLLocationCoordinate2D) -> Void)? = nil
+    var onRouteCreationStopRemoval: ((UUID) -> Void)? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -344,7 +350,7 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.updateBikeLanesOverlay(bikeLanesOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
-            visibleSavedRoutePreview == nil && !isSimulationMode
+            visibleSavedRoutePreview == nil && routeCreation == nil && !isSimulationMode
                 ? (isNavigating ? .followWithHeading : .follow) : .none
         
         // Configure map appearance
@@ -380,6 +386,8 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.simulatedPosition = simulatedPosition
         context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
         context.coordinator.onOnlinePOISelected = onOnlinePOISelected
+        context.coordinator.onRouteCreationLongPress = onRouteCreationLongPress
+        context.coordinator.onRouteCreationStopRemoval = onRouteCreationStopRemoval
 
         DispatchQueue.main.async {
             controlState.connect(to: mapView)
@@ -391,6 +399,8 @@ struct MapViewContainer: UIViewRepresentable {
     func updateUIView(_ uiView: MKMapView, context: Context) {
         context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
         context.coordinator.onOnlinePOISelected = onOnlinePOISelected
+        context.coordinator.onRouteCreationLongPress = onRouteCreationLongPress
+        context.coordinator.onRouteCreationStopRemoval = onRouteCreationStopRemoval
         context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
                                               location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
@@ -409,7 +419,7 @@ struct MapViewContainer: UIViewRepresentable {
             includesSavedRoutePreview: false
         )
         let preview = visibleSavedRoutePreview
-        let isFreePanActive = otherFreePanActive || preview != nil
+        let isFreePanActive = otherFreePanActive || preview != nil || routeCreation != nil
         let shouldResetTracking = context.coordinator.isNavigating != isNavigating ||
             (!context.coordinator.isUserLocationAuthorized && isUserLocationAuthorized) ||
             (context.coordinator.isSimulationMode && !isSimulationMode)
@@ -460,6 +470,28 @@ struct MapViewContainer: UIViewRepresentable {
             offlineNavigationPolyline: offlineNavigationPolyline
         )
         context.coordinator.updateDetourOverlay(isNavigating ? detourPolyline : nil, on: uiView)
+        if routeCreation != nil, !isNavigating, !context.coordinator.routeCreationLayer.isActive {
+            // A Navigate Here pin dropped earlier is not part of the new route.
+            uiView.removeAnnotations(uiView.annotations.filter { $0 is DestinationAnnotation })
+        }
+        let endedRouteCreation = context.coordinator.routeCreationLayer.update(
+            isNavigating ? nil : routeCreation,
+            on: uiView,
+            bottomPadding: routeCreationBottomPadding
+        )
+        if endedRouteCreation, preview == nil, !isNavigating, route == nil, routeAlternatives.isEmpty {
+            // Discarding a route returns the map to the rider, like hiding a
+            // saved-route preview; saving one shows its preview instead.
+            context.coordinator.finishNavigationTracking(
+                mapView: uiView,
+                isUserLocationAuthorized: isUserLocationAuthorized,
+                isFreePanActive: context.coordinator.isFreePanActive(
+                    mapView: uiView,
+                    isOfflineMapSelectionActive: isOfflineMapSelectionActive,
+                    includesSavedRoutePreview: false
+                )
+            )
+        }
         
         // Update simulated position
         let existingSimAnnotations = uiView.annotations.filter { $0 is SimulatedPositionAnnotation }
@@ -534,6 +566,7 @@ struct MapViewContainer: UIViewRepresentable {
         coordinator: Coordinator
     ) {
         coordinator.removeSavedRouteOverlay(from: uiView)
+        coordinator.routeCreationLayer.clear(from: uiView)
         coordinator.updateTopographyOverlay(nil, on: uiView)
         coordinator.updateBikeLanesOverlay(nil, on: uiView)
         coordinator.controlState?.disconnect(from: uiView)
@@ -541,6 +574,9 @@ struct MapViewContainer: UIViewRepresentable {
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         let socialLayer = SocialMapLayer()
+        let routeCreationLayer = RouteCreationMapLayer()
+        var onRouteCreationLongPress: ((CLLocationCoordinate2D) -> Void)?
+        var onRouteCreationStopRemoval: ((UUID) -> Void)?
         var isOnlinePOISearchActive = false
         var onOnlinePOISelected: ((MKMapItem?) -> Void)?
         private var focusedOnlinePOI: MKMapItem?
@@ -712,7 +748,8 @@ struct MapViewContainer: UIViewRepresentable {
                 isNavigating: isNavigating,
                 isSimulationMode: isSimulationMode,
                 isOfflineMapSelectionActive: isOfflineMapSelectionActive ||
-                    displayedSavedRouteOverlay != nil || isOnlinePOISearchActive,
+                    displayedSavedRouteOverlay != nil || isOnlinePOISearchActive ||
+                    routeCreationLayer.isActive,
                 isDestinationSelectionActive: isDestinationSelectionActive
             )
 
@@ -752,7 +789,7 @@ struct MapViewContainer: UIViewRepresentable {
             isOfflineMapSelectionActive: Bool,
             includesSavedRoutePreview: Bool = true
         ) -> Bool {
-            isOnlinePOISearchActive ||
+            isOnlinePOISearchActive || routeCreationLayer.isActive ||
                 (includesSavedRoutePreview && displayedSavedRouteOverlay != nil) ||
                 isOfflineMapSelectionActive || mapView.selectedAnnotations.contains {
                     $0 is DestinationAnnotation
@@ -1354,10 +1391,18 @@ struct MapViewContainer: UIViewRepresentable {
         }
         
         @objc func handleLongPress(_ gestureRecognizer: UILongPressGestureRecognizer) {
-            guard gestureRecognizer.state == .began,
-                  !isOnlinePOISearchActive,
-                  let mapView = mapView,
-                  onDestinationSelected != nil else { return }
+            guard gestureRecognizer.state == .began, let mapView = mapView else { return }
+            if let onRouteCreationLongPress {
+                let coordinate = mapView.convert(
+                    gestureRecognizer.location(in: mapView),
+                    toCoordinateFrom: mapView
+                )
+                if CLLocationCoordinate2DIsValid(coordinate) {
+                    onRouteCreationLongPress(coordinate)
+                }
+                return
+            }
+            guard !isOnlinePOISearchActive, onDestinationSelected != nil else { return }
             
             // Disable user tracking mode to allow free map movement
             mapView.userTrackingMode = .none
@@ -1542,6 +1587,12 @@ struct MapViewContainer: UIViewRepresentable {
                 renderer.alpha = 0.65
                 return
             }
+            if routeCreationLayer.owns(overlay) {
+                renderer.strokeColor = .systemBlue
+                renderer.lineWidth = navigationRouteLineWidth
+                renderer.alpha = 1
+                return
+            }
             if let detour = displayedDetourOverlay, overlay === detour {
                 renderer.strokeColor = .systemOrange
                 // The dashed renderer scales its stroke with the display density.
@@ -1579,6 +1630,9 @@ struct MapViewContainer: UIViewRepresentable {
             }
             if let rider = annotation as? SocialRiderAnnotation {
                 return socialLayer.annotationView(rider, map: mapView)
+            }
+            if let stop = annotation as? RouteCreationStopAnnotation {
+                return RouteCreationMapLayer.annotationView(for: stop, on: mapView)
             }
             if let label = annotation as? BicinoContourLabelAnnotation { return BicinoContourLabelAnnotation.view(on: mapView, annotation: label) }
             // Use default view for user location
@@ -1653,6 +1707,12 @@ struct MapViewContainer: UIViewRepresentable {
         }
         
         func mapView(_ mapView: MKMapView, annotationView view: MKAnnotationView, calloutAccessoryControlTapped control: UIControl) {
+            if let annotation = view.annotation,
+               let stopID = routeCreationLayer.stopID(for: annotation) {
+                mapView.deselectAnnotation(annotation, animated: true)
+                onRouteCreationStopRemoval?(stopID)
+                return
+            }
             // Handle the callout button tap
             if let destinationAnnotation = view.annotation as? DestinationAnnotation,
                let destination = destinationAnnotation.destination {

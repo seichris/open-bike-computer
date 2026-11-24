@@ -16,7 +16,6 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
     case gpxRouteImport(OfflineRouteSaveDraft)
-    case routeCreator
     case savedMapShare(URL)
 
     var id: String {
@@ -27,8 +26,6 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "strava-route-import"
         case .gpxRouteImport(let draft):
             return "gpx-route-import:\(draft.id.uuidString)"
-        case .routeCreator:
-            return "route-creator"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
@@ -88,6 +85,8 @@ struct SettingsView: View {
     let isNavigationActive: Bool
     let onRequestLocationAuthorization: () -> Void
     let onSaveOnlineRoute: (SavedDestination?) -> Void
+    /// Create a Route happens on the main map; this closes Settings first.
+    let onCreateRoute: () -> Void
     let opensSavedMaps: Bool
     let onStartTestNavigation: (String) -> Void
 
@@ -109,6 +108,7 @@ struct SettingsView: View {
         destinationStore: SavedDestinationStore? = nil,
         onRequestLocationAuthorization: @escaping () -> Void = {},
         onSaveOnlineRoute: @escaping (SavedDestination?) -> Void = { _ in },
+        onCreateRoute: @escaping () -> Void = {},
         opensSavedMaps: Bool = false,
         onStartTestNavigation: @escaping (String) -> Void
     ) {
@@ -153,6 +153,7 @@ struct SettingsView: View {
             wrappedValue: destinationStore ?? SavedDestinationStore()
         )
         self.onSaveOnlineRoute = onSaveOnlineRoute
+        self.onCreateRoute = onCreateRoute
         self.onStartTestNavigation = onStartTestNavigation
     }
 
@@ -233,10 +234,7 @@ struct SettingsView: View {
                     stravaCoordinator: stravaIntegrationCoordinator,
                     destinationStore: destinationStore,
                     onSaveOnlineRoute: onSaveOnlineRoute,
-                    onCreateRoute: {
-                        routeImportFeedback = nil
-                        presentedSheet = .routeCreator
-                    },
+                    onCreateRoute: onCreateRoute,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
                     },
@@ -406,15 +404,6 @@ struct SettingsView: View {
             )
         case .gpxRouteImport(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
-                routeImportFeedback = result.message
-                presentedSheet = nil
-            }
-        case .routeCreator:
-            RouteCreatorView(
-                library: routeLibrary,
-                destinationStore: destinationStore,
-                currentLocation: currentLocation
-            ) { result in
                 routeImportFeedback = result.message
                 presentedSheet = nil
             }
