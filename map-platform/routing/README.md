@@ -9,6 +9,11 @@ bike-accessible ferry links and crossings as retained polygons if probes show a
 route needs more space. The mask is a build input. No country list participates in
 the iPhone’s MapKit-first decision.
 
+For the procedure used for the first production rollout, see
+[Refresh and rollback](refresh-runbook.md). The
+[first release manifest](releases/2026-11-23.json) records the source and
+graph identities needed to trace or reproduce the build.
+
 ## Build and release
 
 1. Use an on-demand Linux amd64 builder with Docker, Osmium, and Python 3.11 or
@@ -79,14 +84,16 @@ the iPhone’s MapKit-first decision.
    credential on the serving side. The staged file and active file paths are
    separate. The script checks the SHA-256, tar index, and tile count before
    installing the candidate in a digest directory. The default free-space
-   reserve is 50 GB. Use one immutable copy across the serving environments.
+   reserve is 50 GB. Use one immutable archive with a separate hard link under
+   the production graph root so staging cleanup cannot remove the production
+   path.
    Use `--compress-transfer` when both rsync installations support Zstandard.
    Transfer compression preserves the checksum of the staged archive.
 
    ```sh
    python stage_graph.py --root /var/lib/bicino-valhalla/graphs \
      --manifest "$approved_manifest" --expected-sha256 "$approved_archive_sha" \
-     --source "$builder_host:$builder_archive"
+     --source "$builder_host:$builder_archive" --compress-transfer
    ```
 
 6. Qualify the exact staged bytes in development, including the App Attest API
@@ -100,10 +107,11 @@ the iPhone’s MapKit-first decision.
 7. Advance the Coolify production graph lock through reviewed deployment after
    development qualification and CI. Preserve the existing API and map worker
    image pins. Retain the previous verified graph on the VPS and the original
-   small GCC archive. Roll back by remounting the prior digest and restarting
-   Valhalla. Keep the manifest in version control so disk loss can be recovered
-   by rebuilding. Cancel the builder after the VPS archive and development
-   probes pass. Refresh monthly or following a reviewed coverage change.
+   small GCC archive. Roll back by restoring the previous mount in the
+   production Compose lock and redeploying through Coolify. Keep the manifest
+   in version control for recovery by rebuild. Delete the builder after the
+   VPS archive and development server probes pass. Refresh monthly or after
+   a reviewed coverage change.
 
 ## Focused checks
 

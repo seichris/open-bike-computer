@@ -1,0 +1,37 @@
+{
+  "schema": "bicino-valhalla-graph-v1",
+  "coverage": "worldwide-gap",
+  "source": {
+    "url": "https://planet.openstreetmap.org/pbf/planet-261116.osm.pbf",
+    "bytes": 95941737359,
+    "sha256": "297f73cc2bb81b753442debb24e5cb0e664236835356dfc578c6e24c1372cf19"
+  },
+  "mask": {
+    "bytes": 2043721,
+    "sha256": "2528c3b9b4fc32f0aef6c37ebca303fcad976dd589c780c5c10eca7467c7a176"
+  },
+  "policy": {
+    "bytes": 1590,
+    "sha256": "7788bc7362a0a8e6da7ee0e9426def28fe7f06a398a83129edfa6c7a53c8e39f"
+  },
+  "builder": {
+    "image": "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228",
+    "platform": "linux/amd64",
+    "threads": 8
+  },
+  "configuration": {
+    "bytes": 9574,
+    "sha256": "fdc4d1e92bd7b6689f634b3630a006152796b7463877cface364544e2116ac8b"
+  },
+  "admin": {
+    "bytes": 540946432,
+    "sha256": "7a21fa152e352d494825d1263baa90fd416950ca10830c063cb2b2a5abb4a2df"
+  },
+  "maskedInputBytes": 62994776129,
+  "archive": {
+    "name": "valhalla_tiles.tar",
+    "tiles": 165327,
+    "bytes": 66259056640,
+    "sha256": "b1f74e965a5687130c7500db0bccd060e7086b1f88e41fd579cf776cd9da969d"
+  }
+}
