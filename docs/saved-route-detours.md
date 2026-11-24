@@ -5,7 +5,10 @@ or a saved Apple Maps / Create a Route archive) and reliably leaves it, Bicino
 calculates a temporary bicycle detour from the rider's position to one rejoin
 point on the original route. The original route stays visible and keeps its
 identity; the detour is discarded when the rider has a confirmed rejoin, and
-original guidance resumes from there.
+original guidance resumes from there. A detour that ends on the original route
+keeps its "Rejoin saved route" cue until that rejoin is confirmed. One that ends
+off the route is discarded once the rider has stayed at its end for 4 s, and
+Bicino asks for the next rejoin point from there.
 
 ## Routing policy
 

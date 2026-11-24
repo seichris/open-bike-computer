@@ -12,6 +12,11 @@ BICINO_URL_SCHEME = bikecomputer-dev
 BICINO_APP_ICON_NAME = AppIconDev
 BICINO_APP_ATTEST_ENVIRONMENT = development
 BICINO_MAP_SERVICE_HOST = maps-dev.8o.vc
+// Bike Lanes tiles: an HTTPS host name, and an absolute path with {z}, {x}
+// and {y}. A full URL cannot go here because "//" starts an xcconfig
+// comment. Leave either empty to hide the layer.
+BICINO_BIKE_LANES_TILE_HOST =
+BICINO_BIKE_LANES_TILE_PATH =
 // Bicino Dev shares the production library identity and catalog with Bicino.
 // Staging validation builds override this setting at build time.
 BICINO_MAP_CATALOG_HOST = maps-share.8o.vc

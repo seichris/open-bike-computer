@@ -55,6 +55,8 @@ enum NavigationInitialStepStrategyV1: Equatable {
 }
 
 struct NavigationRuntimeV1 {
+    nonisolated static let minimumProjectionAmbiguityMeters = 20.0
+
     private(set) var route: NavigationRouteV1?
     private(set) var snapshot: NavigationSnapshotV1?
     private(set) var generation: UInt32 = 0
@@ -255,7 +257,7 @@ struct NavigationRuntimeV1 {
         // Treat projections inside the same 20 m maneuver-arrival band as
         // ambiguous. Continuity then wins on loopbacks, while `.first` keeps a
         // new ride from starting near the end of its first curved maneuver.
-        let ambiguityTolerance = max(accuracy, 20)
+        let ambiguityTolerance = max(accuracy, Self.minimumProjectionAmbiguityMeters)
         let plausible = projections.filter {
             $0.crossTrackDistanceMeters <= closestDistance + ambiguityTolerance
         }

@@ -70,6 +70,7 @@ private extension PresentationDetent {
 struct ContentView: View {
     @EnvironmentObject private var social: SocialCoordinator
     @State private var terrainExperiment: TerrainMapStyle?
+    @State private var bikeLanesTileSource = BikeLanesTileSource.make()
     
     // MARK: - State
     
@@ -155,6 +156,8 @@ struct ContentView: View {
     @AppStorage(IPhoneMapAppearance.realisticElevationDefaultsKey)
     private var usesRealisticMapElevation =
         IPhoneMapAppearance.defaultValue.usesRealisticElevation
+    @AppStorage("iphoneMapAppearance.bikeLanes.v1")
+    private var showsBikeLanes = false
     // Shared with the bike computer's map screens; BLEManager migrates and sends it.
     @AppStorage(FriendMarkerScale.defaultsKey)
     private var friendMarkerScale = FriendMarkerScale.normal.rawValue
@@ -386,6 +389,12 @@ struct ContentView: View {
                         HStack {
                             Spacer()
                             mapControlCluster
+                        }
+                        // An overlay adds no height, so expanded destination
+                        // search keeps its layout. The attribution hides with
+                        // the rest of the map chrome, like MapKit's legal label.
+                        .overlay(alignment: .bottomLeading) {
+                            if bikeLanesOverlay != nil { bikeLanesAttribution }
                         }
                         .padding(.trailing, 12)
                         .padding(
@@ -2012,17 +2021,27 @@ struct ContentView: View {
             }
 
             Section {
-                Toggle(isOn: $usesRealisticMapElevation) {
+                Toggle(isOn: realisticTerrainBinding) {
                     Label("3D Terrain", systemImage: "mountain.2.fill")
                 }
+                .disabled(pausesRealisticTerrain)
                 .accessibilityHint(
-                    "Adds realistic elevation; tilt the map to see the terrain."
+                    pausesRealisticTerrain
+                        ? "Available after map overlays are removed."
+                        : "Requests realistic ground elevation."
                 )
 
                 Toggle(isOn: $offlineMapManager.topographicMapsEnabled) {
                     Label("Topographic Contours", systemImage: "mountain.2")
                 }
                 .accessibilityHint(offlineMapManager.topographyOverlayStatus)
+
+                if bikeLanesTileSource != nil {
+                    Toggle(isOn: $showsBikeLanes) {
+                        Label("Bike Lanes", systemImage: "bicycle")
+                    }
+                    .accessibilityHint("Shows bicycle infrastructure mapped by OpenStreetMap.")
+                }
             }
             if social.session.state != .unavailable {
                 Section("Friends") {
@@ -2058,11 +2077,11 @@ struct ContentView: View {
         }
         .accessibilityLabel("Layers")
         .accessibilityValue(
-            "\(mapAppearance.baseStyle.title), " +
-            (usesRealisticMapElevation ? "3D Terrain on, " : "3D Terrain off, ") +
+            "\(mapAppearance.baseStyle.title), 3D Terrain \(realisticTerrainBinding.wrappedValue ? "on" : "off"), " +
             (offlineMapManager.topographicMapsEnabled
                 ? "Topographic Contours on"
-                : "Topographic Contours off")
+                : "Topographic Contours off") +
+            (bikeLanesTileSource == nil ? "" : ", Bike Lanes \(showsBikeLanes ? "on" : "off")")
         )
     }
 
@@ -2529,7 +2548,57 @@ struct ContentView: View {
     }
     
     // MARK: - Map View
-    
+
+    private var pausesRealisticTerrain: Bool {
+        RealisticTerrainOverlayPolicy.isPaused(
+            showsBikeLanes: bikeLanesOverlay != nil,
+            showsContours: offlineMapManager.topographyOverlay != nil,
+            showsSavedRoutePreview: visibleSavedRouteMapPreview != nil,
+            hasRouteCreationLine: routeCreation.isActive &&
+                routeCreation.mapInput(polylines: routeCreationPolylines)?.polyline != nil,
+            isNavigating: coordinator.isNavigating,
+            hasCalculatedRoute: coordinator.currentRoute != nil,
+            hasOfflineRoute: coordinator.offlineRoutePolyline != nil,
+            hasDetour: coordinator.detourPolyline != nil
+        )
+    }
+
+    private var realisticTerrainBinding: Binding<Bool> {
+        Binding(
+            get: {
+                RealisticTerrainOverlayPolicy.displayedValue(
+                    preference: usesRealisticMapElevation,
+                    isPaused: pausesRealisticTerrain
+                )
+            },
+            set: { requested in
+                let preference = RealisticTerrainOverlayPolicy.preference(
+                    afterRequesting: requested,
+                    current: usesRealisticMapElevation,
+                    isPaused: pausesRealisticTerrain
+                )
+                if preference != usesRealisticMapElevation {
+                    usesRealisticMapElevation = preference
+                }
+            }
+        )
+    }
+
+    private var bikeLanesOverlay: MKTileOverlay? {
+        showsBikeLanes ? bikeLanesTileSource : nil
+    }
+
+    private var bikeLanesAttribution: some View {
+        Link("CyclOSM · © OpenStreetMap",
+             destination: URL(string: "https://www.openstreetmap.org/copyright")!)
+            .font(.caption2)
+            .padding(5)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.leading, 12)
+            // Stay clear of the 52-point control rail at large text sizes.
+            .padding(.trailing, 64)
+    }
+
     private func mapView(
         selectionFrame: CGRect?,
         routePlanningBottomPadding: CGFloat,
@@ -2578,6 +2647,7 @@ struct ContentView: View {
             savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
             topographyOverlay: offlineMapManager.topographyOverlay,
+            bikeLanesOverlay: bikeLanesOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline,
             detourPolyline: coordinator.detourPolyline,
             socialRiders: social.visibleRiders.filter { $0.id != social.profile?.id },
