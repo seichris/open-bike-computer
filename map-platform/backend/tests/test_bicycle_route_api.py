@@ -232,10 +232,17 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
             (400, valhalla_error(443), "no_bicycle_route"),
             (400, valhalla_error(154), "request_too_long"),
         ]
-        trip = json.loads(DUBAI_ROUTE)
-        # Valhalla reports short push-the-bike stretches as pedestrian maneuvers.
-        trip["trip"]["legs"][0]["maneuvers"][3]["travel_mode"] = "pedestrian"
-        cases.append((200, json.dumps(trip).encode(), "no_bicycle_route"))
+        # A long walk is not a bike route; neither is a car stretch.
+        for mode, kilometres in (("pedestrian", 0.101), ("auto", 0.02)):
+            trip = json.loads(DUBAI_ROUTE)
+            trip["trip"]["legs"][0]["maneuvers"][3]["travel_mode"] = mode
+            trip["trip"]["legs"][0]["maneuvers"][3]["length"] = kilometres
+            cases.append((200, json.dumps(trip).encode(), "no_bicycle_route"))
+        walk_only = json.loads(DUBAI_ROUTE)
+        for maneuver in walk_only["trip"]["legs"][0]["maneuvers"]:
+            maneuver["travel_mode"] = "pedestrian"
+            maneuver["length"] = 0.05
+        cases.append((200, json.dumps(walk_only).encode(), "no_bicycle_route"))
         for status, body, reason in cases:
             with self.subTest(reason=reason, body=body[:40]):
                 self.transport.status = status
@@ -251,6 +258,43 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
                     "reason": reason,
                 })
                 self.assertNotIn("25.2", "\n".join(logs.output))
+
+    def test_short_push_stretches_stay_in_the_bike_route(self):
+        trip = json.loads(DUBAI_ROUTE)
+        # Valhalla reports short push-the-bike stretches as pedestrian maneuvers.
+        trip["trip"]["legs"][0]["maneuvers"][3]["travel_mode"] = "pedestrian"
+        trip["trip"]["legs"][0]["maneuvers"][3]["length"] = 0.1
+        self.transport.body = json.dumps(trip).encode()
+        response = self.post(route_payload(profile="gravel"))
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "ready", body)
+        self.assertEqual(body["route"]["travelMode"], "bicycle")
+        self.assertEqual(body["route"]["maneuvers"][3]["lengthMeters"], 100.0)
+        self.assertEqual(body["route"]["profile"], "gravel")
+
+    def test_back_to_back_push_maneuvers_count_as_one_stretch(self):
+        def route_with_walks(*indexes):
+            trip = json.loads(DUBAI_ROUTE)
+            for index in indexes:
+                trip["trip"]["legs"][0]["maneuvers"][index]["travel_mode"] = "pedestrian"
+                trip["trip"]["legs"][0]["maneuvers"][index]["length"] = 0.06
+            return json.dumps(trip).encode()
+
+        # 60 m + 60 m with a turn between them is one 120 m walk.
+        self.transport.body = route_with_walks(2, 3)
+        self.assertEqual(self.post(route_payload()).json()["reason"], "no_bicycle_route")
+        # Two 60 m walks with riding between them are two short pushes.
+        self.transport.body = route_with_walks(2, 4)
+        self.assertEqual(self.post(route_payload()).json()["status"], "ready")
+
+    def test_detours_never_accept_push_stretches(self):
+        trip = json.loads(DUBAI_ROUTE)
+        trip["trip"]["legs"][0]["maneuvers"][3]["travel_mode"] = "pedestrian"
+        trip["trip"]["legs"][0]["maneuvers"][3]["length"] = 0.02
+        self.transport.body = json.dumps(trip).encode()
+        response = self.post(detour_payload(), path="/v1/bicycle-detours")
+        self.assertEqual(response.json()["reason"], "no_bicycle_route")
 
     def test_answers_beyond_the_size_caps_are_terminal_request_too_long(self):
         limits = route_size_limits(150_000)
@@ -487,6 +531,7 @@ class ServiceTests(unittest.TestCase):
         for variable, value in (("MAP_PLATFORM_BICYCLE_ROUTE_MAX_SEPARATION_METERS", "600000"),
                                 ("MAP_PLATFORM_BICYCLE_ROUTE_MAX_CONCURRENT", "0"),
                                 ("MAP_PLATFORM_BICYCLE_ROUTE_TIMEOUT_SECONDS", "1"),
+                                ("MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS", "501"),
                                 ("MAP_PLATFORM_BICYCLE_ROUTE_ENABLED", "maybe")):
             with self.subTest(variable=variable), patch.dict(os.environ, {variable: value}), \
                     self.assertRaises(ValueError):
@@ -501,5 +546,18 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(parsed.locale, "en-AE")
 
 
+class StrictPushRouteTests(BicycleRouteAPITests):
+    environment_overrides = {"MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS": "0"}
+
+    def test_push_allowance_can_be_turned_off(self):
+        trip = json.loads(DUBAI_ROUTE)
+        trip["trip"]["legs"][0]["maneuvers"][3]["travel_mode"] = "pedestrian"
+        trip["trip"]["legs"][0]["maneuvers"][3]["length"] = 0.02
+        self.transport.body = json.dumps(trip).encode()
+        response = self.post(route_payload())
+        self.assertEqual(response.json()["reason"], "no_bicycle_route")
+
+
 if __name__ == "__main__":
     unittest.main()
+
