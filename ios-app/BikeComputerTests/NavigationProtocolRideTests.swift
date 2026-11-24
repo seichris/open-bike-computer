@@ -2053,6 +2053,18 @@ extension NavigationProtocolTests {
             "a registered bike computer keeps device screen settings"
         )
         assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowHardwareSettings(
+                knownDeviceCount: 0
+            ),
+            "first-time Bicino setup hides hardware settings"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowHardwareSettings(
+                knownDeviceCount: 1
+            ),
+            "a registered bike computer shows hardware settings in its menu"
+        )
+        assert(
             !BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
                 hasEverConnectedBikeComputer: false,
                 sensorProfileCount: 0
