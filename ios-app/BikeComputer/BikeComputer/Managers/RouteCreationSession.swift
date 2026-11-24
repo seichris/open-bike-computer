@@ -3,13 +3,14 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// The travel modes Create a Route offers: three bicycle preferences from
-/// Bicino's route service, and Apple Maps' Drive and Walk.
+/// The travel modes Create a Route offers: four bicycle preferences from
+/// Bicino's route service, and Apple Maps' Walk. A remembered mode that is no
+/// longer offered (Drive) falls back to Everyday.
 enum RouteCreatorTravelMode: String, CaseIterable, Identifiable {
     case road
     case gravel
     case everyday
-    case driving
+    case mountain
     case walking
 
     static let defaultsKey = "routeCreator.travelMode.v1"
@@ -18,8 +19,7 @@ enum RouteCreatorTravelMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .road, .gravel, .everyday: bicycleProfile?.title ?? ""
-        case .driving: "Drive"
+        case .road, .gravel, .everyday, .mountain: bicycleProfile?.title ?? ""
         case .walking: "Walk"
         }
     }
@@ -29,15 +29,15 @@ enum RouteCreatorTravelMode: String, CaseIterable, Identifiable {
         case .road: .road
         case .gravel: .gravel
         case .everyday: .everyday
-        case .driving, .walking: nil
+        case .mountain: .mountain
+        case .walking: nil
         }
     }
 
     /// Apple Maps' mode, also used where the bicycle service has no route.
     var transportType: MKDirectionsTransportType {
         switch self {
-        case .road, .gravel, .everyday: RouteTransportTypes.cycling
-        case .driving: .automobile
+        case .road, .gravel, .everyday, .mountain: RouteTransportTypes.cycling
         case .walking: .walking
         }
     }
@@ -243,6 +243,29 @@ final class RouteCreationSession: ObservableObject {
     func reverse() {
         notice = nil
         draft.reverse()
+    }
+
+    /// Whether Shortest Path has stops to reorder.
+    var canReorderForShortestPath: Bool { draft.canReorderForShortestPath }
+
+    /// Shortest Path: visits the stops between the start and the destination
+    /// in the order with the shortest straight-line ride.
+    func reorderForShortestPath() {
+        var updated = draft
+        guard updated.reorderForShortestPath() else {
+            notice = draft.canReorderForShortestPath ? Self.alreadyShortestNotice : nil
+            return
+        }
+        notice = nil
+        draft = updated
+    }
+
+    static let alreadyShortestNotice = "The stops are already in the shortest order."
+
+    /// Tapping a lighter route on the map uses it for its leg.
+    func selectAlternative(routeID: UUID) {
+        guard isActive else { return }
+        planner.selectAlternative(routeID: routeID)
     }
 
     func retry() {

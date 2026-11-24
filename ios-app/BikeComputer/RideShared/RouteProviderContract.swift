@@ -68,7 +68,7 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .activeOnly
     )
 
-    /// A Road, Gravel or Everyday Create a Route plan saved through the
+    /// A Road, Gravel, Everyday or Mountain Create a Route plan saved through the
     /// phone's save sheet. Phone only like a saved Apple Maps plan: kept on
     /// this iPhone, never sent to the Watch or shared.
     static let valhallaSavedOnPhone = RouteProviderMetadataV1(

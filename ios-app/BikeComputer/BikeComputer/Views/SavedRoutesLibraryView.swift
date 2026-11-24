@@ -84,7 +84,7 @@ struct RouteSaveSheet: View {
         interaction.draft?.archive.route.provider == RouteProviderPolicyV1.mapKitSavedOnPhone
     }
 
-    /// A Road, Gravel or Everyday route from Bicino's bicycle route service.
+    /// A Road, Gravel, Everyday or Mountain route from Bicino's bicycle route service.
     private var isPlannedBicinoRoute: Bool {
         interaction.draft?.archive.route.provider == RouteProviderPolicyV1.valhallaSavedOnPhone
     }

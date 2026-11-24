@@ -32,13 +32,25 @@ struct MapRouteCreation: Equatable {
         }
     }
 
+    /// A leg's route that is not selected, drawn lighter; tapping it selects it.
+    struct Alternative: Equatable {
+        let routeID: UUID
+        let polyline: MKPolyline
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.routeID == rhs.routeID && lhs.polyline === rhs.polyline
+        }
+    }
+
     let stops: [Stop]
     /// The planned route's identity; nil while no plan is ready.
     let routeID: UUID?
     let polyline: MKPolyline?
+    var alternatives: [Alternative] = []
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.stops == rhs.stops && lhs.routeID == rhs.routeID && lhs.polyline === rhs.polyline
+        lhs.stops == rhs.stops && lhs.routeID == rhs.routeID && lhs.polyline === rhs.polyline &&
+            lhs.alternatives == rhs.alternatives
     }
 }
 
@@ -71,6 +83,7 @@ final class RouteCreationMapLayer {
 
     private(set) var displayed: MapRouteCreation?
     private(set) var polyline: MKPolyline?
+    private var alternativePolylines: [MKPolyline] = []
     private var annotations: [RouteCreationStopAnnotation] = []
     private var fittedRouteID: UUID?
     /// A stop or route changed while the panel's layout was unsettled.
@@ -83,6 +96,31 @@ final class RouteCreationMapLayer {
     func owns(_ overlay: MKOverlay) -> Bool {
         guard let polyline else { return false }
         return overlay === polyline
+    }
+
+    func ownsAlternative(_ overlay: MKOverlay) -> Bool {
+        alternativePolylines.contains { $0 === overlay }
+    }
+
+    /// The alternative whose line is nearest a tap, or nil when the tap is
+    /// nearer the selected route or misses every line.
+    func alternativeRouteID(at point: CGPoint, on mapView: MKMapView) -> UUID? {
+        guard let creation = displayed, !creation.alternatives.isEmpty else { return nil }
+        var candidates = creation.alternatives.map {
+            MapRouteSelectionCandidate(id: $0.routeID, points: Self.screenPoints(for: $0.polyline, on: mapView))
+        }
+        if let routeID = creation.routeID, let polyline = creation.polyline {
+            candidates.append(MapRouteSelectionCandidate(
+                id: routeID,
+                points: Self.screenPoints(for: polyline, on: mapView)
+            ))
+        }
+        let nearest = MapRouteSelectionPolicy.routeID(
+            nearestTo: point,
+            candidates: candidates,
+            preferredRouteID: creation.routeID
+        )
+        return nearest == creation.routeID ? nil : nearest
     }
 
     /// Returns true when this call removed the layer's content.
@@ -110,6 +148,19 @@ final class RouteCreationMapLayer {
                 mapView.addOverlay(polyline, level: .aboveRoads)
             }
         }
+        let alternatives = creation.alternatives.map(\.polyline)
+        if !alternatives.elementsEqual(alternativePolylines, by: ===) {
+            mapView.removeOverlays(alternativePolylines)
+            alternativePolylines = alternatives
+            // Beneath the selected route, which stays on top where they share roads.
+            for alternative in alternatives {
+                if let polyline {
+                    mapView.insertOverlay(alternative, below: polyline)
+                } else {
+                    mapView.addOverlay(alternative, level: .aboveRoads)
+                }
+            }
+        }
 
         let routeChanged = creation.routeID != nil && creation.routeID != fittedRouteID
         if routeChanged { fittedRouteID = creation.routeID }
@@ -131,8 +182,10 @@ final class RouteCreationMapLayer {
     func clear(from mapView: MKMapView) -> Bool {
         let hadContent = displayed != nil || polyline != nil || !annotations.isEmpty
         if let polyline { mapView.removeOverlay(polyline) }
+        mapView.removeOverlays(alternativePolylines)
         mapView.removeAnnotations(annotations)
         polyline = nil
+        alternativePolylines = []
         annotations = []
         displayed = nil
         fittedRouteID = nil
@@ -180,6 +233,13 @@ final class RouteCreationMapLayer {
     }
 
     // MARK: - Private
+
+    private static func screenPoints(for polyline: MKPolyline, on mapView: MKMapView) -> [CGPoint] {
+        guard polyline.pointCount > 0 else { return [] }
+        var coordinates = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(), count: polyline.pointCount)
+        polyline.getCoordinates(&coordinates, range: NSRange(location: 0, length: polyline.pointCount))
+        return coordinates.map { mapView.convert($0, toPointTo: mapView) }
+    }
 
     private func updateAnnotations(_ stops: [MapRouteCreation.Stop], on mapView: MKMapView) {
         var kept: [RouteCreationStopAnnotation] = []

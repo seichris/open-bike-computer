@@ -157,7 +157,7 @@ struct MultiStopRouteRequest: Equatable {
     let places: [MultiStopRoutePlace]
     /// Apple Maps' mode: cycling for every bicycle profile.
     let transportType: MKDirectionsTransportType
-    /// Road, Gravel or Everyday asks Bicino's bicycle route service first.
+    /// Road, Gravel, Everyday or Mountain asks Bicino's bicycle route service first.
     var bicycleProfile: BicycleRouteProfileV1? = nil
 }
 
@@ -251,6 +251,26 @@ struct MultiStopRouteDraft: Equatable {
         stops.reverse()
     }
 
+    /// Shortest Path needs two or more stops between the start and the
+    /// destination, and every stop needs a place.
+    var canReorderForShortestPath: Bool {
+        stops.count >= 4 && stops.allSatisfy { $0.place != nil }
+    }
+
+    /// Keeps the start and the destination and visits the stops between them
+    /// in the order with the shortest straight-line ride. Returns false when
+    /// it cannot reorder or the current order is already the shortest.
+    @discardableResult
+    mutating func reorderForShortestPath() -> Bool {
+        guard canReorderForShortestPath else { return false }
+        let coordinates = stops.compactMap(\.place?.mapCoordinate)
+        guard coordinates.count == stops.count,
+              let order = MultiStopRouteOrdering.shortestOrder(coordinates),
+              order != Array(stops.indices) else { return false }
+        stops = order.map { stops[$0] }
+        return true
+    }
+
     mutating func setPlace(_ place: MultiStopRoutePlace?, forStopID id: UUID) {
         guard let index = stops.firstIndex(where: { $0.id == id }) else { return }
         stops[index].place = place
@@ -294,6 +314,67 @@ struct MultiStopRouteDraft: Equatable {
             transportType: transportType,
             bicycleProfile: bicycleProfile
         )
+    }
+}
+
+/// The visiting order with the shortest straight-line ride, for Shortest
+/// Path. Road distances can differ, so it is a good order, not a promise.
+enum MultiStopRouteOrdering {
+    /// Below this saving the current order is kept, so float noise never
+    /// shuffles stops.
+    static let minimumSavingMeters = 1.0
+
+    /// Indices of `coordinates` in the new order, first and last fixed, or nil
+    /// when there are no two intermediate points to swap. Exact (Held-Karp):
+    /// at most 8 intermediate stops make 2^8 × 8 × 8 steps.
+    static func shortestOrder(_ coordinates: [RouteCoordinateV1]) -> [Int]? {
+        let count = coordinates.count
+        guard count >= 4, count <= MultiStopRouteDraft.maximumStops else { return nil }
+        let distance = coordinates.map { from in
+            coordinates.map { to in NavigationGeometryV1.distance(from: from, to: to) }
+        }
+        let middle = Array(1..<(count - 1))
+        let full = (1 << middle.count) - 1
+        // cost[mask][j]: from the start through the stops in mask, ending at middle[j].
+        var cost = Array(repeating: Array(repeating: Double.infinity, count: middle.count), count: full + 1)
+        var previous = Array(repeating: Array(repeating: -1, count: middle.count), count: full + 1)
+        for j in middle.indices {
+            cost[1 << j][j] = distance[0][middle[j]]
+        }
+        for mask in 1...full {
+            for j in middle.indices where mask & (1 << j) != 0 && cost[mask][j] < .infinity {
+                for k in middle.indices where mask & (1 << k) == 0 {
+                    let next = mask | (1 << k)
+                    let candidate = cost[mask][j] + distance[middle[j]][middle[k]]
+                    if candidate < cost[next][k] {
+                        cost[next][k] = candidate
+                        previous[next][k] = j
+                    }
+                }
+            }
+        }
+        var best = Double.infinity
+        var last = -1
+        for j in middle.indices {
+            let total = cost[full][j] + distance[middle[j]][count - 1]
+            if total < best {
+                best = total
+                last = j
+            }
+        }
+        guard last >= 0, best.isFinite else { return nil }
+        var visited: [Int] = []
+        var mask = full
+        var current = last
+        while current >= 0 {
+            visited.append(middle[current])
+            let before = previous[mask][current]
+            mask &= ~(1 << current)
+            current = before
+        }
+        let order = [0] + visited.reversed() + [count - 1]
+        let currentLength = (0..<(count - 1)).reduce(0.0) { $0 + distance[$1][$1 + 1] }
+        return best < currentLength - minimumSavingMeters ? order : Array(0..<count)
     }
 }
 

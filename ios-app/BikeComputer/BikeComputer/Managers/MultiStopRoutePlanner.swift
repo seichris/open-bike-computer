@@ -9,8 +9,16 @@ struct MultiStopRoutePlan: Identifiable {
     var id: UUID { route.id }
     let request: MultiStopRouteRequest
     /// Canonical legs, one per consecutive pair of stops: all from Bicino's
-    /// bicycle route service or all from Apple Maps.
+    /// bicycle route service or all from Apple Maps. Each is the leg's
+    /// selected option.
     let legs: [NavigationRouteV1]
+    /// Every route offered for each leg, the provider's preferred one first;
+    /// the map draws the ones not selected as alternatives.
+    let legOptions: [[NavigationRouteV1]]
+    /// The selected option of each leg, an index into `legOptions`.
+    let selectedOptions: [Int]
+    /// The selected legs' surfaces added up, when every leg has a breakdown.
+    let surfaces: RouteSurfaceBreakdownV1?
     /// The stitched active-only route shown in the preview.
     let route: NavigationRouteV1
     /// The same route with the explicit phone-only saved scope.
@@ -20,7 +28,7 @@ struct MultiStopRoutePlan: Identifiable {
     let carDirectionLegs: [Int]
     /// The car legs among them that use highways or toll roads.
     let carDirectionLegsWithHighwaysOrTolls: [Int]
-    /// Set when a Road, Gravel or Everyday request was answered by Apple
+    /// Set when a Road, Gravel, Everyday or Mountain request was answered by Apple
     /// Maps cycling directions instead of Bicino's bicycle route service.
     let bicycleProfileNotice: String?
 
@@ -29,6 +37,15 @@ struct MultiStopRoutePlan: Identifiable {
     }
 
     var usesCarDirections: Bool { !carDirectionLegs.isEmpty }
+
+    /// The leg options not selected, with the leg each belongs to.
+    var alternatives: [(leg: Int, route: NavigationRouteV1)] {
+        legOptions.enumerated().flatMap { leg, options in
+            options.enumerated()
+                .filter { $0.offset != selectedOptions[leg] }
+                .map { (leg: leg, route: $0.element) }
+        }
+    }
 
     var carDirectionsNotice: String? {
         guard usesCarDirections else { return nil }
@@ -56,12 +73,13 @@ enum MultiStopRoutePlanFailure: Equatable {
     }
 }
 
-/// Calculates Create a Route plans, one leg per pair of stops. Road, Gravel
-/// and Everyday ask Bicino's bicycle route service for every leg; where it
-/// has no route, or is not offered, the whole plan uses Apple Maps cycling
-/// directions instead, so a plan never mixes providers. Drive and Walk use
-/// Apple Maps. It owns its requests and never touches the coordinator's
-/// direct-navigation plan, rerouting or active navigation.
+/// Calculates Create a Route plans, one leg per pair of stops. Road, Gravel,
+/// Everyday and Mountain ask Bicino's bicycle route service for every leg;
+/// where it has no route, or is not offered, the whole plan uses Apple Maps
+/// cycling directions instead, so a plan never mixes providers. Walk uses
+/// Apple Maps. Each leg keeps the alternatives its provider offered, and the
+/// rider can pick one per leg. It owns its requests and never touches the
+/// coordinator's direct-navigation plan, rerouting or active navigation.
 @MainActor
 final class MultiStopRoutePlanner: ObservableObject {
     enum State {
@@ -85,6 +103,9 @@ final class MultiStopRoutePlanner: ObservableObject {
     private var activeServiceTask: Task<Void, Never>?
     private var cachedLegs: [LegKey: PlannedLeg] = [:]
     private var cachedLegOrder: [LegKey] = []
+    /// The legs behind the ready plan, so picking an alternative re-stitches
+    /// without asking any provider again.
+    private var readyLegs: (request: MultiStopRouteRequest, source: LegSource, keys: [LegKey])?
     /// A bicycle-profile request that Apple Maps answers instead, and why.
     private var appleFallback: (request: MultiStopRouteRequest, reason: AppleFallbackReason)?
 
@@ -108,13 +129,23 @@ final class MultiStopRoutePlanner: ObservableObject {
         }
     }
 
-    /// A calculated leg and whether it is car directions standing in for
+    /// One route for a leg and whether it is car directions standing in for
     /// unavailable cycling directions, and if so whether that car route uses
     /// highways or toll roads.
-    private struct PlannedLeg {
+    private struct LegOption {
         let route: NavigationRouteV1
-        let usesCarDirections: Bool
-        let usesHighwaysOrTolls: Bool
+        var usesCarDirections = false
+        var usesHighwaysOrTolls = false
+        var surfaces: RouteSurfaceBreakdownV1?
+    }
+
+    /// A calculated leg: the routes its provider offered, preferred first,
+    /// and the one the rider uses.
+    private struct PlannedLeg {
+        let options: [LegOption]
+        var selected = 0
+
+        var chosen: LegOption { options[selected] }
     }
 
     /// Instructions are localized, so a leg is only reused in its locale, and
@@ -179,6 +210,24 @@ final class MultiStopRoutePlanner: ObservableObject {
         state = .idle
     }
 
+    /// Uses the leg option with this route ID instead of the leg's current
+    /// one. Only the ready plan's legs are searched; the choice is kept for
+    /// that leg while it stays cached.
+    func selectAlternative(routeID: UUID) {
+        guard case .ready = state, let context = readyLegs else { return }
+        for key in context.keys {
+            guard var leg = cachedLegs[key],
+                  let option = leg.options.firstIndex(where: { $0.route.id == routeID }) else { continue }
+            guard option != leg.selected else { return }
+            leg.selected = option
+            cachedLegs[key] = leg
+            let legs = context.keys.compactMap { cachedLegs[$0] }
+            guard legs.count == context.keys.count else { return }
+            finish(request: context.request, source: context.source, keys: context.keys, legs: legs)
+            return
+        }
+    }
+
     private var isIdle: Bool {
         if case .idle = state { return true }
         return false
@@ -186,6 +235,7 @@ final class MultiStopRoutePlanner: ObservableObject {
 
     private func invalidate() {
         generation &+= 1
+        readyLegs = nil
         activeDirections?.cancel()
         activeDirections = nil
         if let activeServiceTask {
@@ -255,7 +305,17 @@ final class MultiStopRoutePlanner: ObservableObject {
     ) {
         guard generation == self.generation else { return }
         guard let index = legs.firstIndex(where: { $0 == nil }) else {
-            finish(request: request, source: legSource, legs: legs.compactMap { $0 })
+            let places = request.places
+            let keys = places.indices.dropLast().map { index in
+                legKey(
+                    from: places[index],
+                    to: places[index + 1],
+                    request: request,
+                    source: legSource,
+                    localeIdentifier: localeIdentifier
+                )
+            }
+            finish(request: request, source: legSource, keys: keys, legs: legs.compactMap { $0 })
             return
         }
         state = .calculating(
@@ -279,7 +339,7 @@ final class MultiStopRoutePlanner: ObservableObject {
         directionsRequest.source = source.mapItem
         directionsRequest.destination = destination.mapItem
         directionsRequest.transportType = request.transportType
-        directionsRequest.requestsAlternateRoutes = false
+        directionsRequest.requestsAlternateRoutes = true
 
         let directions = CyclingFallbackDirectionsTask(
             request: directionsRequest,
@@ -302,25 +362,20 @@ final class MultiStopRoutePlanner: ObservableObject {
                     )
                 ))
             case .success(let routes):
-                guard let (leg, mapKitRoute) = Self.preferredLeg(
+                let options = Self.orderedOptions(
                     from: routes,
                     source: source,
                     destination: destination,
                     localeIdentifier: localeIdentifier
-                ) else {
+                )
+                guard !options.isEmpty else {
                     self.state = .failed(.leg(
                         index: index,
                         message: Self.noRouteMessage(from: source, to: destination)
                     ))
                     return
                 }
-                let usesCarDirections = mapKitRoute is CyclingFallbackCarRoute
-                let planned = PlannedLeg(
-                    route: leg,
-                    usesCarDirections: usesCarDirections,
-                    usesHighwaysOrTolls: usesCarDirections &&
-                        (mapKitRoute.hasHighways || mapKitRoute.hasTolls)
-                )
+                let planned = PlannedLeg(options: options)
                 self.store(planned, for: self.legKey(
                     from: source,
                     to: destination,
@@ -362,21 +417,27 @@ final class MultiStopRoutePlanner: ObservableObject {
             originLabel: source.label,
             destinationLabel: destination.label,
             profile: profile,
-            localeIdentifier: localeIdentifier
+            localeIdentifier: localeIdentifier,
+            alternatives: BicycleRouteServiceContractV1.maximumAlternatives,
+            surfaces: true
         )
         activeServiceTask = Task { [weak self] in
             let outcome = await bicycleRoutes.route(for: query)
             guard let self, self.generation == generation else { return }
             self.activeServiceTask = nil
             switch outcome {
-            case .route(let leg):
-                guard leg.provider == RouteProviderPolicyV1.valhallaDetour,
-                      leg.transportType == .cycling else {
+            case .routes(let routes):
+                let isBicycleRoute: (NavigationRouteV1) -> Bool = {
+                    $0.provider == RouteProviderPolicyV1.valhallaDetour && $0.transportType == .cycling
+                }
+                guard let first = routes.first, isBicycleRoute(first.route) else {
                     self.appleFallback = (request, .notOffered)
                     self.start(request)
                     return
                 }
-                let planned = PlannedLeg(route: leg, usesCarDirections: false, usesHighwaysOrTolls: false)
+                let planned = PlannedLeg(options: routes.filter { isBicycleRoute($0.route) }.map {
+                    LegOption(route: $0.route, surfaces: $0.surfaces)
+                })
                 self.store(planned, for: self.legKey(
                     from: source,
                     to: destination,
@@ -434,9 +495,11 @@ final class MultiStopRoutePlanner: ObservableObject {
     private func finish(
         request: MultiStopRouteRequest,
         source: LegSource,
+        keys: [LegKey],
         legs plannedLegs: [PlannedLeg]
     ) {
-        let legs = plannedLegs.map(\.route)
+        let chosen = plannedLegs.map(\.chosen)
+        let legs = chosen.map(\.route)
         do {
             let route = try MultiStopRouteStitcher.stitch(
                 legs: legs,
@@ -451,16 +514,21 @@ final class MultiStopRoutePlanner: ObservableObject {
                 now: createdAt,
                 limits: limits
             )
+            let surfaces = chosen.map(\.surfaces)
+            readyLegs = (request, source, keys)
             state = .ready(MultiStopRoutePlan(
                 request: request,
                 legs: legs,
+                legOptions: plannedLegs.map { $0.options.map(\.route) },
+                selectedOptions: plannedLegs.map(\.selected),
+                surfaces: surfaces.contains { $0 == nil }
+                    ? nil
+                    : surfaces.compactMap { $0 }.reduce(.zero, +),
                 route: route,
                 draft: draft,
-                carDirectionLegs: plannedLegs.indices.filter {
-                    plannedLegs[$0].usesCarDirections
-                },
-                carDirectionLegsWithHighwaysOrTolls: plannedLegs.indices.filter {
-                    plannedLegs[$0].usesHighwaysOrTolls
+                carDirectionLegs: chosen.indices.filter { chosen[$0].usesCarDirections },
+                carDirectionLegsWithHighwaysOrTolls: chosen.indices.filter {
+                    chosen[$0].usesHighwaysOrTolls
                 },
                 bicycleProfileNotice: bicycleProfileNotice(for: request, source: source)
             ))
@@ -502,15 +570,16 @@ final class MultiStopRoutePlanner: ObservableObject {
         }
     }
 
-    /// The same preference as direct planning: fastest, then shortest, then
-    /// MapKit's order, skipping any response that cannot be normalized safely.
-    /// Returns the canonical leg and the MapKit route it came from.
-    private static func preferredLeg(
+    /// Apple Maps routes in the same preference as direct planning: fastest,
+    /// then shortest, then MapKit's order, skipping any response that cannot
+    /// be normalized safely. At most the preferred route and as many
+    /// alternatives as the bicycle route service offers.
+    private static func orderedOptions(
         from routes: [MKRoute],
         source: MultiStopRoutePlace,
         destination: MultiStopRoutePlace,
         localeIdentifier: String
-    ) -> (NavigationRouteV1, MKRoute)? {
+    ) -> [LegOption] {
         let ordered = routes.enumerated().sorted { lhs, rhs in
             if lhs.element.expectedTravelTime != rhs.element.expectedTravelTime {
                 return lhs.element.expectedTravelTime < rhs.element.expectedTravelTime
@@ -520,18 +589,23 @@ final class MultiStopRoutePlanner: ObservableObject {
             }
             return lhs.offset < rhs.offset
         }
-        for candidate in ordered {
-            if let leg = try? MapKitRouteAdapter.route(
+        let options = ordered.lazy.compactMap { candidate -> LegOption? in
+            guard let leg = try? MapKitRouteAdapter.route(
                 from: candidate.element,
                 fallbackSource: source.wgs84Coordinate,
                 sourceLabel: source.label,
                 destinationLabel: destination.label,
                 localeIdentifier: localeIdentifier
-            ) {
-                return (leg, candidate.element)
-            }
+            ) else { return nil }
+            let usesCarDirections = candidate.element is CyclingFallbackCarRoute
+            return LegOption(
+                route: leg,
+                usesCarDirections: usesCarDirections,
+                usesHighwaysOrTolls: usesCarDirections &&
+                    (candidate.element.hasHighways || candidate.element.hasTolls)
+            )
         }
-        return nil
+        return Array(options.prefix(1 + BicycleRouteServiceContractV1.maximumAlternatives))
     }
 
     private static func noRouteMessage(
