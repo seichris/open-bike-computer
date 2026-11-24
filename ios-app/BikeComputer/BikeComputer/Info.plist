@@ -19,6 +19,10 @@
 
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoBikeLanesTileHost</key>
+	<string>$(BICINO_BIKE_LANES_TILE_HOST)</string>
+	<key>BicinoBikeLanesTilePath</key>
+	<string>$(BICINO_BIKE_LANES_TILE_PATH)</string>
 	<key>BicinoURLScheme</key>
 	<string>$(BICINO_URL_SCHEME)</string>
 	<key>CFBundleURLTypes</key>

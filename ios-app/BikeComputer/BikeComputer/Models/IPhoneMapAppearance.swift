@@ -35,6 +35,46 @@ enum IPhoneMapBaseStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// MapKit shows flat ground while an overlay it did not create is on the map,
+/// and returns to realistic ground when the last one is removed; MapKit
+/// Directions polylines follow the terrain instead (WWDC22, "What's new in
+/// MapKit"). The inputs mirror the overlays `MapViewContainer` installs, so the
+/// 3D Terrain row can show what the rider sees without changing the saved
+/// preference. Calculated routes and alternatives are Directions polylines.
+enum RealisticTerrainOverlayPolicy {
+    nonisolated static func isPaused(
+        showsBikeLanes: Bool,
+        showsContours: Bool,
+        showsSavedRoutePreview: Bool,
+        hasRouteCreationLine: Bool,
+        isNavigating: Bool,
+        hasCalculatedRoute: Bool,
+        hasOfflineRoute: Bool,
+        hasDetour: Bool
+    ) -> Bool {
+        showsBikeLanes || showsContours || showsSavedRoutePreview ||
+            // Create a Route draws its planned line only outside navigation.
+            (!isNavigating && hasRouteCreationLine) ||
+            // MapViewContainer draws these two only while navigating, and the
+            // offline line only without a calculated route.
+            (isNavigating && !hasCalculatedRoute && hasOfflineRoute) ||
+            (isNavigating && hasDetour)
+    }
+
+    nonisolated static func displayedValue(preference: Bool, isPaused: Bool) -> Bool {
+        preference && !isPaused
+    }
+
+    /// The paused row is disabled; a late write must not replace the preference.
+    nonisolated static func preference(
+        afterRequesting requested: Bool,
+        current: Bool,
+        isPaused: Bool
+    ) -> Bool {
+        isPaused ? current : requested
+    }
+}
+
 struct IPhoneMapAppearance: Equatable {
     static let baseStyleDefaultsKey = "iphoneMapAppearance.baseStyle.v1"
     static let realisticElevationDefaultsKey =

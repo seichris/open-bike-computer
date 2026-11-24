@@ -126,6 +126,14 @@ private final class PreviewRecordingMap: MKMapView {
         items.insert(overlay, at: index)
         levels.append(level)
     }
+    override func insertOverlay(_ overlay: MKOverlay, above sibling: MKOverlay) {
+        guard let index = items.firstIndex(where: { $0 === sibling }) else {
+            preconditionFailure("insertOverlay(_:above:) needs a sibling on the map")
+        }
+        additions += 1
+        items.insert(overlay, at: index + 1)
+        levels.append(.aboveRoads) // The sibling's level; these tests use only aboveRoads.
+    }
     override func addOverlays(_ overlays: [MKOverlay], level: MKOverlayLevel) {
         for overlay in overlays { addOverlay(overlay, level: level) }
     }
@@ -180,6 +188,7 @@ struct SavedRouteMapPreviewTests {
         try testExpiryAndDeletion()
         try testFactoryAndCoordinateBoundary()
         try testOverlayOwnershipAndCamera()
+        testBikeLanesOverlayOrder()
         try testSettingsAction()
         try testSavedMapKitPreview()
         try testOfflineNavigationOverlayOwnership()
@@ -395,6 +404,51 @@ struct SavedRouteMapPreviewTests {
                 includesSavedRoutePreview: false),
             savedRoutePreview: preview, savedRoutePreviewBottomPadding: padding,
             isRouteCalculationActive: calculating)
+    }
+
+    private static func testBikeLanesOverlayOrder() {
+        func order(_ map: MKMapView) -> [ObjectIdentifier] {
+            map.overlays.map { ObjectIdentifier($0 as AnyObject) }
+        }
+        func ids(_ overlays: MKOverlay...) -> [ObjectIdentifier] {
+            overlays.map { ObjectIdentifier($0 as AnyObject) }
+        }
+        for contoursFirst in [true, false] {
+            let map = PreviewRecordingMap()
+            let coordinator = MapViewContainer.Coordinator()
+            let route = MKPolyline()
+            map.addOverlay(route, level: .aboveRoads)
+            let contours = MKTileOverlay(urlTemplate: nil)
+            let lanes = MKTileOverlay(urlTemplate: nil)
+            if contoursFirst {
+                coordinator.updateTopographyOverlay(contours, on: map)
+                coordinator.updateBikeLanesOverlay(lanes, on: map)
+            } else {
+                coordinator.updateBikeLanesOverlay(lanes, on: map)
+                coordinator.updateTopographyOverlay(contours, on: map)
+            }
+            let when = contoursFirst ? "contours first" : "lanes first"
+            check(order(map) == ids(contours, lanes, route), "Bike lanes sit between contours and the route (\(when))")
+
+            let refreshed = MKTileOverlay(urlTemplate: nil)
+            coordinator.updateTopographyOverlay(refreshed, on: map)
+            check(order(map) == ids(refreshed, lanes, route), "Replacing contours keeps the lanes above them (\(when))")
+
+            let additions = map.additions
+            coordinator.updateBikeLanesOverlay(lanes, on: map)
+            check(map.additions == additions, "Unchanged bike lanes do not churn overlays (\(when))")
+
+            coordinator.updateBikeLanesOverlay(nil, on: map)
+            check(order(map) == ids(refreshed, route), "Turning lanes off removes only the lanes (\(when))")
+            check(coordinator.mapView(map, rendererFor: lanes) is MKTileOverlayRenderer,
+                  "Bike lanes never use the blue route renderer (\(when))")
+
+            coordinator.updateBikeLanesOverlay(lanes, on: map)
+            check(order(map) == ids(refreshed, lanes, route), "Turning lanes on again returns above contours (\(when))")
+            coordinator.updateTopographyOverlay(nil, on: map)
+            check(order(map) == ids(lanes, route), "Lanes stay below the route without contours (\(when))")
+            check(map.fits.isEmpty, "Bike lanes cannot move the camera (\(when))")
+        }
     }
 
     private static func testOverlayOwnershipAndCamera() throws {
