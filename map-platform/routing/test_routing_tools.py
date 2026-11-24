@@ -11,9 +11,10 @@ from unittest.mock import patch
 
 from shapely.geometry import Point, box, mapping
 
-from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, file_identity, prepare_inputs
+from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, file_identity, prepare_inputs
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
+import probe_graph
 import probe_profiles
 
 
@@ -82,6 +83,60 @@ class CoverageTests(unittest.TestCase):
             result = subprocess.check_output(["osmium", "cat", roads, "-f", "opl"], text=True)
             self.assertIn("w11 ", result)
             self.assertIn("r20 ", result)
+
+
+class BuildArgumentTests(unittest.TestCase):
+    PLANET = "https://planet.openstreetmap.org/pbf/planet-261116.osm.pbf"
+
+    def test_worldwide_gap_needs_a_mask_and_planet_takes_none(self):
+        mask = Path("mask.geojson")
+        self.assertIsNone(argument_error("worldwide-gap", False, mask, self.PLANET))
+        self.assertIn("require a mask", argument_error("worldwide-gap", False, None, self.PLANET))
+        self.assertIsNone(argument_error("planet", False, None, self.PLANET))
+        self.assertIn("take no mask", argument_error("planet", False, mask, self.PLANET))
+
+    def test_release_builds_need_a_dated_planet_snapshot(self):
+        for coverage in ("worldwide-gap", "planet"):
+            mask = Path("mask.geojson") if coverage == "worldwide-gap" else None
+            self.assertIn("dated", argument_error(coverage, False, mask, "https://example.com/planet-latest.osm.pbf"))
+        self.assertIsNone(argument_error("planet", True, None, "file:///sample.osm.pbf"))
+
+
+class ProbeExpectationTests(unittest.TestCase):
+    LEGS = [{"shape": "abc"}]
+
+    def test_planet_override_and_coverage_filter(self):
+        fairview = {"name": "Fairview", "route": False, "planet": True}
+        self.assertFalse(probe_graph.expects_route(fairview, "worldwide-gap"))
+        self.assertTrue(probe_graph.expects_route(fairview, "planet"))
+        city = {"name": "Amsterdam", "route": True, "coverages": ["planet"]}
+        self.assertFalse(probe_graph.applies(city, "worldwide-gap"))
+        self.assertTrue(probe_graph.applies(city, "planet"))
+        self.assertTrue(probe_graph.applies(fairview, "worldwide-gap"))
+
+    def test_push_segments_pass_only_where_allowed(self):
+        strict = {"name": "Dubai", "route": True}
+        push = {"name": "Paris", "route": True, "pushAllowed": True}
+        both = ["bicycle", "pedestrian"]
+        self.assertTrue(probe_graph.passed(strict, "planet", self.LEGS, ["bicycle"], 1.2, None))
+        self.assertFalse(probe_graph.passed(strict, "planet", self.LEGS, both, 1.2, None))
+        self.assertTrue(probe_graph.passed(push, "planet", self.LEGS, both, 1.2, None))
+        self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["pedestrian"], 1.2, None))
+        self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["bicycle", "auto"], 1.2, None))
+
+    def test_expected_misses_need_a_no_route_code(self):
+        miss = {"name": "Great Bear Lake", "route": False}
+        self.assertTrue(probe_graph.passed(miss, "planet", [], [], 0, 442))
+        self.assertFalse(probe_graph.passed(miss, "planet", [], [], 0, 154))
+
+    def test_checked_in_probes_are_well_formed(self):
+        fixtures = json.loads(Path(probe_graph.__file__).with_name("probes.json").read_text())
+        for fixture in fixtures:
+            self.assertEqual(set(fixture) - {"name", "points", "route", "planet", "coverages", "pushAllowed"}, set())
+            self.assertEqual(len(fixture["points"]), 2)
+            self.assertTrue(set(fixture.get("coverages", probe_graph.COVERAGES)) <= set(probe_graph.COVERAGES))
+        planet = [f for f in fixtures if probe_graph.applies(f, "planet") and probe_graph.expects_route(f, "planet")]
+        self.assertGreaterEqual(len(planet), 15, "a planet graph must route in Apple-covered cities too")
 
 
 class ArchiveTests(unittest.TestCase):

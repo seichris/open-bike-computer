@@ -1,4 +1,14 @@
-# Worldwide bicycle-detour graph
+# Worldwide bicycle graph
+
+Two coverages build from the same pipeline:
+
+- **`planet`**: the whole planet, so Create a Route's Road, Gravel and
+  Everyday routes work everywhere. It takes no mask.
+- **`worldwide-gap`**: only the places where Apple Maps has no cycling
+  directions, plus border bands. This was the first production graph, for
+  saved-route detours.
+
+The iPhone still asks MapKit first for detours with either graph.
 
 Build and qualify the graph off the serving host. The versioned policy maps Apple’s
 published Maps Cycling entries to Natural Earth map units. Mainland mappings for
@@ -53,12 +63,26 @@ retains the exact clipping input.
      --work "$build_scratch/candidate" --threads 8
    ```
 
+   For a planet graph, leave out the mask step and pass `--coverage planet`
+   without `--mask`. The manifest then records `"coverage": "planet"` and no
+   mask or policy.
+
+   ```sh
+   python build_graph.py --coverage planet --source "$planet_pbf" \
+     --source-sha256 "$planet_sha" --source-url "$planet_url" \
+     --work "$build_scratch/candidate" --threads 8
+   ```
+
    Use `--sample` for development input. Sample results are never worldwide
    release evidence. Record peak scratch and memory, phase times, output size,
    the policy and inventory, source and configuration hashes, and probe results.
 
 4. Run [probes.json](probes.json) with the pinned build image against the archive
-   alone. Add probes for the full release across continents and territories and
+   alone, passing `probe_graph.py --coverage planet` for a planet graph. A
+   fixture's `route` is its worldwide-gap expectation. `planet` overrides it,
+   `coverages` limits where it runs, and `pushAllowed` accepts short
+   pedestrian push segments. On a planet graph, generate the audit inventory
+   with `coverage_audit.py generate --all-units`. Add probes for the full release across continents and territories and
    for shortlisted road and ferry crossings in both directions. Check the
    inventory against routable OSM coverage and record any territory without a
    bicycle network. For the first pass, generate routing fixtures with
