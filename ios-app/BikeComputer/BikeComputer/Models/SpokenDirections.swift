@@ -11,7 +11,8 @@ nonisolated enum SpokenDirectionsPreference {
     }
 
     /// Prompts play with the screen locked only when the build declares the
-    /// `audio` background mode. Today only Debug (Bicino Dev) does.
+    /// `audio` background mode. Debug and Release both do; a build without
+    /// it tells riders to keep Bicino open on screen.
     static func speaksInBackground(infoDictionary: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
         (infoDictionary?["UIBackgroundModes"] as? [String])?.contains("audio") ?? false
     }

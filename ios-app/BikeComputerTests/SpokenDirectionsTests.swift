@@ -164,16 +164,16 @@ struct SpokenDirectionsTests {
         expectEqual(speaker.stopCount, 0, "and the audio session is never touched")
     }
 
-    /// Release builds have no background audio, so the footer must not
-    /// promise prompts with the screen locked.
+    /// A build without background audio must not promise prompts with the
+    /// screen locked.
     static func testFooterMatchesBackgroundAudio() {
         typealias Preference = SpokenDirectionsPreference
         expect(Preference.speaksInBackground(infoDictionary: [
             "UIBackgroundModes": ["audio", "location", "bluetooth-central"],
-        ]), "the Debug plist's background audio")
+        ]), "background audio, as Debug and Release declare it")
         expect(!Preference.speaksInBackground(infoDictionary: [
             "UIBackgroundModes": ["location", "bluetooth-central"],
-        ]), "Release has location and Bluetooth only")
+        ]), "a build with location and Bluetooth only")
         expect(!Preference.speaksInBackground(infoDictionary: nil), "no plist")
         expect(Preference.settingsFooter(speaksInBackground: false).contains("with Bicino open on screen"),
                "foreground-only builds say so")
