@@ -35,13 +35,35 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
         guard route.provider == RouteProviderPolicyV1.mapKit else {
             throw OfflineRouteSaveError.sourceNotApproved
         }
+        return try planned(route, savedAs: RouteProviderPolicyV1.mapKitSavedOnPhone, createdAt: createdAt)
+    }
+
+    /// A Create a Route plan: Apple Maps legs keep Apple's saved scope and
+    /// Bicino route service legs become a phone-only Bicino route. Nothing
+    /// else is admitted, and the provider is never relabeled across sources.
+    static func plannedRoute(_ route: NavigationRouteV1, createdAt: Date) throws -> Self {
+        switch route.provider {
+        case RouteProviderPolicyV1.mapKit:
+            return try plannedMapKit(route, createdAt: createdAt)
+        case RouteProviderPolicyV1.valhallaDetour:
+            return try planned(route, savedAs: RouteProviderPolicyV1.valhallaSavedOnPhone, createdAt: createdAt)
+        default:
+            throw OfflineRouteSaveError.sourceNotApproved
+        }
+    }
+
+    private static func planned(
+        _ route: NavigationRouteV1,
+        savedAs provider: RouteProviderMetadataV1,
+        createdAt: Date
+    ) throws -> Self {
         try route.validate()
         let suggestedName = route.name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = suggestedName.flatMap { $0.isEmpty ? nil : $0 }
             ?? "\(route.source.label) → \(route.destination.label)"
         let saved = NavigationRouteV1(
             id: route.id, revision: route.revision,
-            provider: RouteProviderPolicyV1.mapKitSavedOnPhone,
+            provider: provider,
             sourceReference: route.sourceReference,
             localeIdentifier: route.localeIdentifier, transportType: route.transportType,
             source: route.source, destination: route.destination, bounds: route.bounds,
@@ -72,7 +94,8 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
             throw OfflineRouteSaveError.invalidName
         }
         guard !requiresExistingArchive,
-              [RouteProviderPolicyV1.importedGPX, RouteProviderPolicyV1.mapKitSavedOnPhone]
+              [RouteProviderPolicyV1.importedGPX, RouteProviderPolicyV1.mapKitSavedOnPhone,
+               RouteProviderPolicyV1.valhallaSavedOnPhone]
                 .contains(archive.route.provider) else {
             throw OfflineRouteSaveError.sourceNotApproved
         }
@@ -101,7 +124,8 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
     }
 
     static func sameSavableContent(_ lhs: NavigationRouteV1, _ rhs: NavigationRouteV1) -> Bool {
-        [RouteProviderPolicyV1.importedGPX, RouteProviderPolicyV1.mapKitSavedOnPhone]
+        [RouteProviderPolicyV1.importedGPX, RouteProviderPolicyV1.mapKitSavedOnPhone,
+               RouteProviderPolicyV1.valhallaSavedOnPhone]
             .contains(lhs.provider) && lhs.provider == rhs.provider &&
             lhs.localeIdentifier == rhs.localeIdentifier &&
             lhs.sourceReference == rhs.sourceReference &&

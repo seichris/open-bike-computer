@@ -216,6 +216,27 @@ and Argentina:
 
 An answer over a cap is `request_too_long`, not a retryable `503`.
 
+## In the app
+
+`MultiStopRoutePlanner` asks this endpoint for every leg of a Road, Gravel or
+Everyday plan (`BicinoBicycleRouteService`, `BicycleRouteClient`), using the
+stops' WGS-84 coordinates. Legs are cached per profile and locale, so editing
+one stop re-asks only the legs that changed.
+
+- **Apple Maps fallback for the whole plan:** `no_bicycle_route` /
+  `request_too_long` ("isn't available here"), and a missing or disabled
+  service, a refused installation or an unusable answer ("isn't available
+  right now"). A leg longer than 150 km goes to Apple Maps without a request.
+  A plan never mixes providers, and the panel names the fallback. A fallback
+  for an unavailable service lasts only for that plan, so the next plan asks
+  again. A route without a Bicino route stays on Apple Maps until the
+  session ends.
+- **Try Again:** offline, `429` and `503`.
+- **Saving:** a Bicino plan saves as `bicino.valhalla` with phone-only scope
+  (`RouteProviderPolicyV1.valhallaSavedOnPhone`). It is never sent to the Watch
+  or shared. It gets route elevation with the `saved` source and detours with
+  the `valhalla` source.
+
 ## Privacy
 
 For a bicycle leg, the app sends the leg's start and end coordinates, the

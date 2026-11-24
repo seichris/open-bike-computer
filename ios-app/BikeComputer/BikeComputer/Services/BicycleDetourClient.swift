@@ -10,33 +10,76 @@ typealias BicycleDetourHTTPRequestExecutor = @MainActor (
 /// leg of Watch-owned rides relayed through this iPhone.
 @MainActor
 final class BicycleDetourClient: BicycleDetourServiceTransporting {
-    private let serviceSession: BicinoServiceSession
-    private let execute: BicycleDetourHTTPRequestExecutor
+    private let poster: BicinoServiceJSONPoster
 
     init(
         serviceSession: BicinoServiceSession,
         execute: BicycleDetourHTTPRequestExecutor? = nil
     ) {
+        poster = BicinoServiceJSONPoster(serviceSession: serviceSession, execute: execute)
+    }
+
+    func post(_ body: BicycleDetourServiceRequestV1) async throws -> BicycleDetourHTTPResponseV1 {
+        try await poster.post(body, path: BicycleDetourServiceContractV1.path, evidenceTag: "DETOUR_EVIDENCE")
+    }
+}
+
+/// Installation-authenticated transport for `POST /v1/bicycle-routes`: one
+/// Create a Route leg's two end points, its profile and the locale.
+@MainActor
+final class BicycleRouteClient: BicycleRouteServiceTransporting {
+    private let poster: BicinoServiceJSONPoster
+
+    init(
+        serviceSession: BicinoServiceSession,
+        execute: BicycleDetourHTTPRequestExecutor? = nil
+    ) {
+        poster = BicinoServiceJSONPoster(serviceSession: serviceSession, execute: execute)
+    }
+
+    func post(_ body: BicycleRouteServiceRequestV1) async throws -> BicycleDetourHTTPResponseV1 {
+        try await poster.post(body, path: BicycleRouteServiceContractV1.path, evidenceTag: "BICYCLE_ROUTE_EVIDENCE")
+    }
+}
+
+/// Posts a JSON body to the managed Bicino service with the installation
+/// credential, refreshing it once on 401, and accepts the answer only from
+/// that same service origin.
+@MainActor
+struct BicinoServiceJSONPoster {
+    let serviceSession: BicinoServiceSession
+    private let execute: BicycleDetourHTTPRequestExecutor
+
+    init(serviceSession: BicinoServiceSession, execute: BicycleDetourHTTPRequestExecutor?) {
         self.serviceSession = serviceSession
         self.execute = execute ?? { request in
             try await serviceSession.urlSession.data(for: request)
         }
     }
 
-    func post(_ body: BicycleDetourServiceRequestV1) async throws -> BicycleDetourHTTPResponseV1 {
+    func post<Body: Encodable>(
+        _ body: Body,
+        path: String,
+        evidenceTag: String
+    ) async throws -> BicycleDetourHTTPResponseV1 {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let payload = try encoder.encode(body)
-        var response = try await send(payload, refreshCredential: false)
+        var response = try await send(payload, path: path, refreshCredential: false, evidenceTag: evidenceTag)
         if response.statusCode == 401 {
-            response = try await send(payload, refreshCredential: true)
+            response = try await send(payload, path: path, refreshCredential: true, evidenceTag: evidenceTag)
         }
         return response
     }
 
-    private func send(_ payload: Data, refreshCredential: Bool) async throws -> BicycleDetourHTTPResponseV1 {
+    private func send(
+        _ payload: Data,
+        path: String,
+        refreshCredential: Bool,
+        evidenceTag: String
+    ) async throws -> BicycleDetourHTTPResponseV1 {
         var request = try await serviceSession.authenticatedRequest(
-            path: BicycleDetourServiceContractV1.path,
+            path: path,
             method: "POST",
             refreshCredential: refreshCredential
         )
@@ -56,7 +99,7 @@ final class BicycleDetourClient: BicycleDetourServiceTransporting {
             throw URLError(.badServerResponse)
         }
 #if DEBUG
-        print("DETOUR_EVIDENCE service status=\(http.statusCode) refresh=\(refreshCredential) host=\(responseComponents.host ?? "") bytes=\(data.count)")
+        print("\(evidenceTag) service status=\(http.statusCode) refresh=\(refreshCredential) host=\(responseComponents.host ?? "") bytes=\(data.count)")
 #endif
         return BicycleDetourHTTPResponseV1(
             statusCode: http.statusCode,

@@ -84,6 +84,23 @@ struct RouteSaveSheet: View {
         interaction.draft?.archive.route.provider == RouteProviderPolicyV1.mapKitSavedOnPhone
     }
 
+    /// A Road, Gravel or Everyday route from Bicino's bicycle route service.
+    private var isPlannedBicinoRoute: Bool {
+        interaction.draft?.archive.route.provider == RouteProviderPolicyV1.valhallaSavedOnPhone
+    }
+
+    private var isPlannedRoute: Bool { isPlannedMapKitRoute || isPlannedBicinoRoute }
+
+    private var footer: String {
+        if isPlannedMapKitRoute {
+            return "Saves this Apple Maps route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
+        }
+        if isPlannedBicinoRoute {
+            return "Saves this route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
+        }
+        return "Saves route guidance on this iPhone, not offline map tiles. You can send the saved route to Apple Watch separately."
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -105,7 +122,7 @@ struct RouteSaveSheet: View {
                             dismiss()
                         }
                     } label: {
-                        Label(isPlannedMapKitRoute ? "Save Offline" : "Save Route",
+                        Label(isPlannedRoute ? "Save Offline" : "Save Route",
                               systemImage: "square.and.arrow.down")
                     }
                     .disabled(!interaction.canSave(now: Date()))
@@ -115,12 +132,10 @@ struct RouteSaveSheet: View {
                             .accessibilityIdentifier("offlineRouteSaveFailure")
                     }
                 } footer: {
-                    Text(isPlannedMapKitRoute
-                         ? "Saves this Apple Maps route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
-                         : "Saves route guidance on this iPhone, not offline map tiles. You can send the saved route to Apple Watch separately.")
+                    Text(footer)
                 }
             }
-            .navigationTitle(isPlannedMapKitRoute ? "Save Offline" : "Import GPX")
+            .navigationTitle(isPlannedRoute ? "Save Offline" : "Import GPX")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", role: .cancel) { interaction.cancel(); dismiss() }

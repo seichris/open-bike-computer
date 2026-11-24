@@ -70,6 +70,12 @@ other identifier as linked even when the app has no account or real-world name.
   own Valhalla server, and leave no coordinates in storage or logs. On a Watch
   ride they stop, including any request in flight, as soon as online routing
   is turned off.
+- Confirm Create a Route's Road, Gravel and Everyday modes (`POST
+  /v1/bicycle-routes`) send one request per leg carrying only that leg's two
+  end points, the chosen profile and the locale, require the installation
+  credential, are served by Bicino's own Valhalla server, and leave no
+  coordinates in storage or logs. A saved Bicino route stays on the iPhone,
+  like a saved Apple Maps route, and is not shared or sent to the Watch.
 - Confirm paired-device coordinate favorites and offline route archives remain
   inside WatchConnectivity/local device storage, and that expired archives and
   rider-requested deletions follow the documented retention behavior.

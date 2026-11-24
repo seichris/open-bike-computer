@@ -3,25 +3,40 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// The travel modes Create a Route offers.
+/// The travel modes Create a Route offers: three bicycle preferences from
+/// Bicino's route service, and Apple Maps' Drive and Walk.
 enum RouteCreatorTravelMode: String, CaseIterable, Identifiable {
-    case cycling
+    case road
+    case gravel
+    case everyday
     case driving
     case walking
+
+    static let defaultsKey = "routeCreator.travelMode.v1"
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .cycling: "Bike"
+        case .road, .gravel, .everyday: bicycleProfile?.title ?? ""
         case .driving: "Drive"
         case .walking: "Walk"
         }
     }
 
+    var bicycleProfile: BicycleRouteProfileV1? {
+        switch self {
+        case .road: .road
+        case .gravel: .gravel
+        case .everyday: .everyday
+        case .driving, .walking: nil
+        }
+    }
+
+    /// Apple Maps' mode, also used where the bicycle service has no route.
     var transportType: MKDirectionsTransportType {
         switch self {
-        case .cycling: RouteTransportTypes.cycling
+        case .road, .gravel, .everyday: RouteTransportTypes.cycling
         case .driving: .automobile
         case .walking: .walking
         }
@@ -49,8 +64,12 @@ final class RouteCreationSession: ObservableObject {
     @Published private(set) var draft = MultiStopRouteDraft() {
         didSet { replan() }
     }
-    @Published var travelMode = RouteCreatorTravelMode.cycling {
-        didSet { replan() }
+    /// Remembered for the next route.
+    @Published var travelMode: RouteCreatorTravelMode {
+        didSet {
+            defaults.set(travelMode.rawValue, forKey: RouteCreatorTravelMode.defaultsKey)
+            replan()
+        }
     }
     /// The stop whose place the panel is searching for.
     @Published private(set) var searchingStopID: UUID?
@@ -59,6 +78,7 @@ final class RouteCreationSession: ObservableObject {
 
     let planner: MultiStopRoutePlanner
     private let namePlace: PlaceNamer
+    private let defaults: UserDefaults
     private var plannerChanges: AnyCancellable?
     /// A stop made by Add Stop, removed again if its search ends without a pick.
     private var provisionalStopID: UUID?
@@ -67,10 +87,14 @@ final class RouteCreationSession: ObservableObject {
 
     init(
         planner: MultiStopRoutePlanner? = nil,
+        defaults: UserDefaults = .standard,
         namePlace: @escaping PlaceNamer = { _ in nil }
     ) {
         self.planner = planner ?? MultiStopRoutePlanner()
+        self.defaults = defaults
         self.namePlace = namePlace
+        travelMode = defaults.string(forKey: RouteCreatorTravelMode.defaultsKey)
+            .flatMap(RouteCreatorTravelMode.init(rawValue:)) ?? .everyday
         // The panel and the map read the plan through this session.
         plannerChanges = self.planner.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -78,7 +102,10 @@ final class RouteCreationSession: ObservableObject {
     }
 
     var request: MultiStopRouteRequest? {
-        draft.request(transportType: travelMode.transportType)
+        draft.request(
+            transportType: travelMode.transportType,
+            bicycleProfile: travelMode.bicycleProfile
+        )
     }
 
     /// Save is offered only for the plan of the stops shown right now.
@@ -111,7 +138,6 @@ final class RouteCreationSession: ObservableObject {
         searchingStopID = nil
         provisionalStopID = nil
         notice = nil
-        travelMode = .cycling
         draft = MultiStopRouteDraft()
         planner.cancel()
     }

@@ -112,6 +112,23 @@ nonisolated enum BicycleDetourServiceConversionV1 {
         from response: BicycleDetourServiceResponseV1.Route,
         localeIdentifier: String
     ) throws -> NavigationRouteV1 {
+        try route(
+            from: response,
+            sourceLabel: "Current Location",
+            destinationLabel: SavedRouteDetourRouteV1.destinationLabel,
+            localeIdentifier: localeIdentifier
+        )
+    }
+
+    /// The same conversion with the leg's own end labels, for a Create a
+    /// Route leg from `POST /v1/bicycle-routes`. The last step keeps
+    /// Valhalla's arrival maneuver, like a MapKit leg.
+    static func route(
+        from response: BicycleDetourServiceResponseV1.Route,
+        sourceLabel: String,
+        destinationLabel: String,
+        localeIdentifier: String
+    ) throws -> NavigationRouteV1 {
         guard response.travelMode == "bicycle",
               response.provider == BicycleDetourServiceResponseV1.Provider(
                 id: RouteProviderPolicyV1.valhallaDetour.providerID,
@@ -166,8 +183,8 @@ nonisolated enum BicycleDetourServiceConversionV1 {
             provider: RouteProviderPolicyV1.valhallaDetour,
             localeIdentifier: localeIdentifier,
             transportType: .cycling,
-            source: RouteEndpointV1(coordinate: first, label: "Current Location"),
-            destination: RouteEndpointV1(coordinate: last, label: SavedRouteDetourRouteV1.destinationLabel),
+            source: RouteEndpointV1(coordinate: first, label: sourceLabel),
+            destination: RouteEndpointV1(coordinate: last, label: destinationLabel),
             bounds: bounds,
             distanceMeters: response.distanceMeters > 0 ? response.distanceMeters : max(measured, 1),
             expectedTravelTimeSeconds: response.durationSeconds > 0 ? response.durationSeconds : nil,
