@@ -536,6 +536,83 @@ private func testEngineDoesNotRecoverOnAnEarlierPassOfTheDetourEndpoint() {
            "being at the endpoint on an earlier pass is not completing the detour")
 }
 
+/// Rides through `corners` (metres east, north) at `speed` m/s, one fix a second.
+private func cycle(through corners: [(Double, Double)], speed: Double, ride: inout Ride, time: inout Date) {
+    let points = track(corners, spacing: speed)
+    for (from, to) in zip(points, points.dropFirst()) {
+        time.addTimeInterval(1)
+        ride.feed(sample(to, course: SavedRouteGeometryV1.bearing(from: from, to: to), speed: speed, at: time))
+    }
+}
+
+private func testEngineDetourEndingOnTheSavedRouteKeepsItsRejoinCue() {
+    // The usual rejoin: the detour turns onto the saved route and ends on it.
+    // Inside the 15 m endpoint radius before the turn, a slow approach or a
+    // wait at the junction outlasts the 4 s grace long before the tracker can
+    // see 15 m of forward progress. Rejected candidates first make the
+    // detour the episode's last one (the leave point).
+    for (rejected, approachSpeed, waitSeconds) in [(0, 5.0, 0), (0, 2.5, 0), (0, 2.5, 10), (3, 5.0, 10)] {
+        let label = "rejected \(rejected), approach \(approachSpeed) m/s, wait \(waitSeconds) s"
+        var ride = Ride(route: northRoute())
+        var time = leaveRoute(&ride)
+        for _ in 0..<rejected {
+            ride.complete(.noBicycleRoute, now: time)
+            time.addTimeInterval(1)
+            ride.feed(sample(point(120, 996), at: time))
+        }
+        let request = ride.lastRequest!
+        let junction = request.target.distanceAlongMeters
+        let corners = [(120.0, 996.0), (120, junction), (0, junction)]
+        ride.complete(.route(savedRoute(track(corners, spacing: 5), provider: RouteProviderPolicyV1.valhallaDetour)),
+                      now: time)
+        expect(ride.engine.phase == .following, "\(label): following")
+        let requests = requestCount(ride)
+
+        cycle(through: corners, speed: approachSpeed, ride: &ride, time: &time)
+        for _ in 0..<waitSeconds {
+            time.addTimeInterval(1)
+            ride.feed(sample(point(0, junction), course: -1, speed: 0, at: time))
+        }
+        expect(ride.engine.phase == .following && !ride.effects.contains(.endDetour) &&
+               ride.detourRuntime.snapshot?.instruction == SavedRouteDetourRouteV1.rejoinInstruction,
+               "\(label): at the junction the rider keeps the rejoin cue")
+        expect(requestCount(ride) == requests, "\(label): no request from the saved route")
+
+        cycle(through: [(0, junction), (0, junction + 100)], speed: 5, ride: &ride, time: &time)
+        guard let end = ride.effects.firstIndex(of: .endDetour), case .resumeSavedRoute? = ride.effects.dropFirst(end + 1).first
+        else { fatalError("FAILED: \(label): the detour ends only with a confirmed rejoin") }
+        expect(ride.engine.phase == .onRoute && requestCount(ride) == requests &&
+               ride.runtime.snapshot?.offRouteDistanceMeters == nil,
+               "\(label): riding on along the route resumes saved guidance")
+    }
+}
+
+private func testEngineDetourEndRecoveryNeverAsksFromTheSavedRoute() {
+    var ride = Ride(route: northRoute())
+    var time = leaveRoute(&ride)
+    let detour = wrongWayDetour()
+    ride.complete(.route(detour), now: time)
+    followDetour(detour, ride: &ride, time: &time)
+    let endpoint = detour.points.last!
+    for _ in 0..<6 {
+        time.addTimeInterval(1)
+        ride.feed(sample(endpoint, course: -1, speed: 0, at: time))
+    }
+    expect(requestCount(ride) == 2 && ride.lastRequest?.origin == endpoint,
+           "an end 50 m off the saved route still recovers")
+    ride.complete(.noBicycleRoute, now: time)
+
+    // The rider crosses onto the saved route and waits there.
+    for _ in 0..<5 {
+        time.addTimeInterval(1)
+        ride.feed(sample(point(3, 1_250), course: -1, speed: 0, at: time))
+    }
+    expect(requestCount(ride) == 2, "no further detour is asked from the saved route")
+    cycle(through: [(3, 1_250), (3, 1_350)], speed: 5, ride: &ride, time: &time)
+    expect(ride.engine.phase == .onRoute && requestCount(ride) == 2,
+           "riding on along the route confirms the rejoin")
+}
+
 private func testEngineStaleOriginAnswerAsksAgainForSameCandidate() {
     var ride = Ride(route: northRoute())
     let time = leaveRoute(&ride)
@@ -1062,6 +1139,8 @@ enum SavedRouteDetourTestRunner {
         testEngineCompletedDetourRecoversWhenBackOnline()
         testEngineDetourEndAllowsAConfirmedForwardMerge()
         testEngineDoesNotRecoverOnAnEarlierPassOfTheDetourEndpoint()
+        testEngineDetourEndingOnTheSavedRouteKeepsItsRejoinCue()
+        testEngineDetourEndRecoveryNeverAsksFromTheSavedRoute()
         testEngineRejectsImplausibleDetourAndBacksOff()
         testEngineStaleOriginAnswerAsksAgainForSameCandidate()
         testEngineFailedDetourStartBacksOff()

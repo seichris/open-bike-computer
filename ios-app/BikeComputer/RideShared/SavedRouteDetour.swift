@@ -339,6 +339,26 @@ nonisolated struct SavedRouteRejoinTrackerV1: Equatable {
 
     var matchedFixCount: Int { alongs.count }
 
+    /// The passes of the saved route, from just behind confirmed progress on,
+    /// that this fix lies on: the band in which the tracker can match fixes.
+    static func onRouteProjections(
+        of sample: NavigationLocationSampleV1,
+        geometry: SavedRouteGeometryV1,
+        confirmedProgress: Double,
+        policy: SavedRouteDetourPolicyV1
+    ) -> [NavigationGeometryV1.Projection] {
+        let threshold = policy.offRouteThreshold(accuracy: sample.horizontalAccuracyMeters)
+        let lowest = max(confirmedProgress - policy.rejoinBehindToleranceMeters, 0)
+        return SavedRouteGeometryV1.passMinima(NavigationGeometryV1.projections(
+            of: sample.coordinate,
+            onto: geometry.route.points,
+            cumulativeDistances: geometry.cumulative,
+            segmentRange: geometry.segmentIndex(atDistance: lowest)..<max(geometry.route.points.count - 1, 1)
+        )).filter {
+            $0.crossTrackDistanceMeters <= threshold && $0.distanceAlongRouteMeters >= lowest
+        }
+    }
+
     mutating func observe(
         _ sample: NavigationLocationSampleV1,
         geometry: SavedRouteGeometryV1,
@@ -350,16 +370,9 @@ nonisolated struct SavedRouteRejoinTrackerV1: Equatable {
         let window = SavedRouteRejoinPlannerV1.window(
             confirmedProgress: confirmedProgress, geometry: geometry, policy: policy
         )
-        let threshold = policy.offRouteThreshold(accuracy: accuracy)
-        let lowest = max(confirmedProgress - policy.rejoinBehindToleranceMeters, 0)
-        let onRoute = SavedRouteGeometryV1.passMinima(NavigationGeometryV1.projections(
-            of: sample.coordinate,
-            onto: geometry.route.points,
-            cumulativeDistances: geometry.cumulative,
-            segmentRange: geometry.segmentIndex(atDistance: lowest)..<max(geometry.route.points.count - 1, 1)
-        )).filter {
-            $0.crossTrackDistanceMeters <= threshold && $0.distanceAlongRouteMeters >= lowest
-        }
+        let onRoute = Self.onRouteProjections(
+            of: sample, geometry: geometry, confirmedProgress: confirmedProgress, policy: policy
+        )
         guard !onRoute.isEmpty else {
             reset()
             return nil
@@ -693,6 +706,18 @@ nonisolated struct SavedRouteDetourEngineV1 {
             sample.horizontalAccuracyMeters <= policy.maximumAccuracyMeters
     }
 
+    /// The rejoin tracker can match this fix to the saved route, so only a
+    /// confirmed forward rejoin, never a new detour, should follow from here.
+    private func isWithinRejoinBand(_ sample: NavigationLocationSampleV1) -> Bool {
+        !SavedRouteRejoinTrackerV1.onRouteProjections(
+            of: sample, geometry: geometry, confirmedProgress: confirmedProgressMeters, policy: policy
+        ).isEmpty
+    }
+
+    /// The rider has stayed at the end of a detour that finished off the
+    /// saved route. An end on the route (the usual turn onto it, or a wait
+    /// there) never counts: there the detour keeps its rejoin cue until the
+    /// tracker confirms the rider riding on along the route.
     private mutating func reachedDetourEnd(
         _ sample: NavigationLocationSampleV1,
         snapshot: NavigationSnapshotV1?,
@@ -707,7 +732,8 @@ nonisolated struct SavedRouteDetourEngineV1 {
               let along = snapshot.distanceAlongGeometryMeters,
               hasUsableFix(sample, now: now),
               detourLengthMeters - along <= progressTolerance,
-              NavigationGeometryV1.distance(from: sample.coordinate, to: endpoint) <= policy.detourEndRadiusMeters
+              NavigationGeometryV1.distance(from: sample.coordinate, to: endpoint) <= policy.detourEndRadiusMeters,
+              !isWithinRejoinBand(sample)
         else {
             detourEndSince = nil
             return false
@@ -729,8 +755,11 @@ nonisolated struct SavedRouteDetourEngineV1 {
             return []
         }
         guard now >= nextAllowedAt else { return [] }
-        // A rider who already followed a detour can ask again while stopped.
-        if !recoveringFromDetourEnd {
+        if recoveringFromDetourEnd {
+            // A rider who already followed a detour can ask again while
+            // stopped, but not from the saved route itself.
+            guard !isWithinRejoinBand(sample) else { return [] }
+        } else {
             guard let since = offRouteSince, let origin = offRouteOrigin,
                   sample.timestamp.timeIntervalSince(since) >= policy.minimumOffRouteSeconds,
                   NavigationGeometryV1.distance(from: origin, to: sample.coordinate) >=
