@@ -53,6 +53,8 @@ class NavigationEngine: NSObject, ObservableObject {
     var onDetourRequest: ((SavedRouteDetourRequestV1, String) -> Void)?
     /// Tells the owner a pending request is no longer wanted.
     var onDetourCancel: ((UInt64) -> Void)?
+    /// Spoken-directions input. The owner decides whether anything is said.
+    var onSpokenDirectionsEvent: ((SpokenDirectionsEventV1) -> Void)?
     
     // MARK: - Private Properties
     private var currentRoute: NavigationRouteV1?
@@ -353,6 +355,7 @@ class NavigationEngine: NSObject, ObservableObject {
         }
 
         print("Navigation started with \(sharedRoute.steps.count) steps (Test Mode: \(isTestMode))")
+        onSpokenDirectionsEvent?(.started)
         
         if isTestMode {
             startSimulation()
@@ -437,6 +440,7 @@ class NavigationEngine: NSObject, ObservableObject {
         hasAcceptedLiveLocation = true
         lastSentGeometrySegmentIndex = nil
         lastGeometrySendTime = .distantPast
+        onSpokenDirectionsEvent?(.rerouted)
         applyRuntimeSnapshot(
             replacementSnapshot,
             route: sharedRoute,
@@ -474,6 +478,7 @@ class NavigationEngine: NSObject, ObservableObject {
     
     /// Stop navigation
     func stopNavigation() {
+        let endsNavigation = isNavigating
         let deviceLocationToRestore: (location: CLLocation, convertFromMapKitRoute: Bool)? = {
             if isSimulationMode, let latestExternalGpsLocation {
                 return (latestExternalGpsLocation, false)
@@ -515,6 +520,7 @@ class NavigationEngine: NSObject, ObservableObject {
                                   convertFromMapKitRoute: deviceLocationToRestore.convertFromMapKitRoute,
                                   includeRideTelemetry: false)
         }
+        if endsNavigation { onSpokenDirectionsEvent?(.stopped) }
         print("Navigation stopped")
     }
     
@@ -581,6 +587,7 @@ class NavigationEngine: NSObject, ObservableObject {
         if simulationProgress >= 1.0 {
             simulationProgress = 1.0
             print("Simulation complete")
+            onSpokenDirectionsEvent?(.arrived(instruction: navigationRuntime.snapshot?.instruction))
             stopNavigation()
             return
         }
@@ -724,6 +731,7 @@ class NavigationEngine: NSObject, ObservableObject {
            runtimeSnapshot.distanceToManeuverMeters < 20,
            isNearOfflineFinish {
             print("Navigation complete!")
+            onSpokenDirectionsEvent?(.arrived(instruction: runtimeSnapshot.instruction))
             stopNavigation()
             return
         }
@@ -769,6 +777,26 @@ class NavigationEngine: NSObject, ObservableObject {
         }
 
         sendRouteGeometryIfNeeded(currentLocation: currentLocation)
+        reportSpokenDirectionsProgress(runtimeSnapshot, location: currentLocation)
+    }
+
+    /// Full provider text, not the shortened device instruction.
+    private func reportSpokenDirectionsProgress(
+        _ snapshot: NavigationSnapshotV1,
+        location: CLLocation
+    ) {
+        guard let onSpokenDirectionsEvent else { return }
+        onSpokenDirectionsEvent(.progress(SpokenDirectionsProgressV1(
+            routeID: snapshot.routeID,
+            navigationGeneration: snapshot.navigationGeneration,
+            stepIndex: snapshot.currentStepIndex,
+            instruction: snapshot.instruction,
+            maneuver: snapshot.maneuver,
+            distanceToManeuverMeters: snapshot.distanceToManeuverMeters,
+            speedMetersPerSecond: location.speed,
+            isOffRoute: snapshot.offRouteDistanceMeters != nil,
+            announcesOffRoute: snapshot.mode == .offline
+        )))
     }
 
     // MARK: - Saved-route detours
@@ -844,6 +872,7 @@ class NavigationEngine: NSObject, ObservableObject {
                 }
                 activeDetourRoute = route
                 switchDeviceGeometry(to: route)
+                onSpokenDirectionsEvent?(.rerouted)
             case .endDetour:
                 detourRuntime.stop()
                 activeDetourRoute = nil
@@ -852,6 +881,7 @@ class NavigationEngine: NSObject, ObservableObject {
                 resumed = try? navigationRuntime.resume(
                     atDistanceAlongGeometry: rejoin.distanceAlongMeters, currentLocation: sample
                 )
+                if resumed != nil { onSpokenDirectionsEvent?(.rejoinedRoute) }
 #if DEBUG
                 if let resumed {
                     print("DETOUR_EVIDENCE resumed generation=\(resumed.navigationGeneration) step=\(resumed.currentStepIndex) offRoute=\(resumed.offRouteDistanceMeters != nil) instruction=\(resumed.instruction)")
@@ -979,6 +1009,7 @@ class NavigationEngine: NSObject, ObservableObject {
             sendNavigationDataToESP32(maneuverSnapshot)
         }
         sendRouteGeometryIfNeeded(currentLocation: currentLocation)
+        reportSpokenDirectionsProgress(detour, location: currentLocation)
     }
 
     private func resetDetourState() {

@@ -288,6 +288,8 @@ class BikeComputerCoordinator: ObservableObject {
     private var navigationElevationKey: RouteElevationDeliveryPlannerV1.RouteKey?
     private var navigationElevationState: RouteElevationStateV1?
     private var navigationElevationProgress: NavigationElevationProgressV1?
+    /// Speaks navigation prompts on iPhone when the rider turned them on.
+    private let spokenDirections = SpokenDirectionsController()
 
     private struct PendingRoutePlan {
         let alternatives: [NavigationRouteAlternativeV1]
@@ -421,6 +423,9 @@ class BikeComputerCoordinator: ObservableObject {
         }
         navEngine.onDetourCancel = { [weak self] id in
             self?.cancelDetourRequest(id)
+        }
+        navEngine.onSpokenDirectionsEvent = { [weak self] event in
+            self?.spokenDirections.handle(event)
         }
         navEngine.$activeDetourRoute
             .map { route -> MKPolyline? in

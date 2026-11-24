@@ -75,6 +75,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SpokenDirectionsController.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift",
@@ -85,6 +86,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
@@ -250,6 +252,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
@@ -321,6 +324,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SpokenDirectionsController.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift",
@@ -331,6 +335,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
@@ -546,6 +551,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
@@ -666,6 +672,7 @@
     "common-5": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SpokenDirectionsController.swift",
         "ios-app/BikeComputer/RideShared/CyclingDirectionsFallback.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift",
@@ -768,6 +775,16 @@
         "ios-app/BikeComputerTests/ContourLabelLifecycleTests.swift"
       ]
     },
+    "spoken-directions-1": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SpokenDirectionsController.swift",
+        "ios-app/BikeComputerTests/SpokenDirectionsTests.swift"
+      ]
+    },
     "contour-companion-1": {
       "groups": [
         "common-1"
@@ -793,6 +810,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
@@ -867,6 +885,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SpokenDirections.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",

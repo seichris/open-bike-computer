@@ -7,6 +7,8 @@ App Store submission remains a separate gate.
 Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated
 app-family icon (dark for production, light for Dev), and production no longer declares background audio for
 the development-firmware-only World Radio feature. Debug keeps background audio.
+From #875, production declares background audio again, for Spoken Directions.
+That submission needs the Spoken Directions review notes below.
 
 ## App Store What's New
 
@@ -56,6 +58,34 @@ content is sent to a backend.
 
 No account or external cycling sensor is required. Optional Bluetooth bike
 computer hardware is not required to review the Watch/iPhone workflow.
+
+### Spoken Directions and background audio
+
+Paste this into App Store Connect's review notes for the first build that
+includes #875. Production declared background audio on October 20 without a
+production feature that used it. This text shows the reviewer the audio feature.
+
+> Bicino declares the "audio" background mode for Spoken Directions: spoken
+> turn-by-turn navigation prompts on iPhone that continue while the screen is
+> locked or another app is open. Prompts are short (for example, "In 200
+> meters, turn left onto Main Street" and "You have arrived"). While a prompt
+> plays, other audio is lowered; the audio session is released after each
+> prompt.
+>
+> Spoken Directions is off by default. To review it:
+>
+> 1. Open Settings > Software Customization and turn on Spoken Directions in
+>    the Navigation section.
+> 2. To hear the prompts without travelling, open Settings > Developer
+>    Settings, enter a destination under Test Navigation, and tap Start Test
+>    Navigation (allow location access if asked). This simulates riding from the
+>    current location to the destination. Bicino announces the route, each turn
+>    and the arrival. Keep Bicino open during this simulation.
+> 3. During real navigation (plan a route on the map and start it), Bicino keeps
+>    navigating in the background with location updates. The prompts continue
+>    while the iPhone is locked.
+>
+> No account, Apple Watch or Bicino hardware is needed to review this feature.
 
 ## Firmware rollout notes
 

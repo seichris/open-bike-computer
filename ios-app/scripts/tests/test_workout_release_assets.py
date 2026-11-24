@@ -96,20 +96,24 @@ def target_build_configurations(project: str, target_name: str) -> dict[str, str
 
 
 class WorkoutReleaseAssetsTests(unittest.TestCase):
-    def test_background_audio_is_development_only(self):
+    def test_background_audio_serves_spoken_directions_in_both_builds(self):
+        # Production dropped background audio after the 2026-10-20 App Review
+        # rejection, when only development-firmware World Radio used it. Spoken
+        # Directions is a production feature that keeps speaking while the
+        # iPhone is locked, so Debug and Release declare it again.
         production = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
         development = load_plist(
             IOS_PROJECT / "BikeComputer" / "Info-Development.plist"
         )
         self.assertEqual(
-            set(production["UIBackgroundModes"]), {"location", "bluetooth-central"}
-        )
-        self.assertEqual(
-            set(development["UIBackgroundModes"]),
+            set(production["UIBackgroundModes"]),
             {"audio", "location", "bluetooth-central"},
         )
-        development["UIBackgroundModes"].remove("audio")
         self.assertEqual(development, production, "Shared app metadata must stay aligned")
+        settings = (
+            IOS_PROJECT / "BikeComputer" / "Views" / "SpokenDirectionsSettingsSection.swift"
+        ).read_text()
+        self.assertIn('Toggle("Spoken Directions"', settings)
 
         project = (IOS_PROJECT / "BikeComputer.xcodeproj/project.pbxproj").read_text()
         configurations = target_build_configurations(project, "BikeComputer")
