@@ -161,6 +161,9 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_APP_ICON_NAME": "AppIconDev",
             "BICINO_APP_ATTEST_ENVIRONMENT": "development",
             "BICINO_MAP_SERVICE_HOST": "maps-dev.8o.vc",
+            # Bike Lanes stays hidden until a managed tile service exists.
+            "BICINO_BIKE_LANES_TILE_HOST": "",
+            "BICINO_BIKE_LANES_TILE_PATH": "",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
             "BICINO_MAP_R2_DOWNLOAD_HOST": (
                 "5834cd65d5f197557149dbc10074d37f."
@@ -189,6 +192,9 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_APP_ICON_NAME": "AppIcon",
             "BICINO_APP_ATTEST_ENVIRONMENT": "production",
             "BICINO_MAP_SERVICE_HOST": "maps.8o.vc",
+            # Bike Lanes stays hidden until a managed tile service exists.
+            "BICINO_BIKE_LANES_TILE_HOST": "",
+            "BICINO_BIKE_LANES_TILE_PATH": "",
             "BICINO_MAP_CATALOG_HOST": "maps-share.8o.vc",
             "BICINO_MAP_R2_DOWNLOAD_HOST": (
                 "5834cd65d5f197557149dbc10074d37f."
