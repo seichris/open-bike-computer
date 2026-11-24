@@ -302,6 +302,7 @@ struct MapViewContainer: UIViewRepresentable {
     var savedRoutePreviewBottomPadding: CGFloat? = 220
     var isRouteCalculationActive = false
     var topographyOverlay: MKTileOverlay? = nil
+    var bikeLanesOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
     /// A temporary bicycle detour back to the saved route, drawn on top of it.
     var detourPolyline: MKPolyline? = nil
@@ -340,6 +341,7 @@ struct MapViewContainer: UIViewRepresentable {
         ), animated: false)
         mapView.delegate = context.coordinator
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
+        context.coordinator.updateBikeLanesOverlay(bikeLanesOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
             visibleSavedRoutePreview == nil && !isSimulationMode
@@ -392,6 +394,7 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
                                               location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
+        context.coordinator.updateBikeLanesOverlay(bikeLanesOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
             to: uiView
@@ -532,6 +535,7 @@ struct MapViewContainer: UIViewRepresentable {
     ) {
         coordinator.removeSavedRouteOverlay(from: uiView)
         coordinator.updateTopographyOverlay(nil, on: uiView)
+        coordinator.updateBikeLanesOverlay(nil, on: uiView)
         coordinator.controlState?.disconnect(from: uiView)
     }
     
@@ -590,6 +594,7 @@ struct MapViewContainer: UIViewRepresentable {
 
         private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
+        private var displayedBikeLanesOverlay: MKTileOverlay?
 #if DEBUG
         private var contourDiagnosticCount = 0
 #endif
@@ -613,6 +618,13 @@ struct MapViewContainer: UIViewRepresentable {
             // Navigation and saved-route overlays retain their own ownership.
             // No camera, tracking, selection or route state changes here.
         }
+        func updateBikeLanesOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
+            guard displayedBikeLanesOverlay !== overlay else { return }
+            if let displayedBikeLanesOverlay { mapView.removeOverlay(displayedBikeLanesOverlay) }
+            displayedBikeLanesOverlay = overlay
+            if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
+        }
+
         func refreshContourLabels(on mapView: MKMapView) {
             contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
         }
@@ -1498,8 +1510,8 @@ struct MapViewContainer: UIViewRepresentable {
         }
         
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            if let topography = overlay as? MKTileOverlay {
-                return MKTileOverlayRenderer(tileOverlay: topography)
+            if let tileOverlay = overlay as? MKTileOverlay {
+                return MKTileOverlayRenderer(tileOverlay: tileOverlay)
             }
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)

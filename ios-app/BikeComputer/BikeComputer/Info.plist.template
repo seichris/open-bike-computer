@@ -19,6 +19,8 @@
 
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
+	<key>BicinoBikeLanesTileURLTemplate</key>
+	<string>$(BICINO_BIKE_LANES_TILE_URL_TEMPLATE)</string>
 	<key>BicinoMapCatalogHost</key>
 	<string>$(BICINO_MAP_CATALOG_HOST)</string>
 	<key>BicinoMapR2DownloadHost</key>
