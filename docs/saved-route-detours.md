@@ -26,8 +26,11 @@ original guidance resumes from there.
    the off-route status stay on screen.
 
 Each Valhalla request carries exactly two coordinates: the rider's current
-position and one selected rejoin point. The saved route's provenance (`gpx`,
-`strava`, `mapkit`) travels as a tag; its geometry does not.
+position and one selected rejoin point. The saved route's provenance travels
+as a tag; its geometry does not. The tag is `gpx`, `strava`, `mapkit`, or
+`valhalla`. `valhalla` marks a saved Create a Route archive whose Road, Gravel
+or Everyday legs came from [`/v1/bicycle-routes`](bicycle-routes.md). The tag
+is validated, never forwarded to Valhalla, and never logged.
 
 ## Endpoint
 

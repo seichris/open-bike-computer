@@ -47,8 +47,11 @@ ORIGIN_FIELDS = frozenset({"latitudeE6", "longitudeE6", "courseDegrees"})
 REJOIN_FIELDS = frozenset({"latitudeE6", "longitudeE6"})
 # Provenance of the saved route the rider is returning to. Strava API imports
 # were approved by the maintainer on 2026-11-21 on the same terms as GPX and
-# saved Apple Maps routes; only the two points above are sent.
-ROUTE_SOURCES = frozenset({"gpx", "strava", "mapkit"})
+# saved Apple Maps routes; "valhalla" marks a saved Create a Route archive
+# whose bicycle legs came from /v1/bicycle-routes (road, gravel, everyday).
+# The tag is validated only; it is never forwarded, and only the two points
+# above are sent.
+ROUTE_SOURCES = frozenset({"gpx", "strava", "mapkit", "valhalla"})
 # Valhalla 3.9.2 lowercases bicycle_type, so "hybrid" selects the hybrid
 # (city) bicycle explicitly; see valhalla_bicycle.
 BICYCLE_COSTING_OPTIONS = {
