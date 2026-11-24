@@ -3398,6 +3398,15 @@ extension NavigationProtocolTests {
             "a claimed share downloads the copy the connected bike trusts"
         )
         assert(
+            contentSource.contains(
+                ".overlay(alignment:.bottomLeading){ifbikeLanesOverlay!=nil{bikeLanesAttribution}}"
+            ) &&
+                contentSource.contains(
+                    "Link(\"CyclOSM·©OpenStreetMap\",destination:URL(string:\"https://www.openstreetmap.org/copyright\")!)"
+                ),
+            "visible bike lanes credit CyclOSM and OpenStreetMap without adding height to the map chrome row"
+        )
+        assert(
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
                 source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&
                 source.contains("manager.hasActiveBackgroundUpload") &&
