@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -107,6 +108,10 @@ PROFILES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
 PROFILE_NAMES = ("road", "gravel", "everyday", "mountain")
 DEFAULT_MAXIMUM_SEPARATION_METERS = 150_000
 DEFAULT_TIMEOUT_SECONDS = 15
+# All surface lookups of one request share this budget, so a slow
+# /trace_attributes adds seconds, not one full timeout per route.
+SURFACE_BUDGET_SECONDS = 5.0
+MINIMUM_SURFACE_TIMEOUT_SECONDS = 1.0
 DEFAULT_MAXIMUM_CONCURRENT = 2
 # A pedestrian maneuver up to this length is pushing the bike (walkways and
 # path connectors); a longer one makes the leg no_bicycle_route. Detours keep 0.
@@ -202,13 +207,13 @@ def parse_request(payload: Any, *, maximum_separation_meters: float) -> BicycleR
     )
 
 
-def upstream_body(request: BicycleRouteRequest) -> bytes:
+def upstream_body(request: BicycleRouteRequest, *, alternates: int | None = None) -> bytes:
     return bicycle_route_body(
         break_location(request.origin),
         request.destination,
         PROFILES[request.profile],
         request.locale,
-        alternates=request.alternatives,
+        alternates=request.alternatives if alternates is None else alternates,
     )
 
 
@@ -297,16 +302,33 @@ class BicycleRouteService:
         assert self._router is not None
         try:
             outcome = self._router.route(upstream_body(request))
+            if outcome.route is None and outcome.response_too_large and request.alternatives:
+                # Alternatives made the answer too big; the route alone may fit.
+                _LOGGER.info("bicycle route retry without alternatives reason=response-too-large")
+                outcome = self._router.route(upstream_body(request, alternates=0))
         except ValhallaUnavailableError as exc:
             raise BicycleRouteUnavailableError(exc.reason) from None
         if outcome.route is None:
             return _unavailable(outcome.reason or "no_bicycle_route")
         routes = [outcome.route, *outcome.alternatives[: request.alternatives]]
         answered = []
+        deadline = time.monotonic() + SURFACE_BUDGET_SECONDS
+        looking_up_surfaces = request.surfaces
         for route, shape in zip(routes, outcome.shapes):
             item = {**route, "profile": request.profile}
-            if request.surfaces:
-                breakdown = self._router.surface_breakdown(shape)
+            remaining = deadline - time.monotonic()
+            if looking_up_surfaces and remaining < MINIMUM_SURFACE_TIMEOUT_SECONDS:
+                _LOGGER.info("bicycle route surfaces skipped reason=budget")
+                looking_up_surfaces = False
+            if looking_up_surfaces:
+                try:
+                    breakdown = self._router.surface_breakdown(
+                        shape, timeout_seconds=min(remaining, self._router.timeout_seconds),
+                    )
+                except ValhallaUnavailableError:
+                    # One failed lookup means the others would fail too.
+                    looking_up_surfaces = False
+                    breakdown = None
                 if breakdown is not None:
                     item["surfaces"] = breakdown
             answered.append(item)

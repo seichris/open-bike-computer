@@ -74,15 +74,21 @@ class RoutingTransport:
         self.trace_status = 200
         self.trace_body = TRACE_EDGES
         self.trace_failure: str | None = None
+        # Answer for route requests that ask for alternates, when set.
+        self.body_with_alternates: bytes | None = None
 
     def request(self, *, method, url, headers, body, timeout_seconds, maximum_body_bytes):
-        self.requests.append({"method": method, "url": url, "body": json.loads(body), "timeout": timeout_seconds})
+        decoded = json.loads(body)
+        self.requests.append({"method": method, "url": url, "body": decoded, "timeout": timeout_seconds})
         if url.endswith("/trace_attributes"):
             if self.trace_failure:
                 raise ElevationProviderError(self.trace_failure)
             return ProviderHTTPResponse(self.trace_status, {"content-type": "application/json"}, self.trace_body, url)
         if self.failure:
             raise ElevationProviderError(self.failure)
+        if self.body_with_alternates is not None and decoded.get("alternates"):
+            return ProviderHTTPResponse(self.status, {"content-type": "application/json"},
+                                        self.body_with_alternates, url)
         return ProviderHTTPResponse(self.status, {"content-type": "application/json"}, self.body, url)
 
 
@@ -310,6 +316,49 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["status"], "ready")
                 self.assertNotIn("surfaces", response.json()["route"])
+
+    def test_a_failing_surface_lookup_is_not_repeated_for_the_alternatives(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip, trip)
+        for status, failure in ((200, "provider-timeout"), (503, None)):
+            with self.subTest(status=status, failure=failure):
+                self.transport.requests.clear()
+                self.transport.trace_status = status
+                self.transport.trace_failure = failure
+                body = self.post(route_payload(alternatives=2, surfaces=True)).json()
+                self.assertEqual(body["status"], "ready")
+                self.assertEqual(len(body["alternatives"]), 2)
+                self.assertFalse(any("surfaces" in item for item in [body["route"], *body["alternatives"]]))
+                traces = [r for r in self.transport.requests if r["url"].endswith("/trace_attributes")]
+                self.assertEqual(len(traces), 1)
+
+    def test_surface_lookups_share_one_time_budget(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip, trip)
+        # The deadline is set at 100 s; the first lookup starts at 100 s and
+        # the second would start at 104.5 s, with under a second left.
+        with patch("map_platform.bicycle_route_service.time") as clock:
+            clock.monotonic.side_effect = [100.0, 100.0, 104.5, 104.6]
+            body = self.post(route_payload(alternatives=2, surfaces=True)).json()
+        self.assertIn("surfaces", body["route"])
+        self.assertFalse(any("surfaces" in item for item in body["alternatives"]))
+        traces = [r for r in self.transport.requests if r["url"].endswith("/trace_attributes")]
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(traces[0]["timeout"], 5.0)
+
+    def test_alternatives_too_big_to_send_fall_back_to_the_route_alone(self):
+        self.transport.body_with_alternates = b" " * (3 * 1024 * 1024)
+        body = self.post(route_payload(alternatives=2)).json()
+        self.assertEqual(body["status"], "ready", body)
+        self.assertEqual(body["alternatives"], [])
+        routes = [r for r in self.transport.requests if r["url"].endswith("/route")]
+        self.assertEqual([r["body"].get("alternates") for r in routes], [2, None])
+
+        self.transport.requests.clear()
+        self.transport.body = b" " * (3 * 1024 * 1024)
+        body = self.post(route_payload()).json()
+        self.assertEqual((body["status"], body["reason"]), ("unavailable", "request_too_long"))
+        self.assertEqual(len(self.transport.requests), 1)
 
     def test_alternatives_and_surfaces_fields_are_validated(self):
         for field, value in (("alternatives", 3), ("alternatives", -1), ("alternatives", True),

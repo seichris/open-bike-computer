@@ -77,9 +77,13 @@ which echoes the request.
 - `alternatives` appears only when the request asked for them. It holds up to
   that many routes of the same shape, in Valhalla's order. An alternative that
   fails the checks (for example a walking push segment) is left out rather
-  than failing the answer, so the list can be shorter or empty.
+  than failing the answer, so the list can be shorter or empty. If the
+  alternatives make Valhalla's answer larger than the size limit, the route is
+  asked for again without them and the list is empty.
 - `surfaces` appears on each route only when requested and when the lookup
-  succeeded. If the lookup fails, the route is served without it.
+  succeeded. If the lookup fails, the route is served without it. The lookups
+  of one request share a 5-second budget, and after the first failed lookup
+  the remaining routes are served without surfaces instead of being looked up.
   - **Paved:** Valhalla `paved_smooth`, `paved` and `paved_rough`.
   - **Gravel:** `compacted` and `gravel`.
   - **Unpaved:** `dirt`, `path` and `impassable`.

@@ -232,12 +232,15 @@ class ValhallaOutcome:
     ``alternatives`` holds the usable alternative routes Valhalla also
     returned. ``shapes`` holds the encoded shapes of ``route`` and then of
     each alternative, in the same order, for a surface lookup.
+    ``response_too_large`` marks a ``request_too_long`` caused only by the
+    answer's size, which asking for fewer alternatives may avoid.
     """
 
     route: dict[str, Any] | None
     reason: str | None
     alternatives: tuple[dict[str, Any], ...] = ()
     shapes: tuple[str, ...] = ()
+    response_too_large: bool = False
 
 
 # Valhalla edge surfaces (``baldr::Surface``) by rider-facing group.
@@ -276,6 +279,10 @@ class ValhallaBicycleRouter:
         self._logger = logger
         self._label = log_label
 
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
     def route(self, body: bytes) -> ValhallaOutcome:
         try:
             response = self._transport.request(
@@ -291,7 +298,7 @@ class ValhallaBicycleRouter:
             raise ValhallaUnavailableError("routing-unavailable") from None
         if response.status_code == 200 and len(response.body) > self._limits.upstream_bytes:
             self._logger.info("%s outcome=request_too_long reason=response-too-large", self._label)
-            return ValhallaOutcome(None, "request_too_long")
+            return ValhallaOutcome(None, "request_too_long", response_too_large=True)
         try:
             decoded = json.loads(response.body)
         except (ValueError, UnicodeDecodeError):
@@ -333,11 +340,13 @@ class ValhallaBicycleRouter:
             shapes.append(_trip_shape(trip))
         return ValhallaOutcome(route, None, tuple(alternatives), tuple(shapes))
 
-    def surface_breakdown(self, shape: str) -> dict[str, float] | None:
+    def surface_breakdown(self, shape: str, timeout_seconds: float | None = None) -> dict[str, float] | None:
         """Metres per surface group along one route's exact edges, or None.
 
-        A lookup that fails or answers unexpectedly returns None, so the
-        route is still served without a breakdown.
+        An answer without usable edges returns None. A transport failure or
+        an error status raises ``ValhallaUnavailableError``, so the caller can
+        stop asking for the other routes' surfaces. Either way the route is
+        still served, without a breakdown.
         """
 
         body = json.dumps({
@@ -352,19 +361,22 @@ class ValhallaBicycleRouter:
                 url=self._trace_url,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 body=body,
-                timeout_seconds=self._timeout_seconds,
+                timeout_seconds=self._timeout_seconds if timeout_seconds is None else timeout_seconds,
                 maximum_body_bytes=self._limits.upstream_bytes,
             )
         except ElevationProviderError as exc:
             self._logger.info("%s surfaces failed code=%s", self._label, exc.code)
-            return None
+            raise ValhallaUnavailableError("surfaces-unavailable") from None
+        if response.status_code != 200:
+            self._logger.info("%s surfaces unavailable status=%s", self._label, response.status_code)
+            raise ValhallaUnavailableError("surfaces-unavailable")
         try:
             decoded = json.loads(response.body)
         except (ValueError, UnicodeDecodeError):
             decoded = None
         edges = decoded.get("edges") if isinstance(decoded, dict) else None
-        if response.status_code != 200 or not isinstance(edges, list) or not edges:
-            self._logger.info("%s surfaces unavailable status=%s", self._label, response.status_code)
+        if not isinstance(edges, list) or not edges:
+            self._logger.info("%s surfaces unavailable reason=no-edges", self._label)
             return None
         totals = {"pavedMeters": 0.0, "gravelMeters": 0.0, "unpavedMeters": 0.0, "unknownMeters": 0.0}
         for edge in edges:
