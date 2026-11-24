@@ -46,12 +46,15 @@ enum RealisticTerrainOverlayPolicy {
         showsBikeLanes: Bool,
         showsContours: Bool,
         showsSavedRoutePreview: Bool,
+        hasRouteCreationLine: Bool,
         isNavigating: Bool,
         hasCalculatedRoute: Bool,
         hasOfflineRoute: Bool,
         hasDetour: Bool
     ) -> Bool {
         showsBikeLanes || showsContours || showsSavedRoutePreview ||
+            // Create a Route draws its planned line only outside navigation.
+            (!isNavigating && hasRouteCreationLine) ||
             // MapViewContainer draws these two only while navigating, and the
             // offline line only without a calculated route.
             (isNavigating && !hasCalculatedRoute && hasOfflineRoute) ||

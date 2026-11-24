@@ -2546,6 +2546,8 @@ struct ContentView: View {
             showsBikeLanes: bikeLanesOverlay != nil,
             showsContours: offlineMapManager.topographyOverlay != nil,
             showsSavedRoutePreview: visibleSavedRouteMapPreview != nil,
+            hasRouteCreationLine: routeCreation.isActive &&
+                routeCreation.mapInput(polylines: routeCreationPolylines)?.polyline != nil,
             isNavigating: coordinator.isNavigating,
             hasCalculatedRoute: coordinator.currentRoute != nil,
             hasOfflineRoute: coordinator.offlineRoutePolyline != nil,

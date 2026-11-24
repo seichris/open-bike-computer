@@ -263,6 +263,7 @@ struct MapAppearanceTests {
         var bikeLanes = false
         var contours = false
         var savedRoute = false
+        var routeCreationLine = false
         var navigating = false
         var calculatedRoute = false
         var offlineRoute = false
@@ -273,6 +274,7 @@ struct MapAppearanceTests {
                 showsBikeLanes: bikeLanes,
                 showsContours: contours,
                 showsSavedRoutePreview: savedRoute,
+                hasRouteCreationLine: routeCreationLine,
                 isNavigating: navigating,
                 hasCalculatedRoute: calculatedRoute,
                 hasOfflineRoute: offlineRoute,
@@ -286,6 +288,14 @@ struct MapAppearanceTests {
         precondition(TerrainOverlays(bikeLanes: true).isPaused, "bike lanes flatten the ground")
         precondition(TerrainOverlays(contours: true).isPaused, "contours flatten the ground")
         precondition(TerrainOverlays(savedRoute: true).isPaused, "a saved-route preview flattens the ground")
+        precondition(
+            TerrainOverlays(routeCreationLine: true).isPaused,
+            "a planned Create a Route line flattens the ground"
+        )
+        precondition(
+            !TerrainOverlays(routeCreationLine: true, navigating: true).isPaused,
+            "the map hides the Create a Route line during navigation"
+        )
         precondition(
             TerrainOverlays(navigating: true, offlineRoute: true).isPaused,
             "an offline route being navigated flattens the ground"

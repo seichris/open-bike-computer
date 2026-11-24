@@ -6,8 +6,9 @@ contours. In a pitched view, MapKit can show the cycling lines faintly through
 buildings.
 
 The 3D Terrain switch saves a preference for realistic ground. MapKit
-flattens the ground while bike lanes, a saved route, a detour, or downloaded
-contours are visible; routes from MapKit directions keep the terrain. The 3D
+flattens the ground while bike lanes, a saved route, a route being created, a
+detour, or downloaded contours are visible; routes from MapKit directions keep
+the terrain. The 3D
 Terrain switch is unchecked and unavailable during that time. Bicino retains
 the saved preference. Realistic ground can return when the last affected
 overlay is removed and the basemap supports it.
