@@ -191,7 +191,8 @@ class ProfileProbeTests(unittest.TestCase):
         probe = report["probes"][0]
         self.assertTrue(probe["roadGravelGeometryDiffers"])
         self.assertEqual({name: item["bicycleTypes"] for name, item in probe["profiles"].items()},
-                         {"road": ["road"], "gravel": ["cross"], "everyday": ["hybrid"]})
+                         {"road": ["road"], "gravel": ["cross"], "everyday": ["hybrid"],
+                          "mountain": ["mountain"]})
 
     def test_a_silently_ignored_bicycle_type_fails(self):
         _, failures = self.run_probe(ignore_type=True)

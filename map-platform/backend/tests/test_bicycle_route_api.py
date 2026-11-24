@@ -40,7 +40,27 @@ EXPECTED_COSTING = {
                "avoid_bad_surfaces": 0.0},
     "everyday": {"bicycle_type": "hybrid", "use_roads": 0.25, "use_hills": 0.25, "use_ferry": 0.0,
                  "avoid_bad_surfaces": 0.5},
+    "mountain": {"bicycle_type": "mountain", "use_roads": 0.1, "use_hills": 0.5, "use_ferry": 0.0,
+                 "avoid_bad_surfaces": 0.0},
 }
+# A trace_attributes answer for the route's exact edges (lengths in km).
+TRACE_EDGES = json.dumps({"edges": [
+    {"surface": "paved_smooth", "length": 1.2},
+    {"surface": "paved", "length": 0.8},
+    {"surface": "compacted", "length": 0.5},
+    {"surface": "gravel", "length": 0.25},
+    {"surface": "dirt", "length": 0.1},
+    {"surface": "path", "length": 0.05},
+    {"length": 0.02},
+]}).encode()
+
+
+def with_alternates(*trips) -> bytes:
+    """DUBAI_ROUTE plus the given trips as Valhalla ``alternates``."""
+
+    answer = json.loads(DUBAI_ROUTE)
+    answer["alternates"] = [{"trip": trip} for trip in trips]
+    return json.dumps(answer).encode()
 
 
 class RoutingTransport:
@@ -51,9 +71,16 @@ class RoutingTransport:
         self.status = 200
         self.body = DUBAI_ROUTE
         self.failure: str | None = None
+        self.trace_status = 200
+        self.trace_body = TRACE_EDGES
+        self.trace_failure: str | None = None
 
     def request(self, *, method, url, headers, body, timeout_seconds, maximum_body_bytes):
         self.requests.append({"method": method, "url": url, "body": json.loads(body), "timeout": timeout_seconds})
+        if url.endswith("/trace_attributes"):
+            if self.trace_failure:
+                raise ElevationProviderError(self.trace_failure)
+            return ProviderHTTPResponse(self.trace_status, {"content-type": "application/json"}, self.trace_body, url)
         if self.failure:
             raise ElevationProviderError(self.failure)
         return ProviderHTTPResponse(self.status, {"content-type": "application/json"}, self.body, url)
@@ -207,7 +234,7 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
 
     def test_each_profile_maps_to_its_valhalla_bicycle_costing(self):
         self.assertEqual({name: dict(options) for name, options in PROFILES.items()}, EXPECTED_COSTING)
-        for profile in ("road", "gravel", "everyday"):
+        for profile in ("road", "gravel", "everyday", "mountain"):
             with self.subTest(profile=profile):
                 response = self.post(route_payload(profile=profile))
                 self.assertEqual(response.status_code, 200, response.text)
@@ -216,7 +243,77 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
                 self.assertEqual(sent, {"bicycle": EXPECTED_COSTING[profile]})
         # Valhalla 3.9.2 only recognises these lowercase types; anything else
         # silently becomes hybrid.
-        self.assertEqual({options["bicycle_type"] for options in PROFILES.values()}, {"road", "cross", "hybrid"})
+        self.assertEqual(
+            {options["bicycle_type"] for options in PROFILES.values()}, {"road", "cross", "hybrid", "mountain"}
+        )
+
+    def test_alternatives_are_asked_for_converted_and_unusable_ones_skipped(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        walking = json.loads(DUBAI_ROUTE)["trip"]
+        walking["legs"][0]["maneuvers"][1]["travel_mode"] = "pedestrian"
+        self.transport.body = with_alternates(trip, walking, trip)
+        with self.assertLogs("map_platform", level="INFO") as logs:
+            response = self.post(route_payload(profile="mountain", alternatives=2))
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(set(body), {"schema", "status", "route", "alternatives", "reason"})
+        self.assertEqual(self.transport.requests[0]["body"]["alternates"], 2)
+        self.assertEqual(len(body["alternatives"]), 2)
+        for alternative in body["alternatives"]:
+            self.assertEqual(alternative["profile"], "mountain")
+            self.assertEqual(alternative["travelMode"], "bicycle")
+            self.assertEqual(alternative["provider"]["id"], "bicino.valhalla")
+            self.assertNotIn("surfaces", alternative)
+        self.assertIn("alternative skipped reason=non-bicycle-maneuver", "\n".join(logs.output))
+        self.assertIn("alternatives=2 surfaces=0", "\n".join(logs.output))
+
+        self.transport.body = with_alternates(trip, trip)
+        one = self.post(route_payload(alternatives=1)).json()
+        self.assertEqual(len(one["alternatives"]), 1)
+        self.assertEqual(self.transport.requests[-1]["body"]["alternates"], 1)
+
+        plain = self.post(route_payload()).json()
+        self.assertNotIn("alternatives", plain)
+        self.assertNotIn("alternates", self.transport.requests[-1]["body"])
+
+    def test_surfaces_summarise_each_routes_exact_edges(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip)
+        response = self.post(route_payload(alternatives=1, surfaces=True))
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        expected = {"pavedMeters": 2000.0, "gravelMeters": 750.0, "unpavedMeters": 150.0, "unknownMeters": 20.0}
+        self.assertEqual(body["route"]["surfaces"], expected)
+        self.assertEqual(body["alternatives"][0]["surfaces"], expected)
+        traces = [request for request in self.transport.requests if request["url"].endswith("/trace_attributes")]
+        self.assertEqual(len(traces), 2)
+        self.assertEqual(traces[0]["url"], UPSTREAM + "/trace_attributes")
+        self.assertEqual(traces[0]["body"]["shape_match"], "edge_walk")
+        self.assertEqual(traces[0]["body"]["costing"], "bicycle")
+        self.assertEqual(traces[0]["body"]["encoded_polyline"], trip["legs"][0]["shape"])
+        self.assertEqual(traces[0]["body"]["filters"],
+                         {"attributes": ["edge.surface", "edge.length"], "action": "include"})
+
+    def test_a_failed_surface_lookup_still_serves_the_route(self):
+        for status, body, failure in ((500, b"{}", None), (200, b'{"edges": []}', None),
+                                      (200, b"not json", None), (200, TRACE_EDGES, "provider-timeout")):
+            with self.subTest(status=status, failure=failure):
+                self.transport.trace_status = status
+                self.transport.trace_body = body
+                self.transport.trace_failure = failure
+                response = self.post(route_payload(surfaces=True))
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], "ready")
+                self.assertNotIn("surfaces", response.json()["route"])
+
+    def test_alternatives_and_surfaces_fields_are_validated(self):
+        for field, value in (("alternatives", 3), ("alternatives", -1), ("alternatives", True),
+                             ("alternatives", "2"), ("alternatives", 1.0), ("surfaces", "yes"),
+                             ("surfaces", 1)):
+            with self.subTest(field=field, value=value):
+                response = self.post(route_payload(**{field: value}))
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["detail"]["code"], "bicycle_route_invalid_request")
 
     def test_locale_defaults_and_is_normalised(self):
         payload = route_payload()
@@ -346,7 +443,7 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
             route_payload(schema="bicino-bicycle-detour-request-v1"),
             route_payload(requestId="not-a-uuid"),
             route_payload(requestId=str(uuid.uuid4()).upper()),
-            route_payload(profile="mountain"),
+            route_payload(profile="mtb"),
             route_payload(profile="Road"),
             route_payload(profile=None),
             payload_without_profile,
@@ -405,7 +502,9 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
             "schema": "bicino-bicycle-route-request-v1",
             "provider": "bicino.valhalla",
             "attribution": "© OpenStreetMap contributors",
-            "profiles": ["road", "gravel", "everyday"],
+            "profiles": ["road", "gravel", "everyday", "mountain"],
+            "maximumAlternatives": 2,
+            "surfaces": True,
             "maximumSeparationMeters": 150000,
         })
         self.assertEqual(integrations["bicycleDetour"]["maximumSeparationMeters"], 15000)

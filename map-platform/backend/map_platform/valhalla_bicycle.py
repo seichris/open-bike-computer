@@ -188,10 +188,12 @@ def bicycle_route_body(
     destination: MapPoint,
     costing_options: Mapping[str, Any],
     locale: str,
+    alternates: int = 0,
 ) -> bytes:
     """The Valhalla ``/route`` body for one two-point bicycle request.
 
     ``origin`` is a Valhalla location (``lat``/``lon`` plus optional heading).
+    ``alternates`` asks for up to that many alternative routes as well.
     """
 
     body = {
@@ -205,6 +207,8 @@ def bicycle_route_body(
         "language": locale,
         "directions_type": "instructions",
     }
+    if alternates > 0:
+        body["alternates"] = alternates
     return json.dumps(body, separators=(",", ":")).encode()
 
 
@@ -222,10 +226,30 @@ class ValhallaUnavailableError(RuntimeError):
 
 @dataclass(frozen=True)
 class ValhallaOutcome:
-    """Either ``route`` (ready) or ``reason`` (an unavailable outcome)."""
+    """Either ``route`` (ready) or ``reason`` (an unavailable outcome).
+
+    ``alternatives`` holds the usable alternative routes Valhalla also
+    returned. ``shapes`` holds the encoded shapes of ``route`` and then of
+    each alternative, in the same order, for a surface lookup.
+    """
 
     route: dict[str, Any] | None
     reason: str | None
+    alternatives: tuple[dict[str, Any], ...] = ()
+    shapes: tuple[str, ...] = ()
+
+
+# Valhalla edge surfaces (``baldr::Surface``) by rider-facing group.
+SURFACE_GROUPS = {
+    "paved_smooth": "pavedMeters",
+    "paved": "pavedMeters",
+    "paved_rough": "pavedMeters",
+    "compacted": "gravelMeters",
+    "gravel": "gravelMeters",
+    "dirt": "unpavedMeters",
+    "path": "unpavedMeters",
+    "impassable": "unpavedMeters",
+}
 
 
 class ValhallaBicycleRouter:
@@ -242,6 +266,7 @@ class ValhallaBicycleRouter:
         size_limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS,
     ):
         self._route_url = route_url
+        self._trace_url = route_url[: -len("/route")] + "/trace_attributes"
         self._limits = size_limits
         self._transport = transport
         self._timeout_seconds = timeout_seconds
@@ -291,13 +316,76 @@ class ValhallaBicycleRouter:
             if str(exc) == "non-bicycle-maneuver":
                 return ValhallaOutcome(None, "no_bicycle_route")
             raise ValhallaUnavailableError("routing-invalid-response") from None
-        return ValhallaOutcome(route, None)
+        alternatives: list[dict[str, Any]] = []
+        shapes = [_trip_shape(decoded.get("trip"))]
+        raw_alternates = decoded.get("alternates")
+        for raw in raw_alternates if isinstance(raw_alternates, list) else []:
+            trip = raw.get("trip") if isinstance(raw, dict) else None
+            try:
+                alternatives.append(route_from_trip(trip, self._limits))
+            except ValueError as exc:
+                # An unusable alternative never costs the rider the main route.
+                self._logger.info("%s alternative skipped reason=%s", self._label, exc)
+                continue
+            shapes.append(_trip_shape(trip))
+        return ValhallaOutcome(route, None, tuple(alternatives), tuple(shapes))
+
+    def surface_breakdown(self, shape: str) -> dict[str, float] | None:
+        """Metres per surface group along one route's exact edges, or None.
+
+        A lookup that fails or answers unexpectedly returns None, so the
+        route is still served without a breakdown.
+        """
+
+        body = json.dumps({
+            "encoded_polyline": shape,
+            "shape_match": "edge_walk",
+            "costing": "bicycle",
+            "filters": {"attributes": ["edge.surface", "edge.length"], "action": "include"},
+        }, separators=(",", ":")).encode()
+        try:
+            response = self._transport.request(
+                method="POST",
+                url=self._trace_url,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                body=body,
+                timeout_seconds=self._timeout_seconds,
+                maximum_body_bytes=self._limits.upstream_bytes,
+            )
+        except ElevationProviderError as exc:
+            self._logger.info("%s surfaces failed code=%s", self._label, exc.code)
+            return None
+        try:
+            decoded = json.loads(response.body)
+        except (ValueError, UnicodeDecodeError):
+            decoded = None
+        edges = decoded.get("edges") if isinstance(decoded, dict) else None
+        if response.status_code != 200 or not isinstance(edges, list) or not edges:
+            self._logger.info("%s surfaces unavailable status=%s", self._label, response.status_code)
+            return None
+        totals = {"pavedMeters": 0.0, "gravelMeters": 0.0, "unpavedMeters": 0.0, "unknownMeters": 0.0}
+        for edge in edges:
+            if not isinstance(edge, dict):
+                return None
+            try:
+                length = _number(edge.get("length", 0), "length")
+            except ValueError:
+                return None
+            group = SURFACE_GROUPS.get(edge.get("surface"), "unknownMeters")
+            totals[group] += max(length, 0) * 1000
+        return {key: round(value, 1) for key, value in totals.items()}
 
 
 def _number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError(f"invalid-{name}")
     return float(value)
+
+
+def _trip_shape(trip: Any) -> str:
+    """The encoded shape of a trip ``route_from_trip`` already accepted."""
+
+    return trip["legs"][0]["shape"]
 
 
 def route_from_trip(trip: Any, limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS) -> dict[str, Any]:
