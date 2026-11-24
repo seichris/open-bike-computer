@@ -30,9 +30,9 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # GCC States archive built from the map backend's cached OSM extract.
+      # Worldwide Apple Maps Cycling coverage gaps, built from OSM planet-261116.
       - type: bind
-        source: /var/lib/bicino-valhalla-production/graphs/a1911ad2d013f43bc1595a9fdd40e7caa4b88075db4b86f4ddfc8f0b3150bfff
+        source: /var/lib/bicino-valhalla-production/graphs/b1f74e965a5687130c7500db0bccd060e7086b1f88e41fd579cf776cd9da969d
         target: /graph
         read_only: true
         bind:
