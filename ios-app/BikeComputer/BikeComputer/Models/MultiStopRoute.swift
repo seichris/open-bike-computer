@@ -155,7 +155,10 @@ enum MultiStopRouteDraftIssue: Equatable {
 
 struct MultiStopRouteRequest: Equatable {
     let places: [MultiStopRoutePlace]
+    /// Apple Maps' mode: cycling for every bicycle profile.
     let transportType: MKDirectionsTransportType
+    /// Road, Gravel or Everyday asks Bicino's bicycle route service first.
+    var bicycleProfile: BicycleRouteProfileV1? = nil
 }
 
 /// Ordered stops being edited. Position defines the role: the first stop is
@@ -281,11 +284,15 @@ struct MultiStopRouteDraft: Equatable {
         }
     }
 
-    func request(transportType: MKDirectionsTransportType) -> MultiStopRouteRequest? {
+    func request(
+        transportType: MKDirectionsTransportType,
+        bicycleProfile: BicycleRouteProfileV1? = nil
+    ) -> MultiStopRouteRequest? {
         guard issue == nil else { return nil }
         return MultiStopRouteRequest(
             places: stops.compactMap(\.place),
-            transportType: transportType
+            transportType: transportType,
+            bicycleProfile: bicycleProfile
         )
     }
 }
@@ -350,13 +357,14 @@ enum MultiStopRouteStitchError: LocalizedError, Equatable {
     }
 }
 
-/// Joins consecutive MapKit legs into one canonical route without changing
-/// provider, normalization or any leg geometry. The result is an ordinary
-/// active-only MapKit route; only `OfflineRouteSaveDraft.plannedMapKit` may
-/// give it the explicit phone-only saved scope.
+/// Joins consecutive legs from one provider (Apple Maps, or Bicino's bicycle
+/// route service) into one canonical route without changing provider,
+/// normalization or any leg geometry. The result is an ordinary active-only
+/// route; only `OfflineRouteSaveDraft.plannedRoute` may give it the explicit
+/// phone-only saved scope.
 enum MultiStopRouteStitcher {
-    /// MapKit snaps the end of one leg and the start of the next to the road
-    /// network independently. A join up to this length is that snapping
+    /// The provider snaps the end of one leg and the start of the next to the
+    /// road network independently. A join up to this length is that snapping
     /// difference at the stop; a wider one is rejected, not drawn off-road.
     static let maximumJunctionGapMeters = 100.0
     /// Connector vertices stay far inside the device's 16-bit delta window.
@@ -379,12 +387,14 @@ enum MultiStopRouteStitcher {
             )
         }
         guard let firstLeg = legs.first,
+              [RouteProviderPolicyV1.mapKit, RouteProviderPolicyV1.valhallaDetour]
+                .contains(firstLeg.provider),
               labels.count == legs.count + 1,
               labels.allSatisfy({ !$0.isEmpty }) else {
             throw MultiStopRouteStitchError.invalidLegs
         }
         for leg in legs {
-            guard leg.provider == RouteProviderPolicyV1.mapKit,
+            guard leg.provider == firstLeg.provider,
                   leg.sourceReference == nil,
                   leg.localeIdentifier == firstLeg.localeIdentifier,
                   leg.transportType == firstLeg.transportType,
@@ -460,7 +470,7 @@ enum MultiStopRouteStitcher {
         let route = NavigationRouteV1(
             id: routeID,
             revision: 1,
-            provider: RouteProviderPolicyV1.mapKit,
+            provider: firstLeg.provider,
             localeIdentifier: firstLeg.localeIdentifier,
             transportType: firstLeg.transportType,
             source: RouteEndpointV1(coordinate: first, label: labels[0]),

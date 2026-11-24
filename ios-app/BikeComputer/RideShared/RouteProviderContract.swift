@@ -59,12 +59,22 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .durable
     )
 
-    /// A temporary bicycle detour from Bicino's Valhalla service (OSM data).
-    /// Active only: never stored, shared, sent for elevation or to the Watch.
+    /// A temporary bicycle detour from Bicino's Valhalla service (OSM data),
+    /// and the legs of a Create a Route plan before it is saved. Active only:
+    /// never stored, shared, sent for elevation or to the Watch.
     static let valhallaDetour = RouteProviderMetadataV1(
         providerID: "bicino.valhalla",
         attribution: "© OpenStreetMap contributors",
         storageScope: .activeOnly
+    )
+
+    /// A Road, Gravel or Everyday Create a Route plan saved through the
+    /// phone's save sheet. Phone only like a saved Apple Maps plan: kept on
+    /// this iPhone, never sent to the Watch or shared.
+    static let valhallaSavedOnPhone = RouteProviderMetadataV1(
+        providerID: "bicino.valhalla",
+        attribution: "© OpenStreetMap contributors",
+        storageScope: .phoneOnly
     )
 
     /// Saved routes a temporary bicycle detour may serve, with the provenance
@@ -77,6 +87,7 @@ nonisolated enum RouteProviderPolicyV1 {
         if metadata == importedGPX { return "gpx" }
         if metadata == strava { return "strava" }
         if metadata == mapKitSavedOnPhone { return "mapkit" }
+        if metadata == valhallaSavedOnPhone { return "valhalla" }
         return nil
     }
 
@@ -106,6 +117,8 @@ nonisolated enum RouteProviderPolicyV1 {
         if metadata == importedGPX { return "gpx" }
         if metadata == mapKit || metadata == mapKitSavedOnPhone { return "mapkit" }
         if metadata == strava { return "strava" }
+        // A saved Bicino route: the service's generic saved-route source.
+        if metadata == valhallaSavedOnPhone { return "saved" }
         return nil
     }
 
@@ -120,7 +133,7 @@ nonisolated enum RouteProviderPolicyV1 {
         case strava.providerID:
             metadata == strava
         case valhallaDetour.providerID:
-            metadata == valhallaDetour
+            metadata == valhallaDetour || metadata == valhallaSavedOnPhone
         default:
             true
         }
@@ -131,7 +144,8 @@ nonisolated enum RouteProviderPolicyV1 {
     ) -> Bool {
         // Implementation admission, not a license grant. A self-declared
         // durable scope is insufficient, and normal MapKit responses still fail.
-        metadata == importedGPX || metadata == strava || metadata == mapKitSavedOnPhone
+        metadata == importedGPX || metadata == strava || metadata == mapKitSavedOnPhone ||
+            metadata == valhallaSavedOnPhone
     }
 
     static func requiresExpiry(

@@ -78,9 +78,7 @@ struct ContentView: View {
     @StateObject private var mapViewControlState: MapViewControlState
     @StateObject private var onlinePlaces = OnlinePOISearchSession()
     /// Create a Route on this map, in place of destination search.
-    @StateObject private var routeCreation = RouteCreationSession(
-        namePlace: RouteDroppedPinNamer.name(for:)
-    )
+    @StateObject private var routeCreation: RouteCreationSession
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
@@ -279,6 +277,16 @@ struct ContentView: View {
         )
         _mapViewControlState = StateObject(
             wrappedValue: MapViewControlState()
+        )
+        _routeCreation = StateObject(
+            wrappedValue: RouteCreationSession(
+                planner: MultiStopRoutePlanner(
+                    bicycleRoutes: BicinoBicycleRouteService(
+                        transport: BicycleRouteClient(serviceSession: bicinoServiceSession)
+                    )
+                ),
+                namePlace: { await RouteDroppedPinNamer.name(for: $0) }
+            )
         )
         _offlineMapManager = StateObject(
             wrappedValue: OfflineMapManager(
