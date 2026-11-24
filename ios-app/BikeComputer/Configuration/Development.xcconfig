@@ -14,9 +14,10 @@ BICINO_APP_ATTEST_ENVIRONMENT = development
 BICINO_MAP_SERVICE_HOST = maps-dev.8o.vc
 // Bike Lanes tiles: an HTTPS host name, and an absolute path with {z}, {x}
 // and {y}. A full URL cannot go here because "//" starts an xcconfig
-// comment. Leave either empty to hide the layer.
-BICINO_BIKE_LANES_TILE_HOST =
-BICINO_BIKE_LANES_TILE_PATH =
+// comment. Leave either empty to hide the layer. Bicino Dev uses the same
+// public CyclOSM Lite endpoint as Bicino, so the layer can be tested.
+BICINO_BIKE_LANES_TILE_HOST = a.tile-cyclosm.openstreetmap.fr
+BICINO_BIKE_LANES_TILE_PATH = /cyclosm-lite/{z}/{x}/{y}.png
 // Bicino Dev shares the production library identity and catalog with Bicino.
 // Staging validation builds override this setting at build time.
 BICINO_MAP_CATALOG_HOST = maps-share.8o.vc

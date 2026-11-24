@@ -15,8 +15,8 @@ overlay is removed and the basemap supports it.
 
 ## Tile configuration
 
-Production builds use the public CyclOSM Lite endpoint with its original
-colors. The layer is opt-in. [Issue #863](https://github.com/seichris/open-bike-computer/issues/863)
+Bicino and Bicino Dev builds both use the public CyclOSM Lite endpoint with
+its original colors. The layer is opt-in. [Issue #863](https://github.com/seichris/open-bike-computer/issues/863)
 tracks tile-source alternatives, including the Bicino backend.
 
 Set two build settings to choose a tile source:
