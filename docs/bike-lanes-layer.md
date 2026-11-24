@@ -1,6 +1,6 @@
 # iPhone bike lanes
 
-The Bike Lanes switch in Layers shows a transparent teal CyclOSM Lite layer.
+The Bike Lanes switch in Layers shows a transparent cycling layer.
 MapKit places it below the saved route and map labels, and above downloaded
 contours. In a pitched view, MapKit can show the cycling lines faintly through
 buildings.
@@ -15,7 +15,11 @@ overlay is removed and the basemap supports it.
 
 ## Tile configuration
 
-Set two build settings for a managed tile service:
+Production builds use the public CyclOSM Lite endpoint with its original
+colors. The layer is opt-in. [Issue #863](https://github.com/seichris/open-bike-computer/issues/863)
+tracks tile-source alternatives, including the Bicino backend.
+
+Set two build settings to choose a tile source:
 
 - `BICINO_BIKE_LANES_TILE_HOST`: the HTTPS host name only, such as
   `tiles.example.com`, with no scheme, port, or path.
@@ -24,8 +28,8 @@ Set two build settings for a managed tile service:
 
 The app joins them as `https://<host><path>`. A full URL cannot go in an
 xcconfig file, because `//` starts a comment there and would cut the value to
-`https:`. The service should return transparent, 256-pixel XYZ PNG tiles styled
-in thin teal at zooms 13–18. With either setting empty or invalid, the Bike
+`https:`. The service should return transparent, 256-pixel XYZ PNG tiles
+at zooms 13–18. With either setting empty or invalid, the Bike
 Lanes option is hidden. The app shows attribution with the map controls while
 the layer is enabled; like the other map chrome, it hides while destination
 search is expanded.
