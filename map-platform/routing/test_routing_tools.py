@@ -123,6 +123,9 @@ class ProbeExpectationTests(unittest.TestCase):
         self.assertTrue(probe_graph.passed(push, "planet", self.LEGS, both, 1.2, None))
         self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["pedestrian"], 1.2, None))
         self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["bicycle", "auto"], 1.2, None))
+        self.assertTrue(probe_graph.passed(push, "planet", self.LEGS, both, 1.2, None, 100))
+        self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, both, 3.0, None, 2000),
+                         "a mostly walking route is not a bike route")
 
     def test_expected_misses_need_a_no_route_code(self):
         miss = {"name": "Great Bear Lake", "route": False}
