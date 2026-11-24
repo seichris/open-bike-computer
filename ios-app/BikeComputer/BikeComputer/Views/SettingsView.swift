@@ -261,13 +261,7 @@ struct SettingsView: View {
                                 onRequestLocationAuthorization
                         )
                     } label: {
-                        Label("Ride Detection", systemImage: "figure.outdoor.cycle")
-                    }
-
-                    NavigationLink {
-                        HardwareCustomizationSettingsView()
-                    } label: {
-                        Label("Hardware Customization", systemImage: "dial.low")
+                        Label("Software Customization", systemImage: "slider.horizontal.3")
                     }
 
                     NavigationLink {
@@ -624,7 +618,7 @@ private struct RideDetectionSettingsView: View {
                 }
             }
         }
-        .navigationTitle("Ride Detection")
+        .navigationTitle("Software Customization")
     }
 
     private var rideDetectionFooterText: String {
@@ -681,95 +675,6 @@ private struct RideDetectionSettingsView: View {
             return
         }
         openURL(url)
-    }
-}
-
-private struct DeviceSoundsSettingsSection: View {
-    @EnvironmentObject private var bleManager: BLEManager
-
-    private var soundSelection: Binding<DeviceSound> {
-        Binding(
-            get: { bleManager.selectedDeviceSound },
-            set: { sound in
-                bleManager.selectedDeviceSound = sound
-                bleManager.saveSettings()
-                if bleManager.isPowerButtonHonkEnabled {
-                    bleManager.sendPowerButtonHonkConfiguration()
-                }
-            }
-        )
-    }
-
-    private var volumeSelection: Binding<Double> {
-        Binding(
-            get: { bleManager.deviceSoundVolumePercent },
-            set: { volume in
-                bleManager.deviceSoundVolumePercent = volume
-                bleManager.saveSettings()
-            }
-        )
-    }
-
-    private var powerButtonHonkSelection: Binding<Bool> {
-        Binding(
-            get: { bleManager.isPowerButtonHonkEnabled },
-            set: { enabled in
-                bleManager.isPowerButtonHonkEnabled = enabled
-                bleManager.saveSettings()
-                bleManager.sendPowerButtonHonkConfiguration()
-            }
-        )
-    }
-
-    var body: some View {
-        Section(
-            header: Text("Device Sounds"),
-            footer: Text("Enable this when a speaker is connected to show the sound controls and honk button.")
-        ) {
-            Toggle("Enable Device Sounds", isOn: $bleManager.deviceSoundsEnabled)
-                .onChange(of: bleManager.deviceSoundsEnabled) { _ in
-                    bleManager.saveSettings()
-                }
-
-            if bleManager.deviceSoundsEnabled {
-                Group {
-                    Picker("Sound", selection: soundSelection) {
-                        ForEach(DeviceSound.allCases) { sound in
-                            Label(sound.title, systemImage: sound.systemImage)
-                                .tag(sound)
-                        }
-                    }
-                    .pickerStyle(.inline)
-
-                    VStack(alignment: .leading) {
-                        HStack {
-                            Text("Volume")
-                            Spacer()
-                            Text("\(Int(bleManager.deviceSoundVolumePercent))%")
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(
-                            value: volumeSelection,
-                            in: 0...100,
-                            step: 5,
-                            onEditingChanged: { isEditing in
-                                bleManager.deviceSoundVolumeEditingChanged(isEditing)
-                            }
-                        )
-                    }
-
-                    Toggle("Use PWR Button as Honk", isOn: powerButtonHonkSelection)
-                        .disabled(!bleManager.supportsPowerButtonHonk)
-
-                    if let error = bleManager.powerButtonHonkConfigurationError {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                }
-                .disabled(!bleManager.supportsDeviceSounds)
-            }
-        }
     }
 }
 
@@ -3147,116 +3052,6 @@ private struct MapStyleSettingsView: View {
             Slider(value: value, in: range, step: 1)
                 .onChange(of: value.wrappedValue, perform: onChange)
         }
-    }
-}
-
-private struct HardwareCustomizationSettingsView: View {
-    @EnvironmentObject private var bleManager: BLEManager
-
-    private var displayInactivityFooter: String {
-        guard bleManager.supportsDisplayInactivityTimeouts else {
-            return "When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active."
-        }
-        return "When enabled, the display dims after \(bleManager.displayDimTimeout.title) and turns off after \(bleManager.displayOffTimeout.title) unless navigation, workout, transfer, or attention activity is active."
-    }
-
-    var body: some View {
-        Form {
-            if bleManager.supportsDisplayBrightness {
-                Section(
-                    header: Text("Device Brightness"),
-                    footer: Text(displayInactivityFooter)
-                ) {
-                    VStack(alignment: .leading) {
-                        HStack {
-                            Text("Brightness")
-                            Spacer()
-                            Text("\(Int(bleManager.deviceBrightnessPercent))%")
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
-                            .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
-                                bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
-                            }
-                    }
-
-                    Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
-                        .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
-                            bleManager.sendSetting(
-                                id: DeviceBLEProtocol.automaticDisplayOffSettingID,
-                                value: newValue ? 1 : 0
-                            )
-                        }
-                        .disabled(!bleManager.supportsAutomaticDisplayOff)
-                    if bleManager.supportsDisplayInactivityTimeouts {
-                        Picker("Dim After", selection: $bleManager.displayDimTimeout) {
-                            ForEach(DisplayDimTimeout.allCases.filter {
-                                $0.rawValue < bleManager.displayOffTimeout.rawValue
-                            }) { timeout in
-                                Text(timeout.title).tag(timeout)
-                            }
-                        }
-                        .onChange(of: bleManager.displayDimTimeout) { _ in
-                            bleManager.sendDisplayInactivityTimeouts()
-                        }
-                        .disabled(!bleManager.automaticDisplayOffEnabled)
-
-                        Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
-                            ForEach(DisplayOffTimeout.allCases.filter {
-                                $0.rawValue > bleManager.displayDimTimeout.rawValue
-                            }) { timeout in
-                                Text(timeout.title).tag(timeout)
-                            }
-                        }
-                        .onChange(of: bleManager.displayOffTimeout) { _ in
-                            bleManager.sendDisplayInactivityTimeouts()
-                        }
-                        .disabled(!bleManager.automaticDisplayOffEnabled)
-                    }
-                }
-                .disabled(!bleManager.supportsDeviceSettings)
-
-            }
-            if bleManager.supportsDisconnectedSleep {
-                Section(
-                    header: Text("Power"),
-                    footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
-                ) {
-                    Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
-                        ForEach(DisconnectedSleepTimeout.allCases) { timeout in
-                            Text(timeout.title).tag(timeout)
-                        }
-                    }
-                    .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
-                        bleManager.sendSetting(
-                            id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
-                            value: newValue.settingValue
-                        )
-                    }
-                }
-                .disabled(!bleManager.supportsDeviceSettings)
-
-            }
-            if bleManager.supportsTapToCycle {
-                Section(header: Text("Screen Navigation")) {
-                    Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                        .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                            bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                        }
-                }
-                .disabled(!bleManager.supportsDeviceSettings)
-
-            }
-            if bleManager.isEPaperDevice {
-                Section("E-paper controls") {
-                    Text("Up and down change screens. Press the center key for actions; hold it to return from screen controls.")
-                    Text("The display keeps its image without power. Check the connection and GPS status before relying on displayed guidance.")
-                }
-            }
-            DeviceSoundsSettingsSection()
-        }
-        .navigationTitle("Hardware Customization")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

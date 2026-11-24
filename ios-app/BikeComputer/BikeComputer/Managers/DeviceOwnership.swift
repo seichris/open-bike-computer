@@ -567,6 +567,13 @@ enum BikeComputerSettingsPresentationPolicy {
         knownDeviceCount > 0
     }
 
+    /// Brightness, power, screen and sound settings sit at the bottom of
+    /// Bicino & Bike Sensors once a Bicino is known; first-time setup stays
+    /// focused on finding one.
+    static func shouldShowHardwareSettings(knownDeviceCount: Int) -> Bool {
+        knownDeviceCount > 0
+    }
+
     static func shouldShowSensorManagement(
         hasEverConnectedBikeComputer: Bool,
         sensorProfileCount: Int,
