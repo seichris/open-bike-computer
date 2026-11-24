@@ -11,9 +11,13 @@ from unittest.mock import patch
 
 from shapely.geometry import Point, box, mapping
 
-from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, file_identity, prepare_inputs
+from build_graph import (
+    ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, elevation_identity, file_identity,
+    prepare_inputs, valhalla_build,
+)
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
+import build_elevation
 import probe_graph
 import probe_profiles
 
@@ -100,6 +104,208 @@ class BuildArgumentTests(unittest.TestCase):
             mask = Path("mask.geojson") if coverage == "worldwide-gap" else None
             self.assertIn("dated", argument_error(coverage, False, mask, "https://example.com/planet-latest.osm.pbf"))
         self.assertIsNone(argument_error("planet", True, None, "file:///sample.osm.pbf"))
+
+
+class ElevationTileTests(unittest.TestCase):
+    def test_hgt_names_follow_the_srtm_layout(self):
+        self.assertEqual(build_elevation.hgt_name(8, 47), "N47E008")
+        self.assertEqual(build_elevation.hgt_name(-1, -1), "S01W001")
+        self.assertEqual(build_elevation.hgt_name(-180, 0), "N00W180")
+        self.assertEqual(build_elevation.hgt_path(Path("/e"), 8, 47), Path("/e/N47/N47E008.hgt.gz"))
+
+    def test_neighbours_wrap_the_antimeridian_and_stop_at_the_poles(self):
+        self.assertEqual(build_elevation.neighbour(179, 10, 1, 0), ((-180, 10), 360))
+        self.assertEqual(build_elevation.neighbour(-180, 10, -1, -1), ((179, 9), -360))
+        self.assertEqual(build_elevation.neighbour(5, 10, 1, 1), ((6, 11), 0))
+        self.assertIsNone(build_elevation.neighbour(0, 89, 0, 1))
+        self.assertIsNone(build_elevation.neighbour(0, -90, 0, -1))
+
+    def test_higher_priority_source_wins_each_cell(self):
+        class Source:
+            def __init__(self, id, priority):
+                self.id, self.priority = id, priority
+
+        glo30, glo90 = Source("glo30", 100), Source("glo90", 50)
+        chosen = build_elevation.choose_sources(
+            [glo90, glo30], {"glo30": {(1, 1)}, "glo90": {(1, 1), (2, 2)}})
+        self.assertEqual({cell: source.id for cell, source in chosen.items()}, {(1, 1): "glo30", (2, 2): "glo90"})
+
+    def test_posts_are_rounded_big_endian_with_a_no_data_marker(self):
+        import numpy as np
+
+        heights = np.zeros((3601, 3601), dtype="float32")
+        heights[0, :4] = [1.4, -1.6, 40000, np.nan]
+        payload, missing = build_elevation.encode_posts(heights)
+        self.assertEqual(len(payload), 3601 * 3601 * 2)
+        self.assertEqual(missing, 1)
+        self.assertEqual(np.frombuffer(payload[:8], dtype=">i2").tolist(), [1, -2, 32767, -32768])
+        with self.assertRaises(ValueError):
+            build_elevation.encode_posts(np.zeros((1201, 1201), dtype="float32"))
+
+    def test_border_posts_come_from_the_neighbour(self):
+        import numpy as np
+        from affine import Affine
+
+        step = build_elevation.STEP
+        posts = Affine(step, 0, -step / 2, 0, -step, 4 * step + step / 2)
+        heights = np.full((5, 5), np.nan, dtype="float32")
+        own = np.arange(16, dtype="float32").reshape(4, 4)
+        east = np.full((5, 2), 100, dtype="float32")
+        build_elevation.resample_into(heights, posts, east, posts @ Affine.translation(4, 0), 0)
+        build_elevation.resample_into(heights, posts, own, posts, 0)
+        np.testing.assert_array_equal(heights[:4, :4], own)
+        np.testing.assert_array_equal(heights[:, 4], [100] * 5)
+        self.assertTrue(np.isnan(heights[4, :4]).all())
+
+    def test_wrapped_neighbour_is_shifted_next_to_the_cell(self):
+        import numpy as np
+        from affine import Affine
+
+        step = build_elevation.STEP
+        posts = Affine(step, 0, 180 - 4 * step - step / 2, 0, -step, step / 2)
+        heights = np.full((1, 5), np.nan, dtype="float32")
+        west_of_antimeridian = Affine(step, 0, -180 - step / 2, 0, -step, step / 2)
+        build_elevation.resample_into(heights, posts, np.full((1, 2), 7, dtype="float32"),
+                                      west_of_antimeridian, 360)
+        self.assertEqual(heights[0, 4], 7)
+        self.assertTrue(np.isnan(heights[0, :4]).all())
+
+    def test_only_neighbours_holding_border_posts_are_read(self):
+        import numpy as np
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        step = 10 / 3600
+
+        def point_registered(longitude, latitude):
+            memory = MemoryFile()
+            transform = Affine(step, 0, longitude - step / 2, 0, -step, latitude + 1 + step / 2)
+            with memory.open(driver="GTiff", width=360, height=360, count=1, dtype="float32",
+                             crs="EPSG:4326", transform=transform) as dataset:
+                dataset.write(np.full((1, 360, 360), 5, dtype="float32"))
+                dataset.update_tags(AREA_OR_POINT="Point")
+            return memory
+
+        for (longitude, latitude), shift, expected in (
+            ((9, 47), 0, True),      # east of cell (8, 47)
+            ((8, 46), 0, True),      # south
+            ((9, 46), 0, True),      # south-east
+            ((7, 47), 0, False),     # west
+            ((8, 48), 0, False),     # north
+            ((-180, 47), 360, True), # east across the antimeridian of cell (179, 47)
+        ):
+            cell_longitude = 8 if shift == 0 else 179
+            with self.subTest(neighbour=(longitude, latitude)), point_registered(longitude, latitude) as memory, \
+                    memory.open() as dataset:
+                array, _ = build_elevation.edge_window(dataset, cell_longitude, 47, (longitude, latitude), shift)
+                self.assertEqual(array is not None, expected)
+                if expected:
+                    self.assertLessEqual(array.size, 3 * 360)
+
+
+class ElevationReceiptTests(unittest.TestCase):
+    class Source:
+        def __init__(self, id):
+            self.id = id
+
+        def tile_url(self, longitude, latitude):
+            return f"https://{self.id}/{longitude}/{latitude}.tif"
+
+    def test_resume_rebuilds_cells_whose_source_changed(self):
+        glo30, glo90 = self.Source("glo30"), self.Source("glo90")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            receipt = {"source": "glo90", "url": glo90.tile_url(8, 47)}
+            (out / "receipts" / "N47E008.json").write_text(json.dumps(receipt))
+            self.assertEqual(build_elevation.current_receipt(out, (8, 47), {(8, 47): glo90}), receipt)
+            self.assertIsNone(build_elevation.current_receipt(out, (8, 47), {(8, 47): glo30}))
+            self.assertIsNone(build_elevation.current_receipt(out, (9, 47), {(9, 47): glo30}))
+
+    def test_manifest_counts_sources_from_receipts_and_marks_partial_runs(self):
+        class Policy:
+            version = 2
+            sources = [type("S", (), {"id": "glo30", "index_sha256": "i", "terms_url": "t", "attribution_url": "a"}),
+                       type("S", (), {"id": "glo90", "index_sha256": "j", "terms_url": "t", "attribution_url": "a"})]
+
+        glo30, glo90 = self.Source("glo30"), self.Source("glo90")
+        chosen = {(8, 47): glo30, (9, 47): glo90, (10, 47): glo30}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            policy_path = out / "policy.json"
+            policy_path.write_text("{}")
+            for cell, source in list(chosen.items())[:2]:
+                name = build_elevation.hgt_name(*cell)
+                (out / "receipts" / f"{name}.json").write_text(json.dumps({
+                    "cell": name, "source": source.id, "url": source.tile_url(*cell), "hgtSha256": name,
+                    "bytes": 1, "fileBytes": 1, "noDataPosts": 0}))
+            path = build_elevation.write_manifest(out, policy_path, Policy, chosen, [(8, 47), (9, 47)], [8, 47, 10, 48])
+            manifest = json.loads(path.read_text())
+            self.assertEqual((manifest["bounds"], manifest["catalogCells"], manifest["cells"]), ([8, 47, 10, 48], 3, 2))
+            self.assertEqual([s["cells"] for s in manifest["sources"]], [1, 1])
+            with self.assertRaises(ValueError):
+                build_elevation.write_manifest(out, policy_path, Policy, chosen, list(chosen))
+
+
+    def test_cells_a_dead_worker_left_behind_are_built_again(self):
+        cells = [(8, 47), (9, 47), (10, 47)]
+        built, calls = set(), []
+
+        def run_pool(pending, chosen, out, jobs):
+            calls.append(list(pending))
+            built.add(pending[0])
+            if len(calls) == 1:
+                raise build_elevation.BrokenProcessPool("worker ended")
+            built.update(pending)
+
+        receipt = lambda out, cell, chosen: {} if cell in built else None
+        with patch.object(build_elevation, "run_pool", run_pool), \
+                patch.object(build_elevation, "current_receipt", receipt), \
+                patch("builtins.print"):
+            build_elevation.build_pending(cells, {}, Path("."), 2)
+            self.assertEqual(calls, [cells, cells[1:]])
+            built.clear(), calls.clear()
+            with self.assertRaises(build_elevation.BrokenProcessPool):
+                build_elevation.build_pending(cells, {}, Path("."), 2, rounds=1)
+
+    def test_each_cell_runs_under_a_deadline(self):
+        alarms = []
+        with patch.object(build_elevation.signal, "alarm", alarms.append), \
+                patch.object(build_elevation, "build_cell", side_effect=OSError("offline")), \
+                patch.dict(build_elevation._WORKER, chosen={}, out=Path(".")):
+            with self.assertRaises(OSError):
+                build_elevation._build((8, 47))
+        self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
+
+class ElevationManifestTests(unittest.TestCase):
+    def test_graph_manifest_records_the_elevation_tiles_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            elevation = Path(tmp)
+            manifest = {
+                "schema": "bicino-valhalla-elevation-v1", "bounds": None, "catalogCells": 2, "cells": 2,
+                "cellListSha256": "ab", "sources": [{"id": "glo30", "cells": 2}, {"id": "glo90", "cells": 0}],
+            }
+            (elevation / "elevation-manifest.json").write_text(json.dumps(manifest))
+            identity = elevation_identity(elevation)
+            self.assertEqual((identity["cells"], identity["cellListSha256"], identity["sources"]), (2, "ab", ["glo30"]))
+            for partial in ({"bounds": [9, 46, 11, 48]}, {"catalogCells": 3}, {"catalogCells": None}):
+                (elevation / "elevation-manifest.json").write_text(json.dumps({**manifest, **partial}))
+                with self.subTest(partial=partial), self.assertRaisesRegex(ValueError, "part of the source"):
+                    elevation_identity(elevation)
+            (elevation / "elevation-manifest.json").write_text(json.dumps({**manifest, "bounds": [9, 46, 11, 48]}))
+            self.assertEqual(elevation_identity(elevation, sample=True)["cells"], 2)
+            (elevation / "elevation-manifest.json").write_text(json.dumps({"schema": "other", "cells": 2}))
+            with self.assertRaises(ValueError):
+                elevation_identity(elevation)
+
+    def test_build_fails_when_valhalla_skips_the_elevation_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            skipped = "[WARN] Elevation storage directory does not exist\n"
+            with patch("build_graph.run_valhalla", return_value=(work / "valhalla-build.log", skipped)):
+                with self.assertRaisesRegex(ValueError, "elevation tiles"):
+                    valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4, work)
 
 
 class ProbeExpectationTests(unittest.TestCase):

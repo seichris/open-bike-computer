@@ -140,8 +140,13 @@ When the service is disabled, `available` is `false` and `provider` and
   hills, and moderate avoidance of rough surfaces.
 - **Mountain** accepts any surface the graph allows bicycles on and prefers
   paths and tracks to roads.
-- Ferries are never used. `use_hills` has no effect on the current graphs,
-  which are built without elevation.
+- Ferries are never used. `use_hills` acts only on graphs graded with
+  elevation. The planet graph is graded from the production-approved
+  Copernicus DEM (GLO-30, with GLO-90 where GLO-30 has no cell). The
+  earlier GCC and worldwide-gap graphs had no elevation, so `use_hills` did
+  nothing there.
+  The DEM is a surface model, so trees and buildings can add noise to grades
+  in forests and dense cities.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
 25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst
@@ -216,6 +221,14 @@ connector.
 In the UAE sweep with the old all-strict rule, 11 of 73 routes failed this
 way. Most were longer than 25 km (7 of the 18 routes over 100 km), each with
 17–173 m of walking in total, spread over 12–60 m stretches.
+
+**Points above stations.** Valhalla snaps a point to the nearest edge in any
+layer. On the 2026-11-24 planet graph a destination right above Oxford Circus
+snapped 3 m onto an escalator two levels underground (`highway=steps`,
+`indoor=yes`), which bicycles cannot reach, so the leg was
+`no_bicycle_route` (Valhalla 442) one way and fine the other way. Valhalla's
+`exclude_tunnel` search filter did not help. The London probe therefore ends
+on Oxford Street west of the circus.
 
 ## Limits and configuration
 

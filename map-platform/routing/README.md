@@ -73,6 +73,33 @@ retains the exact clipping input.
      --work "$build_scratch/candidate" --threads 8
    ```
 
+   Grade the graph with elevation so `use_hills` has an effect. First write
+   Valhalla's one-degree HGT tiles from the production-approved Copernicus
+   sources in `config/topography-source-policy-v2.json` (GLO-30, then GLO-90
+   where GLO-30 has no cell). Run it in the map-platform image, which pins
+   rasterio, with network access. For the planet (26,475 cells) it reads
+   about 1 TB from the public COG mirrors and writes gzipped tiles, which
+   Valhalla reads like plain HGT (690 GB unpacked). It keeps a receipt per
+   cell, so an interrupted run resumes where it stopped. A cell still running
+   after 15 minutes ends its worker, and the run builds the cells left without
+   a receipt again, up to three rounds. The first planet run read 589 GB in
+   about 95 minutes with 16 jobs and wrote 160 GB.
+
+   ```sh
+   docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \
+     -v "$build_scratch/elevation:/out" --entrypoint python3 "$map_platform_image" \
+     /routing/build_elevation.py --out /out --jobs 20 \
+     --policy /app/map-platform/config/topography-source-policy-v2.json
+   ```
+
+   Then pass `--elevation "$build_scratch/elevation"` to `build_graph.py`. The
+   build fails if Valhalla skips its elevation stage. Grade at build time: a
+   finished build cannot be graded afterwards. Running the elevation stage on
+   finished tiles, with or without validate, gave a graph that answered some
+   `/locate` calls with HTTP 500. The manifest's `elevation` records the
+   elevation manifest, its cell count, the checksum of its cell list and the
+   sources used.
+
    Use `--sample` for development input. Sample results are never worldwide
    release evidence. Record peak scratch and memory, phase times, output size,
    the policy and inventory, source and configuration hashes, and probe results.
