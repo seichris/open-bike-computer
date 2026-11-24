@@ -142,8 +142,9 @@ When the service is disabled, `available` is `false` and `provider` and
   paths and tracks to roads.
 - Ferries are never used. `use_hills` acts only on graphs graded with
   elevation. The planet graph is graded from the production-approved
-  Copernicus DEM (GLO-30, with GLO-90 where GLO-30 has no cell); the GCC
-  graph it replaces had no elevation, so `use_hills` did nothing there.
+  Copernicus DEM (GLO-30, with GLO-90 where GLO-30 has no cell). The
+  earlier GCC and worldwide-gap graphs had no elevation, so `use_hills` did
+  nothing there.
   The DEM is a surface model, so trees and buildings can add noise to grades
   in forests and dense cities.
 
