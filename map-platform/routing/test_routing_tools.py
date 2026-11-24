@@ -124,7 +124,11 @@ class ProbeExpectationTests(unittest.TestCase):
         self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["pedestrian"], 1.2, None))
         self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, ["bicycle", "auto"], 1.2, None))
         self.assertTrue(probe_graph.passed(push, "planet", self.LEGS, both, 1.2, None, 100))
-        self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, both, 3.0, None, 2000),
+        walk = {"travel_mode": "pedestrian", "length": 0.06}
+        ride = {"travel_mode": "bicycle", "length": 1.0}
+        self.assertAlmostEqual(probe_graph.longest_push_meters([ride, walk, ride, walk, ride]), 60)
+        self.assertAlmostEqual(probe_graph.longest_push_meters([ride, walk, walk, ride]), 120)
+        self.assertFalse(probe_graph.passed(push, "planet", self.LEGS, both, 3.0, None, 101),
                          "a mostly walking route is not a bike route")
 
     def test_expected_misses_need_a_no_route_code(self):

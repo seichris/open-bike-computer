@@ -173,10 +173,11 @@ the bike. These come back as `travel_mode: "pedestrian"` /
 `travel_type: "foot"` maneuvers, typically 12–60 m on a footway or a cycle-path
 connector.
 
-- **Bicycle routes:** a pedestrian maneuver of at most
+- **Bicycle routes:** a push stretch of at most
   `MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS` (default 100 m, `0` turns it
-  off) stays in the route with Valhalla's own instruction. Chris approved
-  this on 2026-11-24.
+  off) stays in the route with Valhalla's own instructions. Valhalla starts a
+  new maneuver at each turn, so back-to-back pedestrian maneuvers are summed
+  as one stretch. Chris approved this on 2026-11-24.
 - **Refused:** a longer walk, any other mode, or a route with no bicycle
   maneuver at all is `no_bicycle_route`.
 - **Detours:** saved-route detours never accept push stretches.

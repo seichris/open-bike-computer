@@ -334,18 +334,23 @@ def route_from_trip(
     maneuvers: list[dict[str, Any]] = []
     previous_end = 0
     cycles = False
+    push_meters = 0.0
     for raw in raw_maneuvers:
         if not isinstance(raw, dict):
             raise ValueError("invalid-maneuver")
         # Never present driving, transit or long walking directions as a bike
-        # route. Short pedestrian stretches are pushing the bike.
+        # route. A short pedestrian stretch is pushing the bike; Valhalla
+        # splits one stretch into a maneuver per turn, so back-to-back
+        # pedestrian maneuvers count as one stretch.
         mode = raw.get("travel_mode")
         if mode == "bicycle":
             cycles = True
-        elif (
-            mode != "pedestrian" or maximum_push_meters <= 0
-            or _number(raw.get("length", 0), "length") * 1000 > maximum_push_meters
-        ):
+            push_meters = 0.0
+        elif mode == "pedestrian" and maximum_push_meters > 0:
+            push_meters += _number(raw.get("length", 0), "length") * 1000
+            if push_meters > maximum_push_meters:
+                raise ValueError("non-bicycle-maneuver")
+        else:
             raise ValueError("non-bicycle-maneuver")
         maneuver_type = raw.get("type")
         begin = raw.get("begin_shape_index")
