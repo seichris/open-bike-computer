@@ -1,0 +1,6 @@
+[
+  {"name":"Austria to Slovakia via Berg", "points":[[48.1021,17.0359],[48.1106,17.1014]], "route":true},
+  {"name":"Slovakia to Austria via Berg", "points":[[48.1106,17.1014],[48.1021,17.0359]], "route":true},
+  {"name":"Mexico to Guatemala via Ciudad Hidalgo", "points":[[14.6820,-92.1521],[14.6753,-92.1464]], "route":true},
+  {"name":"Guatemala to Mexico via Ciudad Hidalgo", "points":[[14.6753,-92.1464],[14.6820,-92.1521]], "route":true}
+]
