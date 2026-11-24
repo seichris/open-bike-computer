@@ -38,11 +38,16 @@ the infrastructure, transfer, and deployment that passed qualification.
    against the manifest before building. Verify and qualify the rebuilt graph
    before deploying it.
 
-A planet build (`--coverage planet`, no mask) uses the same builder. Scale
-the gap build by the input size: about 96 GB of planet against 63 GB of
-masked input. Expect roughly 760 GB of scratch, about 5 hours of build and
-an archive of about 100 GB. Check the VPS for the candidate, the current
-graph, transfer parts and the 50 GB reserve before transferring.
+A planet build (`--coverage planet`, no mask) uses the same builder. The
+2026-11-24 planet release was graded with elevation. Converting the
+Copernicus DEM read 589 GB in about 95 minutes with 16 jobs and wrote 160 GB
+of tiles. The graph build then took 4 hours 39 minutes, 67 of them in
+Valhalla's elevation stage, and peaked at 41.6 GB of memory. Scratch use
+peaked at 803 GB, which included the elevation tiles and a kept build
+without elevation. The archive held 209,979 tiles in 107.6 GB. The same
+build without elevation took 3 hours 25 minutes and wrote 104.6 GB. Check
+the VPS for the candidate, the current graph, transfer parts and the 50 GB
+reserve before transferring.
 
 The first successful attempt took 3 hours 9 minutes from build start through
 archive verification. Observed builder scratch use reached about 499 GB before
@@ -65,7 +70,16 @@ Build and verify off-host. The Coolify VPS serves the resulting archive.
   units after targeting mapped roads in five small units. The other 11 had
   neither mapped highway ways nor bicycle or ferry relations in their source
   checks. These were ATC, BJN, BVT, CLP, CSI, FQI, HMD, HQI, KQI, SCR, and SER.
-  Recheck those exceptions on every refresh.
+  Recheck those exceptions on every refresh. The 2026-11-24 planet audit
+  (`generate --all-units`) routed in 281 of 298 units. Its 17 exceptions are
+  those 11 plus ATF, IOT, KAS, PCN, TKL and VAT: remote islands and reefs, a
+  glacier and Vatican City. Their fixture seeds lie at sea, give a
+  zero-length route, or were never generated.
+- On a graph built with elevation, check that `use_hills` changes routes.
+  Serve the graded and the previous ungraded archive side by side and route
+  city pairs with `use_hills` 0 and 1. On 2026-11-24 all 7 pairs (two in San
+  Francisco, and Lisbon, Stuttgart, Zurich, Wellington and Amsterdam) changed
+  on the graded graph and none changed on the ungraded one.
 - Include a direct Valhalla miss in the Apple-listed interior near Fairview,
   Oklahoma. A live MapKit request there can still succeed. The first release
   also returned no route from either provider at Great Bear Lake in Canada.

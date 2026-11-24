@@ -1,0 +1,40 @@
+{
+  "schema": "bicino-valhalla-elevation-v1",
+  "format": "srtm-hgt-1-arcsecond-int16-big-endian-gzip",
+  "posts": 3601,
+  "noData": -32768,
+  "resampling": "bilinear",
+  "policy": {
+    "name": "topography-source-policy-v2.json",
+    "bytes": 1864,
+    "sha256": "c470fadf40509bb4ab07cfce0e8ec3d7995275ab84d5050dd632a4c96cb3ad96",
+    "policyVersion": 2
+  },
+  "sources": [
+    {
+      "id": "copernicus-glo30-public-2021",
+      "indexSha256": "10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc",
+      "termsUrl": "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf",
+      "attributionUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "cells": 26450
+    },
+    {
+      "id": "copernicus-glo90-2021",
+      "indexSha256": "e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97",
+      "termsUrl": "https://dataspace.copernicus.eu/sites/default/files/media/files/2025-06/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf",
+      "attributionUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "cells": 25
+    }
+  ],
+  "runtime": {
+    "rasterio": "1.4.4",
+    "gdal": "3.10.3"
+  },
+  "bounds": null,
+  "catalogCells": 26475,
+  "cells": 26475,
+  "cellListSha256": "c262a47dfc6807ef168aff854a43cba0ef0ee207a45a0722194b8ef2cad5f95d",
+  "sourceBytes": 589253929212,
+  "fileBytes": 160401431217,
+  "noDataPosts": 13974408
+}

@@ -9,11 +9,11 @@ internal Valhalla 3.9.2 service, the one that serves
 [saved-route detours](saved-route-detours.md), with the `bicycle` costing and
 the profile's options.
 
-The production graph covers only the places where Apple Maps has no cycling
-directions, plus a border band (see the
-[routing README](../map-platform/routing/README.md)). Elsewhere an
-`unavailable` / `no_bicycle_route` answer is normal, and the app decides what
-to fall back to.
+Since 2026-11-24 the production graph covers the whole planet and is graded
+with elevation (see the [routing README](../map-platform/routing/README.md)).
+An `unavailable` / `no_bicycle_route` answer still happens where
+OpenStreetMap has no way a bicycle may use between the two points, and the
+app decides what to fall back to.
 
 ## Endpoint
 
@@ -227,8 +227,10 @@ layer. On the 2026-11-24 planet graph a destination right above Oxford Circus
 snapped 3 m onto an escalator two levels underground (`highway=steps`,
 `indoor=yes`), which bicycles cannot reach, so the leg was
 `no_bicycle_route` (Valhalla 442) one way and fine the other way. Valhalla's
-`exclude_tunnel` search filter did not help. The London probe therefore ends
-on Oxford Street west of the circus.
+`exclude_tunnel` search filter did not help. Oxford Street west of the
+circus did not work either: bicycles may not use it, so the leg pushed the
+bike 131 m. The London probe therefore ends in Cavendish Square, north of
+the circus, with at most 21 m of pushing either way.
 
 ## Limits and configuration
 

@@ -1,0 +1,43 @@
+{
+  "schema": "bicino-valhalla-graph-v1",
+  "coverage": "planet",
+  "source": {
+    "url": "https://planet.openstreetmap.org/pbf/planet-261116.osm.pbf",
+    "bytes": 95941737359,
+    "sha256": "297f73cc2bb81b753442debb24e5cb0e664236835356dfc578c6e24c1372cf19"
+  },
+  "mask": null,
+  "policy": null,
+  "builder": {
+    "image": "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228",
+    "platform": "linux/amd64",
+    "threads": 20
+  },
+  "configuration": {
+    "bytes": 9560,
+    "sha256": "f8d65aa4aeabf14474566c5ce34da4013dd631856946a3d43cd081cfa88eec03"
+  },
+  "admin": {
+    "bytes": 540946432,
+    "sha256": "d28bccd9873d1f9c736c9ed0460a5ba131080bab1ccfefeeb430f25f8dab96aa"
+  },
+  "elevation": {
+    "manifest": {
+      "bytes": 1608,
+      "sha256": "7c7ba9c0057a9b8feb4630b1ce9c6435fe4938bed5c3913dd70ed4261c35301f"
+    },
+    "cells": 26475,
+    "cellListSha256": "c262a47dfc6807ef168aff854a43cba0ef0ee207a45a0722194b8ef2cad5f95d",
+    "sources": [
+      "copernicus-glo30-public-2021",
+      "copernicus-glo90-2021"
+    ]
+  },
+  "maskedInputBytes": 95941737359,
+  "archive": {
+    "name": "valhalla_tiles.tar",
+    "tiles": 209979,
+    "bytes": 107554304000,
+    "sha256": "9e7e68e70783e8bf9fd4575855686bc3de3c45a8e89dd41cc93f4521d0719098"
+  }
+}

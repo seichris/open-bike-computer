@@ -3,7 +3,8 @@
 Two coverages build from the same pipeline:
 
 - **`planet`**: the whole planet, so Create a Route's Road, Gravel and
-  Everyday routes work everywhere. It takes no mask.
+  Everyday routes work everywhere. It takes no mask. Production has served
+  it, graded with elevation, since 2026-11-24.
 - **`worldwide-gap`**: only the places where Apple Maps has no cycling
   directions, plus border bands. This was the first production graph, for
   saved-route detours.
@@ -23,7 +24,11 @@ For the procedure used for the first production rollout, see
 [Refresh and rollback](refresh-runbook.md). The
 [first release manifest](releases/2026-11-23.json) records the source and
 graph identities. The [archived mask](releases/2026-11-23-mask.geojson.gz)
-retains the exact clipping input.
+retains the exact clipping input. The
+[planet release manifest](releases/2026-11-24.json) records the graph in
+production now. Its [elevation manifest](releases/2026-11-24-elevation.json)
+and [cell list](releases/2026-11-24-elevation-cells.txt.gz) identify every
+elevation tile it was graded with.
 
 ## Build and release
 
