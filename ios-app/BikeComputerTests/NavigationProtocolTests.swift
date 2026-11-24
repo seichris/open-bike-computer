@@ -965,6 +965,7 @@ struct NavigationProtocolTests {
         testShanghaiNormalAndTestNavigationShareWGSDeviceSpace()
         testHongKongBorderStartKeepsGPSFix()
         testTestNavigationHeadingFollowsRouteTurns()
+        testTestNavigationReportsSpokenDirectionsOncePerStep()
         testRendererBenchmarkGPSOverrideSuppressesPhysicalFixes()
         testNavigationPacketBuilder()
         testNavigationWriteQueue()
@@ -7568,6 +7569,74 @@ struct NavigationProtocolTests {
         assert((engine.distanceToCurrentStep(from: routeLocation) ?? .infinity) < 1,
                "the route and the rider stay in Hong Kong")
         engine.stopNavigation()
+    }
+
+    /// Test Navigation drives the same engine events as a ride: each turn
+    /// gets its early alert and now prompt once, then arrival is announced
+    /// and navigation stops without cutting it off.
+    @MainActor
+    static func testTestNavigationReportsSpokenDirectionsOncePerStep() {
+        // Singapore: MapKit and WGS-84 coordinates coincide.
+        let start = CLLocationCoordinate2D(latitude: 1.3, longitude: 103.85)
+        let metersPerLongitudeDegree = 111_290.0
+        let metersPerLatitudeDegree = 110_600.0
+        let leftTurn = CLLocationCoordinate2D(
+            latitude: start.latitude, longitude: start.longitude + 400 / metersPerLongitudeDegree
+        )
+        let rightTurn = CLLocationCoordinate2D(
+            latitude: leftTurn.latitude + 300 / metersPerLatitudeDegree, longitude: leftTurn.longitude
+        )
+        let finish = CLLocationCoordinate2D(
+            latitude: rightTurn.latitude, longitude: rightTurn.longitude + 300 / metersPerLongitudeDegree
+        )
+        let route = TestRoute(
+            steps: [
+                TestRouteStep(instructions: "Turn left onto North Road", coordinates: [start, leftTurn]),
+                TestRouteStep(instructions: "Turn right onto East Lane", coordinates: [leftTurn, rightTurn]),
+                TestRouteStep(instructions: "Arrive at the destination", coordinates: [rightTurn, finish]),
+            ],
+            coordinates: [start, leftTurn, rightTurn, finish]
+        )
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        var events: [SpokenDirectionsEventV1] = []
+        engine.onSpokenDirectionsEvent = { events.append($0) }
+        engine.startNavigation(with: route, isTestMode: true)
+        for _ in 0..<200 where engine.isNavigating {
+            engine.updateSimulationForTesting(timeInterval: 1)
+        }
+        assert(!engine.isNavigating, "test navigation reaches the destination")
+        assertEqual(events.first, .started, "spoken directions hear the start first")
+        assertEqual(events.last, .stopped, "and the stop last")
+        assertEqual(
+            events.filter { if case .arrived = $0 { return true } else { return false } }.count,
+            1, "arrival is reported once"
+        )
+        let progress = events.compactMap { event -> SpokenDirectionsProgressV1? in
+            if case .progress(let value) = event { return value } else { return nil }
+        }
+        assert(progress.allSatisfy { $0.speedMetersPerSecond == 10 }, "simulated speed reaches the timing")
+        assertEqual(
+            Array(Set(progress.map(\.instruction))).sorted(),
+            ["Arrive at the destination", "Turn left onto North Road", "Turn right onto East Lane"],
+            "full provider instructions, not the shortened device text"
+        )
+
+        var planner = SpokenDirectionsPlannerV1(usesMetricSystem: true)
+        let said = events.compactMap { event -> SpokenDirectionsAnnouncementV1? in
+            if case .speak(let announcement) = planner.handle(event) { return announcement }
+            return nil
+        }
+        assertEqual(
+            said.map(\.kind), [.preview, .early, .now, .early, .now, .early, .arrival],
+            "one preview, then each turn's early and now prompts once, then arrival: \(said.map(\.text))"
+        )
+        assertEqual(said[2].text, "Turn left onto North Road.", "first now prompt")
+        assertEqual(said[4].text, "Turn right onto East Lane.", "second now prompt")
+        assertEqual(said.last?.text, "You have arrived.", "arrival")
     }
 
     @MainActor

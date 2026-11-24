@@ -12,11 +12,12 @@ World Radio remains available only in development firmware with
 27, so iOS hides the option. It is also off by default in Device Screens in a
 development build.
 
-Only the iPhone Debug configuration declares background audio, using
-`Info-Development.plist`. The production `Info.plist` retains background location
-and Bluetooth but omits audio, because production firmware has no radio screen.
-Keep both iPhone property lists identical except for this background mode; the
-release asset tests enforce that constraint.
+Both iPhone configurations declare background audio. Production removed it
+after the 2026-10-20 App Review rejection, when World Radio was its only user and
+production firmware has no radio screen. It returned for Spoken Directions, a
+production feature that keeps speaking navigation prompts while the iPhone is
+locked. Keep `Info.plist` and `Info-Development.plist` identical; the release
+asset tests enforce that.
 
 The development screen intentionally has no embedded raster map, flag atlas, or
 multilingual font. A 156-pixel Earth is drawn from LVGL lines and filled polygon
