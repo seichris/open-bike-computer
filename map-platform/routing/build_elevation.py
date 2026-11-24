@@ -12,7 +12,8 @@ shared borders. The cell's own pixels win where both cover a post.
 Run it in the map-platform image (rasterio 1.4.4) with network access. Each
 cell is downloaded in full and hashed; neighbour edges are read with HTTP range
 requests. A receipt per cell makes the run resumable; `elevation-manifest.json`
-is written once every cell has one.
+is written once every cell has one. A cell that runs past CELL_DEADLINE ends its
+worker, and the cells left without a receipt are built again, up to ROUNDS times.
 """
 
 import argparse
@@ -21,16 +22,20 @@ import hashlib
 import json
 import math
 import os
+import signal
 import sys
 import time
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 POSTS = 3601
 STEP = 1 / 3600
 NO_DATA = -32768
 MARGIN = 2 * STEP
+CELL_DEADLINE = 900
+ROUNDS = 3
 NEIGHBOURS = tuple((dx, dy) for dy in (1, 0, -1) for dx in (-1, 0, 1) if (dx, dy) != (0, 0))
 GDAL_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -216,7 +221,40 @@ def _start_worker(chosen, out):
 
 
 def _build(cell):
-    return build_cell(cell, _WORKER["chosen"], _WORKER["out"])
+    # urlopen's timeout does not cover the name lookup. On 2026-11-24 two of the
+    # planet's 26,475 cells blocked in it for good, with no socket open. With no
+    # handler installed, SIGALRM ends the worker, which breaks the pool so
+    # build_pending retries.
+    signal.alarm(CELL_DEADLINE)
+    try:
+        return build_cell(cell, _WORKER["chosen"], _WORKER["out"])
+    finally:
+        signal.alarm(0)
+
+
+def run_pool(pending, chosen, out, jobs):
+    started = time.monotonic()
+    with ProcessPoolExecutor(jobs, initializer=_start_worker, initargs=(chosen, out)) as pool:
+        futures = {pool.submit(_build, cell): cell for cell in pending}
+        for done, future in enumerate(as_completed(futures), 1):
+            future.result()
+            if done % 100 == 0 or done == len(futures):
+                rate = done / max(time.monotonic() - started, 1)
+                print(f"{done}/{len(futures)} cells, {rate:.2f}/s", flush=True)
+
+
+def build_pending(cells, chosen, out, jobs, rounds=ROUNDS):
+    """Build the cells without a current receipt, again after a worker dies."""
+    for attempt in range(1, rounds + 1):
+        pending = [cell for cell in cells if current_receipt(out, cell, chosen) is None]
+        print(f"{len(cells)} cells, {len(pending)} to build", flush=True)
+        try:
+            run_pool(pending, chosen, out, jobs)
+            return
+        except BrokenProcessPool as error:
+            if attempt == rounds:
+                raise
+            print(f"A worker died ({error}); building the cells without a receipt again", flush=True)
 
 
 def load_indexes(policy, index_dir):
@@ -309,16 +347,7 @@ def main():
     if args.bounds:
         west, south, east, north = args.bounds
         cells = [(x, y) for x, y in cells if west <= x < east and south <= y < north]
-    pending = [cell for cell in cells if current_receipt(out, cell, chosen) is None]
-    print(f"{len(cells)} cells, {len(pending)} to build", flush=True)
-    started = time.monotonic()
-    with ProcessPoolExecutor(args.jobs, initializer=_start_worker, initargs=(chosen, out)) as pool:
-        futures = {pool.submit(_build, cell): cell for cell in pending}
-        for done, future in enumerate(as_completed(futures), 1):
-            future.result()
-            if done % 100 == 0 or done == len(futures):
-                rate = done / max(time.monotonic() - started, 1)
-                print(f"{done}/{len(futures)} cells, {rate:.2f}/s", flush=True)
+    build_pending(cells, chosen, out, args.jobs)
     manifest = write_manifest(out, args.policy, policy, chosen, cells, args.bounds)
     print(f"Elevation manifest: {manifest}", flush=True)
 

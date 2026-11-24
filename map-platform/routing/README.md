@@ -80,7 +80,10 @@ retains the exact clipping input.
    rasterio, with network access. For the planet (26,475 cells) it reads
    about 1 TB from the public COG mirrors and writes gzipped tiles, which
    Valhalla reads like plain HGT (690 GB unpacked). It keeps a receipt per
-   cell, so an interrupted run resumes where it stopped.
+   cell, so an interrupted run resumes where it stopped. A cell still running
+   after 15 minutes ends its worker, and the run builds the cells left without
+   a receipt again, up to three rounds. The first planet run read 589 GB in
+   about 95 minutes with 16 jobs and wrote 160 GB.
 
    ```sh
    docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \

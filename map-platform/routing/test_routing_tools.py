@@ -248,6 +248,36 @@ class ElevationReceiptTests(unittest.TestCase):
                 build_elevation.write_manifest(out, policy_path, Policy, chosen, list(chosen))
 
 
+    def test_cells_a_dead_worker_left_behind_are_built_again(self):
+        cells = [(8, 47), (9, 47), (10, 47)]
+        built, calls = set(), []
+
+        def run_pool(pending, chosen, out, jobs):
+            calls.append(list(pending))
+            built.add(pending[0])
+            if len(calls) == 1:
+                raise build_elevation.BrokenProcessPool("worker ended")
+            built.update(pending)
+
+        receipt = lambda out, cell, chosen: {} if cell in built else None
+        with patch.object(build_elevation, "run_pool", run_pool), \
+                patch.object(build_elevation, "current_receipt", receipt), \
+                patch("builtins.print"):
+            build_elevation.build_pending(cells, {}, Path("."), 2)
+            self.assertEqual(calls, [cells, cells[1:]])
+            built.clear(), calls.clear()
+            with self.assertRaises(build_elevation.BrokenProcessPool):
+                build_elevation.build_pending(cells, {}, Path("."), 2, rounds=1)
+
+    def test_each_cell_runs_under_a_deadline(self):
+        alarms = []
+        with patch.object(build_elevation.signal, "alarm", alarms.append), \
+                patch.object(build_elevation, "build_cell", side_effect=OSError("offline")), \
+                patch.dict(build_elevation._WORKER, chosen={}, out=Path(".")):
+            with self.assertRaises(OSError):
+                build_elevation._build((8, 47))
+        self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
+
 class ElevationManifestTests(unittest.TestCase):
     def test_graph_manifest_records_the_elevation_tiles_used(self):
         with tempfile.TemporaryDirectory() as tmp:
