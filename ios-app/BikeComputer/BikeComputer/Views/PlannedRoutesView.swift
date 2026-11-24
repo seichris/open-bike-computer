@@ -9,7 +9,7 @@ struct SavedRoutesSettingsSection: View {
     @Environment(\.savedRouteMapAction) private var mapAction
     /// Plans a route to a favorite on the main map (the single-destination flow).
     let onSaveOnlineRoute: (SavedDestination?) -> Void
-    /// Opens the multi-stop route creator; only Create a Route uses it.
+    /// Creates a route through stops on the main map; only Create a Route uses it.
     let onCreateRoute: () -> Void
     let onImportFromStrava: () -> Void
     let onConfirmGPX: (OfflineRouteSaveDraft) -> Void
@@ -49,8 +49,9 @@ struct SavedRoutesSettingsSection: View {
             } label: {
                 Label("Create a Route", systemImage: "magnifyingglass")
             }
+            .disabled(mapAction?.isNavigationActive == true)
             .accessibilityIdentifier("saveOnlineRoute")
-            .accessibilityHint("Plans a route through a start, stops and a destination, then saves it on this iPhone")
+            .accessibilityHint("Plans a route through a start, stops and a destination on the map, then saves it on this iPhone")
 
             Button {
                 finishRenaming()

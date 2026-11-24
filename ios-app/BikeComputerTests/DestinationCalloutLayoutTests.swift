@@ -154,8 +154,127 @@ struct DestinationCalloutLayoutTests {
         await testResolvedAddressCallbackAndRecentInsertion()
         await testFallbackAddress()
         await testStaleResolutionCancellation()
+        await testRouteCreationLongPressAndStopPins()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    /// While a route is being created, touch and hold adds a stop instead of
+    /// a Navigate Here pin, and the map draws only the creator's own pins.
+    @MainActor
+    private static func testRouteCreationLongPressAndStopPins() async {
+        let office = CLLocationCoordinate2D(latitude: 51.5040, longitude: -0.1000)
+        let mapView = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator(addressResolver: { _ in nil })
+        coordinator.mapView = mapView
+        mapView.convertedCoordinate = office
+        mapView.userTrackingMode = .follow
+        var destinationSelections = 0
+        var longPresses: [CLLocationCoordinate2D] = []
+        var removals: [UUID] = []
+        coordinator.onDestinationSelected = { _, _ in destinationSelections += 1 }
+        coordinator.onRouteCreationLongPress = { longPresses.append($0) }
+        coordinator.onRouteCreationStopRemoval = { removals.append($0) }
+
+        coordinator.handleLongPress(RecordingLongPressGestureRecognizer(
+            state: .began, location: CGPoint(x: 195, y: 422)
+        ))
+        coordinator.handleLongPress(RecordingLongPressGestureRecognizer(
+            state: .changed, location: CGPoint(x: 195, y: 422)
+        ))
+        precondition(
+            longPresses.count == 1 && longPresses[0].latitude == office.latitude &&
+                longPresses[0].longitude == office.longitude,
+            "while creating a route, touch and hold reports its map coordinate once"
+        )
+        precondition(
+            !mapView.annotations.contains { $0 is DestinationAnnotation } && destinationSelections == 0,
+            "while creating a route, touch and hold drops no Navigate Here pin"
+        )
+
+        let startID = UUID()
+        let stopID = UUID()
+        let destinationID = UUID()
+        let start = CLLocationCoordinate2D(latitude: 51.5000, longitude: -0.1000)
+        let bakery = CLLocationCoordinate2D(latitude: 51.5020, longitude: -0.0980)
+        let polyline = MKPolyline(coordinates: [start, bakery, office], count: 3)
+        let creation = MapRouteCreation(
+            stops: [
+                .init(id: startID, coordinate: start, label: "Current Location", kind: .start),
+                .init(id: stopID, coordinate: bakery, label: "Bakery", kind: .stop(1)),
+                .init(id: destinationID, coordinate: office, label: "Office", kind: .destination)
+            ],
+            routeID: UUID(),
+            polyline: polyline
+        )
+        coordinator.routeCreationLayer.update(creation, on: mapView, bottomPadding: 300)
+        let pins = mapView.annotations.compactMap { $0 as? RouteCreationStopAnnotation }
+        precondition(
+            pins.count == 3 && mapView.userTrackingMode == .none &&
+                coordinator.isFreePanActive(mapView: mapView, isOfflineMapSelectionActive: false) &&
+                mapView.overlays.contains { $0 === polyline },
+            "a route being created shows its stops and route and stops following the rider"
+        )
+        let renderer = coordinator.mapView(mapView, rendererFor: polyline) as? MKPolylineRenderer
+        precondition(
+            renderer?.strokeColor == .systemBlue && renderer?.lineWidth == 6 && renderer?.lineDashPattern == nil,
+            "the planned route is drawn as a solid route line"
+        )
+        guard let stopPin = pins.first(where: { $0.stopID == stopID }),
+              let stopView = coordinator.mapView(mapView, viewFor: stopPin) as? MKMarkerAnnotationView,
+              let remove = stopView.rightCalloutAccessoryView as? UIControl,
+              let destinationPin = pins.first(where: { $0.stopID == destinationID }),
+              let destinationView = coordinator.mapView(mapView, viewFor: destinationPin) as? MKMarkerAnnotationView else {
+            preconditionFailure("route creation pins should have marker views with a remove button")
+        }
+        precondition(
+            stopPin.title == "Stop 1" && stopPin.subtitle == "Bakery" && stopView.glyphText == "1" &&
+                stopView.markerTintColor == .systemOrange && destinationView.markerTintColor == .systemRed &&
+                destinationView.glyphImage != nil,
+            "pins show their role, number and place"
+        )
+        coordinator.mapView(mapView, annotationView: stopView, calloutAccessoryControlTapped: remove)
+        precondition(removals == [stopID], "a pin's remove button asks to remove that stop")
+
+        let keptStart = pins.first { $0.stopID == startID }
+        let renamed = MapRouteCreation(
+            stops: [
+                creation.stops[0],
+                creation.stops[1],
+                .init(id: destinationID, coordinate: office, label: "Office HQ", kind: .destination)
+            ],
+            routeID: creation.routeID,
+            polyline: polyline
+        )
+        coordinator.routeCreationLayer.update(renamed, on: mapView, bottomPadding: 300)
+        let renamedPins = mapView.annotations.compactMap { $0 as? RouteCreationStopAnnotation }
+        precondition(
+            renamedPins.count == 3 && renamedPins.contains { $0 === keptStart } &&
+                renamedPins.contains { $0.subtitle == "Office HQ" } &&
+                !renamedPins.contains { $0.subtitle == "Office" },
+            "a renamed stop replaces only its own pin"
+        )
+
+        let other = MKPointAnnotation()
+        mapView.addAnnotation(other)
+        precondition(
+            coordinator.routeCreationLayer.update(nil, on: mapView, bottomPadding: nil) &&
+                !mapView.annotations.contains { $0 is RouteCreationStopAnnotation } &&
+                !mapView.overlays.contains { $0 === polyline } &&
+                mapView.annotations.contains { $0 === other } &&
+                !coordinator.routeCreationLayer.isActive,
+            "ending route creation removes only its own pins and route"
+        )
+
+        coordinator.onRouteCreationLongPress = nil
+        coordinator.handleLongPress(RecordingLongPressGestureRecognizer(
+            state: .began, location: CGPoint(x: 195, y: 422)
+        ))
+        precondition(
+            mapView.annotations.contains { $0 is DestinationAnnotation },
+            "outside route creation, touch and hold drops a Navigate Here pin as before"
+        )
+        await coordinator.waitForReverseGeocodingForTesting()
     }
 
     @MainActor
