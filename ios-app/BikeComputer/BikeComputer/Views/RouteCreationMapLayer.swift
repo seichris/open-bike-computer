@@ -194,7 +194,7 @@ final class RouteCreationMapLayer {
         mapView.removeAnnotations(removed)
         let added = stops
             .filter { stop in !kept.contains { $0.matches(stop) } }
-            .map(RouteCreationStopAnnotation.init)
+            .map { RouteCreationStopAnnotation($0) }
         mapView.addAnnotations(added)
         annotations = kept + added
     }

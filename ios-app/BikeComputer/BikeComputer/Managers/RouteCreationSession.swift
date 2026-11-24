@@ -96,20 +96,21 @@ final class RouteCreationSession: ObservableObject {
     /// Starts a new route from the rider's position, or with an empty start.
     func begin(currentLocation: CLLocation?) {
         end()
+        savingPlan = nil
         isActive = true
         draft = MultiStopRouteDraft(
             start: currentLocation.flatMap { MultiStopRoutePlace.currentLocation($0) }
         )
     }
 
-    /// Discards the route being created.
+    /// Discards the route being created. A save sheet already showing keeps
+    /// its plan, so a save that completes afterwards still links a favorite.
     func end() {
         isActive = false
         cancelNaming()
         searchingStopID = nil
         provisionalStopID = nil
         notice = nil
-        savingPlan = nil
         travelMode = .cycling
         draft = MultiStopRouteDraft()
         planner.cancel()
@@ -242,7 +243,8 @@ final class RouteCreationSession: ObservableObject {
            destinationStore.isFavorite(destination) {
             destinationStore.addFavorite(destination, savedRouteID: result.summary.id)
         }
-        end()
+        savingPlan = nil
+        if isActive { end() }
     }
 
     // MARK: - Private

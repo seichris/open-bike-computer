@@ -279,6 +279,21 @@ extension OfflineRouteSaveTests {
         check(store.favorite(savedRouteID: result.summary.id)?.name == "Office" && !session.isActive &&
             Stops.isIdle(session.planner),
             "Saving a route that ends at a favorite links it to the favorite and ends the session")
+
+        session.begin(currentLocation: fix(Stops.homePoint, at: f.now))
+        session.search(forStopID: session.draft.stops[1].id)
+        session.choose(office)
+        guard let laterDraft = session.beginSave() else { preconditionFailure("Expected a savable plan") }
+        session.end()
+        f.now = f.now.addingTimeInterval(60)
+        let later = try f.library.saveOffline(laterDraft, name: "Commute again")
+        session.finishSave(later, destinationStore: store)
+        check(store.favorite(savedRouteID: later.summary.id)?.name == "Office" && !session.isActive,
+            "A save that completes after the route was replaced still links its favorite")
+        let content = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/ContentView.swift", encoding: .utf8)
+        check(content.contains("let wasCreating = routeCreation.isActive") &&
+            content.contains("if wasCreating {\n                    showCreatedRoute(result)"),
+            "Only a save of the route still being created replaces the map with its preview")
     }
 
     /// Beside Shenzhen, Hong Kong's Apple Maps coordinates also read as

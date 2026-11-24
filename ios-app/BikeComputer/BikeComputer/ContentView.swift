@@ -990,8 +990,15 @@ struct ContentView: View {
             .presentationBackgroundInteraction(.disabled)
         case .saveCreatedRoute(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                // Navigation or a route planned elsewhere may have replaced
+                // the route while the sheet was up; it keeps the map then.
+                let wasCreating = routeCreation.isActive
                 routeCreation.finishSave(result, destinationStore: coordinator.destinationStore)
-                showCreatedRoute(result)
+                if wasCreating {
+                    showCreatedRoute(result)
+                } else {
+                    presentedSheet = nil
+                }
             }
             .presentationDetents([.medium, .large])
             .presentationBackgroundInteraction(.disabled)
