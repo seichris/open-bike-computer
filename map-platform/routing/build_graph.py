@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build one Valhalla bicycle-detour archive from a checksum-verified OSM snapshot."""
+"""Build one Valhalla bicycle archive from a checksum-verified OSM snapshot.
+
+`worldwide-gap` clips the planet to the coverage mask (the places Apple Maps
+has no cycling directions, plus border bands). `planet` keeps the whole planet
+for Create a Route's Road, Gravel and Everyday routes everywhere.
+"""
 
 import argparse
 import hashlib
@@ -19,6 +24,8 @@ ARCHIVE_NAME = "valhalla_tiles.tar"
 INDEX_ENTRY = struct.Struct("<QLL")
 TILE_PATH = re.compile(r"([0-2])/([0-9]{3}(?:/[0-9]{3}){1,2})\.gph")
 ROUTING_RELATIONS = ("r/type=restriction,restriction:bicycle", "r/route=ferry,bicycle")
+COVERAGES = ("worldwide-gap", "planet")
+PLANET_URL = re.compile(r"https://planet\.openstreetmap\.org/pbf/planet-[0-9]{6}\.osm\.pbf")
 
 
 def file_identity(path):
@@ -123,6 +130,19 @@ def prepare_inputs(source, work, mask):
     return admin, roads
 
 
+def argument_error(coverage, sample, mask, source_url):
+    """Why this combination cannot build a release, or None."""
+    if sample:
+        return None
+    if not PLANET_URL.fullmatch(source_url):
+        return "Release builds require a dated OpenStreetMap planet snapshot"
+    if coverage == "worldwide-gap" and mask is None:
+        return "Worldwide-gap builds require a mask"
+    if coverage == "planet" and mask is not None:
+        return "Planet builds keep the whole planet and take no mask"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path)
@@ -131,17 +151,15 @@ def main():
     parser.add_argument("--work", required=True, type=Path, help="A new build directory on scratch")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--mask", type=Path, help="Inclusion mask")
+    parser.add_argument("--coverage", choices=COVERAGES, default="worldwide-gap")
     parser.add_argument("--sample", action="store_true", help="Build a development sample")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")
-    if not args.sample and (
-        args.mask is None or not re.fullmatch(
-            r"https://planet\.openstreetmap\.org/pbf/planet-[0-9]{6}\.osm\.pbf", args.source_url
-        )
-    ):
-        parser.error("Worldwide builds require a mask and a dated OpenStreetMap planet snapshot")
+    error = argument_error(args.coverage, args.sample, args.mask, args.source_url)
+    if error:
+        parser.error(error)
     source = args.source.resolve(strict=True)
     source_identity = file_identity(source)
     if source_identity["sha256"] != args.source_sha256:
@@ -157,7 +175,7 @@ def main():
     archive = work / ARCHIVE_NAME
     manifest = {
         "schema": "bicino-valhalla-graph-v1",
-        "coverage": "development-sample" if args.sample else "worldwide-gap",
+        "coverage": "development-sample" if args.sample else args.coverage,
         "source": {"url": args.source_url, **source_identity},
         "mask": mask_identity,
         "policy": policy_identity,
