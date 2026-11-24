@@ -98,6 +98,12 @@ from .bicycle_detour_service import (
     BicycleDetourService,
     BicycleDetourUnavailableError,
 )
+from .bicycle_route_service import (
+    BicycleRouteBusyError,
+    BicycleRouteRequestError,
+    BicycleRouteService,
+    BicycleRouteUnavailableError,
+)
 from .request_limits import RequestBodyLimitMiddleware
 from .route_elevation_providers import ElevationTransport
 from .route_elevation_service import (
@@ -368,6 +374,24 @@ def create_app(
     bicycle_detour_requires_app_attest = os.environ.get(
         "MAP_PLATFORM_BICYCLE_DETOUR_REQUIRE_APP_ATTEST", "true"
     ).strip().lower() not in {"0", "false", "no"}
+    bicycle_route_ip_policy = RateLimitPolicy(
+        "bicycle-route-ip",
+        int(os.environ.get("MAP_PLATFORM_BICYCLE_ROUTE_IP_LIMIT_PER_HOUR", "480")),
+        3_600,
+    )
+    bicycle_route_installation_hour_policy = RateLimitPolicy(
+        "bicycle-route-installation-hour",
+        int(os.environ.get("MAP_PLATFORM_BICYCLE_ROUTE_LIMIT_PER_HOUR", "240")),
+        3_600,
+    )
+    bicycle_route_installation_day_policy = RateLimitPolicy(
+        "bicycle-route-installation-day",
+        int(os.environ.get("MAP_PLATFORM_BICYCLE_ROUTE_LIMIT_PER_DAY", "1200")),
+        86_400,
+    )
+    bicycle_route_requires_app_attest = os.environ.get(
+        "MAP_PLATFORM_BICYCLE_ROUTE_REQUIRE_APP_ATTEST", "true"
+    ).strip().lower() not in {"0", "false", "no"}
     rollout_approvals_path = Path(
         os.environ.get(
             "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS",
@@ -442,6 +466,9 @@ def create_app(
     bicycle_detour_service = BicycleDetourService.from_environment(
         transport=bicycle_routing_transport,
     )
+    bicycle_route_service = BicycleRouteService.from_environment(
+        transport=bicycle_routing_transport,
+    )
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
@@ -476,6 +503,7 @@ def create_app(
         body_limits={
             ("POST", "/v1/route-elevation-profiles"): 1024 * 1024,
             ("POST", "/v1/bicycle-detours"): 16 * 1024,
+            ("POST", "/v1/bicycle-routes"): 16 * 1024,
             **({(method, path): 5*1024*1024 for method, path in (("PUT", "/v1/social/me/avatar"), ("POST", "/v1/social/routes"), ("POST", "/v1/social/activities"))}
                if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true" else {}),
         },
@@ -493,6 +521,7 @@ def create_app(
     app.state.strava_integration = strava_integration
     app.state.route_elevation_service = route_elevation_service
     app.state.bicycle_detour_service = bicycle_detour_service
+    app.state.bicycle_route_service = bicycle_route_service
 
     def client_ip(request: Request) -> str:
         return client_address_resolver.resolve(
@@ -578,6 +607,7 @@ def create_app(
             or path == "/v1/source-regions"
             or path == "/v1/route-elevation-profiles"
             or path == "/v1/bicycle-detours"
+            or path == "/v1/bicycle-routes"
             or path == "/v1/map-jobs"
             or path.startswith(("/v1/map-jobs/", "/v1/map-packs/"))
         )
@@ -726,6 +756,7 @@ def create_app(
             ),
             "routeElevation": route_elevation_service.public_summary(),
             "bicycleDetour": bicycle_detour_service.public_summary(),
+            "bicycleRoute": bicycle_route_service.public_summary(),
         }
 
     @app.get("/v1/capabilities")
@@ -747,6 +778,7 @@ def create_app(
             "stravaRouteImport": strava_integration.capability(),
             "routeElevation": route_elevation_service.capability(),
             "bicycleDetour": bicycle_detour_service.capability(),
+            "bicycleRoute": bicycle_route_service.capability(),
         }
         return result
 
@@ -858,6 +890,65 @@ def create_app(
                 status_code=503,
                 detail={
                     "code": "bicycle_detour_unavailable",
+                    "message": "bicycle routing is temporarily unavailable",
+                },
+                headers={**no_store, "Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+
+    @app.post("/v1/bicycle-routes")
+    def create_bicycle_route(
+        request: Request,
+        response: Response,
+        payload: dict[str, Any],
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        """One bicycle leg for Create a Route with a road, gravel or everyday profile.
+
+        Exactly two coordinates arrive (leg origin and destination) and go to
+        the internal Valhalla service; nothing is stored or logged.
+        """
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+        )
+        if (
+            bicycle_route_requires_app_attest
+            and app_attest_store.key_id_for_installation(installation_id) is None
+        ):
+            raise AppAttestError(
+                "installation_attestation_required",
+                "installation App Attest enrollment is required",
+            )
+        enforce_rate_limits(
+            (bicycle_route_ip_policy, client_ip(request)),
+            (bicycle_route_installation_hour_policy, installation_id),
+            (bicycle_route_installation_day_policy, installation_id),
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        no_store = {"Cache-Control": "private, no-store"}
+        try:
+            return bicycle_route_service.create_route(payload)
+        except BicycleRouteRequestError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+                headers=no_store,
+            ) from exc
+        except BicycleRouteBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "bicycle_route_busy", "message": "bicycle route service is busy"},
+                headers={**no_store, "Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+        except BicycleRouteUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "bicycle_route_unavailable",
                     "message": "bicycle routing is temporarily unavailable",
                 },
                 headers={**no_store, "Retry-After": str(exc.retry_after_seconds)},

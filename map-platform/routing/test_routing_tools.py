@@ -14,6 +14,7 @@ from shapely.geometry import Point, box, mapping
 from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, file_identity, prepare_inputs
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
+import probe_profiles
 
 
 def write_archive(path, offset=1536):
@@ -131,6 +132,89 @@ class ArchiveTests(unittest.TestCase):
             transfer.assert_not_called()
             self.assertEqual(receipt, root / expected["sha256"])
             self.assertEqual(file_identity(receipt / ARCHIVE_NAME), file_identity(source))
+
+
+def encode_polyline6(points):
+    def encode(value):
+        value = ~(value << 1) if value < 0 else value << 1
+        chunks = ""
+        while value >= 0x20:
+            chunks += chr((0x20 | (value & 0x1F)) + 63)
+            value >>= 5
+        return chunks + chr(value + 63)
+
+    encoded, previous = "", (0, 0)
+    for latitude, longitude in points:
+        encoded += encode(latitude - previous[0]) + encode(longitude - previous[1])
+        previous = (latitude, longitude)
+    return encoded
+
+
+class FakeValhalla:
+    """Answers like Valhalla: travel_type reports the requested bicycle type."""
+
+    def __init__(self, *, ignore_type=False, same_geometry=False, push=False):
+        self.ignore_type, self.same_geometry, self.push = ignore_type, same_geometry, push
+
+    def request(self, *, method, url, headers, body, timeout_seconds, maximum_body_bytes):
+        from map_platform.route_elevation_providers import ProviderHTTPResponse
+
+        request = json.loads(body)
+        bicycle_type = request["costing_options"]["bicycle"]["bicycle_type"]
+        points = [(25_206_600, 55_269_200), (25_225_800, 55_263_100)]
+        if bicycle_type == "road" and not self.same_geometry:
+            points.insert(1, (25_216_000, 55_270_000))
+        maneuvers = [{
+            "type": 1, "instruction": "Ride.", "begin_shape_index": 0, "end_shape_index": len(points) - 1,
+            "length": 3.0, "time": 600, "travel_mode": "bicycle",
+            "travel_type": "hybrid" if self.ignore_type else bicycle_type,
+        }]
+        if self.push:
+            maneuvers[0]["end_shape_index"] = len(points) - 2
+            maneuvers.append({"type": 8, "instruction": "Walk.", "begin_shape_index": len(points) - 2,
+                              "end_shape_index": len(points) - 1, "length": 0.02, "time": 15,
+                              "travel_mode": "pedestrian", "travel_type": "foot"})
+        trip = {"status": 0, "summary": {"length": 3.0, "time": 600},
+                "legs": [{"shape": encode_polyline6(points), "maneuvers": maneuvers}]}
+        return ProviderHTTPResponse(200, {}, json.dumps({"trip": trip}).encode(), url)
+
+
+class ProfileProbeTests(unittest.TestCase):
+    FIXTURES = [{"name": "Dubai", "origin": [25.2066, 55.2692], "destination": [25.2258, 55.2631], "ready": True}]
+
+    def run_probe(self, **fake):
+        return probe_profiles.run("http://valhalla:8002", self.FIXTURES, transport_factory=lambda: FakeValhalla(**fake))
+
+    def test_applied_types_and_differing_geometry_pass(self):
+        report, failures = self.run_probe()
+        self.assertEqual(failures, [])
+        probe = report["probes"][0]
+        self.assertTrue(probe["roadGravelGeometryDiffers"])
+        self.assertEqual({name: item["bicycleTypes"] for name, item in probe["profiles"].items()},
+                         {"road": ["road"], "gravel": ["cross"], "everyday": ["hybrid"]})
+
+    def test_a_silently_ignored_bicycle_type_fails(self):
+        _, failures = self.run_probe(ignore_type=True)
+        self.assertTrue(any("road ran as ['hybrid']" in failure for failure in failures), failures)
+
+    def test_identical_road_and_gravel_geometry_everywhere_fails(self):
+        _, failures = self.run_probe(same_geometry=True)
+        self.assertIn("no pair produced different road and gravel geometry", failures)
+
+    def test_push_segments_are_reported_and_fail_a_ready_pair(self):
+        report, failures = self.run_probe(push=True)
+        road = report["probes"][0]["profiles"]["road"]
+        self.assertEqual((road["status"], road["reason"]), ("unavailable", "no_bicycle_route"))
+        self.assertEqual((road["nonBicycleManeuvers"], road["nonBicycleMeters"]), (1, 20))
+        self.assertIn("Dubai: road was no_bicycle_route", failures)
+
+    def test_checked_in_pairs_are_well_formed(self):
+        fixtures = json.loads(Path(probe_profiles.__file__).with_name("profile-probes.json").read_text())
+        self.assertGreaterEqual(len(fixtures), 2)
+        for fixture in fixtures:
+            self.assertEqual(set(fixture) - {"name", "origin", "destination", "ready"}, set())
+            self.assertEqual(len(fixture["origin"]), 2)
+            self.assertEqual(len(fixture["destination"]), 2)
 
 
 if __name__ == "__main__":
