@@ -19,7 +19,9 @@ from map_platform.bicycle_route_service import (
     BicycleRouteRequestError,
     BicycleRouteService,
     parse_request,
+    route_size_limits,
 )
+from map_platform.valhalla_bicycle import RouteSizeLimits
 from map_platform.installations import InstallationCredentialStore
 from map_platform.route_elevation_providers import ElevationProviderError, ProviderHTTPResponse
 
@@ -78,6 +80,19 @@ def detour_payload():
         "rejoin": {"latitudeE6": 25_225_800, "longitudeE6": 55_263_100},
         "routeSource": "mapkit",
     }
+
+
+def oversized_trip(*, points: int = 2, maneuvers: int = 1) -> bytes:
+    """A syntactically valid Valhalla trip with the given shape and maneuver counts."""
+
+    # Precision-6 polyline: the first point, then zero deltas ("??") per point.
+    shape = "_izlhA~rlgdF" + "??" * (points - 1)
+    steps = [{"type": 8, "instruction": "Continue.", "begin_shape_index": 0, "end_shape_index": 0,
+              "length": 0, "time": 0, "travel_mode": "bicycle"} for _ in range(maneuvers - 1)]
+    steps.append({"type": 4, "instruction": "Arrive.", "begin_shape_index": 0, "end_shape_index": points - 1,
+                  "length": 1, "time": 1, "travel_mode": "bicycle"})
+    return json.dumps({"trip": {"status": 0, "summary": {"length": 1, "time": 1},
+                                "legs": [{"shape": shape, "maneuvers": steps}]}}).encode()
 
 
 def valhalla_error(code: int) -> bytes:
@@ -236,6 +251,41 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
                     "reason": reason,
                 })
                 self.assertNotIn("25.2", "\n".join(logs.output))
+
+    def test_answers_beyond_the_size_caps_are_terminal_request_too_long(self):
+        limits = route_size_limits(150_000)
+        self.assertEqual(limits, RouteSizeLimits(upstream_bytes=2 * 1024 * 1024, shape_points=45_000,
+                                                 maneuvers=3_000))
+        within = oversized_trip(points=limits.shape_points, maneuvers=limits.maneuvers)
+        self.transport.body = within
+        response = self.post(route_payload())
+        self.assertEqual(response.json()["status"], "ready", response.text)
+        self.assertEqual(len(response.json()["route"]["pointsE6"]), 45_000)
+        cases = {
+            "too-many-points": oversized_trip(points=limits.shape_points + 1),
+            "too-many-maneuvers": oversized_trip(points=10, maneuvers=limits.maneuvers + 1),
+            "response-too-large": within + b" " * (limits.upstream_bytes - len(within) + 1),
+        }
+        for reason, body in cases.items():
+            with self.subTest(reason=reason):
+                self.transport.body = body
+                with self.assertLogs("map_platform", level="INFO") as logs:
+                    response = self.post(route_payload())
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["status"], "unavailable")
+                self.assertEqual(response.json()["reason"], "request_too_long")
+                self.assertIn(f"outcome=request_too_long reason={reason}", "\n".join(logs.output))
+        self.assertEqual(self.transport.requests[-1]["body"]["costing"], "bicycle")
+
+    def test_size_caps_scale_with_the_configured_separation_and_keep_the_detour_floor(self):
+        self.assertEqual(route_size_limits(1_000), RouteSizeLimits())
+        self.assertEqual(route_size_limits(500_000), RouteSizeLimits(upstream_bytes=5_120_000,
+                                                                     shape_points=150_000, maneuvers=10_000))
+        # Detours keep their own caps; their overflow is terminal too.
+        self.transport.body = oversized_trip(points=20_001)
+        detour = self.post(detour_payload(), path="/v1/bicycle-detours")
+        self.assertEqual(detour.status_code, 200, detour.text)
+        self.assertEqual(detour.json()["reason"], "request_too_long")
 
     def test_upstream_failures_are_retryable_service_errors(self):
         self.transport.failure = "provider-timeout"

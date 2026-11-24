@@ -68,7 +68,7 @@ which echoes the request.
 | --- | --- |
 | `200` `ready` | `route` as above, `reason: null`. |
 | `200` `unavailable`, `no_bicycle_route` | Valhalla 170/171/442/443 (no path, or a point outside the loaded graph), or Valhalla answered with any maneuver whose `travel_mode` is not `bicycle`. |
-| `200` `unavailable`, `request_too_long` | Valhalla 154 (beyond its bicycle distance limit). |
+| `200` `unavailable`, `request_too_long` | Valhalla 154 (beyond its bicycle distance limit), or the answer exceeds the size caps below. Asking again cannot help. |
 | `200` `unavailable`, `service_disabled` | No upstream configured, or `MAP_PLATFORM_BICYCLE_ROUTE_ENABLED=0`. |
 | `400` `bicycle_route_invalid_request` | Schema, field, profile, locale or separation error. |
 | `401` | Missing or wrong credential, or `installation_attestation_required`. |
@@ -201,6 +201,20 @@ under the detour timeout of 8 s.
 
 Both `compose.yaml` and `compose.development.yaml` pass these settings to the
 API, and only to the API. The public per-IP request limit applies as well.
+
+**Answer-size caps.** These scale with `BICYCLE_ROUTE_MAX_SEPARATION_METERS`
+and never drop below the detour caps (2 MiB, 20,000 points, 1,000 maneuvers).
+Each straight-line kilometre allows 10 KiB of Valhalla JSON, 300 shape points
+and 20 maneuvers, so 150 km gives 2 MiB, 45,000 points and 3,000 maneuvers.
+
+Measured on 2026-11-24 on legs of 60–218 km in the UAE, Oman, Saudi Arabia
+and Argentina:
+- at most 30 shape points, 1.8 maneuvers and 1 KiB of Valhalla JSON per
+  route kilometre;
+- at most about 5,200 points per route;
+- about 100 KiB of `pointsE6` per route.
+
+An answer over a cap is `request_too_long`, not a retryable `503`.
 
 ## Privacy
 

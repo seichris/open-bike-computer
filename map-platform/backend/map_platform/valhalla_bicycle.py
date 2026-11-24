@@ -7,6 +7,9 @@ module holds the pieces they share: request-field parsing, the upstream
 transport call, Valhalla error-code mapping, the precision-6 polyline decoder
 and the trip-to-route conversion that refuses any non-bicycle maneuver.
 
+An answer larger than the caller's size limits is a deterministic outcome
+(``request_too_long``), never a retryable service error.
+
 Neither coordinates nor routes are stored or logged here. Log lines carry
 outcome and upstream codes only, and the upstream URL never leaves the server.
 
@@ -41,6 +44,22 @@ _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 _LOCALE = re.compile(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8}){0,3}")
 
 RequestErrorFactory = Callable[[str], Exception]
+
+
+@dataclass(frozen=True)
+class RouteSizeLimits:
+    """Largest Valhalla answer a caller accepts."""
+
+    upstream_bytes: int = MAXIMUM_UPSTREAM_BYTES
+    shape_points: int = MAXIMUM_SHAPE_POINTS
+    maneuvers: int = MAXIMUM_MANEUVERS
+
+
+DEFAULT_SIZE_LIMITS = RouteSizeLimits()
+
+
+class RouteTooLargeError(ValueError):
+    """The route exceeds the caller's size limits; asking again cannot help."""
 
 
 @dataclass(frozen=True)
@@ -99,7 +118,7 @@ def haversine_meters(a: MapPoint, b: MapPoint) -> float:
     return 2 * radius * math.asin(min(1.0, math.sqrt(h)))
 
 
-def decode_polyline6(encoded: str) -> list[tuple[int, int]]:
+def decode_polyline6(encoded: str, maximum_points: int = MAXIMUM_SHAPE_POINTS) -> list[tuple[int, int]]:
     """Decodes a Valhalla precision-6 polyline into (latE6, lonE6) pairs."""
 
     points: list[tuple[int, int]] = []
@@ -128,8 +147,8 @@ def decode_polyline6(encoded: str) -> list[tuple[int, int]]:
         if not -90_000_000 <= latitude <= 90_000_000 or not -180_000_000 <= longitude <= 180_000_000:
             raise ValueError("polyline coordinate out of range")
         points.append((latitude, longitude))
-        if len(points) > MAXIMUM_SHAPE_POINTS:
-            raise ValueError("polyline has too many points")
+        if len(points) > maximum_points:
+            raise RouteTooLargeError("too-many-points")
     return points
 
 
@@ -220,8 +239,10 @@ class ValhallaBicycleRouter:
         timeout_seconds: float,
         logger: logging.Logger,
         log_label: str,
+        size_limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS,
     ):
         self._route_url = route_url
+        self._limits = size_limits
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._logger = logger
@@ -235,13 +256,14 @@ class ValhallaBicycleRouter:
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 body=body,
                 timeout_seconds=self._timeout_seconds,
-                maximum_body_bytes=MAXIMUM_UPSTREAM_BYTES,
+                maximum_body_bytes=self._limits.upstream_bytes,
             )
         except ElevationProviderError as exc:
             self._logger.info("%s upstream failed code=%s", self._label, exc.code)
             raise ValhallaUnavailableError("routing-unavailable") from None
-        if len(response.body) > MAXIMUM_UPSTREAM_BYTES:
-            raise ValhallaUnavailableError("routing-response-too-large")
+        if response.status_code == 200 and len(response.body) > self._limits.upstream_bytes:
+            self._logger.info("%s outcome=request_too_long reason=response-too-large", self._label)
+            return ValhallaOutcome(None, "request_too_long")
         try:
             decoded = json.loads(response.body)
         except (ValueError, UnicodeDecodeError):
@@ -260,7 +282,10 @@ class ValhallaBicycleRouter:
             self._logger.info("%s upstream status=%s", self._label, response.status_code)
             raise ValhallaUnavailableError("routing-unavailable")
         try:
-            route = route_from_trip(decoded.get("trip"))
+            route = route_from_trip(decoded.get("trip"), self._limits)
+        except RouteTooLargeError as exc:
+            self._logger.info("%s outcome=request_too_long reason=%s", self._label, exc)
+            return ValhallaOutcome(None, "request_too_long")
         except ValueError as exc:
             self._logger.info("%s upstream answer rejected reason=%s", self._label, exc)
             if str(exc) == "non-bicycle-maneuver":
@@ -275,7 +300,7 @@ def _number(value: Any, name: str) -> float:
     return float(value)
 
 
-def route_from_trip(trip: Any) -> dict[str, Any]:
+def route_from_trip(trip: Any, limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS) -> dict[str, Any]:
     if not isinstance(trip, dict) or trip.get("status") not in (0, None):
         raise ValueError("invalid-trip")
     legs = trip.get("legs")
@@ -285,12 +310,14 @@ def route_from_trip(trip: Any) -> dict[str, Any]:
     shape = leg.get("shape")
     if not isinstance(shape, str) or not shape:
         raise ValueError("invalid-shape")
-    points = decode_polyline6(shape)
+    points = decode_polyline6(shape, limits.shape_points)
     if len(points) < 2:
         raise ValueError("invalid-shape")
     raw_maneuvers = leg.get("maneuvers")
-    if not isinstance(raw_maneuvers, list) or not raw_maneuvers or len(raw_maneuvers) > MAXIMUM_MANEUVERS:
+    if not isinstance(raw_maneuvers, list) or not raw_maneuvers:
         raise ValueError("invalid-maneuvers")
+    if len(raw_maneuvers) > limits.maneuvers:
+        raise RouteTooLargeError("too-many-maneuvers")
     maneuvers: list[dict[str, Any]] = []
     previous_end = 0
     for raw in raw_maneuvers:

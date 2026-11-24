@@ -51,7 +51,8 @@ position and one selected rejoin point. The saved route's provenance (`gpx`,
   bearings). The app converts them into a `.activeOnly` `NavigationRouteV1`
   whose last step is "Rejoin saved route", never an arrival.
 - `unavailable` with `reason`: `no_bicycle_route` (Valhalla 170/171/442/443,
-  which includes points outside the loaded graph), `request_too_long` (154),
+  which includes points outside the loaded graph), `request_too_long` (154,
+  or an answer over 2 MiB, 20,000 shape points or 1,000 maneuvers),
   `service_disabled` (no upstream configured).
 - `400 bicycle_detour_invalid_request`, `429` (per-IP and per-installation
   hourly/daily limits), `503 bicycle_detour_busy|bicycle_detour_unavailable`

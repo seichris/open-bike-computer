@@ -31,7 +31,9 @@ from .valhalla_bicycle import (
     ATTRIBUTION,
     MINIMUM_SEPARATION_METERS,
     PROVIDER_ID,
+    DEFAULT_SIZE_LIMITS,
     MapPoint,
+    RouteSizeLimits,
     ValhallaBicycleRouter,
     ValhallaUnavailableError,
     bicycle_route_body,
@@ -93,6 +95,25 @@ DEFAULT_MAXIMUM_SEPARATION_METERS = 150_000
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAXIMUM_CONCURRENT = 2
 _LOGGER = logging.getLogger(__name__)
+
+
+def route_size_limits(maximum_separation_meters: float) -> RouteSizeLimits:
+    """Answer-size caps that grow with the longest leg the service accepts.
+
+    Measured 2026-11-24 on UAE, Oman, Saudi and Argentina legs of 60-218 km:
+    at most 30 shape points, 1.8 maneuvers and 1 KiB of Valhalla JSON per
+    route kilometre, with routes up to about 1.5 times the straight-line
+    separation. The per-straight-line-kilometre budgets below leave roughly a
+    five- to tenfold margin and never fall below the detour caps. A route that
+    still exceeds them is ``request_too_long``.
+    """
+
+    kilometres = maximum_separation_meters / 1000
+    return RouteSizeLimits(
+        upstream_bytes=max(DEFAULT_SIZE_LIMITS.upstream_bytes, int(kilometres * 10 * 1024)),
+        shape_points=max(DEFAULT_SIZE_LIMITS.shape_points, int(kilometres * 300)),
+        maneuvers=max(DEFAULT_SIZE_LIMITS.maneuvers, int(kilometres * 20)),
+    )
 
 
 class BicycleRouteRequestError(ValueError):
@@ -181,6 +202,7 @@ class BicycleRouteService:
                 timeout_seconds=timeout_seconds,
                 logger=_LOGGER,
                 log_label="bicycle route",
+                size_limits=route_size_limits(maximum_separation_meters),
             )
             if route_url is not None
             else None
