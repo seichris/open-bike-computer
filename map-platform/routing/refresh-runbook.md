@@ -1,4 +1,4 @@
-# Refresh the worldwide bicycle detour graph
+# Refresh the worldwide bicycle graph
 
 The first production release used one Valhalla archive for the gaps in Apple
 Maps Cycling. The iPhone still tries MapKit for each request. Follow the
@@ -37,6 +37,12 @@ the infrastructure, transfer, and deployment that passed qualification.
    decompress the mask with `gzip -dc` and verify the uncompressed bytes
    against the manifest before building. Verify and qualify the rebuilt graph
    before deploying it.
+
+A planet build (`--coverage planet`, no mask) uses the same builder. Scale
+the gap build by the input size: about 96 GB of planet against 63 GB of
+masked input. Expect roughly 760 GB of scratch, about 5 hours of build and
+an archive of about 100 GB. Check the VPS for the candidate, the current
+graph, transfer parts and the 50 GB reserve before transferring.
 
 The first successful attempt took 3 hours 9 minutes from build start through
 archive verification. Observed builder scratch use reached about 499 GB before

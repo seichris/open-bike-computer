@@ -8,6 +8,12 @@
   {"name": "Umm Al Quwain", "points": [[25.5578, 55.5469], [25.5691, 55.5549]], "route": true},
   {"name": "Ras Al Khaimah", "points": [[25.7849, 55.9457], [25.7964, 55.9568]], "route": true},
   {"name": "Fujairah", "points": [[25.1252, 56.3265], [25.1339, 56.3360]], "route": true},
-  {"name": "Fairview, Oklahoma", "points": [[36.2687, -98.4802], [36.2659, -98.4731]], "route": false},
-  {"name": "Great Bear Lake, Canada", "points": [[65.9400, -120.5250], [65.9500, -120.5000]], "route": false}
+  {"name": "Fairview, Oklahoma", "points": [[36.2687, -98.4802], [36.2659, -98.4731]], "route": false, "planet": true},
+  {"name": "Great Bear Lake, Canada", "points": [[65.9400, -120.5250], [65.9500, -120.5000]], "route": false},
+  {"name": "Amsterdam", "points": [[52.3731, 4.8922], [52.3601, 4.8852]], "route": true, "coverages": ["planet"], "pushAllowed": true},
+  {"name": "London", "points": [[51.5079, -0.1281], [51.5154, -0.1418]], "route": true, "coverages": ["planet"], "pushAllowed": true},
+  {"name": "Paris", "points": [[48.8566, 2.3522], [48.8606, 2.3376]], "route": true, "coverages": ["planet"], "pushAllowed": true},
+  {"name": "New York", "points": [[40.7580, -73.9855], [40.7484, -73.9857]], "route": true, "coverages": ["planet"], "pushAllowed": true},
+  {"name": "Tokyo", "points": [[35.6812, 139.7671], [35.6717, 139.7650]], "route": true, "coverages": ["planet"], "pushAllowed": true},
+  {"name": "Sydney", "points": [[-33.8688, 151.2093], [-33.8568, 151.2153]], "route": true, "coverages": ["planet"], "pushAllowed": true}
 ]
