@@ -11,10 +11,9 @@ struct SpokenDirectionsSettingsSection: View {
         } header: {
             Text("Navigation")
         } footer: {
-            Text(
-                "Reads turn-by-turn directions aloud on iPhone while "
-                + "navigating, and lowers other audio while speaking."
-            )
+            Text(SpokenDirectionsPreference.settingsFooter(
+                speaksInBackground: SpokenDirectionsPreference.speaksInBackground()
+            ))
         }
     }
 }

@@ -96,7 +96,8 @@ final class SilentSpokenDirectionsSpeaker: SpokenDirectionsSpeaking {
 ///
 /// Speaking while Bicino is in the background needs the `audio` background
 /// mode, which only the Debug (Bicino Dev) Info.plist declares. In other
-/// builds activation fails in the background and the prompt is skipped.
+/// builds activation fails in the background and the prompt is skipped; the
+/// settings footer tells those riders to keep Bicino open on screen.
 @MainActor
 final class SystemSpokenDirectionsSpeaker: NSObject, SpokenDirectionsSpeaking, AVSpeechSynthesizerDelegate {
     private struct Queued {

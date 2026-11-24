@@ -105,6 +105,7 @@ struct SpokenDirectionsTests {
     static func main() {
         testOffByDefault()
         testSettingsScreenUsesTheSameDefault()
+        testFooterMatchesBackgroundAudio()
         testTiming()
         testRideAnnouncesEachStepOnce()
         testJitterAndRepeatedFixesNeverRepeat()
@@ -161,6 +162,30 @@ struct SpokenDirectionsTests {
         controller.handle(.stopped)
         expect(speaker.spoken.isEmpty, "nothing is spoken while off: \(speaker.spoken.map(\.text))")
         expectEqual(speaker.stopCount, 0, "and the audio session is never touched")
+    }
+
+    /// Release builds have no background audio, so the footer must not
+    /// promise prompts with the screen locked.
+    static func testFooterMatchesBackgroundAudio() {
+        typealias Preference = SpokenDirectionsPreference
+        expect(Preference.speaksInBackground(infoDictionary: [
+            "UIBackgroundModes": ["audio", "location", "bluetooth-central"],
+        ]), "the Debug plist's background audio")
+        expect(!Preference.speaksInBackground(infoDictionary: [
+            "UIBackgroundModes": ["location", "bluetooth-central"],
+        ]), "Release has location and Bluetooth only")
+        expect(!Preference.speaksInBackground(infoDictionary: nil), "no plist")
+        expect(Preference.settingsFooter(speaksInBackground: false).contains("with Bicino open on screen"),
+               "foreground-only builds say so")
+        expect(!Preference.settingsFooter(speaksInBackground: true).contains("open on screen"),
+               "background-capable builds do not")
+        guard let section = try? String(
+            contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SpokenDirectionsSettingsSection.swift",
+            encoding: .utf8
+        ) else { return }
+        expect(section.filter { !$0.isWhitespace }.contains(
+            "speaksInBackground:SpokenDirectionsPreference.speaksInBackground()"
+        ), "the footer reads this build's own background modes")
     }
 
     /// The settings view is app-only, so check its source: the toggle must

@@ -9,6 +9,20 @@ nonisolated enum SpokenDirectionsPreference {
     static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledDefaultsKey) as? Bool ?? defaultEnabled
     }
+
+    /// Prompts play with the screen locked only when the build declares the
+    /// `audio` background mode. Today only Debug (Bicino Dev) does.
+    static func speaksInBackground(infoDictionary: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
+        (infoDictionary?["UIBackgroundModes"] as? [String])?.contains("audio") ?? false
+    }
+
+    static func settingsFooter(speaksInBackground: Bool) -> String {
+        speaksInBackground
+            ? "Reads turn-by-turn directions aloud on iPhone while navigating, "
+                + "and lowers other audio while speaking."
+            : "Reads turn-by-turn directions aloud on iPhone while navigating "
+                + "with Bicino open on screen, and lowers other audio while speaking."
+    }
 }
 
 /// What the navigation engine reports for spoken directions.
