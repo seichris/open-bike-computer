@@ -14,6 +14,7 @@ enum BikeLanesTileCacheTests {
         testStoreServesExpiredTileOnlyWhenTheNetworkFails()
         testStorePurgesACachedFailure()
         testSessionKeepsOnlyImageTilesOnDisk()
+        testSessionFallsBackToAnExpiredTileOnDisk()
         testZoomThreshold()
         testOverlayAndRendererFollowTheZoom()
     }
@@ -76,6 +77,15 @@ enum BikeLanesTileCacheTests {
         for status in [204, 206, 304, 403, 404, 429, 500, 503] {
             precondition(!BikeLanesTileStore.isCacheableTile(http(status), data: png), "status \(status)")
         }
+        let octetStream = "application/octet-stream"
+        precondition(BikeLanesTileStore.isCacheableTile(http(200, type: octetStream), data: pngBytes),
+                     "a PNG from object storage without a content type")
+        precondition(BikeLanesTileStore.isCacheableTile(http(200, type: octetStream), data: jpegBytes))
+        precondition(BikeLanesTileStore.isCacheableTile(http(200, type: octetStream), data: webpBytes))
+        precondition(!BikeLanesTileStore.isCacheableTile(http(200, type: octetStream), data: png), "unknown bytes")
+        precondition(!BikeLanesTileStore.isCacheableTile(http(200, type: "text/html"), data: Data("<html>".utf8)))
+        precondition(!BikeLanesTileStore.isCacheableTile(http(404, type: octetStream), data: pngBytes),
+                     "an image body does not rescue an error status")
         let nonHTTP = URLResponse(url: tileURL, mimeType: "image/png", expectedContentLength: 8, textEncodingName: nil)
         precondition(!BikeLanesTileStore.isCacheableTile(nonHTTP, data: png), "not an HTTP answer")
         let request = BikeLanesTileStore.request(for: tileURL)
@@ -184,6 +194,8 @@ enum BikeLanesTileCacheTests {
             ("missing", 404, "image/png", bytes(20, 2), false),
             ("throttled", 429, "image/png", bytes(20, 3), false),
             ("portal", 200, "text/html", Data("<html>".utf8), false),
+            ("untyped", 200, "application/octet-stream", pngBytes, true),
+            ("untyped-page", 200, "application/octet-stream", Data("<html>".utf8), false),
             ("blank", 200, "image/png", Data(), false),
         ]
         for item in cases {
@@ -205,6 +217,34 @@ enum BikeLanesTileCacheTests {
         precondition(loaded.wait(timeout: .now() + 10) == .success)
         let before = BikeLanesStubProtocol.requestCount
         precondition(load(store, url).source == .memory && BikeLanesStubProtocol.requestCount == before)
+    }
+
+    /// The real session with a tile already on disk: a later outage or
+    /// server error shows that tile, and a vetoed error keeps it on disk.
+    private static func testSessionFallsBackToAnExpiredTileOnDisk() {
+        let urlCache = temporaryURLCache()
+        let session = BikeLanesTileSession(urlCache: urlCache, protocolClasses: [BikeLanesStubProtocol.self])
+        defer { session.invalidate() }
+        let store = BikeLanesTileStore(memory: memory(), urlCache: urlCache) { request, completion in
+            session.load(request, completion: completion)
+        }
+        let url = URL(string: "https://tiles.example.test/expired.png")!
+        let request = BikeLanesTileStore.request(for: url)
+        urlCache.storeCachedResponse(
+            CachedURLResponse(response: http(200, url: url), data: pngBytes), for: request)
+
+        BikeLanesStubProtocol.set(url, status: 503, type: "text/plain", body: Data("busy".utf8))
+        let serverError = waitForStoreLoad(store, url)
+        precondition(try! serverError.result.get() == pngBytes && serverError.source == .stale)
+        precondition(urlCache.cachedResponse(for: request)?.data == pngBytes, "the 503 did not replace the tile on disk")
+
+        BikeLanesStubProtocol.set(url, status: 0, type: "", body: Data())
+        let offline = waitForStoreLoad(store, url)
+        precondition(try! offline.result.get() == pngBytes && offline.source == .stale)
+        precondition(store.memory.count == 0, "an expired tile is never promoted to memory")
+
+        BikeLanesStubProtocol.set(url, status: 404, type: "text/plain", body: Data("gone".utf8))
+        guard case .failure = waitForStoreLoad(store, url).result else { preconditionFailure("a 404 fails the tile") }
     }
 
     // MARK: Zoom
@@ -268,13 +308,16 @@ enum BikeLanesTileCacheTests {
     private static let otherTileURL = URL(string: "https://tiles.example.test/13/4207/2692.png")!
 
     private static func bytes(_ count: Int, _ value: UInt8) -> Data { Data(repeating: value, count: count) }
+    private static let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13])
+    private static let jpegBytes = Data([0xFF, 0xD8, 0xFF, 0xE0, 0, 16])
+    private static let webpBytes = Data(Array("RIFF".utf8) + [36, 0, 0, 0] + Array("WEBPVP8 ".utf8))
 
     private static func memory() -> BikeLanesTileMemoryCache {
         BikeLanesTileMemoryCache(byteLimit: 1_000_000, countLimit: 100)
     }
 
-    private static func http(_ status: Int, type: String = "image/png") -> HTTPURLResponse {
-        HTTPURLResponse(url: tileURL, statusCode: status, httpVersion: "HTTP/1.1",
+    private static func http(_ status: Int, type: String = "image/png", url: URL = tileURL) -> HTTPURLResponse {
+        HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                         headerFields: ["Content-Type": type, "Cache-Control": "max-age=86400"])!
     }
 
@@ -291,6 +334,19 @@ enum BikeLanesTileCacheTests {
         store.loadTile(at: url) { result, source in box.value = (result, source) }
         guard let value = box.value else { preconditionFailure("the fake transport answers at once") }
         return value
+    }
+
+    private static func waitForStoreLoad(
+        _ store: BikeLanesTileStore, _ url: URL
+    ) -> (result: Result<Data, Error>, source: BikeLanesTileStore.Source?) {
+        let box = ResultBox()
+        let done = DispatchSemaphore(value: 0)
+        store.loadTile(at: url) { result, source in
+            box.value = (result, source)
+            done.signal()
+        }
+        precondition(done.wait(timeout: .now() + 10) == .success, "the stub answers")
+        return box.value!
     }
 
     private static func waitForLoad(
@@ -344,6 +400,7 @@ private final class FakeTransport: @unchecked Sendable {
 }
 
 /// Serves canned HTTP answers, as a server would, including cache headers.
+/// Status 0 fails the request as if the device were offline.
 private final class BikeLanesStubProtocol: URLProtocol {
     private struct Answer {
         let status: Int
@@ -371,6 +428,10 @@ private final class BikeLanesStubProtocol: URLProtocol {
                   return Self.answers[url]
               }) else {
             client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+            return
+        }
+        guard answer.status != 0 else {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
             return
         }
         let response = HTTPURLResponse(

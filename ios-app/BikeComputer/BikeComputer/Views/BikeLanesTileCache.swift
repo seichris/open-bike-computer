@@ -228,12 +228,22 @@ nonisolated final class BikeLanesTileStore: @unchecked Sendable {
 #endif
     }
 
-    /// Only a complete HTTP 200 image is worth keeping. Errors, redirects,
+    /// Only a complete HTTP 200 image is shown and kept. Errors, redirects,
     /// empty bodies and captive-portal pages never enter either cache.
     static func isCacheableTile(_ response: URLResponse?, data: Data?) -> Bool {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let data, !data.isEmpty else { return false }
-        return http.mimeType?.lowercased().hasPrefix("image/") == true
+        // Object storage without content-type metadata sends tiles as
+        // application/octet-stream, so the image bytes count as well.
+        return http.mimeType?.lowercased().hasPrefix("image/") == true || hasImageSignature(data)
+    }
+
+    /// PNG, JPEG or WebP file signatures.
+    static func hasImageSignature(_ data: Data) -> Bool {
+        let head = [UInt8](data.prefix(12))
+        if head.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return true }
+        if head.starts(with: [0xFF, 0xD8, 0xFF]) { return true }
+        return head.count == 12 && head.starts(with: Array("RIFF".utf8)) && Array(head[8...]) == Array("WEBP".utf8)
     }
 
     static func request(for url: URL) -> URLRequest {

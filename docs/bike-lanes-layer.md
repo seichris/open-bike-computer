@@ -54,8 +54,9 @@ Tiles load through `BikeLanesTileStore`:
 - A 64 MiB `URLCache` in `Caches/BikeLanesTiles`. It follows the server's
   `Cache-Control` and `ETag` headers: CyclOSM sends `max-age=86400`, so a tile
   comes from disk for a day and is then revalidated with `If-None-Match`.
-- Only HTTP 200 image responses are cached. Errors, empty bodies and non-image
-  pages are not kept in memory or on disk. When the network fails or the server
+- Only HTTP 200 image responses are shown and cached: an `image/*` content
+  type, or PNG, JPEG or WebP bytes from a host that sends no image type. Errors,
+  empty bodies and other pages are not kept in memory or on disk. When the network fails or the server
   returns a 5xx error, an expired tile on disk is shown rather than an empty
   map; it is not added to memory, so the next load retries the network.
 - Concurrent requests for the same tile share one download. Tiles are not
