@@ -259,8 +259,8 @@ old data as current. Reconnection requests the newest coherent snapshot.
 ### Ride Detection (internal builds)
 
 Compatible internal firmware can detect sustained cycling and coordinate the
-existing Watch-owned workout. Configure **Settings > Workouts > Ride
-Detection** on iPhone:
+existing Watch-owned workout. Configure **Settings > Software Customization** on
+iPhone:
 
 - **Ask to Start** is the default and displays **Start Ride** / **Not Now** on
   the bike computer and iPhone.

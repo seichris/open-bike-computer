@@ -174,7 +174,7 @@ I2C helpers for register access.
 The authenticated BLE command is `SNDP` followed by a `UInt8` sound ID and a
 `UInt8` volume percentage in the range `0...100`. Legacy requests containing
 only the sound ID use the `70%` default. The app stores the selection under
-**Hardware Customization > Device Sounds** and the center-right button on the
+**Bicino & Bike Sensors > Device Sounds** and the center-right button on the
 main map sends the selected sound and volume.
 
 ## Hardware Regression Checklist

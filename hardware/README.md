@@ -298,7 +298,7 @@ through `70%`, then ramps to `+20 dB` ES8311 DAC gain at `100%`. Playback above
 the DAC's unity-gain point uses a soft limiter to prevent hard clipping.
 
 The iOS app stores the selected sound and volume locally. The selector and
-volume slider are under **Hardware Customization > Device Sounds**. Pressing
+volume slider are under **Bicino & Bike Sensors > Device Sounds**. Pressing
 the sound button at the center-right of the main map sends the selected sound
 and volume to the bike computer. Healthy serial output includes
 `Speaker: playback task ready`, `Speaker: ES8311 ready at 70% default volume`,
