@@ -1,16 +1,13 @@
-import CoreLocation
 import SwiftUI
 
 private enum SavedRouteImportSheet: Identifiable {
     case strava
     case gpx(OfflineRouteSaveDraft)
-    case routeCreator
 
     var id: String {
         switch self {
         case .strava: "strava"
         case .gpx(let draft): "gpx:\(draft.id.uuidString)"
-        case .routeCreator: "route-creator"
         }
     }
 }
@@ -20,8 +17,9 @@ struct SavedRoutesLibraryView: View {
     @ObservedObject var library: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
     @ObservedObject var destinationStore: SavedDestinationStore
-    let currentLocation: CLLocation?
     let onSaveOnlineRoute: (SavedDestination?) -> Void
+    /// Create a Route happens on the main map; this closes the shortcut first.
+    let onCreateRoute: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var presentedImport: SavedRouteImportSheet?
     @State private var importFeedback: String?
@@ -34,10 +32,7 @@ struct SavedRoutesLibraryView: View {
                     stravaCoordinator: stravaCoordinator,
                     destinationStore: destinationStore,
                     onSaveOnlineRoute: onSaveOnlineRoute,
-                    onCreateRoute: {
-                        importFeedback = nil
-                        presentedImport = .routeCreator
-                    },
+                    onCreateRoute: onCreateRoute,
                     onImportFromStrava: { presentedImport = .strava },
                     onConfirmGPX: { draft in
                         importFeedback = nil
@@ -58,15 +53,6 @@ struct SavedRoutesLibraryView: View {
                     StravaRouteImportView(coordinator: stravaCoordinator)
                 case .gpx(let draft):
                     RouteSaveSheet(library: library, draft: draft) { result in
-                        importFeedback = result.message
-                        presentedImport = nil
-                    }
-                case .routeCreator:
-                    RouteCreatorView(
-                        library: library,
-                        destinationStore: destinationStore,
-                        currentLocation: currentLocation
-                    ) { result in
                         importFeedback = result.message
                         presentedImport = nil
                     }

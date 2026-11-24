@@ -16,6 +16,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     case socialProfile
     case offlineRoutes
     case savePlannedRoute(OfflineRouteSaveDraft)
+    case saveCreatedRoute(OfflineRouteSaveDraft)
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
@@ -31,6 +32,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         case .savedMapsSettings: return "saved-maps-settings"
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
+        case .saveCreatedRoute(let draft): return "save-created-route:\(draft.id.uuidString)"
         case .bikeComputerSetup: return "bike-computer-setup"
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
@@ -74,6 +76,10 @@ struct ContentView: View {
     @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var mapViewControlState: MapViewControlState
     @StateObject private var onlinePlaces = OnlinePOISearchSession()
+    /// Create a Route on this map, in place of destination search.
+    @StateObject private var routeCreation = RouteCreationSession(
+        namePlace: RouteDroppedPinNamer.name(for:)
+    )
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
@@ -119,6 +125,11 @@ struct ContentView: View {
     @State private var routeSearchInitialDestination: SavedDestination?
     @State private var pendingRouteSearchAfterSheetDismissal: SavedDestination?
     @State private var hasPendingRouteSearchAfterSheetDismissal = false
+    @State private var hasPendingRouteCreationAfterSheetDismissal = false
+    @State private var isRouteCreatorExpanded = true
+    /// The Create a Route panel's top edge on screen.
+    @State private var routeCreatorPanelTop: CGFloat?
+    @State private var routeCreationPolylines = RouteCreationPolylineCache()
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
     @State private var confirmedMapSwitchKey: String?
@@ -289,7 +300,9 @@ struct ContentView: View {
                     savedRoutePreviewBottomPadding:
                         savedRoutePreviewBottomHeight.map {
                             $0 + proxy.safeAreaInsets.bottom + 12
-                        }
+                        },
+                    routeCreationBottomPadding:
+                        routeCreationBottomPadding(in: proxy)
                 )
                     .ignoresSafeArea()
 
@@ -502,6 +515,17 @@ struct ContentView: View {
         .onChange(of: savedRouteMapPreview?.identity) { identity in
             if identity == nil { synchronizeRideMetricsSheet() }
         }
+        .onChange(of: routeCreation.isActive) { isActive in
+            routeCreatorPanelTop = nil
+            if !isActive { synchronizeRideMetricsSheet() }
+        }
+        .onPreferenceChange(RouteCreatorPanelTopKey.self) { top in
+            Task { @MainActor in
+                guard routeCreation.isActive, let top, top.isFinite,
+                      routeCreatorPanelTop != top else { return }
+                routeCreatorPanelTop = top
+            }
+        }
         .task {
 #if DEBUG
             await runSavedRouteDetourAcceptanceIfRequested()
@@ -595,7 +619,12 @@ struct ContentView: View {
             presentNearbyBicinoIfEligible()
             presentPendingBicinoSetupAppLinkIfEligible()
         }
-        .onChange(of: coordinator.isNavigating) { _ in
+        .onChange(of: coordinator.routeCalculation.isCalculating) { isCalculating in
+            // A route planned elsewhere, such as from Siri, replaces it.
+            if isCalculating, routeCreation.isActive { routeCreation.end() }
+        }
+        .onChange(of: coordinator.isNavigating) { isNavigating in
+            if isNavigating, routeCreation.isActive { routeCreation.end() }
             updateIdleTimer()
             synchronizeRideMetricsSheet()
         }
@@ -676,6 +705,7 @@ struct ContentView: View {
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
+                if routeCreation.isActive { routeCreation.end() }
                 if presentedSheet == .settings || presentedSheet == .savedMapsSettings {
                     presentedSheet = nil
                 }
@@ -745,6 +775,7 @@ struct ContentView: View {
         if savedRouteMapPreview?.identity != preview.identity {
             savedRoutePreviewBottomHeight = nil
         }
+        if routeCreation.isActive { routeCreation.end() }
         savedRouteMapPreview = preview
         isSearchPanelExpanded = false
         // This is deliberately after both the validated read and factory. A
@@ -759,6 +790,7 @@ struct ContentView: View {
         // User explicitly selected an offline route. Do not cancel their online
         // plan until the exact archive and its display geometry were verified.
         coordinator.cancelRoutePlan()
+        if routeCreation.isActive { routeCreation.end() }
         savedRoutePreviewBottomHeight = nil
         savedRouteMapPreview = preview
         isSearchPanelExpanded = false
@@ -956,12 +988,26 @@ struct ContentView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationBackgroundInteraction(.disabled)
+        case .saveCreatedRoute(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                // Navigation or a route planned elsewhere may have replaced
+                // the route while the sheet was up; it keeps the map then.
+                let wasCreating = routeCreation.isActive
+                routeCreation.finishSave(result, destinationStore: coordinator.destinationStore)
+                if wasCreating {
+                    showCreatedRoute(result)
+                } else {
+                    presentedSheet = nil
+                }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackgroundInteraction(.disabled)
         case .offlineRoutes:
             SavedRoutesLibraryView(library: routeLibrary,
                 stravaCoordinator: stravaIntegrationCoordinator,
                 destinationStore: coordinator.destinationStore,
-                currentLocation: coordinator.currentLocation,
-                onSaveOnlineRoute: openOfflineRouteSearch)
+                onSaveOnlineRoute: openOfflineRouteSearch,
+                onCreateRoute: openRouteCreator)
                 .environment(\.savedRouteMapAction, SavedRouteMapAction(
                     isNavigationActive: coordinator.isNavigating,
                     show: { selection in try showOfflineRouteFromLibrary(selection) }
@@ -993,6 +1039,7 @@ struct ContentView: View {
                     coordinator.requestLocationAuthorization()
                 },
                 onSaveOnlineRoute: openOfflineRouteSearch,
+                onCreateRoute: openRouteCreator,
                 opensSavedMaps: destination == .savedMapsSettings,
                 onStartTestNavigation: { destination in
                     clearSavedRoutePreview()
@@ -1148,7 +1195,8 @@ struct ContentView: View {
         guard (phase ?? scenePhase) == .active else { return }
         if workoutStore.presentation.isWorkoutActive {
             guard presentedSheet == nil,
-                  savedRouteMapPreview == nil else { return }
+                  savedRouteMapPreview == nil,
+                  !routeCreation.isActive else { return }
             rideMetricsDetent = .rideMetricsCompact
             presentedSheet = .rideMetrics
         } else if presentedSheet == .rideMetrics {
@@ -1206,7 +1254,8 @@ struct ContentView: View {
             return
         }
         guard workoutStore.presentation.isWorkoutActive,
-              savedRouteMapPreview == nil else {
+              savedRouteMapPreview == nil,
+              !routeCreation.isActive else {
             isSheetDismissalInFlight = false
             presentNearbyBicinoIfEligible()
             return
@@ -1216,6 +1265,7 @@ struct ContentView: View {
             guard scenePhase == .active,
                   presentedSheet == nil,
                   savedRouteMapPreview == nil,
+                  !routeCreation.isActive,
                   workoutStore.presentation.isWorkoutActive else {
                 isSheetDismissalInFlight = false
                 presentNearbyBicinoIfEligible()
@@ -1252,6 +1302,13 @@ struct ContentView: View {
             queuedSheetAfterDismiss = nil
             isSheetDismissalInFlight = false
             beginOfflineRouteSearch(destination: destination)
+            return
+        }
+        if hasPendingRouteCreationAfterSheetDismissal {
+            hasPendingRouteCreationAfterSheetDismissal = false
+            queuedSheetAfterDismiss = nil
+            isSheetDismissalInFlight = false
+            beginRouteCreation()
             return
         }
         if case .nearbyBicino(let peripheralIdentifier) =
@@ -1400,6 +1457,7 @@ struct ContentView: View {
     }
 
     private func beginOfflineRouteSearch(destination: SavedDestination? = nil) {
+        if routeCreation.isActive { routeCreation.end() }
         clearSavedRoutePreview()
         coordinator.cancelRoutePlan()
         pendingFavoriteDestination = destination
@@ -1416,6 +1474,63 @@ struct ContentView: View {
         pendingRouteSearchAfterSheetDismissal = destination
         hasPendingRouteSearchAfterSheetDismissal = true
         presentedSheet = nil
+    }
+
+    /// Settings > Saved Routes > Create a Route: closes the sheet and creates
+    /// the route on this map once the sheet is gone.
+    private func openRouteCreator() {
+        hasPendingRouteCreationAfterSheetDismissal = true
+        presentedSheet = nil
+    }
+
+    private func beginRouteCreation() {
+        guard !coordinator.isNavigating,
+              !offlineMapManager.isMapAreaSelectionActive else { return }
+        // Choosing Create a Route again returns to the route being created.
+        guard !routeCreation.isActive else {
+            isRouteCreatorExpanded = true
+            return
+        }
+        clearSavedRoutePreview()
+        cancelRoutePlan()
+        isSearchPanelExpanded = false
+        onlinePlaces.clear()
+        isRouteCreatorExpanded = true
+        routeCreation.begin(currentLocation: coordinator.currentLocation)
+    }
+
+    private func saveCreatedRoute() {
+        guard let draft = routeCreation.beginSave() else { return }
+        presentedSheet = .saveCreatedRoute(draft)
+    }
+
+    private func addRouteCreationStop(at coordinate: CLLocationCoordinate2D) {
+        if routeCreation.addDroppedPin(at: coordinate) != nil {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        } else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            isRouteCreatorExpanded = true
+        }
+    }
+
+    /// A saved route is shown on the map with its preview card and Start.
+    private func showCreatedRoute(_ result: OfflineRouteSaveResult) {
+        presentedSheet = nil
+        // The route is saved either way; an unreadable preview leaves the map
+        // as it is and the route stays in Saved Routes.
+        try? showOfflineRouteFromLibrary(routeLibrary.mapSelection(for: result.summary))
+    }
+
+    private var isRouteCreatorSearching: Bool {
+        routeCreation.isActive && routeCreation.searchingStopID != nil
+    }
+
+    /// The map covered below the panel's top edge, keyboard included. Nil
+    /// while searching, so the map does not move under the keyboard.
+    private func routeCreationBottomPadding(in proxy: GeometryProxy) -> CGFloat? {
+        guard !isRouteCreatorSearching, let top = routeCreatorPanelTop else { return nil }
+        let screenBottom = proxy.frame(in: .global).maxY + proxy.safeAreaInsets.bottom
+        return max(screenBottom - top, 0) + 12
     }
 
     private func cancelRoutePlan() {
@@ -1978,7 +2093,28 @@ struct ContentView: View {
                 rideControlPanel(isCompactHeight: isCompactHeight)
             }
 
-            if !coordinator.isNavigating {
+            if !coordinator.isNavigating, routeCreation.isActive {
+                RouteCreatorPanel(
+                    session: routeCreation,
+                    destinationStore: coordinator.destinationStore,
+                    currentLocation: coordinator.currentLocation,
+                    isExpanded: $isRouteCreatorExpanded,
+                    maxHeight: maxHeight,
+                    onSave: saveCreatedRoute,
+                    onCancel: { routeCreation.end() }
+                )
+                .background {
+                    GeometryReader { layout in
+                        Color.clear.preference(
+                            key: RouteCreatorPanelTopKey.self,
+                            value: layout.frame(in: .global).minY
+                        )
+                    }
+                }
+                .padding(.horizontal, 12)
+                .layoutPriority(1)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if !coordinator.isNavigating {
                 if shouldShowOfflineMapStatusChip,
                    showsSupplementaryMapChrome {
                     offlineMapStatusChip
@@ -2001,6 +2137,7 @@ struct ContentView: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.88), value: isSearchPanelExpanded)
         .animation(.easeInOut(duration: 0.2), value: coordinator.routeCalculation.isCalculating)
         .animation(.easeInOut(duration: 0.2), value: coordinator.isNavigating)
+        .animation(.easeInOut(duration: 0.25), value: routeCreation.isActive)
     }
 
     private func rideMetricsPanel(
@@ -2335,7 +2472,7 @@ struct ContentView: View {
     private var showsSupplementaryMapChrome: Bool {
         MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(
             isSearchPanelExpanded: isSearchPanelExpanded
-        )
+        ) && !isRouteCreatorSearching
     }
 
     private var isOnlyCheckingForServerMaps: Bool {
@@ -2388,10 +2525,12 @@ struct ContentView: View {
     private func mapView(
         selectionFrame: CGRect?,
         routePlanningBottomPadding: CGFloat,
-        savedRoutePreviewBottomPadding: CGFloat?
+        savedRoutePreviewBottomPadding: CGFloat?,
+        routeCreationBottomPadding: CGFloat?
     ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
-            && !onlinePlaces.isActive
+            && !onlinePlaces.isActive && !routeCreation.isActive
+        let isCreatingRoute = routeCreation.isActive && !coordinator.isNavigating
 
         return MapViewContainer(
             appearance: mapAppearance,
@@ -2441,7 +2580,17 @@ struct ContentView: View {
             onlinePOIItems: onlinePlaces.items,
             selectedOnlinePOI: onlinePlaces.selectedItem,
             isOnlinePOISearchActive: onlinePlaces.isActive,
-            onOnlinePOISelected: { onlinePlaces.select($0) }
+            onOnlinePOISelected: { onlinePlaces.select($0) },
+            routeCreation: isCreatingRoute
+                ? routeCreation.mapInput(polylines: routeCreationPolylines)
+                : nil,
+            routeCreationBottomPadding: routeCreationBottomPadding,
+            onRouteCreationLongPress: isCreatingRoute
+                ? { addRouteCreationStop(at: $0) }
+                : nil,
+            onRouteCreationStopRemoval: isCreatingRoute
+                ? { routeCreation.removeOrClear(stopID: $0) }
+                : nil
         )
     }
 
@@ -2616,6 +2765,15 @@ struct ContentView: View {
             offlineMapSelectionHeight = height
             offlineMapSelectionCenterY = fixedEdge + height / 2
         }
+    }
+}
+
+/// The Create a Route panel's top edge, so the map fits stops above it.
+private struct RouteCreatorPanelTopKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
     }
 }
 
