@@ -257,10 +257,28 @@ An answer over a cap is `request_too_long`, not a retryable `503`.
 
 ## In the app
 
-`MultiStopRoutePlanner` asks this endpoint for every leg of a Road, Gravel or
-Everyday plan (`BicinoBicycleRouteService`, `BicycleRouteClient`), using the
-stops' WGS-84 coordinates. Legs are cached per profile and locale, so editing
-one stop re-asks only the legs that changed.
+Create a Route offers Road, Gravel, Everyday, Mountain and Walk. A remembered
+Drive from an older version opens as Everyday. `MultiStopRoutePlanner` asks
+this endpoint for every leg of a Road, Gravel, Everyday or Mountain plan
+(`BicinoBicycleRouteService`, `BicycleRouteClient`), using the stops' WGS-84
+coordinates, with `alternatives: 2` and `surfaces: true`. Legs are cached per
+profile and locale, so editing one stop re-asks only the legs that changed.
+
+- **Alternatives:** each leg keeps the routes its provider offered, the
+  preferred one first: Valhalla's alternatives, or up to three Apple Maps
+  routes (fastest first) for Walk and the fallback. The map draws the chosen
+  legs in blue and the others in a lighter blue beneath them. Tapping a
+  lighter line uses it for its leg and re-stitches the plan without a new
+  request; the choice stays with that leg while it is cached. An alternative
+  that would make the route too long to save is refused with a notice, and the
+  current route stays.
+- **Surfaces:** when every chosen leg has a breakdown, the panel adds them up
+  under the leg count as a bar and "81% paved · 13% gravel · 5% unpaved".
+  Apple Maps legs have no breakdown, so the line is hidden for them.
+- **Shortest Path:** with two or more stops between the start and the
+  destination, it keeps both ends and visits the stops in the order with the
+  shortest straight-line ride (exact, Held-Karp over at most eight stops).
+  Road distances can differ from straight lines.
 
 - **Apple Maps fallback for the whole plan:** `no_bicycle_route` /
   `request_too_long` ("isn't available here"), and a missing or disabled
@@ -279,7 +297,8 @@ one stop re-asks only the legs that changed.
 ## Privacy
 
 For a bicycle leg, the app sends the leg's start and end coordinates, the
-chosen profile and the display language to the Bicino service with the
+chosen profile, the display language and the alternatives and surfaces
+options to the Bicino service with the
 installation credential. The service computes the route on Bicino's own
 Valhalla server and returns it. Neither the coordinates nor the route are
 stored or logged. Log lines carry only the outcome, Valhalla's error code,

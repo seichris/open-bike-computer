@@ -47,7 +47,7 @@ struct SavedRoutesSettingsSection: View {
                 focusedRouteID = nil
                 onCreateRoute()
             } label: {
-                Label("Create a Route", systemImage: "magnifyingglass")
+                Label("Create a Route", systemImage: "arrow.triangle.turn.up.right.diamond")
             }
             .disabled(mapAction?.isNavigationActive == true)
             .accessibilityIdentifier("saveOnlineRoute")

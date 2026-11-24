@@ -122,17 +122,37 @@ struct RouteCreatorPanel: View {
 
     private var stopActions: some View {
         ViewThatFits(in: .horizontal) {
-            HStack {
+            HStack(spacing: 16) {
                 addStopButton
-                Spacer()
+                Spacer(minLength: 0)
+                shortestPathButton
                 reverseButton
             }
             VStack(alignment: .leading, spacing: 10) {
                 addStopButton
+                HStack(spacing: 16) {
+                    shortestPathButton
+                    reverseButton
+                }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                addStopButton
+                shortestPathButton
                 reverseButton
             }
         }
         .font(.subheadline)
+    }
+
+    private var shortestPathButton: some View {
+        Button {
+            session.reorderForShortestPath()
+        } label: {
+            Label("Shortest Path", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+        .disabled(!session.canReorderForShortestPath)
+        .accessibilityHint("Reorders the stops between the start and the destination for the shortest ride")
+        .accessibilityIdentifier("shortestRoutePath")
     }
 
     private var addStopButton: some View {
@@ -201,9 +221,10 @@ struct RouteCreatorPanel: View {
         return session.currentPlan?.usesBicycleRouteService ?? true
     }
 
+    /// Bike routes keep only the attribution OpenStreetMap's licence asks for.
     private var sourceFooter: String {
         usesBicycleRouteService
-            ? "Bike routes come from Bicino's route service with OpenStreetMap data (© OpenStreetMap contributors). It receives the start and end of each leg. Save keeps the route and its instructions on this iPhone for offline navigation. Offline map tiles and Watch transfer are not included."
+            ? "© OpenStreetMap contributors"
             : "Calculated with Apple Maps. Save keeps the route and its instructions on this iPhone for offline navigation. Offline map tiles and Watch transfer are not included."
     }
 
@@ -313,12 +334,25 @@ struct RouteCreatorPanel: View {
 
     // MARK: - Status
 
+    /// The draft's problem worth a message. A missing destination needs none:
+    /// the empty Destination row already asks for one.
+    private var shownIssue: MultiStopRouteDraftIssue? {
+        guard let issue = session.draft.issue else { return nil }
+        if case .missingPlace(let index) = issue,
+           session.draft.role(at: index) == .destination {
+            return nil
+        }
+        return issue
+    }
+
     @ViewBuilder
     private var routeStatus: some View {
-        if let issue = session.draft.issue {
+        if let issue = shownIssue {
             Label(session.draft.message(for: issue), systemImage: "info.circle")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+        } else if session.draft.issue != nil {
+            EmptyView()
         } else if let plan = session.currentPlan {
             VStack(alignment: .leading, spacing: 4) {
                 Text(RouteCreatorFormat.details(
@@ -329,6 +363,9 @@ struct RouteCreatorPanel: View {
                 Text("\(plan.legs.count) \(plan.legs.count == 1 ? "leg" : "legs") · \(plan.route.steps.count) instructions")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let surfaces = plan.surfaces {
+                    RouteSurfaceSummary(surfaces: surfaces)
+                }
                 if let notice = plan.bicycleProfileNotice {
                     Label(notice, systemImage: "info.circle")
                         .font(.caption)
@@ -380,8 +417,11 @@ struct RouteCreatorPanel: View {
     }
 
     private var statusLine: String {
-        if let issue = session.draft.issue {
+        if let issue = shownIssue {
             return session.draft.message(for: issue)
+        }
+        if session.draft.issue != nil {
+            return session.travelMode.title
         }
         if let plan = session.currentPlan {
             return RouteCreatorFormat.details(
@@ -415,22 +455,31 @@ extension RouteCreationSession {
                 kind: kind
             )
         }
-        let route = currentPlan?.route
+        let plan = currentPlan
+        let route = plan?.route
+        let alternatives = plan?.alternatives.compactMap { alternative in
+            polylines.polyline(for: alternative.route).map {
+                MapRouteCreation.Alternative(routeID: alternative.route.id, polyline: $0)
+            }
+        } ?? []
+        polylines.keep(only: Set([route?.id].compactMap { $0 } + alternatives.map(\.routeID)))
         return MapRouteCreation(
             stops: stops,
             routeID: route?.id,
-            polyline: route.flatMap { polylines.polyline(for: $0) }
+            polyline: route.flatMap { polylines.polyline(for: $0) },
+            alternatives: alternatives
         )
     }
 }
 
-/// Converts each planned route to display space once, not on every render.
+/// Converts each planned route and alternative to display space once, not on
+/// every render.
 @MainActor
 final class RouteCreationPolylineCache {
-    private var cached: (id: UUID, polyline: MKPolyline)?
+    private var cached: [UUID: MKPolyline] = [:]
 
     func polyline(for route: NavigationRouteV1) -> MKPolyline? {
-        if let cached, cached.id == route.id { return cached.polyline }
+        if let polyline = cached[route.id] { return polyline }
         let coordinates = route.points.map {
             SavedRouteMapPreviewFactory.displayCoordinate(CLLocationCoordinate2D(
                 latitude: $0.latitude,
@@ -439,8 +488,13 @@ final class RouteCreationPolylineCache {
         }
         guard coordinates.count >= 2 else { return nil }
         let polyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
-        cached = (route.id, polyline)
+        cached[route.id] = polyline
         return polyline
+    }
+
+    /// Forgets routes the map no longer shows.
+    func keep(only routeIDs: Set<UUID>) {
+        cached = cached.filter { routeIDs.contains($0.key) }
     }
 }
 
@@ -528,6 +582,51 @@ enum RouteCreatorFormat {
         duration.allowedUnits = travelTime >= 3_600 ? [.hour, .minute] : [.minute]
         guard let time = duration.string(from: max(travelTime, 60)) else { return distance }
         return "\(distance) · \(time)"
+    }
+}
+
+/// How much of the route is paved, gravel or unpaved: a thin bar and a
+/// caption under the leg count. Surfaces the map doesn't know stay grey.
+struct RouteSurfaceSummary: View {
+    let surfaces: RouteSurfaceBreakdownV1
+
+    var body: some View {
+        let shares = surfaces.shares
+        if !shares.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                GeometryReader { proxy in
+                    HStack(spacing: 1) {
+                        ForEach(shares, id: \.kind) { share in
+                            Rectangle()
+                                .fill(share.kind.color)
+                                .frame(width: max(proxy.size.width * share.fraction - 1, 1))
+                        }
+                    }
+                    .clipShape(Capsule())
+                }
+                .frame(height: 6)
+                .accessibilityHidden(true)
+                Text(surfaces.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Surfaces: " + surfaces.summary)
+            .accessibilityIdentifier("createdRouteSurfaces")
+        }
+    }
+}
+
+extension RouteSurfaceKind {
+    var color: Color {
+        switch self {
+        case .paved: Color(.systemGray)
+        case .gravel: .orange
+        case .unpaved: .brown
+        case .unknown: Color(.systemGray4)
+        }
     }
 }
 

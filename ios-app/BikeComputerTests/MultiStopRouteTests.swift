@@ -142,6 +142,8 @@ extension OfflineRouteSaveTests {
         try multiStopBicycleRouteService()
         try multiStopBicycleRouteFallbacks()
         try multiStopBicycleRouteDecoding()
+        try multiStopRouteAlternativesAndSurfaces()
+        try multiStopShortestPathAndTravelModes()
     }
 
     private static func pump(timeout: TimeInterval = 2, until condition: () -> Bool) -> Bool {
@@ -289,6 +291,14 @@ extension OfflineRouteSaveTests {
         )
     }
 
+    /// A service answer with one route and no alternatives.
+    private static func answer(
+        _ route: NavigationRouteV1,
+        surfaces: RouteSurfaceBreakdownV1? = nil
+    ) -> BicycleRouteServiceOutcomeV1 {
+        .routes([BicycleRouteOptionV1(route: route, surfaces: surfaces)])
+    }
+
     @MainActor
     private final class FakeBicycleRoutes: BicycleRouteServicing {
         var queries: [BicycleRouteQueryV1] = []
@@ -303,7 +313,7 @@ extension OfflineRouteSaveTests {
         func cancel() { cancels += 1 }
     }
 
-    /// Road, Gravel and Everyday legs come from Bicino's bicycle route service
+    /// Road, Gravel, Everyday and Mountain legs come from Bicino's bicycle route service
     /// and save as a phone-only Bicino route.
     static func multiStopBicycleRouteService() throws {
         let f = MultiStopFixture(); defer { f.cleanup() }
@@ -320,12 +330,12 @@ extension OfflineRouteSaveTests {
             service.queries[0].profile == .road && service.queries[0].originLabel == "Home" &&
             service.queries[0].destinationLabel == "Bakery",
             "A Road route asks the bicycle service for its first leg, not Apple Maps")
-        service.answers[0].resume(returning: .route(try serviceLeg(service.queries[0], via: Stops.canalPoint)))
+        service.answers[0].resume(returning: answer(try serviceLeg(service.queries[0], via: Stops.canalPoint)))
         check(pump { service.queries.count == 2 } &&
             service.queries[1].origin == Stops.bakery.wgs84Coordinate &&
             service.queries[1].destination == Stops.office.wgs84Coordinate,
             "Each leg is one request between its two stops")
-        service.answers[1].resume(returning: .route(try serviceLeg(service.queries[1], via: Stops.stationPoint)))
+        service.answers[1].resume(returning: answer(try serviceLeg(service.queries[1], via: Stops.stationPoint)))
         guard pump(until: { planner.readyPlan != nil }), let plan = planner.readyPlan else {
             preconditionFailure("Expected a Bicino plan")
         }
@@ -362,7 +372,7 @@ extension OfflineRouteSaveTests {
             "Another profile asks again")
         planner.cancel()
         check(service.cancels >= 1 && Stops.isIdle(planner), "Cancelling stops the service request")
-        service.answers[2].resume(returning: .route(try serviceLeg(service.queries[2], via: Stops.canalPoint)))
+        service.answers[2].resume(returning: answer(try serviceLeg(service.queries[2], via: Stops.canalPoint)))
         _ = pump(timeout: 0.2) { false }
         check(Stops.isIdle(planner), "A late answer after cancelling changes nothing")
     }
@@ -379,7 +389,7 @@ extension OfflineRouteSaveTests {
         request.bicycleProfile = .everyday
         planner.plan(request)
         _ = pump { service.queries.count == 1 }
-        service.answers[0].resume(returning: .route(try serviceLeg(service.queries[0], via: Stops.canalPoint)))
+        service.answers[0].resume(returning: answer(try serviceLeg(service.queries[0], via: Stops.canalPoint)))
         _ = pump { service.queries.count == 2 }
         service.answers[1].resume(returning: .noBicycleRoute)
         check(pump { f.factory.tasks.count == 1 } &&
@@ -435,7 +445,7 @@ extension OfflineRouteSaveTests {
             "A busy service asks the rider to wait")
         planner.retry()
         _ = pump { service.queries.count == 7 }
-        service.answers[6].resume(returning: .route(try serviceLeg(service.queries[6], via: Stops.canalPoint)))
+        service.answers[6].resume(returning: answer(try serviceLeg(service.queries[6], via: Stops.canalPoint)))
         check(pump { planner.readyPlan?.usesBicycleRouteService == true }, "A retried leg completes the Bicino plan")
 
         let far = Stops.place("Cambridge", CLLocationCoordinate2D(latitude: 52.205, longitude: 0.1218))
@@ -484,7 +494,7 @@ extension OfflineRouteSaveTests {
         planner.plan(homeward)
         check(pump { service.queries.count == queriesBefore + 2 },
             "Planning that route again after a transient failure asks the service again")
-        service.answers[queriesBefore + 1].resume(returning: .route(
+        service.answers[queriesBefore + 1].resume(returning: answer(
             try serviceLeg(service.queries[queriesBefore + 1], via: Stops.canalPoint)
         ))
         check(pump { planner.readyPlan?.usesBicycleRouteService == true },
@@ -563,9 +573,9 @@ extension OfflineRouteSaveTests {
             ["schema": BicycleRouteServiceContractV1.responseSchema, "status": "unavailable",
              "route": NSNull(), "reason": reason]
         }
-        guard case .route(let route) = BicycleRouteServiceDecoderV1.outcome(
+        guard case .routes(let routes) = BicycleRouteServiceDecoderV1.outcome(
             for: try response(body: try ready(profile: "gravel")), query: query
-        ) else { preconditionFailure("Expected a decoded route") }
+        ), routes.count == 1, let route = routes.first?.route else { preconditionFailure("Expected a decoded route") }
         check(route.source.label == "Home" && route.destination.label == "Office" &&
             route.provider == RouteProviderPolicyV1.valhallaDetour && route.transportType == .cycling &&
             route.steps.last?.maneuver == .arrive,
@@ -606,9 +616,244 @@ extension OfflineRouteSaveTests {
             outcomes.values.append(await readyService.route(for: query))
         }
         check(pump { outcomes.values.count == 2 } && outcomes.values[0] == .offline &&
-            { if case .route = outcomes.values[1] { return true }; return false }() &&
+            { if case .routes = outcomes.values[1] { return true }; return false }() &&
             readyService.lastRequest?.profile == "gravel",
             "The service maps a lost connection to offline and decodes a ready answer")
+    }
+
+    /// Each leg keeps its provider's alternatives; picking one re-stitches the
+    /// plan without asking again, and surfaces add up across legs.
+    static func multiStopRouteAlternativesAndSurfaces() throws {
+        let query = BicycleRouteQueryV1(
+            origin: RouteCoordinateV1(latitude: 25.2066, longitude: 55.2692),
+            destination: RouteCoordinateV1(latitude: 25.2258, longitude: 55.2631),
+            originLabel: "Home", destinationLabel: "Office", profile: .mountain, localeIdentifier: "en_AE",
+            alternatives: 2, surfaces: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let asking = BicycleRouteServiceRequestV1(
+            origin: query.origin, destination: query.destination, profile: .mountain,
+            localeIdentifier: "en_AE", alternatives: 7, surfaces: true,
+            requestID: UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF")!
+        )
+        check(String(data: try encoder.encode(asking), encoding: .utf8) == #"{"alternatives":2,"destination":{"latitudeE6":25225800,"longitudeE6":55263100},"locale":"en-AE","origin":{"latitudeE6":25206600,"longitudeE6":55269200},"profile":"mountain","requestId":"6f9619ff-8b86-d011-b42d-00c04fc964ff","schema":"bicino-bicycle-route-request-v1","surfaces":true}"#,
+            "Mountain asks for at most two alternatives and the surfaces")
+
+        let origin = CLLocationCoordinate2D(latitude: 25.2066, longitude: 55.2692)
+        let destination = CLLocationCoordinate2D(latitude: 25.2258, longitude: 55.2631)
+        func routeObject(profile: String, via: CLLocationCoordinate2D, surfaces: Any?) throws -> [String: Any] {
+            let route = serviceRoute(origin, via: via, to: destination)
+            var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(route)) as! [String: Any]
+            object["profile"] = profile
+            if let surfaces { object["surfaces"] = surfaces }
+            return object
+        }
+        let mixed: [String: Any] = ["pavedMeters": 200.0, "gravelMeters": 40.0, "unpavedMeters": 20.0, "unknownMeters": 0.0]
+        let body: [String: Any] = [
+            "schema": BicycleRouteServiceContractV1.responseSchema, "status": "ready", "reason": NSNull(),
+            "route": try routeObject(profile: "mountain", via: CLLocationCoordinate2D(latitude: 25.21, longitude: 55.27),
+                                     surfaces: mixed),
+            "alternatives": [
+                try routeObject(profile: "road", via: CLLocationCoordinate2D(latitude: 25.22, longitude: 55.27),
+                                surfaces: mixed),
+                ["profile": "mountain", "travelMode": 3],
+                try routeObject(profile: "mountain", via: CLLocationCoordinate2D(latitude: 25.21, longitude: 55.26),
+                                surfaces: ["pavedMeters": -1.0, "gravelMeters": 0.0, "unpavedMeters": 0.0, "unknownMeters": 0.0])
+            ]
+        ]
+        let http = BicycleDetourHTTPResponseV1(
+            statusCode: 200, cacheControl: "private, no-store", contentType: "application/json",
+            retryAfter: nil, body: try JSONSerialization.data(withJSONObject: body)
+        )
+        guard case .routes(let options) = BicycleRouteServiceDecoderV1.outcome(for: http, query: query) else {
+            preconditionFailure("Expected routes")
+        }
+        check(options.count == 2 &&
+            options[0].surfaces == RouteSurfaceBreakdownV1(pavedMeters: 200, gravelMeters: 40, unpavedMeters: 20, unknownMeters: 0) &&
+            options[1].surfaces == nil && options[0].route.id != options[1].route.id,
+            "Another profile's and undecodable alternatives are dropped, and so is a malformed surface breakdown")
+        var withoutSurfaces = query
+        withoutSurfaces.surfaces = false
+        withoutSurfaces.alternatives = 0
+        guard case .routes(let plain) = BicycleRouteServiceDecoderV1.outcome(for: http, query: withoutSurfaces) else {
+            preconditionFailure("Expected a route")
+        }
+        check(plain.count == 1 && plain[0].surfaces == nil, "Alternatives and surfaces nobody asked for are ignored")
+        var partial = body
+        var mainRoute = partial["route"] as! [String: Any]
+        mainRoute["surfaces"] = ["pavedMeters": 10.0, "gravelMeters": "a lot"]
+        partial["route"] = mainRoute
+        let partialHTTP = BicycleDetourHTTPResponseV1(
+            statusCode: 200, cacheControl: "private, no-store", contentType: "application/json",
+            retryAfter: nil, body: try JSONSerialization.data(withJSONObject: partial)
+        )
+        guard case .routes(let partialOptions) = BicycleRouteServiceDecoderV1.outcome(for: partialHTTP, query: query) else {
+            preconditionFailure("Expected routes despite malformed surfaces")
+        }
+        check(partialOptions.count == 2 && partialOptions[0].surfaces == nil,
+            "A structurally malformed surface breakdown is dropped, not the route")
+        check(options[0].surfaces?.summary == "77% paved · 15% gravel · 8% unpaved" &&
+            RouteSurfaceBreakdownV1(pavedMeters: 995, gravelMeters: 0, unpavedMeters: 0, unknownMeters: 4).summary ==
+                "100% paved · <1% unknown" &&
+            RouteSurfaceBreakdownV1.zero.shares.isEmpty,
+            "The surface line reads largest share first, unknown last")
+
+        // The planner keeps both service routes and switches between them.
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let service = FakeBicycleRoutes()
+        let planner = MultiStopRoutePlanner(
+            directionsFactory: f.factory.makeTask, bicycleRoutes: service, now: { f.now }
+        )
+        var request = Stops.request([Stops.home, Stops.bakery, Stops.office])
+        request.bicycleProfile = .mountain
+        planner.plan(request)
+        check(pump { service.queries.count == 1 } && service.queries[0].alternatives == 2 &&
+            service.queries[0].surfaces && service.queries[0].profile == .mountain,
+            "Each leg asks for two alternatives and the surfaces")
+        let firstMain = try serviceLeg(service.queries[0], via: Stops.canalPoint)
+        let firstOther = try serviceLeg(service.queries[0], via: CLLocationCoordinate2D(latitude: 51.5010, longitude: -0.0990))
+        let paved = RouteSurfaceBreakdownV1(pavedMeters: 260, gravelMeters: 0, unpavedMeters: 0, unknownMeters: 0)
+        let rough = RouteSurfaceBreakdownV1(pavedMeters: 60, gravelMeters: 100, unpavedMeters: 100, unknownMeters: 0)
+        service.answers[0].resume(returning: .routes([
+            BicycleRouteOptionV1(route: firstMain, surfaces: paved),
+            BicycleRouteOptionV1(route: firstOther, surfaces: rough)
+        ]))
+        _ = pump { service.queries.count == 2 }
+        let secondMain = try serviceLeg(service.queries[1], via: Stops.stationPoint)
+        service.answers[1].resume(returning: answer(secondMain, surfaces: paved))
+        guard pump(until: { planner.readyPlan != nil }), let plan = planner.readyPlan else {
+            preconditionFailure("Expected a plan with alternatives")
+        }
+        check(plan.legOptions.map { $0.map(\.id) } == [[firstMain.id, firstOther.id], [secondMain.id]] &&
+            plan.selectedOptions == [0, 0] && plan.legs.map(\.id) == [firstMain.id, secondMain.id] &&
+            plan.alternatives.map(\.route.id) == [firstOther.id] && plan.alternatives.map(\.leg) == [0] &&
+            plan.surfaces == paved + paved,
+            "The preferred route is chosen first and the other is offered as an alternative")
+
+        planner.selectAlternative(routeID: firstOther.id)
+        guard let switched = planner.readyPlan else { preconditionFailure("Expected the switched plan") }
+        check(service.queries.count == 2 && switched.selectedOptions == [1, 0] &&
+            switched.legs.map(\.id) == [firstOther.id, secondMain.id] &&
+            switched.alternatives.map(\.route.id) == [firstMain.id] &&
+            switched.route.points.contains(firstOther.points[1]) && switched.route.id != plan.route.id &&
+            switched.draft.archive.route.points == switched.route.points &&
+            switched.surfaces == rough + paved,
+            "Picking the alternative re-stitches the route, its save draft and its surfaces without a request")
+        planner.selectAlternative(routeID: firstOther.id)
+        planner.selectAlternative(routeID: UUID())
+        check(planner.readyPlan?.route.id == switched.route.id, "Picking the chosen route or an unknown one changes nothing")
+
+        planner.plan(Stops.request([Stops.home, Stops.office]))
+        planner.plan(request)
+        check(service.queries.count == 2 && planner.readyPlan?.selectedOptions == [1, 0],
+            "A leg remembers the picked route while it is cached")
+
+        // Apple Maps legs keep MapKit's alternatives too, fastest first.
+        let mapKitPlanner = f.makePlanner()
+        let tasksBefore = f.factory.tasks.count
+        mapKitPlanner.plan(Stops.request([Stops.home, Stops.office]))
+        let slow = Stops.leg(Stops.homePoint, via: Stops.bakeryPoint, to: Stops.officePoint,
+                             turn: "Turn right onto Bakery Lane", travelTime: 400)
+        f.factory.tasks[tasksBefore].succeed(with: [slow, Stops.homeToOffice, slow, slow])
+        guard let mapKitPlan = mapKitPlanner.readyPlan else { preconditionFailure("Expected a MapKit plan") }
+        check(f.factory.tasks[tasksBefore].request.requestsAlternateRoutes &&
+            mapKitPlan.legOptions[0].count == 3 && mapKitPlan.legs[0].expectedTravelTimeSeconds == 200 &&
+            mapKitPlan.surfaces == nil,
+            "MapKit legs offer up to three routes, fastest first, without surfaces")
+        mapKitPlanner.selectAlternative(routeID: mapKitPlan.legOptions[0][1].id)
+        check(mapKitPlanner.readyPlan?.legs[0].expectedTravelTimeSeconds == 400 &&
+            mapKitPlanner.readyPlan?.route.provider == RouteProviderPolicyV1.mapKit,
+            "A MapKit alternative can be picked the same way")
+
+        // ALT-1: an alternative too big to save never replaces a good plan.
+        let tight = f.makePlanner(limits: NavigationRouteLimitsV1(
+            maximumPoints: 3, maximumSteps: 2_000, maximumEncodedBytes: 4 * 1_024 * 1_024))
+        let tightTasks = f.factory.tasks.count
+        tight.plan(Stops.request([Stops.home, Stops.office]))
+        let winding = TestRoute(steps: [
+            TestRouteStep(instructions: "", coordinates: [Stops.homePoint]),
+            TestRouteStep(instructions: "Turn right onto Bakery Lane",
+                          coordinates: [Stops.homePoint, Stops.canalPoint, Stops.bakeryPoint, Stops.stationPoint]),
+            TestRouteStep(instructions: "Arrive at the destination", coordinates: [Stops.stationPoint, Stops.officePoint])
+        ], coordinates: [Stops.homePoint, Stops.canalPoint, Stops.bakeryPoint, Stops.stationPoint, Stops.officePoint],
+           expectedTravelTime: 500)
+        f.factory.tasks[tightTasks].succeed(with: [Stops.homeToOffice, winding])
+        guard let good = tight.readyPlan, good.legOptions[0].count == 2 else {
+            preconditionFailure("Expected a plan with an oversized alternative")
+        }
+        let failure = tight.selectAlternative(routeID: good.legOptions[0][1].id)
+        check(failure == .route(message: MultiStopRouteStitchError.tooLong.localizedDescription) &&
+            tight.readyPlan?.route.id == good.route.id && tight.readyPlan?.selectedOptions == [0],
+            "Picking an alternative too long to save keeps the current plan")
+        tight.plan(Stops.request([Stops.office, Stops.home]))
+        tight.plan(Stops.request([Stops.home, Stops.office]))
+        check(tight.readyPlan?.selectedOptions == [0], "The refused pick is not remembered for the leg")
+
+        let session = RouteCreationSession(planner: tight, defaults: f.defaults)
+        session.begin(currentLocation: nil)
+        session.selectAlternative(routeID: good.legOptions[0][1].id)
+        check(session.notice == nil, "A session only picks routes of its own plan")
+        session.end()
+    }
+
+    /// Shortest Path keeps the start and destination; the modes are Road,
+    /// Gravel, Everyday, Mountain and Walk.
+    static func multiStopShortestPathAndTravelModes() throws {
+        let canal = Stops.place("Canal", Stops.canalPoint)
+        let station = Stops.place("Station", Stops.stationPoint)
+        var draft = MultiStopRouteDraft(places: [Stops.home, station, canal, Stops.bakery, Stops.office])
+        check(draft.canReorderForShortestPath && draft.reorderForShortestPath() &&
+            draft.stops.compactMap(\.place?.label) == ["Home", "Canal", "Bakery", "Station", "Office"],
+            "Shortest Path orders the stops between the start and destination by straight-line distance")
+        check(!draft.reorderForShortestPath(), "The shortest order is left alone")
+        check(!MultiStopRouteDraft(places: [Stops.home, Stops.bakery, Stops.office]).canReorderForShortestPath &&
+            !MultiStopRouteDraft(places: [Stops.home, canal, nil, Stops.office]).canReorderForShortestPath,
+            "One stop, or a stop without a place, leaves nothing to reorder")
+
+        // Held-Karp agrees with trying every order.
+        let points = [(0.0, 0.0), (0.03, 0.01), (0.01, 0.04), (0.05, 0.05), (0.02, 0.02), (0.04, 0.0), (0.06, 0.03)]
+            .map { RouteCoordinateV1(latitude: 51.5 + $0.0, longitude: -0.1 + $0.1) }
+        func length(_ order: [Int]) -> Double {
+            zip(order, order.dropFirst()).reduce(0) { $0 + NavigationGeometryV1.distance(from: points[$1.0], to: points[$1.1]) }
+        }
+        func permutations(_ items: [Int]) -> [[Int]] {
+            guard items.count > 1 else { return [items] }
+            return items.flatMap { item in permutations(items.filter { $0 != item }).map { [item] + $0 } }
+        }
+        let bruteForce = permutations(Array(1..<(points.count - 1))).map { [0] + $0 + [points.count - 1] }
+            .map(length).min() ?? .infinity
+        guard let order = MultiStopRouteOrdering.shortestOrder(points) else { preconditionFailure("Expected an order") }
+        check(order.first == 0 && order.last == points.count - 1 && Set(order) == Set(points.indices) &&
+            abs(length(order) - bruteForce) < 0.001,
+            "The order is the shortest of all orders")
+
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let session = RouteCreationSession(planner: f.makePlanner(), defaults: f.defaults)
+        session.begin(currentLocation: nil)
+        // Start, destination, then two stops added before the destination.
+        for point in [Stops.homePoint, Stops.officePoint, Stops.stationPoint, Stops.canalPoint] {
+            session.addDroppedPin(at: point)
+        }
+        check(session.canReorderForShortestPath, "Two stops between the ends can be reordered")
+        session.reorderForShortestPath()
+        check(session.draft.stops.compactMap(\.place?.mapCoordinate) ==
+            [Stops.homePoint, Stops.canalPoint, Stops.stationPoint, Stops.officePoint].map {
+                RouteCoordinateV1(latitude: $0.latitude, longitude: $0.longitude)
+            } && session.notice == nil,
+            "Shortest Path reorders the session's stops")
+        session.reorderForShortestPath()
+        check(session.notice == RouteCreationSession.alreadyShortestNotice, "Pressing it again says the order is already shortest")
+        session.end()
+
+        check(RouteCreatorTravelMode.allCases.map(\.title) == ["Road", "Gravel", "Everyday", "Mountain", "Walk"] &&
+            RouteCreatorTravelMode.mountain.bicycleProfile == .mountain &&
+            RouteCreatorTravelMode.mountain.transportType == RouteTransportTypes.cycling &&
+            RouteCreatorTravelMode.walking.bicycleProfile == nil,
+            "Drive is gone; Mountain is a bicycle profile")
+        f.defaults.set("driving", forKey: RouteCreatorTravelMode.defaultsKey)
+        check(RouteCreationSession(planner: f.makePlanner(), defaults: f.defaults).travelMode == .everyday,
+            "A remembered Drive becomes Everyday")
     }
 
     static func multiStopMapRouteCreationLimitsAndSave() throws {
@@ -715,8 +960,8 @@ extension OfflineRouteSaveTests {
         check(Stops.progress(planner) == [1, 2], "Completed legs are counted")
         f.factory.tasks[1].succeed(with: [Stops.bakeryToOffice])
         check(f.factory.tasks.allSatisfy {
-            $0.request.transportType == RouteTransportTypes.cycling && !$0.request.requestsAlternateRoutes
-        }, "Each leg is one MapKit request with the chosen travel mode")
+            $0.request.transportType == RouteTransportTypes.cycling && $0.request.requestsAlternateRoutes
+        }, "Each leg is one MapKit request with the chosen travel mode, asking for alternatives")
 
         guard let plan = planner.readyPlan else { preconditionFailure("Expected a ready plan") }
         let first = try MapKitRouteAdapter.route(from: Stops.homeToBakery)
@@ -1348,7 +1593,7 @@ extension OfflineRouteSaveTests {
         check(content.contains("bicycleRoutes: BicinoBicycleRouteService(") &&
             content.contains("transport: BicycleRouteClient(serviceSession: bicinoServiceSession)") &&
             creation.contains("bicycleProfile: travelMode.bicycleProfile"),
-            "The main map's creator asks Bicino's bicycle route service for Road, Gravel and Everyday")
+            "The main map's creator asks Bicino's bicycle route service for its bike modes")
         check(creation.contains("guard let plan = planner.readyPlan, plan.request == request") &&
             creator.contains(".disabled(session.currentPlan == nil)"),
             "Save is offered only for the plan of the stops shown")

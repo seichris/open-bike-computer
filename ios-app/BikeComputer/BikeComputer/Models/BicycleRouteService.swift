@@ -5,14 +5,95 @@ nonisolated enum BicycleRouteProfileV1: String, CaseIterable, Codable, Sendable 
     case road
     case gravel
     case everyday
+    case mountain
 
     var title: String {
         switch self {
         case .road: "Road"
         case .gravel: "Gravel"
         case .everyday: "Everyday"
+        case .mountain: "Mountain"
         }
     }
+}
+
+/// How much of a route runs on each kind of surface, from the bicycle route
+/// service's `surfaces` object. Metres that the map has no surface for are
+/// `unknownMeters`.
+nonisolated struct RouteSurfaceBreakdownV1: Codable, Equatable, Sendable {
+    var pavedMeters: Double
+    var gravelMeters: Double
+    var unpavedMeters: Double
+    var unknownMeters: Double
+
+    static let zero = RouteSurfaceBreakdownV1(
+        pavedMeters: 0, gravelMeters: 0, unpavedMeters: 0, unknownMeters: 0
+    )
+
+    var totalMeters: Double { pavedMeters + gravelMeters + unpavedMeters + unknownMeters }
+
+    var isValid: Bool {
+        [pavedMeters, gravelMeters, unpavedMeters, unknownMeters]
+            .allSatisfy { $0.isFinite && $0 >= 0 }
+    }
+
+    static func + (lhs: Self, rhs: Self) -> Self {
+        RouteSurfaceBreakdownV1(
+            pavedMeters: lhs.pavedMeters + rhs.pavedMeters,
+            gravelMeters: lhs.gravelMeters + rhs.gravelMeters,
+            unpavedMeters: lhs.unpavedMeters + rhs.unpavedMeters,
+            unknownMeters: lhs.unknownMeters + rhs.unknownMeters
+        )
+    }
+}
+
+nonisolated enum RouteSurfaceKind: CaseIterable, Hashable, Sendable {
+    case paved
+    case gravel
+    case unpaved
+    case unknown
+
+    var title: String {
+        switch self {
+        case .paved: "paved"
+        case .gravel: "gravel"
+        case .unpaved: "unpaved"
+        case .unknown: "unknown"
+        }
+    }
+}
+
+nonisolated extension RouteSurfaceBreakdownV1 {
+    /// Each surface's share of the route, largest known first and unknown
+    /// last, leaving out surfaces the route never uses.
+    var shares: [(kind: RouteSurfaceKind, fraction: Double)] {
+        let total = totalMeters
+        guard isValid, total > 0 else { return [] }
+        let known: [(kind: RouteSurfaceKind, fraction: Double)] = [
+            (.paved, pavedMeters / total),
+            (.gravel, gravelMeters / total),
+            (.unpaved, unpavedMeters / total)
+        ].filter { $0.fraction > 0 }.sorted { $0.fraction > $1.fraction }
+        let unknown = unknownMeters / total
+        return unknown > 0 ? known + [(.unknown, unknown)] : known
+    }
+
+    /// "82% paved · 12% gravel · 6% unpaved"; a share under one percent
+    /// reads "<1%".
+    var summary: String {
+        shares.map { share in
+            let percent = (share.fraction * 100).rounded()
+            let value = percent < 1 ? "<1%" : "\(Int(percent))%"
+            return "\(value) \(share.kind.title)"
+        }.joined(separator: " · ")
+    }
+}
+
+/// One route the bicycle route service offered for a leg: its first answer
+/// or one of the alternatives.
+nonisolated struct BicycleRouteOptionV1: Equatable {
+    let route: NavigationRouteV1
+    let surfaces: RouteSurfaceBreakdownV1?
 }
 
 /// Wire contract of `POST /v1/bicycle-routes`: one leg between two points
@@ -25,6 +106,8 @@ nonisolated enum BicycleRouteServiceContractV1 {
     static let minimumSeparationMeters = 10.0
     /// The service rejects longer legs; the app sends them to Apple Maps.
     static let maximumSeparationMeters = 150_000.0
+    /// Alternatives asked for per leg, the most the service returns.
+    static let maximumAlternatives = 2
 }
 
 nonisolated struct BicycleRouteServiceRequestV1: Codable, Equatable, Sendable {
@@ -39,12 +122,17 @@ nonisolated struct BicycleRouteServiceRequestV1: Codable, Equatable, Sendable {
     let destination: Point
     let profile: String
     let locale: String
+    /// Sent only when asked for, so a plain request stays the original shape.
+    let alternatives: Int?
+    let surfaces: Bool?
 
     init(
         origin: RouteCoordinateV1,
         destination: RouteCoordinateV1,
         profile: BicycleRouteProfileV1,
         localeIdentifier: String,
+        alternatives: Int = 0,
+        surfaces: Bool = false,
         requestID: UUID = UUID()
     ) {
         schema = BicycleRouteServiceContractV1.requestSchema
@@ -59,32 +147,74 @@ nonisolated struct BicycleRouteServiceRequestV1: Codable, Equatable, Sendable {
         )
         self.profile = profile.rawValue
         locale = BicycleDetourServiceRequestV1.languageTag(localeIdentifier)
+        let alternatives = min(max(alternatives, 0), BicycleRouteServiceContractV1.maximumAlternatives)
+        self.alternatives = alternatives > 0 ? alternatives : nil
+        self.surfaces = surfaces ? true : nil
     }
 }
 
-/// The route object has the detour route's shape plus the profile it used.
+/// Each route object has the detour route's shape plus the profile it used
+/// and, when asked for, its surface breakdown.
 nonisolated struct BicycleRouteServiceResponseV1: Decodable, Equatable {
-    nonisolated private struct ProfileEcho: Decodable {
+    /// One route object: the shared detour route shape and its extra fields.
+    nonisolated struct Route: Decodable, Equatable {
+        /// The profile is required; a malformed surface breakdown is
+        /// dropped rather than failing the route.
+        nonisolated private struct Extras: Decodable {
+            private enum CodingKeys: String, CodingKey {
+                case profile, surfaces
+            }
+
+            let profile: String
+            let surfaces: RouteSurfaceBreakdownV1?
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                profile = try container.decode(String.self, forKey: .profile)
+                surfaces = try? container.decodeIfPresent(RouteSurfaceBreakdownV1.self, forKey: .surfaces)
+            }
+        }
+
+        let route: BicycleDetourServiceResponseV1.Route
         let profile: String
+        let surfaces: RouteSurfaceBreakdownV1?
+
+        init(from decoder: Decoder) throws {
+            route = try BicycleDetourServiceResponseV1.Route(from: decoder)
+            let extras = try Extras(from: decoder)
+            profile = extras.profile
+            surfaces = extras.surfaces
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case schema, status, route, reason
+        case schema, status, route, alternatives, reason
     }
 
     let schema: String
     let status: String
-    let route: BicycleDetourServiceResponseV1.Route?
-    let routeProfile: String?
+    let route: Route?
+    /// Undecodable alternatives are dropped; they never cost the main route.
+    let alternatives: [Route]
     let reason: String?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schema = try container.decode(String.self, forKey: .schema)
         status = try container.decode(String.self, forKey: .status)
-        route = try container.decodeIfPresent(BicycleDetourServiceResponseV1.Route.self, forKey: .route)
-        routeProfile = try container.decodeIfPresent(ProfileEcho.self, forKey: .route)?.profile
+        route = try container.decodeIfPresent(Route.self, forKey: .route)
+        alternatives = (try? container.decodeIfPresent([Lenient<Route>].self, forKey: .alternatives))?
+            .compactMap(\.value) ?? []
         reason = try container.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    /// Decodes one array element, or nothing when it does not decode.
+    nonisolated private struct Lenient<Value: Decodable>: Decodable {
+        let value: Value?
+
+        init(from decoder: Decoder) throws {
+            value = try? Value(from: decoder)
+        }
     }
 }
 
@@ -97,11 +227,16 @@ nonisolated struct BicycleRouteQueryV1: Equatable, Sendable {
     let destinationLabel: String
     let profile: BicycleRouteProfileV1
     let localeIdentifier: String
+    /// Alternative routes to ask for, from 0 to the contract's maximum.
+    var alternatives: Int = 0
+    /// Whether to ask for each route's surface breakdown.
+    var surfaces: Bool = false
 }
 
 /// What the bicycle route service answered for one leg.
 nonisolated enum BicycleRouteServiceOutcomeV1: Equatable {
-    case route(NavigationRouteV1)
+    /// The service's route first, then any usable alternatives.
+    case routes([BicycleRouteOptionV1])
     /// No bicycle route between these points, which includes points outside
     /// the service's graph (where Apple Maps has cycling directions).
     case noBicycleRoute
@@ -144,16 +279,13 @@ nonisolated enum BicycleRouteServiceDecoderV1 {
         switch decoded.status {
         case "ready":
             guard let route = decoded.route,
-                  decoded.routeProfile == query.profile.rawValue,
-                  let converted = try? BicycleDetourServiceConversionV1.route(
-                      from: route,
-                      sourceLabel: query.originLabel,
-                      destinationLabel: query.destinationLabel,
-                      localeIdentifier: query.localeIdentifier
-                  ) else {
+                  let first = option(from: route, query: query) else {
                 return .failed
             }
-            return .route(converted)
+            let alternatives = decoded.alternatives
+                .prefix(query.alternatives)
+                .compactMap { option(from: $0, query: query) }
+            return .routes([first] + alternatives)
         case "unavailable" where decoded.reason == "no_bicycle_route" || decoded.reason == "request_too_long":
             return .noBicycleRoute
         case "unavailable" where decoded.reason == "service_disabled":
@@ -161,6 +293,25 @@ nonisolated enum BicycleRouteServiceDecoderV1 {
         default:
             return .failed
         }
+    }
+
+    /// A converted route for the asked profile; a malformed surface breakdown
+    /// is dropped rather than failing the route.
+    private static func option(
+        from route: BicycleRouteServiceResponseV1.Route,
+        query: BicycleRouteQueryV1
+    ) -> BicycleRouteOptionV1? {
+        guard route.profile == query.profile.rawValue,
+              let converted = try? BicycleDetourServiceConversionV1.route(
+                  from: route.route,
+                  sourceLabel: query.originLabel,
+                  destinationLabel: query.destinationLabel,
+                  localeIdentifier: query.localeIdentifier
+              ) else {
+            return nil
+        }
+        let surfaces = query.surfaces ? route.surfaces.flatMap { $0.isValid ? $0 : nil } : nil
+        return BicycleRouteOptionV1(route: converted, surfaces: surfaces)
     }
 }
 
@@ -178,7 +329,8 @@ protocol BicycleRouteServicing: AnyObject {
 }
 
 /// The Bicino Valhalla bicycle route service for Create a Route legs. Only
-/// the leg's two end points, the profile and the locale are sent.
+/// the leg's two end points, the profile, the locale and the alternatives and
+/// surfaces options are sent.
 @MainActor
 final class BicinoBicycleRouteService: BicycleRouteServicing {
     private let transport: BicycleRouteServiceTransporting
@@ -196,7 +348,9 @@ final class BicinoBicycleRouteService: BicycleRouteServicing {
             origin: query.origin,
             destination: query.destination,
             profile: query.profile,
-            localeIdentifier: query.localeIdentifier
+            localeIdentifier: query.localeIdentifier,
+            alternatives: query.alternatives,
+            surfaces: query.surfaces
         )
         lastRequest = request
         do {

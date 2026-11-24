@@ -319,6 +319,8 @@ struct MapViewContainer: UIViewRepresentable {
     /// While creating a route, touch and hold adds a stop instead of a pin.
     var onRouteCreationLongPress: ((CLLocationCoordinate2D) -> Void)? = nil
     var onRouteCreationStopRemoval: ((UUID) -> Void)? = nil
+    /// Tapping a lighter Create a Route alternative passes its route ID.
+    var onRouteCreationAlternativeSelected: ((UUID) -> Void)? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -388,6 +390,7 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.onOnlinePOISelected = onOnlinePOISelected
         context.coordinator.onRouteCreationLongPress = onRouteCreationLongPress
         context.coordinator.onRouteCreationStopRemoval = onRouteCreationStopRemoval
+        context.coordinator.onRouteCreationAlternativeSelected = onRouteCreationAlternativeSelected
 
         DispatchQueue.main.async {
             controlState.connect(to: mapView)
@@ -401,6 +404,7 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.onOnlinePOISelected = onOnlinePOISelected
         context.coordinator.onRouteCreationLongPress = onRouteCreationLongPress
         context.coordinator.onRouteCreationStopRemoval = onRouteCreationStopRemoval
+        context.coordinator.onRouteCreationAlternativeSelected = onRouteCreationAlternativeSelected
         context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
                                               location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
@@ -577,6 +581,7 @@ struct MapViewContainer: UIViewRepresentable {
         let routeCreationLayer = RouteCreationMapLayer()
         var onRouteCreationLongPress: ((CLLocationCoordinate2D) -> Void)?
         var onRouteCreationStopRemoval: ((UUID) -> Void)?
+        var onRouteCreationAlternativeSelected: ((UUID) -> Void)?
         var isOnlinePOISearchActive = false
         var onOnlinePOISelected: ((MKMapItem?) -> Void)?
         private var focusedOnlinePOI: MKMapItem?
@@ -679,6 +684,17 @@ struct MapViewContainer: UIViewRepresentable {
         private(set) var lastOfflineNavigationPolyline: MKPolyline?
         private(set) var displayedDetourOverlay: MKPolyline?
         private let navigationRouteLineWidth: CGFloat = 6
+        /// System blue washed out toward the map: lighter in light mode,
+        /// dimmer in dark mode. Opaque, so overlapping alternatives don't
+        /// darken where they share a road.
+        static let alternativeRouteColor = UIColor { traits in
+            let blue = UIColor.systemBlue.resolvedColor(with: traits)
+            let toward: CGFloat = traits.userInterfaceStyle == .dark ? 0.15 : 1
+            var red: CGFloat = 0, green: CGFloat = 0, blueComponent: CGFloat = 0, alpha: CGFloat = 0
+            blue.getRed(&red, green: &green, blue: &blueComponent, alpha: &alpha)
+            let mix: (CGFloat) -> CGFloat = { $0 + (toward - $0) * 0.5 }
+            return UIColor(red: mix(red), green: mix(green), blue: mix(blueComponent), alpha: 1)
+        }
 
         /// The saved route stays drawn; the detour is a separate dashed line
         /// above it, removed as soon as the rider rejoins.
@@ -1372,6 +1388,14 @@ struct MapViewContainer: UIViewRepresentable {
 
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
             guard gestureRecognizer.state == .ended else { return }
+            if let mapView, let onRouteCreationAlternativeSelected,
+               let routeID = routeCreationLayer.alternativeRouteID(
+                   at: gestureRecognizer.location(in: mapView),
+                   on: mapView
+               ) {
+                onRouteCreationAlternativeSelected(routeID)
+                return
+            }
             if let mapView,
                onRouteAlternativeSelected != nil,
                let routeID = routeAlternativeID(
@@ -1590,6 +1614,13 @@ struct MapViewContainer: UIViewRepresentable {
             if routeCreationLayer.owns(overlay) {
                 renderer.strokeColor = .systemBlue
                 renderer.lineWidth = navigationRouteLineWidth
+                renderer.alpha = 1
+                return
+            }
+            if routeCreationLayer.ownsAlternative(overlay) {
+                // Apple Maps' look: the chosen route in blue, the others lighter.
+                renderer.strokeColor = Self.alternativeRouteColor
+                renderer.lineWidth = 5
                 renderer.alpha = 1
                 return
             }

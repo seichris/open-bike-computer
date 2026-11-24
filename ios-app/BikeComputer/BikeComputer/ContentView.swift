@@ -2668,6 +2668,9 @@ struct ContentView: View {
                 : nil,
             onRouteCreationStopRemoval: isCreatingRoute
                 ? { routeCreation.removeOrClear(stopID: $0) }
+                : nil,
+            onRouteCreationAlternativeSelected: isCreatingRoute
+                ? { routeCreation.selectAlternative(routeID: $0) }
                 : nil
         )
     }
