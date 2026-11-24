@@ -48,8 +48,7 @@ enum MultiStopRoutePlanFailure: Equatable {
     }
 }
 
-/// Calculates Settings > Saved Routes > Create a Route plans, one MapKit leg
-/// per pair of stops. It owns its directions requests and never touches the
+/// Calculates Create a Route plans, one MapKit leg per pair of stops. It owns its directions requests and never touches the
 /// coordinator's direct-navigation plan, rerouting or active navigation.
 @MainActor
 final class MultiStopRoutePlanner: ObservableObject {

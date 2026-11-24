@@ -770,15 +770,18 @@ explicit state + generation, task, `retryAfter` (hidden Throttled sub-state repo
 
 **G-22 Multi-stop planner & stop resolver** — `BikeComputer/Managers/MultiStopRoutePlanner.swift:90-115`,
 `:341-399`. Explicit state plus request + generation + directions + leg cache deciding
-restarts; resolver `pendingID` nil = idle.
+restarts; resolver `pendingID` nil = idle. `RouteCreationSession` (main-map Create a
+Route) adds `isActive`, the searched stop, a provisional Add Stop removed on cancel,
+per-stop dropped-pin naming tasks and the plan captured for saving; `ContentView`
+starts it after the Settings sheet is gone (`hasPendingRouteCreationAfterSheetDismissal`)
+and keeps the ride sheet hidden while it is active.
 
 **G-23 View-local one-shot latches** — `DeviceScreensSettingsView` save-in-progress /
 saved confirmation (3 s); `StravaRouteImportView` initial completion sequence;
 `BikeComputersSettingsView` discovery ownership (seven write sites) + selected candidate +
 completion generation + disconnect confirmation; `SavedMapRow` share-after-dismissal;
 `SavedMapsSettingsSection` removal map/device/epoch; `SocialProfileEditor` pending saves;
-`SocialLinkView` completed + session generation; `RouteCreatorView` saving → completed
-sheet handoff.
+`SocialLinkView` completed + session generation.
 
 **G-24 Models with hidden phases** — `OfflineRouteSaveInteraction` (draft / result /
 error); `SavedRouteRenameInteraction` (`editingRouteID` nil = idle);

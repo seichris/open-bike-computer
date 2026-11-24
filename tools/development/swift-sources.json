@@ -390,6 +390,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
         "ios-app/BikeComputer/BikeComputer/Models/MultiStopRoute.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/MultiStopRoutePlanner.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RouteCreationSession.swift",
         "ios-app/BikeComputerTests/MultiStopRouteTests.swift"
       ],
       "groups": [
@@ -630,6 +631,7 @@
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
         "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/RouteCreationMapLayer.swift",
         "ios-app/BikeComputer/BikeComputer/Views/SocialMapLayer.swift",
         "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",

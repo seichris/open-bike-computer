@@ -2,8 +2,8 @@ import CoreLocation
 import Foundation
 import MapKit
 
-/// Settings > Saved Routes > Create a Route: multi-stop planning, leg
-/// stitching, save/reload, offline navigation and the direct-navigation
+/// Create a Route on the main map: multi-stop planning, touch-and-hold stops,
+/// leg stitching, save/reload, offline navigation and the direct-navigation
 /// boundary. Runs inside the offline-route host test executable.
 @MainActor
 private final class MultiStopFixture {
@@ -137,6 +137,148 @@ extension OfflineRouteSaveTests {
         try multiStopPlaceResolution()
         try multiStopDirectNavigationIsolation()
         try multiStopCurrentLocationBesideBorder()
+        try multiStopMapRouteCreation()
+        try multiStopMapRouteCreationLimitsAndSave()
+    }
+
+    private static func pump(timeout: TimeInterval = 2, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
+    }
+
+    private static func fix(_ coordinate: CLLocationCoordinate2D, at time: Date) -> CLLocation {
+        Stops.fix(RouteCoordinateV1(latitude: coordinate.latitude, longitude: coordinate.longitude), at: time)
+    }
+
+    /// Touch and hold on the main map fills the first empty stop, then adds
+    /// stops before the destination; names arrive later without new requests.
+    static func multiStopMapRouteCreation() throws {
+        final class Names {
+            var continuations: [CheckedContinuation<RouteDroppedPinName?, Never>] = []
+        }
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let names = Names()
+        let session = RouteCreationSession(planner: f.makePlanner()) { _ in
+            await withCheckedContinuation { names.continuations.append($0) }
+        }
+        check(!session.isActive && session.addDroppedPin(at: Stops.officePoint) == nil,
+            "Touch and hold adds nothing until a route is being created")
+
+        session.begin(currentLocation: fix(Stops.homePoint, at: f.now))
+        check(session.isActive && session.draft.stops.count == 2 &&
+            session.draft.stops[0].place?.origin == .currentLocation &&
+            session.draft.stops[1].place == nil && f.factory.tasks.isEmpty,
+            "A new route starts at the rider and waits for a destination")
+
+        let destinationID = session.addDroppedPin(at: Stops.officePoint)
+        check(destinationID == session.draft.stops[1].id &&
+            session.draft.stops[1].place?.label == MultiStopRoutePlace.droppedPinLabel &&
+            session.draft.stops[1].place?.origin == .droppedPin && f.factory.tasks.count == 1 &&
+            pump { names.continuations.count == 1 },
+            "The first pin fills the empty destination and plans at once")
+        f.factory.tasks[0].succeed(with: [Stops.homeToOffice])
+        check(session.currentPlan?.legs.count == 1, "The planned route is offered for saving")
+        names.continuations[0].resume(returning: RouteDroppedPinName(title: "Office", subtitle: "London"))
+        check(pump { session.draft.stops[1].place?.label == "Office" } &&
+            session.draft.stops[1].place?.subtitle == "London" && f.factory.tasks.count == 1 &&
+            session.currentPlan?.route.destination.label == "Office",
+            "Reverse geocoding names the pin and reuses the calculated leg")
+
+        let stopID = session.addDroppedPin(at: Stops.bakeryPoint)
+        check(session.draft.stops.count == 3 && session.draft.stops[1].id == stopID &&
+            session.draft.role(at: 1) == .stop(1) && session.draft.stops[2].place?.label == "Office" &&
+            pump { names.continuations.count == 2 },
+            "Later pins become stops just before the destination")
+        if let stopID { session.removeOrClear(stopID: stopID) }
+        names.continuations[1].resume(returning: RouteDroppedPinName(title: "Bakery", subtitle: nil))
+        _ = pump(timeout: 0.2) { false }
+        check(session.draft.stops.count == 2 && session.draft.stops[1].place?.label == "Office" &&
+            session.currentPlan?.legs.count == 1,
+            "A removed pin is never named back, and the earlier plan returns from the cache")
+
+        if let destinationID { session.removeOrClear(stopID: destinationID) }
+        check(session.draft.stops.count == 2 && session.draft.stops[1].place == nil && session.currentPlan == nil,
+            "With only a start and a destination, removing one clears its place")
+
+        session.search(forStopID: session.draft.stops[1].id)
+        let searched = session.addDroppedPin(at: Stops.bakeryPoint)
+        check(searched == session.draft.stops[1].id && session.searchingStopID == nil &&
+            session.draft.stops[1].place?.origin == .droppedPin && pump { names.continuations.count == 3 },
+            "Touch and hold while searching picks the place for the searched stop")
+        names.continuations[2].resume(returning: nil)
+        _ = pump(timeout: 0.2) { false }
+        check(session.draft.stops[1].place?.label == MultiStopRoutePlace.droppedPinLabel,
+            "A pin without a reverse-geocoded name keeps its placeholder")
+
+        session.addStopAndSearch()
+        let provisional = session.searchingStopID
+        check(session.draft.stops.count == 3 && session.draft.stops[1].id == provisional &&
+            session.draft.stops[1].place == nil,
+            "Add Stop inserts an empty stop before the destination and searches for it")
+        session.cancelSearch()
+        check(session.draft.stops.count == 2 && session.searchingStopID == nil,
+            "Cancelling that search removes the empty stop again")
+        session.addStopAndSearch()
+        session.choose(Stops.office)
+        check(session.draft.stops.count == 3 && session.draft.stops[1].place == Stops.office &&
+            session.searchingStopID == nil,
+            "A chosen place keeps the added stop")
+
+        session.travelMode = .walking
+        check(f.factory.tasks.last?.request.transportType == .walking,
+            "Changing the travel mode recalculates in that mode")
+        session.end()
+        check(!session.isActive && Stops.isIdle(session.planner) && session.searchingStopID == nil &&
+            session.travelMode == .cycling && session.draft.stops.allSatisfy { $0.place == nil },
+            "Cancel discards the route and its calculation")
+    }
+
+    static func multiStopMapRouteCreationLimitsAndSave() throws {
+        let f = MultiStopFixture(); defer { f.cleanup() }
+        let session = RouteCreationSession(planner: f.makePlanner())
+        session.begin(currentLocation: nil)
+        check(session.draft.stops.allSatisfy { $0.place == nil },
+            "Without a location fix the start is chosen like any other stop")
+        let startID = session.addDroppedPin(at: Stops.homePoint)
+        check(startID == session.draft.stops[0].id, "The first pin fills the empty start")
+        for index in 0..<(MultiStopRouteDraft.maximumStops - 1) {
+            session.addDroppedPin(at: CLLocationCoordinate2D(
+                latitude: 51.51 + Double(index) * 0.002,
+                longitude: -0.1
+            ))
+        }
+        check(session.draft.stops.count == MultiStopRouteDraft.maximumStops && session.notice == nil &&
+            session.draft.stops.allSatisfy { $0.place != nil },
+            "Pins fill the route up to the stop limit")
+        check(session.addDroppedPin(at: Stops.officePoint) == nil &&
+            session.notice == RouteCreationSession.stopLimitNotice &&
+            session.draft.stops.count == MultiStopRouteDraft.maximumStops,
+            "At the limit touch and hold adds nothing and says why")
+        session.addStopAndSearch()
+        check(session.searchingStopID == nil && session.draft.stops.count == MultiStopRouteDraft.maximumStops,
+            "Add Stop adds nothing at the limit")
+        session.moveStop(id: session.draft.stops[1].id, by: 1)
+        check(session.notice == nil, "The next edit clears the notice")
+
+        let store = SavedDestinationStore(defaults: f.defaults)
+        let favorite = SavedDestination(name: "Office", coordinate: Stops.officePoint)
+        store.addFavorite(favorite)
+        guard let office = MultiStopRoutePlace.saved(store.favoriteDestinations[0]) else {
+            preconditionFailure("Expected a favorite with coordinates")
+        }
+        session.begin(currentLocation: fix(Stops.homePoint, at: f.now))
+        session.search(forStopID: session.draft.stops[1].id)
+        session.choose(office)
+        f.factory.tasks.last?.succeed(with: [Stops.homeToOffice])
+        guard let draft = session.beginSave() else { preconditionFailure("Expected a savable plan") }
+        let result = try f.library.saveOffline(draft, name: "Commute")
+        session.finishSave(result, destinationStore: store)
+        check(store.favorite(savedRouteID: result.summary.id)?.name == "Office" && !session.isActive &&
+            Stops.isIdle(session.planner),
+            "Saving a route that ends at a favorite links it to the favorite and ends the session")
     }
 
     /// Beside Shenzhen, Hong Kong's Apple Maps coordinates also read as
@@ -792,22 +934,34 @@ extension OfflineRouteSaveTests {
         let section = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/PlannedRoutesView.swift", encoding: .utf8)
         let settings = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift", encoding: .utf8)
         let panel = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SavedRoutesLibraryView.swift", encoding: .utf8)
-        let creator = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/RouteCreatorView.swift", encoding: .utf8)
-        check(!search.contains("MultiStop") && !search.contains("RouteCreator") &&
-            !content.contains("MultiStop") && !content.contains("RouteCreatorView"),
-            "Direct navigation search and the main map have no waypoint UI")
+        let creator = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/RouteCreatorPanel.swift", encoding: .utf8)
+        let creation = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Managers/RouteCreationSession.swift", encoding: .utf8)
+        check(!search.contains("MultiStop") && !search.contains("RouteCreat"),
+            "Direct destination search has no waypoint UI")
         check(section.contains("onCreateRoute()") && !section.contains("onSaveOnlineRoute(nil)") &&
-            section.contains("onSaveOnlineRoute(favorite)"),
-            "Only Create a Route opens the creator; a favorite keeps single-destination planning")
+            section.contains("onSaveOnlineRoute(favorite)") &&
+            section.contains(".disabled(mapAction?.isNavigationActive == true)"),
+            "Only Create a Route opens the creator, never during navigation; a favorite keeps single-destination planning")
         check(content.contains("onSaveOnlineRoute: openOfflineRouteSearch") &&
             content.contains("beginOfflineRouteSearch(destination: destination)"),
             "Favorite route planning keeps its main-map flow")
-        check(settings.contains("presentedSheet = .routeCreator") && settings.contains("RouteCreatorView(") &&
-            panel.contains("presentedImport = .routeCreator") && panel.contains("RouteCreatorView("),
-            "Settings and the Saved Routes shortcut both open the creator from Create a Route")
-        check(creator.contains("RouteSaveSheet(library: library, draft: plan.draft)") &&
-            creator.contains(".onDisappear { planner.cancel() }") &&
-            creator.contains("guard let plan = planner.readyPlan, plan.request == request"),
-            "The creator saves only the current plan through the shared sheet and cancels when closed")
+        check(settings.contains("onCreateRoute: onCreateRoute") && panel.contains("onCreateRoute: onCreateRoute") &&
+            !settings.contains("RouteCreatorView(") && !panel.contains("RouteCreatorView(") &&
+            content.contains("onCreateRoute: openRouteCreator") &&
+            !FileManager.default.fileExists(atPath: "ios-app/BikeComputer/BikeComputer/Views/RouteCreatorView.swift"),
+            "Settings and the Saved Routes shortcut both hand Create a Route to the main map")
+        check(content.contains("RouteCreatorPanel(") && content.contains("case .saveCreatedRoute(let draft):") &&
+            content.contains("routeCreation.finishSave(result, destinationStore: coordinator.destinationStore)") &&
+            content.contains("onRouteCreationLongPress: isCreatingRoute") &&
+            content.contains("&& !onlinePlaces.isActive && !routeCreation.isActive"),
+            "The main map's panel saves through the shared sheet and touch and hold adds stops instead of a pin")
+        check(creation.contains("guard let plan = planner.readyPlan, plan.request == request") &&
+            creator.contains(".disabled(session.currentPlan == nil)"),
+            "Save is offered only for the plan of the stops shown")
+        check(!creator.contains("EditButton") && !creator.contains("Button(editMode") &&
+            !creator.contains("Stops are visited in order") &&
+            creator.contains(".environment(\\.editMode, .constant(.active))") &&
+            creator.contains(".onMove { session.moveStops(fromOffsets: $0, toOffset: $1) }"),
+            "Stops reorder by their drag handles without an Edit button or ordering footer")
     }
 }
