@@ -11,9 +11,13 @@ from unittest.mock import patch
 
 from shapely.geometry import Point, box, mapping
 
-from build_graph import ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, file_identity, prepare_inputs
+from build_graph import (
+    ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, elevation_identity, file_identity,
+    prepare_inputs, valhalla_build,
+)
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
+import build_elevation
 import probe_graph
 import probe_profiles
 
@@ -100,6 +104,126 @@ class BuildArgumentTests(unittest.TestCase):
             mask = Path("mask.geojson") if coverage == "worldwide-gap" else None
             self.assertIn("dated", argument_error(coverage, False, mask, "https://example.com/planet-latest.osm.pbf"))
         self.assertIsNone(argument_error("planet", True, None, "file:///sample.osm.pbf"))
+
+
+class ElevationTileTests(unittest.TestCase):
+    def test_hgt_names_follow_the_srtm_layout(self):
+        self.assertEqual(build_elevation.hgt_name(8, 47), "N47E008")
+        self.assertEqual(build_elevation.hgt_name(-1, -1), "S01W001")
+        self.assertEqual(build_elevation.hgt_name(-180, 0), "N00W180")
+        self.assertEqual(build_elevation.hgt_path(Path("/e"), 8, 47), Path("/e/N47/N47E008.hgt.gz"))
+
+    def test_neighbours_wrap_the_antimeridian_and_stop_at_the_poles(self):
+        self.assertEqual(build_elevation.neighbour(179, 10, 1, 0), ((-180, 10), 360))
+        self.assertEqual(build_elevation.neighbour(-180, 10, -1, -1), ((179, 9), -360))
+        self.assertEqual(build_elevation.neighbour(5, 10, 1, 1), ((6, 11), 0))
+        self.assertIsNone(build_elevation.neighbour(0, 89, 0, 1))
+        self.assertIsNone(build_elevation.neighbour(0, -90, 0, -1))
+
+    def test_higher_priority_source_wins_each_cell(self):
+        class Source:
+            def __init__(self, id, priority):
+                self.id, self.priority = id, priority
+
+        glo30, glo90 = Source("glo30", 100), Source("glo90", 50)
+        chosen = build_elevation.choose_sources(
+            [glo90, glo30], {"glo30": {(1, 1)}, "glo90": {(1, 1), (2, 2)}})
+        self.assertEqual({cell: source.id for cell, source in chosen.items()}, {(1, 1): "glo30", (2, 2): "glo90"})
+
+    def test_posts_are_rounded_big_endian_with_a_no_data_marker(self):
+        import numpy as np
+
+        heights = np.zeros((3601, 3601), dtype="float32")
+        heights[0, :4] = [1.4, -1.6, 40000, np.nan]
+        payload, missing = build_elevation.encode_posts(heights)
+        self.assertEqual(len(payload), 3601 * 3601 * 2)
+        self.assertEqual(missing, 1)
+        self.assertEqual(np.frombuffer(payload[:8], dtype=">i2").tolist(), [1, -2, 32767, -32768])
+        with self.assertRaises(ValueError):
+            build_elevation.encode_posts(np.zeros((1201, 1201), dtype="float32"))
+
+    def test_border_posts_come_from_the_neighbour(self):
+        import numpy as np
+        from affine import Affine
+
+        step = build_elevation.STEP
+        posts = Affine(step, 0, -step / 2, 0, -step, 4 * step + step / 2)
+        heights = np.full((5, 5), np.nan, dtype="float32")
+        own = np.arange(16, dtype="float32").reshape(4, 4)
+        east = np.full((5, 2), 100, dtype="float32")
+        build_elevation.resample_into(heights, posts, east, posts @ Affine.translation(4, 0), 0)
+        build_elevation.resample_into(heights, posts, own, posts, 0)
+        np.testing.assert_array_equal(heights[:4, :4], own)
+        np.testing.assert_array_equal(heights[:, 4], [100] * 5)
+        self.assertTrue(np.isnan(heights[4, :4]).all())
+
+    def test_wrapped_neighbour_is_shifted_next_to_the_cell(self):
+        import numpy as np
+        from affine import Affine
+
+        step = build_elevation.STEP
+        posts = Affine(step, 0, 180 - 4 * step - step / 2, 0, -step, step / 2)
+        heights = np.full((1, 5), np.nan, dtype="float32")
+        west_of_antimeridian = Affine(step, 0, -180 - step / 2, 0, -step, step / 2)
+        build_elevation.resample_into(heights, posts, np.full((1, 2), 7, dtype="float32"),
+                                      west_of_antimeridian, 360)
+        self.assertEqual(heights[0, 4], 7)
+        self.assertTrue(np.isnan(heights[0, :4]).all())
+
+    def test_only_neighbours_holding_border_posts_are_read(self):
+        import numpy as np
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        step = 10 / 3600
+
+        def point_registered(longitude, latitude):
+            memory = MemoryFile()
+            transform = Affine(step, 0, longitude - step / 2, 0, -step, latitude + 1 + step / 2)
+            with memory.open(driver="GTiff", width=360, height=360, count=1, dtype="float32",
+                             crs="EPSG:4326", transform=transform) as dataset:
+                dataset.write(np.full((1, 360, 360), 5, dtype="float32"))
+                dataset.update_tags(AREA_OR_POINT="Point")
+            return memory
+
+        for (longitude, latitude), shift, expected in (
+            ((9, 47), 0, True),      # east of cell (8, 47)
+            ((8, 46), 0, True),      # south
+            ((9, 46), 0, True),      # south-east
+            ((7, 47), 0, False),     # west
+            ((8, 48), 0, False),     # north
+            ((-180, 47), 360, True), # east across the antimeridian of cell (179, 47)
+        ):
+            cell_longitude = 8 if shift == 0 else 179
+            with self.subTest(neighbour=(longitude, latitude)), point_registered(longitude, latitude) as memory, \
+                    memory.open() as dataset:
+                array, _ = build_elevation.edge_window(dataset, cell_longitude, 47, (longitude, latitude), shift)
+                self.assertEqual(array is not None, expected)
+                if expected:
+                    self.assertLessEqual(array.size, 3 * 360)
+
+
+class ElevationManifestTests(unittest.TestCase):
+    def test_graph_manifest_records_the_elevation_tiles_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            elevation = Path(tmp)
+            (elevation / "elevation-manifest.json").write_text(json.dumps({
+                "schema": "bicino-valhalla-elevation-v1", "cells": 2, "cellListSha256": "ab",
+                "sources": [{"id": "glo30", "cells": 2}, {"id": "glo90", "cells": 0}],
+            }))
+            identity = elevation_identity(elevation)
+            self.assertEqual((identity["cells"], identity["cellListSha256"], identity["sources"]), (2, "ab", ["glo30"]))
+            (elevation / "elevation-manifest.json").write_text(json.dumps({"schema": "other", "cells": 2}))
+            with self.assertRaises(ValueError):
+                elevation_identity(elevation)
+
+    def test_build_fails_when_valhalla_skips_the_elevation_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            skipped = "[WARN] Elevation storage directory does not exist\n"
+            with patch("build_graph.run_valhalla", return_value=(work / "valhalla-build.log", skipped)):
+                with self.assertRaisesRegex(ValueError, "elevation tiles"):
+                    valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4, work)
 
 
 class ProbeExpectationTests(unittest.TestCase):

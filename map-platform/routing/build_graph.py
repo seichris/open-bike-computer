@@ -72,37 +72,68 @@ def run(*command):
     subprocess.run(command, check=True)
 
 
-def valhalla_build(work, admin_input, roads, threads):
-    log_path = work / "valhalla-build.log"
-    # Every mounted input is local. The container has no network or cloud credentials.
-    script = """
-valhalla_build_config --mjolnir-tile-dir /work/tiles \\
-  --mjolnir-tile-extract /work/valhalla_tiles.tar --mjolnir-admin /work/admin.sqlite \\
-  --mjolnir-concurrency "$1" > /work/valhalla.json
-valhalla_build_admins -c /work/valhalla.json /input/admin.osm.pbf
-test -s /work/admin.sqlite
-valhalla_build_tiles -c /work/valhalla.json -j "$1" /input/roads.osm.pbf
-valhalla_build_extract -c /work/valhalla.json
-"""
+NO_ELEVATION = re.compile(r"Elevation storage directory does not exist")
+
+
+def run_valhalla(work, script, threads, log_name, volumes):
+    """Run Valhalla tools in the pinned image with only local inputs mounted."""
+    log_path = work / log_name
+    mounts = [argument for source, target in volumes for argument in ("--volume", f"{source}:{target}:ro")]
+    # The container has no network or cloud credentials.
     with log_path.open("w") as log:
         subprocess.run(
             [
                 "docker", "run", "--rm", "--network", "none", "--platform", PLATFORM,
                 "--user", f"{os.getuid()}:{os.getgid()}",
-                "--volume", f"{work}:/work",
-                "--volume", f"{admin_input}:/input/admin.osm.pbf:ro",
-                "--volume", f"{roads}:/input/roads.osm.pbf:ro",
+                "--volume", f"{work}:/work", *mounts,
                 "--entrypoint", "/bin/bash", IMAGE, "-euc", script, "_", str(threads),
             ],
             check=True, stdout=log, stderr=subprocess.STDOUT,
         )
-    log = log_path.read_text(errors="replace")
+    return log_path, log_path.read_text(errors="replace")
+
+
+def valhalla_build(work, admin_input, roads, threads, elevation=None):
+    """Build and pack the tiles; `elevation` grades edges for `use_hills`.
+
+    Elevation must be there when the tiles are built. Running Valhalla's
+    elevation stage on finished tiles (alone or followed by validate) does
+    not give the same graph: on 2026-11-24 such a graph answered some
+    /locate calls with HTTP 500.
+    """
+    script = """valhalla_build_config --mjolnir-tile-dir /work/tiles \\
+  --mjolnir-tile-extract /work/valhalla_tiles.tar --mjolnir-admin /work/admin.sqlite \\
+  --mjolnir-concurrency "$1" --additional-data-elevation /elevation > /work/valhalla.json
+valhalla_build_admins -c /work/valhalla.json /input/admin.osm.pbf
+test -s /work/admin.sqlite
+valhalla_build_tiles -c /work/valhalla.json -j "$1" /input/roads.osm.pbf
+valhalla_build_extract -c /work/valhalla.json
+"""
+    volumes = [(admin_input, "/input/admin.osm.pbf"), (roads, "/input/roads.osm.pbf")]
+    if elevation is not None:
+        volumes.append((elevation, "/elevation"))
+    log_path, log = run_valhalla(work, script, threads, "valhalla-build.log", volumes)
     if re.search(r"Admin db.*not found|Not saving admin information", log, re.IGNORECASE):
         raise ValueError(f"Valhalla did not use the administrative database: {log_path}")
+    if elevation is not None and NO_ELEVATION.search(log):
+        raise ValueError(f"Valhalla did not use the elevation tiles: {log_path}")
     with sqlite3.connect(f"file:{work / 'admin.sqlite'}?mode=ro", uri=True) as database:
         count = database.execute("SELECT count(*) FROM admins").fetchone()[0]
     if count == 0:
         raise ValueError("Valhalla administrative database contains no boundaries")
+
+
+def elevation_identity(elevation):
+    path = elevation / "elevation-manifest.json"
+    manifest = json.loads(path.read_text())
+    if manifest.get("schema") != "bicino-valhalla-elevation-v1" or not manifest.get("cells"):
+        raise ValueError(f"Not a Valhalla elevation manifest: {path}")
+    return {
+        "manifest": file_identity(path),
+        "cells": manifest["cells"],
+        "cellListSha256": manifest["cellListSha256"],
+        "sources": [source["id"] for source in manifest["sources"] if source["cells"]],
+    }
 
 
 def prepare_inputs(source, work, mask):
@@ -154,9 +185,11 @@ def main():
     parser.add_argument("--coverage", choices=COVERAGES, default="worldwide-gap")
     parser.add_argument("--sample", action="store_true", help="Build a development sample")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
+    parser.add_argument("--elevation", type=Path, help="HGT tiles written by build_elevation.py")
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")
+    elevation = args.elevation.resolve(strict=True) if args.elevation else None
     error = argument_error(args.coverage, args.sample, args.mask, args.source_url)
     if error:
         parser.error(error)
@@ -168,10 +201,11 @@ def main():
     mask = args.mask.resolve(strict=True) if args.mask else None
     mask_identity = file_identity(mask) if mask else None
     policy_identity = file_identity(args.policy) if mask else None
+    elevation_record = elevation_identity(elevation) if elevation else None
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)
-    valhalla_build(work, admin, roads, args.threads)
+    valhalla_build(work, admin, roads, args.threads, elevation)
     archive = work / ARCHIVE_NAME
     manifest = {
         "schema": "bicino-valhalla-graph-v1",
@@ -182,6 +216,7 @@ def main():
         "builder": {"image": IMAGE, "platform": PLATFORM, "threads": args.threads},
         "configuration": file_identity(work / "valhalla.json"),
         "admin": file_identity(work / "admin.sqlite"),
+        "elevation": elevation_record,
         "maskedInputBytes": roads.stat().st_size,
         "archive": {"name": ARCHIVE_NAME, "tiles": archive_tile_count(archive), **file_identity(archive)},
     }
