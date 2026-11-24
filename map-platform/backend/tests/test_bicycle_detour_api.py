@@ -157,6 +157,25 @@ class BicycleDetourEndpointTests(BicycleDetourAPITests):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["status"], "ready")
 
+    def test_saved_valhalla_routes_are_accepted_and_still_send_only_two_points(self):
+        # Create a Route archives whose Road/Gravel/Everyday legs came from
+        # /v1/bicycle-routes are tagged "valhalla".
+        with self.assertLogs("map_platform", level="DEBUG") as logs:
+            logging.getLogger("map_platform").debug("capture")
+            response = self.post(detour_payload(routeSource="valhalla"))
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "ready")
+        upstream = self.transport.requests[-1]["body"]
+        self.assertEqual(len(upstream["locations"]), 2)
+        self.assertNotIn("valhalla", json.dumps(upstream).replace("bicino-valhalla-test", ""))
+        self.assertEqual(upstream["costing_options"]["bicycle"]["bicycle_type"], "hybrid")
+        self.assertNotIn("25.2066", "\n".join(logs.output))
+        for wrong in ("Valhalla", "bicino.valhalla", "saved"):
+            with self.subTest(source=wrong):
+                rejected = self.post(detour_payload(routeSource=wrong))
+                self.assertEqual(rejected.status_code, 400, rejected.text)
+                self.assertEqual(rejected.json()["detail"]["code"], "bicycle_detour_invalid_request")
+
     def test_no_bicycle_route_and_outside_graph_are_unavailable_outcomes(self):
         for body, reason in ((NO_PATH, "no_bicycle_route"), (NO_EDGES, "no_bicycle_route")):
             with self.subTest(reason=reason, body=body[:40]):

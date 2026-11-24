@@ -120,5 +120,18 @@ retains the exact clipping input.
 tools/dev-env --map-backend python -m unittest discover -s map-platform/routing -v
 ```
 
+To prove the road, gravel and everyday route profiles still change Valhalla's
+answer on a candidate graph, run [probe_profiles.py](probe_profiles.py) from the
+map-backend environment against a private, archive-only Valhalla (for example
+the step 4 container with `-p 127.0.0.1:8002:8002` instead of `--network none`).
+It drives the backend's own route service over
+[profile-probes.json](profile-probes.json) and fails if a profile's maneuvers
+report a different bicycle type or no pair yields different road and gravel
+geometry; see [Bicycle routes](../../docs/bicycle-routes.md).
+
+```sh
+tools/dev-env --map-backend python map-platform/routing/probe_profiles.py --origin http://127.0.0.1:8002
+```
+
 See [Saved-route bicycle detours](../../docs/saved-route-detours.md) for the
 existing provider contract and GCC baseline.
