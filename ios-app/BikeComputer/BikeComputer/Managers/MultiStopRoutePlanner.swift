@@ -92,6 +92,9 @@ final class MultiStopRoutePlanner: ObservableObject {
         case noBicycleRoute
         case notOffered
         case legTooLong
+
+        /// Asking again could answer differently, so a new plan asks again.
+        var isTransient: Bool { self == .notOffered }
     }
 
     /// Where a plan's legs come from.
@@ -157,6 +160,8 @@ final class MultiStopRoutePlanner: ObservableObject {
             return
         }
         if request == self.request, !isIdle { return }
+        // Only this plan's own recalculation keeps a transient fallback.
+        if appleFallback?.reason.isTransient == true { appleFallback = nil }
         start(request)
     }
 
@@ -170,6 +175,7 @@ final class MultiStopRoutePlanner: ObservableObject {
     func cancel() {
         invalidate()
         request = nil
+        appleFallback = nil
         state = .idle
     }
 
@@ -390,7 +396,9 @@ final class MultiStopRoutePlanner: ObservableObject {
             case .noBicycleRoute:
                 self.appleFallback = (request, .noBicycleRoute)
                 self.start(request)
-            case .notOffered, .failed:
+            case .notOffered, .failed, .cancelled:
+                // A cancellation this planner did not ask for (it would have
+                // changed the generation), such as a rejected trust check.
                 self.appleFallback = (request, .notOffered)
                 self.start(request)
             case .offline:
@@ -403,8 +411,6 @@ final class MultiStopRoutePlanner: ObservableObject {
                     index: index,
                     message: "Bicino's route service is busy. Wait a moment, then try again."
                 ))
-            case .cancelled:
-                break
             }
         }
     }

@@ -462,11 +462,61 @@ extension OfflineRouteSaveTests {
             "A leg is longer than 150 km, so this route uses Apple Maps cycling directions.",
             "The notice names the long leg")
 
+        // BRS-1: a cancellation the planner did not ask for still ends.
+        var homeward = Stops.request([Stops.bakery, Stops.home])
+        homeward.bicycleProfile = .everyday
+        let tasksBefore = f.factory.tasks.count
+        planner.plan(homeward)
+        _ = pump { service.queries.count == queriesBefore + 1 }
+        service.answers[queriesBefore].resume(returning: .cancelled)
+        check(pump { f.factory.tasks.count == tasksBefore + 1 } &&
+            Stops.endpoints(f.factory.tasks[tasksBefore]) == [Stops.bakery.mapCoordinate, Stops.home.mapCoordinate],
+            "A cancellation the planner did not request falls back to Apple Maps instead of calculating forever")
+        f.factory.tasks[tasksBefore].succeed(with: [Stops.leg(Stops.bakeryPoint, via: Stops.canalPoint,
+            to: Stops.homePoint, turn: "Turn left onto Canal Street", travelTime: 120)])
+        check(planner.readyPlan?.bicycleProfileNotice ==
+            "Everyday routing isn't available right now, so this route uses Apple Maps cycling directions.",
+            "That fallback says the service is unavailable")
+
+        // BRS-2: a transient fallback is not remembered by the next plan.
+        let drive = MultiStopRouteRequest(places: [Stops.home, Stops.office], transportType: .automobile)
+        planner.plan(drive)
+        planner.plan(homeward)
+        check(pump { service.queries.count == queriesBefore + 2 },
+            "Planning that route again after a transient failure asks the service again")
+        service.answers[queriesBefore + 1].resume(returning: .route(
+            try serviceLeg(service.queries[queriesBefore + 1], via: Stops.canalPoint)
+        ))
+        check(pump { planner.readyPlan?.usesBicycleRouteService == true },
+            "A recovered service gives the Bicino route")
+
+        var noRoute = Stops.request([Stops.office, Stops.home])
+        noRoute.bicycleProfile = .everyday
+        let tasksBeforeNoRoute = f.factory.tasks.count
+        planner.plan(noRoute)
+        _ = pump { service.queries.count == queriesBefore + 3 }
+        service.answers[queriesBefore + 2].resume(returning: .noBicycleRoute)
+        check(pump { f.factory.tasks.count == tasksBeforeNoRoute + 1 }, "No Bicino route falls back to Apple Maps")
+        f.factory.tasks[tasksBeforeNoRoute].succeed(with: [Stops.leg(Stops.officePoint, via: Stops.stationPoint,
+            to: Stops.homePoint, turn: "Turn right onto Station Road", travelTime: 180)])
+        check(planner.readyPlan?.usesBicycleRouteService == false, "The fallback plan comes from Apple Maps")
+        planner.plan(drive)
+        planner.plan(noRoute)
+        check(planner.readyPlan?.usesBicycleRouteService == false && service.queries.count == queriesBefore + 3,
+            "A route without a Bicino route stays on Apple Maps without asking again")
+        planner.cancel()
+        planner.plan(noRoute)
+        check(pump { service.queries.count == queriesBefore + 4 },
+            "A new session asks again even for a route that had none")
+        planner.cancel()
+
         let withoutService = f.makePlanner()
         var profileOnly = Stops.request([Stops.home, Stops.office])
         profileOnly.bicycleProfile = .road
+        let tasksBeforeWithoutService = f.factory.tasks.count
         withoutService.plan(profileOnly)
-        check(f.factory.tasks.count == 6, "Without a configured service a bike profile uses Apple Maps")
+        check(f.factory.tasks.count == tasksBeforeWithoutService + 1,
+            "Without a configured service a bike profile uses Apple Maps")
     }
 
     /// The bicycle route endpoint's request and answers.
