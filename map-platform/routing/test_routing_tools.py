@@ -153,7 +153,7 @@ def encode_polyline6(points):
 class FakeValhalla:
     """Answers like Valhalla: travel_type reports the requested bicycle type."""
 
-    def __init__(self, *, ignore_type=False, same_geometry=False, push=False):
+    def __init__(self, *, ignore_type=False, same_geometry=False, push=0.0):
         self.ignore_type, self.same_geometry, self.push = ignore_type, same_geometry, push
 
     def request(self, *, method, url, headers, body, timeout_seconds, maximum_body_bytes):
@@ -172,7 +172,7 @@ class FakeValhalla:
         if self.push:
             maneuvers[0]["end_shape_index"] = len(points) - 2
             maneuvers.append({"type": 8, "instruction": "Walk.", "begin_shape_index": len(points) - 2,
-                              "end_shape_index": len(points) - 1, "length": 0.02, "time": 15,
+                              "end_shape_index": len(points) - 1, "length": self.push, "time": 15,
                               "travel_mode": "pedestrian", "travel_type": "foot"})
         trip = {"status": 0, "summary": {"length": 3.0, "time": 600},
                 "legs": [{"shape": encode_polyline6(points), "maneuvers": maneuvers}]}
@@ -201,11 +201,18 @@ class ProfileProbeTests(unittest.TestCase):
         _, failures = self.run_probe(same_geometry=True)
         self.assertIn("no pair produced different road and gravel geometry", failures)
 
-    def test_push_segments_are_reported_and_fail_a_ready_pair(self):
-        report, failures = self.run_probe(push=True)
+    def test_short_push_segments_are_reported_and_stay_ready(self):
+        report, failures = self.run_probe(push=0.02)
+        road = report["probes"][0]["profiles"]["road"]
+        self.assertEqual(road["status"], "ready")
+        self.assertEqual((road["nonBicycleManeuvers"], road["nonBicycleMeters"]), (1, 20))
+        self.assertEqual(failures, [])
+
+    def test_long_push_segments_fail_a_ready_pair(self):
+        report, failures = self.run_probe(push=0.15)
         road = report["probes"][0]["profiles"]["road"]
         self.assertEqual((road["status"], road["reason"]), ("unavailable", "no_bicycle_route"))
-        self.assertEqual((road["nonBicycleManeuvers"], road["nonBicycleMeters"]), (1, 20))
+        self.assertEqual((road["nonBicycleManeuvers"], road["nonBicycleMeters"]), (1, 150))
         self.assertIn("Dubai: road was no_bicycle_route", failures)
 
     def test_checked_in_pairs_are_well_formed(self):
