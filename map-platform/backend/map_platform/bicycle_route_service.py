@@ -4,10 +4,11 @@ Create a Route builds a multi-stop route one leg at a time. For bicycle legs
 the app offers four Valhalla bicycle profiles (road, gravel, everyday,
 mountain); each leg is one request to this endpoint carrying exactly two
 coordinates, the leg's origin and destination. A request may also ask for up
-to two alternative routes and a surface breakdown of each route. They are forwarded to Bicino's internal Valhalla
-service with the ``bicycle`` costing and the profile's costing options; the
-response is a bicycle route whose maneuvers are all ``travel_mode ==
-"bicycle"``.
+to two alternative routes and a surface breakdown of each route. The points
+are forwarded to Bicino's internal Valhalla service with the ``bicycle``
+costing and the profile's costing options; the response is a bicycle route
+whose maneuvers are all ``travel_mode == "bicycle"``, except short pedestrian push stretches of at most
+``MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS`` each (100 m by default).
 
 The service shares the upstream with saved-route detours but has its own
 concurrency slots, timeout and rate limits, so leg planning cannot take the
@@ -107,6 +108,9 @@ PROFILE_NAMES = ("road", "gravel", "everyday", "mountain")
 DEFAULT_MAXIMUM_SEPARATION_METERS = 150_000
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAXIMUM_CONCURRENT = 2
+# A pedestrian maneuver up to this length is pushing the bike (walkways and
+# path connectors); a longer one makes the leg no_bicycle_route. Detours keep 0.
+DEFAULT_MAXIMUM_PUSH_METERS = 100
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -217,6 +221,7 @@ class BicycleRouteService:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         maximum_concurrent: int = DEFAULT_MAXIMUM_CONCURRENT,
         maximum_separation_meters: float = DEFAULT_MAXIMUM_SEPARATION_METERS,
+        maximum_push_meters: float = DEFAULT_MAXIMUM_PUSH_METERS,
     ):
         route_url = upstream_route_url(upstream_url) if upstream_url else None
         self._router = (
@@ -227,6 +232,7 @@ class BicycleRouteService:
                 logger=_LOGGER,
                 log_label="bicycle route",
                 size_limits=route_size_limits(maximum_separation_meters),
+                maximum_push_meters=maximum_push_meters,
             )
             if route_url is not None
             else None
@@ -251,6 +257,9 @@ class BicycleRouteService:
             maximum_separation_meters=float(environment_integer(
                 "MAP_PLATFORM_BICYCLE_ROUTE_MAX_SEPARATION_METERS",
                 DEFAULT_MAXIMUM_SEPARATION_METERS, 1_000, 500_000,
+            )),
+            maximum_push_meters=float(environment_integer(
+                "MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS", DEFAULT_MAXIMUM_PUSH_METERS, 0, 500,
             )),
         )
 

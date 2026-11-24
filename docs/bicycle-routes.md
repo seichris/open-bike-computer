@@ -89,7 +89,7 @@ which echoes the request.
 | Outcome | Meaning |
 | --- | --- |
 | `200` `ready` | `route` as above, `reason: null`. |
-| `200` `unavailable`, `no_bicycle_route` | Valhalla 170/171/442/443 (no path, or a point outside the loaded graph), or Valhalla answered with any maneuver whose `travel_mode` is not `bicycle`. |
+| `200` `unavailable`, `no_bicycle_route` | Valhalla 170/171/442/443 (no path, or a point outside the loaded graph), or Valhalla answered with a maneuver that is neither `bicycle` nor a short pedestrian push stretch (see below). |
 | `200` `unavailable`, `request_too_long` | Valhalla 154 (beyond its bicycle distance limit), or the answer exceeds the size caps below. Asking again cannot help. |
 | `200` `unavailable`, `service_disabled` | No upstream configured, or `MAP_PLATFORM_BICYCLE_ROUTE_ENABLED=0`. |
 | `400` `bicycle_route_invalid_request` | Schema, field, profile, locale or separation error. |
@@ -198,12 +198,20 @@ tools/dev-env --map-backend python map-platform/routing/probe_profiles.py \
 Valhalla's bicycle routes can include short stretches where the rider walks
 the bike. These come back as `travel_mode: "pedestrian"` /
 `travel_type: "foot"` maneuvers, typically 12–60 m on a footway or a cycle-path
-connector. The server never returns a non-bicycle maneuver, so such a route is
-`unavailable` / `no_bicycle_route` for every profile. In the UAE sweep this
-affected 11 of 73 routes, mostly routes longer than 25 km (7 of the 18 routes
-over 100 km), each with 17–173 m of walking in total. Treat a
-`no_bicycle_route` on a long leg as possibly this case rather than proof that
-no rideable route exists.
+connector.
+
+- **Bicycle routes:** a push stretch of at most
+  `MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS` (default 100 m, `0` turns it
+  off) stays in the route with Valhalla's own instructions. Valhalla starts a
+  new maneuver at each turn, so back-to-back pedestrian maneuvers are summed
+  as one stretch. Chris approved this on 2026-11-24.
+- **Refused:** a longer walk, any other mode, or a route with no bicycle
+  maneuver at all is `no_bicycle_route`.
+- **Detours:** saved-route detours never accept push stretches.
+
+In the UAE sweep with the old all-strict rule, 11 of 73 routes failed this
+way. Most were longer than 25 km (7 of the 18 routes over 100 km), each with
+17–173 m of walking in total, spread over 12–60 m stretches.
 
 ## Limits and configuration
 

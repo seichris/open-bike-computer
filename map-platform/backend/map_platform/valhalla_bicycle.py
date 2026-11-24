@@ -5,7 +5,8 @@ send two coordinates to the same internal Valhalla service with the
 ``bicycle`` costing only, and convert its answer into one route shape. This
 module holds the pieces they share: request-field parsing, the upstream
 transport call, Valhalla error-code mapping, the precision-6 polyline decoder
-and the trip-to-route conversion that refuses any non-bicycle maneuver.
+and the trip-to-route conversion that refuses non-bicycle maneuvers (a router
+may allow short pedestrian push segments; detours allow none).
 
 An answer larger than the caller's size limits is a deterministic outcome
 (``request_too_long``), never a retryable service error.
@@ -264,10 +265,12 @@ class ValhallaBicycleRouter:
         logger: logging.Logger,
         log_label: str,
         size_limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS,
+        maximum_push_meters: float = 0.0,
     ):
         self._route_url = route_url
         self._trace_url = route_url[: -len("/route")] + "/trace_attributes"
         self._limits = size_limits
+        self._maximum_push_meters = maximum_push_meters
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._logger = logger
@@ -307,7 +310,7 @@ class ValhallaBicycleRouter:
             self._logger.info("%s upstream status=%s", self._label, response.status_code)
             raise ValhallaUnavailableError("routing-unavailable")
         try:
-            route = route_from_trip(decoded.get("trip"), self._limits)
+            route = route_from_trip(decoded.get("trip"), self._limits, self._maximum_push_meters)
         except RouteTooLargeError as exc:
             self._logger.info("%s outcome=request_too_long reason=%s", self._label, exc)
             return ValhallaOutcome(None, "request_too_long")
@@ -322,7 +325,7 @@ class ValhallaBicycleRouter:
         for raw in raw_alternates if isinstance(raw_alternates, list) else []:
             trip = raw.get("trip") if isinstance(raw, dict) else None
             try:
-                alternatives.append(route_from_trip(trip, self._limits))
+                alternatives.append(route_from_trip(trip, self._limits, self._maximum_push_meters))
             except ValueError as exc:
                 # An unusable alternative never costs the rider the main route.
                 self._logger.info("%s alternative skipped reason=%s", self._label, exc)
@@ -388,7 +391,17 @@ def _trip_shape(trip: Any) -> str:
     return trip["legs"][0]["shape"]
 
 
-def route_from_trip(trip: Any, limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS) -> dict[str, Any]:
+def route_from_trip(
+    trip: Any,
+    limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS,
+    maximum_push_meters: float = 0.0,
+) -> dict[str, Any]:
+    """Convert a one-leg Valhalla trip into the app's route shape.
+
+    Every maneuver must be ``bicycle``, except that a pedestrian maneuver of at
+    most ``maximum_push_meters`` is accepted as a short push-the-bike stretch.
+    A route still needs at least one bicycle maneuver.
+    """
     if not isinstance(trip, dict) or trip.get("status") not in (0, None):
         raise ValueError("invalid-trip")
     legs = trip.get("legs")
@@ -408,11 +421,24 @@ def route_from_trip(trip: Any, limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS) ->
         raise RouteTooLargeError("too-many-maneuvers")
     maneuvers: list[dict[str, Any]] = []
     previous_end = 0
+    cycles = False
+    push_meters = 0.0
     for raw in raw_maneuvers:
         if not isinstance(raw, dict):
             raise ValueError("invalid-maneuver")
-        # Never present driving, walking or transit directions as a bike route.
-        if raw.get("travel_mode") != "bicycle":
+        # Never present driving, transit or long walking directions as a bike
+        # route. A short pedestrian stretch is pushing the bike; Valhalla
+        # splits one stretch into a maneuver per turn, so back-to-back
+        # pedestrian maneuvers count as one stretch.
+        mode = raw.get("travel_mode")
+        if mode == "bicycle":
+            cycles = True
+            push_meters = 0.0
+        elif mode == "pedestrian" and maximum_push_meters > 0:
+            push_meters += _number(raw.get("length", 0), "length") * 1000
+            if push_meters > maximum_push_meters:
+                raise ValueError("non-bicycle-maneuver")
+        else:
             raise ValueError("non-bicycle-maneuver")
         maneuver_type = raw.get("type")
         begin = raw.get("begin_shape_index")
@@ -440,6 +466,8 @@ def route_from_trip(trip: Any, limits: RouteSizeLimits = DEFAULT_SIZE_LIMITS) ->
         maneuvers.append(item)
     if previous_end != len(points) - 1:
         raise ValueError("invalid-maneuver-coverage")
+    if not cycles:
+        raise ValueError("non-bicycle-maneuver")
     summary = trip.get("summary") if isinstance(trip.get("summary"), dict) else {}
     return {
         "provider": {"id": PROVIDER_ID, "attribution": ATTRIBUTION},

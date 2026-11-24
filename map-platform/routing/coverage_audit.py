@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Generate and run a bicycle-routing probe inventory for unlisted map units."""
+"""Generate and run a bicycle-routing probe inventory.
+
+By default the inventory holds the map units Apple Maps Cycling does not list,
+which a worldwide-gap graph must cover. `--all-units` adds the listed units too,
+for a planet graph.
+"""
 
 import argparse
 import hashlib
@@ -14,7 +19,7 @@ from probe_graph import probe, status
 PLACES_SHA256 = "fd3fa867a320cbd5c5b6bb5bc550afeec2939fb2cef688e508007282a55ac42f"
 
 
-def generate(policy_path, boundary_dir, places_path):
+def generate(policy_path, boundary_dir, places_path, all_units=False):
     # The serving image only needs the standard library for the probe phase.
     from pyproj import Geod
     from shapely.geometry import Point, shape
@@ -35,7 +40,7 @@ def generate(policy_path, boundary_dir, places_path):
     targets = []
     for unit in sorted(units, key=lambda unit: unit["properties"]["GU_A3"]):
         code = unit["properties"]["GU_A3"]
-        if code in supported:
+        if code in supported and not all_units:
             continue
         area = polygonal(shape(unit["geometry"]))
         nearby = lookup.query(area, predicate="covers")
@@ -97,13 +102,14 @@ def main():
     generate_parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
     generate_parser.add_argument("--boundaries", type=Path, required=True)
     generate_parser.add_argument("--places", type=Path, required=True)
+    generate_parser.add_argument("--all-units", action="store_true", help="Include Apple-listed units (planet graph)")
     check_parser = commands.add_parser("check")
     check_parser.add_argument("--origin", default="http://127.0.0.1:8002")
     check_parser.add_argument("--inventory", type=Path, required=True)
     check_parser.add_argument("--concurrency", type=int, choices=range(1, 5), default=2)
     args = parser.parse_args()
     if args.command == "generate":
-        result = generate(args.policy, args.boundaries, args.places)
+        result = generate(args.policy, args.boundaries, args.places, args.all_units)
     else:
         result = check(args.origin, json.loads(args.inventory.read_text()), args.concurrency)
     print(json.dumps(result, indent=2))
