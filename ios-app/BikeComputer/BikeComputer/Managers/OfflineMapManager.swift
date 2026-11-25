@@ -5079,8 +5079,9 @@ final class OfflineMapManager: ObservableObject {
         let recoveryServerURL = recoveryServerURL(
             persistedServerURL: persistedServerURL
         )
-        var client = try await makeClient(serverURLString: recoveryServerURL)
-        client = try await ensureRegisteredInstallationWithRetry(client: client)
+        let client = try await ensureRegisteredInstallationWithRetry(
+            serverURLString: recoveryServerURL
+        )
         var jobId = persistedJobId
         var shouldInstallOnDevice = persistedInstallIntent
 
@@ -5208,14 +5209,15 @@ final class OfflineMapManager: ObservableObject {
         throw CancellationError()
     }
 
-    private func ensureRegisteredInstallationWithRetry(
-        client: OfflineMapPlatformClient
+    func ensureRegisteredInstallationWithRetry(
+        serverURLString: String
     ) async throws -> OfflineMapPlatformClient {
         var failureCount = 0
         while !Task.isCancelled {
             do {
-                let currentClient = try await bicinoServiceSession.clientForCurrentNetwork(client)
-                return try await ensureRegisteredInstallation(client: currentClient)
+                // Origin selection may fail transiently before an installation request is sent.
+                let client = try await makeClient(serverURLString: serverURLString)
+                return try await ensureRegisteredInstallation(client: client)
             } catch {
                 guard OfflineMapPollingRetryPolicy.shouldRetry(error) else {
                     throw error

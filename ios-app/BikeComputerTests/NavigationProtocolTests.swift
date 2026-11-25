@@ -1082,6 +1082,7 @@ struct NavigationProtocolTests {
         testHTTPMapTransferStatusKeepsRendererLayerState()
         await testOfflineMapServiceConfigChannels()
         await testDevelopmentEndpointSelection()
+        await testRecoveryRetriesUnreachableEndpoint()
         testOfflineMapCatalogConfigChannels()
         testOfflineMapCatalogTrustStoreChannels()
         testOfflineMapShareLinkValidation()
@@ -8399,14 +8400,79 @@ struct NavigationProtocolTests {
         assertEqual(try! await selector.endpoint(for: .api), directAPI, "stale and cancelled requests leave the new origin cached")
     }
 
+    static func testRecoveryRetriesUnreachableEndpoint() async {
+        let probe = DevelopmentEndpointProbe()
+        let selector = BicinoDevelopmentEndpointSelector(monitorNetwork: false) {
+            service, origin, _ in await probe.check(service, origin)
+        }
+        let direct = BicinoDevelopmentEndpointSelector.Service.api.direct
+        let proxy = BicinoDevelopmentEndpointSelector.Service.api.proxy
+        await probe.allow([proxy], failingFirst: 2)
+
+        let suite = "BicinoRecoveryEndpoint.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        let cache = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: cache)
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+        let key = Data(repeating: 0x44, count: 32).base64EncodedString()
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_1234567890abcdef1234567890abcdef",
+            clientInstallationToken: "v1." + String(repeating: "R", count: 43),
+            appAttestKeyId: key
+        )
+        try! OfflineMapInstallationCredentialStore(defaults: defaults).save(
+            credential, serverURLString: direct.absoluteString
+        )
+        try! OfflineMapAppAttestKeyStore(defaults: defaults).saveActive(
+            key, serverURLString: direct.absoluteString
+        )
+        let service = BicinoServiceSession(
+            defaults: defaults,
+            urlSession: session,
+            appAttestService: TestOfflineMapAppAttestService(keyID: key),
+            developmentEndpointSelector: selector
+        )
+        let manager = OfflineMapManager(
+            defaults: defaults, mapPlatformSession: session, bicinoServiceSession: service,
+            cacheDirectory: cache
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            assertEqual(request.url?.host, proxy.host, "installation recovers through the healthy alias")
+            assertEqual(request.url?.path, "/v1/installations", "recovery refreshes the existing installation")
+            assertEqual(request.value(forHTTPHeaderField: "X-Installation-Token"), credential.clientInstallationToken, "recovery keeps its token")
+            return (200, try! JSONEncoder().encode(credential))
+        }
+        let recovered = try! await manager.ensureRegisteredInstallationWithRetry(
+            serverURLString: direct.absoluteString
+        )
+        assertEqual(await probe.calls, [direct, proxy, direct, proxy], "recovery retries both probes after the initial outage")
+        assertEqual(recovered.baseURL, proxy, "recovery returns the reselected origin")
+        assertEqual(OfflineMapTestURLProtocol.requests().count, 1, "failed probes never submit installation requests")
+    }
+
     private actor DevelopmentEndpointProbe {
         private(set) var calls: [URL] = []
         private var healthy: Set<URL> = []
+        private var failuresRemaining = 0
 
-        func allow(_ origins: Set<URL>) { healthy = origins }
+        func allow(_ origins: Set<URL>, failingFirst: Int = 0) {
+            healthy = origins
+            failuresRemaining = failingFirst
+        }
 
         func check(_ service: BicinoDevelopmentEndpointSelector.Service, _ url: URL) -> Bool {
             calls.append(url)
+            if failuresRemaining > 0 {
+                failuresRemaining -= 1
+                return false
+            }
             return healthy.contains(url)
         }
     }
