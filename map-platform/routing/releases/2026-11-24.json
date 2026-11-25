@@ -1,0 +1,31 @@
+{
+  "schema": "bicino-valhalla-graph-v1",
+  "coverage": "planet",
+  "source": {
+    "url": "https://planet.openstreetmap.org/pbf/planet-261116.osm.pbf",
+    "bytes": 95941737359,
+    "sha256": "297f73cc2bb81b753442debb24e5cb0e664236835356dfc578c6e24c1372cf19"
+  },
+  "mask": null,
+  "policy": null,
+  "builder": {
+    "image": "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228",
+    "platform": "linux/amd64",
+    "threads": 16
+  },
+  "configuration": {
+    "bytes": 9575,
+    "sha256": "34f7aba31f3bf5d1e3ff57863d1aa03d3f5bc667e8f1389046fb2444e4fc6d34"
+  },
+  "admin": {
+    "bytes": 540946432,
+    "sha256": "0f95a6825ddb5d2ac41a7e241ece701c5f7edb12527d2c2b929870d3ff0ed40a"
+  },
+  "maskedInputBytes": 95941737359,
+  "archive": {
+    "name": "valhalla_tiles.tar",
+    "tiles": 209979,
+    "bytes": 104563353600,
+    "sha256": "abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8"
+  }
+}
