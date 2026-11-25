@@ -185,16 +185,29 @@ its terms are moot for now:
 **Recommendation: grade the next planet build with Copernicus opened at
 200 m. Do not use GEDTM30 or raw Copernicus.** The opening uses only the
 production-approved Copernicus sources, so the topography source policy does
-not change. It does change the production elevation, so it needs Chris's
-approval. Before building:
+not change. It does change the production elevation, so it needed Chris's
+approval. **Chris approved it on 2026-11-25.** Before building:
 
-1. Add the opening to `build_elevation.py`. Read margins from the
-   neighbouring cells so the ellipse spans cell borders, and record the
-   method and radius in the elevation manifest. On a laptop it takes about
-   1 s per cell at 52° latitude; the ellipse widens towards the poles.
+1. Done: `build_elevation.py --opening-radius 200 --raw DIR` opens every
+   cell with margins from its neighbours' raw tiles and records the method,
+   radius and raw manifest in the elevation manifest and in each receipt;
+   `build_graph.py` carries the method into the graph manifest (see
+   [Build and release](README.md#build-and-release) for its cost). On the
+   Buenos Aires cell S35W059 it gave the same tile as
+   `sample_elevation.py opening --radius 200` run over the cell's 3 x 3
+   neighbourhood. Against the single-cell tile these samples were graded
+   with, 11,116 posts differ, all within 14 posts (430 m) of the cell's
+   edge, where the sample repeated its edge posts instead of reading the
+   neighbours: up to 8 m, median 1 m. Every Buenos Aires leg lies more than
+   0.3° inside the cell.
 2. Build the planet graded and ungraded from the same snapshot.
-3. Run `compare_elevation.py` against both planet services as the release
-   gate: these eight cities, plus the 20 cities of the 2026-11-24 check.
+3. Run `compare_elevation.py` against both planet services, with no
+   `--city`, as the release gate. `elevation-probes.json` holds these eight
+   cities and, marked `planetOnly`, the cities of the 2026-11-24 planet
+   check that they lack: Copenhagen, Paris, London, Munich, New York, Tokyo,
+   Dubai and Stuttgart (16 cities, 45 legs). That check had 27 legs over
+   the same 16 cities: 20 city legs and 7 hill legs. All 27 are in the file
+   with the same coordinates, some under other names.
 
 The samples used the pinned Valhalla image under amd64 emulation on a
 laptop. One elevation-stage build segfaulted there and passed on a retry. The

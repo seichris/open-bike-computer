@@ -77,14 +77,19 @@ production now.
    ```
 
    Grading the graph with elevation makes `use_hills` work, but no
-   production graph is graded. The Copernicus DEM below is a surface model,
-   and on the 2026-11-24 planet it sent flat-city routes around buildings and
-   trees (see [Refresh and rollback](refresh-runbook.md)). Keep these steps
-   for testing other sources, and compare a graded regional sample with an
-   ungraded one before building a planet. To grade a graph, first write
-   Valhalla's one-degree HGT tiles from the production-approved Copernicus
-   sources in `config/topography-source-policy-v2.json` (GLO-30, then GLO-90
-   where GLO-30 has no cell). Run it in the map-platform image, which pins
+   production graph is graded yet. The Copernicus DEM below is a surface
+   model, and on the 2026-11-24 planet it sent flat-city routes around
+   buildings and trees (see [Refresh and rollback](refresh-runbook.md)).
+   Chris approved on 2026-11-25 grading the next planet with the same
+   Copernicus tiles after a 200 m grey-scale morphological opening, which
+   kept flat-city routes on city samples while hill avoidance still worked.
+   Compare the graded planet with an ungraded one before releasing it (see
+   [Compare elevation sources](#compare-elevation-sources-on-city-samples)).
+
+   To grade a graph, first write Valhalla's one-degree HGT tiles from the
+   production-approved Copernicus sources in
+   `config/topography-source-policy-v2.json` (GLO-30, then GLO-90 where
+   GLO-30 has no cell). Run it in the map-platform image, which pins
    rasterio, with network access. For the planet (26,475 cells) it reads
    about 1 TB from the public COG mirrors and writes gzipped tiles, which
    Valhalla reads like plain HGT (690 GB unpacked). It keeps a receipt per
@@ -93,20 +98,60 @@ production now.
    a receipt again, up to three rounds. The first planet run read 589 GB in
    about 95 minutes with 16 jobs and wrote 160 GB.
 
+   `--opening-radius 200 --raw DIR` writes those raw tiles to `DIR`, then
+   opens every cell into `--out`. The opening is an erosion and then a
+   dilation over an ellipse with 200 m half-axes. It removes anything raised
+   that is narrower than about 400 m, such as buildings and rows of trees,
+   and never raises a post. An arc-second of longitude shortens with
+   cos(latitude), so the ellipse is 13 posts tall and, sized for each post
+   row, 13 posts wide at the equator, 27 at 60° and 125 at 84°. Its
+   half-width stops at 1,799 posts (half a cell), which binds only within
+   0.2° of the poles. Each cell is opened from its own raw posts and a margin
+   of its eight neighbours' raw posts two half-heights and two half-widths
+   deep. Every post therefore gets the height it would have in an opening of
+   the whole planet, whatever order the cells are opened in. Where
+   neighbouring raw tiles share border posts, the southern and then the
+   eastern tile's posts are used. No-data posts stay no data and take no
+   part. With `--bounds`, the raw stage also builds the ring of neighbouring
+   cells. Keep `--raw` outside `--out`, because Valhalla reads every tile
+   below its elevation directory. Each opened cell's receipt records the
+   method, the cell's raw receipt and the SHA-256 of every raw tile it read.
+   A cell is opened again when one of those tiles or the radius changes, and
+   a raw tile that no longer matches its receipt stops the run.
+
    ```sh
    docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \
-     -v "$build_scratch/elevation:/out" --entrypoint python3 "$map_platform_image" \
-     /routing/build_elevation.py --out /out --jobs 20 \
+     -v "$build_scratch/elevation-raw:/raw" -v "$build_scratch/elevation:/out" \
+     --entrypoint python3 "$map_platform_image" \
+     /routing/build_elevation.py --raw /raw --out /out --opening-radius 200 --jobs 20 \
      --policy /app/map-platform/config/topography-source-policy-v2.json
    ```
+
+   The opening stage reads only local raw tiles. On 2026-11-25 one Apple M3
+   Pro core opened a cell in about 0.5 s at Buenos Aires (35° S), 0.6 s at
+   Svalbard (78° N) and 0.65 s at the South Pole (S90E000, the widest
+   window). About half of that is reading and hashing the nine raw tiles.
+   Each row of the ellipse is a run of posts, and the minimum or maximum of
+   a run is that of two overlapping power-of-two runs, so the cost grows
+   with the logarithm of the ellipse's width. `sample_elevation.py`'s filter
+   visits every post of the ellipse instead (1 s at 52°, 3 s at 80°, and
+   minutes near the poles). The catalog has 26,475 cells; 3,996 of them lie
+   beyond 80°, including 720 Antarctic cells south of 88° S. The planet should
+   therefore take about 4 core-hours, or 15 to 30 minutes with 20 jobs on
+   top of the raw stage, if the raw tiles stay in the page cache. Cells are
+   opened in catalog order, so neighbouring tiles are read close together.
+   A worker peaks at about 0.6 GB, and 1.1 GB for polar cells. Opened tiles
+   compress better than raw ones (43%, 76% and 24% of the raw file in those
+   three cells), so `--out` needs at most another 160 GB beside `--raw`.
 
    Then pass `--elevation "$build_scratch/elevation"` to `build_graph.py`. The
    build fails if Valhalla skips its elevation stage. Grade at build time: a
    finished build cannot be graded afterwards. Running the elevation stage on
    finished tiles, with or without validate, gave a graph that answered some
    `/locate` calls with HTTP 500. The manifest's `elevation` records the
-   elevation manifest, its cell count, the checksum of its cell list and the
-   sources used.
+   elevation manifest, its cell count, the checksum of its cell list, the
+   sources used and the `method`: null for raw tiles, or the opening with
+   its radius and the identity of the raw manifest it opened.
 
    Use `--sample` for development input. Sample results are never worldwide
    release evidence. Record peak scratch and memory, phase times, output size,
@@ -182,6 +227,15 @@ San Francisco, Zurich, Wellington), each with a box and four or five legs.
 The 2026-11-25 results and the recommendation are in
 [Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples).
 
+Cities marked `planetOnly` hold the legs of the 2026-11-24 planet check that
+the sample cities lack: Copenhagen, Paris, London, Munich, New York, Tokyo
+and Dubai (flat) and Stuttgart (hilly), with one or two legs each. With them
+the file holds all 27 legs of that check. They were
+never built as samples, so they run only against planet services. Together
+with the sample cities they are the release gate for a graded planet: serve
+the graded and the ungraded planet from the same snapshot and run every city
+in one report, with no `--city`.
+
 1. Download a dated Geofabrik extract that holds the whole city and its
    state or province boundary (Valhalla keeps only country and state
    polygons, so a cut state such as NorCal gives an empty admin database).
@@ -227,8 +281,8 @@ The 2026-11-25 results and the recommendation are in
    bodies, compares lengths with the ungraded routes, reads the share of
    route length on 6%+ grades back with `/trace_attributes`, and in hilly
    cities flips `use_hills` between 0 and 1. `summary` exits non-zero when
-   a source misses a target. The same commands work against two
-   planet-wide services before a planet release.
+   a source misses a target. The same commands, without `--city`, are the
+   planet release gate.
 
    ```sh
    tools/dev-env --map-backend python map-platform/routing/compare_elevation.py run \

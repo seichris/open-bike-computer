@@ -124,7 +124,11 @@ valhalla_build_extract -c /work/valhalla.json
 
 
 def elevation_identity(elevation, sample=False):
-    """The elevation manifest's identity; only a sample may use a partial run."""
+    """The elevation manifest's identity; only a sample may use a partial run.
+
+    `method` is how the posts were processed after resampling: null for raw
+    Copernicus posts, or the opening and the raw tiles it read.
+    """
     path = elevation / "elevation-manifest.json"
     manifest = json.loads(path.read_text())
     if manifest.get("schema") != "bicino-valhalla-elevation-v1" or not manifest.get("cells"):
@@ -136,6 +140,7 @@ def elevation_identity(elevation, sample=False):
         "cells": manifest["cells"],
         "cellListSha256": manifest["cellListSha256"],
         "sources": [source["id"] for source in manifest["sources"] if source["cells"]],
+        "method": manifest.get("method"),
     }
 
 
