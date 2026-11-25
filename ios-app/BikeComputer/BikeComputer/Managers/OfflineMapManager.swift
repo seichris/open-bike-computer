@@ -729,6 +729,9 @@ nonisolated enum OfflineMapServerIdentity {
         }
         components.query = nil
         components.fragment = nil
+        if components.string == OfflineMapServiceConfig.developmentProxyURLString {
+            return OfflineMapServiceConfig.developmentServerURLString
+        }
         return components.string ?? trimmed.lowercased()
     }
 
@@ -2495,7 +2498,8 @@ final class OfflineMapManager: ObservableObject {
         self.catalogClient = catalogClient
 #else
         self.catalogClient = catalogClient ?? (try? OfflineMapCatalogClient(
-            session: mapPlatformSession
+            session: mapPlatformSession,
+            developmentEndpointSelector: bicinoServiceSession.developmentEndpointSelector
         ))
 #endif
         let resolvedServerURL = Self.resolvedServerURL(defaults: defaults)
@@ -2673,7 +2677,7 @@ final class OfflineMapManager: ObservableObject {
         }
 
         startMapJobTask { manager in
-            var client = try manager.makeClient()
+            var client = try await manager.makeClient()
             client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
@@ -4226,7 +4230,7 @@ final class OfflineMapManager: ObservableObject {
         statusMessage = "downloading shared map"
         downloadProgress = 0
         downloadByteProgress = nil
-        guard let catalogHost = OfflineMapCatalogConfig.catalogHost,
+        guard let catalogHost = client.downloadHost(for: grant.downloadURL),
               let r2DownloadHost = OfflineMapCatalogConfig.r2DownloadHost else {
             throw OfflineMapCatalogError.invalidConfiguration
         }
@@ -4235,12 +4239,18 @@ final class OfflineMapManager: ObservableObject {
             catalogHost: catalogHost,
             r2DownloadHost: r2DownloadHost
         )
-        let temporaryURL = try await packDownload(
-            grant.downloadURL,
-            constraints,
-            { [weak self] progress in self?.downloadProgress = progress },
-            { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
-        )
+        let temporaryURL: URL
+        do {
+            temporaryURL = try await packDownload(
+                grant.downloadURL,
+                constraints,
+                { [weak self] progress in self?.downloadProgress = progress },
+                { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
+            )
+        } catch {
+            await client.recordConnectionFailure(error, requestURL: grant.downloadURL)
+            throw error
+        }
         let verifiedReaderRequirements: OfflineMapReaderRequirements
         var verifiedTopography: VerifiedBikeMapTopography?
         var topographyDownload: (
@@ -4295,6 +4305,9 @@ final class OfflineMapManager: ObservableObject {
                 throw OfflineMapTopographyCompanionError.missing
             }
         } catch {
+            if let companionURL = grant.companion?.downloadURL {
+                await client.recordConnectionFailure(error, requestURL: companionURL)
+            }
             try? FileManager.default.removeItem(at: temporaryURL)
             downloadURL = nil
             throw error
@@ -4992,7 +5005,7 @@ final class OfflineMapManager: ObservableObject {
     ) {
         guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
-            var client = try manager.makeClient()
+            var client = try await manager.makeClient()
             client = try await manager.ensureRegisteredInstallation(client: client)
             if try await manager.recoverOwnedServerJobIfAvailable(
                 client: client,
@@ -5066,8 +5079,9 @@ final class OfflineMapManager: ObservableObject {
         let recoveryServerURL = recoveryServerURL(
             persistedServerURL: persistedServerURL
         )
-        var client = try makeClient(serverURLString: recoveryServerURL)
-        client = try await ensureRegisteredInstallationWithRetry(client: client)
+        let client = try await ensureRegisteredInstallationWithRetry(
+            serverURLString: recoveryServerURL
+        )
         var jobId = persistedJobId
         var shouldInstallOnDevice = persistedInstallIntent
 
@@ -5111,10 +5125,11 @@ final class OfflineMapManager: ObservableObject {
         _ request: OfflineMapJobRequest,
         client: OfflineMapPlatformClient
     ) async throws -> OfflineMapJob {
-        var activeClient = client
+        var activeClient = try await bicinoServiceSession.clientForCurrentNetwork(client)
         var recoveredUnavailableKey = false
         return try await OfflineMapJobCreator.create(
             request: request,
+            maximumAttempts: activeClient.developmentEndpointSelector == nil ? 3 : 1,
             create: { identifiedRequest in
                 do {
                     return try await activeClient.createJob(identifiedRequest)
@@ -5129,7 +5144,8 @@ final class OfflineMapManager: ObservableObject {
                 }
             },
             list: {
-                try await activeClient.jobs()
+                activeClient = try await self.bicinoServiceSession.clientForCurrentNetwork(activeClient)
+                return try await activeClient.jobs()
             },
             sleep: { nanoseconds in
                 try await Task.sleep(nanoseconds: nanoseconds)
@@ -5177,7 +5193,8 @@ final class OfflineMapManager: ObservableObject {
         var failureCount = 0
         while !Task.isCancelled {
             do {
-                return try await client.jobs()
+                let currentClient = try await bicinoServiceSession.clientForCurrentNetwork(client)
+                return try await currentClient.jobs()
             } catch {
                 guard OfflineMapPollingRetryPolicy.shouldRetry(error) else { throw error }
                 failureCount += 1
@@ -5192,12 +5209,14 @@ final class OfflineMapManager: ObservableObject {
         throw CancellationError()
     }
 
-    private func ensureRegisteredInstallationWithRetry(
-        client: OfflineMapPlatformClient
+    func ensureRegisteredInstallationWithRetry(
+        serverURLString: String
     ) async throws -> OfflineMapPlatformClient {
         var failureCount = 0
         while !Task.isCancelled {
             do {
+                // Origin selection may fail transiently before an installation request is sent.
+                let client = try await makeClient(serverURLString: serverURLString)
                 return try await ensureRegisteredInstallation(client: client)
             } catch {
                 guard OfflineMapPollingRetryPolicy.shouldRetry(error) else {
@@ -5280,7 +5299,7 @@ final class OfflineMapManager: ObservableObject {
                     .bestEffortCredential {
                         try await self.ensureCatalogCredential()
                     }
-                let client = try self.makeClient()
+                let client = try await self.makeClient()
                 guard client.clientInstallationToken?.isEmpty == false else { return }
                 let jobs = try await client.jobs()
                 for packURL in packURLs {
@@ -5306,7 +5325,7 @@ final class OfflineMapManager: ObservableObject {
                     .bestEffortCredential {
                         try await self.ensureCatalogCredential()
                     }
-                let client = try self.makeClient()
+                let client = try await self.makeClient()
                 guard client.clientInstallationToken?.isEmpty == false else { return }
                 let jobs = try await client.jobs()
                 await self.syncSavedMapInventory(
@@ -5662,9 +5681,9 @@ final class OfflineMapManager: ObservableObject {
 
     private func makeClient(
         serverURLString: String? = nil
-    ) throws -> OfflineMapPlatformClient {
+    ) async throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
-        return try bicinoServiceSession.makeOfflineMapClient(
+        return try await bicinoServiceSession.makeOfflineMapClient(
             serverURLString: value,
             mapStreamTrustCapabilities: mapStreamTrustStore.capabilityHeaderValue
         )
@@ -5748,7 +5767,10 @@ final class OfflineMapManager: ObservableObject {
             currentJob = try await OfflineMapJobPoller.waitForReady(
                 jobId: jobId,
                 pollIntervalNanoseconds: OfflineMapDefaults.mapJobPollIntervalNanoseconds,
-                fetch: { id in try await client.job(id: id) },
+                fetch: { id in
+                    let currentClient = try await self.bicinoServiceSession.clientForCurrentNetwork(client)
+                    return try await currentClient.job(id: id)
+                },
                 sleep: { nanoseconds in try await Task.sleep(nanoseconds: nanoseconds) },
                 onUpdate: { [weak self] job in
                     self?.currentJob = job
@@ -5843,7 +5865,8 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private func downloadReadyPack(client: OfflineMapPlatformClient) async throws {
+    private func downloadReadyPack(client initialClient: OfflineMapPlatformClient) async throws {
+        let client = try await bicinoServiceSession.clientForCurrentNetwork(initialClient)
         let mapId = try readyMapId()
         guard let job = currentJob else {
             throw OfflineMapPlatformError.invalidResponse
@@ -5941,6 +5964,7 @@ final class OfflineMapManager: ObservableObject {
             unsignedContourDeclaration = validation.3
             try Task.checkCancellation()
         } catch {
+            await client.recordConnectionFailure(error, requestURL: url)
             if let temporaryURL {
                 try? FileManager.default.removeItem(at: temporaryURL)
             }

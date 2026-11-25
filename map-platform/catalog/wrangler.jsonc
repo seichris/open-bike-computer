@@ -172,6 +172,10 @@
           "pattern": "maps-share.8o.vc",
           "custom_domain": true,
         },
+        {
+          "pattern": "maps-library.bicino.com",
+          "custom_domain": true,
+        },
       ],
       "vars": {
         "MAP_DELIVERY_ENABLED": "1",

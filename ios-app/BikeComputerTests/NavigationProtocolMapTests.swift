@@ -1074,6 +1074,30 @@ extension NavigationProtocolTests {
         assertEqual(createRequestIds, ["request-test-123"], "reconciliation preserves the submitted request ID")
         assertEqual(listCount, 1, "ambiguous create checks durable server jobs")
 
+        var unreconciledSubmissions = 0
+        var unreconciledLookups = 0
+        do {
+            _ = try await OfflineMapJobCreator.create(
+                request: request,
+                maximumAttempts: 1,
+                create: { _ in
+                    unreconciledSubmissions += 1
+                    throw URLError(.networkConnectionLost)
+                },
+                list: {
+                    unreconciledLookups += 1
+                    return []
+                },
+                sleep: { _ in preconditionFailure("a single submission cannot schedule a retry") },
+                onRetry: {}
+            )
+            preconditionFailure("an unreconciled failure must be surfaced")
+        } catch {
+            assertEqual((error as? URLError)?.code, .networkConnectionLost, "surface the original submission failure")
+        }
+        assertEqual(unreconciledSubmissions, 1, "managed recovery does not replay an ambiguous create")
+        assertEqual(unreconciledLookups, 1, "a single submission still checks for the committed job")
+
         var retryRequestIds: [String?] = []
         let retried = try? await OfflineMapJobCreator.create(
             request: request,

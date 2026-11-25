@@ -4055,7 +4055,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
 #endif
 
 struct OfflineMapPlatformClient {
-    let baseURL: URL
+    private(set) var baseURL: URL
     let legacyBearerToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
@@ -4063,6 +4063,7 @@ struct OfflineMapPlatformClient {
     let mapStreamTrustCapabilities: String?
     let mapStreamAppBuildIdentity: MapStreamAppBuildIdentity?
     let managedAppAttestClient: ManagedOfflineMapAppAttestClient?
+    var developmentEndpointSelector: BicinoDevelopmentEndpointSelector?
     var session: URLSession = .shared
 
     init(
@@ -4074,7 +4075,8 @@ struct OfflineMapPlatformClient {
         mapStreamTrustCapabilities: String? = BikeMapStreamTrustStore.production.capabilityHeaderValue,
         mapStreamAppBuildIdentity: MapStreamAppBuildIdentity? = .current,
         managedAppAttestClient: ManagedOfflineMapAppAttestClient? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        developmentEndpointSelector: BicinoDevelopmentEndpointSelector? = nil
     ) {
         self.baseURL = baseURL
         self.legacyBearerToken = legacyBearerToken?.isEmpty == true ? nil : legacyBearerToken
@@ -4085,6 +4087,13 @@ struct OfflineMapPlatformClient {
         self.mapStreamAppBuildIdentity = mapStreamAppBuildIdentity
         self.managedAppAttestClient = managedAppAttestClient
         self.session = session
+        self.developmentEndpointSelector = developmentEndpointSelector
+    }
+
+    func atOrigin(_ origin: URL) -> OfflineMapPlatformClient {
+        var client = self
+        client.baseURL = origin
+        return client
     }
 
     func createJob(_ jobRequest: OfflineMapJobRequest) async throws -> OfflineMapJob {
@@ -4116,12 +4125,17 @@ struct OfflineMapPlatformClient {
                 clientInstallationToken: token,
                 appAttestKeyId: keyID
             )
-            request = try await managedAppAttestClient.authorizeMapCreate(
-                request: request,
-                jobRequest: jobRequest,
-                credential: credential,
-                baseURL: baseURL
-            )
+            do {
+                request = try await managedAppAttestClient.authorizeMapCreate(
+                    request: request,
+                    jobRequest: jobRequest,
+                    credential: credential,
+                    baseURL: baseURL
+                )
+            } catch {
+                await recordConnectionFailure(error, requestURL: baseURL)
+                throw error
+            }
         }
         do {
             return try await send(request: request)
@@ -4233,7 +4247,7 @@ struct OfflineMapPlatformClient {
         )
         var authorized = request
         authorizeInstallation(&authorized)
-        let (data, response) = try await session.data(for: authorized)
+        let (data, response) = try await data(for: authorized)
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse
         }
@@ -4462,7 +4476,7 @@ struct OfflineMapPlatformClient {
     }
 
     private func send<Response: Decodable>(request: URLRequest) async throws -> Response {
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapPlatformError.invalidResponse
         }
@@ -4470,6 +4484,21 @@ struct OfflineMapPlatformClient {
             throw Self.platformError(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            await recordConnectionFailure(error, requestURL: request.url)
+            throw error
+        }
+    }
+
+    func recordConnectionFailure(_ error: Error, requestURL: URL?) async {
+        await developmentEndpointSelector?.recordConnectionFailure(
+            error, for: .api, requestURL: requestURL
+        )
     }
 
     static func platformError(

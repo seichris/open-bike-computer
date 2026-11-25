@@ -6,6 +6,7 @@ import Security
 nonisolated enum OfflineMapCatalogConfig {
     static let productionHost = "maps-share.8o.vc"
     static let developmentHost = "maps-share-staging.8o.vc"
+    static let developmentProxyHost = "maps-library.bicino.com"
     static let sharedKeychainAccessGroup =
         "4H5PK8686H.LetItRide.BikeComputer.map-library"
     static let catalogHostInfoKey = "BicinoMapCatalogHost"
@@ -1202,10 +1203,12 @@ nonisolated enum OfflineMapShareLink {
 nonisolated struct OfflineMapCatalogClient: Sendable {
     let baseURL: URL
     let session: URLSession
+    private let developmentEndpointSelector: BicinoDevelopmentEndpointSelector?
 
     init(
         baseURL: URL? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        developmentEndpointSelector: BicinoDevelopmentEndpointSelector? = nil
     ) throws {
         guard let baseURL = baseURL ?? OfflineMapCatalogConfig.baseURL,
               baseURL.scheme == "https",
@@ -1217,6 +1220,9 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         }
         self.baseURL = baseURL
         self.session = session
+        self.developmentEndpointSelector =
+            baseURL == BicinoDevelopmentEndpointSelector.Service.catalog.direct
+            ? developmentEndpointSelector : nil
     }
 
     func bootstrap(existingCredential: String?) async throws -> OfflineMapCatalogCredential {
@@ -1395,7 +1401,8 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         guard !acceptedSigners.isEmpty else {
             throw OfflineMapCatalogError.missingCompatibleArtifact
         }
-        return try await mutation(
+        let origin = try await selectedOrigin()
+        let grant: OfflineMapCatalogDownloadGrant = try await mutation(
             path: "/v1/library/maps/\(encodedPath(mapEntryId))/download-grants",
             method: "POST",
             body: DownloadGrantRequest(
@@ -1408,21 +1415,58 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
                     buildSha256: appIdentity.componentSha256
                 )
             ),
-            credential: credential
+            credential: credential,
+            selectedOrigin: origin
         )
+        guard origin.host == OfflineMapCatalogConfig.developmentProxyHost else { return grant }
+        return OfflineMapCatalogDownloadGrant(
+            downloadURL: try Self.proxyDownloadURL(grant.downloadURL),
+            expiresAt: grant.expiresAt,
+            artifact: grant.artifact,
+            companion: try grant.companion.map {
+                OfflineMapCatalogCompanionDownloadGrant(
+                    downloadURL: try Self.proxyDownloadURL($0.downloadURL),
+                    expiresAt: $0.expiresAt,
+                    artifact: $0.artifact
+                )
+            }
+        )
+    }
+
+    static func proxyDownloadURL(_ url: URL) throws -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme == "https",
+              components.host == OfflineMapCatalogConfig.productionHost,
+              components.user == nil, components.password == nil, components.port == nil,
+              components.query == nil, components.fragment == nil,
+              components.percentEncodedPath.range(
+                  of: "^/v1/downloads/[A-Za-z0-9_-]+$", options: .regularExpression
+              ) != nil else { throw OfflineMapCatalogError.invalidResponse }
+        components.host = OfflineMapCatalogConfig.developmentProxyHost
+        guard let url = components.url else { throw OfflineMapCatalogError.invalidResponse }
+        return url
+    }
+
+    func downloadHost(for grantURL: URL) -> String? {
+        guard let host = grantURL.host?.lowercased() else { return nil }
+        if host == baseURL.host?.lowercased() { return host }
+        if developmentEndpointSelector != nil,
+           host == OfflineMapCatalogConfig.developmentProxyHost { return host }
+        return nil
     }
 
     private func mutation<Request: Encodable, Response: Decodable>(
         path: String,
         method: String,
         body: Request,
-        credential: String
+        credential: String,
+        selectedOrigin: URL? = nil
     ) async throws -> Response {
         var request = try request(path: path, method: method)
         authorize(credential, request: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        return try await send(request)
+        return try await send(request, selectedOrigin: selectedOrigin)
     }
 
     private func request(path: String, method: String = "GET") throws -> URLRequest {
@@ -1444,8 +1488,35 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         }
     }
 
-    private func send<Response: Decodable>(_ request: URLRequest) async throws -> Response {
-        let (data, response) = try await session.data(for: request)
+    private func selectedOrigin() async throws -> URL {
+        guard let developmentEndpointSelector else { return baseURL }
+        return try await developmentEndpointSelector.endpoint(for: .catalog)
+    }
+
+    private func routedRequest(_ request: URLRequest, origin: URL) throws -> URLRequest {
+        guard origin != baseURL else { return request }
+        guard var components = request.url.flatMap({
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)
+        }), components.host == baseURL.host, let host = origin.host else {
+            throw OfflineMapCatalogError.invalidConfiguration
+        }
+        components.host = host
+        guard let url = components.url else { throw OfflineMapCatalogError.invalidConfiguration }
+        var routed = request
+        routed.url = url
+        return routed
+    }
+
+    private func send<Response: Decodable>(
+        _ request: URLRequest, selectedOrigin: URL? = nil
+    ) async throws -> Response {
+        let origin: URL
+        if let selectedOrigin {
+            origin = selectedOrigin
+        } else {
+            origin = try await self.selectedOrigin()
+        }
+        let (data, response) = try await data(for: routedRequest(request, origin: origin))
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapCatalogError.invalidResponse
         }
@@ -1464,7 +1535,8 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         _ request: URLRequest,
         expectedStatus: Int
     ) async throws {
-        let (data, response) = try await session.data(for: request)
+        let origin = try await selectedOrigin()
+        let (data, response) = try await data(for: routedRequest(request, origin: origin))
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapCatalogError.invalidResponse
         }
@@ -1472,6 +1544,21 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
             let detail = String(data: data.prefix(4096), encoding: .utf8) ?? ""
             throw OfflineMapCatalogError.serverStatus(http.statusCode, detail)
         }
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            await recordConnectionFailure(error, requestURL: request.url)
+            throw error
+        }
+    }
+
+    func recordConnectionFailure(_ error: Error, requestURL: URL?) async {
+        await developmentEndpointSelector?.recordConnectionFailure(
+            error, for: .catalog, requestURL: requestURL
+        )
     }
 
     private func encodedPath(_ value: String) -> String {

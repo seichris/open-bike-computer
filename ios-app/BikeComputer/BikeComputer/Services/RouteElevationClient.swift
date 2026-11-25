@@ -62,13 +62,13 @@ final class RouteElevationClient: RouteElevationProfileFetching {
             )
             request.httpBody = payload
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            (data, urlResponse) = try await execute(request)
+            (data, urlResponse) = try await serviceSession.performRouteRequest(request, execute: execute)
         } catch {
             throw RouteElevationClientError.classify(error)
         }
         guard let http = urlResponse as? HTTPURLResponse,
               let responseURL = http.url,
-              let serviceURL = serviceSession.managedServiceURL,
+              let serviceURL = request.url,
               let responseComponents = URLComponents(url: responseURL, resolvingAgainstBaseURL: false),
               let serviceComponents = URLComponents(url: serviceURL, resolvingAgainstBaseURL: false),
               responseComponents.scheme == serviceComponents.scheme,

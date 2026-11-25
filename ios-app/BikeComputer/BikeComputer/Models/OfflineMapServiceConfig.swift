@@ -6,9 +6,11 @@
 //
 
 import Foundation
+import Network
 
 enum OfflineMapServiceConfig {
     nonisolated static let developmentServerURLString = "https://maps-dev.8o.vc"
+    nonisolated static let developmentProxyURLString = "https://api-dev.bicino.com"
     nonisolated static let productionServerURLString = "https://maps.8o.vc"
     nonisolated static let unconfiguredServerURLString = "https://invalid.invalid"
     nonisolated static let infoDictionaryHostKey = "BicinoMapServiceHost"
@@ -64,6 +66,143 @@ enum OfflineMapServiceConfig {
             // unreachable sentinel instead of accepting an arbitrary host or
             // silently crossing from Development into Production.
             return unconfiguredServerURLString
+        }
+    }
+}
+
+/// Development requests select a healthy transport before sending credentials
+/// or submitting work. Each service keeps its own result for the current path.
+@MainActor
+final class BicinoDevelopmentEndpointSelector {
+    nonisolated enum Service: Hashable, Sendable {
+        case api, catalog
+
+        var direct: URL {
+            switch self {
+            case .api: URL(string: OfflineMapServiceConfig.developmentServerURLString)!
+            case .catalog: URL(string: "https://\(OfflineMapCatalogConfig.productionHost)")!
+            }
+        }
+
+        var proxy: URL {
+            switch self {
+            case .api: URL(string: OfflineMapServiceConfig.developmentProxyURLString)!
+            case .catalog: URL(string: "https://\(OfflineMapCatalogConfig.developmentProxyHost)")!
+            }
+        }
+
+        var healthChannel: (key: String, value: String) {
+            switch self {
+            case .api: ("deploymentChannel", "development")
+            case .catalog: ("environment", "production")
+            }
+        }
+    }
+
+    typealias Probe = @Sendable (Service, URL, TimeInterval) async -> Bool
+
+    static let shared = BicinoDevelopmentEndpointSelector()
+
+    private let probe: Probe
+    private let monitor: NWPathMonitor?
+    private var selected: [Service: URL] = [:]
+    private var pending: [Service: Task<URL?, Never>] = [:]
+    private var pathGeneration = 0
+
+    init(monitorNetwork: Bool = true, probe: @escaping Probe = probeHealth) {
+        self.probe = probe
+        let monitor = monitorNetwork ? NWPathMonitor() : nil
+        self.monitor = monitor
+        monitor?.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in self?.networkDidChange() }
+        }
+        monitor?.start(queue: DispatchQueue(label: "BicinoDevelopmentEndpointSelector"))
+    }
+
+    deinit {
+        monitor?.cancel()
+    }
+
+    func endpoint(for service: Service) async throws -> URL {
+        while true {
+            try Task.checkCancellation()
+            if let url = selected[service] { return url }
+            let generation = pathGeneration
+            let task: Task<URL?, Never>
+            if let inFlight = pending[service] {
+                task = inFlight
+            } else {
+                task = Task { [probe] in
+                    if await probe(service, service.direct, 2.5) { return service.direct }
+                    guard !Task.isCancelled else { return nil }
+                    if await probe(service, service.proxy, 10) { return service.proxy }
+                    return nil
+                }
+                pending[service] = task
+            }
+            let result = await task.value
+            guard pathGeneration == generation else { continue }
+            if pending[service] == task {
+                selected[service] = result
+                pending[service] = nil
+            } else if let result, selected[service] != result {
+                // Another waiter installed the result and a request already failed on it.
+                continue
+            }
+            try Task.checkCancellation()
+            guard let result else { throw URLError(.cannotConnectToHost) }
+            return result
+        }
+    }
+
+    func networkDidChange() {
+        pathGeneration += 1
+        for task in pending.values { task.cancel() }
+        pending.removeAll()
+        selected.removeAll()
+    }
+
+    func recordConnectionFailure(_ error: Error, for service: Service, requestURL: URL?) {
+        guard let failure = error as? URLError,
+              let origin = selected[service],
+              let failedURL = failure.failingURL ?? requestURL,
+              failedURL.scheme == origin.scheme,
+              failedURL.host == origin.host,
+              failedURL.port == origin.port else { return }
+
+        switch failure.code {
+        case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost,
+             .networkConnectionLost, .notConnectedToInternet, .timedOut, .secureConnectionFailed:
+            // The next operation can probe again. The failed request keeps its original result.
+            selected[service] = nil
+        default:
+            break
+        }
+    }
+
+    private nonisolated static func probeHealth(
+        service: Service, origin: URL, timeout: TimeInterval
+    ) async -> Bool {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        configuration.httpShouldSetCookies = false
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        let url = origin.appendingPathComponent("healthz")
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard let response = response as? HTTPURLResponse,
+                  response.statusCode == 200,
+                  response.url == url,
+                  let body = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            let channel = service.healthChannel
+            return body["status"] as? String == "ok" && body[channel.key] as? String == channel.value
+        } catch {
+            return false
         }
     }
 }
