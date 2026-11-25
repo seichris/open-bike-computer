@@ -14,6 +14,11 @@ asks to approve one:
   morphological opening (an erosion, then a dilation, over an ellipse of
   --radius metres). That removes raised features narrower than the ellipse,
   such as buildings and rows of trees, and keeps terrain wider than it.
+  It sizes the ellipse at the centre of --bounds and repeats the outermost
+  posts beyond them. build_elevation.py --opening-radius is the production
+  version: it sizes the ellipse for each post row and reads the neighbouring
+  cells' posts instead. Away from the box's edges, and where the ellipse
+  has the same width, both give the same posts.
 
 Both write the same gzipped HGT layout and manifest schema as
 build_elevation.py. The manifest always records `bounds`, so build_graph.py
@@ -31,10 +36,10 @@ import urllib.request
 from pathlib import Path
 
 from build_elevation import (
-    GDAL_OPTIONS, MARGIN, NO_DATA, POSTS, STEP, encode_posts, hgt_name, hgt_path, resample_into,
+    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, encode_posts, hgt_name, hgt_path,
+    resample_into,
 )
 
-METRES_PER_ARCSECOND = 30.87
 FORMAT = "srtm-hgt-1-arcsecond-int16-big-endian-gzip"
 
 

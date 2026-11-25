@@ -88,5 +88,80 @@
       {"name": "Railway station to Hataitai", "origin": [-41.2790, 174.7810], "destination": [-41.3000, 174.7950]},
       {"name": "Thorndon to Karori", "origin": [-41.2760, 174.7770], "destination": [-41.2850, 174.7380]}
     ]
+  },
+  {
+    "city": "Copenhagen",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [12.45, 55.62, 12.68, 55.75],
+    "legs": [
+      {"name": "Norreport to Christianshavn", "origin": [55.6833, 12.5717], "destination": [55.6727, 12.5939]},
+      {"name": "Frederiksberg to Osterbro", "origin": [55.6786, 12.5320], "destination": [55.7060, 12.5780]}
+    ]
+  },
+  {
+    "city": "Paris",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [2.22, 48.80, 2.47, 48.92],
+    "legs": [
+      {"name": "Louvre to Bastille", "origin": [48.8606, 2.3376], "destination": [48.8532, 2.3691]},
+      {"name": "Montparnasse to Gare du Nord", "origin": [48.8422, 2.3205], "destination": [48.8809, 2.3553]}
+    ]
+  },
+  {
+    "city": "London",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [-0.25, 51.45, 0.00, 51.60],
+    "legs": [
+      {"name": "Kings Cross to Southbank", "origin": [51.5308, -0.1238], "destination": [51.5055, -0.1160]},
+      {"name": "Hackney to Shoreditch", "origin": [51.5450, -0.0553], "destination": [51.5260, -0.0780]}
+    ]
+  },
+  {
+    "city": "Munich",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [11.45, 48.08, 11.70, 48.22],
+    "legs": [
+      {"name": "Marienplatz to Schwabing", "origin": [48.1374, 11.5755], "destination": [48.1630, 11.5860]}
+    ]
+  },
+  {
+    "city": "New York",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [-74.05, 40.65, -73.90, 40.80],
+    "legs": [
+      {"name": "Midtown to Brooklyn", "origin": [40.7549, -73.9840], "destination": [40.6930, -73.9900]}
+    ]
+  },
+  {
+    "city": "Tokyo",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [139.60, 35.62, 139.80, 35.73],
+    "legs": [
+      {"name": "Shibuya to Shinjuku", "origin": [35.6580, 139.7016], "destination": [35.6896, 139.7006]}
+    ]
+  },
+  {
+    "city": "Dubai",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [55.15, 25.12, 55.40, 25.30],
+    "legs": [
+      {"name": "Satwa to Wasl", "origin": [25.2235, 55.2785], "destination": [25.1985, 55.2468]}
+    ]
+  },
+  {
+    "city": "Stuttgart",
+    "terrain": "hilly",
+    "planetOnly": true,
+    "bbox": [9.08, 48.70, 9.28, 48.85],
+    "legs": [
+      {"name": "Hauptbahnhof to Degerloch", "origin": [48.7840, 9.1820], "destination": [48.7488, 9.1700]}
+    ]
   }
 ]
