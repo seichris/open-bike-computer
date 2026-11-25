@@ -41,7 +41,11 @@ The request needs an App Attest–enrolled installation
 - `surfaces` (optional, boolean, default false) adds a surface breakdown to
   each route. It is read from Valhalla `trace_attributes` with
   `shape_match: edge_walk` over the route's own shape, so it costs one extra
-  upstream call per route but no new search.
+  upstream call per route but no new search. When `edge_walk` cannot follow
+  the shape (HTTP 400, error 443), the lookup is asked once more with
+  `shape_match: walk_or_snap` within the same time budget. That answer is used
+  only if its edges add up to the route length within 30 m or 0.1 %,
+  whichever is larger; otherwise the route is served without `surfaces`.
 - `locale` is a BCP 47 tag; `en_AE` is normalised to `en-AE`. It is optional
   and defaults to `en-US`.
 - Unknown fields are rejected.

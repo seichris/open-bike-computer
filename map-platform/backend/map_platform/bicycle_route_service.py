@@ -33,6 +33,7 @@ from .route_elevation_providers import ElevationTransport, UrllibElevationTransp
 from .valhalla_bicycle import (
     ATTRIBUTION,
     MINIMUM_SEPARATION_METERS,
+    MINIMUM_SURFACE_TIMEOUT_SECONDS,
     PROVIDER_ID,
     DEFAULT_SIZE_LIMITS,
     MapPoint,
@@ -111,7 +112,6 @@ DEFAULT_TIMEOUT_SECONDS = 15
 # All surface lookups of one request share this budget, so a slow
 # /trace_attributes adds seconds, not one full timeout per route.
 SURFACE_BUDGET_SECONDS = 5.0
-MINIMUM_SURFACE_TIMEOUT_SECONDS = 1.0
 DEFAULT_MAXIMUM_CONCURRENT = 2
 # A pedestrian maneuver up to this length is pushing the bike (walkways and
 # path connectors); a longer one makes the leg no_bicycle_route. Detours keep 0.
@@ -322,8 +322,12 @@ class BicycleRouteService:
                 looking_up_surfaces = False
             if looking_up_surfaces:
                 try:
+                    # An edge_walk miss is retried inside this same timeout,
+                    # so the retry never stretches the shared budget.
                     breakdown = self._router.surface_breakdown(
-                        shape, timeout_seconds=min(remaining, self._router.timeout_seconds),
+                        shape,
+                        route["distanceMeters"],
+                        timeout_seconds=min(remaining, self._router.timeout_seconds),
                     )
                 except ValhallaUnavailableError:
                     # One failed lookup means the others would fail too.
