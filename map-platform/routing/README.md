@@ -4,7 +4,7 @@ Two coverages build from the same pipeline:
 
 - **`planet`**: the whole planet, so Create a Route's Road, Gravel and
   Everyday routes work everywhere. It takes no mask. Production has served
-  it, graded with elevation, since 2026-11-24.
+  it, without elevation, since 2026-11-24.
 - **`worldwide-gap`**: only the places where Apple Maps has no cycling
   directions, plus border bands. This was the first production graph, for
   saved-route detours.
@@ -26,9 +26,7 @@ For the procedure used for the first production rollout, see
 graph identities. The [archived mask](releases/2026-11-23-mask.geojson.gz)
 retains the exact clipping input. The
 [planet release manifest](releases/2026-11-24.json) records the graph in
-production now. Its [elevation manifest](releases/2026-11-24-elevation.json)
-and [cell list](releases/2026-11-24-elevation-cells.txt.gz) identify every
-elevation tile it was graded with.
+production now.
 
 ## Build and release
 
@@ -78,7 +76,12 @@ elevation tile it was graded with.
      --work "$build_scratch/candidate" --threads 8
    ```
 
-   Grade the graph with elevation so `use_hills` has an effect. First write
+   Grading the graph with elevation makes `use_hills` work, but no
+   production graph is graded. The Copernicus DEM below is a surface model,
+   and on the 2026-11-24 planet it sent flat-city routes around buildings and
+   trees (see [Refresh and rollback](refresh-runbook.md)). Keep these steps
+   for testing other sources, and compare a graded regional sample with an
+   ungraded one before building a planet. To grade a graph, first write
    Valhalla's one-degree HGT tiles from the production-approved Copernicus
    sources in `config/topography-source-policy-v2.json` (GLO-30, then GLO-90
    where GLO-30 has no cell). Run it in the map-platform image, which pins

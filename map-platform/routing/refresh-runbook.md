@@ -39,15 +39,16 @@ the infrastructure, transfer, and deployment that passed qualification.
    before deploying it.
 
 A planet build (`--coverage planet`, no mask) uses the same builder. The
-2026-11-24 planet release was graded with elevation. Converting the
-Copernicus DEM read 589 GB in about 95 minutes with 16 jobs and wrote 160 GB
-of tiles. The graph build then took 4 hours 39 minutes, 67 of them in
-Valhalla's elevation stage, and peaked at 41.6 GB of memory. Scratch use
-peaked at 803 GB, which included the elevation tiles and a kept build
-without elevation. The archive held 209,979 tiles in 107.6 GB. The same
-build without elevation took 3 hours 25 minutes and wrote 104.6 GB. Check
-the VPS for the candidate, the current graph, transfer parts and the 50 GB
-reserve before transferring.
+2026-11-24 planet release has no elevation. It took 3 hours 25 minutes,
+peaked at 535 GB of scratch and 39 GB of memory, and wrote 209,979 tiles in
+104.6 GB. It was built before `build_graph.py` gained `--elevation`, so its
+manifest has no `elevation` field. A build graded with the Copernicus DEM was made alongside it and
+not shipped (see the elevation check below). Converting the DEM read 589 GB
+in about 95 minutes with 16 jobs and wrote 160 GB of tiles. The graded build
+took 4 hours 39 minutes, 67 of them in Valhalla's elevation stage, peaked at
+41.6 GB of memory and 803 GB of scratch, and wrote 107.6 GB. Check the VPS
+for the candidate, the current graph, transfer parts and the 50 GB reserve
+before transferring.
 
 The first successful attempt took 3 hours 9 minutes from build start through
 archive verification. Observed builder scratch use reached about 499 GB before
@@ -75,11 +76,20 @@ Build and verify off-host. The Coolify VPS serves the resulting archive.
   those 11 plus ATF, IOT, KAS, PCN, TKL and VAT: remote islands and reefs, a
   glacier and Vatican City. Their fixture seeds lie at sea, give a
   zero-length route, or were never generated.
-- On a graph built with elevation, check that `use_hills` changes routes.
-  Serve the graded and the previous ungraded archive side by side and route
-  city pairs with `use_hills` 0 and 1. On 2026-11-24 all 7 pairs (two in San
-  Francisco, and Lisbon, Stuttgart, Zurich, Wellington and Amsterdam) changed
-  on the graded graph and none changed on the ungraded one.
+- Before shipping a graph built with elevation, serve it beside an ungraded
+  build of the same snapshot. Check that `use_hills` changes routes in hilly
+  cities and that flat cities keep theirs. On 2026-11-24 the
+  Copernicus-graded planet passed the first check: with `use_hills` 0 and 1,
+  all 7 city pairs (two in San Francisco, and Lisbon, Stuttgart, Zurich,
+  Wellington and Amsterdam) changed, and none changed ungraded. It failed
+  the second. Across 40 Road and Everyday legs in 20 cities its routes were
+  2.1% longer at the median and 11 were more than 5% longer. Everyday legs
+  grew 21% in Buenos Aires, 17% in New York, 15% in Amsterdam, 12% in Tokyo
+  and 11% in Houston. The DEM is a surface model, so buildings and trees
+  read as terrain. It put 53–64% of a Buenos Aires leg on grades of 6% or
+  more, and 13–37% of legs in Amsterdam, Houston and Berlin. Production
+  stayed ungraded. Try a bare-earth terrain model next, checked the same way
+  on regional samples before a planet build.
 - Include a direct Valhalla miss in the Apple-listed interior near Fairview,
   Oklahoma. A live MapKit request there can still succeed. The first release
   also returned no route from either provider at Great Bear Lake in Canada.

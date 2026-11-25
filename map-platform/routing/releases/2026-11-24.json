@@ -11,33 +11,21 @@
   "builder": {
     "image": "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228",
     "platform": "linux/amd64",
-    "threads": 20
+    "threads": 16
   },
   "configuration": {
-    "bytes": 9560,
-    "sha256": "f8d65aa4aeabf14474566c5ce34da4013dd631856946a3d43cd081cfa88eec03"
+    "bytes": 9575,
+    "sha256": "34f7aba31f3bf5d1e3ff57863d1aa03d3f5bc667e8f1389046fb2444e4fc6d34"
   },
   "admin": {
     "bytes": 540946432,
-    "sha256": "d28bccd9873d1f9c736c9ed0460a5ba131080bab1ccfefeeb430f25f8dab96aa"
-  },
-  "elevation": {
-    "manifest": {
-      "bytes": 1608,
-      "sha256": "7c7ba9c0057a9b8feb4630b1ce9c6435fe4938bed5c3913dd70ed4261c35301f"
-    },
-    "cells": 26475,
-    "cellListSha256": "c262a47dfc6807ef168aff854a43cba0ef0ee207a45a0722194b8ef2cad5f95d",
-    "sources": [
-      "copernicus-glo30-public-2021",
-      "copernicus-glo90-2021"
-    ]
+    "sha256": "0f95a6825ddb5d2ac41a7e241ece701c5f7edb12527d2c2b929870d3ff0ed40a"
   },
   "maskedInputBytes": 95941737359,
   "archive": {
     "name": "valhalla_tiles.tar",
     "tiles": 209979,
-    "bytes": 107554304000,
-    "sha256": "9e7e68e70783e8bf9fd4575855686bc3de3c45a8e89dd41cc93f4521d0719098"
+    "bytes": 104563353600,
+    "sha256": "abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8"
   }
 }

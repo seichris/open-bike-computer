@@ -30,10 +30,10 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # Whole planet, graded with Copernicus elevation, built from OSM planet-261116
+      # Whole planet without elevation, built from OSM planet-261116
       # (map-platform/routing/releases/2026-11-24.json).
       - type: bind
-        source: /var/lib/bicino-valhalla-production/graphs/9e7e68e70783e8bf9fd4575855686bc3de3c45a8e89dd41cc93f4521d0719098
+        source: /var/lib/bicino-valhalla-production/graphs/abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8
         target: /graph
         read_only: true
         bind:

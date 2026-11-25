@@ -9,8 +9,8 @@ internal Valhalla 3.9.2 service, the one that serves
 [saved-route detours](saved-route-detours.md), with the `bicycle` costing and
 the profile's options.
 
-Since 2026-11-24 the production graph covers the whole planet and is graded
-with elevation (see the [routing README](../map-platform/routing/README.md)).
+Since 2026-11-24 the production graph covers the whole planet (see the
+[routing README](../map-platform/routing/README.md)). It has no elevation.
 An `unavailable` / `no_bicycle_route` answer still happens where
 OpenStreetMap has no way a bicycle may use between the two points, and the
 app decides what to fall back to.
@@ -141,12 +141,15 @@ When the service is disabled, `available` is `false` and `provider` and
 - **Mountain** accepts any surface the graph allows bicycles on and prefers
   paths and tracks to roads.
 - Ferries are never used. `use_hills` acts only on graphs graded with
-  elevation. The planet graph is graded from the production-approved
-  Copernicus DEM (GLO-30, with GLO-90 where GLO-30 has no cell). The
-  earlier GCC and worldwide-gap graphs had no elevation, so `use_hills` did
-  nothing there.
-  The DEM is a surface model, so trees and buildings can add noise to grades
-  in forests and dense cities.
+  elevation, and no production graph is graded yet, so it does nothing.
+  A planet graph graded from the production-approved Copernicus DEM (GLO-30,
+  with GLO-90 where GLO-30 has no cell) was built on 2026-11-24 and not
+  shipped. The DEM is a surface model: it measures the tops of buildings and
+  trees, so flat cities get steep grades that are not there, and the
+  profiles that avoid hills ride around them. Everyday legs became up to 21%
+  longer in Buenos Aires, New York, Amsterdam, Tokyo and Houston. See
+  [Refresh and rollback](../map-platform/routing/refresh-runbook.md) before
+  grading a graph again.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
 25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst
