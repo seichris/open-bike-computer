@@ -263,18 +263,21 @@ EDGE_WALK_NO_MATCH_ERROR_CODE = 443
 # A surface lookup with less time than this left is not started.
 MINIMUM_SURFACE_TIMEOUT_SECONDS = 1.0
 # A walk_or_snap match counts only if its edges add up to the route length
-# within max(30 m, 0.1 %). Measured on the same 206 routes (dev, 2026-11-25):
-# - exact edge_walk edges fall short of the route length by at most 13 m;
-# - map_snap answers fall short by at most 17 m (0.04 % of a 39.5 km route,
-#   0.5 % of a 3 km one), including all 13 walk_or_snap fallbacks (5-15 m);
+# within max(30 m, 0.1 %). Measured on the dev planet graph (2026-11-25):
+# - the 206 routes above (3-48 km): exact edge_walk edges fall at most 13 m
+#   short of the route length, map_snap answers at most 17 m (0.5 % of a
+#   3 km leg), including all 13 walk_or_snap fallbacks (5-15 m short);
+# - 16 routes of 127-213 km: edge_walk 17-37 m short, map_snap 27-46 m
+#   (at most 0.033 %), including walk_or_snap after a 443 on Berlin-Leipzig
+#   (182 km, 33-34 m short, 1.2-1.4 s);
 # - where map_snap's edges differ from edge_walk's, it cuts a junction
-#   corner over 4-54 m of other ways or drops a final 13 m edge.
-# The 30 m floor is twice the worst short-route shortfall, and 0.1 % is 2.5
-# times the worst long-route one, leaving room for edge rounding on legs of
-# up to 150 km. A match that skips part of the shape, ends early, or leaves
-# the route along other ways and comes back differs by more and is refused.
-# A parallel way of the same length cannot be told apart by length alone;
-# such a stretch has been at most tens of metres in the samples.
+#   corner over 4-54 m of other ways or drops a final 13 m edge; once
+#   (Dubai-Abu Dhabi, 199 km) it dropped 13.6 km.
+# The 30 m floor is twice the worst short-leg shortfall, and 0.1 % is three
+# times the worst long-leg one. A match that skips part of the shape, ends
+# early, or leaves the route along other ways and comes back differs by more
+# and is refused. A parallel way of the same length cannot be told apart by
+# length alone; such a stretch has been at most tens of metres in the samples.
 MATCHED_LENGTH_TOLERANCE_METERS = 30.0
 MATCHED_LENGTH_TOLERANCE_FRACTION = 0.001
 
@@ -398,7 +401,9 @@ class ValhallaBicycleRouter:
             self._logger.info("%s surfaces edge_walk no match; retrying walk_or_snap", self._label)
             status, decoded = self._trace_attributes(shape, "walk_or_snap", remaining)
             if status == 400:
-                # The shape cannot be matched; the other routes still can be.
+                # The shape cannot be matched, for example 154 on a route
+                # longer than Valhalla's 200 km trace limit (edge_walk has no
+                # such limit). The other routes still can be.
                 self._logger.info(
                     "%s surfaces unavailable reason=walk-or-snap-rejected upstream_code=%s",
                     self._label, _error_code(decoded),

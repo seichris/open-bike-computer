@@ -688,7 +688,9 @@ class SurfaceFallbackTests(BicycleRouteAPITests):
     def test_a_refused_walk_or_snap_match_does_not_stop_the_alternatives_lookups(self):
         trip = json.loads(DUBAI_ROUTE)["trip"]
         self.transport.body = with_alternates(trip)
-        for snap_status, snap_body in ((200, TRACE_EDGES), (400, valhalla_error(444)), (200, b'{"edges": []}')):
+        # 154: walk_or_snap refuses routes over Valhalla's 200 km trace limit.
+        for snap_status, snap_body in ((200, TRACE_EDGES), (400, valhalla_error(444)), (400, valhalla_error(154)),
+                                       (200, b'{"edges": []}')):
             with self.subTest(snap_status=snap_status, snap_body=snap_body[:20]):
                 self.transport.requests.clear()
                 self.transport.snap_status = snap_status
