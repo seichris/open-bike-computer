@@ -729,10 +729,14 @@ nonisolated enum OfflineMapServerIdentity {
         }
         components.query = nil
         components.fragment = nil
-        if components.string == OfflineMapServiceConfig.developmentProxyURLString {
+        switch components.string {
+        case OfflineMapServiceConfig.developmentProxyURLString:
             return OfflineMapServiceConfig.developmentServerURLString
+        case OfflineMapServiceConfig.productionProxyURLString:
+            return OfflineMapServiceConfig.productionServerURLString
+        default:
+            return components.string ?? trimmed.lowercased()
         }
-        return components.string ?? trimmed.lowercased()
     }
 
     static func isManaged(_ value: String?) -> Bool {
@@ -2499,7 +2503,7 @@ final class OfflineMapManager: ObservableObject {
 #else
         self.catalogClient = catalogClient ?? (try? OfflineMapCatalogClient(
             session: mapPlatformSession,
-            developmentEndpointSelector: bicinoServiceSession.developmentEndpointSelector
+            endpointSelector: bicinoServiceSession.endpointSelector
         ))
 #endif
         let resolvedServerURL = Self.resolvedServerURL(defaults: defaults)
@@ -5129,7 +5133,7 @@ final class OfflineMapManager: ObservableObject {
         var recoveredUnavailableKey = false
         return try await OfflineMapJobCreator.create(
             request: request,
-            maximumAttempts: activeClient.developmentEndpointSelector == nil ? 3 : 1,
+            maximumAttempts: activeClient.endpointSelector == nil ? 3 : 1,
             create: { identifiedRequest in
                 do {
                     return try await activeClient.createJob(identifiedRequest)

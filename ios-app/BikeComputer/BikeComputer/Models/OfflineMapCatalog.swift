@@ -6,7 +6,7 @@ import Security
 nonisolated enum OfflineMapCatalogConfig {
     static let productionHost = "maps-share.8o.vc"
     static let developmentHost = "maps-share-staging.8o.vc"
-    static let developmentProxyHost = "maps-library.bicino.com"
+    static let proxyHost = "maps-library.bicino.com"
     static let sharedKeychainAccessGroup =
         "4H5PK8686H.LetItRide.BikeComputer.map-library"
     static let catalogHostInfoKey = "BicinoMapCatalogHost"
@@ -1203,12 +1203,12 @@ nonisolated enum OfflineMapShareLink {
 nonisolated struct OfflineMapCatalogClient: Sendable {
     let baseURL: URL
     let session: URLSession
-    private let developmentEndpointSelector: BicinoDevelopmentEndpointSelector?
+    private let endpointSelector: BicinoEndpointSelector?
 
     init(
         baseURL: URL? = nil,
         session: URLSession = .shared,
-        developmentEndpointSelector: BicinoDevelopmentEndpointSelector? = nil
+        endpointSelector: BicinoEndpointSelector? = nil
     ) throws {
         guard let baseURL = baseURL ?? OfflineMapCatalogConfig.baseURL,
               baseURL.scheme == "https",
@@ -1220,9 +1220,9 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         }
         self.baseURL = baseURL
         self.session = session
-        self.developmentEndpointSelector =
-            baseURL == BicinoDevelopmentEndpointSelector.Service.catalog.direct
-            ? developmentEndpointSelector : nil
+        self.endpointSelector =
+            baseURL == URL(string: "https://\(OfflineMapCatalogConfig.productionHost)")
+            ? endpointSelector : nil
     }
 
     func bootstrap(existingCredential: String?) async throws -> OfflineMapCatalogCredential {
@@ -1418,7 +1418,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
             credential: credential,
             selectedOrigin: origin
         )
-        guard origin.host == OfflineMapCatalogConfig.developmentProxyHost else { return grant }
+        guard origin.host == OfflineMapCatalogConfig.proxyHost else { return grant }
         return OfflineMapCatalogDownloadGrant(
             downloadURL: try Self.proxyDownloadURL(grant.downloadURL),
             expiresAt: grant.expiresAt,
@@ -1442,7 +1442,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
               components.percentEncodedPath.range(
                   of: "^/v1/downloads/[A-Za-z0-9_-]+$", options: .regularExpression
               ) != nil else { throw OfflineMapCatalogError.invalidResponse }
-        components.host = OfflineMapCatalogConfig.developmentProxyHost
+        components.host = OfflineMapCatalogConfig.proxyHost
         guard let url = components.url else { throw OfflineMapCatalogError.invalidResponse }
         return url
     }
@@ -1450,8 +1450,8 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
     func downloadHost(for grantURL: URL) -> String? {
         guard let host = grantURL.host?.lowercased() else { return nil }
         if host == baseURL.host?.lowercased() { return host }
-        if developmentEndpointSelector != nil,
-           host == OfflineMapCatalogConfig.developmentProxyHost { return host }
+        if endpointSelector != nil,
+           host == OfflineMapCatalogConfig.proxyHost { return host }
         return nil
     }
 
@@ -1489,8 +1489,8 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
     }
 
     private func selectedOrigin() async throws -> URL {
-        guard let developmentEndpointSelector else { return baseURL }
-        return try await developmentEndpointSelector.endpoint(for: .catalog)
+        guard let endpointSelector else { return baseURL }
+        return try await endpointSelector.endpoint(for: .catalog)
     }
 
     private func routedRequest(_ request: URLRequest, origin: URL) throws -> URLRequest {
@@ -1556,7 +1556,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
     }
 
     func recordConnectionFailure(_ error: Error, requestURL: URL?) async {
-        await developmentEndpointSelector?.recordConnectionFailure(
+        await endpointSelector?.recordConnectionFailure(
             error, for: .catalog, requestURL: requestURL
         )
     }
