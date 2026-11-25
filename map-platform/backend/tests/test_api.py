@@ -1443,6 +1443,77 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertNotIn(installation_id, inventory.text)
         self.assertNotIn("download-receipt-0001", inventory.text)
 
+    def test_fulfillment_preset_reuses_cli_job_and_retries_failed_build(self):
+        from map_platform.admin_fulfillment import CITY_PRESETS
+
+        endpoint = "/v1/admin/fulfillment-maps"
+        preset_id = "buenos-aires-v1"
+        request = dict(CITY_PRESETS[preset_id]["request"])
+        headers = {"Authorization": "Bearer admin-secret"}
+        self.assertEqual(self.client.get(endpoint).status_code, 401)
+        self.assertEqual(self.client.post(f"{endpoint}/{preset_id}").status_code, 401)
+        self.assertEqual(self.client.post(f"{endpoint}/unknown", headers=headers).status_code, 404)
+
+        from map_platform.sources import SourceIndex
+
+        source = SourceIndex.from_json(self.repo_root / "map-platform/backend/config/source-regions.json").regions[0]
+        with patch.object(SourceIndex, "resolve_for_bounds", return_value=source):
+            created = self.client.post(f"{endpoint}/{preset_id}", headers=headers)
+            self.assertEqual(created.status_code, 200, created.text)
+            job_id = created.json()["jobId"]
+            current = self.client.get(endpoint, headers=headers).json()["presets"][0]["job"]
+            self.assertEqual(current["jobId"], job_id)
+            self.assertEqual(self.client.post(f"{endpoint}/{preset_id}", headers=headers).json()["jobId"], job_id)
+
+            store = self.client.app.state.job_store
+            failed = store.get(job_id)
+            self.assertEqual(failed.request, request)
+            failed.status = JobStatus.FAILED
+            failed.error = "private storage log"
+            failed.error_code = "source_fetch_failed"
+            store.save(failed)
+            overview = self.client.get(endpoint, headers=headers)
+            self.assertEqual(overview.json()["presets"][0]["job"]["errorCode"], "source_fetch_failed")
+            self.assertNotIn("private storage log", overview.text)
+            retry = self.client.post(f"{endpoint}/{preset_id}", headers=headers)
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertNotEqual(retry.json()["jobId"], job_id)
+
+    def test_admin_map_inventory_checks_upstream_without_downloading(self):
+        from io import BytesIO
+        from urllib.response import addinfourl
+
+        endpoint = "/v1/admin/map-inventory"
+        headers = {"Authorization": "Bearer admin-secret"}
+        self.assertEqual(self.client.get(endpoint).status_code, 401)
+        data = Path(self.tmp.name)
+        cached = data / "argentina.osm.pbf"
+        cached.write_bytes(b"pbf")
+        (data / "source-cache.json").write_text(json.dumps({"sources": {
+            "geofabrik-argentina": {
+                "path": str(cached),
+                "sourceUrl": "https://download.geofabrik.de/south-america/argentina-latest.osm.pbf",
+                "downloadedAt": "2026-11-01T00:00:00Z",
+                "lastModified": "Sun, 01 Nov 2026 00:00:00 GMT",
+                "etag": "earlier",
+            },
+            "missing": {"path": str(data / "missing.osm.pbf")},
+        }}))
+
+        def head(request, *, timeout):
+            self.assertEqual(request.get_method(), "HEAD")
+            self.assertEqual(request.get_header("If-none-match"), "earlier")
+            return addinfourl(BytesIO(), {"Last-Modified": "Mon, 02 Nov 2026 00:00:00 GMT"}, request.full_url)
+
+        with patch("map_platform.admin_fulfillment.open_geofabrik_url", side_effect=head):
+            response = self.client.get(endpoint, headers=headers, params={"checkUpstream": True})
+        self.assertEqual(response.status_code, 200, response.text)
+        sources = response.json()["sources"]
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["updateStatus"], "newer")
+        self.assertEqual(sources[0]["bytes"], 3)
+        self.assertNotIn(str(cached), response.text)
+
     def test_admin_map_monitoring_is_authenticated_and_restart_safe(self):
         job_id = self.create_job()
         job = self.client.app.state.job_store.get(job_id)
