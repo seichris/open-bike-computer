@@ -29,7 +29,10 @@ class ProviderRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, request, response, code, message, headers, newurl):
         validate_geofabrik_url(newurl)
-        return super().redirect_request(request, response, code, message, headers, newurl)
+        redirected = super().redirect_request(request, response, code, message, headers, newurl)
+        if redirected is not None and request.get_method() == "HEAD":
+            redirected.method = "HEAD"
+        return redirected
 
 
 def open_geofabrik_url(request, *, timeout):
