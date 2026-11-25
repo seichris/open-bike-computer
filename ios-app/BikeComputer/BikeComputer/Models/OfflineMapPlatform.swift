@@ -4055,7 +4055,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
 #endif
 
 struct OfflineMapPlatformClient {
-    let baseURL: URL
+    private(set) var baseURL: URL
     let legacyBearerToken: String?
     let clientInstallationId: String
     let clientInstallationToken: String?
@@ -4085,6 +4085,12 @@ struct OfflineMapPlatformClient {
         self.mapStreamAppBuildIdentity = mapStreamAppBuildIdentity
         self.managedAppAttestClient = managedAppAttestClient
         self.session = session
+    }
+
+    func atOrigin(_ origin: URL) -> OfflineMapPlatformClient {
+        var client = self
+        client.baseURL = origin
+        return client
     }
 
     func createJob(_ jobRequest: OfflineMapJobRequest) async throws -> OfflineMapJob {

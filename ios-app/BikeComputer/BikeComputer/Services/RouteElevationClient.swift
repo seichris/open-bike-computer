@@ -68,7 +68,7 @@ final class RouteElevationClient: RouteElevationProfileFetching {
         }
         guard let http = urlResponse as? HTTPURLResponse,
               let responseURL = http.url,
-              let serviceURL = serviceSession.managedServiceURL,
+              let serviceURL = request.url,
               let responseComponents = URLComponents(url: responseURL, resolvingAgainstBaseURL: false),
               let serviceComponents = URLComponents(url: serviceURL, resolvingAgainstBaseURL: false),
               responseComponents.scheme == serviceComponents.scheme,

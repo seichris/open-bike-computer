@@ -1080,7 +1080,8 @@ struct NavigationProtocolTests {
         testOfflineMapCustomBBoxRequest()
         testOfflineMapPoiTargetNegotiation()
         testHTTPMapTransferStatusKeepsRendererLayerState()
-        testOfflineMapServiceConfigChannels()
+        await testOfflineMapServiceConfigChannels()
+        await testDevelopmentEndpointSelection()
         testOfflineMapCatalogConfigChannels()
         testOfflineMapCatalogTrustStoreChannels()
         testOfflineMapShareLinkValidation()
@@ -3469,7 +3470,7 @@ struct NavigationProtocolTests {
         }
         do {
             try store.save(old, serverURLString: origin)
-            let client = try service.makeOfflineMapClient(serverURLString: origin)
+            let client = try await service.makeOfflineMapClient(serverURLString: origin)
             do {
                 _ = try await service.ensureRegisteredInstallation(client: client)
                 assert(false, "lost response must fail without deleting credentials")
@@ -3628,7 +3629,7 @@ struct NavigationProtocolTests {
                 defaults: defaults, urlSession: session,
                 appAttestService: service, appAttestAppBuild: "123"
             )
-            let client = try serviceSession.makeOfflineMapClient(
+            let client = try await serviceSession.makeOfflineMapClient(
                 serverURLString: baseURL.absoluteString
             )
             service.nextAttestationError = URLError(.cannotConnectToHost)
@@ -3741,7 +3742,7 @@ struct NavigationProtocolTests {
                 appAttestService: TestOfflineMapAppAttestService(keyID: newKeyID),
                 appAttestAppBuild: "123"
             )
-            let client = try serviceSession.makeOfflineMapClient(
+            let client = try await serviceSession.makeOfflineMapClient(
                 serverURLString: origin
             )
             let recovered = try await serviceSession.ensureRegisteredInstallation(
@@ -3921,7 +3922,7 @@ struct NavigationProtocolTests {
                 appAttestService: TestOfflineMapAppAttestService(keyID: newKeyID),
                 appAttestAppBuild: "123"
             )
-            let client = try serviceSession.makeOfflineMapClient(
+            let client = try await serviceSession.makeOfflineMapClient(
                 serverURLString: origin
             )
             let recovered = try await serviceSession.ensureRegisteredInstallation(
@@ -8159,7 +8160,7 @@ struct NavigationProtocolTests {
         assertEqual(rejectedRequestCount, 1, "the legacy rejection is not retried as target 2")
     }
 
-    static func testOfflineMapServiceConfigChannels() {
+    static func testOfflineMapServiceConfigChannels() async {
         let qualification = "http://qualification-mac.local:8765"
         assert(OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
             "http://QUALIFICATION-MAC.local:8765/", configuredOrigin: qualification
@@ -8187,7 +8188,7 @@ struct NavigationProtocolTests {
         qualificationDefaults.set(qualification,
             forKey: OfflineMapServiceConfig.lanQualificationOriginDefaultsKey)
         let qualificationSession = BicinoServiceSession(defaults: qualificationDefaults)
-        let qualificationClient = try! qualificationSession.makeOfflineMapClient(
+        let qualificationClient = try! await qualificationSession.makeOfflineMapClient(
             serverURLString: qualification)
         assert(qualificationClient.managedAppAttestClient == nil,
                "non-Debug clients ignore the LAN qualification opt-in")
@@ -8265,6 +8266,123 @@ struct NavigationProtocolTests {
             ) == nil,
             "development builds reject production-host share substitution"
         )
+    }
+
+    static func testDevelopmentEndpointSelection() async {
+        let probe = DevelopmentEndpointProbe()
+        let selector = BicinoDevelopmentEndpointSelector(monitorNetwork: false) {
+            service, origin, _ in await probe.check(service, origin)
+        }
+        let directAPI = BicinoDevelopmentEndpointSelector.Service.api.direct
+        let proxyAPI = BicinoDevelopmentEndpointSelector.Service.api.proxy
+        let directCatalog = BicinoDevelopmentEndpointSelector.Service.catalog.direct
+        let proxyCatalog = BicinoDevelopmentEndpointSelector.Service.catalog.proxy
+
+        await probe.allow([directAPI, proxyAPI, proxyCatalog])
+        async let first = selector.endpoint(for: .api)
+        async let second = selector.endpoint(for: .api)
+        let concurrent = try! await [first, second]
+        assertEqual(concurrent, [directAPI, directAPI], "healthy direct route wins")
+        let callsAfterAPI = await probe.calls
+        assertEqual(callsAfterAPI, [directAPI], "concurrent requests share a health check")
+
+        let catalog = try! await selector.endpoint(for: .catalog)
+        assertEqual(catalog, proxyCatalog, "catalog can use its proxy independently")
+        let callsAfterCatalog = await probe.calls
+        assertEqual(callsAfterCatalog, [directAPI, directCatalog, proxyCatalog], "catalog tries both origins in order")
+
+        await probe.allow([proxyAPI, directCatalog])
+        let cached = try! await selector.endpoint(for: .api)
+        assertEqual(cached, directAPI, "selection is reused on the same path")
+        selector.networkDidChange()
+        let changed = try! await selector.endpoint(for: .api)
+        assertEqual(changed, proxyAPI, "network change clears the previous selection")
+
+        selector.networkDidChange()
+        await probe.allow([])
+        do {
+            _ = try await selector.endpoint(for: .api)
+            preconditionFailure("unhealthy endpoints must fail before an API request")
+        } catch {
+            assertEqual((error as? URLError)?.code, .cannotConnectToHost, "no healthy path")
+        }
+        await probe.allow([directAPI])
+        let recovered = try! await selector.endpoint(for: .api)
+        assertEqual(recovered, directAPI, "failed probe results are never cached")
+
+        assertEqual(
+            OfflineMapServerIdentity.normalized(proxyAPI.absoluteString),
+            OfflineMapServerIdentity.normalized(directAPI.absoluteString),
+            "development aliases share the installation and recovery identity"
+        )
+        let grant = URL(string: "https://maps-share.8o.vc/v1/downloads/test_token-123")!
+        assertEqual(
+            try! OfflineMapCatalogClient.proxyDownloadURL(grant).absoluteString,
+            "https://maps-library.bicino.com/v1/downloads/test_token-123",
+            "catalog grant path is preserved on the proxy"
+        )
+        let unrelated = URL(string: "https://example.com/v1/downloads/test_token-123")!
+        precondition((try? OfflineMapCatalogClient.proxyDownloadURL(unrelated)) == nil)
+
+        let suite = "BicinoDevelopmentEndpointSelection.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "test-installation",
+            clientInstallationToken: "test-installation-token",
+            appAttestKeyId: "test-app-attest-key"
+        )
+        try! OfflineMapInstallationCredentialStore(defaults: defaults).save(
+            credential,
+            serverURLString: directAPI.absoluteString
+        )
+        let service = BicinoServiceSession(
+            defaults: defaults,
+            developmentEndpointSelector: selector
+        )
+        let directClient = try! await service.makeOfflineMapClient(serverURLString: directAPI.absoluteString)
+        selector.networkDidChange()
+        await probe.allow([proxyAPI, proxyCatalog])
+        let switchedClient = try! await service.clientForCurrentNetwork(directClient)
+        assertEqual(switchedClient.baseURL, proxyAPI, "a long-running operation can refresh its route")
+        assertEqual(switchedClient.clientInstallationId, credential.clientInstallationId, "the installation is shared")
+        assertEqual(switchedClient.clientInstallationToken, credential.clientInstallationToken, "the credential is shared")
+        assertEqual(switchedClient.clientAppAttestKeyId, credential.appAttestKeyId, "the App Attest key is shared")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let catalogClient = try! OfflineMapCatalogClient(
+            baseURL: directCatalog,
+            session: URLSession(configuration: configuration),
+            developmentEndpointSelector: selector
+        )
+        OfflineMapTestURLProtocol.configure { request in
+            assertEqual(request.url?.host, proxyCatalog.host, "catalog writes use the chosen host")
+            assertEqual(request.url?.path, "/v1/libraries/bootstrap", "the request path is unchanged")
+            assertEqual(request.httpMethod, "POST", "the request method is unchanged")
+            assertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer library-token", "library authorization is preserved")
+            throw URLError(.networkConnectionLost)
+        }
+        defer { OfflineMapTestURLProtocol.reset() }
+        do {
+            _ = try await catalogClient.bootstrap(existingCredential: "library-token")
+            preconditionFailure("the catalog request should surface the connection failure")
+        } catch {
+            assertEqual((error as? URLError)?.code, .networkConnectionLost, "no catch-and-retry on a different host")
+        }
+        assertEqual(OfflineMapTestURLProtocol.requests().count, 1, "a write is sent only once by endpoint selection")
+    }
+
+    private actor DevelopmentEndpointProbe {
+        private(set) var calls: [URL] = []
+        private var healthy: Set<URL> = []
+
+        func allow(_ origins: Set<URL>) { healthy = origins }
+
+        func check(_ service: BicinoDevelopmentEndpointSelector.Service, _ url: URL) -> Bool {
+            calls.append(url)
+            return healthy.contains(url)
+        }
     }
 
     static func testOfflineMapCatalogConfigChannels() {
