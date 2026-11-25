@@ -254,7 +254,7 @@ class ElevationReceiptTests(unittest.TestCase):
         cells = [(8, 47), (9, 47), (10, 47)]
         built, calls = set(), []
 
-        def run_pool(pending, chosen, out, jobs):
+        def run_pool(pending, chosen, out, jobs, opening=None):
             calls.append(list(pending))
             built.add(pending[0])
             if len(calls) == 1:
@@ -280,6 +280,225 @@ class ElevationReceiptTests(unittest.TestCase):
                 build_elevation._build((8, 47))
         self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
 
+    def test_opened_cells_run_under_the_same_deadline(self):
+        alarms = []
+        opening = build_elevation.Opening(200.0, Path("raw"))
+        with patch.object(build_elevation.signal, "alarm", alarms.append), \
+                patch.object(build_elevation, "open_cell", side_effect=OSError("disk")) as opened, \
+                patch.dict(build_elevation._WORKER, chosen={}, out=Path("."), opening=opening):
+            with self.assertRaises(OSError):
+                build_elevation._build((8, 47))
+        opened.assert_called_once_with((8, 47), {}, Path("."), opening)
+        self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
+
+
+class ElevationOpeningTests(unittest.TestCase):
+    """The production opening, on 41-post tiles so a 3 x 3 mosaic stays small."""
+
+    POSTS = 41
+    SOURCE = ElevationReceiptTests.Source("glo30")
+
+    def setUp(self):
+        for module in (build_elevation, sample_elevation):
+            patcher = patch.object(module, "POSTS", self.POSTS)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def random_tiles(self, cells, seed=1):
+        """Independent random tiles, so neighbours disagree on the border posts they share."""
+        import numpy as np
+
+        rng = np.random.default_rng(seed)
+        tiles = {}
+        for cell in cells:
+            heights = rng.uniform(0, 60, (self.POSTS, self.POSTS)).astype("float32")
+            heights[rng.uniform(size=heights.shape) < 0.03] = np.nan
+            tiles[cell] = heights
+        return tiles
+
+    def write_raw(self, raw, tiles):
+        (raw / "receipts").mkdir(parents=True)
+        for cell, heights in tiles.items():
+            build_elevation.write_receipt(raw, {
+                "cell": build_elevation.hgt_name(*cell), "source": "glo30", "url": self.SOURCE.tile_url(*cell),
+                "bytes": 1, **build_elevation.write_tile(raw, cell, heights)})
+        return {cell: self.SOURCE for cell in tiles}
+
+    def open_in_order(self, raw, out, chosen, cells, radius=100.0):
+        (out / "receipts").mkdir(parents=True)
+        opening = build_elevation.Opening(radius, raw)
+        for cell in cells:
+            build_elevation.open_cell(cell, chosen, out, opening)
+        return opening
+
+    def test_one_latitude_gives_the_sample_tools_opening(self):
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        for latitude in (0, 47, 75):
+            heights = rng.uniform(0, 50, (90, 120)).astype("float32")
+            heights[rng.uniform(size=heights.shape) < 0.05] = np.nan
+            heights[20:40, 30:70] = np.nan
+            columns = np.full(90, build_elevation.footprint_columns(100, latitude, 10 ** 6))
+            with self.subTest(latitude=latitude):
+                np.testing.assert_array_equal(
+                    build_elevation.open_posts(heights, build_elevation.footprint_rows(100), columns),
+                    sample_elevation.open_heights(heights, 100, latitude))
+
+    def test_runs_reduce_over_every_post_of_each_rows_own_ellipse(self):
+        import numpy as np
+
+        def every_post(array, rows, columns, reduce, spread):
+            padded = np.pad(array, ((rows, rows), (int(columns.max()),) * 2), mode="edge")
+            own = np.pad(columns, rows, mode="edge")
+            result = np.empty_like(array)
+            for i, j in np.ndindex(array.shape):
+                values = []
+                for k in range(2 * rows + 1):
+                    # Erosion reads the ellipse of post (i, j); dilation takes the
+                    # ellipses of the posts k - rows rows above that cover it.
+                    row = i + 2 * rows - k if spread else i + k
+                    span = build_elevation.ellipse_spans(rows, int(own[row] if spread else columns[i]))[k]
+                    centre = j + int(columns.max())
+                    values.append(padded[row, centre - span:centre + span + 1])
+                result[i, j] = reduce(np.concatenate(values))
+            return result
+
+        array = np.random.default_rng(4).uniform(0, 50, (40, 50)).astype("float32")
+        columns = np.array([3] * 10 + [4] * 12 + [6] * 8 + [9] * 10)
+        expected = (every_post(array, 2, columns, np.min, False), every_post(array, 2, columns, np.max, True))
+        for block in (build_elevation.RUN_TABLE_POSTS, 500):
+            with self.subTest(block=block), patch.object(build_elevation, "RUN_TABLE_POSTS", block):
+                np.testing.assert_array_equal(build_elevation.erode_rows(array, 2, columns), expected[0])
+                np.testing.assert_array_equal(build_elevation.dilate_rows(array, 2, columns), expected[1])
+
+    def test_opening_never_raises_a_post_and_keeps_no_data(self):
+        import numpy as np
+
+        heights = np.random.default_rng(5).uniform(0, 50, (200, 300)).astype("float32")
+        heights[50:80, 100:200] = np.nan
+        opened = build_elevation.open_posts(heights, 3, np.repeat(np.arange(3, 23), 10))
+        valid = np.isfinite(heights)
+        self.assertTrue(np.isnan(opened[~valid]).all())
+        self.assertTrue(np.isfinite(opened[valid]).all())
+        self.assertTrue((opened[valid] <= heights[valid]).all())
+
+    def test_ellipse_widens_with_latitude_and_stops_at_half_a_cell(self):
+        rows = build_elevation.footprint_rows(200)
+        self.assertEqual(rows, 6)
+        self.assertEqual(build_elevation.ellipse_spans(6, 8), tuple(
+            int(count) // 2 for count in sample_elevation.footprint(200, -34.5).sum(axis=1)))
+        widths = [build_elevation.footprint_columns(200, latitude, 1799) for latitude in (0, 47, 60, 80, 89.9, 90)]
+        self.assertEqual(widths, [6, 9, 13, 37, 1799, 1799])
+
+    def test_border_posts_are_identical_whichever_neighbour_is_opened_first(self):
+        import numpy as np
+
+        # At 70-71 degrees the half-width changes from 10 to 9 posts inside each cell.
+        cells = [(x, y) for x in range(7, 11) for y in range(69, 72) if (x, y) != (10, 71)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            # (9, 71) has no tile to its east.
+            pairs = [((8, 70), (9, 70)), ((8, 70), (8, 71)), ((9, 71), (9, 70))]
+            orders = {"first": [cell for pair in pairs for cell in pair],
+                      "second": [cell for pair in pairs for cell in reversed(pair)][::-1]}
+            for name, order in orders.items():
+                self.open_in_order(root / "raw", root / name, chosen, dict.fromkeys(order))
+            for cell in dict.fromkeys(orders["first"]):
+                path = build_elevation.hgt_path(Path(), *cell)
+                self.assertEqual((root / "first" / path).read_bytes(), (root / "second" / path).read_bytes())
+
+            def posts(cell):
+                return build_elevation.read_tile(build_elevation.hgt_path(root / "first", *cell))[0]
+
+            np.testing.assert_array_equal(posts((8, 70))[:, -1], posts((9, 70))[:, 0])
+            np.testing.assert_array_equal(posts((8, 70))[0], posts((8, 71))[-1])
+            np.testing.assert_array_equal(posts((9, 70))[0], posts((9, 71))[-1])
+            self.assertFalse(np.array_equal(posts((8, 70)), self.random_tiles(cells)[(8, 70)], equal_nan=True))
+
+    def test_a_cell_opened_alone_equals_its_cut_from_the_opened_mosaic_of_its_neighbourhood(self):
+        import numpy as np
+
+        for centre, missing in (((8, 70), None), ((8, 47), (9, 48)), ((179, -20), (-180, -19))):
+            longitude, latitude = centre
+            neighbourhood = [(centre, 0)] + [build_elevation.neighbour(longitude, latitude, dx, dy)
+                                             for dx, dy in build_elevation.NEIGHBOURS]
+            tiles = self.random_tiles([cell for cell, _ in neighbourhood if cell != missing], seed=latitude + 90)
+            # Unwrap the antimeridian so the mosaic is one array; the southern then eastern tile wins.
+            placed = {(cell[0] + shift, cell[1]): tiles[cell] for cell, shift in neighbourhood if cell in tiles}
+            order = sorted(placed, key=lambda cell: (-cell[1], cell[0]))
+            mosaic, west, north = sample_elevation.mosaic(order, placed.__getitem__)
+            rows = build_elevation.footprint_rows(100)
+            latitudes = build_elevation.row_latitudes(north, 0, mosaic.shape[0])
+            columns = [build_elevation.footprint_columns(100, latitude, (self.POSTS - 1) // 2 - 1)
+                       for latitude in latitudes]
+            expected = sample_elevation.cut(build_elevation.open_posts(mosaic, rows, columns), west, north, centre)
+            with self.subTest(centre=centre):
+                np.testing.assert_array_equal(build_elevation.opened_cell(centre, tiles.get, 100), expected)
+
+    def test_opened_receipts_follow_the_raw_tiles_and_the_radius(self):
+        import numpy as np
+
+        cells = [(x, y) for x in range(7, 10) for y in range(46, 49)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tiles = self.random_tiles(cells)
+            chosen = self.write_raw(root / "raw", tiles)
+            opening = self.open_in_order(root / "raw", root / "out", chosen, [(8, 47)])
+            receipt = build_elevation.current_opened_receipt(root / "out", (8, 47), chosen, opening)
+            self.assertEqual(sorted(receipt["inputTiles"]), sorted(build_elevation.hgt_name(*cell) for cell in cells))
+            self.assertEqual(receipt["raw"]["cell"], "N47E008")
+            self.assertIsNone(build_elevation.current_opened_receipt(
+                root / "out", (8, 47), chosen, build_elevation.Opening(200.0, root / "raw")))
+            # A neighbour's raw tile changes: the opened cell is stale and is opened again.
+            build_elevation.write_receipt(root / "raw", {
+                "cell": "N48E009", "source": "glo30", "url": self.SOURCE.tile_url(9, 48), "bytes": 1,
+                **build_elevation.write_tile(root / "raw", (9, 48), np.zeros((self.POSTS,) * 2, dtype="float32"))})
+            self.assertIsNone(build_elevation.current_opened_receipt(root / "out", (8, 47), chosen, opening))
+            # A raw tile that no longer matches its receipt stops the opening.
+            build_elevation.write_tile(root / "raw", (7, 46), tiles[(9, 48)])
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                build_elevation.open_cell((8, 47), chosen, root / "out", opening)
+
+    def test_manifest_records_the_opening_and_the_graph_manifest_carries_it(self):
+        class Policy:
+            version = 2
+            sources = [type("S", (), {"id": "glo30", "index_sha256": "i", "terms_url": "t", "attribution_url": "a"})]
+
+        cells = [(x, y) for x in range(7, 10) for y in range(46, 49)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            policy_path = root / "policy.json"
+            policy_path.write_text("{}")
+            raw_manifest = build_elevation.write_manifest(root / "raw", policy_path, Policy, chosen, cells, [6, 45, 10, 49])
+            opening = self.open_in_order(root / "raw", root / "out", chosen, [(8, 47)])
+            manifest = json.loads(build_elevation.write_manifest(
+                root / "out", policy_path, Policy, chosen, [(8, 47)], [8, 47, 9, 48], opening).read_text())
+            self.assertIsNone(json.loads(raw_manifest.read_text())["method"])
+            method = manifest["method"]
+            self.assertEqual((method["name"], method["radiusMetres"], method["footprintLatitude"]),
+                             ("grey-opening", 100.0, "post row"))
+            self.assertEqual(method["input"]["manifestSha256"], hashlib.sha256(raw_manifest.read_bytes()).hexdigest())
+            self.assertEqual(elevation_identity(root / "out", sample=True)["method"], method)
+            self.assertIsNone(elevation_identity(root / "raw", sample=True)["method"])
+
+    def test_bounded_runs_build_the_raw_tiles_of_every_neighbour(self):
+        chosen = {cell: self.SOURCE for cell in [(8, 47), (9, 47), (9, 48), (179, 0), (-180, 1), (5, 5)]}
+        self.assertEqual(build_elevation.with_neighbours([(8, 47)], chosen), [(8, 47), (9, 47), (9, 48)])
+        self.assertEqual(build_elevation.with_neighbours([(179, 0)], chosen), [(-180, 1), (179, 0)])
+
+    def test_raw_and_opened_tiles_need_separate_directories(self):
+        for arguments in (["--opening-radius", "200"], ["--raw", "raw"],
+                          ["--opening-radius", "5", "--raw", "raw"], ["--opening-radius", "200", "--raw", "out/raw"],
+                          ["--opening-radius", "200", "--raw", "."]):
+            argv = ["build_elevation.py", "--policy", "missing.json", "--out", "out", *arguments]
+            with self.subTest(arguments=arguments), patch("sys.argv", argv), \
+                    patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                build_elevation.main()
+
+
 class ElevationManifestTests(unittest.TestCase):
     def test_graph_manifest_records_the_elevation_tiles_used(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,6 +510,7 @@ class ElevationManifestTests(unittest.TestCase):
             (elevation / "elevation-manifest.json").write_text(json.dumps(manifest))
             identity = elevation_identity(elevation)
             self.assertEqual((identity["cells"], identity["cellListSha256"], identity["sources"]), (2, "ab", ["glo30"]))
+            self.assertIsNone(identity["method"])
             for partial in ({"bounds": [9, 46, 11, 48]}, {"catalogCells": 3}, {"catalogCells": None}):
                 (elevation / "elevation-manifest.json").write_text(json.dumps({**manifest, **partial}))
                 with self.subTest(partial=partial), self.assertRaisesRegex(ValueError, "part of the source"):
@@ -664,11 +884,14 @@ class ElevationComparisonTests(unittest.TestCase):
     def test_checked_in_cities_are_well_formed(self):
         cities = json.loads(Path(compare_elevation.__file__).with_name("elevation-probes.json").read_text())
         self.assertEqual({city["terrain"] for city in cities}, {"flat", "hilly"})
+        self.assertEqual(len({city["city"] for city in cities}), len(cities))
         for city in cities:
-            self.assertEqual(set(city), {"city", "terrain", "bbox", "legs"})
+            self.assertLessEqual({"city", "terrain", "bbox", "legs"}, set(city))
+            self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly"})
             west, south, east, north = city["bbox"]
             self.assertTrue(west < east and south < north, city["city"])
-            self.assertGreaterEqual(len(city["legs"]), 3, city["city"])
+            # Planet-only cities keep the 2026-11-24 planet check's legs; a city sample needs three.
+            self.assertGreaterEqual(len(city["legs"]), 1 if city.get("planetOnly") else 3, city["city"])
             for leg in city["legs"]:
                 for latitude, longitude in (leg["origin"], leg["destination"]):
                     self.assertTrue(west < longitude < east and south < latitude < north, leg["name"])
