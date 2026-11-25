@@ -85,7 +85,7 @@ struct BicinoServiceJSONPoster {
         )
         request.httpBody = payload
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, urlResponse) = try await execute(request)
+        let (data, urlResponse) = try await serviceSession.performRouteRequest(request, execute: execute)
         guard let http = urlResponse as? HTTPURLResponse,
               let responseURL = http.url,
               let serviceURL = request.url,

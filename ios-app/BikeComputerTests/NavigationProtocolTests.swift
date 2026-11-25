@@ -8336,8 +8336,12 @@ struct NavigationProtocolTests {
             credential,
             serverURLString: directAPI.absoluteString
         )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
         let service = BicinoServiceSession(
             defaults: defaults,
+            urlSession: session,
             developmentEndpointSelector: selector
         )
         let directClient = try! await service.makeOfflineMapClient(serverURLString: directAPI.absoluteString)
@@ -8349,11 +8353,9 @@ struct NavigationProtocolTests {
         assertEqual(switchedClient.clientInstallationToken, credential.clientInstallationToken, "the credential is shared")
         assertEqual(switchedClient.clientAppAttestKeyId, credential.appAttestKeyId, "the App Attest key is shared")
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
         let catalogClient = try! OfflineMapCatalogClient(
             baseURL: directCatalog,
-            session: URLSession(configuration: configuration),
+            session: session,
             developmentEndpointSelector: selector
         )
         OfflineMapTestURLProtocol.configure { request in
@@ -8371,6 +8373,30 @@ struct NavigationProtocolTests {
             assertEqual((error as? URLError)?.code, .networkConnectionLost, "no catch-and-retry on a different host")
         }
         assertEqual(OfflineMapTestURLProtocol.requests().count, 1, "a write is sent only once by endpoint selection")
+
+        await probe.allow([directAPI, directCatalog])
+        assertEqual(try! await selector.endpoint(for: .catalog), directCatalog, "catalog reselects after a request failure")
+        assertEqual(try! await selector.endpoint(for: .api), proxyAPI, "catalog failure leaves the API route cached")
+
+        OfflineMapTestURLProtocol.configure { request in
+            assertEqual(request.url?.host, proxyAPI.host, "the cached API route is used for the failed request")
+            throw URLError(.cannotConnectToHost)
+        }
+        do {
+            _ = try await switchedClient.jobs()
+            preconditionFailure("the API read should surface the connection failure")
+        } catch {
+            assertEqual((error as? URLError)?.code, .cannotConnectToHost, "the original error is preserved")
+        }
+        assertEqual(OfflineMapTestURLProtocol.requests().count, 1, "the transport sends the request once")
+        let recoveredClient = try! await service.clientForCurrentNetwork(switchedClient)
+        assertEqual(recoveredClient.baseURL, directAPI, "the next API operation reselects on the same network")
+        assertEqual(recoveredClient.clientAppAttestKeyId, credential.appAttestKeyId, "reselection retains the key")
+
+        selector.recordConnectionFailure(URLError(.timedOut), for: .api, requestURL: proxyAPI)
+        selector.recordConnectionFailure(URLError(.cancelled), for: .api, requestURL: directAPI)
+        await probe.allow([])
+        assertEqual(try! await selector.endpoint(for: .api), directAPI, "stale and cancelled requests leave the new origin cached")
     }
 
     private actor DevelopmentEndpointProbe {

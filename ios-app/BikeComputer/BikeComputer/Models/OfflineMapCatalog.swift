@@ -1516,7 +1516,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         } else {
             origin = try await self.selectedOrigin()
         }
-        let (data, response) = try await session.data(for: routedRequest(request, origin: origin))
+        let (data, response) = try await data(for: routedRequest(request, origin: origin))
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapCatalogError.invalidResponse
         }
@@ -1536,7 +1536,7 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
         expectedStatus: Int
     ) async throws {
         let origin = try await selectedOrigin()
-        let (data, response) = try await session.data(for: routedRequest(request, origin: origin))
+        let (data, response) = try await data(for: routedRequest(request, origin: origin))
         guard let http = response as? HTTPURLResponse else {
             throw OfflineMapCatalogError.invalidResponse
         }
@@ -1544,6 +1544,21 @@ nonisolated struct OfflineMapCatalogClient: Sendable {
             let detail = String(data: data.prefix(4096), encoding: .utf8) ?? ""
             throw OfflineMapCatalogError.serverStatus(http.statusCode, detail)
         }
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            await recordConnectionFailure(error, requestURL: request.url)
+            throw error
+        }
+    }
+
+    func recordConnectionFailure(_ error: Error, requestURL: URL?) async {
+        await developmentEndpointSelector?.recordConnectionFailure(
+            error, for: .catalog, requestURL: requestURL
+        )
     }
 
     private func encodedPath(_ value: String) -> String {

@@ -142,9 +142,13 @@ final class BicinoDevelopmentEndpointSelector {
             }
             let result = await task.value
             guard pathGeneration == generation else { continue }
-            // A waiter may resume after a newer probe has already started.
-            if let url = result { selected[service] = url }
-            if pending[service] == task { pending[service] = nil }
+            if pending[service] == task {
+                selected[service] = result
+                pending[service] = nil
+            } else if let result, selected[service] != result {
+                // Another waiter installed the result and a request already failed on it.
+                continue
+            }
             try Task.checkCancellation()
             guard let result else { throw URLError(.cannotConnectToHost) }
             return result
@@ -156,6 +160,24 @@ final class BicinoDevelopmentEndpointSelector {
         for task in pending.values { task.cancel() }
         pending.removeAll()
         selected.removeAll()
+    }
+
+    func recordConnectionFailure(_ error: Error, for service: Service, requestURL: URL?) {
+        guard let failure = error as? URLError,
+              let origin = selected[service],
+              let failedURL = failure.failingURL ?? requestURL,
+              failedURL.scheme == origin.scheme,
+              failedURL.host == origin.host,
+              failedURL.port == origin.port else { return }
+
+        switch failure.code {
+        case .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost,
+             .networkConnectionLost, .notConnectedToInternet, .timedOut, .secureConnectionFailed:
+            // The next operation can probe again. The failed request keeps its original result.
+            selected[service] = nil
+        default:
+            break
+        }
     }
 
     private nonisolated static func probeHealth(

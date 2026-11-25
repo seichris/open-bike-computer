@@ -84,12 +84,15 @@ final class BicinoServiceSession {
             throw OfflineMapPlatformError.invalidBaseURL
         }
         let baseURL: URL
+        let selector: BicinoDevelopmentEndpointSelector?
         if allowsDevelopmentProxy,
            OfflineMapServerIdentity.normalized(configuredURL.absoluteString) ==
              OfflineMapServiceConfig.developmentServerURLString,
            let developmentEndpointSelector {
+            selector = developmentEndpointSelector
             baseURL = try await developmentEndpointSelector.endpoint(for: .api)
         } else {
+            selector = nil
             baseURL = configuredURL
         }
         let credential = loadedCredential(
@@ -116,15 +119,14 @@ final class BicinoServiceSession {
             mapStreamAppBuildIdentity: mapStreamAppBuildIdentity,
             managedAppAttestClient:
                 isManaged ? managedAppAttestClient : nil,
-            session: urlSession
+            session: urlSession,
+            developmentEndpointSelector: selector
         )
     }
 
     func clientForCurrentNetwork(_ client: OfflineMapPlatformClient) async throws -> OfflineMapPlatformClient {
-        guard let developmentEndpointSelector,
-              OfflineMapServerIdentity.normalized(client.baseURL.absoluteString) ==
-                OfflineMapServiceConfig.developmentServerURLString else { return client }
-        let origin = try await developmentEndpointSelector.endpoint(for: .api)
+        guard let selector = client.developmentEndpointSelector else { return client }
+        let origin = try await selector.endpoint(for: .api)
         return client.atOrigin(origin)
     }
 
@@ -136,14 +138,21 @@ final class BicinoServiceSession {
             client.baseURL.absoluteString
         )
         if let task = registrationTasks[key] {
-            return try await task.value.atOrigin(client.baseURL)
+            var registered = try await task.value.atOrigin(client.baseURL)
+            registered.developmentEndpointSelector = client.developmentEndpointSelector
+            return registered
         }
         let task = Task { @MainActor [weak self] in
             guard let self else { throw CancellationError() }
-            return try await self.registerInstallation(
-                client: client,
-                honorRefreshBackoff: honorRefreshBackoff
-            )
+            do {
+                return try await self.registerInstallation(
+                    client: client,
+                    honorRefreshBackoff: honorRefreshBackoff
+                )
+            } catch {
+                await client.recordConnectionFailure(error, requestURL: client.baseURL)
+                throw error
+            }
         }
         registrationTasks[key] = task
         defer { registrationTasks.removeValue(forKey: key) }
@@ -193,6 +202,20 @@ final class BicinoServiceSession {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 30
         return request
+    }
+
+    func performRouteRequest(
+        _ request: URLRequest,
+        execute: (URLRequest) async throws -> (Data, URLResponse)
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await execute(request)
+        } catch {
+            developmentEndpointSelector?.recordConnectionFailure(
+                error, for: .api, requestURL: request.url
+            )
+            throw error
+        }
     }
 
     nonisolated static func validatedManagedServiceURL(
@@ -451,7 +474,8 @@ final class BicinoServiceSession {
             mapStreamTrustCapabilities: client.mapStreamTrustCapabilities,
             mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
             managedAppAttestClient: client.managedAppAttestClient,
-            session: urlSession
+            session: urlSession,
+            developmentEndpointSelector: client.developmentEndpointSelector
         )
     }
 

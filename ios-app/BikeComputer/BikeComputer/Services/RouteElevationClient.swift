@@ -62,7 +62,7 @@ final class RouteElevationClient: RouteElevationProfileFetching {
             )
             request.httpBody = payload
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            (data, urlResponse) = try await execute(request)
+            (data, urlResponse) = try await serviceSession.performRouteRequest(request, execute: execute)
         } catch {
             throw RouteElevationClientError.classify(error)
         }

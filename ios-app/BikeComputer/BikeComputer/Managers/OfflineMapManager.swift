@@ -4239,12 +4239,18 @@ final class OfflineMapManager: ObservableObject {
             catalogHost: catalogHost,
             r2DownloadHost: r2DownloadHost
         )
-        let temporaryURL = try await packDownload(
-            grant.downloadURL,
-            constraints,
-            { [weak self] progress in self?.downloadProgress = progress },
-            { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
-        )
+        let temporaryURL: URL
+        do {
+            temporaryURL = try await packDownload(
+                grant.downloadURL,
+                constraints,
+                { [weak self] progress in self?.downloadProgress = progress },
+                { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
+            )
+        } catch {
+            await client.recordConnectionFailure(error, requestURL: grant.downloadURL)
+            throw error
+        }
         let verifiedReaderRequirements: OfflineMapReaderRequirements
         var verifiedTopography: VerifiedBikeMapTopography?
         var topographyDownload: (
@@ -4299,6 +4305,9 @@ final class OfflineMapManager: ObservableObject {
                 throw OfflineMapTopographyCompanionError.missing
             }
         } catch {
+            if let companionURL = grant.companion?.downloadURL {
+                await client.recordConnectionFailure(error, requestURL: companionURL)
+            }
             try? FileManager.default.removeItem(at: temporaryURL)
             downloadURL = nil
             throw error
@@ -5119,6 +5128,7 @@ final class OfflineMapManager: ObservableObject {
         var recoveredUnavailableKey = false
         return try await OfflineMapJobCreator.create(
             request: request,
+            maximumAttempts: activeClient.developmentEndpointSelector == nil ? 3 : 1,
             create: { identifiedRequest in
                 do {
                     return try await activeClient.createJob(identifiedRequest)
@@ -5952,6 +5962,7 @@ final class OfflineMapManager: ObservableObject {
             unsignedContourDeclaration = validation.3
             try Task.checkCancellation()
         } catch {
+            await client.recordConnectionFailure(error, requestURL: url)
             if let temporaryURL {
                 try? FileManager.default.removeItem(at: temporaryURL)
             }
