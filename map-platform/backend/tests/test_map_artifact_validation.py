@@ -1,10 +1,13 @@
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 
 from map_platform.map_artifact_validation import (
+    MAX_BASE_FEATURES,
     MAX_BUILDINGS,
     MAX_POIS,
+    _parse_base_geometry,
     validate_fma1,
     validate_fmb3,
     validate_fmb4,
@@ -21,6 +24,14 @@ from tests.map_label_fixtures import (
 
 
 class MapArtifactValidationTests(unittest.TestCase):
+    def test_polygons_and_lines_share_one_renderer_budget(self):
+        polygons = struct.pack("<H", MAX_BASE_FEATURES) + bytes(14 * MAX_BASE_FEATURES)
+        at_limit = b"FMB\x03" + polygons + struct.pack("<H", 0)
+        self.assertEqual(_parse_base_geometry(at_limit), (len(at_limit), 0))
+        over_limit = b"FMB\x03" + polygons + struct.pack("<H", 1)
+        with self.assertRaisesRegex(ValueError, "combined feature limit"):
+            _parse_base_geometry(over_limit)
+
     def test_dense_building_record_ceiling_matches_fmb_v4_contract(self):
         self.assertEqual(MAX_BUILDINGS, 12288)
 

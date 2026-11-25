@@ -7897,9 +7897,14 @@ class MapBuildPipeline:
         building_scope: dict[str, Any] | None = None
         building_complexity: dict[str, int] | None = None
         building_block_cache_evidence: dict[str, Any] | None = None
+        tile_feature_budget: dict[str, Any] | None = None
 
         def handle_output(line: str) -> None:
             nonlocal label_stats, building_stats, poi_stats, building_scope, building_complexity, building_block_cache_evidence
+            nonlocal tile_feature_budget
+            geometry = _parse_structured_stats(line, "GEOMETRY_DIAGNOSTICS:")
+            if geometry is not None and isinstance(geometry.get("tileFeatureBudget"), dict):
+                tile_feature_budget = geometry["tileFeatureBudget"]
             preprocess_progress = parse_building_preprocess_progress(line)
             if preprocess_progress is not None:
                 self._emit_phase_progress(
@@ -8020,7 +8025,7 @@ class MapBuildPipeline:
                     failure["code"], failure["message"]
                 ) from exc
             raise
-        return self._build_metrics(
+        metrics = self._build_metrics(
             format_version,
             label_stats,
             building_stats,
@@ -8031,6 +8036,9 @@ class MapBuildPipeline:
                 scope_plan_path is not None and planned_scope_marker is None
             ),
         )
+        if tile_feature_budget is not None:
+            metrics["tileFeatureBudget"] = tile_feature_budget
+        return metrics
 
     @staticmethod
     def _build_metrics(

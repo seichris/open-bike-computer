@@ -12,6 +12,8 @@ FMB_V4_SECTION_BUILDINGS = 4
 FMB_V5_SECTION_CONTOURS = 5
 FMB_V6_SECTION_POIS = 6
 FMB_V3_CRITICAL_SECTION = 1
+# Base polygons and lines share the firmware's per-tile feature limit.
+MAX_BLOCK_FEATURES = 16384
 MAX_BLOCK_STRINGS = 4096
 MAX_BLOCK_STRING_BYTES = 256 * 1024
 MAX_BLOCK_RUNS = 12288
@@ -547,6 +549,8 @@ def write_fmb(
         raise PoiMapFormatError("renderer target 5 requires a POI section")
     if renderer_target != 5 and poi_records is not None:
         raise PoiMapFormatError("renderer target does not support POIs")
+    if len(polygons) + len(polylines) > MAX_BLOCK_FEATURES:
+        raise MapFormatLimitError("base polygon and line counts exceed the tile feature limit")
     version = renderer_target + 1
     data = bytearray(b"FMB" + bytes((version,)))
     data.extend(struct.pack("<H", len(polygons)))

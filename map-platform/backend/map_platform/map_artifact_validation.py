@@ -10,6 +10,7 @@ from .map_labels import normalize_language_tag
 
 
 MAX_FMB_BYTES = 2 * 1024 * 1024
+MAX_BASE_FEATURES = 16384
 MAX_FMA_BYTES = 16 * 1024 * 1024
 MAX_STRINGS = 4096
 MAX_STRING_BYTES = 256 * 1024
@@ -203,7 +204,7 @@ def _parse_base_geometry(data: bytes) -> tuple[int, int]:
     offset = 4
     counts, offset = _take(data, offset, 2, "FMB polygon count")
     polygon_count = _u16(counts, 0)
-    if polygon_count > 16384:
+    if polygon_count > MAX_BASE_FEATURES:
         raise ValueError("FMB polygon count exceeds its bound")
     for _ in range(polygon_count):
         _fixed, offset = _take(data, offset, 12, "FMB polygon")
@@ -212,8 +213,8 @@ def _parse_base_geometry(data: bytes) -> tuple[int, int]:
         _points, offset = _take(data, offset, point_count * 4, "FMB polygon points")
     counts, offset = _take(data, offset, 2, "FMB polyline count")
     polyline_count = _u16(counts, 0)
-    if polyline_count > 16384:
-        raise ValueError("FMB polyline count exceeds its bound")
+    if polyline_count > MAX_BASE_FEATURES - polygon_count:
+        raise ValueError("FMB polygon and polyline counts exceed the combined feature limit")
     for _ in range(polyline_count):
         _fixed, offset = _take(data, offset, 13, "FMB polyline")
         count_bytes, offset = _take(data, offset, 2, "FMB polyline point count")
