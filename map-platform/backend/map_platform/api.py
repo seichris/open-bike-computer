@@ -20,6 +20,11 @@ except ImportError as exc:  # pragma: no cover - exercised only without the API 
 else:
     _FASTAPI_IMPORT_ERROR = None
 
+from .admin_fulfillment import (
+    fulfillment_maps,
+    production_inventory,
+    queue_fulfillment_map,
+)
 from .admin_inventory import map_inventory
 from .admission import AdmissionCapacityError, QueueAdmissionPolicy
 from .app_attest import (
@@ -960,6 +965,36 @@ def create_app(
             service.store.list(),
             pseudonym_secret=installation_secret or download_secret,
             include_undownloaded=includeUndownloaded,
+        )
+
+    @app.get("/v1/admin/fulfillment-maps", dependencies=[Depends(require_admin_token)])
+    def admin_fulfillment_maps() -> dict[str, Any]:
+        return fulfillment_maps(service.store.list())
+
+    @app.post("/v1/admin/fulfillment-maps/{preset_id}", dependencies=[Depends(require_admin_token)])
+    def admin_queue_fulfillment_map(preset_id: str) -> dict[str, Any]:
+        try:
+            return queue_fulfillment_map(service, preset_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Unknown city preset.") from exc
+        except AdmissionCapacityError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.response_detail(),
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="The city preset could not be queued.") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail="Map jobs are temporarily unavailable.") from exc
+
+    @app.get("/v1/admin/map-inventory", dependencies=[Depends(require_admin_token)])
+    def admin_map_inventory(checkUpstream: bool = False) -> dict[str, Any]:
+        return production_inventory(
+            service.store.list(),
+            source_cache,
+            service.source_index.regions,
+            check_upstream=checkUpstream,
         )
 
     @app.get(
