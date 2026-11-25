@@ -1,5 +1,5 @@
-# control-plane-source-commit: 549d5b4e3689f4b7a9c68fa6fc1b2ee2556b17cb
-# worker-source-commit: e30a59762471e30b6237cb8553ab96f84a16a5ae
+# control-plane-source-commit: 7615a8008af2a2923610bd2e5f9fdd7153c77c57
+# worker-source-commit: fa39ad798f7a4e28dafdee4eae8515af939a378b
 # promotion-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
 # These digest-pinned images are the production deployment manifest. The API
@@ -11,8 +11,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:249544826b4bc5e8733787bb5b03394240ed7d11e11fa073e3cacc86037d7ff7
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:373328b9bcac4137dc3aa291269c231bba7a369e42b9af5c63413ee9b0ab468c
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:98d53542d2ed946ec22d4ebc852578b919168b29f509a787045ea086beda547d
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:57c9ba46581af2863249c455826c5f4829c359be4b759cff8fab2de74f666da4
 
 services:
   map-platform-valhalla:
@@ -187,7 +187,7 @@ services:
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_BASIS_POINTS:-0}
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET: ${MAP_PLATFORM_MAP_STREAM_ROLLOUT_SECRET:-}
       # Keep the approval identity atomic with the image pins in this lock.
-      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261122-gcc-routing
+      MAP_PLATFORM_MAP_STREAM_PROMOTION_ID: msr-20261125-buenos-aires
       MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS: /app/config/map-stream-rollout-approvals.json
       MAP_PLATFORM_WORKER_IMAGE_REFERENCE: *map-platform-worker-image
       MAP_PLATFORM_INLINE_WORKER_ENABLED: "0"
