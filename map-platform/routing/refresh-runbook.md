@@ -88,11 +88,127 @@ Build and verify off-host. The Coolify VPS serves the resulting archive.
   and 11% in Houston. The DEM is a surface model, so buildings and trees
   read as terrain. It put 53–64% of a Buenos Aires leg on grades of 6% or
   more, and 13–37% of legs in Amsterdam, Houston and Berlin. Production
-  stayed ungraded. Try a bare-earth terrain model next, checked the same way
-  on regional samples before a planet build.
+  stayed ungraded. City samples on 2026-11-25 found a source that passes
+  both checks (see [Elevation sources on city samples](#elevation-sources-on-city-samples)).
+  Run `compare_elevation.py` against the two planet services as this check.
 - Include a direct Valhalla miss in the Apple-listed interior near Fairview,
   Oklahoma. A live MapKit request there can still succeed. The first release
   also returned no route from either provider at Great Bear Lake in Canada.
+
+## Elevation sources on city samples
+
+On 2026-11-25 five elevation sources were compared on sample graphs of eight
+cities, following [Compare elevation sources](README.md#compare-elevation-sources-on-city-samples).
+Each city was built six times from the same box: ungraded, and graded with
+each source. Then `compare_elevation.py` routed its legs with the backend's
+Road and Everyday bodies.
+
+- **Copernicus**: the production-approved GLO-30 tiles from
+  `build_elevation.py`, as on the 2026-11-24 planet.
+- **GEDTM30**: GEDTM30 v1.2.0 (OpenGeoHub), a 30 m bare-earth model.
+- **Copernicus opened 100 m / 200 m**: the Copernicus tiles after a
+  grey-scale morphological opening (`sample_elevation.py opening`) over an
+  ellipse of 100 m or 200 m radius. The opening removes anything raised that
+  is narrower than the ellipse, such as buildings and rows of trees.
+- **GEDTM30 opened 200 m**: GEDTM30 after the same opening.
+
+The flat cities were Buenos Aires, Amsterdam, Houston and Berlin. Each had
+four street legs, and Amsterdam and Houston also had a leg through a wood
+(the Amsterdamse Bos and Memorial Park). The hilly cities were Lisbon,
+San Francisco, Zurich and Wellington, with four legs each.
+
+The samples reproduce the planet failure. On the Copernicus sample, Buenos
+Aires Everyday legs grew by up to 20.6% (21% on the planet), and 55% of the
+ungraded routes' length read as 6%+ grade (53–64% on the planet).
+
+| Source | Flat cities: median length change | Longest | Routes >5% longer | Median 6%+ share | Hilly legs changed by `use_hills` | Median 6%+ share removed by avoiding hills | Targets |
+|---|---|---|---|---|---|---|---|
+| Copernicus | +1.1% | +31.5% | 10 of 36 | 21% | 15 of 16 | 3 pts | missed |
+| GEDTM30 | +0.6% | +15.4% | 8 of 36 | 14% | 15 of 16 | 5 pts | missed |
+| Copernicus opened 100 m | 0.0% | +14.3% | 1 of 36 | 3% | 14 of 16 | 3 pts | missed |
+| **Copernicus opened 200 m** | **0.0%** | **+1.1%** | **0 of 36** | **2%** | **12 of 16** | **4 pts** | **met** |
+| GEDTM30 opened 200 m | 0.0% | +6.4% | 1 of 36 | 1% | 12 of 16 | 4 pts | missed |
+
+"6%+ share" is the share of a route's length on edges whose steepest 60 m
+section is 6% or more, as the graph itself reports. The last column judges
+the hilly legs on the mean of every graded graph's heights, so no source
+grades itself. The result holds with Copernicus, GEDTM30 or opened Copernicus
+as the only referee. Using `use_hills` 0 instead of 1 rarely saved total climb
+(median −1 to +1 m for every source). Valhalla penalises grade, not ascent, so
+hill-avoiding routes often climb the same height more gently. The ungraded
+graphs gave identical routes for both `use_hills` values on all 16 hilly
+legs, and no route or `/trace_attributes` call failed.
+
+Flat cities, by source (median length change, longest, median 6%+ share):
+
+| City | Copernicus | GEDTM30 | Copernicus opened 200 m |
+|---|---|---|---|
+| Buenos Aires | +7.3%, +20.6%, 39% | +5.7%, +9.2%, 40% | 0.0%, +0.3%, 5% |
+| Amsterdam | +3.5%, +31.5%, 24% | +0.9%, +15.4%, 10% | 0.0%, 0.0%, 0% |
+| Houston | +0.2%, +1.1%, 11% | +0.2%, +5.8%, 5% | 0.0%, +0.4%, 1% |
+| Berlin | +1.1%, +5.1%, 16% | 0.0%, +4.7%, 14% | 0.0%, +1.1%, 1% |
+
+- **GEDTM30 does not remove the buildings of dense cities.** Along Avenida
+  Rivadavia in Buenos Aires, a street at about 20–25 m, GEDTM30 ranges from
+  18 to 47 m, as Copernicus does (19–49 m). The opened Copernicus ranges from
+  16 to 26 m. GEDTM30 also left 17–20% of the forest legs on 6%+ grades.
+- **The wood legs were the opening's expected weak point, and it held.**
+  Through the Amsterdamse Bos, Copernicus made the route 31.5% longer and put
+  29% of it on 6%+ grades. The opened Copernicus kept the route, with 3.5% on
+  6%+ grades. Through Memorial Park it cut the 6%+ share from 39% to 1%.
+- **The opening also lowers ridges and hilltops narrower than 400 m.** So
+  `use_hills` changed fewer hilly legs (12 of 16, against 15 with
+  Copernicus): Lisbon 4, San Francisco 3, Zurich 3 and Wellington 2. Where it
+  acts, it removes as much steep riding as Copernicus does. Every source had
+  one or two hilly legs where the hill-avoiding route had more than 2 points
+  more 6%+ share; for the opened Copernicus these were −3 and −4 points.
+- **Everyday detours can be long in steep cities.** In Lisbon, Baixa to
+  Estrela grew from 2.5 to 3.7 km (+49%) with the opened Copernicus. Its
+  6%+ share fell from 36% to 11%. That comes from Everyday's `use_hills`
+  0.25, not from noise. Revisit the value once a graded graph ships.
+
+GEDTM30's terms would allow production use, but it lost on the routes, so
+its terms are moot for now:
+
+- It is CC BY 4.0, so commercial use is allowed with attribution. Credit
+  "GEDTM30 (Ho, Hengl et al., OpenGeoHub), CC BY 4.0". Its authors also
+  credit the modified Copernicus DEM (© DLR e.V. 2010–2014 and © Airbus
+  Defence and Space GmbH 2014–2018, provided under COPERNICUS by the European
+  Union and ESA) and JAXA's AW3D30.
+- The authors left FABDEM and FathomDEM out for licence reasons. Zenodo
+  record 18887460 calls v1.2.0 a first release "for testing purposes only".
+- The 30 m data is not archived on Zenodo, which holds only 240 m versions.
+  It is one 432,407,644,715-byte COG on `s3.opengeohub.org` (ETag
+  `8bf9b35f45e9befaa9b91d877bf230d7-3107`, modified 2026-09-23). A
+  production build would need its own copy.
+
+**Recommendation: grade the next planet build with Copernicus opened at
+200 m. Do not use GEDTM30 or raw Copernicus.** The opening uses only the
+production-approved Copernicus sources, so the topography source policy does
+not change. It does change the production elevation, so it needs Chris's
+approval. Before building:
+
+1. Add the opening to `build_elevation.py`. Read margins from the
+   neighbouring cells so the ellipse spans cell borders, and record the
+   method and radius in the elevation manifest. On a laptop it takes about
+   1 s per cell at 52° latitude; the ellipse widens towards the poles.
+2. Build the planet graded and ungraded from the same snapshot.
+3. Run `compare_elevation.py` against both planet services as the release
+   gate: these eight cities, plus the 20 cities of the 2026-11-24 check.
+
+The samples used the pinned Valhalla image under amd64 emulation on a
+laptop. One elevation-stage build segfaulted there and passed on a retry. The
+OSM data was dated Geofabrik extracts of 2026-11-24 (SHA-256 prefixes):
+
+- Argentina `692465776c6e`, used for Buenos Aires
+- Noord-Holland `bca771baeede`, used for Amsterdam
+- Texas `ed9e06b79ef6`, used for Houston
+- Berlin `a9de543c5348`
+- Portugal `4911a6ce24c4`, used for Lisbon
+- California `7dc35f58ac74`, used for San Francisco. NorCal cuts the state
+  boundary and leaves Valhalla's admin database empty.
+- Switzerland `6c9b5e4d8f28`, used for Zurich
+- New Zealand `ca1e09b6801d`, used for Wellington
 
 ## Pull, assemble, and install on Coolify
 

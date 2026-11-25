@@ -151,9 +151,12 @@ When the service is disabled, `available` is `false` and `provider` and
   shipped. The DEM is a surface model: it measures the tops of buildings and
   trees, so flat cities get steep grades that are not there, and the
   profiles that avoid hills ride around them. Everyday legs became up to 21%
-  longer in Buenos Aires, New York, Amsterdam, Tokyo and Houston. See
-  [Refresh and rollback](../map-platform/routing/refresh-runbook.md) before
-  grading a graph again.
+  longer in Buenos Aires, New York, Amsterdam, Tokyo and Houston. City
+  samples on 2026-11-25 kept flat-city routes unchanged when the same
+  Copernicus tiles were first passed through a 200 m morphological opening,
+  while hill avoidance still worked; the GEDTM30 bare-earth model did not
+  fix Buenos Aires. See [Refresh and rollback](../map-platform/routing/refresh-runbook.md#elevation-sources-on-city-samples)
+  before grading a graph again.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
 25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst
