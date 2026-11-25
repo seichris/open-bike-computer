@@ -1,17 +1,24 @@
 """Operator views of fulfillment jobs, cached OSM extracts, and generated packs."""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import logging
 from pathlib import Path
+from threading import Lock
 from urllib.error import HTTPError
 from urllib.request import Request
 
+from .artifacts import ZIP_STORED_FORMAT
+from .building_storage_admission import DEFAULT_BUILDING_STORAGE_RESERVE_BYTES
 from .jobs import MapJobService
 from .limits import ACTIVE_STATUSES
-from .models import JobStatus, MapJob, SourceRegion
-from .source_cache import SourceCache
+from .models import Bounds, JobStatus, MapJob, SourceRegion
+from .source_cache import SourceCache, SourceCacheError, source_file_revision
 from .source_http import open_geofabrik_url, validate_geofabrik_url
+
+logger = logging.getLogger(__name__)
 
 # Version a preset ID when changing its coverage or renderer profile.
 CITY_PRESETS = {
@@ -158,20 +165,125 @@ def _source_row(region_id: str, metadata: dict, region: SourceRegion | None) -> 
     }
 
 
+def _source_cache_path(cache: SourceCache, metadata: dict) -> Path | None:
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("path"), str):
+        return None
+    path = Path(metadata["path"])
+    if not path.name.endswith(".osm.pbf") or not source_file_revision(path):
+        return None
+    try:
+        source_root = cache.data_root.resolve() / "source-pbf"
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    return path if resolved.is_relative_to(source_root) else None
+
+
+class SourceOperationConflict(RuntimeError):
+    pass
+
+
+class SourceOperations:
+    def __init__(self, service: MapJobService, cache: SourceCache):
+        self.service = service
+        self.cache = cache
+        self.lock = Lock()
+        self.active: str | None = None
+        self.failed: dict[str, str] = {}
+
+    def status(self, source_id: str, revision: str | None) -> str | None:
+        with self.lock:
+            if self.active == source_id:
+                return "updating"
+            return "failed" if revision and self.failed.get(source_id) == revision else None
+
+    def _source(self, source_id: str, revision: str):
+        jobs, failures = self.service.store.list_with_failures()
+        if failures:
+            raise SourceOperationConflict("Map jobs could not be checked. Try again.")
+        if any(job.source_region.id == source_id and job.status in ACTIVE_STATUSES for job in jobs):
+            raise SourceOperationConflict("This extract is in use by a map build. Try again after it finishes.")
+        metadata = self.cache.metadata().get("sources", {}).get(source_id, {})
+        path = _source_cache_path(self.cache, metadata)
+        if path is None or revision != source_file_revision(path):
+            raise SourceOperationConflict("The cached extract changed. Reload and try again.")
+        regions = {region.id: region for region in self.service.source_index.regions}
+        regions.update({job.source_region.id: job.source_region for job in jobs})
+        region = regions.get(source_id)
+        return path, _source_row(source_id, metadata, region), region
+
+    def begin_update(self, source_id: str, revision: str) -> SourceRegion:
+        path, source, region = self._source(source_id, revision)
+        if source is None or _upstream_version(source)[0] != "newer":
+            raise SourceOperationConflict("A newer extract could not be confirmed. Reload and try again.")
+        if region is None:
+            region = SourceRegion(
+                id=source_id, provider="geofabrik", name=source["name"],
+                url=source["sourceUrl"], bounds=Bounds(-180, -90, 180, 90),
+            )
+        with self.lock:
+            if self.active is not None:
+                raise SourceOperationConflict("An extract is already updating. Try again when it finishes.")
+            if revision != source_file_revision(path):
+                raise SourceOperationConflict("The cached extract changed. Reload and try again.")
+            self.active = source_id
+            self.failed.pop(source_id, None)
+        return replace(region, url=source["sourceUrl"], local_path=str(path))
+
+    def refresh(self, region: SourceRegion, revision: str) -> None:
+        try:
+            self.cache.ensure(
+                region, force=True,
+                minimum_free_bytes=DEFAULT_BUILDING_STORAGE_RESERVE_BYTES,
+            )
+        except (SourceCacheError, OSError, ValueError):
+            logger.warning("Operator source update failed for %s", region.id, exc_info=True)
+            with self.lock:
+                self.failed[region.id] = revision
+        finally:
+            with self.lock:
+                self.active = None
+
+    def delete(self, source_id: str, revision: str) -> None:
+        _, source, _ = self._source(source_id, revision)
+        if source is None or _upstream_version(source)[0] not in {"newer", "unknown"}:
+            raise SourceOperationConflict("This extract's update status no longer permits deletion.")
+        with self.service.store.lock_job_creation(), self.lock:
+            if self.active == source_id:
+                raise SourceOperationConflict("Wait for this extract to finish updating.")
+            path, _, _ = self._source(source_id, revision)
+            if not self.cache.delete_cached_file(path, revision=revision):
+                raise SourceOperationConflict("The cached extract changed. Reload and try again.")
+            self.failed.pop(source_id, None)
+
+
+def operator_zip(job: MapJob):
+    if job.client_installation_id is not None or job.status != JobStatus.READY or not job.map_id:
+        return None
+    return next((artifact for artifact in job.artifacts if artifact.format == ZIP_STORED_FORMAT), None)
+
+
 def production_inventory(
     jobs: list[MapJob],
     cache: SourceCache,
     configured_regions: list[SourceRegion],
     *,
     check_upstream: bool = False,
+    source_operations: SourceOperations | None = None,
 ) -> dict:
     regions = {region.id: region for region in configured_regions}
     regions.update({job.source_region.id: job.source_region for job in jobs})
-    sources = [
-        row
-        for region_id, metadata in sorted(cache.metadata().get("sources", {}).items())
-        if (row := _source_row(region_id, metadata, regions.get(region_id))) is not None
-    ]
+    sources = []
+    for region_id, metadata in sorted(cache.metadata().get("sources", {}).items()):
+        row = _source_row(region_id, metadata, regions.get(region_id))
+        if row is None:
+            continue
+        path = _source_cache_path(cache, metadata)
+        row["revision"] = source_file_revision(path) if path is not None else None
+        row["operationStatus"] = (
+            source_operations.status(region_id, row["revision"]) if source_operations else None
+        )
+        sources.append(row)
     if check_upstream and sources:
         with ThreadPoolExecutor(max_workers=6) as pool:
             for source, (status, modified) in zip(sources, pool.map(_upstream_version, sources)):
@@ -182,10 +294,14 @@ def production_inventory(
 
     packs = {}
     for job in sorted(jobs, key=lambda job: job.finished_at or job.updated_at, reverse=True):
-        if job.status != JobStatus.READY or not job.map_id or job.map_id in packs:
+        if job.status != JobStatus.READY or not job.map_id:
+            continue
+        downloadable = operator_zip(job) is not None
+        if job.map_id in packs and (packs[job.map_id]["zipJobId"] or not downloadable):
             continue
         packs[job.map_id] = {
             "mapId": job.map_id,
+            "zipJobId": job.job_id if downloadable else None,
             "name": job.artifact_display_name,
             "sourceName": job.source_region.name,
             "bounds": job.geometry.bounds.to_list(),

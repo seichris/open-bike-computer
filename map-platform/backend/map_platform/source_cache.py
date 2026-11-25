@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +24,16 @@ from .osmfr_fallback import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def source_file_revision(path: Path) -> str | None:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+    return f"{metadata.st_ino:x}-{metadata.st_mtime_ns:x}-{metadata.st_size:x}"
 
 
 class SourceCacheError(RuntimeError):
@@ -542,6 +553,16 @@ class SourceCache:
             )
             self._verify_expected_checksum(region, cached.sha256)
             yield cached
+
+    def delete_cached_file(self, path: Path, *, revision: str) -> bool:
+        # Leave historical snapshot metadata intact. The current cache index
+        # excludes missing files, and the next download records the new bytes.
+        lock = path.with_suffix(path.suffix + ".lock")
+        with self._lock(lock, timeout_seconds=0):
+            if source_file_revision(path) != revision:
+                return False
+            path.unlink()
+            return True
 
     def metadata(self) -> dict[str, object]:
         if not self.metadata_path.exists():
