@@ -173,6 +173,71 @@ production now.
    VPS archive and development server probes pass. Refresh monthly or after
    a reviewed coverage change.
 
+## Compare elevation sources on city samples
+
+Judge an elevation source on small city graphs before grading a planet.
+[elevation-probes.json](elevation-probes.json) lists four flat cities
+(Buenos Aires, Amsterdam, Houston, Berlin) and four hilly ones (Lisbon,
+San Francisco, Zurich, Wellington), each with a box and four or five legs.
+The 2026-11-25 results and the recommendation are in
+[Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples).
+
+1. Download a dated Geofabrik extract that holds the whole city and its
+   state or province boundary (Valhalla keeps only country and state
+   polygons, so a cut state such as NorCal gives an empty admin database).
+   Record its SHA-256. Cut the city's box with `osmium extract -b
+   west,south,east,north --strategy complete_ways` and take
+   `osmium tags-filter "$region" r/boundary=administrative` as the admin input.
+   Box extracts fail `build_graph.py`'s check-refs, so build each sample by
+   calling `build_graph.valhalla_build(work, admin, roads, threads, elevation)`
+   directly. A city builds in 10 seconds to 2 minutes on a laptop under amd64
+   emulation; one build segfaulted in the elevation stage there and passed on
+   a retry.
+2. Write the elevation tiles for the city's one-degree cells.
+   `build_elevation.py --bounds W S E N` writes the production Copernicus
+   tiles for those cells. [sample_elevation.py](sample_elevation.py) writes
+   candidates: `cog` resamples a global Cloud Optimized GeoTIFF such as
+   GEDTM30, and `opening --radius` applies a grey-scale morphological
+   opening to tiles that `build_elevation.py` or `cog` wrote. Its manifests
+   always record `bounds`, so `build_graph.py` accepts them only for samples.
+
+   ```sh
+   python sample_elevation.py cog --source-id gedtm30-v1.2 --bounds -59 -35 -58 -34 \
+     --url https://s3.opengeohub.org/global/dtm/v1.2/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif \
+     --out "$scratch/dem/buenos-aires/gedtm30"
+   python sample_elevation.py opening --radius 200 --bounds -59 -35 -58 -34 \
+     --input "$scratch/dem/buenos-aires/copernicus" --out "$scratch/dem/buenos-aires/opening-200"
+   ```
+
+3. Build each city once without elevation and once per source. Serve every
+   archive from the pinned image on its own port, and mount each graded
+   graph's tiles too so that `/height` works:
+
+   ```sh
+   docker run -d --rm --platform linux/amd64 -p 127.0.0.1:18101:8002 \
+     -v "$work/copernicus/valhalla_tiles.tar:/graph/valhalla_tiles.tar:ro" \
+     -v "$scratch/dem/buenos-aires/copernicus:/elevation:ro" --entrypoint /bin/bash "$valhalla_image" -ec '
+       valhalla_build_config --mjolnir-tile-extract /graph/valhalla_tiles.tar \
+         --additional-data-elevation /elevation > /tmp/valhalla.json
+       exec valhalla_service /tmp/valhalla.json 2'
+   ```
+
+4. Run [compare_elevation.py](compare_elevation.py) once per city, then
+   summarise. It routes every leg with the backend's own Road and Everyday
+   bodies, compares lengths with the ungraded routes, reads the share of
+   route length on 6%+ grades back with `/trace_attributes`, and in hilly
+   cities flips `use_hills` between 0 and 1. `summary` exits non-zero when
+   a source misses a target. The same commands work against two
+   planet-wide services before a planet release.
+
+   ```sh
+   tools/dev-env --map-backend python map-platform/routing/compare_elevation.py run \
+     --city "Buenos Aires" --ungraded http://127.0.0.1:18100 \
+     --graded copernicus=http://127.0.0.1:18101 --graded opening-200=http://127.0.0.1:18104 \
+     --out "$scratch/results/buenos-aires.json"
+   tools/dev-env --map-backend python map-platform/routing/compare_elevation.py summary "$scratch"/results/*.json
+   ```
+
 ## Focused checks
 
 ```sh

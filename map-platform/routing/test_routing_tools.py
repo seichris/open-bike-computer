@@ -18,8 +18,10 @@ from build_graph import (
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
 import build_elevation
+import compare_elevation
 import probe_graph
 import probe_profiles
+import sample_elevation
 
 
 def write_archive(path, offset=1536):
@@ -491,6 +493,255 @@ class ProfileProbeTests(unittest.TestCase):
             self.assertEqual(set(fixture) - {"name", "origin", "destination", "ready"}, set())
             self.assertEqual(len(fixture["origin"]), 2)
             self.assertEqual(len(fixture["destination"]), 2)
+
+
+UNGRADED = "http://ungraded:8002"
+
+
+class FakeGradedValhalla:
+    """/route, /trace_attributes and /height of an ungraded and a graded graph.
+
+    A graded graph can add a detour to every route (`detour`) and report steep
+    edges everywhere (`steep`). In the hilly city (south of 50 degrees) its
+    routes are steep, except that with use_hills 0 it takes a flatter route
+    through an extra point (`avoids_hills`). /height gives that route 10 m of
+    climb and every other route 30 m.
+    """
+
+    def __init__(self, *, detour=0.0, steep=False, avoids_hills=True, ungraded_avoids_hills=False, broken=()):
+        self.detour, self.steep = detour, steep
+        self.avoids_hills, self.ungraded_avoids_hills = avoids_hills, ungraded_avoids_hills
+        self.broken = broken  # paths the graded graph answers with HTTP 400
+        self.flatter = set()
+
+    def __call__(self, origin, path, body):
+        graded = origin != UNGRADED
+        if graded and path in self.broken:
+            return 400, {"error_code": 171}
+        if path == "/route":
+            start, end = body["locations"]
+            points = [(round(start["lat"] * 1e6), round(start["lon"] * 1e6)),
+                      (round(end["lat"] * 1e6), round(end["lon"] * 1e6))]
+            length = 3.0
+            if graded and self.detour:
+                points.insert(1, (points[0][0] + 500, points[0][1] - 500))
+                length *= 1 + self.detour
+            avoids = self.avoids_hills if graded else self.ungraded_avoids_hills
+            if avoids and body["costing_options"]["bicycle"]["use_hills"] == 0.0:
+                points.insert(1, (points[0][0] - 700, points[0][1] + 700))
+                length += 0.4
+                self.flatter.add(encode_polyline6(points))
+            return 200, {"trip": {"summary": {"length": length, "time": 600},
+                                  "legs": [{"shape": encode_polyline6(points)}]}}
+        if path == "/trace_attributes":
+            shape = body["encoded_polyline"]
+            hilly = compare_elevation.decode_polyline6(shape)[0][0] < 50 and shape not in self.flatter
+            grade = 8 if graded and (self.steep or hilly) else 2
+            return 200, {"edges": [
+                {"length": 1.0, "max_upward_grade": grade, "max_downward_grade": -1, "weighted_grade": 1.0},
+                {"length": 3.0, "max_upward_grade": 1, "max_downward_grade": -2, "weighted_grade": -1.0},
+            ]}
+        if path == "/height":
+            shape = encode_polyline6([(round(p["lat"] * 1e6), round(p["lon"] * 1e6)) for p in body["shape"]])
+            return 200, {"height": [0, 4, 10] if shape in self.flatter else [0, 2, 1, 30]}
+        return 404, {"error_code": 106}
+
+
+class ElevationComparisonTests(unittest.TestCase):
+    CITIES = [
+        {"city": "Flatville", "terrain": "flat", "bbox": [4.8, 52.3, 4.95, 52.4],
+         "legs": [{"name": "Across", "origin": [52.3791, 4.9003], "destination": [52.3580, 4.8686]}]},
+        {"city": "Hilltown", "terrain": "hilly", "bbox": [8.5, 47.3, 8.6, 47.4],
+         "legs": [{"name": "Up", "origin": [47.3779, 8.5403], "destination": [47.3700, 8.5170]}]},
+    ]
+
+    def compare(self, **fake):
+        valhalla = FakeGradedValhalla(**fake)
+        report = compare_elevation.run(valhalla, self.CITIES, UNGRADED, {"candidate": "http://graded:8002"})
+        return report, compare_elevation.summarize([report])
+
+    def test_route_bodies_are_the_backends_with_only_use_hills_changed(self):
+        from map_platform.bicycle_route_service import PROFILES
+
+        leg = self.CITIES[0]["legs"][0]
+        for profile in ("road", "everyday"):
+            body = compare_elevation.route_body(leg, profile)
+            self.assertEqual(body["costing"], "bicycle")
+            self.assertEqual(body["costing_options"]["bicycle"], dict(PROFILES[profile]))
+            self.assertEqual([body["locations"][0]["lat"], body["locations"][1]["lon"]], [52.3791, 4.8686])
+        hills = compare_elevation.route_body(leg, "everyday", 1.0)
+        hills["costing_options"]["bicycle"]["use_hills"] = PROFILES["everyday"]["use_hills"]
+        self.assertEqual(hills, compare_elevation.route_body(leg, "everyday"))
+
+    def test_steep_share_counts_edges_steep_either_way_by_length(self):
+        edges = [{"length": 1.0, "max_upward_grade": 6, "max_downward_grade": 0, "weighted_grade": 3.0},
+                 {"length": 2.0, "max_upward_grade": 1, "max_downward_grade": -7, "weighted_grade": -1.5},
+                 {"length": 1.0, "max_upward_grade": 5, "max_downward_grade": -5, "weighted_grade": 0.0}]
+        self.assertEqual(compare_elevation.steep_share(edges), {"share": 0.75, "meanAbsWeightedGrade": 1.5})
+        self.assertEqual(compare_elevation.steep_share([])["share"], None)
+
+    def test_polyline_decoding_matches_valhalla_precision(self):
+        points = [(52_379_100, 4_900_300), (52_358_000, 4_868_600), (-41_285_500, 174_776_200)]
+        self.assertEqual(compare_elevation.decode_polyline6(encode_polyline6(points)),
+                         [(52.3791, 4.9003), (52.358, 4.8686), (-41.2855, 174.7762)])
+
+    def test_a_source_that_keeps_flat_routes_and_avoids_hills_meets_the_targets(self):
+        report, (table, failures) = self.compare()
+        self.assertEqual(failures, {"candidate": []})
+        flat = report["rows"][0]["profiles"]["everyday"]["sources"]["candidate"]
+        self.assertEqual((flat["lengthChange"], flat["sameRoute"], flat["grades"]["share"]), (0.0, True, 0.0))
+        hills = report["rows"][1]["hills"]
+        self.assertTrue(hills["candidate"]["differs"])
+        self.assertEqual(hills["candidate"]["measures"], {"candidate": {"steepShare": [0.0, 0.25], "climb": [10.0, 30.0]}})
+        self.assertEqual((hills["ungraded"]["differs"], hills["ungraded"]["measures"]), (False, {}))
+        hilltown = next(entry for entry in table if entry["city"] == "Hilltown")
+        self.assertEqual((hilltown["hillLegsChanged"], hilltown["hillLegsWorse"], hilltown["medianClimbSaved"],
+                          hilltown["medianSteepShareSaved"]), (1, 0, 20.0, 0.25))
+        self.assertIn("| candidate | Hilltown | 2 |", compare_elevation.format_table(table))
+
+    def test_detours_and_fake_hills_in_flat_cities_miss_the_targets(self):
+        _, (_, failures) = self.compare(detour=0.1, steep=True)
+        # Where every street reads as steep, avoiding hills cannot find a gentler route either.
+        self.assertEqual(failures["candidate"], [
+            "flat median length change +10.0%", "a flat leg is +10.0% longer", "flat median 6%+ share 25%",
+            "avoiding hills did not lower the 6%+ share (median +0 pts on the mean of all heights)"])
+
+    def test_a_source_that_ignores_hills_misses_the_targets(self):
+        _, (_, failures) = self.compare(avoids_hills=False)
+        self.assertEqual(failures["candidate"], ["use_hills changed 0 of 1 hilly legs"])
+
+    def test_hill_avoidance_is_judged_on_the_referee_heights(self):
+        def report(name, measures):
+            hills = {"differs": True, "km": [3.4, 3.0], "measures": measures}
+            row = {"city": "Hilltown", "terrain": "hilly", "leg": "Up", "profiles": {},
+                   "hills": {"ungraded": {"differs": False, "measures": {}}, name: hills}}
+            return {"schema": "bicino-elevation-comparison-v1", "sources": [name], "rows": [row]}
+
+        gentler = {"steepShare": [0.1, 0.3], "climb": [70.0, 60.0]}  # climbs more, but gently
+        steeper = {"steepShare": [0.35, 0.3], "climb": [40.0, 60.0]}
+        candidate = report("candidate", {"candidate": gentler, "bare": steeper})
+        table, failures = compare_elevation.summarize([candidate])
+        self.assertEqual(failures, {"candidate": []})  # the mean over both graphs is still gentler
+        self.assertEqual((table[0]["medianClimbSaved"], table[0]["medianSteepShareSaved"]), (5.0, 0.075))
+        table, failures = compare_elevation.summarize([candidate], referee="bare")
+        self.assertEqual(failures, {"candidate": ["avoiding hills did not lower the 6%+ share (median -5 pts on bare)"]})
+        self.assertEqual(table[0]["hillLegsWorse"], 1)
+        _, failures = compare_elevation.summarize([report("candidate", {"candidate": steeper})])
+        self.assertEqual(len(failures["candidate"]), 1)
+
+    def test_failed_measurements_are_missed_targets(self):
+        _, (table, failures) = self.compare(broken=("/route",))
+        self.assertEqual(failures["candidate"], ["4 routes failed on the graded or ungraded graph",
+                                                 "1 hilly legs failed to route", "use_hills changed 0 of 1 hilly legs"])
+        self.assertEqual([entry["errors"] for entry in table], [2, 3])
+        _, (_, failures) = self.compare(broken=("/trace_attributes",))
+        self.assertEqual(failures["candidate"][0], "8 grade lookups failed")
+        self.assertIn("1 changed hilly legs have no 6%+ share on any graded graph", failures["candidate"])
+
+    def test_hill_avoidance_is_judged_without_height(self):
+        report, (table, failures) = self.compare(broken=("/height",))
+        self.assertEqual(failures, {"candidate": []})
+        self.assertEqual(report["rows"][1]["hills"]["candidate"]["measures"]["candidate"]["climb"], [None, None])
+        hilltown = next(entry for entry in table if entry["city"] == "Hilltown")
+        self.assertEqual((hilltown["medianSteepShareSaved"], hilltown["medianClimbSaved"]), (0.25, None))
+
+    def test_climb_ignores_rises_below_the_hysteresis(self):
+        self.assertEqual(compare_elevation.total_climb([10, 12, 10, 12, 10, 12]), 0.0)
+        self.assertEqual(compare_elevation.total_climb([10, 11, 12, 13, 14, 9, 15]), 9.0)  # 3 m to 13, 6 m from 9
+        self.assertEqual(compare_elevation.total_climb([10, 12, 10, 12], hysteresis=1), 4.0)
+
+    def test_use_hills_changing_an_ungraded_route_marks_the_comparison_broken(self):
+        _, (_, failures) = self.compare(ungraded_avoids_hills=True)
+        self.assertEqual(failures["ungraded"], ["use_hills changed 1 hilly legs without elevation"])
+
+    def test_graded_origins_need_unique_names(self):
+        self.assertEqual(compare_elevation.parse_graded(["a=http://x:1", "b=http://y:2"]),
+                         {"a": "http://x:1", "b": "http://y:2"})
+        for bad in (["a"], ["a=ftp://x"], ["a=http://x", "a=http://y"], ["ungraded=http://x"]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                compare_elevation.parse_graded(bad)
+
+    def test_checked_in_cities_are_well_formed(self):
+        cities = json.loads(Path(compare_elevation.__file__).with_name("elevation-probes.json").read_text())
+        self.assertEqual({city["terrain"] for city in cities}, {"flat", "hilly"})
+        for city in cities:
+            self.assertEqual(set(city), {"city", "terrain", "bbox", "legs"})
+            west, south, east, north = city["bbox"]
+            self.assertTrue(west < east and south < north, city["city"])
+            self.assertGreaterEqual(len(city["legs"]), 3, city["city"])
+            for leg in city["legs"]:
+                for latitude, longitude in (leg["origin"], leg["destination"]):
+                    self.assertTrue(west < longitude < east and south < latitude < north, leg["name"])
+                compare_elevation.route_body(leg, "road")
+
+
+class SampleElevationTests(unittest.TestCase):
+    def test_opening_removes_narrow_bumps_and_keeps_broad_slopes(self):
+        import numpy as np
+
+        rows = np.mgrid[0:60, 0:60][0]
+        slope = (rows * 1.5).astype("float32")
+        heights = slope.copy()
+        heights[30:33, 30:33] += 20
+        heights[10, 50] = np.nan
+        opened = sample_elevation.open_heights(heights, 100, 47)
+        inside = (slice(8, 52), slice(8, 52))
+        residual = (opened - slope)[inside]
+        # The 20 m bump drops to at most one post of the slope; the ramp elsewhere is kept.
+        self.assertLessEqual(float(np.nanmax(np.abs(residual))), 1.5)
+        self.assertEqual(int(np.count_nonzero(residual[np.isfinite(residual)])), 9)
+        self.assertTrue(np.isnan(opened[10, 50]))
+        self.assertEqual(sample_elevation.footprint(100, 60).shape, (7, 13))
+
+    def test_mosaic_and_cut_share_border_posts(self):
+        import numpy as np
+
+        cells = {(8, 47): 1.0, (9, 47): 2.0, (8, 48): 3.0}
+        array, west, north = sample_elevation.mosaic(
+            list(cells), lambda cell: np.full((build_elevation.POSTS,) * 2, cells[cell], dtype="float32"))
+        self.assertEqual((array.shape, west, north), ((7201, 7201), 8, 49))
+        for cell, value in cells.items():
+            piece = sample_elevation.cut(array, west, north, cell)
+            self.assertEqual(piece.shape, (build_elevation.POSTS,) * 2)
+            self.assertEqual(float(piece[1800, 1800]), value)
+        empty = sample_elevation.cut(array, west, north, (9, 48))
+        # Only its west column and south row, shared with built neighbours, have heights.
+        self.assertTrue(np.isnan(empty[:-1, 1:]).all())
+        self.assertEqual((float(empty[0, 0]), float(empty[-1, -1])), (3.0, 2.0))
+
+    def test_cog_pixels_centred_on_whole_arcseconds_land_on_posts_unchanged(self):
+        import numpy as np
+        import rasterio
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        step = build_elevation.STEP
+        # Like GEDTM30: pixel edges half a pixel off whole arc-seconds.
+        transform = Affine(step, 0, 7.99875, 0, -step, 48.00125)
+        size = 3609
+        pixels = np.random.default_rng(1).uniform(400, 500, (size, size)).astype("float32")
+        pixels[100, 200] = -3.4e38
+        with MemoryFile() as memory:
+            with memory.open(driver="GTiff", width=size, height=size, count=1, dtype="float32",
+                             crs="EPSG:4326", transform=transform, nodata=-3.4e38) as dataset:
+                dataset.write(pixels, 1)
+            with memory.open() as dataset, rasterio.Env():
+                posts = sample_elevation.cog_cell(dataset, (8, 47))
+        offset = 4  # 0.00125 degrees = 4.5 pixels, so post 0 is pixel 4
+        expected = pixels[offset:offset + 3601, offset:offset + 3601].copy()
+        expected[96, 196] = np.nan  # the no-data pixel stays a single no-data post
+        np.testing.assert_allclose(posts, expected, atol=1e-3)
+
+    def test_sample_manifests_are_only_accepted_for_sample_builds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            entry = {"cell": "N47E008", "hgtSha256": "ab", "fileBytes": 3, "noDataPosts": 0}
+            sample_elevation.write_manifest(out, {"name": "cog"}, [{"id": "gedtm30-v1.2"}], [entry], [8, 47, 9, 48])
+            self.assertEqual(elevation_identity(out, sample=True)["sources"], ["gedtm30-v1.2"])
+            with self.assertRaisesRegex(ValueError, "part of the source"):
+                elevation_identity(out)
+        with self.assertRaises(ValueError):
+            sample_elevation.cells_in([9, 47, 8, 48])
 
 
 if __name__ == "__main__":

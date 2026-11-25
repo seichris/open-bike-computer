@@ -1,0 +1,92 @@
+[
+  {
+    "city": "Buenos Aires",
+    "terrain": "flat",
+    "bbox": [-58.53, -34.70, -58.33, -34.53],
+    "legs": [
+      {"name": "Plaza de Mayo to Palermo", "origin": [-34.6083, -58.3712], "destination": [-34.5771, -58.4206]},
+      {"name": "Retiro to Caballito", "origin": [-34.5916, -58.3747], "destination": [-34.6187, -58.4400]},
+      {"name": "Belgrano to San Telmo", "origin": [-34.5627, -58.4565], "destination": [-34.6215, -58.3731]},
+      {"name": "La Boca to Recoleta", "origin": [-34.6345, -58.3631], "destination": [-34.5875, -58.3974]}
+    ]
+  },
+  {
+    "city": "Amsterdam",
+    "terrain": "flat",
+    "bbox": [4.75, 52.30, 4.99, 52.45],
+    "legs": [
+      {"name": "Centraal to Vondelpark", "origin": [52.3791, 4.9003], "destination": [52.3580, 4.8686]},
+      {"name": "Westerpark to Oost", "origin": [52.3863, 4.8756], "destination": [52.3600, 4.9270]},
+      {"name": "Noord to Zuid", "origin": [52.3990, 4.9180], "destination": [52.3380, 4.8720]},
+      {"name": "Sloterdijk to Amstel", "origin": [52.3889, 4.8380], "destination": [52.3466, 4.9177]},
+      {"name": "Olympic Stadium through the Amsterdamse Bos", "origin": [52.3434, 4.8540], "destination": [52.3120, 4.8290]}
+    ]
+  },
+  {
+    "city": "Houston",
+    "terrain": "flat",
+    "bbox": [-95.55, 29.65, -95.25, 29.85],
+    "legs": [
+      {"name": "Downtown to Rice", "origin": [29.7604, -95.3698], "destination": [29.7174, -95.4018]},
+      {"name": "Montrose to the Heights", "origin": [29.7440, -95.3900], "destination": [29.7980, -95.3980]},
+      {"name": "Midtown to University of Houston", "origin": [29.7400, -95.3770], "destination": [29.7199, -95.3422]},
+      {"name": "Galleria to Downtown", "origin": [29.7390, -95.4630], "destination": [29.7604, -95.3698]},
+      {"name": "Rice Military through Memorial Park", "origin": [29.7680, -95.4080], "destination": [29.7610, -95.4520]}
+    ]
+  },
+  {
+    "city": "Berlin",
+    "terrain": "flat",
+    "bbox": [13.20, 52.42, 13.55, 52.60],
+    "legs": [
+      {"name": "Alexanderplatz to Kreuzberg", "origin": [52.5219, 13.4132], "destination": [52.4980, 13.4030]},
+      {"name": "Mitte to Charlottenburg", "origin": [52.5200, 13.3880], "destination": [52.5050, 13.3040]},
+      {"name": "Tempelhof to Prenzlauer Berg", "origin": [52.4730, 13.4030], "destination": [52.5390, 13.4240]},
+      {"name": "Friedrichshain to Schoeneberg", "origin": [52.5150, 13.4540], "destination": [52.4840, 13.3530]}
+    ]
+  },
+  {
+    "city": "Lisbon",
+    "terrain": "hilly",
+    "bbox": [-9.25, 38.68, -9.08, 38.80],
+    "legs": [
+      {"name": "Cais do Sodre to Graca", "origin": [38.7062, -9.1447], "destination": [38.7166, -9.1316]},
+      {"name": "Cais do Sodre to Castelo", "origin": [38.7061, -9.1446], "destination": [38.7139, -9.1335]},
+      {"name": "Baixa to Estrela", "origin": [38.7104, -9.1386], "destination": [38.7139, -9.1600]},
+      {"name": "Rossio to Campo de Ourique", "origin": [38.7138, -9.1394], "destination": [38.7186, -9.1660]}
+    ]
+  },
+  {
+    "city": "San Francisco",
+    "terrain": "hilly",
+    "bbox": [-122.52, 37.70, -122.36, 37.83],
+    "legs": [
+      {"name": "Ferry Building to Twin Peaks", "origin": [37.7955, -122.3937], "destination": [37.7544, -122.4477]},
+      {"name": "The Wiggle", "origin": [37.7694, -122.4290], "destination": [37.7745, -122.4378]},
+      {"name": "Ferry Building to Castro", "origin": [37.7955, -122.3937], "destination": [37.7609, -122.4350]},
+      {"name": "North Beach to Pacific Heights", "origin": [37.8003, -122.4100], "destination": [37.7925, -122.4382]}
+    ]
+  },
+  {
+    "city": "Zurich",
+    "terrain": "hilly",
+    "bbox": [8.44, 47.32, 8.62, 47.44],
+    "legs": [
+      {"name": "Hauptbahnhof to Wiedikon", "origin": [47.3779, 8.5403], "destination": [47.3700, 8.5170]},
+      {"name": "Hauptbahnhof to ETH Hoenggerberg", "origin": [47.3779, 8.5403], "destination": [47.4083, 8.5077]},
+      {"name": "Bellevue to Fluntern", "origin": [47.3667, 8.5450], "destination": [47.3800, 8.5740]},
+      {"name": "Central to Oerlikon", "origin": [47.3765, 8.5440], "destination": [47.4113, 8.5440]}
+    ]
+  },
+  {
+    "city": "Wellington",
+    "terrain": "hilly",
+    "bbox": [174.70, -41.35, 174.85, -41.22],
+    "legs": [
+      {"name": "CBD to Kelburn", "origin": [-41.2855, 174.7762], "destination": [-41.2869, 174.7680]},
+      {"name": "Te Aro to Brooklyn", "origin": [-41.2940, 174.7760], "destination": [-41.3060, 174.7630]},
+      {"name": "Railway station to Hataitai", "origin": [-41.2790, 174.7810], "destination": [-41.3000, 174.7950]},
+      {"name": "Thorndon to Karori", "origin": [-41.2760, 174.7770], "destination": [-41.2850, 174.7380]}
+    ]
+  }
+]
