@@ -559,8 +559,8 @@ def file_identity(path):
     return {"name": path.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def current_receipt(out, cell, chosen):
-    """The cell's receipt if it was built from the source the policy picks now."""
+def _sourced_receipt(out, cell, chosen):
+    """The cell's receipt if its tile came from the source the policy picks now."""
     path = out / "receipts" / f"{hgt_name(*cell)}.json"
     if not path.exists():
         return None
@@ -571,9 +571,19 @@ def current_receipt(out, cell, chosen):
     return receipt
 
 
+def current_receipt(out, cell, chosen):
+    """The cell's raw receipt if it was built from the source the policy picks now.
+
+    An opened tile's receipt names the same source, but its `method` keeps
+    it from ever counting as a raw tile.
+    """
+    receipt = _sourced_receipt(out, cell, chosen)
+    return receipt if receipt is not None and receipt.get("method") is None else None
+
+
 def current_opened_receipt(out, cell, chosen, opening):
     """The opened cell's receipt if it used this method and the raw tiles there are now."""
-    receipt = current_receipt(out, cell, chosen)
+    receipt = _sourced_receipt(out, cell, chosen)
     if receipt is None or receipt.get("method") != opening.method():
         return None
     if receipt.get("inputTiles") != opening_inputs(cell, chosen, opening.raw):

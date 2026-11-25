@@ -461,6 +461,28 @@ class ElevationOpeningTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "do not match"):
                 build_elevation.open_cell((8, 47), chosen, root / "out", opening)
 
+    def test_opened_tiles_are_never_taken_for_raw_ones(self):
+        class Policy:
+            version = 2
+            sources = [type("S", (), {"id": "glo30", "index_sha256": "i", "terms_url": "t", "attribution_url": "a"})]
+
+        cells = [(x, y) for x in range(7, 10) for y in range(46, 49)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            opening = self.open_in_order(root / "raw", root / "out", chosen, [(8, 47)])
+            self.assertIsNotNone(build_elevation.current_opened_receipt(root / "out", (8, 47), chosen, opening))
+            # A raw run over the opened directory builds the cell again instead of labelling it raw.
+            self.assertIsNone(build_elevation.current_receipt(root / "out", (8, 47), chosen))
+            policy_path = root / "policy.json"
+            policy_path.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "no receipt"):
+                build_elevation.write_manifest(root / "out", policy_path, Policy, chosen, [(8, 47)])
+            # An opened directory passed as --raw has no raw tiles to open.
+            self.assertIsNone(build_elevation.opening_inputs((8, 47), chosen, root / "out"))
+            with self.assertRaisesRegex(ValueError, "no current raw tile"):
+                build_elevation.open_cell((8, 47), chosen, root / "again", build_elevation.Opening(100.0, root / "out"))
+
     def test_manifest_records_the_opening_and_the_graph_manifest_carries_it(self):
         class Policy:
             version = 2

@@ -229,7 +229,8 @@ The 2026-11-25 results and the recommendation are in
 
 Cities marked `planetOnly` hold the legs of the 2026-11-24 planet check that
 the sample cities lack: Copenhagen, Paris, London, Munich, New York, Tokyo
-and Dubai (flat) and Stuttgart (hilly), with one or two legs each. They were
+and Dubai (flat) and Stuttgart (hilly), with one or two legs each. With them
+the file holds all 27 legs of that check. They were
 never built as samples, so they run only against planet services. Together
 with the sample cities they are the release gate for a graded planet: serve
 the graded and the ungraded planet from the same snapshot and run every city

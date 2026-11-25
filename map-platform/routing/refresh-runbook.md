@@ -203,9 +203,11 @@ approval. **Chris approved it on 2026-11-25.** Before building:
 2. Build the planet graded and ungraded from the same snapshot.
 3. Run `compare_elevation.py` against both planet services, with no
    `--city`, as the release gate. `elevation-probes.json` holds these eight
-   cities and, marked `planetOnly`, the legs of the 2026-11-24 planet check
-   that they lack: Copenhagen, Paris, London, Munich, New York, Tokyo, Dubai
-   and Stuttgart (16 cities, 45 legs).
+   cities and, marked `planetOnly`, the cities of the 2026-11-24 planet
+   check that they lack: Copenhagen, Paris, London, Munich, New York, Tokyo,
+   Dubai and Stuttgart (16 cities, 45 legs). That check had 27 legs over
+   the same 16 cities: 20 city legs and 7 hill legs. All 27 are in the file
+   with the same coordinates, some under other names.
 
 The samples used the pinned Valhalla image under amd64 emulation on a
 laptop. One elevation-stage build segfaulted there and passed on a retry. The
