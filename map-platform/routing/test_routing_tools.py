@@ -508,13 +508,16 @@ class FakeGradedValhalla:
     climb and every other route 30 m.
     """
 
-    def __init__(self, *, detour=0.0, steep=False, avoids_hills=True, ungraded_avoids_hills=False):
+    def __init__(self, *, detour=0.0, steep=False, avoids_hills=True, ungraded_avoids_hills=False, broken=()):
         self.detour, self.steep = detour, steep
         self.avoids_hills, self.ungraded_avoids_hills = avoids_hills, ungraded_avoids_hills
+        self.broken = broken  # paths the graded graph answers with HTTP 400
         self.flatter = set()
 
     def __call__(self, origin, path, body):
         graded = origin != UNGRADED
+        if graded and path in self.broken:
+            return 400, {"error_code": 171}
         if path == "/route":
             start, end = body["locations"]
             points = [(round(start["lat"] * 1e6), round(start["lon"] * 1e6)),
@@ -625,6 +628,22 @@ class ElevationComparisonTests(unittest.TestCase):
         self.assertEqual(table[0]["hillLegsWorse"], 1)
         _, failures = compare_elevation.summarize([report("candidate", {"candidate": steeper})])
         self.assertEqual(len(failures["candidate"]), 1)
+
+    def test_failed_measurements_are_missed_targets(self):
+        _, (table, failures) = self.compare(broken=("/route",))
+        self.assertEqual(failures["candidate"], ["4 routes failed on the graded or ungraded graph",
+                                                 "1 hilly legs failed to route", "use_hills changed 0 of 1 hilly legs"])
+        self.assertEqual([entry["errors"] for entry in table], [2, 3])
+        _, (_, failures) = self.compare(broken=("/trace_attributes",))
+        self.assertEqual(failures["candidate"][0], "8 grade lookups failed")
+        self.assertIn("1 changed hilly legs have no 6%+ share on any graded graph", failures["candidate"])
+
+    def test_hill_avoidance_is_judged_without_height(self):
+        report, (table, failures) = self.compare(broken=("/height",))
+        self.assertEqual(failures, {"candidate": []})
+        self.assertEqual(report["rows"][1]["hills"]["candidate"]["measures"]["candidate"]["climb"], [None, None])
+        hilltown = next(entry for entry in table if entry["city"] == "Hilltown")
+        self.assertEqual((hilltown["medianSteepShareSaved"], hilltown["medianClimbSaved"]), (0.25, None))
 
     def test_climb_ignores_rises_below_the_hysteresis(self):
         self.assertEqual(compare_elevation.total_climb([10, 12, 10, 12, 10, 12]), 0.0)

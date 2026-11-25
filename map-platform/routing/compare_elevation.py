@@ -38,7 +38,10 @@ city, and fails when a source misses the targets:
   the legs that change, the hill-avoiding route has less of its length on
   6%+ grades at the median. The table also counts the legs where it has
   more than 2 points more; on 2026-11-25 every source, Copernicus included,
-  had one or two such legs out of 16.
+  had one or two such legs out of 16;
+- every measurement: a route, ``/trace_attributes`` lookup or changed hilly
+  leg that could not be measured is a missed target, so a failing service
+  cannot hide a detour.
 
 Run it from the map-backend environment against private Valhalla services that
 serve each graph and, for graded graphs, its elevation tiles (for /height):
@@ -256,13 +259,15 @@ def hill_effect(hills: dict, judges: list[str] | None, targets: dict = TARGETS) 
     Averaged over the heights of `judges`, or of every graded graph when None.
     """
     measures = hills.get("measures", {})
-    usable = [measures[judge] for judge in (judges or measures) if judge in measures
-              and None not in measures[judge]["climb"] + measures[judge]["steepShare"]]
-    if not hills.get("differs") or not usable:
+    chosen = [measures[judge] for judge in (judges or measures) if judge in measures]
+    steep = [m["steepShare"] for m in chosen if None not in m["steepShare"]]
+    if not hills.get("differs") or not steep:
         return None
-    climb_saved = statistics.mean(m["climb"][1] - m["climb"][0] for m in usable)
-    steep_saved = statistics.mean(m["steepShare"][1] - m["steepShare"][0] for m in usable)
-    return {"climbSaved": round(climb_saved, 1), "steepShareSaved": round(steep_saved, 4),
+    # Climb needs /height; the judged 6%+ share does not.
+    climbs = [m["climb"] for m in chosen if None not in m["climb"]]
+    steep_saved = statistics.mean(after - before for before, after in steep)
+    climb_saved = round(statistics.mean(after - before for before, after in climbs), 1) if climbs else None
+    return {"climbSaved": climb_saved, "steepShareSaved": round(steep_saved, 4),
             "worse": steep_saved < -targets["steepShareTolerance"]}
 
 
@@ -279,7 +284,7 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
     for source in sources:
         missed = []
         pooled: dict[str, list[float]] = {"flatChange": [], "flatShare": []}
-        changed = hilly = 0
+        changed = hilly = route_errors = trace_errors = hill_errors = unmeasured = 0
         steep_saved: list[float] = []
         for city in dict.fromkeys(row["city"] for row in rows):
             city_rows = [row for row in rows if row["city"] == city]
@@ -291,12 +296,16 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
                         continue
                     if result.get("lengthChange") is None:
                         errors += 1
+                        route_errors += 1
                         continue
                     changes.append(result["lengthChange"])
-                    if result["grades"].get("share") is not None:
-                        shares.append(result["grades"]["share"])
-                    if (result.get("ungradedRouteGrades") or {}).get("share") is not None:
-                        base_shares.append(result["ungradedRouteGrades"]["share"])
+                    for key, values in (("grades", shares), ("ungradedRouteGrades", base_shares)):
+                        share = (result.get(key) or {}).get("share")
+                        if share is None:
+                            errors += 1
+                            trace_errors += 1
+                        else:
+                            values.append(share)
             entry = {"source": source, "city": city, "terrain": city_rows[0]["terrain"], "routes": len(changes),
                      "errors": errors, "medianLengthChange": _median(changes),
                      "maximumLengthChange": max(changes) if changes else None,
@@ -307,16 +316,29 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
             hills = [row["hills"][source] for row in city_rows if source in row.get("hills", {})]
             if hills:
                 effects = [hill_effect(h, [referee] if referee else None, targets) for h in hills]
-                effects = [effect for effect in effects if effect]
                 city_changed = sum(1 for h in hills if h.get("differs"))
+                unmeasured += sum(1 for h, e in zip(hills, effects) if h.get("differs") and e is None)
+                hill_errors += sum(1 for h in hills if h.get("error"))
+                entry["errors"] += sum(1 for h in hills if h.get("error"))
+                effects = [effect for effect in effects if effect]
                 entry.update({"hillLegs": len(hills), "hillLegsChanged": city_changed,
-                              "medianClimbSaved": _median([e["climbSaved"] for e in effects]),
+                              "medianClimbSaved": _median([e["climbSaved"] for e in effects
+                                                           if e["climbSaved"] is not None]),
                               "medianSteepShareSaved": _median([e["steepShareSaved"] for e in effects]),
                               "hillLegsWorse": sum(e["worse"] for e in effects)})
                 hilly += len(hills)
                 changed += city_changed
                 steep_saved += [e["steepShareSaved"] for e in effects]
             table.append(entry)
+        if route_errors:
+            missed.append(f"{route_errors} routes failed on the graded or ungraded graph")
+        if trace_errors:
+            missed.append(f"{trace_errors} grade lookups failed")
+        if hill_errors:
+            missed.append(f"{hill_errors} hilly legs failed to route")
+        if unmeasured:
+            missed.append(f"{unmeasured} changed hilly legs have no 6%+ share on "
+                          f"{referee or 'any graded graph'}")
         if pooled["flatChange"]:
             median_change = statistics.median(pooled["flatChange"])
             if abs(median_change) > targets["flatMedianLengthChange"]:
@@ -335,9 +357,13 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
         failures[source] = missed
     # Without elevation use_hills has nothing to act on; a change means the
     # comparison itself is broken (different OSM data or costing).
-    ungraded_changed = sum(1 for row in rows if row.get("hills", {}).get("ungraded", {}).get("differs"))
-    if ungraded_changed:
-        failures["ungraded"] = [f"use_hills changed {ungraded_changed} hilly legs without elevation"]
+    ungraded_hills = [row["hills"]["ungraded"] for row in rows if "ungraded" in row.get("hills", {})]
+    ungraded = [f"use_hills changed {n} hilly legs without elevation"
+                for n in [sum(1 for h in ungraded_hills if h.get("differs"))] if n]
+    ungraded += [f"{n} hilly legs failed to route without elevation"
+                 for n in [sum(1 for h in ungraded_hills if h.get("error"))] if n]
+    if ungraded:
+        failures["ungraded"] = ungraded
     return table, failures
 
 
