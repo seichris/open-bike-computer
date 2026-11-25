@@ -21,7 +21,7 @@ from map_platform.bicycle_route_service import (
     parse_request,
     route_size_limits,
 )
-from map_platform.valhalla_bicycle import RouteSizeLimits
+from map_platform.valhalla_bicycle import RouteSizeLimits, matched_length_tolerance_meters
 from map_platform.installations import InstallationCredentialStore
 from map_platform.route_elevation_providers import ElevationProviderError, ProviderHTTPResponse
 
@@ -53,6 +53,15 @@ TRACE_EDGES = json.dumps({"edges": [
     {"surface": "path", "length": 0.05},
     {"length": 0.02},
 ]}).encode()
+# A walk_or_snap answer whose edges add up to 3,180 m, 14 m short of the
+# 3,194 m DUBAI_ROUTE: as close as Valhalla's map-matched answers come.
+SNAP_EDGES = json.dumps({"edges": [
+    {"surface": "paved_smooth", "length": 2.0},
+    {"surface": "paved", "length": 0.9},
+    {"surface": "gravel", "length": 0.2},
+    {"length": 0.08},
+]}).encode()
+SNAP_SURFACES = {"pavedMeters": 2900.0, "gravelMeters": 200.0, "unpavedMeters": 0.0, "unknownMeters": 80.0}
 
 
 def with_alternates(*trips) -> bytes:
@@ -74,12 +83,20 @@ class RoutingTransport:
         self.trace_status = 200
         self.trace_body = TRACE_EDGES
         self.trace_failure: str | None = None
+        # Answer for trace_attributes requests with shape_match walk_or_snap.
+        self.snap_status = 200
+        self.snap_body = SNAP_EDGES
+        self.snap_failure: str | None = None
         # Answer for route requests that ask for alternates, when set.
         self.body_with_alternates: bytes | None = None
 
     def request(self, *, method, url, headers, body, timeout_seconds, maximum_body_bytes):
         decoded = json.loads(body)
         self.requests.append({"method": method, "url": url, "body": decoded, "timeout": timeout_seconds})
+        if url.endswith("/trace_attributes") and decoded.get("shape_match") == "walk_or_snap":
+            if self.snap_failure:
+                raise ElevationProviderError(self.snap_failure)
+            return ProviderHTTPResponse(self.snap_status, {"content-type": "application/json"}, self.snap_body, url)
         if url.endswith("/trace_attributes"):
             if self.trace_failure:
                 raise ElevationProviderError(self.trace_failure)
@@ -609,6 +626,138 @@ class BicycleRouteEndpointTests(BicycleRouteAPITests):
         health = self.client.get("/healthz").json()
         self.assertEqual(health["bicycleRoute"], {"enabled": True, "provider": "bicino.valhalla"})
         self.assertNotIn("bicino-valhalla-test", json.dumps(health))
+
+
+class SurfaceFallbackTests(BicycleRouteAPITests):
+    """edge_walk answers 443 on some exact route shapes; walk_or_snap stands in."""
+
+    def setUp(self):
+        super().setUp()
+        self.transport.trace_status = 400
+        self.transport.trace_body = valhalla_error(443)
+
+    def traces(self) -> list[dict]:
+        return [r for r in self.transport.requests if r["url"].endswith("/trace_attributes")]
+
+    def test_an_edge_walk_miss_is_retried_once_with_walk_or_snap(self):
+        with self.assertLogs("map_platform", level="INFO") as logs:
+            response = self.post(route_payload(surfaces=True))
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(set(body), {"schema", "status", "route", "reason"})
+        self.assertEqual(body["route"]["surfaces"], SNAP_SURFACES)
+        traces = self.traces()
+        self.assertEqual([t["body"]["shape_match"] for t in traces], ["edge_walk", "walk_or_snap"])
+        shape = json.loads(DUBAI_ROUTE)["trip"]["legs"][0]["shape"]
+        for trace in traces:
+            self.assertEqual(trace["url"], UPSTREAM + "/trace_attributes")
+            self.assertEqual(trace["body"]["encoded_polyline"], shape)
+            self.assertEqual(trace["body"]["costing"], "bicycle")
+            self.assertEqual(trace["body"]["filters"],
+                             {"attributes": ["edge.surface", "edge.length"], "action": "include"})
+        # The retry gets what is left of the lookup's share of the 5 s budget.
+        self.assertLessEqual(traces[1]["timeout"], traces[0]["timeout"])
+        self.assertLessEqual(traces[0]["timeout"], 5.0)
+        joined = "\n".join(logs.output)
+        self.assertIn("surfaces edge_walk no match; retrying walk_or_snap", joined)
+        self.assertIn("surfaces matched with walk_or_snap", joined)
+        self.assertIn("surfaces=1", joined)
+        self.assertNotIn("25.2", joined)
+        self.assertNotIn("bicino-valhalla-test", joined)
+
+    def test_only_a_walk_or_snap_match_close_to_the_route_length_counts(self):
+        # DUBAI_ROUTE is 3,194 m long, so the tolerance is the 30 m floor.
+        self.assertEqual(matched_length_tolerance_meters(3194.0), 30.0)
+        for total_km, accepted in ((3.164, True), (3.224, True), (3.1639, False), (3.2241, False),
+                                   (2.92, False), (6.4, False)):
+            with self.subTest(total_km=total_km):
+                self.transport.requests.clear()
+                self.transport.snap_body = json.dumps({"edges": [
+                    {"surface": "paved", "length": total_km},
+                ]}).encode()
+                with self.assertLogs("map_platform", level="INFO") as logs:
+                    body = self.post(route_payload(surfaces=True)).json()
+                self.assertEqual(body["status"], "ready")
+                if accepted:
+                    self.assertEqual(body["route"]["surfaces"]["pavedMeters"], round(total_km * 1000, 1))
+                else:
+                    self.assertNotIn("surfaces", body["route"])
+                    self.assertIn("reason=walk-or-snap-length-mismatch", "\n".join(logs.output))
+                self.assertEqual(len(self.traces()), 2)
+
+    def test_a_refused_walk_or_snap_match_does_not_stop_the_alternatives_lookups(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip)
+        for snap_status, snap_body in ((200, TRACE_EDGES), (400, valhalla_error(444)), (200, b'{"edges": []}')):
+            with self.subTest(snap_status=snap_status, snap_body=snap_body[:20]):
+                self.transport.requests.clear()
+                self.transport.snap_status = snap_status
+                self.transport.snap_body = snap_body
+                body = self.post(route_payload(alternatives=1, surfaces=True)).json()
+                self.assertEqual(body["status"], "ready")
+                self.assertEqual(len(body["alternatives"]), 1)
+                self.assertFalse(any("surfaces" in item for item in [body["route"], *body["alternatives"]]))
+                self.assertEqual([t["body"]["shape_match"] for t in self.traces()],
+                                 ["edge_walk", "walk_or_snap", "edge_walk", "walk_or_snap"])
+
+    def test_a_failing_walk_or_snap_service_stops_the_lookups(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip)
+        for snap_status, snap_failure in ((200, "provider-timeout"), (503, None)):
+            with self.subTest(snap_status=snap_status, snap_failure=snap_failure):
+                self.transport.requests.clear()
+                self.transport.snap_status = snap_status
+                self.transport.snap_failure = snap_failure
+                body = self.post(route_payload(alternatives=1, surfaces=True)).json()
+                self.assertEqual(body["status"], "ready")
+                self.assertFalse(any("surfaces" in item for item in [body["route"], *body["alternatives"]]))
+                self.assertEqual([t["body"]["shape_match"] for t in self.traces()], ["edge_walk", "walk_or_snap"])
+
+    def test_other_edge_walk_errors_are_not_retried(self):
+        trip = json.loads(DUBAI_ROUTE)["trip"]
+        self.transport.body = with_alternates(trip)
+        for status, body in ((400, valhalla_error(442)), (400, valhalla_error(171)), (400, b"not json"),
+                             (400, b'{"error_code": "443"}'), (500, valhalla_error(443))):
+            with self.subTest(status=status, body=body[:24]):
+                self.transport.requests.clear()
+                self.transport.trace_status = status
+                self.transport.trace_body = body
+                with self.assertLogs("map_platform", level="INFO") as logs:
+                    answer = self.post(route_payload(alternatives=1, surfaces=True)).json()
+                self.assertEqual(answer["status"], "ready")
+                self.assertEqual(len(answer["alternatives"]), 1)
+                self.assertFalse(any("surfaces" in item for item in [answer["route"], *answer["alternatives"]]))
+                # As before: one failed lookup, and none for the alternative.
+                self.assertEqual([t["body"]["shape_match"] for t in self.traces()], ["edge_walk"])
+                self.assertIn(f"surfaces unavailable status={status}", "\n".join(logs.output))
+
+    def test_the_retry_stays_inside_the_lookups_time_budget(self):
+        # The caller gives the lookup at most 5 s. The edge_walk miss comes
+        # back after 1.5 s, so walk_or_snap gets about 3.5 s.
+        with patch("map_platform.valhalla_bicycle.time") as clock:
+            clock.monotonic.side_effect = [100.0, 101.5]
+            body = self.post(route_payload(surfaces=True)).json()
+        self.assertEqual(body["route"]["surfaces"], SNAP_SURFACES)
+        traces = self.traces()
+        self.assertAlmostEqual(traces[0]["timeout"], 5.0, places=1)
+        self.assertAlmostEqual(traces[1]["timeout"], traces[0]["timeout"] - 1.5, places=6)
+
+        # With under a second left, the route is served without asking again.
+        self.transport.requests.clear()
+        with patch("map_platform.valhalla_bicycle.time") as clock:
+            clock.monotonic.side_effect = [100.0, 104.2]
+            with self.assertLogs("map_platform", level="INFO") as logs:
+                body = self.post(route_payload(surfaces=True)).json()
+        self.assertEqual(body["status"], "ready")
+        self.assertNotIn("surfaces", body["route"])
+        self.assertEqual([t["body"]["shape_match"] for t in self.traces()], ["edge_walk"])
+        self.assertIn("reason=edge-walk-no-match-budget", "\n".join(logs.output))
+
+    def test_tolerance_grows_with_long_routes(self):
+        self.assertEqual(matched_length_tolerance_meters(200.0), 30.0)
+        self.assertEqual(matched_length_tolerance_meters(30_000.0), 30.0)
+        self.assertAlmostEqual(matched_length_tolerance_meters(48_500.0), 48.5)
+        self.assertAlmostEqual(matched_length_tolerance_meters(150_000.0), 150.0)
 
 
 class ConfiguredLimitsTests(BicycleRouteAPITests):

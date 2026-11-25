@@ -27,6 +27,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -254,6 +255,28 @@ SURFACE_GROUPS = {
     "path": "unpavedMeters",
     "impassable": "unpavedMeters",
 }
+# trace_attributes with shape_match edge_walk answers 400 / 443 ("edge_walk
+# algorithm failed to find exact route match") on some of Valhalla's own
+# route shapes. On the 2026-11-24 planet graph that was 13 of 206 routes
+# (24 legs x 4 profiles, with alternatives), and walk_or_snap matched all 13.
+EDGE_WALK_NO_MATCH_ERROR_CODE = 443
+# A surface lookup with less time than this left is not started.
+MINIMUM_SURFACE_TIMEOUT_SECONDS = 1.0
+# A walk_or_snap match counts only if its edges add up to the route length
+# within max(30 m, 0.1 %). Measured on the same 206 routes (dev, 2026-11-25):
+# - exact edge_walk edges fall short of the route length by at most 13 m;
+# - map_snap answers fall short by at most 17 m (0.04 % of a 39.5 km route,
+#   0.5 % of a 3 km one), including all 13 walk_or_snap fallbacks (5-15 m);
+# - where map_snap's edges differ from edge_walk's, it cuts a junction
+#   corner over 4-54 m of other ways or drops a final 13 m edge.
+# The 30 m floor is twice the worst short-route shortfall, and 0.1 % is 2.5
+# times the worst long-route one, leaving room for edge rounding on legs of
+# up to 150 km. A match that skips part of the shape, ends early, or leaves
+# the route along other ways and comes back differs by more and is refused.
+# A parallel way of the same length cannot be told apart by length alone;
+# such a stretch has been at most tens of metres in the samples.
+MATCHED_LENGTH_TOLERANCE_METERS = 30.0
+MATCHED_LENGTH_TOLERANCE_FRACTION = 0.001
 
 
 class ValhallaBicycleRouter:
@@ -340,18 +363,71 @@ class ValhallaBicycleRouter:
             shapes.append(_trip_shape(trip))
         return ValhallaOutcome(route, None, tuple(alternatives), tuple(shapes))
 
-    def surface_breakdown(self, shape: str, timeout_seconds: float | None = None) -> dict[str, float] | None:
+    def surface_breakdown(
+        self,
+        shape: str,
+        route_length_meters: float,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, float] | None:
         """Metres per surface group along one route's exact edges, or None.
 
-        An answer without usable edges returns None. A transport failure or
-        an error status raises ``ValhallaUnavailableError``, so the caller can
-        stop asking for the other routes' surfaces. Either way the route is
-        still served, without a breakdown.
+        The lookup walks the route's own shape along the graph (``edge_walk``).
+        When Valhalla cannot walk it (HTTP 400, error 443), the lookup is
+        asked once more with ``walk_or_snap``, within what is left of
+        ``timeout_seconds``. That map-matched answer counts only when its
+        edges add up to ``route_length_meters`` within
+        ``matched_length_tolerance_meters``, so a match that strays onto other
+        ways or skips part of the shape never becomes a breakdown.
+
+        An answer without usable edges, a fallback that fails or strays, and a
+        443 with too little time left for the fallback return None. A
+        transport failure or any other error status raises
+        ``ValhallaUnavailableError``, so the caller can stop asking for the
+        other routes' surfaces. Either way the route is still served, without
+        a breakdown.
         """
+
+        timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
+        started = time.monotonic()
+        status, decoded = self._trace_attributes(shape, "edge_walk", timeout)
+        if status == 400 and _error_code(decoded) == EDGE_WALK_NO_MATCH_ERROR_CODE:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining < MINIMUM_SURFACE_TIMEOUT_SECONDS:
+                self._logger.info("%s surfaces unavailable reason=edge-walk-no-match-budget", self._label)
+                return None
+            self._logger.info("%s surfaces edge_walk no match; retrying walk_or_snap", self._label)
+            status, decoded = self._trace_attributes(shape, "walk_or_snap", remaining)
+            if status == 400:
+                # The shape cannot be matched; the other routes still can be.
+                self._logger.info(
+                    "%s surfaces unavailable reason=walk-or-snap-rejected upstream_code=%s",
+                    self._label, _error_code(decoded),
+                )
+                return None
+            snapped = True
+        else:
+            snapped = False
+        if status != 200:
+            self._logger.info("%s surfaces unavailable status=%s", self._label, status)
+            raise ValhallaUnavailableError("surfaces-unavailable")
+        totals = _surface_totals(decoded)
+        if totals is None:
+            self._logger.info("%s surfaces unavailable reason=no-edges", self._label)
+            return None
+        if snapped:
+            matched = sum(totals.values())
+            if abs(matched - route_length_meters) > matched_length_tolerance_meters(route_length_meters):
+                self._logger.info("%s surfaces unavailable reason=walk-or-snap-length-mismatch", self._label)
+                return None
+            self._logger.info("%s surfaces matched with walk_or_snap", self._label)
+        return totals
+
+    def _trace_attributes(self, shape: str, shape_match: str, timeout_seconds: float) -> tuple[int, Any]:
+        """Status and decoded JSON (or None) of one ``trace_attributes`` call."""
 
         body = json.dumps({
             "encoded_polyline": shape,
-            "shape_match": "edge_walk",
+            "shape_match": shape_match,
             "costing": "bicycle",
             "filters": {"attributes": ["edge.surface", "edge.length"], "action": "include"},
         }, separators=(",", ":")).encode()
@@ -361,34 +437,49 @@ class ValhallaBicycleRouter:
                 url=self._trace_url,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 body=body,
-                timeout_seconds=self._timeout_seconds if timeout_seconds is None else timeout_seconds,
+                timeout_seconds=timeout_seconds,
                 maximum_body_bytes=self._limits.upstream_bytes,
             )
         except ElevationProviderError as exc:
             self._logger.info("%s surfaces failed code=%s", self._label, exc.code)
             raise ValhallaUnavailableError("surfaces-unavailable") from None
-        if response.status_code != 200:
-            self._logger.info("%s surfaces unavailable status=%s", self._label, response.status_code)
-            raise ValhallaUnavailableError("surfaces-unavailable")
         try:
             decoded = json.loads(response.body)
         except (ValueError, UnicodeDecodeError):
             decoded = None
-        edges = decoded.get("edges") if isinstance(decoded, dict) else None
-        if not isinstance(edges, list) or not edges:
-            self._logger.info("%s surfaces unavailable reason=no-edges", self._label)
+        return response.status_code, decoded
+
+
+def matched_length_tolerance_meters(route_length_meters: float) -> float:
+    """How far a ``walk_or_snap`` match's edge length may stray from the route's.
+
+    The comment above ``MATCHED_LENGTH_TOLERANCE_METERS`` gives the measurements.
+    """
+
+    return max(MATCHED_LENGTH_TOLERANCE_METERS, MATCHED_LENGTH_TOLERANCE_FRACTION * route_length_meters)
+
+
+def _error_code(decoded: Any) -> Any:
+    return decoded.get("error_code") if isinstance(decoded, dict) else None
+
+
+def _surface_totals(decoded: Any) -> dict[str, float] | None:
+    """Metres per surface group from a ``trace_attributes`` answer, or None."""
+
+    edges = decoded.get("edges") if isinstance(decoded, dict) else None
+    if not isinstance(edges, list) or not edges:
+        return None
+    totals = {"pavedMeters": 0.0, "gravelMeters": 0.0, "unpavedMeters": 0.0, "unknownMeters": 0.0}
+    for edge in edges:
+        if not isinstance(edge, dict):
             return None
-        totals = {"pavedMeters": 0.0, "gravelMeters": 0.0, "unpavedMeters": 0.0, "unknownMeters": 0.0}
-        for edge in edges:
-            if not isinstance(edge, dict):
-                return None
-            try:
-                length = _number(edge.get("length", 0), "length")
-            except ValueError:
-                return None
-            group = SURFACE_GROUPS.get(edge.get("surface"), "unknownMeters")
-            totals[group] += max(length, 0) * 1000
-        return {key: round(value, 1) for key, value in totals.items()}
+        try:
+            length = _number(edge.get("length", 0), "length")
+        except ValueError:
+            return None
+        group = SURFACE_GROUPS.get(edge.get("surface"), "unknownMeters")
+        totals[group] += max(length, 0) * 1000
+    return {key: round(value, 1) for key, value in totals.items()}
 
 
 def _number(value: Any, name: str) -> float:
