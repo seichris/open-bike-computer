@@ -666,6 +666,41 @@ def clip_polygons(
     return clipped
 
 
+def fit_polygons_to_feature_budget(polygons, line_count, feature_limit):
+    """Keep every line and reduce polygon detail only on overfull tiles."""
+    polygon_budget = feature_limit - line_count
+    if polygon_budget < 0:
+        raise GenericGeometryLimitError(
+            f"tile has {line_count} lines, exceeding its {feature_limit}-feature limit"
+        )
+    if len(polygons) <= polygon_budget:
+        return polygons
+
+    # Clipping can split one polygon into multiple hole-free pieces. Keep or
+    # omit the whole component so a retained area does not develop gaps.
+    groups = {}
+    for index, polygon in enumerate(polygons):
+        source = polygon.get("_source_geometry_key")
+        key = (
+            (source, polygon.get("_source_geometry_component"))
+            if source is not None else (None, index)
+        )
+        groups.setdefault(key, []).append(index)
+
+    def priority(indices):
+        feature_type = polygons[indices[0]]["type"]
+        area = math.fsum(polygons[index]["geom"].area for index in indices)
+        # Retain land use, parks and water before small building footprints.
+        return feature_type.startswith("building."), -area, indices[0]
+
+    retained = set()
+    for indices in sorted(groups.values(), key=priority):
+        if len(indices) <= polygon_budget:
+            retained.update(indices)
+            polygon_budget -= len(indices)
+    return [polygon for index, polygon in enumerate(polygons) if index in retained]
+
+
 class BlockFeatureIndex:
     """Offer each block clip only the features that can affect it, in order.
 

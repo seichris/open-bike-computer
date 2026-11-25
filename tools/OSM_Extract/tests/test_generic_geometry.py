@@ -20,11 +20,12 @@ from funcs import (  # noqa: E402
     GenericGeometryLimitError,
     _validate_quantized_decomposition,
     clip_polygons,
+    fit_polygons_to_feature_budget,
     get_geoms,
     render_map,
 )
 import funcs  # noqa: E402
-from map_format import write_fmb  # noqa: E402
+from map_format import MAX_BLOCK_FEATURES, MapFormatLimitError, write_fmb  # noqa: E402
 
 
 def styled_feature(geometry, identifier="source"):
@@ -42,6 +43,35 @@ def styled_feature(geometry, identifier="source"):
 
 
 class GenericGeometryTests(unittest.TestCase):
+    def test_overfull_tile_keeps_lines_and_complete_polygon_components(self):
+        small_building = {
+            **styled_feature(box(0, 0, 2, 2), "small"), "type": "building.yes",
+        }
+        large_building = {
+            **styled_feature(box(10, 0, 20, 10), "large"), "type": "building.yes",
+        }
+        park_halves = [
+            styled_feature(box(20, 0, 50, 30), "park"),
+            styled_feature(box(50, 0, 80, 30), "park"),
+        ]
+        polygons = [small_building, park_halves[0], large_building, park_halves[1]]
+        self.assertIs(fit_polygons_to_feature_budget(polygons, 2, 6), polygons)
+        self.assertEqual(
+            fit_polygons_to_feature_budget(polygons, 2, 5),
+            [park_halves[0], large_building, park_halves[1]],
+        )
+        self.assertEqual(fit_polygons_to_feature_budget(polygons, 2, 3), [large_building])
+        with self.assertRaisesRegex(GenericGeometryLimitError, "tile has 4 lines"):
+            fit_polygons_to_feature_budget(polygons, 4, 3)
+
+    def test_writer_rejects_combined_count_over_firmware_limit(self):
+        polygon = styled_feature(box(0, 0, 2, 2))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "oversized.fmb"
+            with self.assertRaisesRegex(MapFormatLimitError, "tile feature limit"):
+                write_fmb(path, [polygon] * MAX_BLOCK_FEATURES, [None], 0, 0, renderer_target=1)
+            self.assertFalse(path.exists())
+
     def test_polygon_and_multipolygon_preserve_holes_and_all_components(self):
         polygon = get_geoms(
             {
