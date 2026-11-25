@@ -1514,6 +1514,85 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(sources[0]["bytes"], 3)
         self.assertNotIn(str(cached), response.text)
 
+    def test_admin_source_update_and_delete_use_the_displayed_revision(self):
+        from map_platform.source_cache import SourceCache
+
+        base = "/v1/admin/map-inventory"
+        headers = {"Authorization": "Bearer admin-secret"}
+        data = Path(self.tmp.name)
+        cached = data / "source-pbf" / "argentina.osm.pbf"
+        cached.parent.mkdir(exist_ok=True)
+        cached.write_bytes(b"old pbf")
+        (data / "source-cache.json").write_text(json.dumps({"sources": {
+            "geofabrik-argentina": {
+                "path": str(cached),
+                "sourceUrl": "https://download.geofabrik.de/south-america/argentina-latest.osm.pbf",
+            },
+        }}))
+        update_url = f"{base}/sources/geofabrik-argentina/update"
+        delete_url = f"{base}/sources/geofabrik-argentina/delete"
+        first = self.client.get(base, headers=headers).json()["sources"][0]["revision"]
+        self.assertEqual(self.client.post(delete_url, params={"revision": first}).status_code, 401)
+
+        def refresh(region, **kwargs):
+            self.assertEqual(Path(region.local_path), cached)
+            self.assertTrue(kwargs["force"])
+            cached.write_bytes(b"new pbf contents")
+
+        with patch("map_platform.admin_fulfillment._upstream_version", return_value=("newer", None)):
+            with patch.object(SourceCache, "ensure", side_effect=refresh):
+                response = self.client.post(update_url, headers=headers, params={"revision": first})
+            self.assertEqual(response.json(), {"status": "updating"})
+            self.assertEqual(cached.read_bytes(), b"new pbf contents")
+            self.assertEqual(self.client.post(delete_url, headers=headers, params={"revision": first}).status_code, 409)
+        second = self.client.get(base, headers=headers).json()["sources"][0]["revision"]
+        self.assertNotEqual(first, second)
+        with patch("map_platform.admin_fulfillment._upstream_version", return_value=("current", None)):
+            self.assertEqual(self.client.post(delete_url, headers=headers, params={"revision": second}).status_code, 409)
+        with patch("map_platform.admin_fulfillment._upstream_version", return_value=("unknown", None)):
+            response = self.client.post(delete_url, headers=headers, params={"revision": second})
+        self.assertEqual(response.json(), {"status": "deleted"})
+        self.assertFalse(cached.exists())
+        self.assertEqual(self.client.get(base, headers=headers).json()["sources"], [])
+
+    def test_admin_zip_download_is_scoped_to_ready_operator_builds(self):
+        from map_platform.artifacts import ArtifactRecord, ZIP_MEDIA_TYPE, ZIP_STORED_FORMAT
+
+        base = "/v1/admin/map-inventory"
+        headers = {"Authorization": "Bearer admin-secret"}
+        job_id = self.create_job()
+        store = self.client.app.state.job_store
+        job = store.get(job_id)
+        job.status = JobStatus.READY
+        job.map_id = "test-city"
+        source = Path(self.tmp.name) / "test-city.zip"
+        data = b"immutable production zip"
+        source.write_bytes(data)
+        checksum = hashlib.sha256(data).hexdigest()
+        artifact = ArtifactRecord(
+            format=ZIP_STORED_FORMAT, media_type=ZIP_MEDIA_TYPE, filename="test-city.zip",
+            object_key="maps/test-city/zip-stored-v1/test-city.zip", bytes=len(data), sha256=checksum,
+        )
+        job.artifacts = [artifact]
+        store.save(job)
+        artifact_store = self.client.app.state.artifact_store
+        artifact_store.put(source, artifact.object_key, sha256=checksum, media_type=ZIP_MEDIA_TYPE)
+        endpoint = f"{base}/zips/{job_id}"
+
+        self.assertEqual(self.client.get(endpoint).status_code, 401)
+        self.assertEqual(self.client.get(endpoint, headers=headers).status_code, 404)
+        self.assertIsNone(self.client.get(base, headers=headers).json()["packs"][0]["zipJobId"])
+
+        job.client_installation_id = None
+        job.request.pop("clientInstallationId", None)
+        store.save(job)
+        self.assertEqual(self.client.get(base, headers=headers).json()["packs"][0]["zipJobId"], job_id)
+        response = self.client.get(endpoint, headers=headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        download = self.client.get(response.json()["url"])
+        self.assertEqual(download.status_code, 200, download.text)
+        self.assertEqual(download.content, data)
+
     def test_admin_map_monitoring_is_authenticated_and_restart_safe(self):
         job_id = self.create_job()
         job = self.client.app.state.job_store.get(job_id)

@@ -11,17 +11,20 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlencode
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+    from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 except ImportError as exc:  # pragma: no cover - exercised only without the API extra
-    Depends = FastAPI = Header = HTTPException = Query = Request = Response = None  # type: ignore[assignment]
+    BackgroundTasks = Depends = FastAPI = Header = HTTPException = Query = Request = Response = None  # type: ignore[assignment]
     FileResponse = HTMLResponse = JSONResponse = None  # type: ignore[assignment]
     _FASTAPI_IMPORT_ERROR: ImportError | None = exc
 else:
     _FASTAPI_IMPORT_ERROR = None
 
 from .admin_fulfillment import (
+    SourceOperationConflict,
+    SourceOperations,
     fulfillment_maps,
+    operator_zip,
     production_inventory,
     queue_fulfillment_map,
 )
@@ -487,6 +490,7 @@ def create_app(
         building_task_store=building_task_store,
     )
     source_cache = SourceCache(repo_root, data_root / "source-cache.json", data_root=data_root)
+    source_operations = SourceOperations(service, source_cache)
     pipeline = MapBuildPipeline(
         PipelinePaths(repo_root=repo_root, work_root=data_root / "work", pack_root=data_root / "packs"),
         source_cache=source_cache,
@@ -995,7 +999,59 @@ def create_app(
             source_cache,
             service.source_index.regions,
             check_upstream=checkUpstream,
+            source_operations=source_operations,
         )
+
+    @app.post(
+        "/v1/admin/map-inventory/sources/{source_id}/{operation}",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_operate_on_source(
+        source_id: str,
+        operation: Literal["update", "delete"],
+        background_tasks: BackgroundTasks,
+        revision: str = Query(pattern=r"^[0-9a-f]{1,32}-[0-9a-f]{1,32}-[0-9a-f]{1,32}$"),
+    ) -> dict[str, str]:
+        try:
+            if operation == "delete":
+                source_operations.delete(source_id, revision)
+                return {"status": "deleted"}
+            region = source_operations.begin_update(source_id, revision)
+            background_tasks.add_task(source_operations.refresh, region, revision)
+            return {"status": "updating"}
+        except SourceOperationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SourceCacheError as exc:
+            raise HTTPException(status_code=409, detail="The cached extract is busy. Try again.") from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="The cached extract is temporarily unavailable.") from exc
+
+    @app.get(
+        "/v1/admin/map-inventory/zips/{job_id}",
+        dependencies=[Depends(require_admin_token)],
+    )
+    def admin_operator_zip(job_id: str, response: Response) -> dict[str, str]:
+        try:
+            job = service.get_job(job_id)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail="Map ZIP not available.") from exc
+        artifact = operator_zip(job)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Map ZIP not available.")
+        url = artifact_store.create_download_url(
+            artifact.object_key, expires_in_seconds=300,
+            filename=artifact.filename, media_type=artifact.media_type,
+        )
+        if url is None:
+            if artifact_store.local_path(artifact.object_key) is None:
+                raise HTTPException(status_code=404, detail="Map ZIP file not available.")
+            signed = download_signer.sign(job.map_id, artifact.object_key, ttl_seconds=300)
+            url = (
+                f"/v1/map-packs/{job.map_id}/artifacts/{artifact.format}/download"
+                f"?jobId={job.job_id}&{signed.query()}"
+            )
+        response.headers["Cache-Control"] = "private, no-store"
+        return {"url": url}
 
     @app.get(
         "/v1/admin/building-plans/{parent_job_id}",
