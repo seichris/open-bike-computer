@@ -46,9 +46,12 @@ manifest has no `elevation` field. A build graded with the Copernicus DEM was ma
 not shipped (see the elevation check below). Converting the DEM read 589 GB
 in about 95 minutes with 16 jobs and wrote 160 GB of tiles. The graded build
 took 4 hours 39 minutes, 67 of them in Valhalla's elevation stage, peaked at
-41.6 GB of memory and 803 GB of scratch, and wrote 107.6 GB. Check the VPS
-for the candidate, the current graph, transfer parts and the 50 GB reserve
-before transferring.
+41.6 GB of memory and 803 GB of scratch, and wrote 107.6 GB. On 2026-11-25
+an ungraded and an opened-Copernicus build ran side by side on one builder
+in about 7 hours from the download to both archives, peaking at 1,225 GB of
+scratch (see [Planet gate](#planet-gate-for-copernicus-opened-at-200-m)).
+Check the VPS for the candidate, the current graph, transfer parts and the
+50 GB reserve before transferring.
 
 The first successful attempt took 3 hours 9 minutes from build start through
 archive verification. Observed builder scratch use reached about 499 GB before
@@ -89,7 +92,9 @@ Build and verify off-host. The Coolify VPS serves the resulting archive.
   read as terrain. It put 53–64% of a Buenos Aires leg on grades of 6% or
   more, and 13–37% of legs in Amsterdam, Houston and Berlin. Production
   stayed ungraded. City samples on 2026-11-25 found a source that passes
-  both checks (see [Elevation sources on city samples](#elevation-sources-on-city-samples)).
+  both checks (see [Elevation sources on city samples](#elevation-sources-on-city-samples)),
+  but the planet graded with it lengthened a Midtown Manhattan leg by 5.9%
+  and stayed unshipped too (see [Planet gate](#planet-gate-for-copernicus-opened-at-200-m)).
   Run `compare_elevation.py` against the two planet services as this check.
 - Include a direct Valhalla miss in the Apple-listed interior near Fairview,
   Oklahoma. A live MapKit request there can still succeed. The first release
@@ -186,7 +191,9 @@ its terms are moot for now:
 200 m. Do not use GEDTM30 or raw Copernicus.** The opening uses only the
 production-approved Copernicus sources, so the topography source policy does
 not change. It does change the production elevation, so it needed Chris's
-approval. **Chris approved it on 2026-11-25.** Before building:
+approval. **Chris approved it on 2026-11-25.** The planet built that way
+missed the gate in Midtown Manhattan and was not shipped (see
+[Planet gate](#planet-gate-for-copernicus-opened-at-200-m)). The steps were:
 
 1. Done: `build_elevation.py --opening-radius 200 --raw DIR` opens every
    cell with margins from its neighbours' raw tiles and records the method,
@@ -200,14 +207,14 @@ approval. **Chris approved it on 2026-11-25.** Before building:
    edge, where the sample repeated its edge posts instead of reading the
    neighbours: up to 8 m, median 1 m. Every Buenos Aires leg lies more than
    0.3° inside the cell.
-2. Build the planet graded and ungraded from the same snapshot.
-3. Run `compare_elevation.py` against both planet services, with no
-   `--city`, as the release gate. `elevation-probes.json` holds these eight
-   cities and, marked `planetOnly`, the cities of the 2026-11-24 planet
-   check that they lack: Copenhagen, Paris, London, Munich, New York, Tokyo,
-   Dubai and Stuttgart (16 cities, 45 legs). That check had 27 legs over
-   the same 16 cities: 20 city legs and 7 hill legs. All 27 are in the file
-   with the same coordinates, some under other names.
+2. Done: build the planet graded and ungraded from the same snapshot.
+3. Done, missed: run `compare_elevation.py` against both planet services,
+   with no `--city`, as the release gate. `elevation-probes.json` holds
+   these eight cities and, marked `planetOnly`, the cities of the 2026-11-24
+   planet check that they lack: Copenhagen, Paris, London, Munich, New York,
+   Tokyo, Dubai and Stuttgart (16 cities, 45 legs). That check had 27 legs
+   over the same 16 cities: 20 city legs and 7 hill legs. All 27 are in the
+   file with the same coordinates, some under other names.
 
 The samples used the pinned Valhalla image under amd64 emulation on a
 laptop. One elevation-stage build segfaulted there and passed on a retry. The
@@ -222,6 +229,91 @@ OSM data was dated Geofabrik extracts of 2026-11-24 (SHA-256 prefixes):
   boundary and leaves Valhalla's admin database empty.
 - Switzerland `6c9b5e4d8f28`, used for Zurich
 - New Zealand `ca1e09b6801d`, used for Wellington
+
+### Planet gate for Copernicus opened at 200 m
+
+On 2026-11-25 the planet was built twice from `planet-261116` (SHA-256
+`297f73cc…`, the snapshot production serves): once graded with Copernicus
+opened at 200 m, once without elevation. Both archives passed the smoke
+(17 of 17), cross-border (4 of 4) and profile probes. The coverage audit
+routed 281 of 298 units on each, with the same 17 exceptions as the
+2026-11-24 planet. `compare_elevation.py run` then routed every city against
+both services on the builder, with no `--city`. It missed one target:
+
+| Check | Target | Result |
+|---|---|---|
+| Flat routes, median length change | at most 1% | 0.0% (56 routes in 11 cities) |
+| Flat routes, longest | no route more than 5% longer | **+5.9%** (New York, Everyday): missed |
+| Flat routes, median 6%+ share | at most 5% | 2% |
+| Hilly legs that `use_hills` changes | at least half | 12 of 17 |
+| 6%+ share of the hill-avoiding route | lower at the median | 6 points lower |
+| Routes and grade lookups that failed | none | none |
+
+| City | Routes | Median length change | Longest | Median 6%+ share | `use_hills` changed |
+|---|---|---|---|---|---|
+| Buenos Aires | 8 | 0.0% | +0.3% | 5% | – |
+| Amsterdam | 10 | 0.0% | 0.0% | 0% | – |
+| Houston | 10 | 0.0% | +0.4% | 1% | – |
+| Berlin | 8 | 0.0% | +0.3% | 1% | – |
+| Copenhagen | 4 | 0.0% | 0.0% | 0% | – |
+| Paris | 4 | 0.0% | +0.4% | 3% | – |
+| London | 4 | 0.0% | 0.0% | 1% | – |
+| Munich | 2 | 0.0% | 0.0% | 0% | – |
+| New York | 2 | +5.1% | **+5.9%** | 8% | – |
+| Tokyo | 2 | 0.0% | 0.0% | 9% | – |
+| Dubai | 2 | 0.0% | 0.0% | 0% | – |
+| Lisbon | 8 | +1.6% | +48.8% | 25% | 4 of 4 |
+| San Francisco | 8 | +0.8% | +13.1% | 18% | 2 of 4 |
+| Zurich | 8 | +1.6% | +29.0% | 11% | 3 of 4 |
+| Wellington | 8 | +3.3% | +21.6% | 28% | 2 of 4 |
+| Stuttgart | 2 | −0.9% | +0.4% | 29% | 1 of 1 |
+
+- **Midtown Manhattan keeps phantom hills.** Midtown to Brooklyn became
+  4.3% longer on Road (9.00 to 9.40 km) and 5.9% longer on Everyday (8.87 to
+  9.40 km). The ungraded routes take 5th Avenue or Broadway. On the opened
+  graph these streets have 60 m sections of 13% to 32% on ground that
+  barely slopes, so the graded routes take 7th Avenue, which has fewer. It
+  seems that within 200 m of these streets, among the towers, Copernicus has
+  no post at street level, so the opening cannot reach the ground. The other
+  54 flat routes grew by at most 0.5%. Copenhagen's Everyday leg became 5.5%
+  shorter, and Tokyo's Shibuya to Shinjuku leg did not change.
+- **Hills work much as on the samples.** `use_hills` changed 11 of the 16
+  hilly legs of the sample cities, one San Francisco leg fewer than on the
+  city samples, and Stuttgart's one leg. Two hill-avoiding routes have more of their length on 6%+ grades than
+  the direct ones: Lisbon, Rossio to Campo de Ourique (9 points more), and
+  Stuttgart, Hauptbahnhof to Degerloch (7 points more). With one graded
+  graph, routes are judged on its own heights. Without elevation, every
+  hilly leg gave the same route for both `use_hills` values.
+- **Chris rejected the candidate on 2026-11-26.** Production stays ungraded
+  (`abe5e72e`). Before another graded planet, test a larger opening radius
+  on New York and the hilly city samples: a wider ellipse reaches more
+  street posts but also flattens more real ridges.
+
+Build facts, on a `c4-highmem-24-lssd`:
+
+- Raw tiles: 72 minutes with 20 jobs, reading 589.25 GB and writing
+  160.40 GB, the same cells as on 2026-11-24. Four cells ran past the
+  15-minute deadline; each built in seconds when retried. Because the fourth
+  broke the third and last round, the run stopped, and running the same
+  command again resumed from the receipts.
+- Opening: 67 minutes with 20 jobs beside the ungraded Valhalla build, about
+  3 s per cell per worker. It wrote 104.1 GB (65% of the raw tiles), and a
+  worker peaked at 0.92 GB.
+- Graphs: 4 hours 51 minutes each, ungraded with 16 threads and graded with
+  20, overlapping for 3 hours. The graded build spent 57 minutes in
+  Valhalla's elevation stage. Both together peaked at 1,225 GB of scratch,
+  with both tile sets and the PBF on disk, and 49 GB of memory.
+- Archives: ungraded 209,979 tiles, 104,563,353,600 bytes, `b9421752…` (the
+  same tile count and size as production's `abe5e72e`). Graded 209,979
+  tiles, 107,554,304,000 bytes, `ce870e0f…`, whose manifest records
+  `grey-opening` with `radiusMetres` 200, elevation manifest `31e23896…` and
+  raw manifest `d53d9beb…`.
+- The logs, manifests and gate report are on the map VPS in
+  `/root/bicino-routing-releases/builder-g261116/evidence.tgz`. The builder,
+  its network and its keys were deleted on 2026-11-26.
+- After the builds the builder sat idle for about 8 hours. A wait loop read
+  an unreachable SSH hop as "still running". A loop that waits on the
+  builder must stop and report when its check gets no answer.
 
 ## Pull, assemble, and install on Coolify
 

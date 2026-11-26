@@ -83,7 +83,10 @@ production now.
    Chris approved on 2026-11-25 grading the next planet with the same
    Copernicus tiles after a 200 m grey-scale morphological opening, which
    kept flat-city routes on city samples while hill avoidance still worked.
-   Compare the graded planet with an ungraded one before releasing it (see
+   The planet graded that way still lengthened a Midtown Manhattan leg by
+   5.9% and was not shipped (see
+   [Planet gate](refresh-runbook.md#planet-gate-for-copernicus-opened-at-200-m)).
+   Compare a graded planet with an ungraded one before releasing it (see
    [Compare elevation sources](#compare-elevation-sources-on-city-samples)).
 
    To grade a graph, first write Valhalla's one-degree HGT tiles from the
@@ -95,8 +98,11 @@ production now.
    Valhalla reads like plain HGT (690 GB unpacked). It keeps a receipt per
    cell, so an interrupted run resumes where it stopped. A cell still running
    after 15 minutes ends its worker, and the run builds the cells left without
-   a receipt again, up to three rounds. The first planet run read 589 GB in
-   about 95 minutes with 16 jobs and wrote 160 GB.
+   a receipt again, up to three rounds. If the third round also loses a
+   worker, the run stops; run the same command again to resume. The first
+   planet run read 589 GB in about 95 minutes with 16 jobs and wrote 160 GB.
+   The second, on 2026-11-25, took 72 minutes with 20 jobs, including one
+   such restart after four cells ran past the deadline.
 
    `--opening-radius 200 --raw DIR` writes those raw tiles to `DIR`, then
    opens every cell into `--out`. The opening is an erosion and then a
@@ -136,13 +142,14 @@ production now.
    with the logarithm of the ellipse's width. `sample_elevation.py`'s filter
    visits every post of the ellipse instead (1 s at 52°, 3 s at 80°, and
    minutes near the poles). The catalog has 26,475 cells; 3,996 of them lie
-   beyond 80°, including 720 Antarctic cells south of 88° S. The planet should
-   therefore take about 4 core-hours, or 15 to 30 minutes with 20 jobs on
-   top of the raw stage, if the raw tiles stay in the page cache. Cells are
+   beyond 80°, including 720 Antarctic cells south of 88° S. Cells are
    opened in catalog order, so neighbouring tiles are read close together.
-   A worker peaks at about 0.6 GB, and 1.1 GB for polar cells. Opened tiles
-   compress better than raw ones (43%, 76% and 24% of the raw file in those
-   three cells), so `--out` needs at most another 160 GB beside `--raw`.
+   Plan about an hour on the builder. On 2026-11-25 a
+   `c4-highmem-24-lssd` opened the planet in 67 minutes with 20 jobs, while
+   a Valhalla build ran beside it: about 3 s per cell per worker, against
+   0.5–0.65 s on the laptop core. A worker peaked at 0.92 GB. The opened
+   tiles took 104 GB, 65% of the raw tiles' 160 GB, so `--out` needs at
+   most another 160 GB beside `--raw`.
 
    Then pass `--elevation "$build_scratch/elevation"` to `build_graph.py`. The
    build fails if Valhalla skips its elevation stage. Grade at build time: a
