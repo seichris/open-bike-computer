@@ -137,8 +137,8 @@ bounded work: a stride to 1,000 points, then farthest-point insertion. Website
 imports add elevation gain and duration read from the file, and the star.
 These are the owner's private fields. `public_content` and group-ride
 snapshots strip `body.website`, so friends, link holders and ride members
-never receive them. The list reads only the title, distance and card members,
-never archives. Routes stored before card fields existed list without a
+never receive them. The list selects only the title, distance and card
+members, so archives never leave the database. Routes stored before card fields existed list without a
 preview. Saved Apple Maps routes never get geometry on the website, because
 it draws on OpenStreetMap tiles. Renaming uses the native optimistic
 `revision`. Starring changes no route content and needs no revision.
