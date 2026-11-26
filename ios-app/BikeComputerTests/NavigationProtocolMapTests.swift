@@ -1121,6 +1121,92 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testProductionMapJobSubmissionRetriesOnDirectOrigin() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            OfflineMapTestURLProtocol.reset()
+        }
+
+        let direct = BicinoEndpointSelector.Service.api.direct(in: .production)
+        let proxy = BicinoEndpointSelector.Service.api.proxy(in: .production)
+        let request = OfflineMapJobRequest
+            .customBBox(OfflineMapBounds(minLon: 10, minLat: 20, maxLon: 11, maxLat: 21))
+            .identified(clientInstallationId: "installation-test",
+                        clientRequestId: "request-test-123", installOnDevice: false)
+        let committed = """
+            {"jobId":"job-committed","status":"queued","clientInstallationId":"installation-test","clientRequestId":"request-test-123"}
+            """
+        let cases: [(submission: URL, lookup: URL, committed: Bool, posts: Int, succeeds: Bool)] = [
+            (direct, direct, false, 3, true),
+            (direct, proxy, false, 1, false),
+            (direct, proxy, true, 1, true),
+            (proxy, proxy, false, 1, false),
+        ]
+
+        for scenario in cases {
+            let selector = BicinoEndpointSelector(channel: .production, monitorNetwork: false) {
+                _, origin, _ in origin == scenario.lookup
+            }
+            let client = OfflineMapPlatformClient(
+                baseURL: scenario.submission,
+                clientInstallationId: "installation-test",
+                clientInstallationToken: "installation-token-test",
+                session: session,
+                endpointSelector: selector
+            )
+            var submittedIDs: [String] = []
+            OfflineMapTestURLProtocol.configure { urlRequest in
+                if urlRequest.httpMethod == "GET" {
+                    let jobs = scenario.committed ? committed : ""
+                    return (200, Data("{\"jobs\":[\(jobs)]}".utf8))
+                }
+                let payload = try JSONSerialization.jsonObject(
+                    with: OfflineMapTestURLProtocol.bodyData(from: urlRequest)
+                ) as? [String: Any]
+                submittedIDs.append(payload?["clientRequestId"] as? String ?? "")
+                if submittedIDs.count == 3 {
+                    return (200, Data(committed.utf8))
+                }
+                throw URLError(.networkConnectionLost)
+            }
+            var backoff: [UInt64] = []
+            do {
+                let job = try await OfflineMapJobCreator.create(
+                    request: request,
+                    client: client,
+                    clientForReconciliation: { client in
+                        try await client.atOrigin(selector.endpoint(for: .api))
+                    },
+                    refreshUnavailableKey: { _ in
+                        preconditionFailure("a transport failure does not require a new App Attest key")
+                    },
+                    sleep: { backoff.append($0) },
+                    onRetry: {}
+                )
+                assert(scenario.succeeds, "unreconciled alternate-origin failure must be surfaced")
+                assertEqual(job.jobId, "job-committed", "retry or lookup returns the committed job")
+            } catch {
+                assert(!scenario.succeeds, "expected retry or reconciliation to complete the job")
+                assertEqual((error as? URLError)?.code, .networkConnectionLost, "surface the failed submission")
+            }
+            let requests = OfflineMapTestURLProtocol.requests()
+            assertEqual(requests.filter { $0.httpMethod == "POST" }.compactMap { $0.url?.host },
+                        Array(repeating: scenario.submission.host!, count: scenario.posts),
+                        "all submits use the initial origin")
+            assertEqual(submittedIDs, Array(repeating: "request-test-123", count: scenario.posts),
+                        "same-origin retries preserve the request ID")
+            assertEqual(requests.filter { $0.httpMethod == "GET" }.compactMap { $0.url?.host },
+                        Array(repeating: scenario.lookup.host!, count: scenario.posts == 3 ? 2 : 1),
+                        "only the reconciliation read may use another origin")
+            assertEqual(backoff, scenario.posts == 3 ? [2_000_000_000, 4_000_000_000] : [],
+                        "direct origin keeps the original retry delays")
+        }
+    }
+
+    @MainActor
     static func testOfflineMapRecoveryRoutes() async {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [OfflineMapTestURLProtocol.self]

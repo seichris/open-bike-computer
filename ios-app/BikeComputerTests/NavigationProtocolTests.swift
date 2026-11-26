@@ -856,6 +856,12 @@ struct NavigationProtocolTests {
             print("Delayed map startup regression passed")
             return
         }
+        if CommandLine.arguments.contains("--map-job-submission-only") {
+            await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
+            await testProductionMapJobSubmissionRetriesOnDirectOrigin()
+            print("Map job submission and reconciliation regressions passed")
+            return
+        }
         if CommandLine.arguments.contains("--firmware-install-intent-only") {
             testFirmwareLocalPreparationRecovery()
             await testFirmwareInstallRetainsOriginalDevice()
@@ -1083,6 +1089,7 @@ struct NavigationProtocolTests {
         await testOfflineMapServiceConfigChannels()
         await testDevelopmentEndpointSelection()
         await testRecoveryRetriesUnreachableEndpoint()
+        await testProductionEndpointSelection()
         testOfflineMapCatalogConfigChannels()
         testOfflineMapCatalogTrustStoreChannels()
         testOfflineMapShareLinkValidation()
@@ -1173,6 +1180,7 @@ struct NavigationProtocolTests {
         await testDurableMapDownloads()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
+        await testProductionMapJobSubmissionRetriesOnDirectOrigin()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()
@@ -8271,13 +8279,13 @@ struct NavigationProtocolTests {
 
     static func testDevelopmentEndpointSelection() async {
         let probe = DevelopmentEndpointProbe()
-        let selector = BicinoDevelopmentEndpointSelector(monitorNetwork: false) {
+        let selector = BicinoEndpointSelector(channel: .development, monitorNetwork: false) {
             service, origin, _ in await probe.check(service, origin)
         }
-        let directAPI = BicinoDevelopmentEndpointSelector.Service.api.direct
-        let proxyAPI = BicinoDevelopmentEndpointSelector.Service.api.proxy
-        let directCatalog = BicinoDevelopmentEndpointSelector.Service.catalog.direct
-        let proxyCatalog = BicinoDevelopmentEndpointSelector.Service.catalog.proxy
+        let directAPI = BicinoEndpointSelector.Service.api.direct(in: .development)
+        let proxyAPI = BicinoEndpointSelector.Service.api.proxy(in: .development)
+        let directCatalog = BicinoEndpointSelector.Service.catalog.direct(in: .development)
+        let proxyCatalog = BicinoEndpointSelector.Service.catalog.proxy(in: .development)
 
         await probe.allow([directAPI, proxyAPI, proxyCatalog])
         async let first = selector.endpoint(for: .api)
@@ -8343,7 +8351,7 @@ struct NavigationProtocolTests {
         let service = BicinoServiceSession(
             defaults: defaults,
             urlSession: session,
-            developmentEndpointSelector: selector
+            endpointSelector: selector
         )
         let directClient = try! await service.makeOfflineMapClient(serverURLString: directAPI.absoluteString)
         selector.networkDidChange()
@@ -8357,7 +8365,7 @@ struct NavigationProtocolTests {
         let catalogClient = try! OfflineMapCatalogClient(
             baseURL: directCatalog,
             session: session,
-            developmentEndpointSelector: selector
+            endpointSelector: selector
         )
         OfflineMapTestURLProtocol.configure { request in
             assertEqual(request.url?.host, proxyCatalog.host, "catalog writes use the chosen host")
@@ -8402,11 +8410,11 @@ struct NavigationProtocolTests {
 
     static func testRecoveryRetriesUnreachableEndpoint() async {
         let probe = DevelopmentEndpointProbe()
-        let selector = BicinoDevelopmentEndpointSelector(monitorNetwork: false) {
+        let selector = BicinoEndpointSelector(channel: .development, monitorNetwork: false) {
             service, origin, _ in await probe.check(service, origin)
         }
-        let direct = BicinoDevelopmentEndpointSelector.Service.api.direct
-        let proxy = BicinoDevelopmentEndpointSelector.Service.api.proxy
+        let direct = BicinoEndpointSelector.Service.api.direct(in: .development)
+        let proxy = BicinoEndpointSelector.Service.api.proxy(in: .development)
         await probe.allow([proxy], failingFirst: 2)
 
         let suite = "BicinoRecoveryEndpoint.\(UUID())"
@@ -8437,7 +8445,7 @@ struct NavigationProtocolTests {
             defaults: defaults,
             urlSession: session,
             appAttestService: TestOfflineMapAppAttestService(keyID: key),
-            developmentEndpointSelector: selector
+            endpointSelector: selector
         )
         let manager = OfflineMapManager(
             defaults: defaults, mapPlatformSession: session, bicinoServiceSession: service,
@@ -8457,6 +8465,56 @@ struct NavigationProtocolTests {
         assertEqual(OfflineMapTestURLProtocol.requests().count, 1, "failed probes never submit installation requests")
     }
 
+    static func testProductionEndpointSelection() async {
+        let probe = DevelopmentEndpointProbe()
+        let selector = BicinoEndpointSelector(channel: .production, monitorNetwork: false) {
+            service, origin, _ in await probe.check(service, origin)
+        }
+        let directAPI = URL(string: "https://maps.8o.vc")!
+        let proxyAPI = URL(string: "https://api.bicino.com")!
+        let devAPI = URL(string: "https://maps-dev.8o.vc")!
+        let proxyCatalog = URL(string: "https://maps-library.bicino.com")!
+        let suite = "BicinoProductionEndpointSelection.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "test-production-installation",
+            clientInstallationToken: "test-production-token",
+            appAttestKeyId: "test-production-key"
+        )
+        try! OfflineMapInstallationCredentialStore(defaults: defaults).save(
+            credential,
+            serverURLString: directAPI.absoluteString
+        )
+        let session = BicinoServiceSession(defaults: defaults, endpointSelector: selector)
+
+        await probe.allow([directAPI, proxyAPI, proxyCatalog])
+        let directClient = try! await session.makeOfflineMapClient(serverURLString: directAPI.absoluteString)
+        assertEqual(directClient.baseURL, directAPI, "production keeps its original host first")
+
+        selector.recordConnectionFailure(URLError(.timedOut), for: .api, requestURL: directAPI)
+        await probe.allow([proxyAPI, proxyCatalog])
+        let fallback = try! await session.clientForCurrentNetwork(directClient)
+        assertEqual(fallback.baseURL, proxyAPI, "production selects its own alternate hostname")
+        assertEqual(fallback.clientInstallationToken, credential.clientInstallationToken, "production keeps its token")
+        assertEqual(
+            session.loadedCredential(serverURLString: proxyAPI.absoluteString)?.appAttestKeyId,
+            credential.appAttestKeyId,
+            "the production alias resolves to the existing App Attest key"
+        )
+
+        let otherChannel = try! await session.makeOfflineMapClient(serverURLString: devAPI.absoluteString)
+        assertEqual(otherChannel.baseURL, devAPI, "a development URL is never routed onto production")
+        precondition(otherChannel.endpointSelector == nil)
+        let excluded = try! await session.makeOfflineMapClient(
+            serverURLString: directAPI.absoluteString,
+            allowsManagedProxy: false
+        )
+        assertEqual(excluded.baseURL, directAPI, "excluded endpoints still use the original host")
+        assertEqual(try! await selector.endpoint(for: .catalog), proxyCatalog, "production can use the shared catalog alias")
+        assertEqual(BicinoEndpointSelector.Service.api.healthChannel(in: .production).value, "production", "production verifies the API channel")
+    }
+
     private actor DevelopmentEndpointProbe {
         private(set) var calls: [URL] = []
         private var healthy: Set<URL> = []
@@ -8467,7 +8525,7 @@ struct NavigationProtocolTests {
             failuresRemaining = failingFirst
         }
 
-        func check(_ service: BicinoDevelopmentEndpointSelector.Service, _ url: URL) -> Bool {
+        func check(_ service: BicinoEndpointSelector.Service, _ url: URL) -> Bool {
             calls.append(url)
             if failuresRemaining > 0 {
                 failuresRemaining -= 1

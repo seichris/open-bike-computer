@@ -4063,7 +4063,7 @@ struct OfflineMapPlatformClient {
     let mapStreamTrustCapabilities: String?
     let mapStreamAppBuildIdentity: MapStreamAppBuildIdentity?
     let managedAppAttestClient: ManagedOfflineMapAppAttestClient?
-    var developmentEndpointSelector: BicinoDevelopmentEndpointSelector?
+    var endpointSelector: BicinoEndpointSelector?
     var session: URLSession = .shared
 
     init(
@@ -4076,7 +4076,7 @@ struct OfflineMapPlatformClient {
         mapStreamAppBuildIdentity: MapStreamAppBuildIdentity? = .current,
         managedAppAttestClient: ManagedOfflineMapAppAttestClient? = nil,
         session: URLSession = .shared,
-        developmentEndpointSelector: BicinoDevelopmentEndpointSelector? = nil
+        endpointSelector: BicinoEndpointSelector? = nil
     ) {
         self.baseURL = baseURL
         self.legacyBearerToken = legacyBearerToken?.isEmpty == true ? nil : legacyBearerToken
@@ -4087,7 +4087,7 @@ struct OfflineMapPlatformClient {
         self.mapStreamAppBuildIdentity = mapStreamAppBuildIdentity
         self.managedAppAttestClient = managedAppAttestClient
         self.session = session
-        self.developmentEndpointSelector = developmentEndpointSelector
+        self.endpointSelector = endpointSelector
     }
 
     func atOrigin(_ origin: URL) -> OfflineMapPlatformClient {
@@ -4496,7 +4496,7 @@ struct OfflineMapPlatformClient {
     }
 
     func recordConnectionFailure(_ error: Error, requestURL: URL?) async {
-        await developmentEndpointSelector?.recordConnectionFailure(
+        await endpointSelector?.recordConnectionFailure(
             error, for: .api, requestURL: requestURL
         )
     }
