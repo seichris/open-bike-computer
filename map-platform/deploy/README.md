@@ -216,7 +216,10 @@ configuration is invalid, including a callback/channel mismatch or an
 encryption key that does not decode to exactly 32 bytes.
 
 API and maintenance must share the same Strava client and encryption settings
-because both can revoke athlete tokens. The worker must never receive them.
+because both can revoke athlete tokens. Coolify injects its application environment
+file into every service. The production and development Compose manifests
+explicitly clear Strava credentials on services outside the integration and
+clear the owner bridge settings on every service except the API.
 The persistent `map-platform-data` volume contains the encrypted
 `strava-integrations.sqlite3`; it contains no plaintext token columns. Rotate
 token-encryption keys by placing retained `key-id=base64-key` entries (or a

@@ -31,6 +31,13 @@ class StravaComposeTests(unittest.TestCase):
         "MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR",
     )
 
+    _COOLIFY_MANIFESTS = {"compose.yaml", "compose.development.yaml"}
+    _BRIDGE_VARIABLES = (
+        "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET",
+        "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION",
+        "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE",
+    )
+
     def _service(self, compose: str, service: str) -> str:
         match = re.search(
             rf"(?ms)^  {re.escape(service)}:\n(.*?)(?=^  \S|\Z)",
@@ -59,23 +66,47 @@ class StravaComposeTests(unittest.TestCase):
                 self.assertNotIn(variable, worker, (path.name, variable))
 
     def test_development_bridge_configuration_is_scoped_to_the_apis(self):
-        bridge = "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET"
-        installation = "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION"
-        athlete = "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE"
+        bridge, installation, athlete = self._BRIDGE_VARIABLES
         for path in self._COMPOSE_FILES:
             compose = path.read_text(encoding="utf-8")
             api = self._service(compose, "map-platform-api")
-            if path.name in {"compose.yaml", "compose.development.yaml"}:
+            if path.name in self._COOLIFY_MANIFESTS:
                 self.assertIn(bridge, api)
                 self.assertIn(installation, api)
+                maintenance = self._service(compose, "map-platform-maintenance")
+                for variable in self._BRIDGE_VARIABLES:
+                    self.assertIn(f"{variable}: ''", maintenance)
             else:
-                self.assertNotIn(bridge, api)
-                self.assertNotIn(installation, api)
-            self.assertEqual(athlete in api, path.name == "compose.yaml")
-            for service in ("map-platform-worker", "map-platform-maintenance"):
-                section = self._service(compose, service)
-                for variable in (bridge, installation, athlete):
-                    self.assertNotIn(variable, section, (path.name, service))
+                for service in (api, self._service(compose, "map-platform-maintenance")):
+                    for variable in self._BRIDGE_VARIABLES:
+                        self.assertNotIn(variable, service)
+            if path.name == "compose.yaml":
+                self.assertIn(f"{athlete}: ${{{athlete}:-}}", api)
+            elif path.name == "compose.development.yaml":
+                self.assertIn(f"{athlete}: ''", api)
+            else:
+                self.assertNotIn(athlete, api)
+            worker = self._service(compose, "map-platform-worker")
+            for variable in self._BRIDGE_VARIABLES:
+                self.assertNotIn(variable, worker, (path.name, variable))
+
+    def test_coolify_env_file_cannot_supply_strava_credentials_to_other_services(self):
+        for path in self._COMPOSE_FILES:
+            if path.name not in self._COOLIFY_MANIFESTS:
+                continue
+            compose = path.read_text(encoding="utf-8")
+            start = compose.index("x-strava-disabled: &strava-disabled\n")
+            overrides = compose[start:compose.index("\n\n", start)]
+            self.assertIn("MAP_PLATFORM_STRAVA_ENABLED: '0'", overrides)
+            for variable in self._SHARED_VARIABLES[1:-1] + self._BRIDGE_VARIABLES:
+                self.assertIn(f"{variable}: ''", overrides)
+            worker = self._service(compose, "map-platform-worker")
+            self.assertIn("<<: *strava-disabled", worker)
+            if path.name == "compose.yaml":
+                promotion = self._service(compose, "map-platform-promotion")
+                valhalla = self._service(compose, "map-platform-valhalla")
+                self.assertIn("<<: *strava-disabled", promotion)
+                self.assertIn("environment: *strava-disabled", valhalla)
 
     def test_strava_is_disabled_by_default(self):
         for path in self._COMPOSE_FILES:
