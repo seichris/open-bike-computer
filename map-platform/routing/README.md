@@ -236,7 +236,8 @@ production now.
    `movable`, `viaduct` or `boardwalk` bridge is graded from what lies under
    the deck, and a terrain model holds the water or the ground there. Pass
    `--all-bridges` when the elevation holds a terrain model, and to the
-   ungraded build it is compared with. [graph_lua.py](graph_lua.py) then
+   ungraded build it is compared with; `build_graph.py` stops when a hybrid
+   elevation set comes without the flag. [graph_lua.py](graph_lua.py) then
    writes out the rules the pinned image carries, with every `bridge` value
    but `no`, `false` and `0` made a bridge, and the build stops unless
    Valhalla's log shows it read them. The rules are checked against the SHA-256 of the image's

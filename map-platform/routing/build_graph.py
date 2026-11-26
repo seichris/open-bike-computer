@@ -148,6 +148,12 @@ def graph_lua_identity(work):
             **file_identity(work / GRAPH_LUA)}
 
 
+def needs_all_bridges(elevation_record):
+    """A terrain model holds the ground under a deck, so its graph needs every bridge marked as one."""
+    method = (elevation_record or {}).get("method") or {}
+    return method.get("name") == "terrain-over-opening"
+
+
 def elevation_identity(elevation, sample=False):
     """The elevation manifest's identity; only a sample may use a partial run.
 
@@ -252,6 +258,9 @@ def main():
     mask_identity = file_identity(mask) if mask else None
     policy_identity = file_identity(args.policy) if mask else None
     elevation_record = elevation_identity(elevation, args.sample) if elevation else None
+    if needs_all_bridges(elevation_record) and not args.all_bridges:
+        parser.error("--elevation holds a terrain model: pass --all-bridges, and to the ungraded build it is "
+                     "compared with")
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask, admin_source, args.sample)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)

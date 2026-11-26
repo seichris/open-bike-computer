@@ -15,7 +15,7 @@ from shapely.geometry import Point, box, mapping
 
 from build_graph import (
     ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, elevation_identity, file_identity,
-    graph_lua_identity, prepare_inputs, valhalla_build,
+    graph_lua_identity, needs_all_bridges, prepare_inputs, valhalla_build,
 )
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
@@ -719,6 +719,11 @@ class ElevationHybridTests(ElevationOpeningTests):
             self.assertTrue(self.POSTS * (self.BAND - 1) <= blended <= self.POSTS * self.BAND, blended)
             identity = elevation_identity(root / "out", sample=True)
             self.assertEqual((identity["sources"], identity["method"]), (["glo30", "usgs-3dep-13"], method))
+            # A graph graded with it must mark every bridge; opened or raw tiles alone need not.
+            self.assertTrue(needs_all_bridges(identity))
+            self.assertFalse(needs_all_bridges(elevation_identity(root / "opened", sample=True)))
+            self.assertFalse(needs_all_bridges(elevation_identity(root / "raw", sample=True)))
+            self.assertFalse(needs_all_bridges(None))
             # The terrain tiles alone are not an elevation set a graph may be graded with.
             (root / "terrain" / "elevation-manifest.json").write_bytes(terrain_manifest.read_bytes())
             with self.assertRaisesRegex(ValueError, "Not a Valhalla elevation manifest"):

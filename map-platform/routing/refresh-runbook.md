@@ -702,20 +702,31 @@ four), which still meets the target of half. Riders in the United States
 also get real hills in place of the opened ones. Before a planet build:
 
 1. **Chris approves USGS 3DEP 1/3 arc-second as an elevation source for
-   routing, and decides where that is recorded.** It is not in
-   `config/topography-source-policy-v2.json`, and no planet may use it
-   before he approves it. That file cannot simply take it. Its loader
-   accepts only the Copernicus tiles (`copernicus-cog-v1`, a surface model
-   on EGM2008). It is also an input of the map-platform image and of the
-   offline-map worker's build identity, so a change to it rebuilds the image
-   and moves the signed worker. A source list for routing alone would do
-   neither.
-2. **`build_elevation.py` learns the hybrid.** That means a second source
-   with one dated tile per cell, 3DEP's posts first and opened Copernicus
-   for the rest, the blend inside 3DEP's edge, and receipts and a manifest
-   that record both. `sample_elevation.py tiles` only writes single cells
-   for samples. Repeat the border street check on its tiles; that runs on a
-   laptop.
+   routing.** Done on 2026-11-26. The approval is recorded in
+   [elevation-sources.json](elevation-sources.json), a source list for
+   routing alone, and not in `config/topography-source-policy-v2.json`.
+   That file's loader accepts only the Copernicus tiles
+   (`copernicus-cog-v1`, a surface model on EGM2008), and it is an input of
+   the map-platform image and of the offline-map worker's build identity,
+   so a change to it would rebuild the image and move the signed worker.
+   The list covers the conterminous United States, where the samples
+   tested 3DEP: 968 dated tiles and 365 GB, pinned in
+   [a catalog](usgs-3dep-13-tiles-20261126.txt). Alaska's tiles come from
+   radar, and Hawaii and the territories use other height datums; they stay
+   on opened Copernicus until someone tests them.
+2. **`build_elevation.py` learns the hybrid.** Done:
+   `--terrain-sources` downloads the catalog's tiles, checks each against
+   its size and ETag, and writes 3DEP's posts over the opened Copernicus
+   tiles, lifting the Copernicus side at 3DEP's edge (see
+   [Build and release](README.md#build-and-release)). The Calexico and El
+   Paso cells were built that way on a laptop, each with the tiles around
+   it: about 11 minutes a cell, most of it downloading six to eight 3DEP
+   tiles. In both, the terrain tile equals the one `sample_elevation.py
+   tiles` wrote, and the hybrid equals 3DEP at every post 3DEP has. At El
+   Paso the difference across the edge fell from 2 m at the median, 5 m at
+   the 90th percentile and 69 m at the most to 0, 1 and 8 m; Calexico's
+   figures are with the seam above. One catalog tile, N34W076 in the
+   Atlantic off North Carolina, has no Copernicus cell and is left out.
 3. **Every bridge is graded as a bridge.** Done: Valhalla's tagging rules
    call a way a bridge only when `bridge` is `yes` or `1`.
    `build_graph.py --all-bridges` builds with those rules changed in one
@@ -728,7 +739,18 @@ also get real hills in place of the opened ones. Before a planet build:
    their length on 3DEP, the opened-400 graph still made the Road leg 9.5%
    longer, and the ungraded routes have the same lengths with and without
    the rule. Build the ungraded twin with it too, so that the gate compares
-   graphs that differ in elevation alone.
+   graphs that differ in elevation alone. `build_graph.py` refuses a
+   terrain-graded elevation set without the flag.
+
+   A bridge mapped in several pieces is still graded piece by piece, so a
+   node over water takes the water's height. El Paso's Santa Fe bridge is
+   split at the border, and its 116 m piece reads 3% on 3DEP, from a levee
+   at 1,132 m down to the river at 1,128 m; opened Copernicus, which
+   flattens the levees, reads 1%. On six bridges in New York (Brooklyn,
+   Manhattan, Williamsburg, Queensboro, Pulaski and Roosevelt Island) no
+   bridge edge reads 5% or more on either source, and all six routes are
+   the ungraded ones. A bridge split in mid-span over a deep gorge should
+   read far worse on either source; no leg tests one.
 4. **Build the planet and run the gate.** Reading 3DEP adds up to 494 GB of
    downloads to the elevation stage.
 
