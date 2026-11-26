@@ -26,7 +26,7 @@ guard here (see [Past failures](#past-failures-and-what-covers-them)).
 | `authorize-export-key.sh` | the builder | Lets one SSH key read `export/` with rsync and nothing else. |
 | `builder_status.py` | the map VPS, or a laptop | Asks the builder for the chain's state. |
 | `rehearse.sh`, `rehearse.py` | any machine with Docker | Runs the chain on one city sample, without systemd or a builder. |
-| [`elevation-cache-proposal.md`](elevation-cache-proposal.md) | | A proposal to keep elevation tiles between builds. Not decided. |
+| [`elevation-cache-proposal.md`](elevation-cache-proposal.md) | | The elevation tiles kept in a bucket since 2026-11-26, and what a build still lacks to use them. |
 
 Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
 
@@ -187,7 +187,7 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 | 2026-11-25: Docker took `build/planet-no-elevation/valhalla_tiles.tar` for a volume name and refused it. | Every path comes from `config.sh`, which rejects a relative scratch path. A test checks every mount. |
 | The hand-written qualification and gate scripts waited up to 180 seconds for Valhalla and then went on whether it answered or not. This never fired. | The wait fails the stage when Valhalla does not answer. |
 | Every run: the gate ran last, by hand, after about 7.5 hours. | The gate is a stage. On city samples it can run before a planet is built (see [Rehearse](#rehearse-on-a-city-sample)). |
-| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | Not solved. See the [proposal](elevation-cache-proposal.md). |
+| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | Half solved. The raw and the 400 m tiles of 2026-11-26 are [kept in a bucket](elevation-cache-proposal.md#what-is-kept). The restore step is not built, so a build still makes them again. |
 
 ## Rehearse on a city sample
 

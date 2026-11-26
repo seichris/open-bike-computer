@@ -896,7 +896,11 @@ boot disk, Local SSD data, and external IP are gone. Remove the job's firewall
 rule, subnet, and VPC. `builder/teardown.sh --job JOB` prints those deletions
 and `--delete` runs them, then fails unless the instance, its disks, the
 firewall rule, the subnet and the network are all gone. Deleting the builder
-destroys everything on its scratch volume, so pull `export/` first. Revoke and
+destroys everything on its scratch volume, so pull `export/` first. Its
+elevation tiles go too. Those of the 2026-11-26 builder, raw and opened at
+400 m, are kept in a bucket (see
+[what is kept](builder/elevation-cache-proposal.md#what-is-kept)); tiles of
+another method are not. Revoke and
 remove the one-time transfer keys and remove
 transfer segments and unused development sample archives from the VPS. Keep
 the active graph, rollback archives, release manifest, and small test records.
