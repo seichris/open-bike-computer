@@ -275,17 +275,25 @@ marked `reportOnly`: `compare_elevation.py` routes and tabulates them, but
 no target counts them, and a person judges their length change and 6%+
 share.
 
+All seven tower cities build as samples since 2026-11-26. At 400 m the New
+York sample missed the same target on the same leg as the planet, and five
+of the seven city rows equalled the planet's (see
+[Tower-city samples](refresh-runbook.md#tower-city-samples)). Run them
+before building a planet with a new elevation method.
+
 1. Download the city's Geofabrik extract, which `elevation-probes.json` names
    as `extract`, and record its SHA-256. It holds the whole city and its
    state or province boundary: Valhalla keeps only country and state
    polygons, so a cut state such as NorCal gives an empty admin database.
    [prepare_sample.py](prepare_sample.py) cuts the city's box with complete
    ways into `roads.osm.pbf` and takes the boundaries of the whole extract
-   as `admin.osm.pbf`. The New York extract lacks one member of New York
-   State, and Valhalla then builds no admin polygon; the city lists that way
-   under `adminWays`, and the tool fetches it from the OpenStreetMap API and
-   merges it. `sample.json` records what was cut and `elevationBounds`, the
-   whole-degree bounds for step 2.
+   as `admin.osm.pbf`. The New York and Illinois extracts each lack one
+   member of their state's boundary, and Valhalla then builds no admin
+   polygon and the build stops. Such a city lists the way under `adminWays`,
+   and the tool fetches it from the OpenStreetMap API and merges it. For a
+   new city, Valhalla's build log names the way: `Illinois (122586) is
+   missing way member 814758098`. `sample.json` records what was cut and
+   `elevationBounds`, the whole-degree bounds for step 2.
 
    ```sh
    python prepare_sample.py --city Chicago --region "$scratch/illinois-latest.osm.pbf" \

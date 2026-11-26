@@ -182,6 +182,7 @@
     "terrain": "flat",
     "bbox": [-87.70, 41.85, -87.60, 41.92],
     "extract": "north-america/us/illinois",
+    "adminWays": [151733210, 814754231, 814758098, 815063224, 815063225],
     "legs": [
       {"name": "Union Station to Michigan Avenue", "origin": [41.8786, -87.6403], "destination": [41.8836, -87.6247]},
       {"name": "Magnificent Mile to the South Loop", "origin": [41.8966, -87.6244], "destination": [41.8742, -87.6277]}

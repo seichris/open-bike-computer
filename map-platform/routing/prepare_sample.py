@@ -11,7 +11,9 @@ This writes the inputs `build_graph.py --sample` needs:
   them, so `build_graph.py` takes them from here (`--admin-source`). Where
   the extract itself lacks a member of the state's boundary, the city lists
   the missing ways as `adminWays`; they are fetched from the OpenStreetMap
-  API and merged in. New York State needs one;
+  API and merged in. New York State and Illinois each need one. Valhalla's
+  build log names such a way ("Illinois (122586) is missing way member
+  814758098"), and the build then fails for want of any boundary;
 - `probes.json`: the city's legs as smoke probes for `probe_graph.py`;
 - `sample.json`: what was cut from what, and `elevationBounds`, the
   whole-degree bounds to pass to `build_elevation.py --bounds`.

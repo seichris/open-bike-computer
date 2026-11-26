@@ -468,6 +468,67 @@ reports, tile and graph manifests, and the merged admin input are on the
 map VPS in
 `/root/bicino-routing-releases/opening-radius-samples-20261126/samples-evidence.tgz`.
 
+### Tower-city samples
+
+On 2026-11-26 the gate's seven high-rise cores were built as city samples
+for the first time, to see whether a sample predicts the planet gate there.
+Each was one run of `builder/rehearse.sh --city CITY --radius 400` on a
+laptop: the city's box cut from its Geofabrik extract (files dated
+2026-11-24 or 2026-11-25), the Copernicus cells around it opened at 400 m by
+the production code path, an ungraded and a graded sample graph, and the gate
+on that city. The planet graded at 400 m was gated on a builder the same day.
+Its rows below are quoted from that gate's log; the planet build has its own
+record.
+
+| City | Extract (SHA-256 prefix) | Sample: routes, longest, median 6%+ share | Planet gate log | Sample run |
+|---|---|---|---|---|
+| Shanghai | `asia/china/shanghai` (`58bf1ece308b`) | 4, 0.0%, 0% | 4, 0.0%, 0% | 2 min |
+| Hong Kong (report only) | `asia/china/hong-kong` (`0fa7e9c37b4a`) | 4, 0.0%, 6%; `use_hills` 0 of 2 | 4, 0.0%, 6%; 0 of 2 | 2 min |
+| Singapore | `asia/malaysia-singapore-brunei` (`31b9cde91db4`) | 4, 0.0%, 2% | 4, 0.0%, 2% | 5 min |
+| Dubai | `asia/gcc-states` (`8b0ac30242ee`) | 6, 0.0%, 0% | 6, 0.0%, 0% | 6 min |
+| New York | `north-america/us/new-york` (`0537ef31d952`) | 6, **+28.2%**, 9% | 6, **+28.2%**, 9% | 10 min |
+| Chicago | `north-america/us/illinois` (`b5fe99c6154b`) | 4, +1.5%, 7% | 4, +9.5%, 7% | 7 min |
+| São Paulo (report only) | `south-america/brazil/sudeste` (`13205c5a3d00`) | 4, +6.8%, 14%; `use_hills` 0 of 2 | 4, 0.0%, 15%; 1 of 2 | 15 min |
+
+- **The New York sample gives the planet's verdict.** Its summary reads "a
+  flat leg is +28.2% longer", word for word the planet gate's. The leg is
+  Port Authority to the United Nations: Road goes from 2.09 to 2.68 km and
+  Everyday from 2.38 to 2.68 km (+12.5%). Ten minutes on a laptop showed what
+  the planet build showed after about 7.5 hours. The samples that chose
+  400 m that morning held only New York's first leg, which does not change
+  at 400 m.
+- **Five of the seven city rows equal the planet's.** Chicago's sample has the
+  planet's median change and 6%+ share, but its longest route is 1.5%
+  longer where the planet's is 9.5% longer. A box two and a half times as
+  wide and three times as tall gave the same routes, so the box is not the
+  cause. A sample's ungraded route can differ from the planet's, as New
+  York's Road leg did at 200 m; the planet's per-leg report was out of reach
+  that day, so this was not checked.
+  São Paulo's sample has a Road leg 6.8% longer that the planet does not
+  have, and `use_hills` changes none of its legs where it changes one on the
+  planet. São Paulo is report-only. The cause was not looked into; the
+  extract is nine days newer than the planet snapshot, and the sample has
+  Brazil's states but not its country polygon.
+- **A sample run is mostly the download.** Geofabrik served 1 to 1.5 MB/s
+  that day. With the extract on disk a city takes 2 to 3 minutes.
+- **Boundaries.** Illinois lacks five of the 349 ways of its state boundary
+  in its extract, and New York State one. Without them Valhalla builds no
+  admin polygon and the build stops, which is how the first Chicago run
+  failed. Both cities list the ways as `adminWays`. The Shanghai and Hong
+  Kong samples each got one admin polygon from their extract.
+- **Judge all cities together.** One city's `summary` applies the pooled
+  targets to that city alone: New York by itself also misses "flat median
+  6%+ share" with 9%, which the pooled flat cities meet. `compare_elevation.py
+  summary` over every sample's `gate-report.json` gives the gate's view. Over
+  these samples it reads "opened-400: misses: a flat leg is +28.2% longer".
+
+So a method should pass the tower-city samples, New York above all, before
+a planet is built with it. A pass there is not a pass on the planet: two of
+seven rows differed. Copenhagen, Paris, London, Munich and Tokyo are still
+planet-only. The map VPS could not be reached that day, so the runs' result
+files and gate reports are not stored there; the numbers above are their
+record.
+
 ## Pull, assemble, and install on Coolify
 
 Expose the approved immutable archive and receipt through a dedicated

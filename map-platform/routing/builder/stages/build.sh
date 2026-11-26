@@ -42,9 +42,15 @@ fi
 
 sha256sum "$BICINO_ROUTING/build_graph.py"
 echo "build start=$(bicino_now) threads=$threads"
-/usr/bin/time -v python3 "$BICINO_ROUTING/build_graph.py" \
+# GNU time reports to a file of its own: after a failure the end of this log
+# is then the build's error, which the status shows, not time's statistics.
+timing=$BICINO_LOGS/$BICINO_STAGE.time
+if ! /usr/bin/time -v -o "$timing" python3 "$BICINO_ROUTING/build_graph.py" \
   --source "$roads" --source-sha256 "$sha256" --source-url "$(bicino_source_url)" \
-  "${arguments[@]}" --work "$work" --threads "$threads"
+  "${arguments[@]}" --work "$work" --threads "$threads"; then
+  bicino_fail "build_graph.py failed; its error is above and its resource use in $timing"
+fi
 echo "build end=$(bicino_now)"
+cat "$timing"
 [ -s "$work/manifest.json" ] || bicino_fail "build_graph.py wrote no manifest"
 cat "$work/manifest.json"

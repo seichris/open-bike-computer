@@ -178,9 +178,23 @@ extract needs more. In a second run the graded build was killed after 45
 seconds. The stage was recorded as failed, its Valhalla container was
 removed, and the restarted chain rebuilt the graph and finished.
 
+The same day the seven tower cities ran at 400 m, 2 to 15 minutes each,
+most of it the download of the extract. New York's sample missed the gate on
+the leg the planet build missed it on (see
+[Tower-city samples](../refresh-runbook.md#tower-city-samples)). A run
+without `--radius` built only the ungraded sample and ended `complete` with
+the gate `not-run`.
+
 The rehearsal leaves out what needs a planet: the territory audit, the
 cross-border probes and the profile probe. Its units run one after another.
 Its result file says `"sample": true`. It is never release evidence.
+
+- An extract already at `ROOT/input/` with the published size is not
+  downloaded again.
+- Run one rehearsal at a time on a Docker host. The containers' names and
+  stage labels do not carry the scratch directory, so a second run would
+  remove the first one's containers.
+- Without `--map-platform-image` the pinned image is pulled, about 2 GB.
 
 ## Not verified on a real builder
 
