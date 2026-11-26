@@ -16,11 +16,15 @@ SOCIAL_PROVIDERS = (
     {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'phoneOnly'},
 )
 STRAVA_PROVIDER = {'providerID': 'strava.route', 'attribution': 'Strava', 'storageScope': 'durable'}
+VALHALLA_SAVED_PROVIDER = {
+    'providerID': 'bicino.valhalla', 'attribution': '© OpenStreetMap contributors', 'storageScope': 'phoneOnly',
+}
 # An account's private route library (synced between the app and bicino.com)
-# holds imported GPX and Strava API routes. Maintainer decision 2026-11-26:
+# holds imported GPX, Strava API routes and explicitly saved Bicino plans.
+# Maintainer decision 2026-11-26:
 # Strava routes sync and are kept without the app's seven-day expiry. Library
 # rows are never shared, so Strava data stays with the account that imported it.
-LIBRARY_PROVIDERS = (SOCIAL_PROVIDERS[0], STRAVA_PROVIDER)
+LIBRARY_PROVIDERS = (SOCIAL_PROVIDERS[0], STRAVA_PROVIDER, VALHALLA_SAVED_PROVIDER)
 
 
 def _strava_reference(reference):
@@ -69,8 +73,8 @@ def validate_archive(archive, library=False):
 
     Shared routes accept imported GPX and saved Apple Maps archives without a
     source reference or deadline. A private library row (`library=True`) also
-    accepts the app's Strava archive with its Strava URL and seven-day
-    `deleteAfter`; the server keeps the row regardless of that deadline.
+    accepts saved Bicino plans and the app's Strava archive with its Strava URL
+    and seven-day `deleteAfter`; the server keeps the row regardless of that deadline.
     """
     if set(archive)-{'schemaVersion','route','createdAt','contentHash','deleteAfter'}:
         raise ValueError('archive_fields')

@@ -124,7 +124,9 @@ The native API, behind the `routes` feature and advertised as the
 
 - `GET /library/routes` returns sync rows: `id`, `routeID`, `title`, `revision`,
   `created`, `contentHash`, `routeRevision` and `providerID`. No archives are
-  included. `GET /routes/{id}` returns the archive for a row the account owns.
+  included. The response advertises `supportedProviders` alongside `items`.
+  Clients assume GPX and Strava when this field is absent.
+  `GET /routes/{id}` returns the archive for a row the account owns.
 - `PUT /library/routes/{routeID}` takes `title`, `archive`, `hashPayload` and
   the optional `elevationGainMeters` and `durationSeconds`, and creates or
   replaces the row.
@@ -139,9 +141,11 @@ The native API, behind the `routes` feature and advertised as the
 - `DELETE /library/routes/{routeID}` stays available while `routes` is
   rolled back.
 
-The library accepts imported GPX and the app's Strava API archives, which carry
-their Strava `sourceReference` and seven-day `deleteAfter`. Saved Apple Maps
-and Bicino-planned routes keep their phone-only scope and are refused.
+The library accepts imported GPX, saved Bicino plans and the app's Strava API
+archives, which carry their Strava `sourceReference` and seven-day `deleteAfter`.
+Bicino plans retain `bicino.valhalla` provenance and OpenStreetMap attribution.
+Their existing archive scope still excludes Watch transfer and social sharing.
+Temporary Valhalla routes and Apple Maps routes remain outside this library.
 **Maintainer decision, 2026-11-26:** Strava routes sync to the library and the
 server keeps them without the app's seven-day expiry. Strava's API agreement
 limits caching of Strava data to seven days, so this is a recorded product

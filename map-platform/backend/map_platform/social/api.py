@@ -27,6 +27,7 @@ from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionRec
                      ProfileEdit, QuickMessage, RideCreate,
                      RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion, WebsiteRouteDelete,
                      WebsiteRouteEdit, WebsiteRouteImport, WebsiteRouteList)
+from .route_archive import LIBRARY_PROVIDERS
 from .service import (LIBRARY_SOURCE_PREFIX, SocialError, SocialService, digest, identifier, public_content,
                       row)
 from . import website_routes
@@ -597,7 +598,10 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
     @app.get("/library/routes")
     def library_list(auth=Depends(authenticate)):
         """The account's private route library: sync rows without archives."""
-        return read(lambda c: {"items": service.library_routes(c, auth[0])})
+        return read(lambda c: {
+            "items": service.library_routes(c, auth[0]),
+            "supportedProviders": [provider["providerID"] for provider in LIBRARY_PROVIDERS],
+        })
 
     @app.put("/library/routes/{route_id}")
     async def library_put(route_id: str, data: LibraryRouteUpload, request: Request, auth=Depends(authenticate)):
