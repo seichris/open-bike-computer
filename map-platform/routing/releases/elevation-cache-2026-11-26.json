@@ -1,0 +1,359 @@
+{
+  "schema": "bicino-routing-elevation-cache-v1",
+  "bucket": "bicino-routing-elevation",
+  "location": "europe-west4",
+  "storageClass": "NEARLINE",
+  "storedAt": "2026-11-26",
+  "builder": "bicino-valhalla-r400-261116",
+  "buildElevationSha256": "42ca05a216461864019f747ba471756a4d3841ef011ba63416341ddadfc7b1c9",
+  "sets": {
+    "raw": {
+      "prefix": "copernicus-2021/raw-d53d9beb3206/",
+      "method": null,
+      "manifestSha256": "d53d9beb3206c1485961a6c4ab32eec049b420e22ddb8d3b17f38db7eb1a25ce",
+      "cellListSha256": "c262a47dfc6807ef168aff854a43cba0ef0ee207a45a0722194b8ef2cad5f95d",
+      "cells": 26475,
+      "tileBytes": 160401431217,
+      "sources": [
+        {
+          "id": "copernicus-glo30-public-2021",
+          "indexSha256": "10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc",
+          "cells": 26450
+        },
+        {
+          "id": "copernicus-glo90-2021",
+          "indexSha256": "e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97",
+          "cells": 25
+        }
+      ],
+      "policySha256": "c470fadf40509bb4ab07cfce0e8ec3d7995275ab84d5050dd632a4c96cb3ad96",
+      "runtime": {
+        "rasterio": "1.4.4",
+        "gdal": "3.10.3"
+      },
+      "shardBytes": 160466831360,
+      "shards": [
+        {
+          "name": "N0.tar",
+          "bytes": 8735815680,
+          "files": 1144,
+          "sha256": "6c05eddd7ddce0177011dedc5d1396b003d8c1b4729a9cf28980c75c3976d3fb",
+          "md5": "Ik6KSOKhPqW8cilmMPmi/w=="
+        },
+        {
+          "name": "N1.tar",
+          "bytes": 8650782720,
+          "files": 1253,
+          "sha256": "1b461993d03bae48f4318b36252deaffb14610e8c402f0b7189cbc24b165801c",
+          "md5": "hGoRAh43nikDh9X1m0hyvQ=="
+        },
+        {
+          "name": "N2.tar",
+          "bytes": 13469849600,
+          "files": 1625,
+          "sha256": "25388cf608742bdd8a9b322b1b7006abec3f032252399774538402e6673111d5",
+          "md5": "4wApXanbhFKQFxFht6I/XQ=="
+        },
+        {
+          "name": "N3.tar",
+          "bytes": 17013288960,
+          "files": 1777,
+          "sha256": "bac7933cc3b299aeaec1c8b988c557d2554b358f1b37d432b55aa56dbe1a128c",
+          "md5": "cmfB7YGGcqjtUoAgYGZjhA=="
+        },
+        {
+          "name": "N4.tar",
+          "bytes": 17743298560,
+          "files": 2090,
+          "sha256": "7165d1cf3a71b2b646c4fe0353f2410c9881ce21f1c75441abb0ae14dbe94569",
+          "md5": "C8fTpH7lpYbreyTqa0cN7w=="
+        },
+        {
+          "name": "N5.tar",
+          "bytes": 17580247040,
+          "files": 2373,
+          "sha256": "26c831c0c24c06fdb809edf234f325d3cd3c2e4a81b4a9e93faec86f085a3be5",
+          "md5": "Un6vlh29BcvV/jPlzjKH6g=="
+        },
+        {
+          "name": "N6.tar",
+          "bytes": 19465902080,
+          "files": 2988,
+          "sha256": "fdec6dced47ec1343108a01a08c1e1318fffd6f651c8ff79cbf5163c37e2445c",
+          "md5": "y7GJIYWu3tLIMOi5/p+5Ag=="
+        },
+        {
+          "name": "N7.tar",
+          "bytes": 5642362880,
+          "files": 1704,
+          "sha256": "c6a9eabf1dfbb5e33e268540eb8402608f831f31c5a153d4707a3f1ac1cd422b",
+          "md5": "/AUiqWU7Ds+KbxR+qH/zOw=="
+        },
+        {
+          "name": "N8.tar",
+          "bytes": 1249894400,
+          "files": 396,
+          "sha256": "3e0db75fa60eaca4fd296509fcc0f002cbafc6e51b75b282f4cfbed3a8e8a8c4",
+          "md5": "B8u6eid1HAO91j0mNyTgVg=="
+        },
+        {
+          "name": "S0.tar",
+          "bytes": 8595783680,
+          "files": 1121,
+          "sha256": "965ec9343e6ca2170e29de384197a8ef6a5aed8170647508e0dd78a5a9011449",
+          "md5": "tG5OY7DqeI69ybVYf0qosQ=="
+        },
+        {
+          "name": "S1.tar",
+          "bytes": 7997583360,
+          "files": 1080,
+          "sha256": "76d8da85a0204812920c72a3348e9b225690416652ca5f7231d3e565fa756ab6",
+          "md5": "tkE9eD9c5Ofu0jsu3k8hSA=="
+        },
+        {
+          "name": "S2.tar",
+          "bytes": 7031531520,
+          "files": 1014,
+          "sha256": "92b02d7c8cc3fefc7484f5782cb5f56f0f16a5b984201b01f299f19465573c1a",
+          "md5": "FaccvWHx8DdGddJbFNC9vQ=="
+        },
+        {
+          "name": "S3.tar",
+          "bytes": 3829596160,
+          "files": 567,
+          "sha256": "be42b055d124c31425007fa5744f274eed696edf148ae97a84cabaf2a8ab481f",
+          "md5": "8jGvWKH6ea3PGy9KtwYs0w=="
+        },
+        {
+          "name": "S4.tar",
+          "bytes": 1354403840,
+          "files": 202,
+          "sha256": "5cb0822f7d62eb3b918b8cc1da2632503d44cc6f38f4d0ff8f4fdf7a098cd286",
+          "md5": "xZll8hx0hEhJxPC3xTYyJg=="
+        },
+        {
+          "name": "S5.tar",
+          "bytes": 403875840,
+          "files": 97,
+          "sha256": "aac71fc62d357785b7cf43f25f273589244582d282a71aa5a65b859c47d1fe5d",
+          "md5": "pQrepvwmoiHn91G65DIS3Q=="
+        },
+        {
+          "name": "S6.tar",
+          "bytes": 1545154560,
+          "files": 420,
+          "sha256": "69143ac2b3ae89f458775df3693071eb1c44c3df04a89e8c88ab80e3f3106801",
+          "md5": "D7cfh8foxgyT3eMOxH15CQ=="
+        },
+        {
+          "name": "S7.tar",
+          "bytes": 10467962880,
+          "files": 2664,
+          "sha256": "1e5c3ddf342f45a9d9a725d6dca2e49de33e40ae1f71a8e1ff0129f14e628c9a",
+          "md5": "el8ZRCsJzYMvuQ5mcyf+jA=="
+        },
+        {
+          "name": "S8.tar",
+          "bytes": 9302855680,
+          "files": 3600,
+          "sha256": "e401330048c3dd49c0e14f83250cbbd18c094f4037fab78e7f98f94f744077a3",
+          "md5": "Qg/j5suyUbOsL8LhwD9OAA=="
+        },
+        {
+          "name": "S9.tar",
+          "bytes": 341811200,
+          "files": 360,
+          "sha256": "e3992d1d0aa236202288db4ab04689c0778d0e37d287d5adb95c2afd74feb083",
+          "md5": "igM4e/D7w9PFH7kGxT98vw=="
+        },
+        {
+          "name": "meta.tar",
+          "bytes": 44830720,
+          "files": 26479,
+          "sha256": "4e273a24d0b957afe6d4bf5e56cb0c1e675959985d8ffc39534c95b99e452464",
+          "md5": "Irp/KxT/7gpm+VLywtNWqA=="
+        }
+      ]
+    },
+    "opened-400": {
+      "prefix": "copernicus-2021/opened-400-7c6b3903ce03/",
+      "method": {
+        "name": "grey-opening",
+        "radiusMetres": 400.0,
+        "footprint": "ellipse",
+        "footprintLatitude": "post row",
+        "metresPerArcsecond": 30.87,
+        "maximumHalfWidthPosts": 1799,
+        "noData": "kept, never part of an ellipse",
+        "input": {
+          "manifestSha256": "d53d9beb3206c1485961a6c4ab32eec049b420e22ddb8d3b17f38db7eb1a25ce",
+          "cellListSha256": "c262a47dfc6807ef168aff854a43cba0ef0ee207a45a0722194b8ef2cad5f95d"
+        }
+      },
+      "manifestSha256": "7c6b3903ce03819bcb46f1a68223842069ffcc37224e37e61a1426ad98944cbb",
+      "cellListSha256": "9119004f6c719547a91368078b2893e33a83f885d86aadcee1be2ded36fe50a9",
+      "cells": 26475,
+      "tileBytes": 83815950886,
+      "sources": [
+        {
+          "id": "copernicus-glo30-public-2021",
+          "indexSha256": "10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc",
+          "cells": 26450
+        },
+        {
+          "id": "copernicus-glo90-2021",
+          "indexSha256": "e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97",
+          "cells": 25
+        }
+      ],
+      "policySha256": "c470fadf40509bb4ab07cfce0e8ec3d7995275ab84d5050dd632a4c96cb3ad96",
+      "runtime": {
+        "rasterio": "1.4.4",
+        "gdal": "3.10.3"
+      },
+      "shardBytes": 83917639680,
+      "shards": [
+        {
+          "name": "N0.tar",
+          "bytes": 4564674560,
+          "files": 1144,
+          "sha256": "e0d5963242ef490b43e15ec6dfc145b5e38a7c350b28b6a487ad9a1173ed8134",
+          "md5": "gNsXe3iFL5Rf9zflyAVT7Q=="
+        },
+        {
+          "name": "N1.tar",
+          "bytes": 4654305280,
+          "files": 1253,
+          "sha256": "9a0b582264f019d8ecaa29da85d268df178c5b34505502869891f857aa8ec781",
+          "md5": "xHwOWwslnwlUYvOrV1Pr4A=="
+        },
+        {
+          "name": "N2.tar",
+          "bytes": 7144202240,
+          "files": 1625,
+          "sha256": "16409df77dc3febd539e231f54d6628f78cfe30d037fb3935b17618bb695ae09",
+          "md5": "M4AYirYUM/6u/AMBOn0AZA=="
+        },
+        {
+          "name": "N3.tar",
+          "bytes": 9436620800,
+          "files": 1777,
+          "sha256": "45ba61300985c45ad014356253ce31627134391b4b5d4cf7048bd03175d35fe7",
+          "md5": "hajvjgA32h1zrB8CUCamSw=="
+        },
+        {
+          "name": "N4.tar",
+          "bytes": 10033971200,
+          "files": 2090,
+          "sha256": "89d730f097a01220068b7e08b1ef7113dd866b17ccbfe8822d8a3e01b1bdd112",
+          "md5": "dYKtBiHuicu8CJm4n0MmWw=="
+        },
+        {
+          "name": "N5.tar",
+          "bytes": 9618728960,
+          "files": 2373,
+          "sha256": "516c67f489f07a7a8c4a19104ef4d73b1a86d4db6dc37ec8024975e9e8d2e4bc",
+          "md5": "mQalNq8AzI1dCFtZlH5hwg=="
+        },
+        {
+          "name": "N6.tar",
+          "bytes": 11161907200,
+          "files": 2988,
+          "sha256": "cde9764528392b7d14d232e67622e35991276339c088e0eb9533a30215fc46fd",
+          "md5": "1xEbJoKEpSYrlxkWui98rA=="
+        },
+        {
+          "name": "N7.tar",
+          "bytes": 3273195520,
+          "files": 1704,
+          "sha256": "5b83a3b0b0c4187f20c5b1b41d838a4cbda9e285138576f8a2501bab7b186693",
+          "md5": "8RubApxH8gjG3fpJl+8lPw=="
+        },
+        {
+          "name": "N8.tar",
+          "bytes": 785172480,
+          "files": 396,
+          "sha256": "9636321144f96e4b61f275fea1f3275ba1acbb5aa69cd8f42fc5c037cb7f94cb",
+          "md5": "LRgSIAUE1v7LiP1THJh4Jw=="
+        },
+        {
+          "name": "S0.tar",
+          "bytes": 4430776320,
+          "files": 1121,
+          "sha256": "5397d2f324114d00c9d9f91ec43d23306312cc1f95b286ba628c11842447a4f8",
+          "md5": "w3puDJMMSTechqI1f+h0AA=="
+        },
+        {
+          "name": "S1.tar",
+          "bytes": 4615720960,
+          "files": 1080,
+          "sha256": "0cbe472f3a7be28220f66bec5ea8ccce4545205616be2dd7bb00b890d8d305b2",
+          "md5": "0rQl0USI+Eb1rve8P+Q7uA=="
+        },
+        {
+          "name": "S2.tar",
+          "bytes": 3888967680,
+          "files": 1014,
+          "sha256": "c89a4428b1eafab885c456ce25dc5d919bb351cab98889a4842ec47b370fc9e5",
+          "md5": "nJA9xnUpTCdYdC8F0tGF6w=="
+        },
+        {
+          "name": "S3.tar",
+          "bytes": 2124800000,
+          "files": 567,
+          "sha256": "50fbc2927426ccc3ca0ed70e379e81c7f3f6a17d7ab6cc6b847088e2cf63f681",
+          "md5": "ve7uMx9PWuKNQCofKIstgA=="
+        },
+        {
+          "name": "S4.tar",
+          "bytes": 824709120,
+          "files": 202,
+          "sha256": "941cf0a572c53147505118a72b2ab0e69e6eba13090f8b94f3a18c869dedda22",
+          "md5": "xXHGtseJ2k//O0mKLNXiNA=="
+        },
+        {
+          "name": "S5.tar",
+          "bytes": 241397760,
+          "files": 97,
+          "sha256": "14f7c0e077e5e5d0226c6cff2172774155b7edea55192007cc9e3ec19b15ba57",
+          "md5": "lkLd+H66wYj0HDS5uA3FZQ=="
+        },
+        {
+          "name": "S6.tar",
+          "bytes": 794265600,
+          "files": 420,
+          "sha256": "37aa4875fe8d7eeaee41162f0c11ae3304bd61a3c388feb8451e1538a4fb8f6e",
+          "md5": "U9TBTp+GxQzlCH+KVIgDaQ=="
+        },
+        {
+          "name": "S7.tar",
+          "bytes": 3644416000,
+          "files": 2664,
+          "sha256": "e862e6011000d71bd3a78fac0b31843e3aca6e7c12799e4d76eceab11cc73b6a",
+          "md5": "oFeP6+MYxHlyp8q2lFXF3w=="
+        },
+        {
+          "name": "S8.tar",
+          "bytes": 2536550400,
+          "files": 3600,
+          "sha256": "3392a14b5d59d0df439e3ef4f849552c487054c22396be3ebbf3e5f81691bd19",
+          "md5": "i2lnlyX4jYdh5K6yLdSF2w=="
+        },
+        {
+          "name": "S9.tar",
+          "bytes": 62156800,
+          "files": 360,
+          "sha256": "aedad7f05857501c9fc61359a2f486e6416e56255082dfd292b0428b423f58ee",
+          "md5": "vP1wLAi187cT8onNQRpoJg=="
+        },
+        {
+          "name": "meta.tar",
+          "bytes": 81100800,
+          "files": 26477,
+          "sha256": "2a10f98fcfb3eaf9adf76aebc1e5bad5b69d3a4a3c6c74f3649b4d588fd97e8f",
+          "md5": "NnZRLfjoHHMEBnco8jjfUQ=="
+        }
+      ]
+    }
+  }
+}
