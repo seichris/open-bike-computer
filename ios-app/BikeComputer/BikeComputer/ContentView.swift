@@ -17,6 +17,8 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     case offlineRoutes
     case savePlannedRoute(OfflineRouteSaveDraft)
     case saveCreatedRoute(OfflineRouteSaveDraft)
+    /// A GPX file another app opened in Bicino ("Open in Bicino").
+    case importOpenedGPX(OfflineRouteSaveDraft)
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
@@ -33,6 +35,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
         case .saveCreatedRoute(let draft): return "save-created-route:\(draft.id.uuidString)"
+        case .importOpenedGPX(let draft): return "import-opened-gpx:\(draft.id.uuidString)"
         case .bikeComputerSetup: return "bike-computer-setup"
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
@@ -108,6 +111,7 @@ struct ContentView: View {
     @State private var savedRouteMapPreview: SavedRouteMapPreview?
     @State private var savedRoutePreviewBottomHeight: CGFloat?
     @State private var plannedRouteSaveFeedback: String?
+    @State private var openedGPXError: String?
     @State private var presentedSheet: ContentSheetDestination?
     @State private var queuedSheetAfterDismiss:
         ContentSheetDestination?
@@ -568,6 +572,7 @@ struct ContentView: View {
             presentPendingBicinoSetupAppLinkIfEligible()
         }
         .onOpenURL { url in
+            if OpenedGPXFile.isGPX(url) { presentOpenedGPX(url); return }
             if social.session.handleURL(url) { return }
             if social.handleLink(url) { presentedSheet = .socialLink; return }
             if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
@@ -611,6 +616,17 @@ struct ContentView: View {
                         .joined(separator: "\n")
                 )
             }
+        }
+        .alert(
+            "GPX Import Error",
+            isPresented: Binding(
+                get: { openedGPXError != nil },
+                set: { if !$0 { openedGPXError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { openedGPXError = nil }
+        } message: {
+            Text(openedGPXError ?? "The GPX route could not be imported.")
         }
         .onChange(of: presentedSheet) { destination in
             if let destination {
@@ -1016,6 +1032,14 @@ struct ContentView: View {
                 } else {
                     presentedSheet = nil
                 }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackgroundInteraction(.disabled)
+        case .importOpenedGPX(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { _ in
+                // Land in Saved Routes, where the new route is listed with
+                // its map preview and Watch status.
+                openOfflineRoutes()
             }
             .presentationDetents([.medium, .large])
             .presentationBackgroundInteraction(.disabled)
@@ -1454,6 +1478,28 @@ struct ContentView: View {
         }
 
         presentedSheet = .bikeComputerSetup
+    }
+
+    private func presentOpenedGPX(_ url: URL) {
+        do {
+            let draft = try OpenedGPXFile.draft(
+                from: url,
+                documentsDirectory: FileManager.default.urls(
+                    for: .documentDirectory, in: .userDomainMask
+                ).first,
+                now: Date()
+            )
+            let destination = ContentSheetDestination.importOpenedGPX(draft)
+            if presentedSheet != nil || isSheetDismissalInFlight {
+                queuedSheetAfterDismiss = destination
+                presentedSheet = nil
+            } else {
+                presentedSheet = destination
+            }
+        } catch {
+            openedGPXError = (error as? LocalizedError)?.errorDescription ??
+                "The GPX route could not be imported."
+        }
     }
 
     private func saveSelectedRouteOffline() {

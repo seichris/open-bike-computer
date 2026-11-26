@@ -121,22 +121,7 @@ struct SavedRoutesSettingsSection: View {
     private func importGPX(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
-            let access = url.startAccessingSecurityScopedResource()
-            defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let byteCount = try url.resourceValues(
-                forKeys: [.fileSizeKey]
-            ).fileSize ?? 0
-            guard byteCount > 0,
-                  byteCount <= GPXRouteImporterV1.maximumInputBytes else {
-                throw GPXRouteImporterError.fileTooLarge
-            }
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            let data = try handle.read(upToCount: GPXRouteImporterV1.maximumInputBytes + 1) ?? Data()
-            // The parser rechecks the bound even if the file grew after stat.
-            onConfirmGPX(try OfflineRouteSaveDraft.gpx(
-                data: data, fileName: url.lastPathComponent, now: Date()
-            ))
+            onConfirmGPX(try OfflineRouteSaveDraft.gpxFile(at: url, now: Date()))
         } catch {
             let cocoa = error as NSError
             if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError { return }

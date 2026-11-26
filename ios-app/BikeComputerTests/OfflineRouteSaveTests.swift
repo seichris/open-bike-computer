@@ -245,6 +245,7 @@ struct OfflineRouteSaveTests {
         try operationReceiptAndCrashRecovery()
         try unavailableWatchDeletionAndFenceRenewal()
         try sourceAndValidation()
+        try openedGPXFiles()
         try socialCopyKeepsProviderAndProvenance()
         try socialMapKitCopyKeepsExactRoute()
         try saveIdentityRestartAndDuplicates()
@@ -460,6 +461,52 @@ struct OfflineRouteSaveTests {
         failure { _ = try d.namedArchive("  ") }
         failure { _ = try d.namedArchive(String(repeating: "é", count: 257)) }
         check(f.library.routes.isEmpty, "Rejected sources and geometry never appear in the library")
+    }
+
+    /// "Open in Bicino" from Komoot, Files or Safari: iOS hands over a copy in
+    /// Documents/Inbox, which is read once into a draft and removed.
+    static func openedGPXFiles() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let documents = f.root.appendingPathComponent("Documents", isDirectory: true)
+        let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+
+        check(OpenedGPXFile.isGPX(inbox.appendingPathComponent("Komoot.GPX")), "Upper-case .GPX files are opened")
+        check(!OpenedGPXFile.isGPX(URL(string: "https://www.komoot.com/tour/1.gpx")!), "A web link is not an opened file")
+        check(!OpenedGPXFile.isGPX(inbox.appendingPathComponent("route.xml")), "Only .gpx files reach the importer")
+
+        let copy = inbox.appendingPathComponent("Komoot ride.gpx")
+        try gpx().write(to: copy)
+        check(OpenedGPXFile.isInboxCopy(copy, documentsDirectory: documents), "iOS's Inbox copy is recognized")
+        check(!OpenedGPXFile.isInboxCopy(copy, documentsDirectory: nil), "Without a Documents directory nothing is an Inbox copy")
+        let draft = try OpenedGPXFile.draft(from: copy, documentsDirectory: documents, now: f.now)
+        check(draft.archive.route.provider == RouteProviderPolicyV1.importedGPX &&
+              draft.archive.route.name == "Canal ride" && draft.isEligible(now: f.now),
+              "An opened file becomes the same user-provided GPX draft as Import GPX")
+        check(!FileManager.default.fileExists(atPath: copy.path), "The Inbox copy is removed after reading")
+        check(f.library.routes.isEmpty, "Opening a file only stages a draft; Save writes the route")
+
+        let broken = inbox.appendingPathComponent("broken.gpx")
+        try Data("<not-xml".utf8).write(to: broken)
+        failure { _ = try OpenedGPXFile.draft(from: broken, documentsDirectory: documents, now: f.now) }
+        check(!FileManager.default.fileExists(atPath: broken.path), "A rejected Inbox copy is removed too")
+        let empty = inbox.appendingPathComponent("empty.gpx")
+        try Data().write(to: empty)
+        failure { _ = try OpenedGPXFile.draft(from: empty, documentsDirectory: documents, now: f.now) }
+        let large = inbox.appendingPathComponent("large.gpx")
+        try Data(count: GPXRouteImporterV1.maximumInputBytes + 1).write(to: large)
+        failure { _ = try OpenedGPXFile.draft(from: large, documentsDirectory: documents, now: f.now) }
+        check(!FileManager.default.fileExists(atPath: empty.path) &&
+              !FileManager.default.fileExists(atPath: large.path),
+              "Empty and oversized Inbox copies are removed")
+
+        let nestedFolder = inbox.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: true)
+        for kept in [documents.appendingPathComponent("kept.gpx"), nestedFolder.appendingPathComponent("nested.gpx")] {
+            try gpx().write(to: kept)
+            _ = try OpenedGPXFile.draft(from: kept, documentsDirectory: documents, now: f.now)
+            check(FileManager.default.fileExists(atPath: kept.path), "Only direct Inbox copies are deleted")
+        }
     }
 
     static func saveIdentityRestartAndDuplicates() throws {
@@ -1267,9 +1314,17 @@ struct OfflineRouteSaveTests {
         check(panel.contains("SavedRoutesSettingsSection(") && settings.contains("SavedRoutesSettingsSection("),
             "Planner shortcut and Settings share the same library/import UI")
         check(!panel.contains("ForEach(library.routes)") && !panel.contains(".fileImporter"), "Shortcut does not duplicate library or importer")
-        check(section.contains("onConfirmGPX(try OfflineRouteSaveDraft.gpx(") &&
+        check(section.contains("onConfirmGPX(try OfflineRouteSaveDraft.gpxFile(at: url") &&
             !section.contains("try routeLibrary.importGPX("),
             "Import GPX requests confirmation before the durable commit")
+        let openedGPX = content.components(separatedBy: "private func presentOpenedGPX(").dropFirst().first?
+            .components(separatedBy: "private func saveSelectedRouteOffline").first ?? ""
+        check(content.contains("if OpenedGPXFile.isGPX(url) { presentOpenedGPX(url); return }") &&
+            content.contains("case .importOpenedGPX(let draft):") &&
+            openedGPX.contains("OpenedGPXFile.draft(") &&
+            openedGPX.contains("ContentSheetDestination.importOpenedGPX(draft)") &&
+            !openedGPX.contains("importGPX(") && !openedGPX.contains("saveOffline("),
+            "A GPX opened from another app gets the same confirmation before the durable commit")
         check(!section.contains(".sheet(") &&
             settings.contains("presentedSheet = .gpxRouteImport(draft)") &&
             settings.contains("RouteSaveSheet(library: routeLibrary, draft: draft)") &&

@@ -378,7 +378,10 @@ Offline mode is the default:
 
 1. On iPhone, open **Settings** and find **Saved Routes**. Choose **Import GPX**
    for a durable user-owned GPX route or track, or use the optional Strava flow
-   above for a seven-day provider-backed copy. The longest usable route/track
+   above for a seven-day provider-backed copy. A GPX file can also come from
+   another app: share or open it in Bicino from Komoot's GPX download, Files or
+   Safari. Bicino reads the copy iOS hands over once, deletes that copy, and
+   shows the same confirmation. The longest usable route/track
    segment is validated as a draft. Confirm its name and choose **Save Route**;
    cancelling writes nothing. To save an Apple Maps route without starting it,
    choose **Save an Online Route**, select a destination and route alternative,

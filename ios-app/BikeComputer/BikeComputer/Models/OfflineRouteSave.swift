@@ -28,6 +28,22 @@ struct OfflineRouteSaveDraft: Identifiable, Equatable {
                     gpxVertexElevations: imported.vertexElevations)
     }
 
+    /// Reads a GPX file chosen in Import GPX or opened from another app.
+    /// The read is bounded; the parser rechecks the bound even if the file
+    /// grew after stat.
+    static func gpxFile(at url: URL, now: Date) throws -> Self {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        let byteCount = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard byteCount > 0, byteCount <= GPXRouteImporterV1.maximumInputBytes else {
+            throw GPXRouteImporterError.fileTooLarge
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: GPXRouteImporterV1.maximumInputBytes + 1) ?? Data()
+        return try gpx(data: data, fileName: url.lastPathComponent, now: now)
+    }
+
     /// Takes the already-validated canonical route selected in the planner,
     /// preserving its UUID, ordered geometry, instructions and normalization.
     /// This never converts Apple geometry to a user-GPX provider.
@@ -213,4 +229,37 @@ struct OfflineRouteSaveInteraction {
     }
 
     mutating func cancel() { self = Self() }
+}
+
+/// A GPX file another app hands to Bicino: "Open in Bicino" from Komoot,
+/// Files or a Safari download. Bicino does not open documents in place, so
+/// iOS copies the file into Documents/Inbox first; that copy is read once
+/// and removed, and the rider confirms the import like Import GPX.
+enum OpenedGPXFile {
+    static func isGPX(_ url: URL) -> Bool {
+        url.isFileURL && url.pathExtension.lowercased() == "gpx"
+    }
+
+    /// Only a direct child of this app's Documents/Inbox is iOS's copy.
+    static func isInboxCopy(_ url: URL, documentsDirectory: URL?) -> Bool {
+        guard url.isFileURL, let documentsDirectory else { return false }
+        let inbox = documentsDirectory
+            .appendingPathComponent("Inbox", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        let file = url.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        return file.count == inbox.count + 1 && Array(file.prefix(inbox.count)) == inbox
+    }
+
+    static func draft(
+        from url: URL,
+        documentsDirectory: URL?,
+        now: Date
+    ) throws -> OfflineRouteSaveDraft {
+        defer {
+            if isInboxCopy(url, documentsDirectory: documentsDirectory) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        return try OfflineRouteSaveDraft.gpxFile(at: url, now: now)
+    }
 }
