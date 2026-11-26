@@ -776,14 +776,121 @@ also get real hills in place of the opened ones. Before a planet build:
 
 What a hybrid does not fix: high-rise cores outside the United States stay
 on Copernicus opened at 400 m. The gate's Singapore, Shanghai, Dubai and
-Tokyo legs kept their routes on the 400 m planet, but no leg tests Toronto,
-Vancouver, Seoul or Melbourne. Hill avoidance outside the United States
-also stays as weak as the 400 m opening leaves it.
+Tokyo legs kept their routes on the 400 m planet, and a survey of 36 more
+downtowns found one that did not, Toronto (see
+[below](#toronto-a-tower-downtown-the-hybrid-does-not-fix)). Hill avoidance
+outside the United States also stays as weak as the 400 m opening leaves it.
 
 The reports, tile and graph manifests and the scratch scripts were not
 copied to the map VPS, because this work was not to touch the hosts. They
 are in the sessions' notes folder on Chris's Mac, under
 `usgs-3dep-samples-20261126/`.
+
+#### Toronto: a tower downtown the hybrid does not fix
+
+On 2026-11-26 another session routed 58 legs in 36 tower downtowns outside
+the United States on the 400 m planet's two gate services, with New York
+and Chicago as controls. Its report and scripts are on the map VPS in
+`/root/bicino-routing-releases/opened-400-downtown-survey-20261126/`. Of
+92 routes in flat cities one breaks the 5% rule: Toronto, Rogers Centre to St Lawrence Market, Everyday
+from 2.006 to 2.710 km (+35.1%), leaving Front Street West for Adelaide
+Street. Union Station to Yonge-Dundas Square is 2.8% longer on Road, and 22%
+of it reads 6% or more. Melbourne's Collins Street (Road +7.5%) and Seoul's
+Teheran-ro (Everyday +8.2%) change on real slopes and were not judged; no
+other leg is more than 2.9% longer.
+
+Both Toronto legs are now in `elevation-probes.json` as a flat city, so a
+planet gate sees them. **A hybrid planet built as approved grades Toronto
+with the same opened tiles and would miss the gate on the first leg.**
+
+A city sample shows the same, and that a terrain model repairs it. Toronto's
+box was cut from Geofabrik's `ontario-261125.osm.pbf` (1,016,225,213 bytes,
+SHA-256 `0edd1904…`, MD5 as published) by `prepare_sample.py`, with Canada's
+relation 1428125 merged in; Ontario's boundary is whole in the extract.
+Three sample graphs were built from it with `build_graph.py`'s build, none
+with `--all-bridges`: ungraded, graded with the cell opened at 400 m by
+`build_elevation.py`, and graded with MRDEM-30's terrain model read over
+the cell on 2026-11-26 (bilinear, onto the cell's own posts, heights left
+in CGVD2013) and written by `sample_elevation.py tiles`.
+
+| Leg, profile | Ungraded | Opened at 400 m | MRDEM-30 terrain |
+|---|---|---|---|
+| Rogers Centre to St Lawrence Market, Road | 2.006 km | 2.006 km, 20% at 6%+ | 2.006 km, 9% at 6%+ |
+| Rogers Centre to St Lawrence Market, Everyday | 2.006 km | **2.710 km (+35.1%)**, other streets | 2.006 km, 9% at 6%+ |
+| Union Station to Yonge-Dundas Square, Road | 1.416 km | 1.455 km (+2.8%), other streets | 1.416 km, 0% at 6%+ |
+| Union Station to Yonge-Dundas Square, Everyday | 1.455 km | 1.455 km, 16% at 6%+ | 1.455 km, 0% at 6%+ |
+
+The opened sample gives the survey's numbers, 2.006 to 2.710 km on the
+first leg and +2.8% on the second, so the sample stands for the planet here
+as it does in New York and Chicago. On MRDEM-30 all four routes are the
+ungraded ones. 9% of the first leg still reads 6% or more; the terrain model
+falls from 89 m at the Rogers Centre to 81 m at Simcoe Street, and which
+edges read steep was not looked at. The sample went through the tools by
+hand, not through `builder/rehearse.sh`.
+
+The heights below were read on a laptop from four sources: the Copernicus
+cell N43W080 built raw and opened at 400 m by `build_elevation.py`, the
+3DEP tile the catalog pins for that cell
+(`USGS_13_n44w080_20230227.tif`), and Canada's MRDEM-30 terrain model.
+Metres, each in its own height datum; the lake shows how far those differ.
+
+| Point | Copernicus raw | Opened at 400 m | USGS tile | MRDEM-30 terrain |
+|---|---|---|---|---|
+| Rogers Centre, Front Street West | 79 | 71 | 89.9 | 89.0 |
+| Front Street at Simcoe | 87 | 65 | 79.8 | 81.3 |
+| Union Station | 96 | 75 | 79.8 | 79.7 |
+| Front Street at Bay | 82 | 75 | 79.8 | 79.6 |
+| St Lawrence Market, Front Street East | 80 | 71 | 78.8 | 76.4 |
+| King at Bay | 106 | 77 | 82.7 | 82.8 |
+| Adelaide at Bay | 89 | 78 | 85.3 | 85.0 |
+| Queen at Bay | 85 | 79 | 87.9 | 89.9 |
+| Yonge-Dundas Square | 94 | 89 | 91.9 | 91.9 |
+| Lake Ontario off the harbour | 75 | 74 | 75.8 | 75.1 |
+
+- **The opening spreads pits.** In the downtown box (43.635° to 43.66° N,
+  79.40° to 79.36° W, 13,195 posts) raw Copernicus has 202 posts below the
+  lake's 74 m, the lowest at 53 m. Whether they are excavations open at
+  the time of the radar survey or radar errors between the towers was not
+  found out. Opened, 2,961 posts (22%) read below the lake. An opening gives a post the highest of
+  the lowest heights within 400 m, so where pits lie closer together than
+  that, every disk holds one and the ground between them sinks to the
+  pits. On the straight line between the first leg's ends the opened tile
+  reads 65 to 75 m, median 71 m, and both terrain models a median of 80 m:
+  Front Street becomes a trench up to 9 m below the lake, under King,
+  Adelaide and Queen Street at 77 to 79 m. This is the opposite of
+  Midtown's humps, and a larger radius would spread it further.
+- **3DEP holds heights there, and the build drops them on purpose.** The
+  tile has a height at every post of the cell and reads Front Street at 79
+  to 80 m. The footprint table published beside it
+  (`USGS_13_n44w080_20230227.gpkg`) names two New York lidar projects of
+  2019 and 2020 for the United States' shore, and for the rest only
+  "Photogrammetric mass points and breaklines" or "Unknown", without dates.
+  The approval covers lidar terrain inside the United States, and such fill
+  exists only in the cells that touch it, so the cut at the border stays.
+- **Canada publishes a terrain model that covers it.** MRDEM-30 of Natural
+  Resources Canada (Open Government Licence - Canada, record
+  `18752265-bda3-498c-a4ba-9dfe68cb98da` on open.canada.ca) is a 30 m
+  terrain model of all of Canada: the lidar mosaic (HRDEM) resampled from
+  1 m where it exists, and elsewhere Copernicus GLO-30 with a forest and a
+  settlement removal model applied. It is one cloud-optimised GeoTIFF of
+  83,854,027,098 bytes, last changed 2026-06-24, made to be read in ranges:
+  `https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif`,
+  in Canada Atlas Lambert (EPSG:3979) with heights in CGVD2013. At the ten
+  points it is within 2.4 m of the USGS tile. Its source layer reads 10 in
+  downtown Toronto, Montreal, Vancouver, Calgary and Ottawa and 1 in
+  Nunavut, northern Quebec, Yukon and on the Minnesota side of the border;
+  that was read here as lidar and Copernicus, without the product
+  specification. The part that
+  comes from Copernicus carries the Copernicus notice.
+- **MRDEM-30 is not an approved source, and the build cannot read it.**
+  Using it needs Chris's approval, an entry in `elevation-sources.json`, a
+  reader for one projected file in place of 3DEP's degree tiles, Canada's
+  boundary as its area, a look at the seam with 3DEP along the border, and
+  samples of other Canadian downtowns.
+
+The readings, the sample's report and manifests and the scripts are in the
+sessions' notes folder on Chris's Mac, under
+`usgs-3dep-samples-20261126/toronto/`.
 
 ### Tower-city samples
 
