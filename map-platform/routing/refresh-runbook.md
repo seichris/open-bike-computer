@@ -285,9 +285,9 @@ both services on the builder, with no `--city`. It missed one target:
   graph, routes are judged on its own heights. Without elevation, every
   hilly leg gave the same route for both `use_hills` values.
 - **Chris rejected the candidate on 2026-11-26.** Production stays ungraded
-  (`abe5e72e`). Before another graded planet, test a larger opening radius
-  on New York and the hilly city samples: a wider ellipse reaches more
-  street posts but also flattens more real ridges.
+  (`abe5e72e`). A wider ellipse reaches more street posts but also flattens
+  more real ridges; the samples below test 300 m and 400 m (see
+  [Opening radius](#opening-radius-on-city-samples)).
 
 Build facts, on a `c4-highmem-24-lssd`:
 
@@ -314,6 +314,67 @@ Build facts, on a `c4-highmem-24-lssd`:
 - After the builds the builder sat idle for about 8 hours. A wait loop read
   an unreachable SSH hop as "still running". A loop that waits on the
   builder must stop and report when its check gets no answer.
+
+### Opening radius on city samples
+
+On 2026-11-26 the opening was repeated at 300 m and 400 m on city samples,
+to see whether a wider ellipse reaches the street posts between Midtown's
+towers. The samples were the eight cities above plus New York and Stuttgart,
+built from Geofabrik extracts of 2026-11-24 (New York `0537ef31d952`,
+Baden-Württemberg `bfe0f0225dca`). Each city's tiles were opened at 200, 300
+and 400 m by `build_elevation.py --opening-radius R --raw RAW --bounds ...`,
+the production code path with neighbour margins. Each city was then built
+ungraded and once per radius from the same box. `compare_elevation.py`
+judged hill avoidance on the mean of the three graded graphs' heights.
+
+| Radius | Flat routes: longest | Flat routes: median 6%+ share | New York Everyday | Hilly legs `use_hills` changes | Median 6%+ share saved | Climb on the same 17 hilly routes | Targets |
+|---|---|---|---|---|---|---|---|
+| 200 m | +5.9% | 2% | +5.9% | 13 of 17 | 3 pts | 2,102 m | missed |
+| 300 m | +5.9% | 0.5% | +5.9% | 15 of 17 | 0 pts | 1,900 m | missed |
+| **400 m** | **+0.4%** | **0%** | **0.0%** | **12 of 17** | **4 pts** | **1,762 m** | **met** |
+
+The flat columns cover 38 routes in Buenos Aires, Amsterdam, Houston, Berlin
+and New York; the median length change was 0.0% at every radius. No route or
+grade lookup failed, and the ungraded graphs gave the same route for both
+`use_hills` values on all 17 hilly legs. 400 m also meets the targets when
+the hilly legs are judged on the 200 m or on the 400 m heights alone.
+
+- **The 200 m sample reproduces the planet's New York result.** Everyday
+  went from 8.87 to 9.40 km (+5.9%), as on the planet. The sample's
+  ungraded Road route already takes 7th Avenue, unlike the planet's, so its
+  Road leg does not show the detour.
+- **300 m is not enough.** It cuts the 6%+ share of the direct New York
+  route from 12% to 3%, but Everyday still takes the 7th Avenue detour. It
+  also made one Amsterdam Everyday leg 2.7% longer.
+- **400 m keeps every flat route and still avoids hills, but flattens
+  narrow ones.** The opening removes anything narrower than about twice the
+  radius, and some real hills are that narrow. On the same 17 routes, the
+  400 m tiles report 16% less climb than the 200 m tiles. The losses fall
+  on short, steep hills: Cais do Sodré to Graça in Lisbon (99 to 59 m),
+  North Beach to Pacific Heights over Russian Hill in San Francisco (96 to
+  54 m), and the railway station to Hataitai over Mount Victoria in
+  Wellington (154 to 77 m). `use_hills` changes 2 of Lisbon's 4 legs at
+  400 m, against 4 at 200 m. The broad slopes of Zurich and Stuttgart lose
+  at most 5% of their climb, while the Ferry Building to Twin Peaks loses
+  21% (277 to 218 m).
+
+**Recommendation: if a graded planet is still wanted, grade it with
+Copernicus opened at 400 m.** It is the first radius that passes the gate on
+the samples. Riders in cities with short, steep hills such as Lisbon get
+weaker hill avoidance than 200 m would give. Today's ungraded graph gives
+them none, and in dense high-rise cores like Midtown 400 m does not invent
+hills. The samples hold one high-rise core, New York. The planet gate covers
+Tokyo and Dubai as well, but none of São Paulo, Hong Kong, Singapore or
+Chicago. A planet build at 400 m (about 7.5 hours on the builder, then
+the gate) needs Chris's approval.
+
+The New York state extract lacks one member of the New York State boundary
+relation (r61320): way 29307896, the NY/VT/MA tri-state marker, last edited
+in 2022. Without it Valhalla builds no admin polygon. For the sample, that way
+was fetched from the OpenStreetMap API and merged into the admin input. The
+reports, tile and graph manifests, and the merged admin input are on the
+map VPS in
+`/root/bicino-routing-releases/opening-radius-samples-20261126/samples-evidence.tgz`.
 
 ## Pull, assemble, and install on Coolify
 
