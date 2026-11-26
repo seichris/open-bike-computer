@@ -170,11 +170,20 @@ production now.
    policy, which accepts only Copernicus and is an input of the map-platform
    image and of the offline-map worker's identity. It holds one source, the
    USGS 3DEP 1/3 arc-second tiles of the conterminous United States, and
-   pins [a catalog](usgs-3dep-13-tiles-20261126.txt) of 968 dated tiles
-   (365 GB), one line per cell with the tile's date, size and S3 ETag.
-   [terrain_catalog.py](terrain_catalog.py) writes a new catalog from the
-   USGS bucket when the tiles should move; record its size, SHA-256 and tile
-   count in the source list.
+   pins two files:
+
+   - **The area**: OpenStreetMap's boundary of the United States with its
+     territorial sea, as a gzipped GeoJSON polygon. The newest 3DEP tiles
+     hold no data beyond the border, but older ones carry fill for Mexico
+     and Canada from other sources, which nobody tested or approved. Every
+     post outside the area is dropped.
+   - **[A catalog](usgs-3dep-13-tiles-20261126.txt)** of 955 dated tiles
+     (364 GB), one for every cell that touches the area, with the tile's
+     date, size and S3 ETag.
+
+   [terrain_catalog.py](terrain_catalog.py) writes both, the area from an
+   `osmium export` of the relation and the catalog from the USGS bucket.
+   Record their sizes and SHA-256 and the tile count in the source list.
 
    ```sh
    docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \
@@ -196,12 +205,13 @@ production now.
      the catalog's, because the USGS has then replaced the tile. The tile
      must be laid out as its cell's 3DEP tile is: float32, NAD 83, three
      pixels per post, six pixels of overlap. Its SHA-256 goes into the
-     receipt and its posts into an HGT tile.
+     receipt and its posts inside the area into an HGT tile. A tile is cut
+     again when the area changes.
    - **Hybrid** tiles in `--out`. A post is 3DEP's where 3DEP has data and
      opened Copernicus's elsewhere.
 
-   3DEP ends at the border of the United States and at sea, and the opened
-   surface lies under the ground (a metre or two on flat land, far more on
+   Cut to its area, 3DEP ends at the border of the United States and at sea,
+   and the opened surface lies under the ground (a metre or two on flat land, far more on
    ridges), so the two would meet in a step. The hybrid therefore lifts the
    Copernicus side. A post within 16 posts of 3DEP's data takes the
    difference between the two surfaces at 3DEP's edge, carried outward as
@@ -407,10 +417,12 @@ before building a planet with a new elevation method.
    every cell of `--bounds`, where the source is an HTTPS URL or a local
    file; the manifest records each file's size and SHA-256. A 3DEP tile is
    named by its north-west corner, so cell N40W074 comes from `n41w074`, and
-   its dated versions are under `historical/` in the USGS bucket. 3DEP has
-   no data outside the United States. `--fill DIR` takes those posts from
-   another elevation directory, which makes the hybrid a border cell would
-   hold.
+   its dated versions are under `historical/` in the USGS bucket. The newest
+   3DEP tiles have no data outside the United States; older ones carry fill
+   there, which this sample tool does not remove. `--fill DIR` takes the
+   posts without data from another elevation directory. That gives a border
+   cell's hybrid without the blend `build_elevation.py --terrain-sources`
+   applies.
 
    ```sh
    python sample_elevation.py cog --source-id gedtm30-v1.2 --bounds -59 -35 -58 -34 \
