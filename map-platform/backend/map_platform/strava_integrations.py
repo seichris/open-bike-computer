@@ -43,6 +43,7 @@ STRAVA_SESSION_ID_PATTERN = re.compile(r"oauth_[A-Za-z0-9_-]{24,128}")
 STRAVA_STATE_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
 STRAVA_INSTALLATION_ID_PATTERN = re.compile(r"inst_v2_[0-9a-f]{32}")
 _KNOWN_CALLBACK_SCOPES = frozenset({"read", "read_all"})
+_SHARED_OWNER_GRANT = "strava_shared_owner"
 
 
 class StravaIntegrationError(RuntimeError):
@@ -118,6 +119,7 @@ class StravaOAuthStart:
 class StravaOAuthCallbackResult:
     session_id: str | None
     result: str
+    return_scheme: str | None = None
 
 
 @dataclass(frozen=True)
@@ -424,10 +426,12 @@ class StravaIntegrationStore:
         bundle: StravaTokenBundle,
         *,
         connected_at: float,
+        owner_link: tuple[str, str] | None = None,
+        previous_owner_link: tuple[str, str] | None = None,
     ) -> None:
         key_id, nonce, ciphertext = self._encrypt(installation_id, bundle)
         with self._transaction() as connection:
-            connection.execute(
+            updated = connection.execute(
                 """
                 INSERT INTO connections(
                     installation_id, key_id, nonce, ciphertext,
@@ -447,6 +451,7 @@ class StravaIntegrationStore:
                     refresh_lease_expires_at = NULL,
                     updated_at = excluded.updated_at,
                     revocation_started_at = NULL
+                WHERE ? OR connections.state = 'active'
                 """,
                 (
                     installation_id,
@@ -456,8 +461,78 @@ class StravaIntegrationStore:
                     connected_at,
                     connected_at,
                     connected_at,
+                    owner_link is None,
                 ),
             )
+            if previous_owner_link is not None:
+                self._remove_owner_link(connection, *previous_owner_link, now=connected_at)
+            if owner_link is not None:
+                if not updated.rowcount:
+                    raise StravaIntegrationError("strava_oauth_session_invalid", status_code=409)
+                channel, linked_installation = owner_link
+                connection.execute(
+                    """
+                    INSERT INTO shared_owner_links(
+                        deployment_channel, installation_id, grant_id, last_used_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(deployment_channel, installation_id) DO UPDATE SET
+                        grant_id = excluded.grant_id, last_used_at = excluded.last_used_at
+                    """,
+                    (channel, linked_installation, installation_id, connected_at),
+                )
+                if channel == "production":
+                    # The authenticated installation now uses the shared grant.
+                    # Replace a legacy copy without revoking the provider grant.
+                    connection.execute(
+                        "DELETE FROM connections WHERE installation_id = ?",
+                        (linked_installation,),
+                    )
+
+    def touch_owner_link(self, channel: str, installation_id: str) -> bool:
+        with self._transaction() as connection:
+            return bool(connection.execute(
+                """
+                UPDATE shared_owner_links SET last_used_at = ?
+                WHERE deployment_channel = ? AND installation_id = ?
+                """,
+                (self._clock(), channel, installation_id),
+            ).rowcount)
+
+    def expire_owner_links(self, *, cutoff: float) -> None:
+        with self._transaction() as connection:
+            connection.execute(
+                "DELETE FROM shared_owner_links WHERE last_used_at <= ?", (cutoff,)
+            )
+
+    def unlink_owner(self, channel: str, installation_id: str) -> bool:
+        """Remove one link and queue provider revocation only after the last link."""
+        with self._transaction() as connection:
+            return self._remove_owner_link(connection, channel, installation_id, now=self._clock())
+
+    @staticmethod
+    def _remove_owner_link(
+        connection: sqlite3.Connection, channel: str, installation_id: str, *, now: float,
+    ) -> bool:
+        removed = connection.execute(
+            """
+            DELETE FROM shared_owner_links
+            WHERE deployment_channel = ? AND installation_id = ?
+            """,
+            (channel, installation_id),
+        ).rowcount
+        if not removed:
+            return False
+        return bool(connection.execute(
+            """
+            UPDATE connections
+            SET state = 'pending_revocation', revocation_started_at = ?,
+                refresh_lease_id = NULL, refresh_lease_expires_at = NULL,
+                updated_at = ?
+            WHERE installation_id = ? AND state = 'active'
+              AND NOT EXISTS (SELECT 1 FROM shared_owner_links WHERE grant_id = ?)
+            """,
+            (now, now, _SHARED_OWNER_GRANT, _SHARED_OWNER_GRANT),
+        ).rowcount)
 
     def connection(
         self,
@@ -618,6 +693,9 @@ class StravaIntegrationStore:
                     END,
                     updated_at = ?
                 WHERE installation_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM shared_owner_links WHERE grant_id = connections.installation_id
+                  )
                 """,
                 (revocation_started_at, now, installation_id),
             )
@@ -630,6 +708,17 @@ class StravaIntegrationStore:
                 (installation_id,),
             )
             return cursor.rowcount == 1
+
+    def delete_rejected_connection(self, record: StravaConnectionRecord) -> None:
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM connections
+                WHERE installation_id = ? AND token_revision = ? AND connected_at = ?
+                  AND state = 'active'
+                """,
+                (record.installation_id, record.token_revision, record.connected_at),
+            )
 
     def pending_revocation_ids(self) -> tuple[str, ...]:
         with self._transaction() as connection:
@@ -677,6 +766,9 @@ class StravaIntegrationStore:
                 SELECT installation_id
                 FROM connections
                 WHERE state = 'active' AND last_used_at <= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM shared_owner_links WHERE grant_id = connections.installation_id
+                  )
                 ORDER BY last_used_at, installation_id
                 """,
                 (cutoff,),
@@ -759,6 +851,20 @@ class StravaIntegrationStore:
                 }
                 if "revocation_started_at" not in columns:
                     raise ValueError("Strava integration database schema is incomplete")
+                # Additive so the previous release can open the database during rollback.
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS shared_owner_links(
+                        deployment_channel TEXT NOT NULL
+                            CHECK(deployment_channel IN ('development', 'production')),
+                        installation_id TEXT NOT NULL,
+                        grant_id TEXT NOT NULL REFERENCES connections(installation_id)
+                            ON DELETE CASCADE,
+                        last_used_at REAL NOT NULL,
+                        PRIMARY KEY(deployment_channel, installation_id)
+                    )
+                    """
+                )
                 connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS connections_revocation_expiry
@@ -815,6 +921,7 @@ class StravaIntegrationStore:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5)
         connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     @contextmanager
@@ -835,11 +942,14 @@ class StravaIntegrationService:
         store: StravaIntegrationStore,
         client: StravaClient | None,
         clock: Callable[[], float] = time.time,
+        development_owner: tuple[str, str] | None = None,
     ):
         self.config = config
         self.store = store
         self.client = client
         self._clock = clock
+        self._development_owner = development_owner
+        self._owner_oauth_lock = threading.Lock()
         self._refresh_locks_guard = threading.Lock()
         self._refresh_locks: dict[str, threading.Lock] = {}
 
@@ -851,6 +961,7 @@ class StravaIntegrationService:
         deployment_channel: str,
         transport: StravaTransport | None = None,
         clock: Callable[[], float] = time.time,
+        development_owner: tuple[str, str] | None = None,
     ) -> StravaIntegrationService:
         config = StravaIntegrationConfig.from_environment(deployment_channel)
         store = StravaIntegrationStore(
@@ -870,7 +981,19 @@ class StravaIntegrationService:
                 transport=transport,
             )
         store.prune_oauth_sessions()
-        return cls(config=config, store=store, client=client, clock=clock)
+        if development_owner is not None:
+            if deployment_channel != "production" or not config.enabled:
+                raise ValueError("Strava development bridge requires the enabled production registration")
+            known_grant = store.connection(_SHARED_OWNER_GRANT, include_pending=True)
+            if known_grant is not None and known_grant.bundle.athlete_id != development_owner[1]:
+                raise ValueError("Strava development bridge cannot replace the shared athlete")
+        return cls(
+            config=config,
+            store=store,
+            client=client,
+            clock=clock,
+            development_owner=development_owner,
+        )
 
     def capability(self) -> dict[str, object]:
         return {
@@ -879,9 +1002,13 @@ class StravaIntegrationService:
             "maximumCacheSeconds": STRAVA_ROUTE_CACHE_SECONDS,
         }
 
-    def start_oauth(self, installation_id: str) -> StravaOAuthStart:
+    def start_oauth(
+        self, installation_id: str, *, development: bool = False,
+    ) -> StravaOAuthStart:
         client = self._require_enabled()
         _validate_installation_id(installation_id)
+        channel = self._caller_channel(installation_id, development)
+        return_scheme = "bikecomputer-dev" if development else self.config.return_scheme
         now = self._clock()
         session_id = f"oauth_{secrets.token_urlsafe(32)}"
         state = secrets.token_urlsafe(48)
@@ -890,7 +1017,7 @@ class StravaIntegrationService:
             session_id=session_id,
             state=state,
             installation_id=installation_id,
-            deployment_channel=self.config.deployment_channel,
+            deployment_channel=channel,
             created_at=now,
             expires_at=expires_at,
         )
@@ -899,7 +1026,7 @@ class StravaIntegrationService:
             session_id=session_id,
             app_authorization_url=urls.app_url,
             web_authorization_url=urls.web_url,
-            callback_scheme=self.config.return_scheme,
+            callback_scheme=return_scheme,
             expires_at=_iso_timestamp(expires_at),
         )
 
@@ -915,46 +1042,108 @@ class StravaIntegrationService:
             session = self.store.consume_oauth_session(state)
         except StravaIntegrationError:
             return StravaOAuthCallbackResult(session_id=None, result="invalid")
-        if session.deployment_channel != self.config.deployment_channel:
+        development = (
+            self.config.deployment_channel == "production"
+            and session.deployment_channel == "development"
+        )
+        try:
+            channel = self._caller_channel(session.installation_id, development)
+        except StravaIntegrationError:
+            channel = None
+        if channel != session.deployment_channel:
             self.store.mark_oauth_result(session.session_id, "invalid")
             return StravaOAuthCallbackResult(session.session_id, "invalid")
-        if denied:
-            self.store.mark_oauth_result(session.session_id, "denied")
-            return StravaOAuthCallbackResult(session.session_id, "denied")
-        try:
-            client = self._require_enabled()
-            if code is None or scope is None:
-                raise StravaIntegrationError(
-                    "strava_oauth_session_invalid",
-                    status_code=409,
-                )
-            scopes = _normalize_scopes(scope)
-            token = client.exchange_code(code)
-            if token.athlete_id is None:
-                raise StravaIntegrationError(
-                    "strava_invalid_response",
-                    status_code=502,
-                )
-            bundle = StravaTokenBundle(
-                athlete_id=token.athlete_id,
-                granted_scopes=scopes,
-                access_token=token.access_token,
-                refresh_token=token.refresh_token,
-                expires_at=token.expires_at,
+        return_scheme = "bikecomputer-dev" if development else self.config.return_scheme
+        result = "denied" if denied else "failed"
+        if not denied:
+            try:
+                if code is None or scope is None:
+                    raise StravaIntegrationError(
+                        "strava_oauth_session_invalid", status_code=409
+                    )
+                scopes = _normalize_scopes(scope)
+                if self._development_owner is None:
+                    self._exchange_oauth(session, code, scopes, development)
+                else:
+                    # Serialize code exchanges with refreshes for the shared grant.
+                    with self._owner_oauth_lock:
+                        self._exchange_oauth(session, code, scopes, development)
+                result = "connected"
+            except Exception:
+                result = "failed"
+        self.store.mark_oauth_result(session.session_id, result)
+        return StravaOAuthCallbackResult(session.session_id, result, return_scheme)
+
+    def _exchange_oauth(
+        self,
+        session: StravaOAuthSession,
+        code: str,
+        scopes: tuple[str, ...],
+        development: bool,
+    ) -> None:
+        client = self._require_enabled()
+        owner_athlete = self._development_owner[1] if self._development_owner else None
+        development_grant = (
+            self.store.connection(_SHARED_OWNER_GRANT, include_pending=True) if development else None
+        )
+        if development_grant is not None and (
+            development_grant.state != "active"
+            or development_grant.bundle.athlete_id != owner_athlete
+            or not set(development_grant.bundle.granted_scopes).issubset(scopes)
+        ):
+            # A shared grant must not be replaced during revocation or silently
+            # lose permissions because a second client requested fewer scopes.
+            raise StravaIntegrationError("strava_oauth_session_invalid", status_code=409)
+        token = client.exchange_code(code)
+        if token.athlete_id is None or (development and token.athlete_id != owner_athlete):
+            raise StravaIntegrationError("strava_oauth_session_invalid", status_code=403)
+        bundle = StravaTokenBundle(
+            athlete_id=token.athlete_id,
+            granted_scopes=scopes,
+            access_token=token.access_token,
+            refresh_token=token.refresh_token,
+            expires_at=token.expires_at,
+        )
+        if token.athlete_id == owner_athlete:
+            existing_owner = self.store.connection(_SHARED_OWNER_GRANT, include_pending=True)
+            if existing_owner is not None and (
+                existing_owner.state != "active" or existing_owner.bundle.athlete_id != owner_athlete
+            ):
+                raise StravaIntegrationError("strava_oauth_session_invalid", status_code=409)
+            self.store.put_connection(
+                _SHARED_OWNER_GRANT,
+                bundle,
+                connected_at=self._clock(),
+                owner_link=(session.deployment_channel, session.installation_id),
             )
+        else:
             self.store.put_connection(
                 session.installation_id,
                 bundle,
                 connected_at=self._clock(),
+                previous_owner_link=(
+                    (session.deployment_channel, session.installation_id) if owner_athlete else None
+                ),
             )
-        except Exception:
-            self.store.mark_oauth_result(session.session_id, "failed")
-            return StravaOAuthCallbackResult(session.session_id, "failed")
-        self.store.mark_oauth_result(session.session_id, "connected")
-        return StravaOAuthCallbackResult(session.session_id, "connected")
 
-    def connection_status(self, installation_id: str) -> dict[str, object]:
+    def _caller_channel(self, installation_id: str, development: bool) -> str:
+        if not development:
+            return self.config.deployment_channel
+        if self._development_owner is None or installation_id != self._development_owner[0]:
+            raise StravaIntegrationError("strava_route_unavailable", status_code=404)
+        return "development"
+
+    def _connection_id(self, installation_id: str, development: bool) -> str | None:
         _validate_installation_id(installation_id)
+        channel = self._caller_channel(installation_id, development)
+        if self.store.touch_owner_link(channel, installation_id):
+            return _SHARED_OWNER_GRANT
+        return None if development else installation_id
+
+    def connection_status(
+        self, installation_id: str, *, development: bool = False,
+    ) -> dict[str, object]:
+        connection_id = self._connection_id(installation_id, development)
         if not self.config.enabled or self.config.key_ring is None:
             return {
                 "enabled": self.config.enabled,
@@ -962,7 +1151,7 @@ class StravaIntegrationService:
                 "grantedScopes": [],
                 "canReadPrivateRoutes": False,
             }
-        record = self.store.connection(installation_id)
+        record = self.store.connection(connection_id) if connection_id is not None else None
         if record is None:
             return {
                 "enabled": True,
@@ -970,7 +1159,7 @@ class StravaIntegrationService:
                 "grantedScopes": [],
                 "canReadPrivateRoutes": False,
             }
-        self.store.touch_connection(installation_id, now=self._clock())
+        self.store.touch_connection(record.installation_id, now=self._clock())
         return {
             "enabled": True,
             "connected": True,
@@ -979,9 +1168,17 @@ class StravaIntegrationService:
             "connectedAt": _iso_timestamp(record.connected_at),
         }
 
-    def disconnect(self, installation_id: str) -> dict[str, object]:
-        _validate_installation_id(installation_id)
-        if not self.store.connection_exists(installation_id):
+    def disconnect(
+        self, installation_id: str, *, development: bool = False,
+    ) -> dict[str, object]:
+        connection_id = self._connection_id(installation_id, development)
+        if connection_id == _SHARED_OWNER_GRANT:
+            with self._owner_oauth_lock:
+                pending = self.store.unlink_owner(
+                    self._caller_channel(installation_id, development), installation_id
+                )
+            return {"disconnected": True, "revocationPending": pending}
+        if connection_id is None or not self.store.connection_exists(installation_id):
             return {"disconnected": True, "revocationPending": False}
         if self.client is None or self.config.key_ring is None:
             self.store.delete_connection(installation_id)
@@ -1013,9 +1210,10 @@ class StravaIntegrationService:
         installation_id: str,
         *,
         page: int,
+        development: bool = False,
     ) -> StravaAthleteRoutePage:
         client = self._require_enabled()
-        record = self._usable_connection(installation_id)
+        record = self._usable_connection(self._connection_id(installation_id, development))
         if "read_all" not in record.bundle.granted_scopes:
             raise StravaIntegrationError(
                 "strava_scope_required",
@@ -1028,22 +1226,24 @@ class StravaIntegrationService:
                 page=page,
             )
         except StravaClientError as exc:
-            raise self._map_client_error(exc, installation_id) from exc
-        self.store.touch_connection(installation_id, now=self._clock())
+            raise self._map_client_error(exc, record) from exc
+        self.store.touch_connection(record.installation_id, now=self._clock())
         return result
 
-    def fetch_route(self, installation_id: str, route_id: str) -> StravaRouteDownload:
+    def fetch_route(
+        self, installation_id: str, route_id: str, *, development: bool = False,
+    ) -> StravaRouteDownload:
         client = self._require_enabled()
         route_id = validate_strava_route_id(route_id)
-        record = self._usable_connection(installation_id)
+        record = self._usable_connection(self._connection_id(installation_id, development))
         metadata = self._route_metadata(client, record, route_id)
         self._validate_cycling_route(metadata)
         try:
             gpx = client.export_gpx(route_id, record.bundle.access_token)
         except StravaClientError as exc:
-            raise self._map_client_error(exc, installation_id) from exc
+            raise self._map_client_error(exc, record) from exc
         fetched_at = self._clock()
-        self.store.touch_connection(installation_id, now=fetched_at)
+        self.store.touch_connection(record.installation_id, now=fetched_at)
         return StravaRouteDownload(
             route_id=route_id,
             gpx=gpx,
@@ -1055,14 +1255,16 @@ class StravaIntegrationService:
         self,
         installation_id: str,
         route_id: str,
+        *,
+        development: bool = False,
     ) -> StravaRouteValidation:
         client = self._require_enabled()
         route_id = validate_strava_route_id(route_id)
-        record = self._usable_connection(installation_id)
+        record = self._usable_connection(self._connection_id(installation_id, development))
         metadata = self._route_metadata(client, record, route_id)
         self._validate_cycling_route(metadata)
         checked_at = self._clock()
-        self.store.touch_connection(installation_id, now=checked_at)
+        self.store.touch_connection(record.installation_id, now=checked_at)
         return StravaRouteValidation(
             route_id=route_id,
             checked_at=_iso_timestamp(checked_at),
@@ -1087,6 +1289,7 @@ class StravaIntegrationService:
                 "pendingRevocations": len(self.store.pending_revocation_ids()),
             }
         cutoff = now - self.config.connection_idle_days * 24 * 60 * 60
+        self.store.expire_owner_links(cutoff=cutoff)
         idle_ids = self.store.idle_connection_ids(cutoff=cutoff)
         for installation_id in idle_ids[:maximum_revocations]:
             # The connection has already reached its 30-day idle retention
@@ -1139,8 +1342,15 @@ class StravaIntegrationService:
             )
         return self.client
 
-    def _usable_connection(self, installation_id: str) -> StravaConnectionRecord:
-        _validate_installation_id(installation_id)
+    def _usable_connection(self, installation_id: str | None) -> StravaConnectionRecord:
+        if installation_id is None:
+            raise StravaIntegrationError("strava_not_connected", status_code=401)
+        if installation_id == _SHARED_OWNER_GRANT:
+            with self._owner_oauth_lock:
+                return self._read_or_refresh_connection(installation_id)
+        return self._read_or_refresh_connection(installation_id)
+
+    def _read_or_refresh_connection(self, installation_id: str) -> StravaConnectionRecord:
         record = self.store.connection(installation_id)
         if record is None:
             raise StravaIntegrationError("strava_not_connected", status_code=401)
@@ -1201,7 +1411,7 @@ class StravaIntegrationService:
                     )
             except StravaClientError as exc:
                 self.store.release_refresh(installation_id, lease_id)
-                raise self._map_client_error(exc, installation_id) from exc
+                raise self._map_client_error(exc, record) from exc
             except Exception:
                 self.store.release_refresh(installation_id, lease_id)
                 raise
@@ -1219,7 +1429,7 @@ class StravaIntegrationService:
         try:
             return client.route_metadata(route_id, record.bundle.access_token)
         except StravaClientError as exc:
-            raise self._map_client_error(exc, record.installation_id) from exc
+            raise self._map_client_error(exc, record) from exc
 
     @staticmethod
     def _validate_cycling_route(metadata: StravaRouteMetadata) -> None:
@@ -1232,10 +1442,10 @@ class StravaIntegrationService:
     def _map_client_error(
         self,
         error: StravaClientError,
-        installation_id: str,
+        record: StravaConnectionRecord,
     ) -> StravaIntegrationError:
         if error.code == "strava_token_rejected":
-            self.store.delete_connection(installation_id)
+            self.store.delete_rejected_connection(record)
             return StravaIntegrationError("strava_not_connected", status_code=401)
         return StravaIntegrationError(
             error.code,

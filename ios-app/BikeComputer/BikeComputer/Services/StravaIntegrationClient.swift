@@ -517,13 +517,19 @@ final class StravaIntegrationClient {
         }
         guard pairs.count == items.count else { return false }
         let values = Dictionary(uniqueKeysWithValues: pairs)
+        let oauthCallbackPath = "/v1/integrations/strava/oauth/callback"
+        let serviceOrigin = serviceURL.absoluteString
+        let allowedCallbackOrigins = serviceOrigin == OfflineMapServiceConfig.developmentServerURLString
+            ? [serviceOrigin, OfflineMapServiceConfig.productionServerURLString]
+            : [serviceOrigin]
         guard
            values["client_id"]?.range(
                 of: "^[1-9][0-9]{0,18}$",
                 options: .regularExpression
            ) != nil,
-           values["redirect_uri"] == serviceURL.absoluteString +
-                "/v1/integrations/strava/oauth/callback",
+           allowedCallbackOrigins.contains(where: {
+               values["redirect_uri"] == $0 + oauthCallbackPath
+           }),
            values["response_type"] == "code",
            values["approval_prompt"] == "auto",
            values["scope"] == "read,read_all",

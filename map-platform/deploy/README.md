@@ -239,6 +239,67 @@ step. Verify `/healthz` reports `stravaIntegration: enabled`, then verify the
 authenticated capabilities response before allowing the iOS feature to start
 OAuth.
 
+### Owner-only development using the production registration
+
+Keep the Strava **Authorization Callback Domain** at `maps.8o.vc`. Both
+channels use the production OAuth callback in this mode. The callback returns
+to the iOS scheme from the stored OAuth session. Update Bicino Dev to a build
+that accepts the exact production callback before enabling forwarding.
+
+Set these Coolify variables on the APIs:
+
+| Variable | Production API | Development API |
+| --- | --- | --- |
+| `MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET` | A dedicated high-entropy URL-safe secret | Same secret |
+| `MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION` | Verified owner Bicino Dev installation ID | Same installation ID |
+| `MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE` | Verified owner Strava athlete ID | Unset |
+| `MAP_PLATFORM_STRAVA_ENABLED` | `1` | `0` |
+
+Generate the bridge secret with `secrets.token_urlsafe(32)`. Keep all Strava
+client and encryption credentials on the production API and maintenance. Remove
+those variables from the development Coolify application before activating
+forwarding. The development API starts only with complete forwarding settings
+and without local Strava credentials. The production endpoint checks the
+bridge secret, installation ID, and athlete identity returned by Strava.
+A registered but non-allowlisted development installation receives a disabled
+capability.
+
+During cutover, verify the sole prior development connection belongs to the
+owner. Check for legacy production connections for that athlete before
+enabling sharing. If one exists, have that installation explicitly reconnect
+through the production callback before enabling development forwarding. It
+replaces the legacy copy without revoking the shared grant. Keep concurrent
+standalone token use off after cutover. For an existing standalone development
+connection, retire the encrypted legacy row without calling Strava revocation.
+Have the owner reconnect on the updated Bicino Dev build.
+
+The owner's installations in each channel opt in separately. The production
+control plane stores a single encrypted provider grant and expires unused
+installation links independently. Disconnect from one installation removes its
+link. The last link queues provider revocation in production maintenance.
+Other production athletes continue using the existing production flow.
+
+Publish the production controller with the dedicated workflow profile:
+
+```sh
+gh workflow run map-platform-image.yml --ref main -f release_profile=production-strava-compatibility
+```
+
+This overlays the Strava API and integration modules on the attested
+`d101b43c5260a112e142b7d5595f05c465fa3fdb` production controller. Recheck that
+base against the live production controller before using the profile. The
+validation stage checks the exact runtime file delta and runs the Strava
+tests. Review a control-plane-only Compose-lock PR with the attested
+candidate and the existing worker and promotion scheduler pins. Wait for its
+CI Gate and verify deploy health before turning on development forwarding.
+Use the regular development image promotion for the other channel.
+
+To pause the feature, remove the development API's bridge variables with local
+Strava credentials still absent. Keep the updated production control plane so
+existing production links can be resolved. Recheck production connection
+status, the owner dev OAuth round trip, and the denial for another dev
+installation before calling the rollout complete.
+
 ## Promotion flow
 
 The `Map Platform Image` workflow builds and attests candidate images. After a

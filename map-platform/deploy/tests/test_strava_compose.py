@@ -58,6 +58,25 @@ class StravaComposeTests(unittest.TestCase):
             for variable in self._SHARED_VARIABLES + self._API_ONLY_VARIABLES:
                 self.assertNotIn(variable, worker, (path.name, variable))
 
+    def test_development_bridge_configuration_is_scoped_to_the_apis(self):
+        bridge = "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET"
+        installation = "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION"
+        athlete = "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE"
+        for path in self._COMPOSE_FILES:
+            compose = path.read_text(encoding="utf-8")
+            api = self._service(compose, "map-platform-api")
+            if path.name in {"compose.yaml", "compose.development.yaml"}:
+                self.assertIn(bridge, api)
+                self.assertIn(installation, api)
+            else:
+                self.assertNotIn(bridge, api)
+                self.assertNotIn(installation, api)
+            self.assertEqual(athlete in api, path.name == "compose.yaml")
+            for service in ("map-platform-worker", "map-platform-maintenance"):
+                section = self._service(compose, service)
+                for variable in (bridge, installation, athlete):
+                    self.assertNotIn(variable, section, (path.name, service))
+
     def test_strava_is_disabled_by_default(self):
         for path in self._COMPOSE_FILES:
             compose = path.read_text(encoding="utf-8")

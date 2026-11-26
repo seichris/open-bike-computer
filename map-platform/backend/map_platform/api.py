@@ -131,6 +131,7 @@ from .topography_sources import (
     topography_generation_enabled,
 )
 from .strava_client import StravaTransport
+from .strava_development import DEVELOPMENT_HEADER, StravaDevelopmentBridge
 from .strava_integrations import (
     StravaIntegrationError,
     StravaIntegrationService,
@@ -250,12 +251,21 @@ def create_app(
             os.environ.get("MAP_PLATFORM_ESTIMATE_MAX_REVISIONS_PER_JOB", "16")
         ),
     )
+    strava_bridge = StravaDevelopmentBridge.from_environment(deployment_channel)
     strava_integration = StravaIntegrationService.from_environment(
         data_root=data_root,
         deployment_channel=deployment_channel,
         transport=strava_transport,
         clock=strava_clock,
+        development_owner=(
+            (strava_bridge.installation_id, strava_bridge.athlete_id)
+            if strava_bridge is not None and strava_bridge.athlete_id is not None
+            else None
+        ),
     )
+    strava_forwarding = strava_bridge is not None and deployment_channel == "development"
+    if strava_forwarding and strava_integration.config.is_fully_configured:
+        raise ValueError("Strava development forwarding cannot use local OAuth credentials")
     rate_limiter = PersistentRateLimiter(
         data_root / "rate-limits.sqlite3",
         installation_secret,
@@ -761,7 +771,7 @@ def create_app(
             },
             "catalog": catalog_status_from_environment(),
             "stravaIntegration": (
-                "enabled" if strava_integration.config.enabled else "disabled"
+                "enabled" if strava_integration.config.enabled or strava_forwarding else "disabled"
             ),
             "routeElevation": route_elevation_service.public_summary(),
             "bicycleDetour": bicycle_detour_service.public_summary(),
@@ -783,8 +793,12 @@ def create_app(
         )
         response.headers["Cache-Control"] = "private, no-store"
         result = service.generation_capabilities(installation_id)
+        strava_capability = strava_integration.capability()
+        if strava_forwarding:
+            assert strava_bridge is not None
+            strava_capability["enabled"] = strava_bridge.permits_installation(installation_id)
         result["integrations"] = {
-            "stravaRouteImport": strava_integration.capability(),
+            "stravaRouteImport": strava_capability,
             "routeElevation": route_elevation_service.capability(),
             "bicycleDetour": bicycle_detour_service.capability(),
             "bicycleRoute": bicycle_route_service.capability(),
@@ -1321,7 +1335,40 @@ def create_app(
         }
         return result
 
-    @app.post("/v1/integrations/strava/oauth/start")
+    def verify_strava_caller(
+        request: Request, installation_id: str, installation_token: str | None
+    ) -> tuple[str, bool]:
+        bridge_headers = request.headers.getlist(DEVELOPMENT_HEADER)
+        if bridge_headers:
+            if strava_bridge is not None and strava_bridge.authorizes_forward(
+                installation_id, bridge_headers
+            ):
+                return installation_id, True
+            raise StravaIntegrationError("strava_route_unavailable", status_code=404)
+        installation_id = verify_registered_installation(installation_id, installation_token)
+        if strava_forwarding:
+            assert strava_bridge is not None
+            if not strava_bridge.permits_installation(installation_id):
+                raise StravaIntegrationError("strava_route_unavailable", status_code=404)
+        return installation_id, False
+
+    def forward_strava_request(request: Request, *, page: int | None = None) -> Response:
+        assert strava_bridge is not None and strava_forwarding
+        reply = strava_bridge.forward(request.method, request.url.path, page=page)
+        headers = {"Cache-Control": "private, no-store"}
+        for name in (
+            "content-type",
+            "retry-after",
+            "x-bicino-route-provider",
+            "x-bicino-external-route-id",
+            "x-bicino-fetched-at",
+            "x-bicino-delete-after",
+        ):
+            if name in reply.headers:
+                headers[name] = reply.headers[name]
+        return Response(content=reply.body, status_code=reply.status_code, headers=headers)
+
+    @app.post("/v1/integrations/strava/oauth/start", response_model=None)
     def start_strava_oauth(
         request: Request,
         response: Response,
@@ -1330,16 +1377,17 @@ def create_app(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, str]:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+    ) -> Response | dict[str, str]:
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         enforce_rate_limits(
             (strava_oauth_start_ip_policy, client_ip(request)),
             (strava_oauth_start_installation_policy, installation_id),
         )
-        started = strava_integration.start_oauth(installation_id)
+        if strava_forwarding:
+            return forward_strava_request(request)
+        started = strava_integration.start_oauth(installation_id, development=development)
         response.headers["Cache-Control"] = "private, no-store"
         return {
             "sessionId": started.session_id,
@@ -1351,6 +1399,8 @@ def create_app(
 
     @app.get("/v1/integrations/strava/oauth/callback")
     def complete_strava_oauth(request: Request) -> HTMLResponse:
+        if strava_forwarding:
+            raise StravaIntegrationError("strava_route_unavailable", status_code=404)
         allowed = {"state", "code", "scope", "error", "error_description"}
         unexpected = set(request.query_params.keys()).difference(allowed)
 
@@ -1393,8 +1443,9 @@ def create_app(
         query: dict[str, str] = {"result": result_code}
         if session_id is not None:
             query["sessionId"] = session_id
+        return_scheme = result.return_scheme if result is not None else None
         return_url = (
-            f"{strava_integration.config.return_scheme}://strava/oauth-complete?"
+            f"{return_scheme or strava_integration.config.return_scheme}://strava/oauth-complete?"
             f"{urlencode(query)}"
         )
         escaped_url = html.escape(return_url, quote=True)
@@ -1420,23 +1471,25 @@ def create_app(
             },
         )
 
-    @app.get("/v1/integrations/strava/connection")
+    @app.get("/v1/integrations/strava/connection", response_model=None)
     def strava_connection_status(
+        request: Request,
         response: Response,
         clientInstallationId: str,
         x_installation_token: str | None = Header(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, object]:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+    ) -> Response | dict[str, object]:
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         response.headers["Cache-Control"] = "private, no-store"
-        return strava_integration.connection_status(installation_id)
+        if strava_forwarding:
+            return forward_strava_request(request)
+        return strava_integration.connection_status(installation_id, development=development)
 
-    @app.delete("/v1/integrations/strava/connection")
+    @app.delete("/v1/integrations/strava/connection", response_model=None)
     def disconnect_strava(
         request: Request,
         response: Response,
@@ -1445,18 +1498,19 @@ def create_app(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, object]:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+    ) -> Response | dict[str, object]:
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         enforce_rate_limits(
             (strava_disconnect_ip_policy, client_ip(request)),
         )
         response.headers["Cache-Control"] = "private, no-store"
-        return strava_integration.disconnect(installation_id)
+        if strava_forwarding:
+            return forward_strava_request(request)
+        return strava_integration.disconnect(installation_id, development=development)
 
-    @app.get("/v1/integrations/strava/routes")
+    @app.get("/v1/integrations/strava/routes", response_model=None)
     def list_strava_athlete_routes(
         request: Request,
         response: Response,
@@ -1466,18 +1520,18 @@ def create_app(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, object]:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+    ) -> Response | dict[str, object]:
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         enforce_rate_limits(
             (strava_route_list_ip_policy, client_ip(request)),
             (strava_route_list_installation_policy, installation_id),
         )
+        if strava_forwarding:
+            return forward_strava_request(request, page=page)
         route_page = strava_integration.athlete_routes(
-            installation_id,
-            page=page,
+            installation_id, page=page, development=development
         )
         response.headers["Cache-Control"] = "private, no-store"
         return {
@@ -1505,15 +1559,18 @@ def create_app(
             alias="X-Installation-Token",
         ),
     ) -> Response:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         enforce_rate_limits(
             (strava_route_import_ip_policy, client_ip(request)),
             (strava_route_import_installation_policy, installation_id),
         )
-        download = strava_integration.fetch_route(installation_id, route_id)
+        if strava_forwarding:
+            return forward_strava_request(request)
+        download = strava_integration.fetch_route(
+            installation_id, route_id, development=development
+        )
         return Response(
             content=download.gpx,
             media_type="application/gpx+xml",
@@ -1526,7 +1583,7 @@ def create_app(
             },
         )
 
-    @app.post("/v1/integrations/strava/routes/{route_id}/validate")
+    @app.post("/v1/integrations/strava/routes/{route_id}/validate", response_model=None)
     def validate_strava_route(
         route_id: str,
         request: Request,
@@ -1536,16 +1593,19 @@ def create_app(
             default=None,
             alias="X-Installation-Token",
         ),
-    ) -> dict[str, object]:
-        installation_id = verify_registered_installation(
-            clientInstallationId,
-            x_installation_token,
+    ) -> Response | dict[str, object]:
+        installation_id, development = verify_strava_caller(
+            request, clientInstallationId, x_installation_token
         )
         enforce_rate_limits(
             (strava_route_validation_ip_policy, client_ip(request)),
             (strava_route_validation_installation_policy, installation_id),
         )
-        validation = strava_integration.validate_route(installation_id, route_id)
+        if strava_forwarding:
+            return forward_strava_request(request)
+        validation = strava_integration.validate_route(
+            installation_id, route_id, development=development
+        )
         response.headers["Cache-Control"] = "private, no-store"
         return {
             "available": True,
