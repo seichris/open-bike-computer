@@ -3,8 +3,7 @@ from funcs import (
     BlockFeatureIndex,
     GenericGeometryError,
     clip_lines,
-    clip_polygons,
-    fit_polygons_to_feature_budget,
+    clip_polygons_to_tile_budget,
     lat2y,
     lon2x,
     merge_geometry_diagnostics,
@@ -863,31 +862,13 @@ for init_x, init_y in progress.track(block_positions):
             geometry_diagnostics=geometry_diagnostics,
         )
         try:
-            clipped_polygons = clip_polygons(
-                polygon_index.candidates(mapblock_bbox),
-                mapblock_bbox,
+            clipped_polygons = clip_polygons_to_tile_budget(
+                polygon_index.candidates(mapblock_bbox), mapblock_bbox,
+                len(clipped_lines), MAX_BLOCK_FEATURES,
                 geometry_diagnostics=geometry_diagnostics,
-            )
-            polygon_count = len(clipped_polygons)
-            clipped_polygons = fit_polygons_to_feature_budget(
-                clipped_polygons, len(clipped_lines), MAX_BLOCK_FEATURES,
             )
         except GenericGeometryError as exc:
             fail_generic_geometry(exc)
-        dropped_polygons = polygon_count - len(clipped_polygons)
-        if dropped_polygons:
-            budget = geometry_diagnostics.setdefault(
-                "tileFeatureBudget", {"affectedTiles": 0, "omittedPolygons": 0, "samples": []},
-            )
-            budget["affectedTiles"] += 1
-            budget["omittedPolygons"] += dropped_polygons
-            if len(budget["samples"]) < 8:
-                budget["samples"].append({
-                    "blockOrigin": [min_x, min_y],
-                    "lines": len(clipped_lines),
-                    "polygonsBefore": polygon_count,
-                    "polygonsWritten": len(clipped_polygons),
-                })
         clipped_buildings = []
         building_block_stats = {}
         cached_building_block = None
