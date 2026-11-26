@@ -11,7 +11,9 @@ struct SocialCapabilities: Codable, Equatable {
     var invitePreviews = false
     var savedMapKitRoutes = false
     var friendSharing = false
-    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes, friendSharing }
+    /// The private account route library synced with bicino.com (`/library/routes`).
+    var routeLibrary = false
+    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes, friendSharing, routeLibrary }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -22,6 +24,7 @@ struct SocialCapabilities: Codable, Equatable {
         hardware = try c.decodeIfPresent(Bool.self, forKey: .hardware) ?? false
         invitePreviews = try c.decodeIfPresent(Bool.self, forKey: .invitePreviews) ?? false
         friendSharing = try c.decodeIfPresent(Bool.self, forKey: .friendSharing) ?? false
+        routeLibrary = try c.decodeIfPresent(Bool.self, forKey: .routeLibrary) ?? false
         savedMapKitRoutes = try c.decodeIfPresent(Bool.self, forKey: .savedMapKitRoutes) ?? false
     }
 }

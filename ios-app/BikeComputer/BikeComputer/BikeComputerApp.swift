@@ -65,6 +65,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let watchConnectivityCoordinator: PhoneWatchConnectivityCoordinator
     let watchAvailability: WorkoutWatchAvailabilityMonitor
     let routeLibrary: PhoneRouteLibrary
+    /// Keeps saved GPX and Strava routes in the signed-in account's route
+    /// library, which bicino.com /account/routes shows.
+    lazy var routeLibrarySync: AccountRouteLibrarySync = {
+        let session = social.session
+        return AccountRouteLibrarySync(client: social.client, store: routeLibrary,
+                                       currentGeneration: { session.generation })
+    }()
     let bicinoServiceSession: BicinoServiceSession
     let stravaIntegrationCoordinator: StravaIntegrationCoordinator
     let routeElevationService: RouteElevationService
@@ -196,6 +203,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             whenever: routeLibrary.$routes
         )
         .store(in: &cancellables)
+        let routeLibrarySync = self.routeLibrarySync
+        routeLibrary.onRouteDeletedByRider = { [weak routeLibrarySync] routeID in
+            routeLibrarySync?.recordLocalDeletion(routeID: routeID)
+        }
+        // Sync when the account gains the library and after library changes,
+        // coalescing bursts such as a multi-file import.
+        social.$capabilities.map(\.routeLibrary).removeDuplicates()
+            .combineLatest(routeLibrary.$routes.map { _ in () })
+            .debounce(for: .seconds(2), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.syncAccountRouteLibrary() }
+            .store(in: &cancellables)
         // Strava elevation profiles and late answers follow the route lease:
         // deletion, expiry and disconnect revoke them immediately.
         routeLibrary.$routes.sink { [weak routeElevationService] routes in
@@ -476,6 +494,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         return true
     }
 
+    /// One account route library round when the signed-in server supports it.
+    func syncAccountRouteLibrary() {
+        guard social.capabilities.routeLibrary, social.session.state == .signedIn,
+              let owner = social.session.currentUID else { return }
+        Task { [routeLibrarySync] in await routeLibrarySync.sync(owner: owner) }
+    }
+
     func applicationDidBecomeActive(_ application: UIApplication) {
         rideDiagnosticsRecorder.recordApplicationLifecycle(
             "app_active",
@@ -483,6 +508,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         )
         coordinator.applicationDidBecomeActive()
         setApplicationActive(true)
+        syncAccountRouteLibrary()
     }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
