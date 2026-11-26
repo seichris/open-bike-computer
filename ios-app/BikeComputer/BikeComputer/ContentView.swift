@@ -17,6 +17,9 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     case offlineRoutes
     case savePlannedRoute(OfflineRouteSaveDraft)
     case saveCreatedRoute(OfflineRouteSaveDraft)
+    /// A GPX file another app opened in Bicino ("Open in Bicino").
+    case importOpenedGPX(OfflineRouteSaveDraft)
+    case openedGPXFailure(String)
     case bikeComputerSetup
     case sensorSettings
     case workoutDashboard
@@ -33,6 +36,8 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
         case .saveCreatedRoute(let draft): return "save-created-route:\(draft.id.uuidString)"
+        case .importOpenedGPX(let draft): return "import-opened-gpx:\(draft.id.uuidString)"
+        case .openedGPXFailure(let message): return "opened-gpx-failure:\(message)"
         case .bikeComputerSetup: return "bike-computer-setup"
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
@@ -568,6 +573,7 @@ struct ContentView: View {
             presentPendingBicinoSetupAppLinkIfEligible()
         }
         .onOpenURL { url in
+            if OpenedGPXFile.isGPX(url) { presentOpenedGPX(url); return }
             if social.session.handleURL(url) { return }
             if social.handleLink(url) { presentedSheet = .socialLink; return }
             if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
@@ -1019,6 +1025,17 @@ struct ContentView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationBackgroundInteraction(.disabled)
+        case .importOpenedGPX(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { _ in
+                // Land in Saved Routes, where the new route is listed with
+                // its map preview and Watch status.
+                openOfflineRoutes()
+            }
+            .presentationDetents([.medium, .large])
+            .presentationBackgroundInteraction(.disabled)
+        case .openedGPXFailure(let message):
+            OpenedGPXFailureSheet(message: message)
+                .presentationDetents([.medium])
         case .offlineRoutes:
             SavedRoutesLibraryView(library: routeLibrary,
                 stravaCoordinator: stravaIntegrationCoordinator,
@@ -1454,6 +1471,34 @@ struct ContentView: View {
         }
 
         presentedSheet = .bikeComputerSetup
+    }
+
+    /// A valid file gets the Import GPX confirmation and a rejected one gets
+    /// its reason; both replace a sheet that is already up, so the rider who
+    /// just opened the file always sees the result.
+    private func presentOpenedGPX(_ url: URL) {
+        let destination: ContentSheetDestination
+        do {
+            let draft = try OpenedGPXFile.draft(
+                from: url,
+                documentsDirectory: FileManager.default.urls(
+                    for: .documentDirectory, in: .userDomainMask
+                ).first,
+                now: Date()
+            )
+            destination = .importOpenedGPX(draft)
+        } catch {
+            destination = .openedGPXFailure(
+                (error as? LocalizedError)?.errorDescription ??
+                    "The GPX route could not be imported."
+            )
+        }
+        if presentedSheet != nil || isSheetDismissalInFlight {
+            queuedSheetAfterDismiss = destination
+            presentedSheet = nil
+        } else {
+            presentedSheet = destination
+        }
     }
 
     private func saveSelectedRouteOffline() {
