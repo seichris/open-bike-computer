@@ -1,4 +1,4 @@
-"""Owner-only forwarding to the production Strava integration."""
+"""Authenticated forwarding to the production Strava integration."""
 
 from __future__ import annotations
 
@@ -30,27 +30,39 @@ _FORWARDED_PATH = re.compile(
 @dataclass(frozen=True)
 class StravaDevelopmentBridge:
     channel: str
-    installation_id: str
+    installation_id: str | None
     secret: str = field(repr=False)
     athlete_id: str | None = None
+    allow_all: bool = False
 
     @classmethod
     def from_environment(cls, channel: str) -> StravaDevelopmentBridge | None:
         secret = os.environ.get("MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET", "")
         installation = os.environ.get("MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION", "")
         athlete = os.environ.get("MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE", "")
-        if not (secret or installation or athlete):
+        access = os.environ.get("MAP_PLATFORM_STRAVA_DEVELOPMENT_ACCESS", "")
+        if not (secret or installation or athlete or access):
             return None
+        allow_all = access == "all"
         if (
-            re.fullmatch(r"[A-Za-z0-9_-]{43,128}", secret) is None
-            or STRAVA_INSTALLATION_ID_PATTERN.fullmatch(installation) is None
+            access not in {"", "all"}
+            or re.fullmatch(r"[A-Za-z0-9_-]{43,128}", secret) is None
+            or (not allow_all and STRAVA_INSTALLATION_ID_PATTERN.fullmatch(installation) is None)
             or (channel == "development" and athlete)
-            or (channel == "production" and re.fullmatch(r"[1-9][0-9]{0,18}", athlete) is None)
+            or (
+                not allow_all and channel == "production"
+                and re.fullmatch(r"[1-9][0-9]{0,18}", athlete) is None
+            )
         ):
             raise ValueError("Strava development bridge configuration is invalid")
-        return cls(channel, installation, secret, athlete or None)
+        return cls(
+            channel, None if allow_all else installation, secret,
+            None if allow_all else athlete or None, allow_all,
+        )
 
     def permits_installation(self, installation_id: str) -> bool:
+        if self.allow_all:
+            return STRAVA_INSTALLATION_ID_PATTERN.fullmatch(installation_id) is not None
         return installation_id == self.installation_id
 
     def authorizes_forward(self, installation_id: str, presented: list[str]) -> bool:
@@ -63,11 +75,15 @@ class StravaDevelopmentBridge:
         )
 
     def forward(
-        self, method: str, path: str, *, page: int | None = None
+        self, method: str, path: str, *, installation_id: str, page: int | None = None
     ) -> StravaHTTPResponse:
-        if self.channel != "development" or _FORWARDED_PATH.fullmatch(path) is None:
+        if (
+            self.channel != "development"
+            or not self.permits_installation(installation_id)
+            or _FORWARDED_PATH.fullmatch(path) is None
+        ):
             raise StravaIntegrationError("strava_route_unavailable", status_code=404)
-        query: dict[str, str | int] = {"clientInstallationId": self.installation_id}
+        query: dict[str, str | int] = {"clientInstallationId": installation_id}
         if page is not None:
             query["page"] = page
         url = f"{PRODUCTION_ORIGIN}{path}?{urlencode(query)}"

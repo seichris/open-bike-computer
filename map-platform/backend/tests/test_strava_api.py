@@ -304,6 +304,97 @@ class StravaAPITests(unittest.TestCase):
                 self.assertEqual(len(self.transport.requests), before + 1)
                 self.assertTrue(self.transport.requests[-1]["url"].endswith("/oauth/revoke"))
 
+    def test_open_development_uses_each_authenticated_installations_athlete(self):
+        prefix = "/v1/integrations/strava"
+        redirect_uri = f"https://maps.8o.vc{prefix}/oauth/callback"
+        bridge = {
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_ACCESS": "all",
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET": "a" * 43,
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION": self.params["clientInstallationId"],
+        }
+        with patch.dict(os.environ, bridge | {
+            "MAP_PLATFORM_DATA_ROOT": str(Path(self.temp.name) / "open-production"),
+            "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
+            "MAP_PLATFORM_STRAVA_REDIRECT_URI": redirect_uri,
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE": "44",
+        }):
+            production_app = create_app(
+                strava_transport=self.transport, app_attest_verifier=self.app_attest.verifier
+            )
+        with patch.dict(os.environ, bridge | {
+            "MAP_PLATFORM_STRAVA_ENABLED": "0",
+            "MAP_PLATFORM_STRAVA_CLIENT_ID": "",
+            "MAP_PLATFORM_STRAVA_CLIENT_SECRET": "",
+            "MAP_PLATFORM_STRAVA_REDIRECT_URI": "",
+            "MAP_PLATFORM_STRAVA_TOKEN_KEY_ID": "",
+            "MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64": "",
+        }):
+            development_app = create_app(app_attest_verifier=self.app_attest.verifier)
+
+        with TestClient(production_app) as production, TestClient(development_app) as development:
+            def route_to_production(transport, **request):
+                target = urlparse(request["url"])
+                self.assertEqual((target.scheme, target.netloc), ("https", "maps.8o.vc"))
+                reply = production.request(
+                    request["method"], f"{target.path}?{target.query}", headers=request["headers"]
+                )
+                return StravaHTTPResponse(
+                    reply.status_code, dict(reply.headers), reply.content, request["url"]
+                )
+
+            def authenticated_installation():
+                credential = self.app_attest.issue_installation(development)
+                return {
+                    "params": {"clientInstallationId": credential["clientInstallationId"]},
+                    "headers": {"X-Installation-Token": credential["clientInstallationToken"]},
+                }
+
+            first = authenticated_installation()
+            second = authenticated_installation()
+            third = authenticated_installation()
+            with patch("map_platform.strava_development.UrllibStravaTransport.request",
+                       autospec=True, side_effect=route_to_production):
+                for installation, athlete_id in ((first, 44), (second, 55)):
+                    cap = development.get("/v1/capabilities", **installation)
+                    self.assertTrue(cap.json()["integrations"]["stravaRouteImport"]["enabled"])
+                    start = development.post(f"{prefix}/oauth/start", **installation)
+                    self.assertEqual(start.status_code, 200)
+                    query = parse_qs(urlparse(start.json()["webAuthorizationUrl"]).query)
+                    self.assertEqual(query["redirect_uri"], [redirect_uri])
+                    self.transport.queue_json({
+                        "token_type": "Bearer",
+                        "access_token": f"access-{athlete_id}",
+                        "refresh_token": f"refresh-{athlete_id}",
+                        "expires_at": 2_100_000_000,
+                        "athlete": {"id": athlete_id},
+                    })
+                    callback = production.get(f"{prefix}/oauth/callback", params={
+                        "state": query["state"][0], "code": "code", "scope": "read,read_all",
+                    })
+                    self.assertIn("bikecomputer-dev://strava/oauth-complete?result=connected",
+                                  callback.text)
+
+                for installation, athlete_id in ((first, 44), (second, 55)):
+                    self.transport.queue_json([])
+                    routes = development.get(f"{prefix}/routes", **installation)
+                    self.assertEqual(routes.status_code, 200)
+                    self.assertEqual(routes.headers["cache-control"], "private, no-store")
+                    provider_request = self.transport.requests[-1]
+                    self.assertIn(f"/athletes/{athlete_id}/routes", provider_request["url"])
+                    self.assertEqual(provider_request["headers"]["Authorization"],
+                                     f"Bearer access-{athlete_id}")
+
+                self.assertFalse(development.get(f"{prefix}/connection", **third).json()["connected"])
+                mixed = development.get(
+                    f"{prefix}/routes", params=second["params"], headers=first["headers"],
+                )
+                self.assertEqual(mixed.status_code, 401)
+                forged = production.get(
+                    f"{prefix}/routes", params=second["params"],
+                    headers={DEVELOPMENT_HEADER: "forged"},
+                )
+                self.assertEqual(forged.status_code, 404)
+
     def test_capability_oauth_status_import_validate_and_disconnect(self):
         capabilities = self.client.get(
             "/v1/capabilities",

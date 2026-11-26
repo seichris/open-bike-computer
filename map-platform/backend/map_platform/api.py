@@ -259,8 +259,14 @@ def create_app(
         clock=strava_clock,
         development_owner=(
             (strava_bridge.installation_id, strava_bridge.athlete_id)
-            if strava_bridge is not None and strava_bridge.athlete_id is not None
+            if strava_bridge is not None
+            and strava_bridge.installation_id is not None
+            and strava_bridge.athlete_id is not None
             else None
+        ),
+        development_open=(
+            strava_bridge is not None and strava_bridge.allow_all
+            and deployment_channel == "production"
         ),
     )
     strava_forwarding = strava_bridge is not None and deployment_channel == "development"
@@ -1352,9 +1358,13 @@ def create_app(
                 raise StravaIntegrationError("strava_route_unavailable", status_code=404)
         return installation_id, False
 
-    def forward_strava_request(request: Request, *, page: int | None = None) -> Response:
+    def forward_strava_request(
+        request: Request, installation_id: str, *, page: int | None = None,
+    ) -> Response:
         assert strava_bridge is not None and strava_forwarding
-        reply = strava_bridge.forward(request.method, request.url.path, page=page)
+        reply = strava_bridge.forward(
+            request.method, request.url.path, installation_id=installation_id, page=page,
+        )
         headers = {"Cache-Control": "private, no-store"}
         for name in (
             "content-type",
@@ -1386,7 +1396,7 @@ def create_app(
             (strava_oauth_start_installation_policy, installation_id),
         )
         if strava_forwarding:
-            return forward_strava_request(request)
+            return forward_strava_request(request, installation_id)
         started = strava_integration.start_oauth(installation_id, development=development)
         response.headers["Cache-Control"] = "private, no-store"
         return {
@@ -1486,7 +1496,7 @@ def create_app(
         )
         response.headers["Cache-Control"] = "private, no-store"
         if strava_forwarding:
-            return forward_strava_request(request)
+            return forward_strava_request(request, installation_id)
         return strava_integration.connection_status(installation_id, development=development)
 
     @app.delete("/v1/integrations/strava/connection", response_model=None)
@@ -1507,7 +1517,7 @@ def create_app(
         )
         response.headers["Cache-Control"] = "private, no-store"
         if strava_forwarding:
-            return forward_strava_request(request)
+            return forward_strava_request(request, installation_id)
         return strava_integration.disconnect(installation_id, development=development)
 
     @app.get("/v1/integrations/strava/routes", response_model=None)
@@ -1529,7 +1539,7 @@ def create_app(
             (strava_route_list_installation_policy, installation_id),
         )
         if strava_forwarding:
-            return forward_strava_request(request, page=page)
+            return forward_strava_request(request, installation_id, page=page)
         route_page = strava_integration.athlete_routes(
             installation_id, page=page, development=development
         )
@@ -1567,7 +1577,7 @@ def create_app(
             (strava_route_import_installation_policy, installation_id),
         )
         if strava_forwarding:
-            return forward_strava_request(request)
+            return forward_strava_request(request, installation_id)
         download = strava_integration.fetch_route(
             installation_id, route_id, development=development
         )
@@ -1602,7 +1612,7 @@ def create_app(
             (strava_route_validation_installation_policy, installation_id),
         )
         if strava_forwarding:
-            return forward_strava_request(request)
+            return forward_strava_request(request, installation_id)
         validation = strava_integration.validate_route(
             installation_id, route_id, development=development
         )

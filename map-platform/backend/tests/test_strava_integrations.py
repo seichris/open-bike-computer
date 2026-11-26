@@ -397,6 +397,64 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         self.assertEqual(self.client.routes_calls[-1][:2], ("44", "same-athlete"))
         self.assertFalse(self.store.pending_revocation_ids())
 
+    def test_existing_owner_links_survive_store_upgrade(self):
+        owner_grant = "strava_shared_owner"
+        self.store.put_connection(
+            owner_grant, bundle(expires_at=int(self.clock()) + 3600), connected_at=self.clock()
+        )
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute(
+                "CREATE TABLE shared_owner_links AS SELECT * FROM strava_athlete_links WHERE 0"
+            )
+            connection.execute(
+                "INSERT INTO shared_owner_links VALUES ('development', ?, ?, ?, 1)",
+                (INSTALLATION_ID, owner_grant, self.clock()),
+            )
+
+        for _ in range(2):
+            upgraded = StravaIntegrationStore(self.store.path, key_ring=self.ring, clock=self.clock)
+            self.assertEqual(
+                upgraded.use_connection_link("development", INSTALLATION_ID), (owner_grant, True)
+            )
+            self.assertEqual(upgraded.athlete_grant_id("44"), owner_grant)
+        with sqlite3.connect(self.store.path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM shared_owner_links").fetchone(), (0,))
+
+    def test_open_development_preserves_production_links_and_revokes_only_last_link(self):
+        production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
+        service = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+            development_open=True,
+        )
+        self.store.put_connection(
+            INSTALLATION_ID, bundle(expires_at=int(self.clock()) + 3600), connected_at=self.clock()
+        )
+        first = "inst_v2_" + "b" * 32
+        second = "inst_v2_" + "c" * 32
+
+        for installation, athlete_id in ((first, "44"), (second, "55")):
+            self.client.exchange_result = replace(
+                self.client.exchange_result, athlete_id=athlete_id,
+                access_token=f"access-{athlete_id}", refresh_token=f"refresh-{athlete_id}",
+            )
+            started = service.start_oauth(installation, development=True)
+            state = parse_qs(urlparse(started.web_authorization_url).query)["state"][0]
+            result = service.complete_oauth(
+                state=state, code="code", scope="read,read_all", denied=False,
+            )
+            self.assertEqual(result.result, "connected")
+
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+        service.athlete_routes(INSTALLATION_ID, page=1)
+        self.assertEqual(self.client.routes_calls[-1], ("44", "access-44", 1))
+        self.assertFalse(service.disconnect(first, development=True)["revocationPending"])
+        self.assertEqual(service.maintenance()["completedRevocations"], 0)
+        self.assertTrue(service.connection_status(INSTALLATION_ID)["connected"])
+        self.assertTrue(service.disconnect(INSTALLATION_ID)["revocationPending"])
+        self.assertEqual(service.maintenance()["completedRevocations"], 1)
+        service.athlete_routes(second, development=True, page=1)
+        self.assertEqual(self.client.routes_calls[-1], ("55", "access-55", 1))
+
     def test_oauth_connection_and_scope_status(self):
         start = self.service.start_oauth(INSTALLATION_ID)
         state = parse_qs(urlparse(start.web_authorization_url).query)["state"][0]

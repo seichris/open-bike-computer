@@ -104,8 +104,8 @@ callbacks are:
 - Development: `https://maps-dev.8o.vc/v1/integrations/strava/oauth/callback`
 - Production: `https://maps.8o.vc/v1/integrations/strava/oauth/callback`
 
-For owner-only development using the production registration, use the
-[shared Strava deployment configuration](../deploy/README.md#owner-only-development-using-the-production-registration).
+To share the production Strava registration with Dev, use the
+[shared Strava deployment configuration](../deploy/README.md#development-using-the-production-strava-registration).
 
 Configure each standalone provider with:
 
