@@ -1,19 +1,18 @@
 # Production map controller approval release
 
-This registry-only image now starts from the attested contract-1 runtime
-`sha256:d8b9d172d657cbfa7298e970968b64520c6b3d00f8dcb28758bab8f8cef3a9b9`
-(source `8104250ca68499a50c9ec68b9102f13fe1ab5965`). This is an intentional
-production backend upgrade from the previous controller, not merely an app
-allowlist extension. The base is the unchanged runtime already used to generate
-the development contract-1 Shanghai maps. Its recomputed producer identity is
-`fabfedc35cbb2443b442d2b64753e438c40559b1eac0c98db6d3f675e9cd3d9f`.
+The registry-only image uses the live production Strava controller
+`sha256:e16f7fb10f480ef9605994191ee874cb16f3ed4a2c93a2412a2aef76cfbb5a35`
+(source `29aa415e21eacaae83e8d801815b409a0a5178e9`). Before rebuilding the profile,
+compare that base to the healthy controller running in production.
 
-Only the public approval registry under `/app` is overlaid. Validation compares
-the entire runtime inventory to that immutable base, runs its own rollout tests,
-and checks durable delivery across client upgrades, wrong signer/producer
-rejection, and preservation of the legacy build-104 anchor. The entrypoint rejects
-generation and inline-worker commands. The actual generation worker remains the
-exact base image, independently pinned; do not use the controller as a worker.
+The build replaces the public approval registry and validates the `/app` file
+inventory against that immutable base. It checks durable delivery, rejects wrong
+signer and producer identities, and tests the build-104 compatibility anchor.
+The entrypoint allows API and maintenance
+commands. The production lock independently selects the approved generation
+worker and promotion scheduler.
+
+## Contract 1 history
 
 Approval `msr-20261029-durable-contract1` retains all previous approvals. For
 marked contract-1 artifacts, the backend checks the approved producer and signer
@@ -33,6 +32,8 @@ proceed with merges and releases after recording the incomplete USB cold capture
 and pending production qualification. No optional physical production runs are
 claimed. Diagnostic 1.75 evidence is distinct from production on either board.
 
+## Publish and deploy
+
 After merge, publish using the existing isolated profile:
 
 ```sh
@@ -40,13 +41,11 @@ gh workflow run map-platform-image.yml --ref main \
   -f release_profile=production-map-client-compatibility
 ```
 
-Publish the updated dedicated promotion scheduler separately with
-`release_profile=production-map-promotion`. Then prepare one reviewed production
-Compose lock: controller from this profile, worker at the base digest above,
-promotion scheduler at its new attested digest and converter identity at the same
-base. Select `msr-20261029-durable-contract1` for API and worker. Preserve existing
-production credentials, volumes, generation policy and enabled integrations.
-Require image provenance and CI Gate before merging the lock. Verify live health,
-worker identity, scheduler health and contract-aware delivery before publishing
-firmware build 105. Roll back the complete previous lock; never remove approval
-history or mutate already signed map bytes.
+Prepare a production Compose lock containing the controller from this profile,
+the exact worker digest recorded in the approval registry, and its promotion ID.
+Preserve the existing production credentials, volumes, generation policy and
+enabled integrations. Require image provenance and CI Gate before merging the
+lock. Verify the live controller, worker, scheduler and contract-aware map
+delivery after deployment. Check contract-aware delivery before any associated
+firmware release, as required for the original build-105 rollout. Roll back the
+complete previous lock and retain all approval history and signed map bytes.
