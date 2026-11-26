@@ -993,5 +993,38 @@ class SampleTests(unittest.TestCase):
             self.assertEqual(command[command.index("--label") + 1], f"bicino.work={work}")
 
 
+class ElevationCacheRecordTests(unittest.TestCase):
+    """The pinned record of the tiles kept in the bucket must stay checkable."""
+
+    RECORD = json.loads((ROUTING / "releases" / "elevation-cache-2026-11-26.json").read_text())
+    BANDS = [f"N{band}.tar" for band in range(9)] + [f"S{band}.tar" for band in range(10)] + ["meta.tar"]
+
+    def test_every_shard_of_both_sets_is_pinned(self):
+        self.assertEqual((self.RECORD["schema"], self.RECORD["bucket"]),
+                         ("bicino-routing-elevation-cache-v1", "bicino-routing-elevation"))
+        self.assertEqual(set(self.RECORD["sets"]), {"raw", "opened-400"})
+        for name, tiles in self.RECORD["sets"].items():
+            with self.subTest(set=name):
+                self.assertEqual([shard["name"] for shard in tiles["shards"]], self.BANDS)
+                self.assertEqual(sum(shard["bytes"] for shard in tiles["shards"]), tiles["shardBytes"])
+                # One file per cell in the bands; the receipts are in meta.tar.
+                self.assertEqual(sum(shard["files"] for shard in tiles["shards"][:-1]), tiles["cells"])
+                self.assertEqual(tiles["cells"], 26475)
+                self.assertGreater(tiles["shardBytes"], tiles["tileBytes"])
+                for shard in tiles["shards"]:
+                    self.assertRegex(shard["sha256"], r"^[0-9a-f]{64}$")
+                    self.assertRegex(shard["md5"], r"^[A-Za-z0-9+/]{22}==$")
+                # The prefix names the set by its manifest.
+                self.assertTrue(tiles["prefix"].endswith(f"-{tiles['manifestSha256'][:12]}/"), tiles["prefix"])
+                self.assertRegex(tiles["cellListSha256"], r"^[0-9a-f]{64}$")
+
+    def test_the_opened_set_names_the_raw_set_it_was_opened_from(self):
+        raw, opened = self.RECORD["sets"]["raw"], self.RECORD["sets"]["opened-400"]
+        self.assertIsNone(raw["method"])
+        self.assertEqual((opened["method"]["name"], opened["method"]["radiusMetres"]), ("grey-opening", 400.0))
+        self.assertEqual(opened["method"]["input"],
+                         {"manifestSha256": raw["manifestSha256"], "cellListSha256": raw["cellListSha256"]})
+
+
 if __name__ == "__main__":
     unittest.main()

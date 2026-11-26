@@ -716,10 +716,19 @@ also get real hills in place of the opened ones. Before a planet build:
    that record both. `sample_elevation.py tiles` only writes single cells
    for samples. Repeat the border street check on its tiles; that runs on a
    laptop.
-3. **Every bridge is graded as a bridge.** Find out which `bridge` values
-   Valhalla skips and make the build treat them all as bridges, or a
-   terrain model puts a false dip on each. Check it on the Chicago sample's
-   Michigan Avenue edge.
+3. **Every bridge is graded as a bridge.** Done: Valhalla's tagging rules
+   call a way a bridge only when `bridge` is `yes` or `1`.
+   `build_graph.py --all-bridges` builds with those rules changed in one
+   line, so that every value but `no`, `false` and `0` is a bridge (see
+   [graph_lua.py](graph_lua.py)). On the Chicago sample the Michigan Avenue
+   edge then reads 0% up and 1% down on 3DEP, with a weighted grade of 0.0,
+   where it read 12% both ways. The 6%+ share of the Magnificent Mile Road
+   route fell from 8% to 4%; what is left is Upper Wacker Drive, a deck that
+   OpenStreetMap does not tag as a bridge. All four Chicago routes kept
+   their length on 3DEP, the opened-400 graph still made the Road leg 9.5%
+   longer, and the ungraded routes have the same lengths with and without
+   the rule. Build the ungraded twin with it too, so that the gate compares
+   graphs that differ in elevation alone.
 4. **Build the planet and run the gate.** Reading 3DEP adds up to 494 GB of
    downloads to the elevation stage.
 
@@ -909,7 +918,11 @@ boot disk, Local SSD data, and external IP are gone. Remove the job's firewall
 rule, subnet, and VPC. `builder/teardown.sh --job JOB` prints those deletions
 and `--delete` runs them, then fails unless the instance, its disks, the
 firewall rule, the subnet and the network are all gone. Deleting the builder
-destroys everything on its scratch volume, so pull `export/` first. Revoke and
+destroys everything on its scratch volume, so pull `export/` first. Its
+elevation tiles go too. Those of the 2026-11-26 builder, raw and opened at
+400 m, are kept in a bucket (see
+[what is kept](builder/elevation-cache-proposal.md#what-is-kept)); tiles of
+another method are not. Revoke and
 remove the one-time transfer keys and remove
 transfer segments and unused development sample archives from the VPS. Keep
 the active graph, rollback archives, release manifest, and small test records.
