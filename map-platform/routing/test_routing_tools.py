@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -13,12 +14,13 @@ from shapely.geometry import Point, box, mapping
 
 from build_graph import (
     ARCHIVE_NAME, INDEX_ENTRY, archive_tile_count, argument_error, elevation_identity, file_identity,
-    prepare_inputs, valhalla_build,
+    graph_lua_identity, prepare_inputs, valhalla_build,
 )
 from coverage_mask import DISPUTES, MAP_UNITS, build_mask, check_apple_list, mask_feature
 from stage_graph import stage
 import build_elevation
 import compare_elevation
+import graph_lua
 import probe_graph
 import probe_profiles
 import sample_elevation
@@ -550,6 +552,65 @@ class ElevationManifestTests(unittest.TestCase):
             with patch("build_graph.run_valhalla", return_value=(work / "valhalla-build.log", skipped)):
                 with self.assertRaisesRegex(ValueError, "elevation tiles"):
                     valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4, work)
+
+
+class BridgeRuleTests(unittest.TestCase):
+    LUA = (b"bridge = {\n[\"yes\"] = \"true\",\n[\"no\"] = \"false\"\n}\nfunction ways_proc (kv, nokeys)\n"
+           + graph_lua.BRIDGE_RULE + b"  return 0, kv\nend\n")
+
+    def test_the_images_rules_are_written_out_with_every_bridge_a_bridge(self):
+        binary = b"\x7fELF\0other strings\0" + self.LUA + b"\0more\0"
+        pinned = hashlib.sha256(self.LUA).hexdigest()
+        self.assertEqual(graph_lua.embedded_lua(binary), self.LUA)
+        changed = graph_lua.all_bridges_lua(binary, pinned)
+        self.assertEqual(changed.count(graph_lua.ALL_BRIDGES_RULE), 1)
+        self.assertEqual(changed.replace(graph_lua.ALL_BRIDGES_RULE, graph_lua.BRIDGE_RULE), self.LUA)
+        # Rules of another image, with or without the line, stop the build.
+        with self.assertRaisesRegex(ValueError, "this change was written for"):
+            graph_lua.all_bridges_lua(binary)
+        with self.assertRaisesRegex(ValueError, "no graph.lua"):
+            graph_lua.all_bridges_lua(b"\0bridge = {}\0", pinned)
+        twice = b"\0" + self.LUA + graph_lua.BRIDGE_RULE + b"\0"
+        with self.assertRaisesRegex(ValueError, "more than once"):
+            graph_lua.all_bridges_lua(twice, hashlib.sha256(twice[1:-1]).hexdigest())
+        # yes, 1 and no keep the table's answer. Any other value that is present becomes a bridge,
+        # unless it is false or 0.
+        self.assertEqual(graph_lua.ALL_BRIDGES_RULE, b'  kv["bridge"] = bridge[kv["bridge"]] or (kv["bridge"] and '
+                         b'kv["bridge"] ~= "false" and kv["bridge"] ~= "0" and "true") or "false"\n')
+
+    def test_all_bridges_builds_with_the_changed_rules_and_records_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            calls = []
+
+            def run_valhalla(work, script, threads, log_name, volumes):
+                calls.append((script, volumes))
+                if "graph_lua.py" in script:
+                    (work / "graph.lua").write_bytes(b"rules")
+                with sqlite3.connect(work / "admin.sqlite") as database:
+                    database.execute("CREATE TABLE IF NOT EXISTS admins (name TEXT)")
+                    database.execute("INSERT INTO admins VALUES ('United States')")
+                used = "[INFO] Using LUA script: /work/graph.lua\n" if "graph_lua.py" in script else ""
+                return work / "valhalla-build.log", used
+
+            with patch("build_graph.run_valhalla", run_valhalla):
+                valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4)
+                valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4, None, True)
+            plain, changed = calls
+            self.assertNotIn("graph-lua", plain[0])
+            self.assertEqual([target for _, target in plain[1]], ["/input/admin.osm.pbf", "/input/roads.osm.pbf"])
+            self.assertTrue(changed[0].startswith(
+                "python3 /tools/graph_lua.py /usr/local/bin/valhalla_build_tiles /work/graph.lua\n"))
+            self.assertIn("--additional-data-elevation /elevation --mjolnir-graph-lua-name /work/graph.lua >",
+                          changed[0])
+            self.assertIn((Path(graph_lua.__file__).resolve(), "/tools/graph_lua.py"), changed[1])
+            identity = graph_lua_identity(work)
+            self.assertEqual((identity["baseSha256"], identity["sha256"], identity["bytes"]),
+                             (graph_lua.GRAPH_LUA_SHA256, hashlib.sha256(b"rules").hexdigest(), 5))
+            # A build whose log does not show Valhalla reading the changed rules is not passed off as one.
+            with patch("build_graph.run_valhalla", lambda work, *rest: (work / "valhalla-build.log", "")), \
+                    self.assertRaisesRegex(ValueError, "changed tagging rules"):
+                valhalla_build(work, Path("admin.osm.pbf"), Path("roads.osm.pbf"), 4, None, True)
 
 
 class ProbeExpectationTests(unittest.TestCase):

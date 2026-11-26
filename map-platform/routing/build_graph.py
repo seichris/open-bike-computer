@@ -17,6 +17,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import graph_lua
+
 
 IMAGE = "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228"
 PLATFORM = "linux/amd64"
@@ -95,26 +97,41 @@ def run_valhalla(work, script, threads, log_name, volumes):
     return log_path, log_path.read_text(errors="replace")
 
 
-def valhalla_build(work, admin_input, roads, threads, elevation=None):
+GRAPH_LUA = "graph.lua"
+
+
+def valhalla_build(work, admin_input, roads, threads, elevation=None, all_bridges=False):
     """Build and pack the tiles; `elevation` grades edges for `use_hills`.
 
     Elevation must be there when the tiles are built. Running Valhalla's
     elevation stage on finished tiles (alone or followed by validate) does
     not give the same graph: on 2026-11-24 such a graph answered some
     /locate calls with HTTP 500.
+
+    `all_bridges` builds with the image's tagging rules changed so that every
+    `bridge` value but `no`, `false` and `0` is a bridge (see graph_lua.py). A graph graded
+    with a terrain model needs it; its ungraded twin needs it too, so that
+    the two differ in elevation alone.
     """
-    script = """valhalla_build_config --mjolnir-tile-dir /work/tiles \\
+    rules = ""
+    volumes = [(admin_input, "/input/admin.osm.pbf"), (roads, "/input/roads.osm.pbf")]
+    if all_bridges:
+        rules = f" --mjolnir-graph-lua-name /work/{GRAPH_LUA}"
+        volumes.append((Path(graph_lua.__file__).resolve(), "/tools/graph_lua.py"))
+    script = (f"python3 /tools/graph_lua.py /usr/local/bin/valhalla_build_tiles /work/{GRAPH_LUA}\n" if all_bridges
+              else "") + f"""valhalla_build_config --mjolnir-tile-dir /work/tiles \\
   --mjolnir-tile-extract /work/valhalla_tiles.tar --mjolnir-admin /work/admin.sqlite \\
-  --mjolnir-concurrency "$1" --additional-data-elevation /elevation > /work/valhalla.json
+  --mjolnir-concurrency "$1" --additional-data-elevation /elevation{rules} > /work/valhalla.json
 valhalla_build_admins -c /work/valhalla.json /input/admin.osm.pbf
 test -s /work/admin.sqlite
 valhalla_build_tiles -c /work/valhalla.json -j "$1" /input/roads.osm.pbf
 valhalla_build_extract -c /work/valhalla.json
 """
-    volumes = [(admin_input, "/input/admin.osm.pbf"), (roads, "/input/roads.osm.pbf")]
     if elevation is not None:
         volumes.append((elevation, "/elevation"))
     log_path, log = run_valhalla(work, script, threads, "valhalla-build.log", volumes)
+    if all_bridges and (f"Using LUA script: /work/{GRAPH_LUA}" not in log or not (work / GRAPH_LUA).is_file()):
+        raise ValueError(f"Valhalla did not build with the changed tagging rules: {log_path}")
     if re.search(r"Admin db.*not found|Not saving admin information", log, re.IGNORECASE):
         raise ValueError(f"Valhalla did not use the administrative database: {log_path}")
     if elevation is not None and NO_ELEVATION.search(log):
@@ -123,6 +140,12 @@ valhalla_build_extract -c /work/valhalla.json
         count = database.execute("SELECT count(*) FROM admins").fetchone()[0]
     if count == 0:
         raise ValueError("Valhalla administrative database contains no boundaries")
+
+
+def graph_lua_identity(work):
+    """What the manifest records about tagging rules that are not the image's own."""
+    return {"rule": "every bridge value but no, false and 0 is a bridge", "baseSha256": graph_lua.GRAPH_LUA_SHA256,
+            **file_identity(work / GRAPH_LUA)}
 
 
 def elevation_identity(elevation, sample=False):
@@ -207,6 +230,9 @@ def main():
                         help="With --sample: take administrative boundaries from this uncut extract")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
     parser.add_argument("--elevation", type=Path, help="HGT tiles written by build_elevation.py")
+    parser.add_argument("--all-bridges", action="store_true",
+                        help="Mark every bridge value that does not say no as a bridge; for terrain-graded graphs "
+                             "and their twins")
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")
@@ -229,7 +255,7 @@ def main():
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask, admin_source, args.sample)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)
-    valhalla_build(work, admin, roads, args.threads, elevation)
+    valhalla_build(work, admin, roads, args.threads, elevation, args.all_bridges)
     archive = work / ARCHIVE_NAME
     manifest = {
         "schema": "bicino-valhalla-graph-v1",
@@ -237,7 +263,8 @@ def main():
         "source": {"url": args.source_url, **source_identity},
         "mask": mask_identity,
         "policy": policy_identity,
-        "builder": {"image": IMAGE, "platform": PLATFORM, "threads": args.threads},
+        "builder": {"image": IMAGE, "platform": PLATFORM, "threads": args.threads,
+                    "graphLua": graph_lua_identity(work) if args.all_bridges else None},
         "configuration": file_identity(work / "valhalla.json"),
         "admin": file_identity(work / "admin.sqlite"),
         **({"adminSource": file_identity(admin_source)} if admin_source else {}),
