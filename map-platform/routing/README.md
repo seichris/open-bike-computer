@@ -237,8 +237,11 @@ The 2026-11-25 results and the recommendation are in
 Cities marked `planetOnly` hold the legs of the 2026-11-24 planet check that
 the sample cities lack: Copenhagen, Paris, London, Munich, New York, Tokyo
 and Dubai (flat) and Stuttgart (hilly), with one or two legs each. With them
-the file holds all 27 legs of that check. They were
-never built as samples, so they run only against planet services. Together
+the file holds all 27 legs of that check. Apart from New York and
+Stuttgart, which were sampled on 2026-11-26 to choose the opening radius
+(see [Opening radius](refresh-runbook.md#opening-radius-on-city-samples)),
+they have never been built as samples, so they run only against planet
+services. Together
 with the sample cities they are the release gate for a graded planet: serve
 the graded and the ungraded planet from the same snapshot and run every city
 in one report, with no `--city`.
@@ -249,6 +252,9 @@ in one report, with no `--city`.
    Record its SHA-256. Cut the city's box with `osmium extract -b
    west,south,east,north --strategy complete_ways` and take
    `osmium tags-filter "$region" r/boundary=administrative` as the admin input.
+   Check the state relation with `osmium check-refs -r`. The New York extract
+   lacks one member of New York State, and Valhalla then builds no admin
+   polygon; fetch the missing way from the OpenStreetMap API and merge it.
    Box extracts fail `build_graph.py`'s check-refs, so build each sample by
    calling `build_graph.valhalla_build(work, admin, roads, threads, elevation)`
    directly. A city builds in 10 seconds to 2 minutes on a laptop under amd64
@@ -261,6 +267,10 @@ in one report, with no `--city`.
    GEDTM30, and `opening --radius` applies a grey-scale morphological
    opening to tiles that `build_elevation.py` or `cog` wrote. Its manifests
    always record `bounds`, so `build_graph.py` accepts them only for samples.
+   To try an opening radius on Copernicus, use
+   `build_elevation.py --opening-radius R --raw RAW --bounds W S E N`
+   instead. It builds the raw tiles with the ring of neighbouring cells and
+   opens them as a planet build would, with neighbour margins.
 
    ```sh
    python sample_elevation.py cog --source-id gedtm30-v1.2 --bounds -59 -35 -58 -34 \
