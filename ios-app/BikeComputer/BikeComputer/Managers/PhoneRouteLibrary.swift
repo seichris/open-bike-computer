@@ -577,12 +577,15 @@ final class PhoneRouteLibrary: ObservableObject {
         reload()
     }
 
+    /// The rider deletes an expired Strava route's reload row. Like any rider
+    /// deletion, the account route library deletes its copy too.
     func deleteExpiredStravaBookmark(
         _ bookmark: StravaRouteReloadBookmarkV1
     ) throws {
         _ = try stravaBookmarkStore.delete(routeID: bookmark.routeID)
         removeDisplayName(routeID: bookmark.routeID)
         reload()
+        onRouteDeletedByRider?(bookmark.routeID)
     }
 
     @discardableResult
@@ -764,9 +767,9 @@ final class PhoneRouteLibrary: ObservableObject {
         publishRouteDisplayNames()
     }
 
-    /// Called after the rider deletes a saved route, and for each route a
-    /// Strava disconnect purges, so the account route library deletes it too.
-    /// Lease expiry and Watch cleanup do not call it.
+    /// Called after the rider deletes a saved route or an expired Strava reload
+    /// row, and for each route a Strava disconnect purges, so the account route
+    /// library deletes it too. Lease expiry and Watch cleanup do not call it.
     var onRouteDeletedByRider: ((UUID) -> Void)?
 
     /// The rider's rename for a route, even while its archive is not on this phone.
