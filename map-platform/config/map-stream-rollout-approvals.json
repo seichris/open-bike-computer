@@ -650,6 +650,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261126-madrid-sao-paulo",
+      "candidateGitSha": "91f98d805120b78b7a03df96c3d5ba5811271540",
+      "producerBuildSha256": "67a6ef0596ae2ef4108b8114844124cf7a9a5810b5e19a45817bbd69937366a4",
+      "workerImageDigest": "sha256:449e78d79f96d1640e460084b75c74ebc1274ea48a1926e02425b8fe04a633eb",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 107,
+      "firmwareGitSha": "5f76f445d4943c0984ed08eb299bba14a8b12cfd",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "9150d4020b4be087375ee4ddff252aecdc6bfacae3967c8e0d1ad79316848adb",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-26T05:40:40Z",
+      "approvedBy": "Chris, 2026-11-26, approved this exact production worker digest in Codex.",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
