@@ -42,6 +42,10 @@ class GenericGeometryError(ValueError):
 class GenericGeometryLimitError(GenericGeometryError):
     code = "generic_geometry_amplification_limit"
 
+
+class _PolygonBlockLimitError(GenericGeometryLimitError):
+    pass
+
 PI = 3.14159265358979323846264338327950288
 def DEG2RAD(a): return ((a) / (180 / PI))
 def RAD2DEG(a): return ((a) * (180 / PI))
@@ -370,12 +374,13 @@ def _record_line_clip_without_length(diagnostics, result):
 def merge_geometry_diagnostics(target, source):
     """Add the counts of one diagnostics mapping into another.
 
-    Counters are integers and the ``...ByResult`` breakdowns are mappings of
-    integers, so a block clipped on a worker thread can count into a mapping
-    of its own that is folded into the shared one afterwards.
+    Sum counters and keep the first bounded set of invalid geometry samples.
     """
     for key, value in source.items():
-        if isinstance(value, dict):
+        if key == "droppedGeometrySamples":
+            samples = target.setdefault(key, [])
+            samples.extend(value[:MAX_GEOMETRY_DROP_SAMPLES - len(samples)])
+        elif isinstance(value, dict):
             merge_geometry_diagnostics(target.setdefault(key, {}), value)
         else:
             target[key] = target.get(key, 0) + value
@@ -559,6 +564,44 @@ def _validate_quantized_decomposition(source, pieces, min_x, min_y):
         )
 
 
+def _clipped_polygon_parts(feat, bbox):
+    polygon = feat['geom']
+    if not isinstance(polygon, Polygon):
+        raise GenericGeometryError("generic polygon feature is not a Polygon")
+    # BlockFeatureIndex only omits features this test would skip.
+    if not bbox.intersects(polygon) or bbox.touches(polygon):
+        return
+    parts = intersection(polygon, bbox)
+    if not parts.is_valid:
+        raise GenericGeometryError("clipping produced invalid generic geometry")
+    canonical_parts = [
+        _canonicalize_shapely_polygon(part) for part in _polygonal_parts(parts)
+    ]
+    for part in sorted(canonical_parts, key=_polygon_sort_key):
+        yield from _snap_to_fmb_precision(part)
+
+
+def _source_geometry_key(feat):
+    return feat.get('_source_geometry_key', str(feat.get('id', '')))
+
+
+def _record_polygon_drop(diagnostics, feat, min_x, min_y, exc):
+    reason = (
+        str(exc)[:160] if isinstance(exc, GenericGeometryError)
+        else "GEOS operation failed while clipping generic polygon"
+    )
+    _record_geometry_drop(
+        diagnostics,
+        "invalid_block_polygon",
+        sample={
+            "blockOrigin": [int(min_x), int(min_y)],
+            "component": int(feat.get('_source_geometry_component', 0)),
+            "reason": reason,
+            "sourceGeometryKey": str(_source_geometry_key(feat))[:80],
+        },
+    )
+
+
 def clip_polygons(
     features,
     bbox: Polygon,
@@ -567,75 +610,47 @@ def clip_polygons(
     max_pieces_per_block=MAX_GENERIC_POLYGON_PIECES_PER_BLOCK,
     geometry_diagnostics=None,
 ):
-    """ Clip polygons to the bbox area. Each polygon can be splitted into one or several polygons.
-        Returns a list of polygons
-    """
+    """Return the clipped, hole-free polygon pieces in rendering order."""
     clipped = []
     source_piece_counts = {}
     min_x, min_y = bbox.bounds[:2]
     for feat in features:
-        source_key = feat.get('_source_geometry_key', str(feat.get('id', '')))
+        source_key = _source_geometry_key(feat)
         source_count = source_piece_counts.get(source_key, 0)
         feature_clipped = []
         try:
-            polygon = feat['geom']
-            if not isinstance(polygon, Polygon):
-                raise GenericGeometryError(
-                    "generic polygon feature is not a Polygon"
+            for part in _clipped_polygon_parts(feat, bbox):
+                remaining_source = max_pieces_per_source - source_count
+                remaining_block = (
+                    max_pieces_per_block
+                    - len(clipped)
+                    - len(feature_clipped)
                 )
-            # BlockFeatureIndex only omits features this test would skip;
-            # keep every other per-feature effect below it.
-            if not bbox.intersects(polygon) or bbox.touches(polygon):
-                continue
-            parts = intersection(polygon, bbox)
-            if not parts.is_valid:
-                raise GenericGeometryError(
-                    "clipping produced invalid generic geometry"
-                )
-            polygonal_parts = [
-                _canonicalize_shapely_polygon(part)
-                for part in _polygonal_parts(parts)
-            ]
-            for clipped_part in sorted(polygonal_parts, key=_polygon_sort_key):
-                for part in _snap_to_fmb_precision(clipped_part):
-                    remaining_source = max_pieces_per_source - source_count
-                    remaining_block = (
-                        max_pieces_per_block
-                        - len(clipped)
-                        - len(feature_clipped)
-                    )
-                    if remaining_source <= 0 or remaining_block <= 0:
+                try:
+                    remaining = min(remaining_source, remaining_block)
+                    if remaining <= 0:
                         raise GenericGeometryLimitError(
                             "generic polygon decomposition exceeded its piece budget"
                         )
-                    pieces = _decompose_hole_free(
-                        part, min(remaining_source, remaining_block)
-                    )
-                    _validate_quantized_decomposition(part, pieces, min_x, min_y)
-                    source_count += len(pieces)
-                    if source_count > max_pieces_per_source:
-                        raise GenericGeometryLimitError(
-                            "generic polygon decomposition exceeded the per-source limit"
+                    pieces = _decompose_hole_free(part, remaining)
+                except GenericGeometryLimitError as exc:
+                    if remaining_block < remaining_source:
+                        raise _PolygonBlockLimitError(str(exc)) from exc
+                    raise
+                _validate_quantized_decomposition(part, pieces, min_x, min_y)
+                source_count += len(pieces)
+                for p in pieces:
+                    if p.interiors:
+                        raise GenericGeometryError(
+                            "generic polygon output retained an interior ring"
                         )
-                    if (
-                        len(clipped) + len(feature_clipped) + len(pieces)
-                        > max_pieces_per_block
-                    ):
-                        raise GenericGeometryLimitError(
-                            "generic polygon decomposition exceeded the per-block limit"
-                        )
-                    for p in pieces:
-                        if p.interiors:
-                            raise GenericGeometryError(
-                                "generic polygon output retained an interior ring"
-                            )
-                        new_feat = dict(feat)
-                        new_feat['geom'] = p
-                        new_feat['bbox'] = p.bounds
-                        feature_clipped.append(new_feat)
+                    new_feat = dict(feat)
+                    new_feat['geom'] = p
+                    new_feat['bbox'] = p.bounds
+                    feature_clipped.append(new_feat)
         except GenericGeometryLimitError:
-            # Piece limits protect worker memory and artifact size. They must
-            # remain hard failures instead of silently omitting large areas.
+            # Preserve the limits for direct callers. Tile generation can
+            # recover from an aggregate overflow using its final slot budget.
             raise
         except (GenericGeometryError, GEOSException) as exc:
             # Generic OSM polygons are decorative map context. One malformed
@@ -643,36 +658,129 @@ def clip_polygons(
             # unavailable. Keep the drop atomic so a failed component is
             # never partially encoded, and retain bounded source/block detail
             # for later diagnosis.
-            reason = (
-                str(exc)[:160]
-                if isinstance(exc, GenericGeometryError)
-                else "GEOS operation failed while clipping generic polygon"
-            )
-            _record_geometry_drop(
-                geometry_diagnostics,
-                "invalid_block_polygon",
-                sample={
-                    "blockOrigin": [int(min_x), int(min_y)],
-                    "component": int(feat.get('_source_geometry_component', 0)),
-                    "reason": reason,
-                    "sourceGeometryKey": str(source_key)[:80],
-                },
-            )
+            _record_polygon_drop(geometry_diagnostics, feat, min_x, min_y, exc)
             continue
 
         source_piece_counts[source_key] = source_count
         clipped.extend(feature_clipped)
-        # if len( new_feat['geom'].coords) <= 2: continue
     return clipped
 
 
-def fit_polygons_to_feature_budget(polygons, line_count, feature_limit):
-    """Keep every line and reduce polygon detail only on overfull tiles."""
+def _polygon_priority(feature_type, area, index):
+    # Retain land use, parks and water before small building footprints.
+    return feature_type.startswith("building."), -area, index
+
+
+def _clip_overfull_polygon_block(features, bbox, budget, max_pieces_per_source, diagnostics):
+    # Rank the original OSM components by clipped area without storing their
+    # decompositions. Only contenders for the remaining firmware slots are split.
+    candidates = []
+    min_x, min_y = bbox.bounds[:2]
+    for index, feat in enumerate(features):
+        try:
+            area = math.fsum(part.area for part in _clipped_polygon_parts(feat, bbox))
+        except (GenericGeometryError, GEOSException) as exc:
+            _record_polygon_drop(diagnostics, feat, min_x, min_y, exc)
+            continue
+        if area > 0:
+            candidates.append(_polygon_priority(feat['type'], area, index))
+
+    kept = {}
+    source_piece_counts = {}
+    remaining = budget
+    for _, _, index in sorted(candidates):
+        if remaining == 0:
+            break
+        feat = features[index]
+        source = _source_geometry_key(feat)
+        source_count = source_piece_counts.get(source, 0)
+        try:
+            pieces = clip_polygons(
+                [feat], bbox,
+                max_pieces_per_source=max_pieces_per_source - source_count,
+                max_pieces_per_block=remaining,
+                geometry_diagnostics=diagnostics,
+            )
+        except _PolygonBlockLimitError:
+            # Stop as soon as this component cannot fit the remaining slots.
+            continue
+        if pieces:
+            source_piece_counts[source] = source_count + len(pieces)
+            kept[index] = pieces
+            remaining -= len(pieces)
+
+    # Priority is for admission only. Preserve the original rendering order.
+    selected = [piece for index in sorted(kept) for piece in kept[index]]
+    return selected, len(candidates) - len(kept)
+
+
+def clip_polygons_to_tile_budget(
+    features: list[dict], bbox, line_count, feature_limit, *, geometry_diagnostics=None,
+    max_pieces_per_source=MAX_GENERIC_POLYGON_PIECES_PER_SOURCE,
+    max_pieces_per_block=MAX_GENERIC_POLYGON_PIECES_PER_BLOCK,
+):
+    """Reserve slots for every line before selecting whole polygon components."""
+    polygon_budget = _available_polygon_slots(line_count, feature_limit)
+    # Keep the ordinary path and its output order. Discard its partial
+    # diagnostics if the aggregate guard requires a second pass.
+    block_diagnostics = {} if geometry_diagnostics is not None else None
+    try:
+        polygons = clip_polygons(
+            features, bbox, max_pieces_per_source=max_pieces_per_source,
+            max_pieces_per_block=max_pieces_per_block,
+            geometry_diagnostics=block_diagnostics,
+        )
+    except _PolygonBlockLimitError:
+        overfull = True
+    else:
+        overfull = False
+        if geometry_diagnostics is not None:
+            merge_geometry_diagnostics(geometry_diagnostics, block_diagnostics)
+        selected = fit_polygons_to_feature_budget(polygons, line_count, feature_limit)
+        omitted_pieces = len(polygons) - len(selected)
+        omitted_components = 0
+
+    if overfull:
+        selected, omitted_components = _clip_overfull_polygon_block(
+            features, bbox, min(polygon_budget, max_pieces_per_block),
+            max_pieces_per_source, geometry_diagnostics,
+        )
+        omitted_pieces = 0
+
+    if geometry_diagnostics is not None and (overfull or omitted_pieces):
+        budget = geometry_diagnostics.setdefault(
+            "tileFeatureBudget", {"affectedTiles": 0, "omittedPolygons": 0, "samples": []},
+        )
+        budget["affectedTiles"] += 1
+        budget["omittedPolygons"] += omitted_pieces
+        sample = {
+            "blockOrigin": [int(value) for value in bbox.bounds[:2]],
+            "lines": line_count,
+            "polygonsWritten": len(selected),
+        }
+        if overfull:
+            budget["overfullTiles"] = budget.get("overfullTiles", 0) + 1
+            budget["omittedComponents"] = budget.get("omittedComponents", 0) + omitted_components
+            sample["omittedComponents"] = omitted_components
+        else:
+            sample["polygonsBefore"] = len(polygons)
+        if len(budget["samples"]) < MAX_GEOMETRY_DROP_SAMPLES:
+            budget["samples"].append(sample)
+    return selected
+
+
+def _available_polygon_slots(line_count, feature_limit):
     polygon_budget = feature_limit - line_count
     if polygon_budget < 0:
         raise GenericGeometryLimitError(
             f"tile has {line_count} lines, exceeding its {feature_limit}-feature limit"
         )
+    return polygon_budget
+
+
+def fit_polygons_to_feature_budget(polygons, line_count, feature_limit):
+    """Keep every line and reduce polygon detail only on overfull tiles."""
+    polygon_budget = _available_polygon_slots(line_count, feature_limit)
     if len(polygons) <= polygon_budget:
         return polygons
 
@@ -690,8 +798,7 @@ def fit_polygons_to_feature_budget(polygons, line_count, feature_limit):
     def priority(indices):
         feature_type = polygons[indices[0]]["type"]
         area = math.fsum(polygons[index]["geom"].area for index in indices)
-        # Retain land use, parks and water before small building footprints.
-        return feature_type.startswith("building."), -area, indices[0]
+        return _polygon_priority(feature_type, area, indices[0])
 
     retained = set()
     for indices in sorted(groups.values(), key=priority):
