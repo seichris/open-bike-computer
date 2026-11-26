@@ -72,7 +72,9 @@ STAGE_SETTINGS = {
     "images": (IMAGE,),
     "download": ("BICINO_PLANET_DATE", "BICINO_SAMPLE_CITY", "BICINO_SAMPLE_REGION_URL"),
     "inputs": (IMAGE,),
-    "elevation": (IMAGE, "BICINO_OPENING_RADIUS", "BICINO_SAMPLE_CITY"),
+    "elevation": (IMAGE, "BICINO_OPENING_RADIUS", "BICINO_TERRAIN", "BICINO_SAMPLE_CITY"),
+    # A terrain source changes the tagging rules of both graphs (--all-bridges).
+    "build-ungraded": ("BICINO_TERRAIN",),
     "qualify-ungraded": (IMAGE,),
     "qualify-graded": (IMAGE,),
     "gate": (IMAGE,),
@@ -87,6 +89,7 @@ LOG_TAIL_LINES = 25
 ENV_KEYS = {
     "BICINO_PLANET_DATE": "planetDate",
     "BICINO_OPENING_RADIUS": "openingRadiusMetres",
+    "BICINO_TERRAIN": "terrainSource",
     "BICINO_TOOLS_COMMIT": "toolsCommit",
     "BICINO_MAP_PLATFORM_IMAGE": "mapPlatformImage",
     "BICINO_SAMPLE_CITY": "sampleCity",
@@ -338,6 +341,23 @@ def describe(status):
     return "\n".join(lines)
 
 
+def elevation_sets(root):
+    """Each elevation tile set of the run: its directory and its manifest's name.
+
+    Without a terrain source `elevation/` holds the opened tiles the graph is
+    graded with. With one it holds the hybrid, and the opened and the terrain
+    tiles lie beside it.
+    """
+    sets = {"raw": (root / "elevation-raw", "elevation-manifest.json")}
+    if (root / "elevation-terrain").is_dir():
+        sets["opened"] = (root / "elevation-opened", "elevation-manifest.json")
+        sets["terrain"] = (root / "elevation-terrain", "terrain-manifest.json")
+        sets["hybrid"] = (root / "elevation", "elevation-manifest.json")
+    else:
+        sets["opened"] = (root / "elevation", "elevation-manifest.json")
+    return sets
+
+
 def build_result(root, final=False, clock=time.time):
     status, gate_summary = chain_status(root, clock)
     evidence = root / "export" / "evidence"
@@ -348,10 +368,8 @@ def build_result(root, final=False, clock=time.time):
     result["qualification"] = {
         label: read_json(evidence / f"qualify-{label}" / "summary.json") for label in ("ungraded", "graded")
     }
-    result["elevation"] = {
-        "opened": read_json(root / "elevation" / "elevation-manifest.json"),
-        "raw": read_json(root / "elevation-raw" / "elevation-manifest.json"),
-    }
+    result["elevation"] = {name: read_json(path / manifest)
+                           for name, (path, manifest) in elevation_sets(root).items()}
     result["gate"] = gate_summary
     return result
 
@@ -363,10 +381,8 @@ def collect_evidence(root):
     `export/<label>/valhalla_tiles.tar` with its read-only identity.
     """
     export = root / "export"
-    copies = [(root / "elevation" / name, export / "evidence" / "elevation-opened" / name)
-              for name in ("elevation-manifest.json", "cells.txt")]
-    copies += [(root / "elevation-raw" / name, export / "evidence" / "elevation-raw" / name)
-               for name in ("elevation-manifest.json", "cells.txt")]
+    copies = [(path / name, export / "evidence" / f"elevation-{kind}" / name)
+              for kind, (path, manifest) in elevation_sets(root).items() for name in (manifest, "cells.txt")]
     copies += [(path, export / "evidence" / "input" / path.name)
                for path in sorted((root / "input").glob("*.osm.pbf.*")) if path.stat().st_size < 4096]
     for label in ("ungraded", "graded"):

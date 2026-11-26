@@ -33,6 +33,10 @@ Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
 - `builder.env`: the run's settings, read by systemd and by the scripts.
 - `tools/repo/`: the tools, checked out at the run's commit.
 - `input/`, `elevation-raw/`, `elevation/`, `audit/`, `build/planet-ungraded/`, `build/planet-graded/`: the work.
+  `elevation/` holds the tiles the graded graph is built with. With a
+  terrain source these are the hybrid, and `elevation-opened/` and
+  `elevation-terrain/` hold the opened Copernicus tiles and the terrain
+  tiles it is made of.
 - `export/`: everything the VPS may read. `result.json`, `chain/` (markers), `logs/` (one log per stage and the sampler's series), `evidence/` (probe reports, the gate report, manifests), and `ungraded/` and `graded/` (each archive's manifest and a hard link to the archive).
 
 ## The chain
@@ -49,8 +53,8 @@ download ┼─────────────┴─ build-graded ─┼─
 | `images` | Pull the pinned Valhalla and map-platform images. | 1 min |
 | `download` | Download the planet, check its published MD5, record its SHA-256. | 35 min |
 | `inputs` | Download the pinned Natural Earth layers and write the audit's inventory. | 1 min |
-| `elevation` | Write the raw Copernicus tiles, then open them. Runs `build_elevation.py` up to four times: each run resumes from the receipts. | 2 h 20 min |
-| `build-ungraded` | `build_graph.py --coverage planet`. | 3 h 25 min alone, 4 h 50 min beside the graded build |
+| `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also download the terrain source's tiles and write the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. | 2 h 20 min without a terrain source |
+| `build-ungraded` | `build_graph.py --coverage planet`, with `--all-bridges` when the run has a terrain source. | 3 h 25 min alone, 4 h 50 min beside the graded build |
 | `build-graded` | The same with `--elevation`. | 4 h 50 min |
 | `qualify-ungraded`, `qualify-graded` | Smoke probes, cross-border probes, the territory audit and the profile probe, with no network. | under 1 min each |
 | `gate` | Serve both archives and run `compare_elevation.py` over every city. | 1 min |
@@ -60,6 +64,26 @@ The times are from the 2026-11-25 and 2026-11-26 builds. The whole chain
 takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded` and `gate` are skipped, and it takes about 4 hours.
+
+`--terrain usgs-3dep-13` grades with the hybrid: the terrain source of
+[elevation-sources.json](../elevation-sources.json) where it has data, the
+opened Copernicus tiles elsewhere (see
+[Build and release](../README.md#build-and-release)). The run then differs
+in three ways:
+
+- **The elevation stage does more.** It first checks that the source list
+  holds that source, approved, with the catalog it pins. Then it downloads
+  the catalog's 968 tiles, 365 GB, and blends 26,475 cells. No builder has
+  run this yet, so its time is not known. A terrain worker holds a whole
+  tile; in the Chicago rehearsal the container with three workers peaked at
+  WORKER_PEAK. The stage keeps three more things on scratch: the opened
+  tiles (84 GB at 400 m), the terrain tiles and up to 0.5 GB per job of
+  downloads in flight. The 2026-11-25 run peaked at 1,225 GB of the
+  1,500 GiB.
+- **Both graphs are built with `--all-bridges`**, the ungraded one too, so
+  that the two differ in elevation alone. The gate stage first compares
+  the tagging rules both manifests record and fails when they differ.
+- **The gate's source is named** `usgs-3dep-13-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -81,7 +105,7 @@ wrapper holds a lock. A marker that says `running` without the lock is
 reported as `interrupted`: the wrapper was killed, or the machine restarted.
 
 `settings` are the settings the stage's work depends on, its own and those of
-the stages it needs: the planet snapshot, the opening radius, the sample
+the stages it needs: the planet snapshot, the opening radius, the terrain source, the sample
 and, for the stages that run it, the map-platform image. A finished stage whose settings differ from
 `builder.env` is reported as `stale` (see
 [Build again with other settings](#build-again-with-other-settings)).
@@ -165,10 +189,12 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 - **Another tools commit only**, for example after a fix to one stage:
   finished stages are kept. Each stage's marker and the result name the
   commit that stage ran with, and the status notes that they differ.
-- **Another opening radius, planet snapshot, image or sample**: every
-  finished stage that depends on the changed setting is `stale`. A new radius
-  leaves the download and the ungraded build done and makes the elevation
-  stage, the graded build and what follows stale. A new map-platform image
+- **Another opening radius, terrain source, planet snapshot, image or
+  sample**: every finished stage that depends on the changed setting is
+  `stale`. A new radius leaves the download and the ungraded build done and
+  makes the elevation stage, the graded build and what follows stale. Adding
+  or dropping a terrain source makes the ungraded build stale too, because
+  it changes that graph's tagging rules. A new map-platform image
   does the same, and makes the audit inventory and the probes stale too. A stale stage does not
   start, the stages that need it are `blocked`, and the chain is `failed`
   until someone decides. The old work is never reused under the new settings

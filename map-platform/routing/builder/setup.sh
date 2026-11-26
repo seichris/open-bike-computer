@@ -2,7 +2,8 @@
 # Prepare a fresh planet builder and start the build chain. Run it on the
 # builder as user bicino, piped over SSH so nothing has to be copied first:
 #
-#   ssh -F CONFIG builder 'bash -s -- --commit SHA --planet-date 261116 --opening-radius 400 --start' \
+#   ssh -F CONFIG builder 'bash -s -- --commit SHA --planet-date 261116 --opening-radius 400 \
+#     --terrain usgs-3dep-13 --start' \
 #     < map-platform/routing/builder/setup.sh
 #
 #   --commit SHA               the open-bike-computer commit whose tools run (40 hex digits)
@@ -10,6 +11,9 @@
 #   --opening-radius METRES    grade a second graph with Copernicus opened at this
 #                              radius and run the gate; without it only the
 #                              ungraded planet is built
+#   --terrain ID               put this terrain source of elevation-sources.json
+#                              over the opened tiles, and build both graphs with
+#                              every bridge marked as one
 #   --map-platform-image REF   another digest-pinned map-platform image
 #   --start                    start the chain when everything is in place
 #
@@ -21,6 +25,7 @@ repository=https://github.com/seichris/open-bike-computer.git
 commit=
 planet_date=
 opening_radius=
+terrain=
 image=
 start=()
 
@@ -34,6 +39,7 @@ while [ $# -gt 0 ]; do
     --commit) commit=${2:-}; shift 2 ;;
     --planet-date) planet_date=${2:-}; shift 2 ;;
     --opening-radius) opening_radius=${2:-}; shift 2 ;;
+    --terrain) terrain=${2:-}; shift 2 ;;
     --map-platform-image) image=${2:-}; shift 2 ;;
     --start) start=(--start); shift ;;
     *) fail "unknown argument: $1" ;;
@@ -42,6 +48,8 @@ done
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "--commit takes a full commit SHA"
 [[ "$planet_date" =~ ^[0-9]{6}$ ]] || fail "--planet-date takes YYMMDD"
 [[ -z "$opening_radius" || "$opening_radius" =~ ^[0-9]{2,4}$ ]] || fail "--opening-radius takes whole metres"
+[[ -z "$terrain" || "$terrain" =~ ^[a-z][a-z0-9-]{2,63}$ ]] || fail "--terrain takes a terrain source id"
+[[ -z "$terrain" || -n "$opening_radius" ]] || fail "--terrain needs --opening-radius"
 [ "$(id -un)" = bicino ] || fail "run setup.sh as user bicino; the units run as that user"
 sudo -n true || fail "user bicino needs sudo without a password"
 
@@ -125,6 +133,7 @@ env_file=$scratch/builder.env
   echo "BICINO_TOOLS_COMMIT=$commit"
   echo "BICINO_PLANET_DATE=$planet_date"
   echo "BICINO_OPENING_RADIUS=$opening_radius"
+  echo "BICINO_TERRAIN=$terrain"
   if [ -n "$image" ]; then
     echo "BICINO_MAP_PLATFORM_IMAGE=$image"
   fi
