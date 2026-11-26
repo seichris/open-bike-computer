@@ -265,6 +265,12 @@ jobs:
         run: python "${{ github.workspace }}/tools/dev_check.py" --check map-backend-tests --report "$RUNNER_TEMP/dev-checks/map-backend-tests/results.json"
       - name: Deployment policy tests
         run: python "${{ github.workspace }}/tools/dev_check.py" --check map-deploy-tests --report "$RUNNER_TEMP/dev-checks/map-deploy-tests/results.json"
+      - name: Bicycle graph tools and planet builder tests
+        if: inputs.run_source
+        env:
+          # The builder's shell scripts must pass shellcheck here; locally the test skips without it.
+          BICINO_REQUIRE_SHELLCHECK: "1"
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-routing-tests --report "$RUNNER_TEMP/dev-checks/map-routing-tests/results.json"
       - name: Production promotion scheduler image
         working-directory: .
         run: >-

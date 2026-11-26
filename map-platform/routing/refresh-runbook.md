@@ -7,36 +7,125 @@ the infrastructure, transfer, and deployment that passed qualification.
 
 ## Build on an ephemeral VM
 
+A planet build runs from the scripts in [builder/](builder/README.md): one
+command sets the builder up and starts a chain of systemd units that
+downloads the planet, builds the elevation tiles, builds the graph with and
+without elevation, probes both archives and runs the elevation gate. Nobody
+has to watch it. Run the commands below from a checkout at the commit whose
+tools should build; that commit must be on GitHub. `JOB` names the run, for
+example `r400-261116`, and `VPS` is the Coolify VPS.
+
+The scripts were written on 2026-11-26 and have not yet run on a real
+builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-builder).
+
 1. Confirm the intended Google Cloud project, linked billing account, available
    credits, and quota. See [Cloud Billing Reports](https://console.cloud.google.com/billing)
    and check promotional credit eligibility before creating the machine.
-2. Use an on-demand `c4-highmem-24-lssd` in `europe-west4-b` with Ubuntu 24.04
-   amd64, a 24-hour auto-delete lifetime, and an auto-deleting boot disk.
-   Provision a dedicated VPC, subnet, and SSH firewall rule for the job. Allow
-   SSH from the Coolify VPS only. Use a job-specific SSH key and a VM with no
-   service account. Read its Ed25519 host key through the authenticated Compute
-   Engine serial console before trusting it for the transfer.
-3. Install Docker, Osmium, mdadm, rsync, curl, and GNU time. Verify the four
-   375 GiB Local SSDs are distinct, unmounted, and blank. Stripe only those
-   disks with mdadm RAID0 and mount the ext4 scratch volume at
-   `/srv/bicino-routing-scratch`. Keep the verified input, build directory, and
-   export directory on scratch. Run the build under a transient systemd unit
-   so it survives an SSH disconnect. Keep build logs on scratch and record the
-   build start, end, and peak disk use for the next sizing decision.
-4. Capture Apple's official Maps Cycling list and review coverage differences
-   with the versioned policy before building the mask. Download the pinned
-   Natural Earth inputs and use the GeoJSON Feature from `coverage_mask.py`.
-   Osmium 1.16 rejected bare geometry on Ubuntu. Download the dated planet
-   snapshot with a resumable transfer, verify the published checksum, and
-   record SHA-256. Keep the verified PBF during retries. Run the pinned Valhalla
-   container offline with eight build threads, verify the archive, and retain
-   the manifest and exact mask bytes with the release. The
-   [first release manifest](releases/2026-11-23.json) and
-   [compressed mask](releases/2026-11-23-mask.geojson.gz) preserve the original
-   PBF identity, clipping input, and archive identity. For a recovery build,
-   decompress the mask with `gzip -dc` and verify the uncompressed bytes
-   against the manifest before building. Verify and qualify the rebuilt graph
-   before deploying it.
+   Creating it needs Chris's go-ahead for that build.
+2. Generate the job's SSH key on the VPS and keep its public half:
+
+   ```sh
+   ssh root@VPS "ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/bicino-valhalla-JOB \
+     -C bicino-valhalla-JOB && cat /root/.ssh/bicino-valhalla-JOB.pub" > job.pub
+   ```
+
+3. Print the plan, then create the builder:
+
+   ```sh
+   map-platform/routing/builder/provision.sh --job JOB --ssh-source VPS_PUBLIC_ADDRESS/32 --ssh-key job.pub
+   map-platform/routing/builder/provision.sh --job JOB --ssh-source VPS_PUBLIC_ADDRESS/32 --ssh-key job.pub --create
+   ```
+
+   It creates a VPC, subnet and SSH firewall rule for this job alone, with
+   SSH allowed from the VPS only, and an on-demand `c4-highmem-24-lssd` in
+   `europe-west4-b` with Ubuntu 24.04 amd64, no service account, an
+   auto-deleting boot disk and a 24-hour lifetime after which it deletes
+   itself.
+4. Read the builder's Ed25519 host key through the authenticated Compute
+   Engine serial console, before the first connection:
+
+   ```sh
+   map-platform/routing/builder/provision.sh --job JOB --host-key
+   ```
+
+   It prints `ADDRESS ssh-ed25519 KEY`. On the VPS, put that line in
+   `/root/.ssh/bicino-valhalla-JOB.d/known_hosts` and write
+   `/root/.ssh/bicino-valhalla-JOB.d/config`:
+
+   ```text
+   Host builder
+     HostName ADDRESS
+     User bicino
+     IdentityFile /root/.ssh/bicino-valhalla-JOB
+     IdentitiesOnly yes
+     UserKnownHostsFile /root/.ssh/bicino-valhalla-JOB.d/known_hosts
+     StrictHostKeyChecking yes
+     ServerAliveInterval 30
+   ```
+
+5. Set the builder up and start the chain, in one command:
+
+   ```sh
+   ssh root@VPS "ssh -F /root/.ssh/bicino-valhalla-JOB.d/config builder \
+     'bash -s -- --commit $(git rev-parse HEAD) --planet-date 261116 --opening-radius 400 --start'" \
+     < map-platform/routing/builder/setup.sh
+   ```
+
+   `setup.sh` first masks Ubuntu's package upgrades, which restarted a
+   running build on 2026-11-26. It then installs Docker, Osmium, mdadm, rsync,
+   curl, GNU time and Git, checks that the four 375 GiB Local SSDs are
+   distinct, unmounted and blank, stripes only those with mdadm RAID 0 and
+   mounts the ext4 scratch volume at `/srv/bicino-routing-scratch`. It checks
+   the tools out at the commit, writes the run's settings and starts the
+   chain. Leave out `--opening-radius` to build only the ungraded planet,
+   the graph production serves.
+6. Ask where the build stands whenever you like. Copy
+   `builder/builder_status.py` to the VPS once, or run it from a laptop with
+   `--via`:
+
+   ```sh
+   python3 map-platform/routing/builder/builder_status.py --via root@VPS \
+     --ssh-config /root/.ssh/bicino-valhalla-JOB.d/config
+   ```
+
+   It exits 3 while the chain runs, 0 or 4 when it is complete (gate met or
+   missed), 5 when a stage failed and 7 when it got no usable answer. Exit 7
+   means unreachable, never running: fix the connection and ask again. With
+   `--wait` it polls until the chain is no longer running. A graded build
+   takes about 7.5 hours, an ungraded one about 4.
+7. When the chain is complete, pull the result, the logs and the evidence to
+   the VPS. The archives stay on the builder until one is approved:
+
+   ```sh
+   ssh root@VPS "rsync -a --exclude valhalla_tiles.tar -e 'ssh -F /root/.ssh/bicino-valhalla-JOB.d/config' \
+     builder:/srv/bicino-routing-scratch/export/ /root/bicino-routing-releases/builder-JOB/"
+   ```
+
+   `result.json` holds every stage's state and times, both archive
+   manifests, both elevation manifests, each archive's qualification summary,
+   the gate summary and the peak scratch and memory use. Record the build
+   times and peaks here for the next sizing decision.
+8. If a stage failed, read its log, fix the cause and start the chain again
+   (see [When a stage fails](builder/README.md#when-a-stage-fails)). Finished
+   stages are kept. To build with another radius or snapshot on the same
+   builder, run `setup.sh` again: stages whose settings changed are reported
+   as stale and are neither reused nor deleted (see
+   [Build again with other settings](builder/README.md#build-again-with-other-settings)).
+
+A worldwide-gap build is not part of the chain. Run `setup.sh` without
+`--start` and build by hand on the scratch volume, under a transient systemd
+unit so it survives an SSH disconnect. Capture Apple's official Maps Cycling
+list and review coverage differences with the versioned policy before building
+the mask. Download the pinned Natural Earth inputs and use the GeoJSON Feature
+from `coverage_mask.py`; Osmium 1.16 rejected bare geometry on Ubuntu. Run the
+pinned Valhalla container offline with eight build threads, verify the
+archive, and retain the manifest and exact mask bytes with the release. The
+[first release manifest](releases/2026-11-23.json) and
+[compressed mask](releases/2026-11-23-mask.geojson.gz) preserve the original
+PBF identity, clipping input, and archive identity. For a recovery build,
+decompress the mask with `gzip -dc` and verify the uncompressed bytes
+against the manifest before building. Verify and qualify the rebuilt graph
+before deploying it.
 
 A planet build (`--coverage planet`, no mask) uses the same builder. The
 2026-11-24 planet release has no elevation. It took 3 hours 25 minutes,
@@ -60,6 +149,12 @@ archive held 165,327 tiles and occupied 66.3 GB before transport compression.
 Build and verify off-host. The Coolify VPS serves the resulting archive.
 
 ## Qualify before leaving the builder
+
+The chain's `qualify-ungraded` and `qualify-graded` stages run the first two
+checks below and the profile probe on each archive, and its `gate` stage the
+third. Their summaries are in `result.json`. The audit passes when no unit
+fails beyond the 17 known exceptions (`builder/qualification.py`); a new one
+fails the stage and needs the investigation described here.
 
 - Load the archive with no network in the pinned image. Run [smoke probes](probes.json)
   and [cross-border probes](cross-border-probes.json) with `probe_graph.py --probes`.
@@ -212,7 +307,7 @@ missed the gate in Midtown Manhattan and was not shipped (see
    0.3° inside the cell.
 2. Done: build the planet graded and ungraded from the same snapshot.
 3. Done, missed: run `compare_elevation.py` against both planet services,
-   with no `--city`, as the release gate. `elevation-probes.json` holds
+   with no `--city`, as the release gate. `elevation-probes.json` then held
    these eight cities and, marked `planetOnly`, the cities of the 2026-11-24
    planet check that they lack: Copenhagen, Paris, London, Munich, New York,
    Tokyo, Dubai and Stuttgart (16 cities, 45 legs). That check had 27 legs
@@ -626,12 +721,85 @@ copied to the map VPS, because this work was not to touch the hosts. They
 are in the sessions' notes folder on Chris's Mac, under
 `usgs-3dep-samples-20261126/`.
 
+### Tower-city samples
+
+On 2026-11-26 the gate's seven high-rise cores were built as city samples
+for the first time, to see whether a sample predicts the planet gate there.
+Each was one run of `builder/rehearse.sh --city CITY --radius 400` on a
+laptop: the city's box cut from its Geofabrik extract (files dated
+2026-11-24 or 2026-11-25), the Copernicus cells around it opened at 400 m by
+the production code path, an ungraded and a graded sample graph, and the gate
+on that city. The planet rows are those of the 400 m planet's gate log (see
+[USGS 3DEP](#usgs-3dep-for-the-united-states-on-city-samples)).
+
+| City | Extract (SHA-256 prefix) | Sample: routes, longest, median 6%+ share | Planet gate | Sample run |
+|---|---|---|---|---|
+| Shanghai | `asia/china/shanghai` (`58bf1ece308b`) | 4, 0.0%, 0% | 4, 0.0%, 0% | 3 min |
+| Hong Kong (report only) | `asia/china/hong-kong` (`0fa7e9c37b4a`) | 4, 0.0%, 6%; `use_hills` 0 of 2 | 4, 0.0%, 6%; 0 of 2 | 3 min |
+| Singapore | `asia/malaysia-singapore-brunei` (`31b9cde91db4`) | 4, 0.0%, 2% | 4, 0.0%, 2% | 5 min |
+| Dubai | `asia/gcc-states` (`8b0ac30242ee`) | 6, 0.0%, 0% | 6, 0.0%, 0% | 6 min |
+| New York | `north-america/us/new-york` (`0537ef31d952`) | 6, **+28.2%**, 9% | 6, **+28.2%**, 9% | 9 min |
+| Chicago | `north-america/us/illinois` (`b5fe99c6154b`) | 4, **+9.5%**, 7% | 4, **+9.5%**, 7% | 7 min |
+| São Paulo (report only) | `south-america/brazil/sudeste` (`13205c5a3d00`) | 4, 0.0%, 15%; `use_hills` 1 of 2 | 4, 0.0%, 15%; 1 of 2 | 11 min |
+
+- **All seven rows equal the planet's, in every column of the gate's
+  table.** The two legs the planet missed are the two the samples miss:
+  Port Authority to the United Nations in New York, Road from 2.09 to
+  2.68 km (+28.2%), and the Magnificent Mile to the South Loop in Chicago,
+  Road from 2.71 to 2.97 km (+9.5%). `compare_elevation.py summary` over the
+  seven samples' reports reads "opened-400: misses: a flat leg is +28.2%
+  longer", word for word the planet gate's. The samples took 44 minutes
+  together; the planet build took about 7.5 hours to reach the same answer.
+- **Only with the country relation.** The first runs used each extract's
+  boundaries as they were. Chicago's worst route was then 1.5% longer, not
+  9.5%, and São Paulo had a Road leg 6.8% longer that the planet lacks.
+  New York still showed its +28.2%, with an Everyday change of +12.5% that
+  the planet does not have. A box two and a half times as wide and three
+  times as tall changed nothing in Chicago. With the complete relation of
+  the United States, China and Brazil merged in (see
+  [A sample needs the country relation](#a-sample-needs-the-country-relation)),
+  every row matched. `prepare_sample.py` now does that for a city that
+  lists the relation as `adminRelations`. Singapore's and Dubai's extracts
+  hold their whole country.
+- **State boundaries.** Illinois lacks five of the 349 ways of its state
+  boundary in its extract, and New York State one. Without them Valhalla
+  builds no admin polygon and the build stops, which is how the first
+  Chicago run failed. Both cities list the ways as `adminWays`.
+- **A sample run is mostly the download.** Geofabrik served 1 to 1.5 MB/s
+  that day. With the extract on disk a city takes 2 to 3 minutes.
+- **Judge all cities together.** One city's `summary` applies the pooled
+  targets to that city alone: New York by itself also misses "flat median
+  6%+ share" with 9%, which the pooled flat cities meet.
+
+So an elevation method should pass the tower-city samples before a planet
+is built with it. The 400 m opening would not have: the samples that chose
+it on the morning of 2026-11-26 held only New York's first leg, which does
+not change at 400 m. Copenhagen, Paris, London, Munich and Tokyo are still
+planet-only, and Amsterdam, Berlin and Stuttgart do not list their country's
+relation yet. Each run's result file, stage logs and gate report are in the
+sessions' notes folder on Chris's Mac, in
+`planet-builder-rehearsal-evidence-20261126.tgz`; the map VPS could not be
+reached that day.
+
 ## Pull, assemble, and install on Coolify
 
 Expose the approved immutable archive and receipt through a dedicated
 read-only `rrsync` SSH identity on the builder. Generate its private key on
 the VPS. Use a separate SSH config and pinned host key. Keep graph artifacts
 on VPS disk and transfer them directly from the builder.
+
+On a builder set up with [builder/](builder/README.md), the chain has linked
+both archives into `export/`, and `authorize-export-key.sh` gives the
+transfer key a user of its own, `bicino-export`, that can only read that
+folder with rsync:
+
+```sh
+ssh -F "$job_config" builder "sudo /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/authorize-export-key.sh" \
+  < transfer-key.pub
+```
+
+The stager's source is then `bicino-export@ADDRESS:ungraded/valhalla_tiles.tar`,
+or `graded/` for a graded graph, and its manifest is `export/ungraded/manifest.json`.
 
 Start with Zstandard-compressed rsync and keep the 50 GB free-space reserve in
 `stage_graph.py`. Check available space for the current, candidate, previous,
@@ -725,6 +893,10 @@ routes and Buenos Aires returns the expected no-route response.
 After the verified archive and development server probes pass on Coolify,
 delete the dedicated Compute Engine instance and confirm the auto-deleting
 boot disk, Local SSD data, and external IP are gone. Remove the job's firewall
-rule, subnet, and VPC. Revoke and remove the one-time transfer keys and remove
+rule, subnet, and VPC. `builder/teardown.sh --job JOB` prints those deletions
+and `--delete` runs them, then fails unless the instance, its disks, the
+firewall rule, the subnet and the network are all gone. Deleting the builder
+destroys everything on its scratch volume, so pull `export/` first. Revoke and
+remove the one-time transfer keys and remove
 transfer segments and unused development sample archives from the VPS. Keep
 the active graph, rollback archives, release manifest, and small test records.
