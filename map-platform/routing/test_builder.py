@@ -186,6 +186,7 @@ class ChainStateTests(ScratchCase):
         markers = {stage: chain_state.read_marker(self.chain, stage) for stage in ("download", "elevation", "build-graded")}
         self.assertEqual(markers["download"]["settings"], {"BICINO_PLANET_DATE": "261116", "BICINO_SAMPLE_CITY": "",
                                                            "BICINO_SAMPLE_REGION_URL": ""})
+        self.assertEqual(chain_state.stage_settings("build-ungraded", {}), dict.fromkeys(markers["download"]["settings"], ""))
         self.assertEqual(markers["elevation"]["settings"], {"BICINO_MAP_PLATFORM_IMAGE": "", "BICINO_OPENING_RADIUS": "400",
                                                             "BICINO_SAMPLE_CITY": ""})
         # A graph build depends on everything the stages it needs depend on.
@@ -210,9 +211,13 @@ class ChainStateTests(ScratchCase):
         self.assertEqual(chain_state.read_marker(self.chain, "elevation")["settings"]["BICINO_OPENING_RADIUS"], "400")
         (self.root / "builder.env").write_text(GRADED_ENV)
         self.assertEqual(self.states()["elevation"], "done")
-        # Another planet snapshot leaves nothing but the images.
+        # Another planet snapshot keeps what does not read the planet.
         (self.root / "builder.env").write_text("BICINO_PLANET_DATE=261123\nBICINO_OPENING_RADIUS=400\n")
         self.assertEqual([stage for stage, state in self.states().items() if state == "done"], ["images", "inputs", "elevation"])
+        # Another map-platform image keeps the download and the graph it did not touch.
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_MAP_PLATFORM_IMAGE=ghcr.io/x@sha256:1\n")
+        self.assertEqual([stage for stage, state in self.states().items() if state == "done"], ["download", "build-ungraded"])
+        self.assertEqual({self.states()[stage] for stage in ("images", "inputs", "elevation", "build-graded")}, {"stale"})
 
     def test_newer_tools_keep_finished_work_and_the_result_says_so(self):
         (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TOOLS_COMMIT=" + "a" * 40 + "\n")

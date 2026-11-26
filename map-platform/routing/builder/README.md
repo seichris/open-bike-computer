@@ -81,8 +81,8 @@ wrapper holds a lock. A marker that says `running` without the lock is
 reported as `interrupted`: the wrapper was killed, or the machine restarted.
 
 `settings` are the settings the stage's work depends on, its own and those of
-the stages it needs: the planet snapshot, the opening radius, the
-map-platform image, the sample. A finished stage whose settings differ from
+the stages it needs: the planet snapshot, the opening radius, the sample
+and, for the stages that run it, the map-platform image. A finished stage whose settings differ from
 `builder.env` is reported as `stale` (see
 [Build again with other settings](#build-again-with-other-settings)).
 
@@ -168,7 +168,8 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 - **Another opening radius, planet snapshot, image or sample**: every
   finished stage that depends on the changed setting is `stale`. A new radius
   leaves the download and the ungraded build done and makes the elevation
-  stage, the graded build and what follows stale. A stale stage does not
+  stage, the graded build and what follows stale. A new map-platform image
+  does the same, and makes the audit inventory and the probes stale too. A stale stage does not
   start, the stages that need it are `blocked`, and the chain is `failed`
   until someone decides. The old work is never reused under the new settings
   and never deleted for you. To build it again, delete the stage's marker

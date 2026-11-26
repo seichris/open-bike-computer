@@ -65,10 +65,17 @@ STAGES = {
     "gate": ("qualify-ungraded", "qualify-graded"),
 }
 # The settings a stage's work depends on, beyond those of the stages it needs.
+# The map-platform image counts only for the stages that run it: a graph
+# build without elevation is the same graph whatever that image is.
+IMAGE = "BICINO_MAP_PLATFORM_IMAGE"
 STAGE_SETTINGS = {
-    "images": ("BICINO_MAP_PLATFORM_IMAGE",),
+    "images": (IMAGE,),
     "download": ("BICINO_PLANET_DATE", "BICINO_SAMPLE_CITY", "BICINO_SAMPLE_REGION_URL"),
-    "elevation": ("BICINO_OPENING_RADIUS", "BICINO_SAMPLE_CITY"),
+    "inputs": (IMAGE,),
+    "elevation": (IMAGE, "BICINO_OPENING_RADIUS", "BICINO_SAMPLE_CITY"),
+    "qualify-ungraded": (IMAGE,),
+    "qualify-graded": (IMAGE,),
+    "gate": (IMAGE,),
 }
 MARKED = ("running", "done", "skipped", "failed")
 FINISHED = ("done", "skipped")
@@ -136,7 +143,9 @@ def stage_settings(stage, env):
     """The settings the stage's work depends on: its own and those of every stage it needs."""
     keys = set(STAGE_SETTINGS.get(stage, ()))
     for need in STAGES[stage]:
-        keys.update(stage_settings(need, env))
+        # Pulling the images leaves no work that a later stage builds on.
+        if need != "images":
+            keys.update(stage_settings(need, env))
     return {key: env.get(key, "") for key in sorted(keys)}
 
 
