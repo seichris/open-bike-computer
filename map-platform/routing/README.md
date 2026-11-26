@@ -92,6 +92,11 @@ production now.
    The planet graded that way still lengthened a Midtown Manhattan leg by
    5.9% and was not shipped (see
    [Planet gate](refresh-runbook.md#planet-gate-for-copernicus-opened-at-200-m)).
+   A planet opened at 400 m still lengthened one leg each in New York and
+   Chicago. On city samples USGS 3DEP, a lidar terrain model of the United
+   States, kept both, so a hybrid of 3DEP and opened Copernicus is proposed
+   and waits for approval of the source (see
+   [USGS 3DEP](refresh-runbook.md#usgs-3dep-for-the-united-states-on-city-samples)).
    Compare a graded planet with an ungraded one before releasing it (see
    [Compare elevation sources](#compare-elevation-sources-on-city-samples)).
 
@@ -318,17 +323,40 @@ before building a planet with a new elevation method.
    instead. It builds the raw tiles with the ring of neighbouring cells and
    opens them as a planet build would, with neighbour margins.
 
+   `tiles` resamples one GeoTIFF per cell, such as the USGS 3DEP 1/3
+   arc-second tiles of the United States. Pass `--tile CELL=SOURCE` once for
+   every cell of `--bounds`, where the source is an HTTPS URL or a local
+   file; the manifest records each file's size and SHA-256. A 3DEP tile is
+   named by its north-west corner, so cell N40W074 comes from `n41w074`, and
+   its dated versions are under `historical/` in the USGS bucket. 3DEP has
+   no data outside the United States. `--fill DIR` takes those posts from
+   another elevation directory, which makes the hybrid a border cell would
+   hold.
+
    ```sh
    python sample_elevation.py cog --source-id gedtm30-v1.2 --bounds -59 -35 -58 -34 \
      --url https://s3.opengeohub.org/global/dtm/v1.2/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif \
      --out "$scratch/dem/buenos-aires/gedtm30"
    python sample_elevation.py opening --radius 200 --bounds -59 -35 -58 -34 \
      --input "$scratch/dem/buenos-aires/copernicus" --out "$scratch/dem/buenos-aires/opening-200"
+   python sample_elevation.py tiles --source-id usgs-3dep-13 --bounds -117 32 -116 33 \
+     --tile N32W117=https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/historical/n33w117/USGS_13_n33w117_20260915.tif \
+     --fill "$scratch/dem/san-diego/opening-400" --out "$scratch/dem/san-diego/hybrid"
    ```
 
-3. Build each city once without elevation and once per source. Serve every
-   archive from the pinned image on its own port, and mount each graded
-   graph's tiles too so that `/height` works:
+3. Build each city once without elevation and once per source. The admin
+   input must also hold the country's relation with all its members. A state
+   extract cuts it, and Valhalla then builds the state polygon alone and no
+   `admin_access` row, the country's default access rules. A sample without
+   it takes other ungraded routes than a planet graph: the United States row
+   gives bicycles pedestrian streets, bridleways and paths. For a city
+   there, fetch
+   `relation/148838/full` from the OpenStreetMap API, remove its objects
+   from the extract's admin input with `osmium removeid`, and `osmium merge`
+   the two (see
+   [A sample needs the country relation](refresh-runbook.md#a-sample-needs-the-country-relation)).
+   Serve every archive from the pinned image on its own port, and mount each
+   graded graph's tiles too so that `/height` works:
 
    ```sh
    docker run -d --rm --platform linux/amd64 -p 127.0.0.1:18101:8002 \

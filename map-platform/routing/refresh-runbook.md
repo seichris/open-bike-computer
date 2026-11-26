@@ -187,6 +187,9 @@ fails the stage and needs the investigation described here.
   both checks (see [Elevation sources on city samples](#elevation-sources-on-city-samples)),
   but the planet graded with it lengthened a Midtown Manhattan leg by 5.9%
   and stayed unshipped too (see [Planet gate](#planet-gate-for-copernicus-opened-at-200-m)).
+  A planet opened at 400 m then lengthened one leg each in New York and
+  Chicago, which a lidar terrain model kept on samples (see
+  [USGS 3DEP](#usgs-3dep-for-the-united-states-on-city-samples)).
   Run `compare_elevation.py` against the two planet services as this check.
 - Include a direct Valhalla miss in the Apple-listed interior near Fairview,
   Oklahoma. A live MapKit request there can still succeed. The first release
@@ -467,6 +470,253 @@ was fetched from the OpenStreetMap API and merged into the admin input. The
 reports, tile and graph manifests, and the merged admin input are on the
 map VPS in
 `/root/bicino-routing-releases/opening-radius-samples-20261126/samples-evidence.tgz`.
+
+That planet was built on 2026-11-26 and missed the gate on two legs, both in
+the United States (see [USGS 3DEP](#usgs-3dep-for-the-united-states-on-city-samples)).
+
+### USGS 3DEP for the United States on city samples
+
+The planet graded with Copernicus opened at 400 m (2026-11-26, archive
+`33ec2c77…`) met every target except "no flat leg more than 5% longer". Two
+Road legs missed it. New York, Port Authority to the United Nations, went
+from 2.09 to 2.68 km (+28.2%). Chicago, Magnificent Mile to the South Loop,
+went from 2.71 to 2.97 km (+9.5%). Every other flat leg stayed within +0.4%.
+A wider ellipse is not an option, because 400 m already removes 16% of the
+real climb on hilly routes. Both cities are in the United States, where the
+USGS publishes 3DEP, a terrain model made from lidar with buildings and
+trees removed. On 2026-11-26 it was tried on samples of New York, Chicago,
+San Francisco and Houston, and at seven border crossings.
+
+**3DEP fixes both legs, and a hybrid elevation set is worth a planet build:
+3DEP where it has data, Copernicus opened at 400 m elsewhere.** It needs
+Chris's approval of 3DEP as a source first; see the recommendation below.
+Nothing in production, in development or in the source policy changed.
+
+The source:
+
+- **Product.** USGS 3D Elevation Program, 1/3 arc-second seamless DEM: one
+  GeoTIFF per degree, named by its north-west corner, 10,812 pixels square
+  with six pixels of overlap, float32 metres, no data as −999999. Heights
+  are bare earth, with water flattened.
+- **Where.** `https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/`
+  has each tile under `current/` and every dated version under
+  `historical/`. The tiles change as new lidar arrives, so a build must name
+  dated files. On 2026-11-26 `current/` held 1,449 tiles and 494 GB: 968
+  tiles in the conterminous United States, 442 in Alaska and 39 in Hawaii,
+  Puerto Rico and the territories.
+- **Licence.** Public domain. The USGS asks for an acknowledgement and that
+  anyone who modifies the data describes the changes, without implying its
+  endorsement. A build resamples the tiles and blends their edge.
+- **Coverage.** The tiles hold no data outside the United States. In the
+  border tiles Tijuana, Ciudad Juárez and Windsor are all no data, as is the
+  open sea.
+- **Datums.** NAD 83 and, in the conterminous states, NAVD 88. Copernicus
+  uses WGS 84 and EGM2008. NAD 83 differs from WGS 84 by a metre or two on
+  the ground, far less than the 30 m between posts. The height datums differ
+  by a slowly varying offset: in seven border windows raw Copernicus read
+  0 to 1 m above 3DEP at the median. A constant offset makes no grade, so
+  the datum matters only where the two sources meet, and there it is the
+  smaller part of the step (see the seam below).
+- **Resampling.** `sample_elevation.py tiles` writes each cell from its own
+  tile with the bilinear resampling the other tiles use. A 1 arc-second post
+  lies on the corner of four 1/3 arc-second pixels. GDAL widens the kernel
+  by the ratio of the grids, so each post is a weighted mean of the six by
+  six pixels around it, not a point sample.
+
+| HGT cell | Tile (`historical/`) | Bytes | SHA-256 |
+|---|---|---|---|
+| N40W074 (New York) | `USGS_13_n41w074_20260917.tif` | 165,776,270 | `76c761bf69dd` |
+| N40W075 (New York) | `USGS_13_n41w075_20261028.tif` | 496,124,434 | `063663abd575` |
+| N41W088 (Chicago) | `USGS_13_n42w088_20260902.tif` | 348,304,242 | `a9839a5e6fe3` |
+| N37W123 (San Francisco) | `USGS_13_n38w123_20250826.tif` | 222,936,410 | `73c9935d3b75` |
+| N29W096 (Houston) | `USGS_13_n30w096_20260623.tif` | 487,781,914 | `33a986ecb9ab` |
+| N32W118 (San Ysidro) | `USGS_13_n33w118_20260915.tif` | 58,516,034 | `f75008dd2e97` |
+| N32W117 (Otay Mesa) | `USGS_13_n33w117_20260915.tif` | 202,223,291 | `4926f045b973` |
+| N31W107 (El Paso) | `USGS_13_n32w107_20240416.tif` | 126,302,566 | `359942a09209` |
+| N42W084 (Detroit) | `USGS_13_n43w084_20190412.tif` | 422,168,827 | `5db0e3989b66` |
+| N31W111 (Nogales) | `USGS_13_n32w111_20240401.tif` | 279,886,312 | `df2c30b25f0a` |
+| N32W116 (Calexico) | `USGS_13_n33w116_20240327.tif` | 172,746,979 | `3ae2c0f1121e` |
+| N45W073 (Derby Line) | `USGS_13_n46w073_20260331.tif` | 9,834,031 | `e26d02871d3f` |
+
+#### A sample needs the country relation
+
+The first Chicago sample did not reproduce the planet. Its opened-400 graph
+made the Road leg 1.5% longer, not 9.5%, because its ungraded route was
+already another one: 2.729 km by Wabash Avenue, where the planet's is
+2.711 km down State Street.
+
+- **It was not the map data.** The sample used the Geofabrik extract of
+  2026-11-24 and the planet a snapshot of 2026-11-16. No way of either
+  route had changed since 2026-09-26, and no node of the streets where the
+  routes differ since 2026-11-15.
+- **It was not the size of the box.** A box of half a degree gave the same
+  route.
+- **It was the admin input.** A state extract cuts the country relation, so
+  Valhalla builds the state polygon alone and writes no `admin_access` row.
+  That row holds a country's default access rules. The United States row
+  gives bicycles pedestrian streets, bridleways and paths, and a sample
+  without it falls back to Valhalla's own defaults for them.
+
+With the complete United States relation (r148838, from the OpenStreetMap
+API's `relation/148838/full`) merged into the admin input, the samples match
+the planet's gate report. Of the 28 Road and Everyday routes of the four
+cities, 22 have the planet's ungraded and opened-400 lengths to the metre,
+and the six San Francisco routes are within 1 m with the same change. The
+samples of 2026-11-25 and 2026-11-26 above were built without the relation.
+Their graded and ungraded graphs share that fault, so each comparison is
+still like for like, but their routes are not always the planet's. Every figure below
+comes from samples with the relation, built from the extracts above and
+Illinois `b5fe99c6154b` (2026-11-24), whose state relation also lacked five
+ways.
+
+#### Routes
+
+Each city was built ungraded, graded with Copernicus opened at 400 m by
+`build_elevation.py`, and graded with 3DEP. San Francisco also has the 200 m
+opening.
+
+| City | Source | Routes | Longest leg change | Routes over 5% longer | 6%+ share of the ungraded routes | `use_hills` changed | Climb on the ungraded routes |
+|---|---|---|---|---|---|---|---|
+| New York | Copernicus opened 400 m | 6 | **+28.2%** | 1 | 11% | – | 134 m |
+| New York | **3DEP** | 6 | **0.0%** | 0 | 0% | – | 103 m |
+| Chicago | Copernicus opened 400 m | 4 | **+9.5%** | 1 | 9% | – | 102 m |
+| Chicago | **3DEP** | 4 | **0.0%** | 0 | 3% | – | 50 m |
+| Houston | Copernicus opened 400 m | 10 | +0.4% | 0 | 0% | – | 109 m |
+| Houston | **3DEP** | 10 | +0.2% | 0 | 0% | – | 161 m |
+| San Francisco | Copernicus opened 200 m | 8 | +13.1% | – | 18% | 2 of 4 | 893 m |
+| San Francisco | Copernicus opened 400 m | 8 | +2.7% | – | 13% | 4 of 4 | 709 m |
+| San Francisco | **3DEP** | 8 | +3.4% | – | 25% | 2 of 4 | 912 m |
+
+The shares are medians. Over the 20 flat routes 3DEP changed lengths by 0.0%
+at the median and by +0.2% at most, with a median 6%+ share of 0%, and
+`compare_elevation.py summary` reports that it meets every target. No route
+or grade lookup failed, and the ungraded graphs gave the same route for both
+`use_hills` values.
+
+- **Both failed legs keep their route.** Along 42nd Street, 3DEP reads 13 m
+  at 8th Avenue, 22 m at the crest and 15 m at 1st Avenue, and its steepest
+  60 m section is 3.3%. The opened tiles read 20, 46 and 26 m, with a
+  section of 11.6%: a plateau of towers that the 400 m ellipse cannot reach
+  under. State Street is level at 181 m on 3DEP. On the opened tiles it
+  runs from 174 to 198 m and back, over the same four edges of 8% to 13% as
+  on the planet.
+- **Houston holds as the flat control.** 3DEP reports more climb there than
+  the opened tiles, because it keeps small real relief that the opening
+  removes. One example is a 9 m rise on the West Lawn path in Memorial
+  Park, which the opened tiles lack; it is most likely the land bridge over
+  Memorial Drive, which is newer than Copernicus's 2011–2015 radar. It puts
+  7% of that leg on 6%+ grades and moved no route.
+- **San Francisco gets its hills back.** On the same eight routes 3DEP reads
+  912 m of climb. The 400 m opening reads 709 m, 22% less, and half the
+  6%+ share. `use_hills` changes two legs on 3DEP. The Wiggle falls from 25%
+  to 6% of its length on 6%+ grades for 24 m more, and the leg to Twin Peaks
+  becomes 3% longer for the same climb. The other two legs keep their
+  route. On the opened-400 graph all four legs change, but three by 2 m of
+  length. Judged on 3DEP's heights, its hill-avoiding route from North Beach
+  to Pacific Heights climbs 21 m more than its direct one and has 7 points
+  more of its length on 6%+ grades. With 3DEP as `--referee`, avoiding hills
+  saves 9 points of 6%+ share at the median on the 3DEP graph, 1 point on
+  the 200 m graph and none on the 400 m graph.
+- **A terrain model reads the water under a bridge that Valhalla does not
+  know is one.** Valhalla grades a bridge from its two ends, but the sample
+  graphs mark only some `bridge` values as bridges. Michigan Avenue crosses
+  the Chicago River on a bascule bridge tagged `bridge=movable`. Its 101 m
+  edge is not marked, and on 3DEP it reads 12% down and up with a weighted
+  grade of 8.3%, against 5% and 3.3% on the opened tiles, which hold the
+  deck. Both Magnificent Mile routes cross it, which is where Chicago's 3%
+  comes from, and neither moved. Of the highway bridges in the four samples,
+  7% in New York, 15% in Chicago, 4% in San Francisco and 1% in Houston
+  carry a value other than `yes`: `movable`, `covered`, `viaduct`,
+  `boardwalk` or `pier`.
+
+#### The seam at the border
+
+Because 3DEP stops at the border, a hybrid is made per post, not per cell:
+3DEP where it has data, opened Copernicus elsewhere. `sample_elevation.py
+tiles --fill` writes such a cell, and the seam runs along the border line.
+The two sources were compared in a window around each crossing: over the
+United States side, and at every post on the seam, where their difference
+is the false part of the step a street would meet:
+
+| Crossing | 3DEP above opened Copernicus on the US side: median (10th to 90th percentile) | Difference at the seam: median, 90th percentile, largest |
+|---|---|---|
+| San Ysidro, San Diego to Tijuana | 2 m (0 to 16) | 1, 18, 42 m |
+| Otay Mesa, San Diego to Tijuana | 2 m (0 to 6) | 2, 5, 10 m |
+| El Paso to Ciudad Juárez | 1 m (0 to 5) | 1, 2, 4 m |
+| Detroit to Windsor | 2 m (0 to 6) | 5, 5, 5 m (in the river) |
+| Nogales to Nogales | 8 m (0 to 27) | 9, 37, 72 m |
+| Calexico to Mexicali | 1 m (0 to 2) | 1, 2, 4 m |
+| Derby Line to Stanstead | 2 m (−3 to 15) | 3, 19, 31 m |
+
+- **The step comes from the opening, not from the datum.** Raw Copernicus
+  agrees with 3DEP to within a metre at the median. The opening never raises
+  a post, so the opened surface lies under the ground: by a metre or two on
+  flat land, and by 8 m at the median in the hills of Nogales, where it cuts
+  ridges down.
+- **On streets it makes a false grade, a small one.** Sample graphs of six
+  crossings were graded with the hybrid and with opened Copernicus alone,
+  and 33 car, bicycle and walking routes were sent across in both
+  directions. Where the streets cross, 3DEP lies between 3 m below and 4 m
+  above the opened tiles, and the hybrid turns that into a step over one
+  post. At Calexico the edges at the crossing read a steepest grade of up
+  to 6% and a weighted grade of up to 3.3%, where opened Copernicus alone
+  gives 2% and 0%. At San Ysidro the steepest grade was 4% against 2%, at
+  Otay Mesa 5% against 4%, and on El Paso's bridges, which Valhalla grades
+  from their ends, 3% against 1%. Nogales and Derby Line read the same
+  either way. Detroit and Windsor are joined by one bridge and one tunnel;
+  the seam lies in the river, where 3DEP's water surface is 2 to 5 m above
+  Copernicus's.
+- **It does not steer routes today, but it should not ship as it is.** Every
+  route across a border meets the seam once, so no crossing is favoured.
+  The streets that cross lie in valleys, where the opening changes little.
+  A street across a hillside would meet the larger steps of the table.
+- **A blend removes it.** In a scratch test the difference between the
+  sources was ramped to zero over the 16 posts (about 500 m) inside 3DEP's
+  edge. The Calexico edges read 2% and 0% again, El Paso's bridges 1%, and
+  the steepest 60 m section at both crossings equalled opened Copernicus
+  alone.
+
+#### Recommendation
+
+**Build a hybrid planet, if Chris approves 3DEP as a source.** On the gate's
+legs it turns the two missed legs into 0.0%. If the other legs repeat the
+400 m planet's results, no flat leg is then more than 0.4% longer and
+`use_hills` changes 10 of 17 hilly legs (San Francisco two instead of
+four), which still meets the target of half. Riders in the United States
+also get real hills in place of the opened ones. Before a planet build:
+
+1. **Chris approves USGS 3DEP 1/3 arc-second as an elevation source for
+   routing, and decides where that is recorded.** It is not in
+   `config/topography-source-policy-v2.json`, and no planet may use it
+   before he approves it. That file cannot simply take it. Its loader
+   accepts only the Copernicus tiles (`copernicus-cog-v1`, a surface model
+   on EGM2008). It is also an input of the map-platform image and of the
+   offline-map worker's build identity, so a change to it rebuilds the image
+   and moves the signed worker. A source list for routing alone would do
+   neither.
+2. **`build_elevation.py` learns the hybrid.** That means a second source
+   with one dated tile per cell, 3DEP's posts first and opened Copernicus
+   for the rest, the blend inside 3DEP's edge, and receipts and a manifest
+   that record both. `sample_elevation.py tiles` only writes single cells
+   for samples. Repeat the border street check on its tiles; that runs on a
+   laptop.
+3. **Every bridge is graded as a bridge.** Find out which `bridge` values
+   Valhalla skips and make the build treat them all as bridges, or a
+   terrain model puts a false dip on each. Check it on the Chicago sample's
+   Michigan Avenue edge.
+4. **Build the planet and run the gate.** Reading 3DEP adds up to 494 GB of
+   downloads to the elevation stage.
+
+What a hybrid does not fix: high-rise cores outside the United States stay
+on Copernicus opened at 400 m. The gate's Singapore, Shanghai, Dubai and
+Tokyo legs kept their routes on the 400 m planet, but no leg tests Toronto,
+Vancouver, Seoul or Melbourne. Hill avoidance outside the United States
+also stays as weak as the 400 m opening leaves it.
+
+The reports, tile and graph manifests and the scratch scripts were not
+copied to the map VPS, because this work was not to touch the hosts. They
+are in the sessions' notes folder on Chris's Mac, under
+`usgs-3dep-samples-20261126/`.
 
 ### Tower-city samples
 
