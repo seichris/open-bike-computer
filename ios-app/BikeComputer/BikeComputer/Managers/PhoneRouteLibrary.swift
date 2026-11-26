@@ -747,8 +747,26 @@ final class PhoneRouteLibrary: ObservableObject {
         return name
     }
 
-    /// Called after the rider deletes a saved route, so the account route
-    /// library deletes it too. Expiry, provider purges and Watch cleanup do not call it.
+    /// Renames a Strava route whose lease ended and that remains only as a
+    /// reload bookmark; the alias is reused when the route is reloaded.
+    func renameStravaBookmark(routeID: UUID, to proposedName: String) {
+        guard let bookmark = stravaBookmark(routeID: routeID) else { return }
+        var updated = displayNames
+        let name = updated.rename(routeID: routeID, defaultName: bookmark.localAlias ?? proposedName, to: proposedName)
+        do {
+            try stravaBookmarkStore.upsert(try bookmark.updating(localAlias: .some(name)))
+        } catch {
+            return
+        }
+        loadStravaBookmarks()
+        displayNames = updated
+        displayNames.persist(to: defaults)
+        publishRouteDisplayNames()
+    }
+
+    /// Called after the rider deletes a saved route, and for each route a
+    /// Strava disconnect purges, so the account route library deletes it too.
+    /// Lease expiry and Watch cleanup do not call it.
     var onRouteDeletedByRider: ((UUID) -> Void)?
 
     /// The rider's rename for a route, even while its archive is not on this phone.

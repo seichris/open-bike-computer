@@ -18,7 +18,7 @@ extension PhoneRouteLibrary: AccountRouteLibraryStoreV1 {
             guard seen.insert(routeID).inserted else { continue }
             result.append(AccountLocalRouteV1(
                 routeID: routeID,
-                title: displayName(for: summary),
+                title: AccountRouteSyncPlannerV1.accountTitle(displayName(for: summary)),
                 contentHash: summary.contentHash,
                 revision: Int(summary.revision),
                 providerID: summary.providerID
@@ -31,7 +31,8 @@ extension PhoneRouteLibrary: AccountRouteLibraryStoreV1 {
             guard seen.insert(routeID).inserted else { continue }
             result.append(AccountLocalRouteV1(
                 routeID: routeID,
-                title: storedDisplayName(routeID: bookmark.routeID) ?? bookmark.localAlias,
+                title: (storedDisplayName(routeID: bookmark.routeID) ?? bookmark.localAlias)
+                    .map(AccountRouteSyncPlannerV1.accountTitle),
                 contentHash: nil,
                 revision: Int(bookmark.lastRevision),
                 providerID: RouteProviderPolicyV1.strava.providerID
@@ -49,8 +50,9 @@ extension PhoneRouteLibrary: AccountRouteLibraryStoreV1 {
         return AccountRouteUploadV1(
             archive: String(decoding: encoded, as: UTF8.self),
             hashPayload: String(decoding: try archive.socialHashPayload(), as: UTF8.self),
-            title: displayName(for: summary),
+            title: AccountRouteSyncPlannerV1.accountTitle(displayName(for: summary)),
             contentHash: archive.contentHash,
+            pointCount: archive.storedRoute.points.count,
             elevationGainMeters: knownAscent(for: archive)
         )
     }
@@ -76,8 +78,11 @@ extension PhoneRouteLibrary: AccountRouteLibraryStoreV1 {
     }
 
     func accountSyncRename(routeID: String, title: String) {
-        guard let summary = latestSummary(routeID: routeID) else { return }
-        rename(summary, to: title)
+        if let summary = latestSummary(routeID: routeID) {
+            rename(summary, to: title)
+        } else if let id = UUID(uuidString: routeID) {
+            renameStravaBookmark(routeID: id, to: title)
+        }
     }
 
     func accountSyncDelete(routeID: String) throws {

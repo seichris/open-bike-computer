@@ -371,7 +371,13 @@ which bicino.com shows at `/account/routes`.
   keeps showing the route after the phone's copy has lapsed.
 - **When it runs:** after sign-in, when the app becomes active, and two seconds
   after library changes. Each round lists the library once and sends only the
-  differences.
+  differences, and stops as soon as the signed-in account changes.
+- **Limits:** routes over the library's limits (20,000 points, or an archive
+  of about 1.9 MB) stay on the phone and are not retried until they change.
+  Titles longer than 160 characters are shortened in the account.
+- **Several accounts:** the phone's library syncs with whichever account is
+  signed in. A rider deletion is kept for 90 days and removes the route from
+  every account that holds it.
 - **Implementation:** `AccountRouteLibrarySync` holds the sync rules and its
   host tests are in `AccountRouteLibrarySyncTests`. The server contract is in
   `docs/social-riding-operations.md`.

@@ -70,7 +70,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     lazy var routeLibrarySync: AccountRouteLibrarySync = {
         let session = social.session
         return AccountRouteLibrarySync(client: social.client, store: routeLibrary,
-                                       currentGeneration: { session.generation })
+                                       currentGeneration: { session.generation },
+                                       currentOwner: { session.state == .signedIn ? session.currentUID : nil })
     }()
     let bicinoServiceSession: BicinoServiceSession
     let stravaIntegrationCoordinator: StravaIntegrationCoordinator

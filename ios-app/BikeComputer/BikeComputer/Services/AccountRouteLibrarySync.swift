@@ -37,7 +37,7 @@ struct AccountRouteSyncStateV1: Codable, Equatable, Sendable {
 
     /// Route ID to the content and title last seen on both sides.
     var synced: [String: Entry] = [:]
-    /// Routes the rider deleted on this phone that the server still has to delete.
+    /// Rider deletions for this round, filled from the shared deletion log.
     var pendingDeletes: Set<String> = []
     /// Route ID to the content hash the server refused permanently (for
     /// example over its point limit); retried only when the content changes.
@@ -71,6 +71,28 @@ enum AccountRouteSyncPlannerV1 {
     static let gpxProviderID = "user.imported-gpx"
     static let stravaProviderID = "strava.route"
     static let syncedProviderIDs: Set<String> = [gpxProviderID, stravaProviderID]
+    /// The account library's limits (`LibraryRouteUpload`, `validate_archive`).
+    static let maximumTitleScalars = 160
+    static let maximumPoints = 20_000
+    static let maximumArchiveCharacters = 1_900_000
+
+    /// The title as the account stores it: at most 160 Unicode scalars, cut at
+    /// a character boundary so both sides compare the same text.
+    static func accountTitle(_ title: String) -> String {
+        guard title.unicodeScalars.count > maximumTitleScalars else { return title }
+        var result = ""
+        for character in title {
+            guard result.unicodeScalars.count + character.unicodeScalars.count <= maximumTitleScalars else { break }
+            result.append(character)
+        }
+        return result
+    }
+
+    /// Whether the account library can hold this upload at all.
+    static func fitsAccountLibrary(_ upload: AccountRouteUploadV1) -> Bool {
+        upload.pointCount <= maximumPoints && upload.archive.count <= maximumArchiveCharacters &&
+            upload.hashPayload.count <= maximumArchiveCharacters && !upload.title.isEmpty
+    }
 
     static func plan(
         local: [AccountLocalRouteV1],
@@ -147,6 +169,7 @@ struct AccountRouteUploadV1: Equatable, Sendable {
     let hashPayload: String
     let title: String
     let contentHash: String
+    let pointCount: Int
     let elevationGainMeters: Double?
 }
 
@@ -161,18 +184,24 @@ final class AccountRouteLibrarySync: ObservableObject {
     private weak var store: (any AccountRouteLibraryStoreV1)?
     private let defaults: UserDefaults
     private let currentGeneration: () -> UUID
+    private let currentOwner: () -> String?
     private let now: () -> Date
+    private var requestedOwner: String?
     private var rerunRequested = false
     private var applyingSyncDeletion = false
     static let stateKey = "accountRouteLibrarySync.v1"
+    static let deletionLogKey = "accountRouteLibrarySync.deletions.v1"
+    /// Rider deletions are retried against every account for this long.
+    static let deletionLogLifetime: TimeInterval = 90 * 24 * 60 * 60
 
     init(client: any SocialRideNetworking, store: any AccountRouteLibraryStoreV1,
          defaults: UserDefaults = .standard, currentGeneration: @escaping () -> UUID,
-         now: @escaping () -> Date = Date.init) {
+         currentOwner: @escaping () -> String?, now: @escaping () -> Date = Date.init) {
         self.client = client
         self.store = store
         self.defaults = defaults
         self.currentGeneration = currentGeneration
+        self.currentOwner = currentOwner
         self.now = now
     }
 
@@ -192,46 +221,69 @@ final class AccountRouteLibrarySync: ObservableObject {
         if let data = try? JSONEncoder().encode(states) { defaults.set(data, forKey: Self.stateKey) }
     }
 
-    /// The rider deleted a route on this phone. Every account that synced it
-    /// deletes it on its next round, even one that is signed out right now.
+    /// Route IDs the rider deleted on this phone, with when. Kept apart from
+    /// round state so a round in flight can never overwrite a new deletion.
+    func deletionLog() -> [String: Date] {
+        guard let data = defaults.data(forKey: Self.deletionLogKey),
+              let value = try? JSONDecoder().decode([String: Date].self, from: data) else { return [:] }
+        return value
+    }
+
+    private func saveDeletionLog(_ log: [String: Date]) {
+        if let data = try? JSONEncoder().encode(log) { defaults.set(data, forKey: Self.deletionLogKey) }
+    }
+
+    /// The rider deleted a route on this phone (or a Strava disconnect purged
+    /// it). Every account that holds it deletes it on its next round, including
+    /// one that is signed out now or whose upload was still in flight.
     func recordLocalDeletion(routeID: UUID) {
         guard !applyingSyncDeletion else { return }
-        let key = routeID.uuidString.uppercased()
-        var states = allStates()
-        var changed = false
-        for (owner, state) in states where state.synced[key] != nil {
-            states[owner]?.pendingDeletes.insert(key)
-            changed = true
-        }
-        if changed, let data = try? JSONEncoder().encode(states) { defaults.set(data, forKey: Self.stateKey) }
+        var log = deletionLog()
+        log[routeID.uuidString.uppercased()] = now()
+        saveDeletionLog(log)
     }
 
     // MARK: Rounds
 
-    /// One round for `owner`. Concurrent requests coalesce into one more round.
+    /// One round for `owner`. Requests during a round coalesce into one more
+    /// round for the latest requested account.
     func sync(owner: String) async {
+        requestedOwner = owner
         guard !isSyncing else { rerunRequested = true; return }
         isSyncing = true
         defer { isSyncing = false }
         repeat {
             rerunRequested = false
-            await round(owner: owner)
+            if let owner = requestedOwner { await round(owner: owner) }
         } while rerunRequested
+    }
+
+    /// The round's account is still the signed-in one.
+    private func bound(_ owner: String, _ generation: UUID) -> Bool {
+        generation == currentGeneration() && currentOwner() == owner
     }
 
     private func round(owner: String) async {
         guard let store else { return }
         let generation = currentGeneration()
+        guard bound(owner, generation) else { return }
+        var log = deletionLog()
+        let horizon = now().addingTimeInterval(-Self.deletionLogLifetime)
+        if log.contains(where: { $0.value < horizon }) {
+            log = log.filter { $0.value >= horizon }
+            saveDeletionLog(log)
+        }
         var state = state(owner: owner)
+        state.pendingDeletes = Set(log.keys)
         do {
             let page = try JSONDecoder().decode(LibraryPage.self, from: await client.request(
                 "library/routes", method: "GET", body: nil, contentType: "application/json", query: []))
-            guard generation == currentGeneration() else { return }
+            guard bound(owner, generation) else { return }
             let actions = AccountRouteSyncPlannerV1.plan(local: store.accountSyncRoutes(), remote: page.items, state: state)
             var stopUploads = false
             var failure: String?
             for action in actions {
-                guard generation == currentGeneration() else { return }
+                guard bound(owner, generation) else { return }
                 do {
                     try await apply(action, to: &state, store: store, stopUploads: &stopUploads)
                 } catch let error as SocialFailure where error == .accountChanged || error.endsAccountSession {
@@ -248,8 +300,11 @@ final class AccountRouteLibrarySync: ObservableObject {
                     // request) must not hold up the others; it is retried next round.
                     failure = (error as? SocialFailure).map { "\($0)" } ?? error.localizedDescription
                 }
+                guard bound(owner, generation) else { return }
                 save(state, owner: owner)
             }
+            // Deletions live in the log, not in round state.
+            state.pendingDeletes = []
             save(state, owner: owner)
             lastSyncedAt = now()
             lastError = failure
@@ -266,6 +321,11 @@ final class AccountRouteLibrarySync: ObservableObject {
         case .upload(let routeID):
             guard !stopUploads else { return }
             let upload = try store.accountSyncUpload(routeID: routeID)
+            guard AccountRouteSyncPlannerV1.fitsAccountLibrary(upload) else {
+                // Over the library's point or size limits: never sent, kept on the phone.
+                state.refused[routeID] = upload.contentHash
+                return
+            }
             var body: [String: Any] = ["title": upload.title, "archive": upload.archive, "hashPayload": upload.hashPayload]
             if let ascent = upload.elevationGainMeters, ascent.isFinite, ascent >= 0 { body["elevationGainMeters"] = ascent }
             let row = try await libraryRequest("library/routes/\(routeID)", method: "PUT", body: body)
@@ -279,7 +339,6 @@ final class AccountRouteLibrarySync: ObservableObject {
                 _ = try await client.request("library/routes/\(routeID)", method: "DELETE", body: nil,
                                              contentType: "application/json", query: [])
             } catch SocialFailure.server("not_found") {}
-            state.pendingDeletes.remove(routeID)
             state.synced[routeID] = nil
         case .download(let routeID, let contentID, let title):
             let item = try JSONDecoder().decode(SocialContent.self, from: await client.request(
@@ -302,7 +361,6 @@ final class AccountRouteLibrarySync: ObservableObject {
         case .adopt(let routeID, let contentHash, let title):
             state.synced[routeID] = .init(contentHash: contentHash, title: title)
         case .forget(let routeID):
-            state.pendingDeletes.remove(routeID)
             state.synced[routeID] = nil
         }
     }

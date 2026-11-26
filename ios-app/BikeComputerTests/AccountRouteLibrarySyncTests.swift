@@ -20,8 +20,10 @@ private final class LibraryServer: SocialRideNetworking {
     struct Row { var title: String; var archive: String; var hash: String; var routeRevision: Int; var provider: String; var revision: Int }
     var rows: [String: Row] = [:]
     var generation = UUID()
+    var owner: String? = "me"
     var changeAccountOnNextPut = false
     var refuseUploads: String?
+    var onPut: (() -> Void)?
     var calls: [String] = []
 
     func item(_ routeID: String) -> [String: Any] {
@@ -48,6 +50,7 @@ private final class LibraryServer: SocialRideNetworking {
         switch method {
         case "PUT":
             if changeAccountOnNextPut { generation = UUID(); throw SocialFailure.accountChanged }
+            onPut?()
             if let refuseUploads { throw SocialFailure.server(refuseUploads) }
             let archive = payload!["archive"] as! String
             let decoded = try JSONSerialization.jsonObject(with: Data(archive.utf8)) as! [String: Any]
@@ -74,7 +77,7 @@ private final class LibraryServer: SocialRideNetworking {
 /// The phone's saved routes, reduced to what the sync touches.
 @MainActor
 private final class PhoneLibrary: AccountRouteLibraryStoreV1 {
-    struct Route { var title: String; var hash: String?; var revision: Int; var provider: String }
+    struct Route { var title: String; var hash: String?; var revision: Int; var provider: String; var points = 100 }
     var routes: [String: Route] = [:]
     var unreadable: Set<String> = []
     var onDelete: ((String) -> Void)?
@@ -93,7 +96,8 @@ private final class PhoneLibrary: AccountRouteLibraryStoreV1 {
             throw CocoaError(.fileReadCorruptFile)
         }
         return AccountRouteUploadV1(archive: Self.archive(routeID, hash: hash, revision: route.revision, provider: route.provider),
-                                    hashPayload: "payload", title: route.title, contentHash: hash, elevationGainMeters: 812)
+                                    hashPayload: "payload", title: route.title, contentHash: hash,
+                                    pointCount: route.points, elevationGainMeters: 812)
     }
 
     func accountSyncImport(_ archive: Data, title: String) throws {
@@ -191,7 +195,7 @@ enum AccountRouteLibrarySyncTests {
         let server = LibraryServer()
         let phone = PhoneLibrary()
         let sync = AccountRouteLibrarySync(client: server, store: phone, defaults: defaults,
-                                           currentGeneration: { server.generation })
+                                           currentGeneration: { server.generation }, currentOwner: { server.owner })
         phone.onDelete = { sync.recordLocalDeletion(routeID: UUID(uuidString: $0)!) }
         let a = UUID().uuidString, s = UUID().uuidString, w = UUID().uuidString
         phone.routes[a] = .init(title: "Alpe", hash: "a1", revision: 1, provider: gpx)
@@ -220,6 +224,7 @@ enum AccountRouteLibrarySyncTests {
         precondition(server.rows[a] == nil, "a phone deletion reaches the account")
         precondition(phone.routes[s] == nil, "a website deletion reaches the phone")
         precondition(sync.state(owner: "me").synced[a] == nil && sync.state(owner: "me").pendingDeletes.isEmpty)
+        precondition(sync.deletionLog()[a] != nil, "the rider's deletion stays logged for other accounts")
         precondition(server.rows[w] != nil && phone.routes[w] != nil, "the deletion from bicino.com did not echo back")
 
         let b = UUID().uuidString
@@ -242,6 +247,45 @@ enum AccountRouteLibrarySyncTests {
         phone.unreadable = []
         await sync.sync(owner: "me")
         precondition(server.rows[broken] != nil && sync.lastError == nil, "it uploads once readable")
+
+        // A deletion recorded while a round is in flight is never overwritten.
+        let d = UUID().uuidString, e = UUID().uuidString
+        phone.routes[d] = .init(title: "Deleted mid-round", hash: "d1", revision: 1, provider: gpx)
+        await sync.sync(owner: "me")
+        precondition(server.rows[d] != nil)
+        phone.routes[e] = .init(title: "Triggers a PUT", hash: "e1", revision: 1, provider: gpx)
+        server.onPut = { phone.riderDeletes(d) }
+        await sync.sync(owner: "me")
+        server.onPut = nil
+        await sync.sync(owner: "me")
+        precondition(server.rows[d] == nil && phone.routes[d] == nil, "the mid-round deletion reached the account")
+
+        // Over the library's limits: never sent, remembered.
+        let huge = UUID().uuidString
+        phone.routes[huge] = .init(title: "Dense track", hash: "h1", revision: 1, provider: gpx, points: 30_000)
+        let beforeHuge = server.calls.count
+        await sync.sync(owner: "me")
+        precondition(server.calls.count == beforeHuge + 1 && server.rows[huge] == nil && sync.state(owner: "me").refused[huge] == "h1",
+                     "an oversized route is not uploaded")
+        precondition(AccountRouteSyncPlannerV1.accountTitle(String(repeating: "é", count: 200)).unicodeScalars.count == 160)
+
+        // A round never acts for an account that is not the signed-in one.
+        server.owner = "other"
+        let quiet = server.calls.count
+        await sync.sync(owner: "me")
+        precondition(server.calls.count == quiet, "a stale account's round does nothing")
+        server.owner = "me"
+        server.onPut = { server.owner = "other"; server.generation = UUID() }
+        let f = UUID().uuidString, g = UUID().uuidString
+        phone.routes[f] = .init(title: "First", hash: "f1", revision: 1, provider: gpx)
+        phone.routes[g] = .init(title: "Second", hash: "g1", revision: 1, provider: gpx)
+        let phoneBefore = Set(phone.routes.keys)
+        await sync.sync(owner: "me")
+        precondition(server.calls.filter { $0.hasPrefix("PUT") }.count >= 1 && Set(phone.routes.keys) == phoneBefore,
+                     "an account switch mid-round stops it without touching the phone")
+        precondition(server.rows[f] == nil || server.rows[g] == nil, "no action runs after the switch")
+        server.onPut = nil
+        server.owner = "me"
 
         let c = UUID().uuidString
         phone.routes[c] = .init(title: "Mid-switch", hash: "c1", revision: 1, provider: gpx)
