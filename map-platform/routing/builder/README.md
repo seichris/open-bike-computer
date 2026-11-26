@@ -178,12 +178,15 @@ extract needs more. In a second run the graded build was killed after 45
 seconds. The stage was recorded as failed, its Valhalla container was
 removed, and the restarted chain rebuilt the graph and finished.
 
-The same day the seven tower cities ran at 400 m, 2 to 15 minutes each,
-most of it the download of the extract. New York's sample missed the gate on
-the leg the planet build missed it on (see
+The same day the seven tower cities ran at 400 m, 3 to 11 minutes each,
+most of it the download of the extract. Their rows equalled the planet
+gate's, and the New York and Chicago samples missed the gate on the legs the
+planet build missed it on (see
 [Tower-city samples](../refresh-runbook.md#tower-city-samples)). A run
 without `--radius` built only the ungraded sample and ended `complete` with
-the gate `not-run`.
+the gate `not-run`. A first Chicago run failed in both graph builds for want
+of a state boundary: the chain ended `failed`, with the two qualification
+stages and the gate `blocked`.
 
 The rehearsal leaves out what needs a planet: the territory audit, the
 cross-border probes and the profile probe. Its units run one after another.

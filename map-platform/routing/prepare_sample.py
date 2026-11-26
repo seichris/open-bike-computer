@@ -8,12 +8,18 @@ This writes the inputs `build_graph.py --sample` needs:
 - `roads.osm.pbf`: the city's `bbox`, cut with complete ways;
 - `admin.osm.pbf`: the administrative boundaries of the whole extract.
   Valhalla keeps only whole country and state polygons, and the box cuts
-  them, so `build_graph.py` takes them from here (`--admin-source`). Where
-  the extract itself lacks a member of the state's boundary, the city lists
-  the missing ways as `adminWays`; they are fetched from the OpenStreetMap
-  API and merged in. New York State and Illinois each need one. Valhalla's
-  build log names such a way ("Illinois (122586) is missing way member
-  814758098"), and the build then fails for want of any boundary;
+  them, so `build_graph.py` takes them from here (`--admin-source`). The
+  extract itself can cut them too, and the city then lists what to fetch
+  from the OpenStreetMap API and merge in:
+  - `adminWays`: members the state's boundary lacks. New York State lacks
+    one and Illinois five. Valhalla's build log names them one at a time
+    ("Illinois (122586) is missing way member 814758098"), and with no
+    boundary at all the build fails;
+  - `adminRelations`: the country's relation, complete, where the extract
+    is a part of the country. Without it Valhalla writes no `admin_access`
+    row, the country's default access rules, and the sample takes other
+    ungraded routes than a planet graph (see the refresh runbook, "A sample
+    needs the country relation");
 - `probes.json`: the city's legs as smoke probes for `probe_graph.py`;
 - `sample.json`: what was cut from what, and `elevationBounds`, the
   whole-degree bounds to pass to `build_elevation.py --bounds`.
@@ -41,7 +47,7 @@ from pathlib import Path
 
 SCHEMA = "bicino-routing-sample-v1"
 GEOFABRIK = "https://download.geofabrik.de/"
-OSM_API = "https://api.openstreetmap.org/api/0.6/way/{}/full"
+OSM_API = "https://api.openstreetmap.org/api/0.6/{}/{}/full"
 
 
 def file_identity(path):
@@ -97,8 +103,8 @@ def run(*command):
 
 
 def fetch(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "bicino-routing-sample"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    request = urllib.request.Request(url, headers={"User-Agent": "osm-sample-prep/1"})
+    with urllib.request.urlopen(request, timeout=300) as response:
         return response.read()
 
 
@@ -109,16 +115,24 @@ def prepare(city, region, url, out, run=run, fetch=fetch):
     roads, admin = out / "roads.osm.pbf", out / "admin.osm.pbf"
     run("osmium", "extract", "-b", f"{west},{south},{east},{north}", "--strategy", "complete_ways",
         region, "-o", roads, "--overwrite")
-    ways = city.get("adminWays", [])
-    boundaries = out / "admin-region.osm.pbf" if ways else admin
+    wanted = [("way", way) for way in city.get("adminWays", [])]
+    wanted += [("relation", relation) for relation in city.get("adminRelations", [])]
+    boundaries = out / "admin-region.osm.pbf" if wanted else admin
     run("osmium", "tags-filter", region, "r/boundary=administrative", "-o", boundaries, "--overwrite")
-    if ways:
-        patches = []
-        for way in ways:
-            patch = out / f"way-{way}.osm"
-            patch.write_bytes(fetch(OSM_API.format(way)))
-            patches.append(patch)
-        run("osmium", "merge", boundaries, *patches, "-o", admin, "--overwrite")
+    if wanted:
+        fetched = []
+        for kind, number in wanted:
+            answer = out / f"{kind}-{number}.osm"
+            answer.write_bytes(fetch(OSM_API.format(kind, number)))
+            # The API does not order its answer the way osmium merge needs it.
+            run("osmium", "sort", answer, "-o", answer.with_suffix(".osm.pbf"), "--overwrite")
+            fetched.append(answer.with_suffix(".osm.pbf"))
+        patch, kept = out / "admin-patch.osm.pbf", out / "admin-kept.osm.pbf"
+        run("osmium", "merge", *fetched, "-o", patch, "--overwrite")
+        # The API's objects are newer than the extract's. Drop the extract's
+        # copies so that no object is in the input twice.
+        run("osmium", "removeid", boundaries, "-I", patch, "-o", kept, "--overwrite")
+        run("osmium", "merge", kept, patch, "-o", admin, "--overwrite")
     (out / "probes.json").write_text(json.dumps(smoke_probes(city), indent=1) + "\n")
     sample = {
         "schema": SCHEMA,
@@ -128,7 +142,8 @@ def prepare(city, region, url, out, run=run, fetch=fetch):
         "region": {"url": url, **file_identity(region)},
         "roads": file_identity(roads),
         "admin": file_identity(admin),
-        "adminWays": ways,
+        "adminWays": city.get("adminWays", []),
+        "adminRelations": city.get("adminRelations", []),
     }
     (out / "sample.json").write_text(json.dumps(sample, indent=1) + "\n")
     return sample

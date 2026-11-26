@@ -125,31 +125,41 @@ already refuses a raw tile that does not match its receipt. For a restored
 The tiles derive from the Copernicus sources the topography source policy
 already approves, and a private bucket shares them with nobody.
 
-## What speaks against it now
+## What speaks for and against it now
 
-- No graded graph has shipped, and no method is approved for the next one.
-  The gate log of the 400 m planet build of 2026-11-26 reports a missed
-  target (a flat leg 28.2% longer). If that result stands, a cached 400 m
-  set would never be used.
-- The elevation sources now under test are bare-earth models, not opened
-  Copernicus. If one of them wins, the raw Copernicus tiles are not needed
-  either.
-- City samples can now judge a method before a planet is built (see
-  [Rehearse](README.md#rehearse-on-a-city-sample)), so fewer planet builds
-  should be thrown away.
+- No graded graph has shipped. The planet graded at 400 m missed the gate
+  on 2026-11-26 in New York and Chicago, so the 400 m set alone will not
+  ship.
+- The runbook now proposes a hybrid: USGS 3DEP in the United States and
+  Copernicus opened at 400 m everywhere else (see
+  [USGS 3DEP](../refresh-runbook.md#usgs-3dep-for-the-united-states-on-city-samples)).
+  It waits for Chris's approval of 3DEP as a source. **If he approves it,
+  the next planet build needs exactly the 400 m opened set**, and a kept
+  copy saves that build 2 hours 20 minutes of its elevation stage. The 3DEP
+  tiles, up to 494 GB of downloads, would be a third set to keep.
+- If the hybrid is not approved and another source is tried, neither
+  Copernicus set is needed.
+- City samples now judge a method before a planet is built (see
+  [Tower-city samples](../refresh-runbook.md#tower-city-samples)), so fewer
+  planet builds should be thrown away, and fewer tile sets with them.
 
 ## The choice
 
 1. **Do nothing now.** Decide again when a method has passed the gate on a
    planet. That build's tiles would then be uploaded before its builder is
    deleted, so filling the bucket costs no extra build.
-2. **Keep the raw tiles now**, in Nearline: about $1.50 a month. Worth it
-   only if another opened-Copernicus planet build is likely within a few
-   months. The builder of 2026-11-26 still holds them until it is deleted;
-   after that, filling the bucket means downloading them again.
+2. **Keep the raw and the 400 m opened tiles of the 2026-11-26 builder**, in
+   Nearline: about $2.30 a month. This is worth it if the hybrid is
+   approved. That builder still held both sets on the afternoon of
+   2026-11-26 and deletes itself about 05:40 UTC on 2026-11-27; after that,
+   filling the bucket means building the tiles again. The builder has no
+   service account, and attaching one means stopping the VM first. So the
+   upload would need a bucket and a short-lived credential that Chris issues
+   for it.
 3. **Keep raw and opened tiles from the first build that passes the gate.**
    Once a graded graph is in production, every monthly refresh needs the
    same tiles, and the cache then pays for itself each month.
 
-My recommendation is 1 now and 3 when a graded graph ships. It is Chris's
-decision.
+My recommendation: 2 if Chris means to approve the hybrid and can act before
+the builder is gone, otherwise 1 now and 3 when a graded graph ships. It is
+Chris's decision.

@@ -828,17 +828,34 @@ class SampleTests(unittest.TestCase):
             sample = prepare_sample.prepare(city, region, url, out, run=fake_run, fetch=lambda url: url.encode())
             self.assertEqual(commands[0][:6], ["osmium", "extract", "-b", "-74.05,40.65,-73.9,40.8", "--strategy", "complete_ways"])
             self.assertEqual(commands[1][:4], ["osmium", "tags-filter", str(region), "r/boundary=administrative"])
-            # New York State's boundary lacks one way in the extract.
-            self.assertEqual(commands[2], ["osmium", "merge", str(out / "admin-region.osm.pbf"),
-                                           str(out / "way-29307896.osm"), "-o", str(out / "admin.osm.pbf"), "--overwrite"])
-            self.assertEqual((out / "way-29307896.osm").read_bytes(), b"https://api.openstreetmap.org/api/0.6/way/29307896/full")
+            # The extract lacks one way of New York State's boundary and cuts
+            # the United States relation. Both come from the API, sorted.
+            api = "https://api.openstreetmap.org/api/0.6/"
+            self.assertEqual((out / "way-29307896.osm").read_bytes(), f"{api}way/29307896/full".encode())
+            self.assertEqual((out / "relation-148838.osm").read_bytes(), f"{api}relation/148838/full".encode())
+            fetched = [str(out / "way-29307896.osm.pbf"), str(out / "relation-148838.osm.pbf")]
+            self.assertEqual([command[:2] + command[3:5] for command in commands[2:4]],
+                             [["osmium", "sort", "-o", name] for name in fetched])
+            patch, kept = str(out / "admin-patch.osm.pbf"), str(out / "admin-kept.osm.pbf")
+            self.assertEqual(commands[4], ["osmium", "merge", *fetched, "-o", patch, "--overwrite"])
+            # The extract's older copies of those objects go, then the two are merged.
+            self.assertEqual(commands[5], ["osmium", "removeid", str(out / "admin-region.osm.pbf"), "-I", patch,
+                                           "-o", kept, "--overwrite"])
+            self.assertEqual(commands[6], ["osmium", "merge", kept, patch, "-o", str(out / "admin.osm.pbf"), "--overwrite"])
             self.assertEqual(json.loads((out / "sample.json").read_text()), sample)
-            self.assertEqual((sample["elevationBounds"], sample["region"]["url"], sample["adminWays"]), ([-75, 40, -73, 41], url, [29307896]))
+            self.assertEqual((sample["elevationBounds"], sample["region"]["url"]), ([-75, 40, -73, 41], url))
+            self.assertEqual((sample["adminWays"], sample["adminRelations"]), ([29307896], [148838]))
             probes = json.loads((out / "probes.json").read_text())
             self.assertEqual(len(probes), len(city["legs"]))
             self.assertEqual(probes[0]["points"], [city["legs"][0]["origin"], city["legs"][0]["destination"]])
             with self.assertRaises(ValueError):
                 prepare_sample.prepare(city, region, url.replace("new-york", "new-jersey"), out, run=fake_run)
+            # A city whose extract holds its whole country needs nothing from the API.
+            del commands[:]
+            whole = dict(self.city("Singapore"))
+            prepare_sample.prepare(whole, region, prepare_sample.region_url(whole), out, run=fake_run, fetch=self.fail)
+            self.assertEqual([command[1] for command in commands], ["extract", "tags-filter"])
+            self.assertEqual(commands[1][commands[1].index("-o") + 1], str(out / "admin.osm.pbf"))
 
     def test_every_city_is_a_sample_or_planet_only(self):
         for city in self.CITIES:
@@ -847,8 +864,12 @@ class SampleTests(unittest.TestCase):
                 self.assertRegex(city["extract"], r"^[a-z-]+(/[a-z-]+)+$")
                 prepare_sample.check_region_url(city, prepare_sample.region_url(city))
                 self.assertEqual(len(prepare_sample.smoke_probes(city)), len(city["legs"]))
-            self.assertTrue(all(isinstance(way, int) for way in city.get("adminWays", [])))
-            self.assertTrue(city.get("extract") or "adminWays" not in city, city["city"])
+            for key in ("adminWays", "adminRelations"):
+                self.assertTrue(all(isinstance(number, int) for number in city.get(key, [])))
+                self.assertTrue(city.get("extract") or key not in city, city["city"])
+        # Every sample city in the United States carries the country's relation.
+        united_states = {city["city"] for city in self.CITIES if 148838 in city.get("adminRelations", [])}
+        self.assertEqual(united_states, {"New York", "Chicago", "Houston", "San Francisco"})
 
     def test_a_sample_build_takes_boundaries_from_the_region_and_skips_the_relation_check(self):
         commands = []

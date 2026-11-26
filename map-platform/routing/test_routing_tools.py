@@ -931,7 +931,7 @@ class ElevationComparisonTests(unittest.TestCase):
         for city in cities:
             self.assertLessEqual({"city", "terrain", "bbox", "legs"}, set(city))
             self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly", "reportOnly",
-                                             "extract", "adminWays"})
+                                             "extract", "adminWays", "adminRelations"})
             west, south, east, north = city["bbox"]
             self.assertTrue(west < east and south < north, city["city"])
             self.assertGreaterEqual(len(city["legs"]), 1, city["city"])

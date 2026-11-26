@@ -29,6 +29,7 @@
     "terrain": "flat",
     "bbox": [-95.55, 29.65, -95.25, 29.85],
     "extract": "north-america/us/texas",
+    "adminRelations": [148838],
     "legs": [
       {"name": "Downtown to Rice", "origin": [29.7604, -95.3698], "destination": [29.7174, -95.4018]},
       {"name": "Montrose to the Heights", "origin": [29.7440, -95.3900], "destination": [29.7980, -95.3980]},
@@ -66,6 +67,7 @@
     "terrain": "hilly",
     "bbox": [-122.52, 37.70, -122.36, 37.83],
     "extract": "north-america/us/california",
+    "adminRelations": [148838],
     "legs": [
       {"name": "Ferry Building to Twin Peaks", "origin": [37.7955, -122.3937], "destination": [37.7544, -122.4477]},
       {"name": "The Wiggle", "origin": [37.7694, -122.4290], "destination": [37.7745, -122.4378]},
@@ -142,6 +144,7 @@
     "bbox": [-74.05, 40.65, -73.90, 40.80],
     "extract": "north-america/us/new-york",
     "adminWays": [29307896],
+    "adminRelations": [148838],
     "legs": [
       {"name": "Midtown to Brooklyn", "origin": [40.7549, -73.9840], "destination": [40.6930, -73.9900]},
       {"name": "Port Authority to the United Nations", "origin": [40.7570, -73.9903], "destination": [40.7494, -73.9680]},
@@ -183,6 +186,7 @@
     "bbox": [-87.70, 41.85, -87.60, 41.92],
     "extract": "north-america/us/illinois",
     "adminWays": [151733210, 814754231, 814758098, 815063224, 815063225],
+    "adminRelations": [148838],
     "legs": [
       {"name": "Union Station to Michigan Avenue", "origin": [41.8786, -87.6403], "destination": [41.8836, -87.6247]},
       {"name": "Magnificent Mile to the South Loop", "origin": [41.8966, -87.6244], "destination": [41.8742, -87.6277]}
@@ -203,6 +207,7 @@
     "terrain": "flat",
     "bbox": [121.45, 31.20, 121.56, 31.27],
     "extract": "asia/china/shanghai",
+    "adminRelations": [270056],
     "legs": [
       {"name": "Lujiazui to Century Avenue", "origin": [31.2392, 121.5030], "destination": [31.2292, 121.5158]},
       {"name": "Jin Mao Tower to Dongchang Road", "origin": [31.2366, 121.5054], "destination": [31.2340, 121.5180]}
@@ -214,6 +219,7 @@
     "reportOnly": true,
     "bbox": [114.13, 22.26, 114.20, 22.30],
     "extract": "asia/china/hong-kong",
+    "adminRelations": [270056],
     "legs": [
       {"name": "Central to Wan Chai", "origin": [22.2819, 114.1582], "destination": [22.2776, 114.1733]},
       {"name": "Admiralty to Causeway Bay", "origin": [22.2793, 114.1654], "destination": [22.2802, 114.1837]}
@@ -225,6 +231,7 @@
     "reportOnly": true,
     "bbox": [-46.70, -23.60, -46.60, -23.52],
     "extract": "south-america/brazil/sudeste",
+    "adminRelations": [59470],
     "legs": [
       {"name": "Avenida Paulista, Consolacao to Paraiso", "origin": [-23.5577, -46.6617], "destination": [-23.5755, -46.6406]},
       {"name": "Paulista to Praca da Republica", "origin": [-23.5614, -46.6559], "destination": [-23.5435, -46.6425]}

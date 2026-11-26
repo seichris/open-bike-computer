@@ -280,9 +280,9 @@ marked `reportOnly`: `compare_elevation.py` routes and tabulates them, but
 no target counts them, and a person judges their length change and 6%+
 share.
 
-All seven tower cities build as samples since 2026-11-26. At 400 m the New
-York sample missed the same target on the same leg as the planet, and five
-of the seven city rows equalled the planet's (see
+All seven tower cities build as samples since 2026-11-26. At 400 m their
+rows equalled the planet gate's in every column, and the two legs the planet
+missed are the two the samples miss (see
 [Tower-city samples](refresh-runbook.md#tower-city-samples)). Run them
 before building a planet with a new elevation method.
 
@@ -292,13 +292,19 @@ before building a planet with a new elevation method.
    polygons, so a cut state such as NorCal gives an empty admin database.
    [prepare_sample.py](prepare_sample.py) cuts the city's box with complete
    ways into `roads.osm.pbf` and takes the boundaries of the whole extract
-   as `admin.osm.pbf`. The New York and Illinois extracts each lack one
-   member of their state's boundary, and Valhalla then builds no admin
-   polygon and the build stops. Such a city lists the way under `adminWays`,
-   and the tool fetches it from the OpenStreetMap API and merges it. For a
-   new city, Valhalla's build log names the way: `Illinois (122586) is
-   missing way member 814758098`. `sample.json` records what was cut and
-   `elevationBounds`, the whole-degree bounds for step 2.
+   as `admin.osm.pbf`. Two things an extract cuts are fetched from the
+   OpenStreetMap API and merged in, for a city that lists them:
+   - `adminWays`: members its state's boundary lacks. The New York extract
+     lacks one and the Illinois extract five, and Valhalla then builds no
+     admin polygon and the build stops. For a new city, Valhalla's build log
+     names them one at a time: `Illinois (122586) is missing way member
+     814758098`.
+   - `adminRelations`: the country's relation, complete, where the extract
+     is a part of the country (see step 3). The United States is r148838,
+     China r270056 and Brazil r59470.
+
+   `sample.json` records what was cut and `elevationBounds`, the
+   whole-degree bounds for step 2.
 
    ```sh
    python prepare_sample.py --city Chicago --region "$scratch/illinois-latest.osm.pbf" \
@@ -349,12 +355,13 @@ before building a planet with a new elevation method.
    extract cuts it, and Valhalla then builds the state polygon alone and no
    `admin_access` row, the country's default access rules. A sample without
    it takes other ungraded routes than a planet graph: the United States row
-   gives bicycles pedestrian streets, bridleways and paths. For a city
-   there, fetch
-   `relation/148838/full` from the OpenStreetMap API, remove its objects
-   from the extract's admin input with `osmium removeid`, and `osmium merge`
-   the two (see
+   gives bicycles pedestrian streets, bridleways and paths.
+   `prepare_sample.py` does this for a city that lists the relation as
+   `adminRelations`: it fetches `relation/148838/full` from the
+   OpenStreetMap API, removes its objects from the extract's admin input
+   with `osmium removeid`, and merges the two with `osmium merge` (see
    [A sample needs the country relation](refresh-runbook.md#a-sample-needs-the-country-relation)).
+   Amsterdam, Berlin and Stuttgart do not list their country yet.
    Serve every archive from the pinned image on its own port, and mount each
    graded graph's tiles too so that `/height` works:
 
