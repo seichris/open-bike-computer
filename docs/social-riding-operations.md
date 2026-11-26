@@ -130,14 +130,22 @@ deployed. Proofs expire after 60 seconds. Every mutation's nonce must also be
 its `Idempotency-Key`, so a replay returns the recorded result. Listing never
 creates a social account; the first import does.
 
-Website card fields live in `body.website`, which native decoders ignore:
-the provider, a backend-computed encoded polyline (at most 120 points, imported
-GPX only), elevation gain and duration read from the file, and the star. Saved
-Apple Maps routes are listed without geometry, because the website draws on
-OpenStreetMap tiles. Renaming uses the native optimistic `revision`. Starring
-changes no route content and needs no revision. Deletion stays available
-while the routes feature is rolled back. The bridge is charged per account
-subject (1,200 requests per hour) and then per account like native requests.
+Every route upload, native or website, stores card fields in `body.website`:
+the provider and, for imported GPX only, an encoded-polyline preview of at
+most 120 points. The preview is computed after archive validation with
+bounded work: a stride to 1,000 points, then farthest-point insertion. Website
+imports add elevation gain and duration read from the file, and the star.
+These are the owner's private fields. `public_content` and group-ride
+snapshots strip `body.website`, so friends, link holders and ride members
+never receive them. The list reads only the title, distance and card members,
+never archives. Routes stored before card fields existed list without a
+preview. Saved Apple Maps routes never get geometry on the website, because
+it draws on OpenStreetMap tiles. Renaming uses the native optimistic
+`revision`. Starring changes no route content and needs no revision.
+Deletion stays available while the routes feature is rolled back. The bridge
+is charged per account subject (1,200 requests per hour) and then per account
+like native requests. A mounted social router allows 5 MiB bodies on the
+import path, as it does for `POST /routes`.
 
 ## Upgrade and lifecycle contracts
 

@@ -294,6 +294,24 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
             raise SocialError("not_found", 404)
         return item
 
+    def website_summaries(c, actor, content_id=None):
+        """Card rows without archives: only small JSON members are read."""
+        condition = and_(content.c.owner == actor, content.c.kind == "route")
+        if content_id is not None:
+            condition = and_(condition, content.c.id == content_id)
+        query = (select(content.c.id, content.c.title, content.c.visibility, content.c.revision, content.c.created,
+                        content.c.body["distanceMeters"].label("distanceMeters"),
+                        content.c.body["website"].label("website"))
+                 .where(condition).order_by(content.c.created.desc(), content.c.id.desc())
+                 .limit(WEBSITE_ROUTE_LIST_LIMIT))
+        return [website_routes.summary(dict(value)) for value in c.execute(query).mappings()]
+
+    async def website_summary(actor, content_id):
+        items = await run_in_threadpool(read, lambda c: website_summaries(c, actor, content_id))
+        if not items:
+            raise SocialError("not_found", 404)
+        return items[0]
+
     @app.post("/internal/website/routes/list")
     async def website_route_list(data: WebsiteRouteList, request: Request):
         principal = await website_principal(request, data)
@@ -302,20 +320,13 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
         if actor is None:
             return {"items": []}
         await limit(actor, "requests", 600, 60)
-        def perform(c):
-            values = c.execute(select(content).where(and_(content.c.owner == actor, content.c.kind == "route"))
-                               .order_by(content.c.created.desc(), content.c.id.desc())
-                               .limit(WEBSITE_ROUTE_LIST_LIMIT)).mappings()
-            return [dict(value) for value in values]
-        values = await run_in_threadpool(read, perform)
-        return {"items": await run_in_threadpool(lambda: [website_routes.summary(v) for v in values])}
+        return {"items": await run_in_threadpool(read, lambda c: website_summaries(c, actor))}
 
     @app.post("/internal/website/routes")
     async def website_route_import(data: WebsiteRouteImport, request: Request):
         principal = await website_principal(request, data)
         app.state.features.require("routes")
-        provider, preview = await run_in_threadpool(website_routes.preview_for_archive, data.archive)
-        if provider != website_routes.PREVIEW_PROVIDER:
+        if await run_in_threadpool(website_routes.archive_provider, data.archive) != website_routes.PREVIEW_PROVIDER:
             # The website imports GPX files only; other providers keep their own paths.
             raise SocialError("route_not_redistributable")
         actor = await run_in_threadpool(website_actor, principal, True)
@@ -323,11 +334,11 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
         await limit(actor, "publication", 30)
         upload = RouteUpload(title=data.title, visibility="private", archive=data.archive,
                              hashPayload=data.hashPayload, sharingRightsConfirmed=True)
-        details = {"provider": provider, "preview": preview, "favorite": False,
-                   "elevationGainMeters": data.elevationGainMeters, "durationSeconds": data.durationSeconds}
+        extras = {"favorite": False, "elevationGainMeters": data.elevationGainMeters,
+                  "durationSeconds": data.durationSeconds}
         result = await operation(request, (actor, principal),
-                                 lambda c, a: service.upload_route(c, a, upload, website=details))
-        return website_routes.summary(result)
+                                 lambda c, a: service.upload_route(c, a, upload, website=extras))
+        return await website_summary(actor, result["id"])
 
     @app.patch("/internal/website/routes/{content_id}")
     async def website_route_edit(content_id: str, data: WebsiteRouteEdit, request: Request):
@@ -348,9 +359,9 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
                 body = dict(item["body"])
                 body["website"] = dict(body.get("website") or {}, favorite=data.favorite)
                 c.execute(update(content).where(content.c.id == content_id).values(body=body))
-                item = dict(item, body=body)
-            return item
-        return website_routes.summary(await operation(request, (actor, principal), perform))
+            return {"kind": "route", "body": {}, "id": content_id}
+        await operation(request, (actor, principal), perform)
+        return await website_summary(actor, content_id)
 
     @app.delete("/internal/website/routes/{content_id}")
     async def website_route_delete(content_id: str, data: WebsiteRouteDelete, request: Request):

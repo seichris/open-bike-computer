@@ -8,6 +8,7 @@ deletion proof can never authorize a route request and no new secret has to be
 provisioned.
 """
 import hashlib
+import heapq
 import hmac
 import json
 import math
@@ -16,6 +17,7 @@ SIGNATURE_HEADER = "X-Bicino-Website-Signature"
 KEY_LABEL = b"bicino-website-routes-v1"
 PROOF_WINDOW_SECONDS = 60
 PREVIEW_MAX_POINTS = 120
+PREVIEW_STRIDE_POINTS = 1000
 # Only this provider's geometry is drawn on the website's OpenStreetMap
 # thumbnails. Saved Apple Maps routes stay listed without a map preview.
 PREVIEW_PROVIDER = "user.imported-gpx"
@@ -35,45 +37,49 @@ def valid_signature(key: bytes, method: str, path: str, raw: bytes, signature: s
 
 
 def _simplify(points, limit):
-    """Douglas-Peucker on a local equirectangular projection, capped at `limit`."""
+    """At most `limit` points that keep the route's shape, with bounded work.
+
+    A stride first caps the input at PREVIEW_STRIDE_POINTS, then the farthest
+    remaining point is added one at a time (Douglas-Peucker order, local
+    equirectangular metres) until `limit` points are kept. Each split scans only
+    its own span, so the cost is at most PREVIEW_STRIDE_POINTS * limit
+    distance evaluations whatever the geometry.
+    """
     if len(points) <= limit:
-        return points
+        return list(points)
+    if len(points) > PREVIEW_STRIDE_POINTS:
+        stride = math.ceil((len(points) - 1) / (PREVIEW_STRIDE_POINTS - 1))
+        points = points[::stride] + ([points[-1]] if (len(points) - 1) % stride else [])
     latitude = math.radians(sum(p[0] for p in points) / len(points))
     scale = math.cos(latitude)
     xy = [(p[1] * scale, p[0]) for p in points]
 
-    def keep(tolerance):
-        kept = [False] * len(points)
-        kept[0] = kept[-1] = True
-        stack = [(0, len(points) - 1)]
-        while stack:
-            start, end = stack.pop()
-            (ax, ay), (bx, by) = xy[start], xy[end]
-            dx, dy = bx - ax, by - ay
-            length = dx * dx + dy * dy
-            farthest, distance = None, tolerance
-            for index in range(start + 1, end):
-                px, py = xy[index]
-                if length == 0:
-                    offset = math.hypot(px - ax, py - ay)
-                else:
-                    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length))
-                    offset = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
-                if offset > distance:
-                    farthest, distance = index, offset
-            if farthest is not None:
-                kept[farthest] = True
-                stack.append((start, farthest))
-                stack.append((farthest, end))
-        return [point for point, flag in zip(points, kept) if flag]
+    def farthest(start, end):
+        (ax, ay), (bx, by) = xy[start], xy[end]
+        dx, dy = bx - ax, by - ay
+        length = dx * dx + dy * dy
+        best, offset = None, 0.0
+        for index in range(start + 1, end):
+            px, py = xy[index]
+            t = 0.0 if length == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length))
+            distance = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+            if best is None or distance > offset:
+                best, offset = index, distance
+        return best, offset
 
-    span = max(max(x for x, _ in xy) - min(x for x, _ in xy), max(y for _, y in xy) - min(y for _, y in xy))
-    tolerance = max(span / 500, 1e-7)
-    result = keep(tolerance)
-    while len(result) > limit:
-        tolerance *= 1.5
-        result = keep(tolerance)
-    return result
+    kept = {0, len(points) - 1}
+    queue = []
+    def push(start, end):
+        index, offset = farthest(start, end)
+        if index is not None:
+            heapq.heappush(queue, (-offset, start, end, index))
+    push(0, len(points) - 1)
+    while queue and len(kept) < limit:
+        _, start, end, index = heapq.heappop(queue)
+        kept.add(index)
+        push(start, index)
+        push(index, end)
+    return [points[index] for index in sorted(kept)]
 
 
 def _encode_value(value: int) -> str:
@@ -97,37 +103,44 @@ def encode_polyline(points) -> str:
     return "".join(result)
 
 
-def preview_for_archive(archive_text: str):
-    """(provider ID, polyline or None) for a stored, already validated archive."""
+def archive_provider(archive_text: str):
+    """The provider ID named by an archive, or None when it cannot be read."""
     try:
-        route = json.loads(archive_text)["route"]
-        provider = route["provider"]["providerID"]
-        if provider != PREVIEW_PROVIDER:
-            return provider, None
-        points = [(p["latitude"], p["longitude"]) for p in route["points"]]
+        provider = json.loads(archive_text)["route"]["provider"]["providerID"]
     except (KeyError, TypeError, ValueError):
-        return None, None
-    return provider, encode_polyline(_simplify(points, PREVIEW_MAX_POINTS))
+        return None
+    return provider if isinstance(provider, str) else None
+
+
+def card_details(route):
+    """Card fields for a validated route: its provider and, for GPX only, a preview."""
+    provider = route["provider"]["providerID"]
+    preview = None
+    if provider == PREVIEW_PROVIDER:
+        preview = encode_polyline(_simplify([(p["latitude"], p["longitude"]) for p in route["points"]],
+                                            PREVIEW_MAX_POINTS))
+    return {"provider": provider, "preview": preview}
 
 
 def summary(item):
-    """The website's card fields. Archives, hash payloads and owners stay private."""
-    body = item["body"] if isinstance(item.get("body"), dict) else {}
-    details = body.get("website") if isinstance(body.get("website"), dict) else {}
-    provider, preview = details.get("provider"), details.get("preview")
-    if provider is None and isinstance(body.get("archive"), str):
-        provider, preview = preview_for_archive(body["archive"])
-    distance = body.get("distanceMeters")
+    """The website's card fields from a summary row. Archives and owners stay private."""
+    details = item.get("website") if isinstance(item.get("website"), dict) else {}
+    distance = item.get("distanceMeters")
+    def number(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    preview = details.get("preview")
+    provider = details.get("provider")
     return {
         "id": item["id"],
         "title": item["title"],
         "visibility": item["visibility"],
         "revision": item["revision"],
         "created": item["created"],
-        "provider": provider,
-        "distanceMeters": distance if isinstance(distance, (int, float)) else None,
-        "elevationGainMeters": details.get("elevationGainMeters"),
-        "durationSeconds": details.get("durationSeconds"),
+        # Routes stored before card fields existed list without a preview.
+        "provider": provider if isinstance(provider, str) else None,
+        "distanceMeters": number(distance),
+        "elevationGainMeters": number(details.get("elevationGainMeters")),
+        "durationSeconds": number(details.get("durationSeconds")),
         "favorite": details.get("favorite") is True,
-        "preview": preview,
+        "preview": preview if isinstance(preview, str) and provider == PREVIEW_PROVIDER else None,
     }

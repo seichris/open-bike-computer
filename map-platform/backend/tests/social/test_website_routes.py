@@ -201,6 +201,45 @@ class WebsiteRoutesTest(unittest.TestCase):
         [item] = self.listed()
         self.assertEqual((item['provider'], item['preview']), ('user.imported-gpx', website_routes.encode_polyline(LINE)))
 
+    def test_card_fields_stay_with_the_owner_on_every_shared_path(self):
+        item = self.imported(elevationGainMeters=812.0, durationSeconds=9876)
+        self.assertEqual(self.website('PATCH', f"/internal/website/routes/{item['id']}", {'favorite': True}).status_code, 200)
+        own = self.native('alice', 'GET', f"/routes/{item['id']}").json()
+        self.assertNotIn('website', own['body'])
+        made_public = self.native('alice', 'PATCH', f"/routes/{item['id']}",
+                                  {'revision': 1, 'title': 'Loop', 'visibility': 'link'})
+        self.assertEqual(made_public.status_code, 200, made_public.text)
+        self.assertNotIn('website', made_public.json()['body'])
+        link = self.native('alice', 'POST', '/share-links', {'contentID': item['id']}).json()
+        shared = self.client.post('/shared/resolve', json={'code': link['url'].split('#')[-1]})
+        self.assertEqual(shared.status_code, 200, shared.text)
+        self.assertNotIn('website', json.dumps(shared.json()))
+        self.assertNotIn('9876', json.dumps(shared.json()))
+        ride = self.native('alice', 'POST', '/group-rides', {'routeID': item['id'], 'title': 'Saturday'})
+        self.assertEqual(ride.status_code, 200, ride.text)
+        self.assertNotIn('website', json.dumps(ride.json()))
+        from map_platform.social.database import rides
+        with self.db.transaction() as c:
+            self.assertNotIn('website', c.scalar(select(rides.c.route)))
+        # The owner's library still has them.
+        [card] = self.listed()
+        self.assertEqual((card['favorite'], card['durationSeconds'], card['elevationGainMeters']), (True, 9876, 812.0))
+
+    def test_listing_reads_card_fields_without_archives(self):
+        self.native('alice', 'GET', '/me')
+        with self.db.transaction() as c:
+            owner = c.scalar(select(accounts.c.id).where(accounts.c.uid == 'alice'))
+            c.execute(content.insert().values(
+                id=str(uuid.uuid4()), owner=owner, kind='route', title='Before cards', visibility='private',
+                revision=1, created=self.clock - 10, source=None, fingerprint='0' * 64,
+                body={'archive': 'not json', 'sha256': '0' * 64, 'hashPayload': '{}', 'distanceMeters': 1234.5}))
+        item = self.imported()
+        listed = self.listed()
+        self.assertEqual([entry['id'] for entry in listed][0], item['id'])
+        legacy = listed[1]
+        self.assertEqual((legacy['title'], legacy['distanceMeters'], legacy['provider'], legacy['preview'], legacy['favorite']),
+                         ('Before cards', 1234.5, None, None, False))
+
     def test_rename_star_and_delete(self):
         item = self.imported()
         path = f"/internal/website/routes/{item['id']}"
@@ -247,6 +286,16 @@ class PreviewTest(unittest.TestCase):
     def test_polyline_matches_the_published_example(self):
         points = [(38.5, -120.2), (40.7, -120.95), (43.252, -126.453)]
         self.assertEqual(website_routes.encode_polyline(points), '_p~iF~ps|U_ulLnnqC_mqNvxq`@')
+
+    def test_preview_work_is_bounded_for_adversarial_geometry(self):
+        import math, time
+        spiral = [(1.3 + 0.01 * (i / 60000) * math.cos(i / 7), 103.8 + 0.01 * (i / 60000) * math.sin(i / 7))
+                  for i in range(60000)]
+        started = time.perf_counter()
+        simplified = website_routes._simplify(spiral, website_routes.PREVIEW_MAX_POINTS)
+        self.assertLess(time.perf_counter() - started, 2.0)
+        self.assertEqual(len(simplified), website_routes.PREVIEW_MAX_POINTS)
+        self.assertEqual((simplified[0], simplified[-1]), (spiral[0], spiral[-1]))
 
     def test_long_routes_are_simplified_to_the_card_limit(self):
         points = [(46.5 + 0.0001 * i, 11.7 + 0.002 * ((i // 50) % 2) * (i % 50) / 50) for i in range(20000)]

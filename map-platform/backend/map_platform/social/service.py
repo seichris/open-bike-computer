@@ -58,9 +58,19 @@ def row(c, table, condition):
     return dict(result)
 
 
+def shareable_body(body):
+    """A content body without the owner's private website library card fields."""
+    if isinstance(body, dict) and "website" in body:
+        return {k: v for k, v in body.items() if k != "website"}
+    return body
+
+
 def public_content(item):
-    """Strip storage-only fields (activity source IDs and geometry digests)."""
-    return {k: v for k, v in item.items() if k not in {"source", "fingerprint"}}
+    """Strip storage-only fields (activity source IDs, geometry digests, card fields)."""
+    value = {k: v for k, v in item.items() if k not in {"source", "fingerprint"}}
+    if "body" in value:
+        value["body"] = shareable_body(value["body"])
+    return value
 
 
 class SocialService:
@@ -364,10 +374,10 @@ class SocialService:
             raise SocialError("route_redistribution_not_permitted", 403)
         if c.scalar(select(func.count()).select_from(content).where(content.c.owner == actor)) >= 500:
             raise SocialError("content_quota", 429)
-        body = {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload, "distanceMeters": route["distanceMeters"]}
-        if website is not None:
-            # Website library card fields. Native decoders ignore this key.
-            body["website"] = website
+        from . import website_routes
+        body = {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload, "distanceMeters": route["distanceMeters"],
+                # The owner's bicino.com library card; public_content and ride snapshots strip it.
+                "website": dict(website_routes.card_details(route), **(website or {}))}
         item = {"id": identifier(), "owner": actor, "kind": "route", "title": data.title,
                 "visibility": data.visibility, "revision": 1,
                 "body": body, "source": None, "created": self.now(), "fingerprint": fingerprint}
@@ -455,7 +465,7 @@ class SocialService:
         if not self.now()-3600 <= start <= self.now()+30*86400:
             raise SocialError("invalid_start")
         c.execute(rides.insert().values(id=ride_id, owner=actor, title=data.title,
-            route=source["body"], status="planned", starts=start, expires=start+86400,
+            route=shareable_body(source["body"]), status="planned", starts=start, expires=start+86400,
             code=digest(code), created=self.now(),
             fingerprint=source.get("fingerprint") or archive_fingerprint(source["body"])))
         c.execute(members.insert().values(ride=ride_id, account=actor, status="accepted", sharing=False,
