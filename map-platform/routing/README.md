@@ -246,6 +246,25 @@ with the sample cities they are the release gate for a graded planet: serve
 the graded and the ungraded planet from the same snapshot and run every city
 in one report, with no `--city`.
 
+The 200 m planet failed only in Midtown's tower core, so on 2026-11-26 Chris
+added high-rise cores to the gate. These are planet-only, flat and judged
+like the rest:
+- Chicago: two legs through the Loop.
+- Singapore: two legs through the CBD and Marina Bay.
+- Shanghai: two legs through Lujiazui.
+- Dubai: one leg through Downtown and Business Bay, one through the Marina.
+- New York: two more Manhattan legs, a Midtown crosstown and one down
+  Broadway through the Financial District.
+
+Every leg was checked on the ungraded planet to run through the towers
+rather than around them.
+
+Hong Kong (Central to Causeway Bay) and São Paulo (Avenida Paulista) are
+hilly high-rise cores where a longer graded route can be right. They are
+marked `reportOnly`: `compare_elevation.py` routes and tabulates them, but
+no target counts them, and a person judges their length change and 6%+
+share.
+
 1. Download a dated Geofabrik extract that holds the whole city and its
    state or province boundary (Valhalla keeps only country and state
    polygons, so a cut state such as NorCal gives an empty admin database).

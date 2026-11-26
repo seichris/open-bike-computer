@@ -134,7 +134,9 @@
     "planetOnly": true,
     "bbox": [-74.05, 40.65, -73.90, 40.80],
     "legs": [
-      {"name": "Midtown to Brooklyn", "origin": [40.7549, -73.9840], "destination": [40.6930, -73.9900]}
+      {"name": "Midtown to Brooklyn", "origin": [40.7549, -73.9840], "destination": [40.6930, -73.9900]},
+      {"name": "Port Authority to the United Nations", "origin": [40.7570, -73.9903], "destination": [40.7494, -73.9680]},
+      {"name": "City Hall to Bowling Green", "origin": [40.7127, -74.0059], "destination": [40.7049, -74.0138]}
     ]
   },
   {
@@ -150,9 +152,11 @@
     "city": "Dubai",
     "terrain": "flat",
     "planetOnly": true,
-    "bbox": [55.15, 25.12, 55.40, 25.30],
+    "bbox": [55.10, 25.05, 55.40, 25.30],
     "legs": [
-      {"name": "Satwa to Wasl", "origin": [25.2235, 55.2785], "destination": [25.1985, 55.2468]}
+      {"name": "Satwa to Wasl", "origin": [25.2235, 55.2785], "destination": [25.1985, 55.2468]},
+      {"name": "Downtown Boulevard to Marasi Drive", "origin": [25.1938, 55.2748], "destination": [25.1870, 55.2580]},
+      {"name": "Dubai Marina Mall to Marina Gate", "origin": [25.0766, 55.1403], "destination": [25.0890, 55.1475]}
     ]
   },
   {
@@ -162,6 +166,58 @@
     "bbox": [9.08, 48.70, 9.28, 48.85],
     "legs": [
       {"name": "Hauptbahnhof to Degerloch", "origin": [48.7840, 9.1820], "destination": [48.7488, 9.1700]}
+    ]
+  },
+  {
+    "city": "Chicago",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [-87.70, 41.85, -87.60, 41.92],
+    "legs": [
+      {"name": "Union Station to Michigan Avenue", "origin": [41.8786, -87.6403], "destination": [41.8836, -87.6247]},
+      {"name": "Magnificent Mile to the South Loop", "origin": [41.8966, -87.6244], "destination": [41.8742, -87.6277]}
+    ]
+  },
+  {
+    "city": "Singapore",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [103.80, 1.26, 103.90, 1.32],
+    "legs": [
+      {"name": "Tanjong Pagar to Marina Bay Sands", "origin": [1.2764, 103.8458], "destination": [1.2834, 103.8607]},
+      {"name": "Chinatown to Marina Bay Financial Centre", "origin": [1.2846, 103.8441], "destination": [1.2798, 103.8545]}
+    ]
+  },
+  {
+    "city": "Shanghai",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [121.45, 31.20, 121.56, 31.27],
+    "legs": [
+      {"name": "Lujiazui to Century Avenue", "origin": [31.2392, 121.5030], "destination": [31.2292, 121.5158]},
+      {"name": "Jin Mao Tower to Dongchang Road", "origin": [31.2366, 121.5054], "destination": [31.2340, 121.5180]}
+    ]
+  },
+  {
+    "city": "Hong Kong",
+    "terrain": "hilly",
+    "planetOnly": true,
+    "reportOnly": true,
+    "bbox": [114.13, 22.26, 114.20, 22.30],
+    "legs": [
+      {"name": "Central to Wan Chai", "origin": [22.2819, 114.1582], "destination": [22.2776, 114.1733]},
+      {"name": "Admiralty to Causeway Bay", "origin": [22.2793, 114.1654], "destination": [22.2802, 114.1837]}
+    ]
+  },
+  {
+    "city": "Sao Paulo",
+    "terrain": "hilly",
+    "planetOnly": true,
+    "reportOnly": true,
+    "bbox": [-46.70, -23.60, -46.60, -23.52],
+    "legs": [
+      {"name": "Avenida Paulista, Consolacao to Paraiso", "origin": [-23.5577, -46.6617], "destination": [-23.5755, -46.6406]},
+      {"name": "Paulista to Praca da Republica", "origin": [-23.5614, -46.6559], "destination": [-23.5435, -46.6425]}
     ]
   }
 ]
