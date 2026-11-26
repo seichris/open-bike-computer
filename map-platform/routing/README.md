@@ -171,6 +171,18 @@ production now.
    sources used and the `method`: null for raw tiles, or the opening with
    its radius and the identity of the raw manifest it opened.
 
+   Valhalla grades a bridge from the heights at its two ends, but its
+   tagging rules call a way a bridge only when `bridge` is `yes` or `1`. A
+   `movable`, `viaduct` or `boardwalk` bridge is graded from what lies under
+   the deck, and a terrain model holds the water or the ground there. Pass
+   `--all-bridges` when the elevation holds a terrain model, and to the
+   ungraded build it is compared with. [graph_lua.py](graph_lua.py) then
+   writes out the rules the pinned image carries, with every `bridge` value
+   but `no` made a bridge, and the build stops unless Valhalla's log shows
+   it read them. The rules are checked against the SHA-256 of the image's
+   own, so a new image needs the change reviewed again. The manifest's
+   `builder.graphLua` records the changed rules.
+
    Use `--sample` for development input, such as a city cut from a regional
    extract by [prepare_sample.py](prepare_sample.py). A sample's relations may
    lack members that lie outside the extract, and `--admin-source` takes its
