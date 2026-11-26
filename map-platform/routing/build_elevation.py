@@ -27,8 +27,10 @@ arc-second tiles that elevation-sources.json approves for routing. Each
 dated tile of its catalog is downloaded, checked against the catalog's size
 and ETag, and resampled onto its cell's posts in `--terrain`. The opened
 Copernicus tiles then go to `--opened`, and `--out` gets the hybrid: a post
-is 3DEP's where 3DEP has data and opened Copernicus's elsewhere. 3DEP stops
-at the border of the United States, and the opened surface lies under the
+is 3DEP's where 3DEP has data and opened Copernicus's elsewhere. 3DEP's
+newest tiles stop at the border of the United States, but older ones carry
+fill for Mexico and Canada from other sources, so every tile is first cut to
+the source list's area, the United States. The opened surface lies under the
 ground, so the two would meet in a step. The difference between them at
 3DEP's edge is therefore carried into the Copernicus side and fades to zero
 over BLEND_POSTS posts. 3DEP's own posts are never changed.
@@ -45,6 +47,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -206,28 +209,35 @@ def parse_terrain_catalog(text):
 
 TERRAIN_FIELDS = {
     "id", "adapter", "title", "surfaceModel", "horizontalCrs", "verticalDatum", "verticalUnits", "origin",
-    "coverage", "catalog", "catalogBytes", "catalogSha256", "tileCount", "license", "attribution", "termsUrl",
-    "attributionUrl", "modifications", "approvedForRouting", "approvedAt", "approvedBy",
+    "coverage", "area", "areaBytes", "areaSha256", "areaSource", "catalog", "catalogBytes", "catalogSha256",
+    "tileCount", "license", "attribution", "termsUrl", "attributionUrl", "modifications", "approvedForRouting",
+    "approvedAt", "approvedBy",
 }
 
 
 @dataclass(frozen=True)
 class TerrainSource:
-    """A bare-earth source of the routing elevation source list, one dated tile per cell."""
+    """A bare-earth source of the routing elevation source list, one dated tile per cell.
+
+    `area` is the gzipped GeoJSON polygon the source is approved for. Posts
+    outside it are dropped, whatever the tiles hold there.
+    """
     id: str
     origin: str
     tiles: dict
     catalog_sha256: str
     terms_url: str
     attribution_url: str
+    area: Path
+    area_sha256: str
 
     def tile_url(self, longitude, latitude):
         tile, date, _, _ = self.tiles[(longitude, latitude)]
         return f"{self.origin}/{tile}/USGS_13_{tile}_{date}.tif"
 
     def identity(self):
-        return {"id": self.id, "catalogSha256": self.catalog_sha256, "termsUrl": self.terms_url,
-                "attributionUrl": self.attribution_url}
+        return {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
+                "termsUrl": self.terms_url, "attributionUrl": self.attribution_url}
 
 
 def load_terrain_source(path):
@@ -246,20 +256,73 @@ def load_terrain_source(path):
         raise ValueError("unsupported terrain source contract")
     if value["approvedForRouting"] is not True:
         raise ValueError(f"{value['id']} is not approved for routing")
-    name = value["catalog"]
-    if not isinstance(name, str) or Path(name).name != name:
-        raise ValueError("the terrain catalog must be a file beside the source list")
-    catalog = (path.parent / name).read_bytes()
-    if len(catalog) != value["catalogBytes"] or hashlib.sha256(catalog).hexdigest() != value["catalogSha256"]:
-        raise ValueError(f"{name} is not the catalog the source list pins")
-    tiles = parse_terrain_catalog(catalog.decode())
+    pinned = {}
+    for kind in ("catalog", "area"):
+        name = value[kind]
+        if not isinstance(name, str) or Path(name).name != name:
+            raise ValueError(f"the terrain {kind} must be a file beside the source list")
+        pinned[kind] = (path.parent / name).read_bytes()
+        if (len(pinned[kind]) != value[f"{kind}Bytes"]
+                or hashlib.sha256(pinned[kind]).hexdigest() != value[f"{kind}Sha256"]):
+            raise ValueError(f"{name} is not the {kind} the source list pins")
+    tiles = parse_terrain_catalog(pinned["catalog"].decode())
     if len(tiles) != value["tileCount"]:
-        raise ValueError(f"{name} holds {len(tiles)} tiles, not {value['tileCount']}")
+        raise ValueError(f"{value['catalog']} holds {len(tiles)} tiles, not {value['tileCount']}")
     for field in ("termsUrl", "attributionUrl"):
         if not isinstance(value[field], str) or not value[field].startswith("https://"):
             raise ValueError(f"terrain source {field} must be HTTPS")
     return TerrainSource(value["id"], value["origin"], tiles, value["catalogSha256"], value["termsUrl"],
-                         value["attributionUrl"])
+                         value["attributionUrl"], path.parent / value["area"], value["areaSha256"])
+
+
+@functools.lru_cache(maxsize=2)
+def load_area(path, sha256):
+    """The area of a terrain source: its polygon, and the same prepared for containment tests."""
+    from shapely.geometry import shape
+    from shapely.prepared import prep
+
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise ValueError(f"{path.name} is not the area the source list pins")
+    feature = json.loads(gzip.decompress(data))
+    if feature.get("type") != "Feature" or feature["geometry"]["type"] not in ("Polygon", "MultiPolygon"):
+        raise ValueError(f"{path.name} must hold one GeoJSON polygon feature")
+    polygon = shape(feature["geometry"])
+    if polygon.is_empty or not polygon.is_valid:
+        raise ValueError(f"{path.name} holds no valid polygon")
+    return polygon, prep(polygon)
+
+
+def posts_in_area(cell, area):
+    """Which of a cell's posts lie in the area: True for all, False for none, or a mask of the posts.
+
+    A post is in when its own position is, not when the square around it touches the area.
+    """
+    from rasterio.features import rasterize
+    from shapely.geometry import box
+
+    polygon, prepared = area
+    longitude, latitude = cell
+    posts = box(longitude - STEP / 2, latitude - STEP / 2, longitude + 1 + STEP / 2, latitude + 1 + STEP / 2)
+    if prepared.contains(posts):
+        return True
+    part = polygon.intersection(posts)
+    if part.is_empty:
+        return False
+    return rasterize([(part, 1)], out_shape=(POSTS, POSTS), transform=post_transform(longitude, latitude),
+                     fill=0, dtype="uint8").astype(bool)
+
+
+def clip_to_area(heights, cell, area):
+    """Drop the posts outside the area; returns how many held data."""
+    import numpy as np
+
+    inside = posts_in_area(cell, area)
+    if inside is True:
+        return 0
+    outside = np.isfinite(heights) if inside is False else np.isfinite(heights) & ~inside
+    heights[outside] = np.nan
+    return int(outside.sum())
 
 
 def fetch_range(url, start, end, attempts=6):
@@ -286,13 +349,21 @@ def fetch_to_file(url, path, size, connections=FETCH_CONNECTIONS):
     a tile is up to 500 MB.
     """
     parts = [(start, min(start + FETCH_PART, size)) for start in range(0, size, FETCH_PART)]
+    failed = threading.Event()
     with path.open("wb") as stream:
         stream.truncate(size)
 
         def part(bounds):
-            data, total, etag = fetch_range(url, *bounds)
-            if total != size:
-                raise ValueError(f"{url} holds {total} bytes, not the catalog's {size}")
+            # Once a part has failed for good, the rest are not asked for: the tile is not read to its end first.
+            if failed.is_set():
+                return None
+            try:
+                data, total, etag = fetch_range(url, *bounds)
+                if total != size:
+                    raise ValueError(f"{url} holds {total} bytes, not the catalog's {size}")
+            except BaseException:
+                failed.set()
+                raise
             os.pwrite(stream.fileno(), data, bounds[0])
             return etag
 
@@ -342,7 +413,7 @@ def terrain_posts(dataset, cell):
 
 
 def build_terrain_cell(cell, chosen, out):
-    """Download the cell's dated 3DEP tile, check it against the catalog and write its posts."""
+    """Download the cell's dated 3DEP tile, check it against the catalog and write its posts inside the area."""
     import rasterio
 
     source = chosen[cell]
@@ -358,6 +429,7 @@ def build_terrain_cell(cell, chosen, out):
             heights, invalid = terrain_posts(dataset, cell)
     finally:
         scratch.unlink(missing_ok=True)
+    outside = clip_to_area(heights, cell, load_area(source.area, source.area_sha256))
     return write_receipt(out, {
         "cell": hgt_name(*cell),
         "source": source.id,
@@ -367,6 +439,8 @@ def build_terrain_cell(cell, chosen, out):
         "etag": etag,
         "tileDate": date,
         "invalidPixels": invalid,
+        "areaSha256": source.area_sha256,
+        "outsidePosts": outside,
         **write_tile(out, cell, heights),
     })
 
@@ -809,7 +883,7 @@ def hybrid_inputs(cell, chosen, hybrid):
                 return None
             opened[hgt_name(*other)] = receipt["hgtSha256"]
         if other in hybrid.terrain.tiles:
-            receipt = current_receipt(hybrid.tiles, other, {other: hybrid.terrain})
+            receipt = current_terrain_receipt(hybrid.tiles, other, {other: hybrid.terrain})
             if receipt is None:
                 return None
             terrain[hgt_name(*other)] = receipt["hgtSha256"]
@@ -903,6 +977,8 @@ def build_pending(cells, chosen, out, jobs, rounds=ROUNDS, opening=None, stage=N
     """
     if isinstance(stage, Hybrid):
         current, verb = functools.partial(current_hybrid_receipt, hybrid=stage), "blend"
+    elif stage == TERRAIN:
+        current, verb = current_terrain_receipt, "build"
     elif opening is not None:
         current, verb = functools.partial(current_opened_receipt, opening=opening), "open"
     else:
@@ -971,6 +1047,12 @@ def current_opened_receipt(out, cell, chosen, opening):
     return receipt
 
 
+def current_terrain_receipt(out, cell, chosen):
+    """The terrain tile's receipt if it came from the catalog's tile and was cut to the area pinned now."""
+    receipt = current_receipt(out, cell, chosen)
+    return receipt if receipt is not None and receipt.get("areaSha256") == chosen[cell].area_sha256 else None
+
+
 def current_hybrid_receipt(out, cell, chosen, hybrid):
     """The blended cell's receipt if it used this method and the opened and terrain tiles there are now."""
     receipt = _sourced_receipt(out, cell, chosen)
@@ -1003,7 +1085,7 @@ def manifest_identity(directory, name="elevation-manifest.json"):
 
 def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
     """The terrain tiles' own manifest. Its schema keeps build_graph.py from taking them for a whole set."""
-    receipts = [current_receipt(out, cell, {cell: terrain}) for cell in cells]
+    receipts = [current_terrain_receipt(out, cell, {cell: terrain}) for cell in cells]
     if not all(receipts):
         raise ValueError("a cell has no receipt for its current terrain tile")
     listing = "".join(f"{r['cell']} {r['hgtSha256']}\n" for r in sorted(receipts, key=lambda r: r["cell"]))
@@ -1022,6 +1104,7 @@ def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
         "sourceBytes": sum(r["bytes"] for r in receipts),
         "fileBytes": sum(r["fileBytes"] for r in receipts),
         "noDataPosts": sum(r["noDataPosts"] for r in receipts),
+        "outsidePosts": sum(r["outsidePosts"] for r in receipts),
     }
     (out / "cells.txt").write_text(listing)
     path = out / "terrain-manifest.json"

@@ -512,9 +512,15 @@ The source:
 - **Licence.** Public domain. The USGS asks for an acknowledgement and that
   anyone who modifies the data describes the changes, without implying its
   endorsement. A build resamples the tiles and blends their edge.
-- **Coverage.** The tiles hold no data outside the United States. In the
-  border tiles Tijuana, Ciudad Juárez and Windsor are all no data, as is the
-  open sea.
+- **Coverage.** The newest tiles hold no data beyond the border. In the
+  tiles of the crossings tested here, dated 2019 to 2026, Tijuana, Ciudad
+  Juárez and Windsor are all no data, as is the open sea. Older tiles are
+  different: they carry fill for Mexico and Canada from other sources. The
+  2013 tile of cell N30W107 lies wholly in Chihuahua and has a height at
+  every post, and so do the Mexican parts of the tiles beside El Paso's.
+  Nobody tested or approved that fill, so a build cuts every tile to the
+  United States (see the recommendation). The review of the build change
+  caught this; the samples of this section lie in cells without such fill.
 - **Datums.** NAD 83 and, in the conterminous states, NAVD 88. Copernicus
   uses WGS 84 and EGM2008. NAD 83 differs from WGS 84 by a metre or two on
   the ground, far less than the 30 m between posts. The height datums differ
@@ -636,7 +642,8 @@ or grade lookup failed, and the ungraded graphs gave the same route for both
 
 #### The seam at the border
 
-Because 3DEP stops at the border, a hybrid is made per post, not per cell:
+Because 3DEP, cut to the United States, stops at the border, a hybrid is
+made per post, not per cell:
 3DEP where it has data, opened Copernicus elsewhere. `sample_elevation.py
 tiles --fill` writes such a cell, and the seam runs along the border line.
 The two sources were compared in a window around each crossing: over the
@@ -678,19 +685,20 @@ is the false part of the step a street would meet:
 - **The build lifts the Copernicus side to meet 3DEP.** A first scratch
   test ramped 3DEP down to the opened surface over the 16 posts inside its
   own edge. That removed the step, but it also pulled real ground down: the
-  Calexico crossing stands at −4 m beside the New River's valley at −9 m,
-  and the opening had flattened the rise between them. `build_elevation.py
-  --terrain-sources` therefore leaves 3DEP's posts alone. It lifts the
-  opened posts within 16 posts (about 500 m) of 3DEP's data by the
-  difference at the edge, fading to nothing. On the Calexico cell built
-  that way, 3DEP's 4,364,089 posts are unchanged and 57,616 opened posts
-  are lifted. The difference between the two sides of the edge fell from
-  2 m at the median, 6 m at the 90th percentile and 163 m at the most to
-  0 m, 0 m and 15 m. The 163 m was a 528 m summit in the mountains at the
-  west end of the cell, which raw Copernicus also reads as 528 m and the
-  opening had cut to 365 m. In Valhalla the outbound crossing edge reads
-  1% in place of 4%. The inbound edge still reads 7%, and rightly: it runs
-  down into the river's valley, which 3DEP and raw Copernicus both show.
+  Calexico crossing stands on the bank of the New River's valley, which
+  3DEP and raw Copernicus both show about 10 m deep, and the opening had flattened
+  the bank. `build_elevation.py --terrain-sources` therefore leaves 3DEP's
+  posts alone. It lifts the opened posts within 16 posts (about 500 m) of
+  3DEP's data by the difference at the edge, fading to nothing. On the
+  Calexico cell built that way, 3DEP's 4,355,711 posts are unchanged and
+  the opened posts beside them are lifted. The difference between the two
+  sides of the edge fell from 2 m at the median, 5 m at the 90th percentile
+  and 164 m at the most to 0 m, 0 m and 13 m. The 164 m was a 528 m summit
+  in the mountains at the west end of the cell, which raw Copernicus also
+  reads as 528 m and the opening had cut to 365 m. In Valhalla the outbound
+  crossing edge reads 2% in place of 4%, and the inbound one 4% in place of
+  6%, where opened Copernicus alone reads 1% and 2%. What is left is the
+  valley's bank.
 
 #### Recommendation
 
@@ -710,23 +718,30 @@ also get real hills in place of the opened ones. Before a planet build:
    the map-platform image and of the offline-map worker's build identity,
    so a change to it would rebuild the image and move the signed worker.
    The list covers the conterminous United States, where the samples
-   tested 3DEP: 968 dated tiles and 365 GB, pinned in
-   [a catalog](usgs-3dep-13-tiles-20261126.txt). Alaska's tiles come from
+   tested 3DEP. It pins the area, OpenStreetMap's boundary of the country
+   with its territorial sea, and
+   [a catalog](usgs-3dep-13-tiles-20261126.txt) of the 955 dated tiles
+   (364 GB) whose cells touch it; 13 more tiles of the bucket lie wholly in
+   Mexico or Canada. Alaska's tiles come from
    radar, and Hawaii and the territories use other height datums; they stay
    on opened Copernicus until someone tests them.
 2. **`build_elevation.py` learns the hybrid.** Done:
    `--terrain-sources` downloads the catalog's tiles, checks each against
-   its size and ETag, and writes 3DEP's posts over the opened Copernicus
-   tiles, lifting the Copernicus side at 3DEP's edge (see
+   its size and ETag, cuts it to the area, and writes 3DEP's posts over the
+   opened Copernicus tiles, lifting the Copernicus side at 3DEP's edge (see
    [Build and release](README.md#build-and-release)). The Calexico and El
    Paso cells were built that way on a laptop, each with the tiles around
-   it: about 11 minutes a cell, most of it downloading six to eight 3DEP
+   it: about 11 minutes a cell, most of it downloading six or seven 3DEP
    tiles. In both, the terrain tile equals the one `sample_elevation.py
-   tiles` wrote, and the hybrid equals 3DEP at every post 3DEP has. At El
-   Paso the difference across the edge fell from 2 m at the median, 5 m at
-   the 90th percentile and 69 m at the most to 0, 1 and 8 m; Calexico's
-   figures are with the seam above. One catalog tile, N34W076 in the
-   Atlantic off North Carolina, has no Copernicus cell and is left out.
+   tiles` wrote wherever it keeps data, and the hybrid equals 3DEP at every
+   post 3DEP has. The cut matters at El Paso. Its own tile, of 2024, held
+   10,271 posts just beyond the boundary, and the tiles west and south-east
+   of it held 10.2 and 11.7 million posts of fill for Mexico. With those
+   dropped, the difference across 3DEP's edge fell from 1 m at the median,
+   3 m at the 90th percentile and 38 m at the most to 0, 1 and 2 m.
+   Calexico's figures are with the seam above. One catalog tile, N34W076
+   in the Atlantic off North Carolina, has no Copernicus cell and is left
+   out.
 3. **Every bridge is graded as a bridge.** Done: Valhalla's tagging rules
    call a way a bridge only when `bridge` is `yes` or `1`.
    `build_graph.py --all-bridges` builds with those rules changed in one

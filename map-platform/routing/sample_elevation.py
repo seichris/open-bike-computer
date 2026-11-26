@@ -19,8 +19,17 @@ asks to approve one:
   version: it sizes the ellipse for each post row and reads the neighbouring
   cells' posts instead. Away from the box's edges, and where the ellipse
   has the same width, both give the same posts.
+- `tiles` resamples one GeoTIFF per cell onto that cell's posts. The USGS
+  3DEP 1/3 arc-second tiles (a lidar-derived bare-earth model of the United
+  States) come this way: one file per degree, on a grid three times finer
+  than the posts. `--fill` takes the posts a tile has no data for from
+  another elevation directory. The newest 3DEP tiles stop at the border, so
+  filling one with opened Copernicus tiles gives a border cell's hybrid
+  without the blend. build_elevation.py --terrain-sources is the production
+  version: it also cuts the tiles to the United States, because older tiles
+  carry fill beyond the border, and blends the edge.
 
-Both write the same gzipped HGT layout and manifest schema as
+All three write the same gzipped HGT layout and manifest schema as
 build_elevation.py. The manifest always records `bounds`, so build_graph.py
 accepts these tiles only for a `--sample` build.
 """
