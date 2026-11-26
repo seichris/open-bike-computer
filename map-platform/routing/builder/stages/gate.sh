@@ -17,6 +17,14 @@ valhalla_image=$(bicino_valhalla_image)
 for label in ungraded graded; do
   [ -s "$BICINO_BUILD/planet-$label/manifest.json" ] || bicino_fail "no finished $label build"
 done
+# Two graphs built with different tagging rules differ in more than elevation.
+python3 - "$BICINO_BUILD/planet-ungraded/manifest.json" "$BICINO_BUILD/planet-graded/manifest.json" <<'PY'
+import json, sys
+rules = [json.load(open(path))["builder"].get("graphLua") for path in sys.argv[1:]]
+if rules[0] != rules[1]:
+    sys.exit(f"error: the two graphs were built with different tagging rules: {rules[0]} and {rules[1]}")
+print("tagging rules of both graphs:", rules[0] or "the image's own")
+PY
 mkdir -p "$out"
 rm -f "$out/gate-report.json" "$out/gate-summary.json" "$out/gate-summary.md"
 

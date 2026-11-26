@@ -186,13 +186,59 @@ class ChainStateTests(ScratchCase):
         markers = {stage: chain_state.read_marker(self.chain, stage) for stage in ("download", "elevation", "build-graded")}
         self.assertEqual(markers["download"]["settings"], {"BICINO_PLANET_DATE": "261116", "BICINO_SAMPLE_CITY": "",
                                                            "BICINO_SAMPLE_REGION_URL": ""})
-        self.assertEqual(chain_state.stage_settings("build-ungraded", {}), dict.fromkeys(markers["download"]["settings"], ""))
+        # A terrain source changes the tagging rules of both graphs, so the ungraded build depends on it too.
+        self.assertEqual(chain_state.stage_settings("build-ungraded", {}),
+                         {**dict.fromkeys(markers["download"]["settings"], ""), "BICINO_TERRAIN": ""})
         self.assertEqual(markers["elevation"]["settings"], {"BICINO_MAP_PLATFORM_IMAGE": "", "BICINO_OPENING_RADIUS": "400",
-                                                            "BICINO_SAMPLE_CITY": ""})
+                                                            "BICINO_TERRAIN": "", "BICINO_SAMPLE_CITY": ""})
         # A graph build depends on everything the stages it needs depend on.
         self.assertEqual(set(markers["build-graded"]["settings"]),
                          set(markers["download"]["settings"]) | set(markers["elevation"]["settings"]))
         self.assertEqual({marker["toolsCommit"] for marker in markers.values()}, {"abc123"})
+
+    def test_a_terrain_source_makes_both_graph_builds_and_the_elevation_stale(self):
+        self.finish("images", "download", "inputs", "elevation", "build-ungraded", "build-graded")
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TERRAIN=usgs-3dep-13\n")
+        states = self.states()
+        self.assertEqual({states[stage] for stage in ("elevation", "build-ungraded", "build-graded")}, {"stale"})
+        self.assertEqual({states[stage] for stage in ("images", "download", "inputs")}, {"done"})
+        status = chain_state.chain_status(self.root, self.clock)[0]
+        self.assertEqual(status["run"]["terrainSource"], "usgs-3dep-13")
+        stale = next(entry for entry in status["stages"] if entry["stage"] == "build-ungraded")
+        self.assertEqual(stale["reason"], "done under other settings: BICINO_TERRAIN was '', is now 'usgs-3dep-13'")
+
+    def test_a_hybrid_run_records_every_tile_set(self):
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TERRAIN=usgs-3dep-13\n")
+        self.finish(*chain_state.STAGES)
+        self.write_gate_summary({"usgs-3dep-13-over-opened-400": []})
+        sets = {"elevation-raw": "elevation-manifest.json", "elevation-opened": "elevation-manifest.json",
+                "elevation-terrain": "terrain-manifest.json", "elevation": "elevation-manifest.json"}
+        for directory, manifest in sets.items():
+            (self.root / directory).mkdir()
+            (self.root / directory / manifest).write_text(json.dumps({"set": directory}))
+            (self.root / directory / "cells.txt").write_text(f"{directory}\n")
+        result = chain_state.write_result(self.root, final=True, clock=self.clock)
+        self.assertEqual(result["elevation"], {"raw": {"set": "elevation-raw"}, "opened": {"set": "elevation-opened"},
+                                               "terrain": {"set": "elevation-terrain"}, "hybrid": {"set": "elevation"}})
+        evidence = self.root / "export" / "evidence"
+        self.assertEqual({kind: (evidence / f"elevation-{kind}" / "cells.txt").read_text().strip()
+                          for kind in ("raw", "opened", "terrain", "hybrid")},
+                         {"raw": "elevation-raw", "opened": "elevation-opened", "terrain": "elevation-terrain",
+                          "hybrid": "elevation"})
+        self.assertEqual(json.loads((evidence / "elevation-terrain" / "terrain-manifest.json").read_text()),
+                         {"set": "elevation-terrain"})
+        # The next run on this scratch has no terrain source. The earlier run's directories are still
+        # there, but `elevation/` now holds the opened tiles its graph is graded with, and nothing else counts.
+        (self.root / "builder.env").write_text(GRADED_ENV)
+        (self.root / "elevation" / "elevation-manifest.json").write_text('{"set": "opened again"}')
+        for marker in self.chain.glob("*.json"):
+            marker.unlink()
+        self.finish(*chain_state.STAGES)
+        result = chain_state.write_result(self.root, final=True, clock=self.clock)
+        self.assertEqual(result["elevation"], {"raw": {"set": "elevation-raw"}, "opened": {"set": "opened again"}})
+        self.assertEqual(sorted(path.name for path in evidence.glob("elevation-*")), ["elevation-opened", "elevation-raw"])
+        self.assertEqual(json.loads((evidence / "elevation-opened" / "elevation-manifest.json").read_text()),
+                         {"set": "opened again"})
 
     def test_work_done_under_other_settings_is_stale_not_reused(self):
         self.finish("images", "download", "inputs", "elevation", "build-ungraded", "build-graded")
@@ -773,6 +819,12 @@ class ScriptTests(unittest.TestCase):
             loaded = self.source_config('echo "$BICINO_SAMPLE_CITY|$BICINO_OPENING_RADIUS|$(bicino_graded_name)"',
                                         BICINO_SCRATCH=directory, BICINO_OPENING_RADIUS="200")
             self.assertEqual(loaded.stdout.strip(), "New York|400|opened-400")
+            env.write_text("BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
+            hybrid = self.source_config('echo "$(bicino_graded_name)|$BICINO_ELEVATION|$BICINO_ELEVATION_OPENED|'
+                                        '$BICINO_ELEVATION_TERRAIN"; bicino_is_hybrid', BICINO_SCRATCH=directory)
+            self.assertEqual((hybrid.returncode, hybrid.stdout.strip()),
+                             (0, f"usgs-3dep-13-over-opened-400|{directory}/elevation|{directory}/elevation-opened|"
+                                 f"{directory}/elevation-terrain"))
             for line in ("BICINO_PLANET_DATE=$(touch pwned)", "PATH=/tmp", "BICINO_X='quoted'", "echo hello"):
                 env.write_text(line + "\n")
                 rejected = self.source_config("echo unreachable", BICINO_SCRATCH=directory)
@@ -787,6 +839,9 @@ class ScriptTests(unittest.TestCase):
                      "BICINO_PLANET_DATE=261116\n": 0,
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=USGS 3DEP\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_MAP_PLATFORM_IMAGE=ghcr.io/seichris/open-bike-computer-map-platform:latest\n": 1,
                      "BICINO_SAMPLE_CITY=Berlin\n": 1,
                      "BICINO_SAMPLE_CITY=Berlin\nBICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n": 0}
@@ -794,6 +849,99 @@ class ScriptTests(unittest.TestCase):
                 (Path(directory) / "builder.env").write_text(env)
                 checked = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
                 self.assertEqual(checked.returncode, expected, env + checked.stderr)
+
+    def run_elevation_stage(self, directory, env):
+        """Run the real elevation stage with stand-ins for Docker and the GNU tools; returns it and Docker's calls."""
+        root = Path(directory)
+        (root / "tools" / "repo" / "map-platform").mkdir(parents=True, exist_ok=True)
+        routing = root / "tools" / "repo" / "map-platform" / "routing"
+        if not routing.exists():
+            routing.symlink_to(ROUTING)
+        (root / "builder.env").write_text(env)
+        tools = root / "bin"
+        tools.mkdir(exist_ok=True)
+        calls = root / "docker.txt"
+        calls.write_text("")
+        # The stand-in Docker writes the manifest of every tile set it is given a directory for.
+        (tools / "docker").write_text(f'''#!/bin/bash
+echo "$*" >> "{calls}"
+[ "$1" = run ] || exit 0
+while [ $# -gt 0 ]; do
+  if [ "$1" = -v ]; then
+    case "$2" in
+      *:/terrain) echo '{{}}' > "${{2%%:*}}/terrain-manifest.json" ;;
+      *:/raw|*:/out|*:/opened) echo '{{}}' > "${{2%%:*}}/elevation-manifest.json" ;;
+    esac
+  fi
+  shift
+done
+''')
+        for name in ("sha256sum", "du"):
+            (tools / name).write_text('#!/bin/bash\necho "$0 $*"\n')
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        ran = subprocess.run(["bash", str(BUILDER / "stages" / "elevation.sh")], capture_output=True, text=True,
+                             env={"PATH": f"{tools}:{os.environ['PATH']}", "BICINO_SCRATCH": str(root),
+                                  "BICINO_STAGE": "elevation"})
+        return ran, [line for line in calls.read_text().splitlines() if line.startswith("run ")]
+
+    def test_the_elevation_stage_builds_the_hybrid_only_for_a_terrain_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            plain, runs = self.run_elevation_stage(root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\n")
+            self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+            self.assertEqual(len(runs), 1)
+            self.assertNotIn("terrain", runs[0])
+            self.assertFalse((root / "elevation-terrain").exists())
+            hybrid, runs = self.run_elevation_stage(
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
+            self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
+            self.assertIn("terrain source usgs-3dep-13: 955 tiles", hybrid.stdout)
+            self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
+            self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
+                          "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "
+                          "--jobs 20", runs[0])
+            for manifest in ("elevation-raw/elevation-manifest.json", "elevation/elevation-manifest.json",
+                             "elevation-opened/elevation-manifest.json", "elevation-terrain/terrain-manifest.json"):
+                self.assertIn(f"sha256sum {root}/{manifest}", hybrid.stdout)
+            # A terrain source the source list does not hold stops the stage before anything is built.
+            unknown, runs = self.run_elevation_stage(
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=other-dtm\n")
+            self.assertEqual((unknown.returncode, runs), (1, []))
+            self.assertIn("elevation-sources.json holds usgs-3dep-13, not BICINO_TERRAIN=other-dtm", unknown.stderr)
+
+    def test_a_terrain_source_marks_every_bridge_in_both_builds_and_the_gate_checks_it(self):
+        build = (BUILDER / "stages" / "build.sh").read_text()
+        rule = build.index("if bicino_is_hybrid; then\n  arguments+=(--all-bridges)\nfi")
+        # After the label's own arguments, for ungraded and graded alike, and before the build runs.
+        self.assertLess(build.index('*) bicino_fail "usage: build.sh ungraded|graded" ;;'), rule)
+        self.assertLess(rule, build.index('python3 "$BICINO_ROUTING/build_graph.py"'))
+        gate = (BUILDER / "stages" / "gate.sh").read_text()
+        check = gate[gate.index("python3 - \"$BICINO_BUILD/planet-ungraded/manifest.json\""):gate.index("mkdir -p \"$out\"")]
+        script = check[check.index("<<'PY'\n") + 6:check.index("\nPY\n")]
+        with tempfile.TemporaryDirectory() as directory:
+            manifests = []
+            for name, rules in (("plain", None), ("bridges", {"sha256": "abc"}), ("bridges-too", {"sha256": "abc"})):
+                path = Path(directory) / f"{name}.json"
+                path.write_text(json.dumps({"builder": {"graphLua": rules}}))
+                manifests.append(str(path))
+            same = subprocess.run([sys.executable, "-", manifests[1], manifests[2]], input=script, capture_output=True, text=True)
+            self.assertEqual(same.returncode, 0, same.stderr)
+            mixed = subprocess.run([sys.executable, "-", manifests[0], manifests[1]], input=script, capture_output=True, text=True)
+            self.assertNotEqual(mixed.returncode, 0)
+            self.assertIn("different tagging rules", mixed.stderr)
+
+    def test_setup_and_the_rehearsal_pass_the_terrain_source_on(self):
+        setup = (BUILDER / "setup.sh").read_text()
+        self.assertIn('--terrain) terrain=${2:-}; shift 2 ;;', setup)
+        self.assertIn('[[ -z "$terrain" || -n "$opening_radius" ]] || fail "--terrain needs --opening-radius"', setup)
+        self.assertIn('echo "BICINO_TERRAIN=$terrain"', setup)
+        with tempfile.TemporaryDirectory() as directory:
+            rehearse.write_env(Path(directory), "Chicago", "https://example/illinois.osm.pbf", 400, None, 4, 4,
+                               "usgs-3dep-13")
+            self.assertIn("BICINO_TERRAIN=usgs-3dep-13\n", (Path(directory) / "builder.env").read_text())
+            rehearse.write_env(Path(directory), "Berlin", "https://example/berlin.osm.pbf", 200, None, 4, 4)
+            self.assertIn("BICINO_TERRAIN=\n", (Path(directory) / "builder.env").read_text())
 
     def test_setup_masks_package_upgrades_before_it_installs_anything(self):
         setup = (BUILDER / "setup.sh").read_text()

@@ -40,7 +40,11 @@ BICINO_BUILDER=$BICINO_ROUTING/builder
 BICINO_INPUT=$BICINO_SCRATCH/input
 BICINO_BUILD=$BICINO_SCRATCH/build
 BICINO_ELEVATION_RAW=$BICINO_SCRATCH/elevation-raw
+# The graded build's tiles. With a terrain source these are the hybrid, and
+# the opened Copernicus tiles and the terrain tiles it is made of lie beside it.
 BICINO_ELEVATION=$BICINO_SCRATCH/elevation
+BICINO_ELEVATION_OPENED=$BICINO_SCRATCH/elevation-opened
+BICINO_ELEVATION_TERRAIN=$BICINO_SCRATCH/elevation-terrain
 BICINO_AUDIT=$BICINO_SCRATCH/audit
 BICINO_WORK=$BICINO_SCRATCH/work
 # The VPS pulls from export/ with a read-only identity: markers, logs,
@@ -66,6 +70,9 @@ BICINO_ELEVATION_ATTEMPTS=${BICINO_ELEVATION_ATTEMPTS:-4}
 
 # Empty builds only the ungraded planet, the graph production serves today.
 BICINO_OPENING_RADIUS=${BICINO_OPENING_RADIUS:-}
+# The id of the terrain source of elevation-sources.json to put over the
+# opened tiles, such as usgs-3dep-13. Empty grades with opened Copernicus alone.
+BICINO_TERRAIN=${BICINO_TERRAIN:-}
 BICINO_PLANET_DATE=${BICINO_PLANET_DATE:-}
 BICINO_TOOLS_COMMIT=${BICINO_TOOLS_COMMIT:-}
 
@@ -91,12 +98,21 @@ bicino_is_graded() {
   [ -n "$BICINO_OPENING_RADIUS" ]
 }
 
+bicino_is_hybrid() {
+  [ -n "$BICINO_TERRAIN" ]
+}
+
 bicino_validate_run() {
   [ -d "$BICINO_ROUTING" ] || bicino_fail "no routing tools at $BICINO_ROUTING"
   [[ "$BICINO_MAP_PLATFORM_IMAGE" =~ ^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$ ]] \
     || bicino_fail "BICINO_MAP_PLATFORM_IMAGE must be pinned by digest"
   if [ -n "$BICINO_OPENING_RADIUS" ] && [[ ! "$BICINO_OPENING_RADIUS" =~ ^[0-9]{2,4}$ ]]; then
     bicino_fail "BICINO_OPENING_RADIUS must be whole metres or empty, got: $BICINO_OPENING_RADIUS"
+  fi
+  if bicino_is_hybrid; then
+    [[ "$BICINO_TERRAIN" =~ ^[a-z][a-z0-9-]{2,63}$ ]] \
+      || bicino_fail "BICINO_TERRAIN must be a terrain source id or empty, got: $BICINO_TERRAIN"
+    bicino_is_graded || bicino_fail "BICINO_TERRAIN needs BICINO_OPENING_RADIUS: the terrain lies over opened tiles"
   fi
   local name
   for name in BICINO_ELEVATION_JOBS BICINO_UNGRADED_THREADS BICINO_GRADED_THREADS BICINO_ELEVATION_ATTEMPTS; do
@@ -136,7 +152,11 @@ bicino_roads_file() {
 }
 
 bicino_graded_name() {
-  echo "opened-$BICINO_OPENING_RADIUS"
+  if bicino_is_hybrid; then
+    echo "$BICINO_TERRAIN-over-opened-$BICINO_OPENING_RADIUS"
+  else
+    echo "opened-$BICINO_OPENING_RADIUS"
+  fi
 }
 
 # build_graph.py owns the Valhalla image pin; nothing here repeats it.

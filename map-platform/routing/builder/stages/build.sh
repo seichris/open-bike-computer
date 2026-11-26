@@ -16,6 +16,12 @@ case "$label" in
     ;;
   *) bicino_fail "usage: build.sh ungraded|graded" ;;
 esac
+# A terrain model holds the ground under a deck, so its graph marks every
+# bridge as one. The ungraded twin does too: the gate compares graphs that
+# differ in elevation alone.
+if bicino_is_hybrid; then
+  arguments+=(--all-bridges)
+fi
 
 source_file=$(bicino_source_file)
 [ -s "$source_file.sha256" ] || bicino_fail "$source_file has no verified checksum; the download stage writes it"

@@ -160,9 +160,10 @@ def start_chain(root, units_dir, kill_stage=None, kill_after=None, out=print, in
     return status
 
 
-def write_env(root, city, region_url, radius, image, jobs, threads):
+def write_env(root, city, region_url, radius, image, jobs, threads, terrain=None):
     lines = [f"BICINO_SAMPLE_CITY={city}", f"BICINO_SAMPLE_REGION_URL={region_url}",
-             f"BICINO_OPENING_RADIUS={radius or ''}", f"BICINO_ELEVATION_JOBS={jobs}",
+             f"BICINO_OPENING_RADIUS={radius or ''}", f"BICINO_TERRAIN={terrain or ''}",
+             f"BICINO_ELEVATION_JOBS={jobs}",
              f"BICINO_UNGRADED_THREADS={threads}", f"BICINO_GRADED_THREADS={threads}",
              "BICINO_TOOLS_COMMIT=rehearsal"]
     if image:
@@ -175,6 +176,8 @@ def main(argv=None):
     parser.add_argument("--root", required=True, type=Path, help="The rehearsal's scratch directory")
     parser.add_argument("--city", required=True, help="A city of elevation-probes.json that names an extract")
     parser.add_argument("--radius", type=int, help="Opening radius in metres; without it only the ungraded sample is built")
+    parser.add_argument("--terrain", help="A terrain source id of elevation-sources.json, such as usgs-3dep-13, "
+                                          "to put over the opened tiles; needs --radius")
     parser.add_argument("--date", help="The extract's YYMMDD date on Geofabrik instead of the latest")
     parser.add_argument("--map-platform-image", help="A digest-pinned map-platform image already on this host")
     parser.add_argument("--jobs", type=int, default=4)
@@ -191,8 +194,10 @@ def main(argv=None):
         city = prepare_sample.find_city(cities, args.city)
     except ValueError as error:
         parser.error(str(error))
+    if args.terrain and not args.radius:
+        parser.error("--terrain needs --radius")
     write_env(root, args.city, prepare_sample.region_url(city, args.date), args.radius,
-              args.map_platform_image, args.jobs, args.threads)
+              args.map_platform_image, args.jobs, args.threads, args.terrain)
     os.environ["BICINO_SCRATCH"] = str(root)
     if args.kill_stage:
         start_chain(root, builder / "units", args.kill_stage, args.kill_after)

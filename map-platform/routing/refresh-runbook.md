@@ -78,7 +78,12 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    mounts the ext4 scratch volume at `/srv/bicino-routing-scratch`. It checks
    the tools out at the commit, writes the run's settings and starts the
    chain. Leave out `--opening-radius` to build only the ungraded planet,
-   the graph production serves.
+   the graph production serves. Add `--terrain usgs-3dep-13` to grade with
+   the hybrid of USGS 3DEP and opened Copernicus: the elevation stage then
+   also downloads 3DEP's 955 tiles (364 GB) and blends them in, and both
+   graphs are built with every bridge marked as one (see
+   [the builder's page](builder/README.md#the-chain)). No builder has run
+   that yet.
 6. Ask where the build stands whenever you like. Copy
    `builder/builder_status.py` to the VPS once, or run it from a laptop with
    `--via`:
