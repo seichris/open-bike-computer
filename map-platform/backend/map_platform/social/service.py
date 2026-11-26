@@ -58,10 +58,13 @@ def row(c, table, condition):
     return dict(result)
 
 
+LIBRARY_SOURCE_PREFIX = "library:"
+
+
 def shareable_body(body):
-    """A content body without the owner's private website library card fields."""
-    if isinstance(body, dict) and "website" in body:
-        return {k: v for k, v in body.items() if k != "website"}
+    """A content body without the owner's private library card and sync fields."""
+    if isinstance(body, dict) and ("website" in body or "library" in body):
+        return {k: v for k, v in body.items() if k not in {"website", "library"}}
     return body
 
 
@@ -342,29 +345,37 @@ class SocialService:
             raise SocialError("fresh_invitation_required", 409)
         return result
 
-    def upload_route(self, c, actor, data, website=None):
-        self.db.lock(c, actor)
-        self.active(c, actor)
+    @staticmethod
+    def parse_route_upload(archive_text, payload_text, library=False):
+        """Decode and fully validate an uploaded route archive and its exact hash payload."""
         try:
-            archive = json.loads(data.archive, object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-            payload = json.loads(data.hashPayload, object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            archive = json.loads(archive_text, object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            payload = json.loads(payload_text, object_pairs_hook=unique_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             if (payload != {k: v for k, v in archive.items() if k != "contentHash"}
-                    or digest(data.hashPayload) != archive.get("contentHash")):
+                    or digest(payload_text) != archive.get("contentHash")):
                 raise ValueError()
             from .route_archive import validate_archive
-            validate_archive(archive)
+            validate_archive(archive, library=library)
             route = archive["route"]
             points = route["points"]
             from .models import Point
             if (archive["schemaVersion"] != 1 or len(points) < 2 or len(points) > 20000
-                    or route.get("sourceReference") or archive.get("deleteAfter") is not None
                     or not isinstance(archive["contentHash"], str) or len(archive["contentHash"]) != 64):
+                raise ValueError()
+            if not library and (route.get("sourceReference") or archive.get("deleteAfter") is not None):
                 raise ValueError()
             for point in points:
                 Point.model_validate(point)
             uuid.UUID(route["id"])
-        except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        except (ValueError, KeyError, TypeError, AttributeError, OverflowError, RecursionError):
             raise SocialError("route_not_redistributable") from None
+        return archive, route
+
+    def upload_route(self, c, actor, data, website=None):
+        self.db.lock(c, actor)
+        self.active(c, actor)
+        archive, route = self.parse_route_upload(data.archive, data.hashPayload)
+        points = route["points"]
         fingerprint = route_fingerprint(points)
         if c.scalar(select(exposures.c.owner).where(and_(exposures.c.viewer == actor,
                 exposures.c.fingerprint == fingerprint, exposures.c.owner != actor)).limit(1)) is not None:
@@ -383,6 +394,107 @@ class SocialService:
                 "body": body, "source": None, "created": self.now(), "fingerprint": fingerprint}
         c.execute(content.insert().values(**item))
         return item
+
+    # The account route library: one private row per app route ID, synced
+    # between the iPhone app and bicino.com. `content.source` holds the route
+    # ID, so (owner, kind, source) uniqueness gives one row per route.
+    LIBRARY_QUOTA = 500
+
+    @staticmethod
+    def library_source(route_id):
+        return LIBRARY_SOURCE_PREFIX + str(uuid.UUID(route_id)).upper()
+
+    @staticmethod
+    def is_library_row(item):
+        return isinstance(item.get("source"), str) and item["source"].startswith(LIBRARY_SOURCE_PREFIX)
+
+    def library_row(self, c, actor, route_id):
+        try:
+            source = self.library_source(route_id)
+        except ValueError:
+            raise SocialError("not_found", 404) from None
+        item = c.execute(select(content).where(and_(content.c.owner == actor, content.c.kind == "route",
+                                                    content.c.source == source))).mappings().first()
+        if item is None:
+            raise SocialError("not_found", 404)
+        return dict(item)
+
+    def put_library_route(self, c, actor, route_id, data, extras=None):
+        """Create or replace the library row for one route ID.
+
+        Identical content only updates the title. A newer route revision (for
+        example a reloaded Strava route) replaces the archive and keeps the
+        owner's website card fields. An older revision is refused.
+        """
+        self.db.lock(c, actor)
+        self.active(c, actor)
+        archive, route = self.parse_route_upload(data.archive, data.hashPayload, library=True)
+        if str(uuid.UUID(route["id"])).upper() != str(uuid.UUID(route_id)).upper():
+            raise SocialError("route_id_mismatch")
+        source = self.library_source(route_id)
+        existing = c.execute(select(content).where(and_(content.c.owner == actor, content.c.kind == "route",
+                                                        content.c.source == source))).mappings().first()
+        from . import website_routes
+        library = {"routeID": str(uuid.UUID(route_id)).upper(), "contentHash": archive["contentHash"],
+                   "routeRevision": route["revision"], "providerID": route["provider"]["providerID"]}
+        if existing is not None:
+            previous = existing["body"].get("library") or {}
+            if previous.get("contentHash") == archive["contentHash"]:
+                if data.title != existing["title"]:
+                    c.execute(update(content).where(content.c.id == existing["id"]).values(
+                        title=data.title, revision=existing["revision"] + 1))
+                return dict(row(c, content, content.c.id == existing["id"]))
+            if route["revision"] <= previous.get("routeRevision", 0):
+                raise SocialError("stale_route_revision", 409)
+            card = dict(existing["body"].get("website") or {})
+        else:
+            if c.scalar(select(func.count()).select_from(content).where(content.c.owner == actor)) >= self.LIBRARY_QUOTA:
+                raise SocialError("content_quota", 429)
+            card = {"favorite": False}
+        card.update(website_routes.card_details(route))
+        for key, value in (extras or {}).items():
+            if value is not None:
+                card[key] = value
+        body = {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload,
+                "distanceMeters": route["distanceMeters"], "website": card, "library": library}
+        values = {"title": data.title, "body": body, "fingerprint": route_fingerprint(route["points"])}
+        if existing is not None:
+            c.execute(update(content).where(content.c.id == existing["id"]).values(
+                revision=existing["revision"] + 1, **values))
+            return dict(row(c, content, content.c.id == existing["id"]))
+        item = {"id": identifier(), "owner": actor, "kind": "route", "visibility": "private", "revision": 1,
+                "source": source, "created": self.now(), **values}
+        c.execute(content.insert().values(**item))
+        return item
+
+    def rename_library_route(self, c, actor, route_id, title):
+        self.db.lock(c, actor)
+        self.active(c, actor)
+        item = self.library_row(c, actor, route_id)
+        if title != item["title"]:
+            c.execute(update(content).where(content.c.id == item["id"]).values(title=title, revision=item["revision"] + 1))
+        return dict(row(c, content, content.c.id == item["id"]))
+
+    def delete_library_route(self, c, actor, route_id):
+        self.db.lock(c, actor)
+        item = self.library_row(c, actor, route_id)
+        return self.delete_content(c, actor, item["id"])
+
+    def library_routes(self, c, actor):
+        """Lean sync rows: no archives leave the database."""
+        query = (select(content.c.id, content.c.source, content.c.title, content.c.revision, content.c.created,
+                        content.c.body["library"].label("library"))
+                 .where(and_(content.c.owner == actor, content.c.kind == "route",
+                             content.c.source.like(LIBRARY_SOURCE_PREFIX + "%")))
+                 .order_by(content.c.created, content.c.id).limit(self.LIBRARY_QUOTA))
+        items = []
+        for value in c.execute(query).mappings():
+            library = value["library"] if isinstance(value["library"], dict) else {}
+            items.append({"id": value["id"], "routeID": value["source"][len(LIBRARY_SOURCE_PREFIX):],
+                          "title": value["title"], "revision": value["revision"], "created": value["created"],
+                          "contentHash": library.get("contentHash"), "routeRevision": library.get("routeRevision"),
+                          "providerID": library.get("providerID")})
+        return items
 
     def upload_activity(self, c, actor, data):
         self.db.lock(c, actor)
@@ -415,6 +527,8 @@ class SocialService:
         item = self.content_read(c, actor, content_id)
         if item["owner"] != actor:
             raise SocialError("not_found", 404)
+        if self.is_library_row(item) and data.visibility != "private":
+            raise SocialError("library_route_private", 409)
         if data.revision != item["revision"]:
             raise SocialError("version_conflict", 409)
         if item["body"].get("needsReprocessing"):
@@ -460,6 +574,9 @@ class SocialService:
             raise SocialError("route_owner_required", 403)
         if source["kind"] != "route":
             raise SocialError("route_required")
+        if self.is_library_row(source):
+            # The app shares a snapshot of its own copy; library rows stay private.
+            raise SocialError("library_route_private", 409)
         code, ride_id = secrets.token_urlsafe(24), identifier()
         start = data.startsAt if data.startsAt is not None else self.now()
         if not self.now()-3600 <= start <= self.now()+30*86400:

@@ -108,20 +108,57 @@ the backend through its normal immutable image-lock promotions before delivering
 the app. This change adds no database migration and does not waive the existing
 deployment, provider-permission or physical acceptance gates.
 
-### bicino.com route library
+### Account route library (app and bicino.com)
 
-bicino.com `/account/routes` imports GPX files into the same account route
-store as native sharing: private `route` content rows owned by the signed-in
-account. The website builds the archive exactly as `GPXRouteImporterV1` does
-(`user.imported-gpx`, generated steps, Swift-compatible `hashPayload`), so
-the app's existing `GET /routes` and archive decoding read these rows.
-`POST /routes` validation, the redistribution check, the 500-item content
-quota and the 30-per-hour publication limit all apply unchanged.
+Each account has a private route library that the iPhone app and
+bicino.com `/account/routes` share. The library has one `route` content row
+per app route ID: `content.source` is `library:<ROUTE-UUID>`, and the
+`(owner, kind, source)` uniqueness keeps that to a single row. No schema
+change is involved. Library rows are always private: changing their
+visibility, share links and group rides all return `409 library_route_private`.
+The app shares a separate snapshot through `POST /routes`, as before. The
+native `GET /routes` list omits library rows.
+
+The native API, behind the `routes` feature and advertised as the
+`routeLibrary` capability:
+
+- `GET /library/routes` returns sync rows: `id`, `routeID`, `title`, `revision`,
+  `created`, `contentHash`, `routeRevision` and `providerID`. No archives are
+  included. `GET /routes/{id}` returns the archive for a row the account owns.
+- `PUT /library/routes/{routeID}` takes `title`, `archive`, `hashPayload` and
+  the optional `elevationGainMeters` and `durationSeconds`, and creates or
+  replaces the row.
+  - Identical content updates only the title.
+  - A higher route revision replaces the archive and keeps the website star
+    (for example, a reloaded Strava route).
+  - A lower revision returns `409 stale_route_revision`.
+  - The path ID must match the archive's route ID.
+  - The 500-item content quota applies, with a separate 600-per-hour `library`
+    rate limit.
+- `PATCH /library/routes/{routeID}` takes `{title}`.
+- `DELETE /library/routes/{routeID}` stays available while `routes` is
+  rolled back.
+
+The library accepts imported GPX and the app's Strava API archives, which carry
+their Strava `sourceReference` and seven-day `deleteAfter`. Saved Apple Maps
+and Bicino-planned routes keep their phone-only scope and are refused.
+**Maintainer decision, 2026-11-26:** Strava routes sync to the library and the
+server keeps them without the app's seven-day expiry. Strava's API agreement
+limits caching of Strava data to seven days, so this is a recorded product
+decision, not a reading of those terms. The app's own lease and reload rules
+are unchanged. A private copy of a route that another rider shared is allowed
+in the library because it is never redistributed. `POST /routes` still refuses
+to republish that geometry.
+
+bicino.com imports GPX files into the same library. The website builds the
+archive exactly as `GPXRouteImporterV1` does (`user.imported-gpx`, generated
+steps, Swift-compatible `hashPayload`), so the app can download and decode it.
+It lists library rows only, which means shared snapshots never appear twice.
 
 The website holds only its HTTP-only Firebase session cookie, not an ID token.
 Its server verifies that cookie (with revocation), then calls
 `/v1/social/internal/website/routes` (`POST …/list`, `POST`, `PATCH /{id}`,
-`DELETE /{id}`). Each request body names the account (`uid`, `project`,
+`DELETE /{id}`). A website import is a library upsert keyed by its new route ID. Each request body names the account (`uid`, `project`,
 `issuedAt`, `nonce`). `X-Bicino-Website-Signature` is the hex HMAC-SHA256 of
 `METHOD\npath\nbody`, where `path` is below the `/v1/social` mount. The key is
 `HMAC-SHA256(BICINO_SOCIAL_DELETION_SECRET, "bicino-website-routes-v1")`.
@@ -131,16 +168,18 @@ its `Idempotency-Key`, so a replay returns the recorded result. Listing never
 creates a social account; the first import does.
 
 Every route upload, native or website, stores card fields in `body.website`:
-the provider and, for imported GPX only, an encoded-polyline preview of at
-most 120 points. The preview is computed after archive validation with
+the provider and, for imported GPX and Strava routes, an encoded-polyline
+preview of at most 120 points. Strava cards also keep the canonical Strava
+route URL, which the website shows as a "View on Strava" link. Library sync
+fields live in `body.library`. The preview is computed after archive validation with
 bounded work: a stride to 1,000 points, then farthest-point insertion. Website
 imports add elevation gain and duration read from the file, and the star.
 These are the owner's private fields. `public_content` and group-ride
-snapshots strip `body.website`, so friends, link holders and ride members
+snapshots strip `body.website` and `body.library`, so friends, link holders and ride members
 never receive them. The list selects only the title, distance and card
 members, so archives never leave the database. Routes stored before card fields existed list without a
 preview. Saved Apple Maps routes never get geometry on the website, because
-it draws on OpenStreetMap tiles. Renaming uses the native optimistic
+it draws on OpenStreetMap tiles, and they are not in the library. Renaming uses the native optimistic
 `revision`. Starring changes no route content and needs no revision.
 Deletion stays available while the routes feature is rolled back. The bridge
 is charged per account subject (1,200 requests per hour) and then per account
