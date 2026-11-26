@@ -31,14 +31,13 @@ import hashlib
 import json
 import math
 import os
-import re
 import sys
 import urllib.request
 from pathlib import Path
 
 from build_elevation import (
-    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, encode_posts, fetch, hgt_name, hgt_path,
-    resample_into,
+    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, cell_of, encode_posts, fetch, hgt_name,
+    hgt_path, post_transform, resample_into,
 )
 
 FORMAT = "srtm-hgt-1-arcsecond-int16-big-endian-gzip"
@@ -49,13 +48,6 @@ def cells_in(bounds):
     if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
         raise ValueError("bounds must be whole degrees, west < east and south < north")
     return [(x, y) for y in range(south, north) for x in range(west, east)]
-
-
-def post_transform(longitude, latitude):
-    """Affine of the 3601 x 3601 posts of a cell, each post at a pixel centre."""
-    from affine import Affine
-
-    return Affine(STEP, 0, longitude - STEP / 2, 0, -STEP, latitude + 1 + STEP / 2)
 
 
 def write_hgt(out, cell, heights):
@@ -109,16 +101,6 @@ def cog_cell(dataset, cell):
     if array is not None:
         resample_into(heights, post_transform(*cell), array, transform, 0)
     return heights
-
-
-def cell_of(name):
-    """South-west corner (longitude, latitude) of an HGT cell name such as N40W074."""
-    match = re.fullmatch(r"([NS])(\d{2})([EW])(\d{3})", name)
-    if match:
-        cell = (int(match[4]) * (1 if match[3] == "E" else -1), int(match[2]) * (1 if match[1] == "N" else -1))
-        if hgt_name(*cell) == name:
-            return cell
-    raise ValueError(f"{name!r} is not an HGT cell name such as N40W074")
 
 
 def tile_sources(values, cells):

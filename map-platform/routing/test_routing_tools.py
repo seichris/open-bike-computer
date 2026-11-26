@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ import compare_elevation
 import probe_graph
 import probe_profiles
 import sample_elevation
+import terrain_catalog
 
 
 def write_archive(path, offset=1536):
@@ -254,7 +256,7 @@ class ElevationReceiptTests(unittest.TestCase):
         cells = [(8, 47), (9, 47), (10, 47)]
         built, calls = set(), []
 
-        def run_pool(pending, chosen, out, jobs, opening=None):
+        def run_pool(pending, chosen, out, jobs, opening=None, stage=None):
             calls.append(list(pending))
             built.add(pending[0])
             if len(calls) == 1:
@@ -519,6 +521,413 @@ class ElevationOpeningTests(unittest.TestCase):
             with self.subTest(arguments=arguments), patch("sys.argv", argv), \
                     patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
                 build_elevation.main()
+
+
+class ElevationHybridTests(ElevationOpeningTests):
+    """Terrain tiles over opened tiles, on the opening tests' 41-post cells."""
+
+    BAND = 6
+
+    class Policy:
+        version = 2
+        sources = [type("S", (), {"id": "glo30", "index_sha256": "i", "terms_url": "t", "attribution_url": "a"})]
+
+    def terrain_source(self, cells):
+        tiles = {cell: (f"n{cell[1] + 1:02d}w{-cell[0]:03d}", "20260101", 7, "0" * 32) for cell in cells}
+        return build_elevation.TerrainSource("usgs-3dep-13", "https://terrain.example", tiles, "c" * 64,
+                                             "https://terms.example", "https://credit.example")
+
+    def write_terrain(self, directory, source, tiles):
+        (directory / "receipts").mkdir(parents=True)
+        for cell, heights in tiles.items():
+            build_elevation.write_receipt(directory, {
+                "cell": build_elevation.hgt_name(*cell), "source": source.id, "url": source.tile_url(*cell),
+                "bytes": 7, **build_elevation.write_tile(directory, cell, heights)})
+
+    def hybrid_setup(self, root, cells, terrain_tiles):
+        """Opened tiles of `cells` and terrain tiles; returns chosen and the Hybrid."""
+        chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+        opening = self.open_in_order(root / "raw", root / "opened", chosen, cells)
+        source = self.terrain_source(terrain_tiles)
+        self.write_terrain(root / "terrain", source, terrain_tiles)
+        (root / "out" / "receipts").mkdir(parents=True)
+        return chosen, build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+
+    def test_the_fill_is_lifted_to_the_terrain_and_fades_out(self):
+        import numpy as np
+
+        terrain = np.full((9, 30), np.nan, dtype="float32")
+        terrain[:, :10] = 10
+        fill = np.full((9, 30), 4, dtype="float32")
+        fill[4, 3] = np.nan       # under the terrain: the terrain post stays
+        fill[2, 20] = np.nan      # beyond it: no data stays no data
+        heights, known, blended = build_elevation.blend_fill(terrain, fill, 8)
+        np.testing.assert_array_equal(heights[:, :10], 10)
+        self.assertEqual((int(known.sum()), int(blended.sum())), (90, 9 * 8))
+        # Steps 1 to 8 beyond the edge carry 6 m with weights 8/9 down to 1/9; then the fill alone.
+        np.testing.assert_allclose(heights[0, 10:18], 4 + 6 * np.arange(8, 0, -1) / 9, rtol=1e-6)
+        np.testing.assert_array_equal(heights[0, 18:], 4)
+        self.assertTrue(np.isnan(heights[2, 20]) and not blended[2, 20])
+        # Row 4's terrain post at the edge carries nothing. The rows beside it lift the row a step late,
+        # at weights 7/9, 6/9, ... in place of 8/9, 7/9, ...; it is not left at the fill's height.
+        fill[4, 3], fill[4, 9] = 4, np.nan
+        heights = build_elevation.blend_fill(terrain, fill, 8)[0]
+        np.testing.assert_allclose(heights[4, 10:13], 4 + 6 * np.array([7, 6, 5]) / 9, rtol=1e-6)
+        np.testing.assert_allclose(heights[3, 10:13], 4 + 6 * np.array([8, 7, 6]) / 9, rtol=1e-6)
+        # Nothing to meet: the fill unchanged; nothing to fill: the terrain unchanged.
+        np.testing.assert_array_equal(build_elevation.blend_fill(np.full_like(fill, np.nan), fill, 8)[0], fill)
+        np.testing.assert_array_equal(build_elevation.blend_fill(fill * 0 + 7, fill, 8)[0][0], 7)
+
+    def test_a_ragged_edge_is_carried_as_the_mean_of_the_nearer_posts(self):
+        import numpy as np
+
+        rng = np.random.default_rng(5)
+        terrain = rng.uniform(0, 40, (60, 60)).astype("float32")
+        terrain[rng.uniform(size=terrain.shape) < 0.5] = np.nan
+        terrain[20:45, 15:50] = np.nan
+        fill = rng.uniform(0, 40, (60, 60)).astype("float32")
+        heights, known, blended = build_elevation.blend_fill(terrain, fill, 5)
+        np.testing.assert_array_equal(heights[known], terrain[known])
+        self.assertFalse((known & blended).any())
+        far = np.zeros_like(known)
+        far[27:38, 22:43] = True  # more than five steps from any terrain post
+        np.testing.assert_array_equal(heights[far], fill[far])
+        # A post between two terrain posts takes the mean of their differences at weight 5/6.
+        terrain = np.array([[8, np.nan, 2]], dtype="float32")
+        fill = np.array([[5, 1, 5]], dtype="float32")
+        self.assertAlmostEqual(float(build_elevation.blend_fill(terrain, fill, 5)[0][0, 1]), 1 + 5 / 6 * 0, places=6)
+        # A window with a margin of the band gives every post the whole array's value.
+        terrain = rng.uniform(0, 40, (60, 60)).astype("float32")
+        terrain[:, 30:] = np.nan
+        terrain[rng.uniform(size=terrain.shape) < 0.2] = np.nan
+        fill = rng.uniform(0, 40, (60, 60)).astype("float32")
+        whole = build_elevation.blend_fill(terrain, fill, 5)[0]
+        part = build_elevation.blend_fill(terrain[10:50, 15:55], fill[10:50, 15:55], 5)[0]
+        np.testing.assert_array_equal(part[5:-5, 5:-5], whole[15:45, 20:50])
+
+    def test_a_blended_cell_equals_its_cut_from_the_blend_of_its_neighbourhood(self):
+        import numpy as np
+
+        centre = (-84, 42)
+        cells = [(x, y) for x in range(-86, -81) for y in range(40, 45)]
+        ring = [(x, y) for x in range(-85, -82) for y in range(41, 44)]
+        rng = np.random.default_rng(9)
+        # The terrain covers the centre's west and its western neighbours, with holes; nothing to the east.
+        terrain_tiles = {}
+        for cell in ring:
+            if cell[0] > -84:
+                continue
+            heights = rng.uniform(100, 160, (self.POSTS, self.POSTS)).astype("float32")
+            heights[rng.uniform(size=heights.shape) < 0.1] = np.nan
+            if cell == centre:
+                heights[:, 25:] = np.nan
+            terrain_tiles[cell] = heights
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            opening = self.open_in_order(root / "raw", root / "opened", chosen, cells)
+            source = self.terrain_source(terrain_tiles)
+            self.write_terrain(root / "terrain", source, terrain_tiles)
+            (root / "out" / "receipts").mkdir(parents=True)
+            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            receipt = build_elevation.hybrid_cell(centre, chosen, root / "out", hybrid)
+
+            def stored(directory, cell):
+                return build_elevation.read_tile(build_elevation.hgt_path(directory, *cell))[0]
+
+            # As in a window: the southern then the eastern tile wins a shared border post, with or without data.
+            order = sorted(ring, key=lambda cell: (-cell[1], cell[0]))
+            opened, west, north = sample_elevation.mosaic(order, lambda cell: stored(root / "opened", cell))
+            terrain = np.full_like(opened, np.nan)
+            for cell in order:
+                if cell in terrain_tiles:
+                    row, column = (north - 1 - cell[1]) * (self.POSTS - 1), (cell[0] - west) * (self.POSTS - 1)
+                    terrain[row:row + self.POSTS, column:column + self.POSTS] = stored(root / "terrain", cell)
+            expected = sample_elevation.cut(build_elevation.blend_fill(terrain, opened, self.BAND)[0], west, north,
+                                            centre)
+            payload, _ = build_elevation.encode_posts(expected)
+            self.assertEqual(receipt["hgtSha256"], hashlib.sha256(payload).hexdigest())
+            self.assertGreater(receipt["terrainPosts"], 500)
+            self.assertGreater(receipt["blendedPosts"], 100)
+            self.assertEqual(sorted(receipt["inputTiles"]["terrain"]),
+                             sorted(build_elevation.hgt_name(*cell) for cell in terrain_tiles))
+            self.assertEqual(len(receipt["inputTiles"]["opened"]), 9)
+            # The cells beside the centre get the same posts on the borders they share with it.
+            for cell in ((-83, 42), (-85, 42), (-84, 43)):
+                build_elevation.hybrid_cell(cell, chosen, root / "out", hybrid)
+            np.testing.assert_array_equal(stored(root / "out", centre)[:, -1], stored(root / "out", (-83, 42))[:, 0])
+            np.testing.assert_array_equal(stored(root / "out", centre)[:, 0], stored(root / "out", (-85, 42))[:, -1])
+            np.testing.assert_array_equal(stored(root / "out", centre)[0], stored(root / "out", (-84, 43))[-1])
+
+    def test_cells_away_from_the_terrain_are_their_opened_tiles(self):
+        cells = [(x, y) for x in range(-86, -81) for y in range(40, 45)]
+        ring = [(x, y) for x in range(-85, -82) for y in range(41, 44)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            opening = self.open_in_order(root / "raw", root / "opened", chosen, ring)
+            source = self.terrain_source({})
+            self.write_terrain(root / "terrain", source, {})
+            (root / "out" / "receipts").mkdir(parents=True)
+            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            receipt = build_elevation.hybrid_cell((-84, 42), chosen, root / "out", hybrid)
+            path = build_elevation.hgt_path(Path(), -84, 42)
+            self.assertEqual((root / "out" / path).read_bytes(), (root / "opened" / path).read_bytes())
+            self.assertEqual(receipt["inputTiles"], {"opened": {"N42W084": receipt["hgtSha256"]}, "terrain": {}})
+            self.assertEqual((receipt["terrainPosts"], receipt["blendedPosts"]), (0, 0))
+            self.assertIsNotNone(build_elevation.current_hybrid_receipt(root / "out", (-84, 42), chosen, hybrid))
+
+    def test_blended_receipts_follow_their_tiles_and_the_manifest_names_both_sources(self):
+        import numpy as np
+
+        cells = [(x, y) for x in range(-86, -81) for y in range(40, 45)]
+        west = np.full((self.POSTS,) * 2, 120, dtype="float32")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chosen = self.write_raw(root / "raw", self.random_tiles(cells))
+            opening = self.open_in_order(root / "raw", root / "opened", chosen, cells)
+            source = self.terrain_source({(-85, 42): west})
+            self.write_terrain(root / "terrain", source, {(-85, 42): west})
+            (root / "out" / "receipts").mkdir(parents=True)
+            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            policy_path = root / "policy.json"
+            policy_path.write_text("{}")
+            list_path = root / "elevation-sources.json"
+            list_path.write_text("{}")
+            build_elevation.write_manifest(root / "raw", policy_path, self.Policy, chosen, cells, [-87, 39, -80, 46])
+            build_elevation.write_manifest(root / "opened", policy_path, self.Policy, chosen, cells,
+                                           [-86, 40, -81, 45], opening)
+            terrain_manifest = build_elevation.write_terrain_manifest(root / "terrain", list_path, source,
+                                                                      [(-85, 42)], [-86, 40, -81, 45])
+            for cell in [(-85, 42), (-84, 42)]:
+                build_elevation.hybrid_cell(cell, chosen, root / "out", hybrid)
+            manifest = json.loads(build_elevation.write_manifest(
+                root / "out", policy_path, self.Policy, chosen, [(-85, 42), (-84, 42)], [-85, 42, -83, 43], opening,
+                hybrid).read_text())
+            method = manifest["method"]
+            self.assertEqual((method["name"], method["terrain"], method["blendPosts"], method["fill"]["name"]),
+                             ("terrain-over-opening", "usgs-3dep-13", self.BAND, "grey-opening"))
+            self.assertEqual(method["inputs"]["terrain"]["manifestSha256"],
+                             hashlib.sha256(terrain_manifest.read_bytes()).hexdigest())
+            # The eastern cell has no tile of its own, but the border column it shares with the western one.
+            self.assertEqual([(s["id"], s["cells"]) for s in manifest["sources"]], [("glo30", 2), ("usgs-3dep-13", 2)])
+            self.assertEqual(manifest["sources"][1]["posts"], self.POSTS ** 2 + self.POSTS)
+            # The eastern cell's posts within the band of that column are lifted, bar the few without data.
+            blended = manifest["sources"][1]["blendedPosts"]
+            self.assertTrue(self.POSTS * (self.BAND - 1) <= blended <= self.POSTS * self.BAND, blended)
+            identity = elevation_identity(root / "out", sample=True)
+            self.assertEqual((identity["sources"], identity["method"]), (["glo30", "usgs-3dep-13"], method))
+            # The terrain tiles alone are not an elevation set a graph may be graded with.
+            (root / "terrain" / "elevation-manifest.json").write_bytes(terrain_manifest.read_bytes())
+            with self.assertRaisesRegex(ValueError, "Not a Valhalla elevation manifest"):
+                elevation_identity(root / "terrain", sample=True)
+            # A changed terrain tile, another band or a missing opened neighbour makes the receipt stale.
+            self.assertIsNotNone(build_elevation.current_hybrid_receipt(root / "out", (-84, 42), chosen, hybrid))
+            self.assertIsNone(build_elevation.current_hybrid_receipt(
+                root / "out", (-84, 42), chosen, build_elevation.Hybrid(source, hybrid.tiles, hybrid.opened, opening, 3)))
+            self.write_terrain(root / "terrain2", source, {(-85, 42): west + 1})
+            moved = build_elevation.Hybrid(source, root / "terrain2", hybrid.opened, opening, self.BAND)
+            self.assertIsNone(build_elevation.current_hybrid_receipt(root / "out", (-84, 42), chosen, moved))
+            build_elevation.write_tile(root / "terrain", (-85, 42), west + 2)
+            with self.assertRaisesRegex(ValueError, "do not match"):
+                build_elevation.hybrid_cell((-84, 42), chosen, root / "out", hybrid)
+            (root / "opened" / "receipts" / "N43W084.json").unlink()
+            self.assertIsNone(build_elevation.hybrid_inputs((-84, 42), chosen, hybrid))
+            with self.assertRaisesRegex(ValueError, "no current opened or terrain tile"):
+                build_elevation.hybrid_cell((-84, 42), chosen, root / "out", hybrid)
+
+    def test_terrain_and_blend_stages_run_under_the_cell_deadline(self):
+        source = self.terrain_source({})
+        hybrid = build_elevation.Hybrid(source, Path("terrain"), Path("opened"), build_elevation.Opening(400.0, Path("raw")))
+        for stage, function in ((build_elevation.TERRAIN, "build_terrain_cell"), (hybrid, "hybrid_cell")):
+            alarms = []
+            with self.subTest(function=function), patch.object(build_elevation.signal, "alarm", alarms.append), \
+                    patch.object(build_elevation, function, side_effect=OSError("offline")) as called, \
+                    patch.dict(build_elevation._WORKER, chosen={}, out=Path("."), opening=None, stage=stage):
+                with self.assertRaises(OSError):
+                    build_elevation._build((-84, 42))
+                self.assertEqual(called.call_count, 1)
+                self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
+
+    def terrain_tile(self, cell, pixels, crs="EPSG:4269", shift=0):
+        """A GeoTIFF laid out as the cell's 3DEP tile, at the tests' 41 posts."""
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        fine = build_elevation.STEP / 3
+        memory = MemoryFile()
+        with memory.open(driver="GTiff", width=pixels.shape[1], height=pixels.shape[0], count=1, dtype="float32",
+                         crs=crs, nodata=-999999,
+                         transform=Affine(fine, 0, cell[0] - 6 * fine + shift, 0, -fine, cell[1] + 1 + 6 * fine)) as dataset:
+            dataset.write(pixels, 1)
+        return memory
+
+    def test_a_3dep_tile_gives_its_cells_posts_and_no_other_tile_passes(self):
+        import numpy as np
+        import rasterio
+
+        side = (self.POSTS - 1) * 3 + 12
+        rows, columns = np.mgrid[0:side, 0:side]
+        pixels = (200 + 0.1 * (rows + 0.5) + 0.2 * (columns + 0.5)).astype("float32")
+        pixels[90:] = -999999
+        cell = (-74, 40)
+        with self.terrain_tile(cell, pixels) as memory, memory.open() as dataset, rasterio.Env():
+            posts, invalid = build_elevation.terrain_posts(dataset, cell)
+            for other in ((-73, 40), (-74, 41)):
+                with self.assertRaisesRegex(ValueError, "not the 3DEP"):
+                    build_elevation.terrain_posts(dataset, other)
+        self.assertEqual((posts.shape, invalid), ((self.POSTS,) * 2, (side - 90) * side))
+        post_rows, post_columns = np.mgrid[0:27, 0:self.POSTS]
+        np.testing.assert_allclose(posts[:27], 200 + 0.1 * (6 + 3 * post_rows) + 0.2 * (6 + 3 * post_columns), atol=1e-3)
+        self.assertTrue(np.isnan(posts[30:]).all())
+        for tile in (self.terrain_tile(cell, pixels, crs="EPSG:4326"), self.terrain_tile(cell, pixels[:, :-3]),
+                     self.terrain_tile(cell, pixels, shift=build_elevation.STEP / 6)):
+            with tile as memory, memory.open() as dataset, self.assertRaisesRegex(ValueError, "not the 3DEP"):
+                build_elevation.terrain_posts(dataset, cell)
+        pixels[0, 0] = 9000
+        with self.terrain_tile(cell, pixels) as memory, memory.open() as dataset, \
+                self.assertRaisesRegex(ValueError, "lie outside"):
+            build_elevation.terrain_posts(dataset, cell)
+
+    def test_a_tile_is_downloaded_in_ranges_checked_and_removed(self):
+        import numpy as np
+
+        side = (self.POSTS - 1) * 3 + 12
+        cell = (-74, 40)
+        with self.terrain_tile(cell, np.full((side, side), 31.4, dtype="float32")) as memory:
+            data = memory.read()
+        etag = hashlib.md5(data).hexdigest()
+        requests = []
+
+        def fetch_range(url, start, end):
+            requests.append((url, start, end))
+            return data[start:end], len(data), etag
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(build_elevation, "fetch_range", fetch_range), \
+                patch.object(build_elevation, "FETCH_PART", 1000):
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            self.assertEqual(build_elevation.fetch_to_file("https://u/t.tif", out / "t.tif", len(data)),
+                             (hashlib.sha256(data).hexdigest(), etag))
+            self.assertEqual((out / "t.tif").read_bytes(), data)
+            self.assertEqual(sorted(requests)[1], ("https://u/t.tif", 1000, 2000))
+            self.assertEqual(sum(end - start for _, start, end in requests), len(data))
+            with self.assertRaisesRegex(ValueError, "not the catalog's"):
+                build_elevation.fetch_to_file("https://u/t.tif", out / "short.tif", len(data) - 1)
+            source = build_elevation.TerrainSource(
+                "usgs-3dep-13", "https://terrain.example", {cell: ("n41w074", "20260917", len(data), etag)},
+                "c" * 64, "https://terms.example", "https://credit.example")
+            receipt = build_elevation.build_terrain_cell(cell, {cell: source}, out)
+            self.assertEqual((receipt["url"], receipt["bytes"], receipt["sha256"], receipt["tileDate"]),
+                             ("https://terrain.example/n41w074/USGS_13_n41w074_20260917.tif", len(data),
+                              hashlib.sha256(data).hexdigest(), "20260917"))
+            self.assertEqual(build_elevation.current_receipt(out, cell, {cell: source}), receipt)
+            np.testing.assert_array_equal(build_elevation.read_tile(build_elevation.hgt_path(out, *cell))[0], 31)
+            self.assertEqual(list((out / "downloads").iterdir()), [])
+            # A tile the USGS has replaced since the catalog was written stops the cell.
+            stale = build_elevation.TerrainSource(
+                "usgs-3dep-13", "https://terrain.example", {cell: ("n41w074", "20260917", len(data), "f" * 32)},
+                "c" * 64, "https://terms.example", "https://credit.example")
+            with self.assertRaisesRegex(ValueError, "not the catalog's"):
+                build_elevation.build_terrain_cell(cell, {cell: stale}, out)
+            self.assertEqual(list((out / "downloads").iterdir()), [])
+
+    def test_hybrid_arguments_go_together_and_keep_their_directories_apart(self):
+        sources = str(Path(build_elevation.__file__).with_name("elevation-sources.json"))
+        opened = ["--opening-radius", "400", "--raw", "raw"]
+        for arguments in (["--terrain-sources", sources], [*opened, "--terrain-sources", sources, "--terrain", "t"],
+                          ["--terrain-sources", sources, "--terrain", "t", "--opened", "o"],
+                          [*opened, "--terrain-sources", sources, "--terrain", "out/t", "--opened", "o"],
+                          [*opened, "--terrain-sources", sources, "--terrain", "t", "--opened", "raw"],
+                          [*opened, "--terrain-sources", "missing.json", "--terrain", "t", "--opened", "o"]):
+            argv = ["build_elevation.py", "--policy", "missing.json", "--out", "out", *arguments]
+            with self.subTest(arguments=arguments), patch("sys.argv", argv), \
+                    patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                build_elevation.main()
+
+
+class TerrainSourceTests(unittest.TestCase):
+    ROUTING = Path(build_elevation.__file__).parent
+
+    def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
+        source = build_elevation.load_terrain_source(self.ROUTING / "elevation-sources.json")
+        self.assertEqual((source.id, len(source.tiles)), ("usgs-3dep-13", 968))
+        self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
+                                                   "historical/n41w074/USGS_13_n41w074_20260917.tif")
+        # The conterminous United States only: nothing in Alaska, Hawaii or the territories.
+        self.assertTrue(all(-125 <= x <= -66 and 24 <= y <= 49 for x, y in source.tiles))
+        document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = (self.ROUTING / document["terrain"][0]["catalog"]).read_text()
+
+            def load(change, catalog_text=catalog):
+                value = json.loads(json.dumps(document))
+                change(value["terrain"][0])
+                (root / "elevation-sources.json").write_text(json.dumps(value))
+                (root / document["terrain"][0]["catalog"]).write_text(catalog_text)
+                return build_elevation.load_terrain_source(root / "elevation-sources.json")
+
+            self.assertEqual(load(lambda value: None).tiles, source.tiles)
+            for change, message in (
+                (lambda value: value.update(approvedForRouting=False), "not approved"),
+                (lambda value: value.update(approvedForRouting="yes"), "not approved"),
+                (lambda value: value.update(origin="https://example.org/tiles"), "unsupported"),
+                (lambda value: value.update(surfaceModel="dsm"), "unsupported"),
+                (lambda value: value.update(catalog="../" + value["catalog"]), "beside the source list"),
+                (lambda value: value.update(tileCount=967), "not 967"),
+                (lambda value: value.update(termsUrl="http://usgs.example"), "HTTPS"),
+                (lambda value: value.pop("approvedBy"), "fields"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change)
+            with self.assertRaisesRegex(ValueError, "not the catalog"):
+                load(lambda value: None, catalog.replace("20260917", "20260918"))
+
+    def test_catalog_lines_name_one_dated_tile_per_cell(self):
+        tiles = {(-74, 40): ("n41w074", "20260917", 165776270, "02fe0b7c39d43b570742e25e02c0462c"),
+                 (-88, 41): ("n42w088", "20260902", 348304242, "db44654aaecc53df42757080210fca19-67")}
+        text = build_elevation.format_terrain_catalog(tiles)
+        self.assertEqual(text.splitlines()[0], "N40W074 n41w074 20260917 165776270 02fe0b7c39d43b570742e25e02c0462c")
+        self.assertEqual(build_elevation.parse_terrain_catalog(text), tiles)
+        for bad in (text.replace("n41w074", "n41w075"), text + text.splitlines()[0] + "\n",
+                    "".join(reversed(text.splitlines(keepends=True))), text.replace(" 165776270", " 0"),
+                    text.replace("20260917", "2026-09-17"), text.replace("N40W074", "N40E074")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                build_elevation.parse_terrain_catalog(bad)
+
+    def test_the_newest_dated_version_of_each_conterminous_tile_is_listed(self):
+        def entry(key, size, etag):
+            return (f"<Contents><Key>StagedProducts/Elevation/13/TIFF/historical/{key}</Key>"
+                    f"<LastModified>2026-09-17T20:27:03.000Z</LastModified><ETag>&quot;{etag}&quot;</ETag>"
+                    f"<Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>")
+
+        pages = {
+            None: "<ListBucketResult><IsTruncated>true</IsTruncated>"
+                  + entry("n41w074/USGS_13_n41w074_20260820.tif", 5, "a" * 32)
+                  + entry("n41w074/USGS_13_n41w074_20260917.tif", 6, "b" * 32)
+                  + entry("n41w074/USGS_13_n41w074_20260917.xml", 1, "c" * 32)
+                  + "<NextContinuationToken>next+page/=</NextContinuationToken></ListBucketResult>",
+            "next+page/=": "<ListBucketResult><IsTruncated>false</IsTruncated>"
+                           + entry("n61w150/USGS_13_n61w150_20240101.tif", 7, "d" * 32)
+                           + entry("n20w156/USGS_13_n20w156_20240101.tif", 8, "e" * 32)
+                           + entry("n25w081/USGS_13_n25w081_20220406.tif", 9, "f" * 32 + "-3")
+                           + "</ListBucketResult>",
+        }
+        asked = []
+
+        def fetch(url):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            asked.append(query)
+            return pages[query.get("continuation-token", [None])[0]]
+
+        tiles = terrain_catalog.newest_tiles(terrain_catalog.list_bucket(fetch))
+        self.assertEqual(tiles, {(-74, 40): ("n41w074", "20260917", 6, "b" * 32),
+                                 (-81, 24): ("n25w081", "20220406", 9, "f" * 32 + "-3")})
+        self.assertEqual(asked[0]["prefix"], ["StagedProducts/Elevation/13/TIFF/historical/"])
+        self.assertEqual(build_elevation.parse_terrain_catalog(build_elevation.format_terrain_catalog(tiles)), tiles)
+        with self.assertRaisesRegex(ValueError, "next page"):
+            terrain_catalog.parse_listing("<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>")
 
 
 class ElevationManifestTests(unittest.TestCase):
