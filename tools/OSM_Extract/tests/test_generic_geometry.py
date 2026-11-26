@@ -20,6 +20,7 @@ from funcs import (  # noqa: E402
     GenericGeometryLimitError,
     _validate_quantized_decomposition,
     clip_polygons,
+    clip_polygons_to_tile_budget,
     fit_polygons_to_feature_budget,
     get_geoms,
     render_map,
@@ -63,6 +64,63 @@ class GenericGeometryTests(unittest.TestCase):
         self.assertEqual(fit_polygons_to_feature_budget(polygons, 2, 3), [large_building])
         with self.assertRaisesRegex(GenericGeometryLimitError, "tile has 4 lines"):
             fit_polygons_to_feature_budget(polygons, 4, 3)
+
+    def test_aggregate_piece_limit_prioritizes_areas_before_buildings(self):
+        block = box(0, 0, 80, 80)
+        buildings = [
+            {**styled_feature(geom, name), "type": "building.yes"}
+            for name, geom in (
+                ("small", box(0, 0, 3, 3)),
+                ("large", box(10, 10, 30, 30)),
+                ("medium", box(0, 10, 5, 15)),
+            )
+        ]
+        park = styled_feature(box(0, 40, 4, 42), "park")
+        water = styled_feature(box(0, 50, 4, 54), "water")
+        features = [*buildings, park, water]
+        diagnostics = {}
+        with self.assertRaises(GenericGeometryLimitError):
+            clip_polygons(features, block, max_pieces_per_block=4)
+        selected = clip_polygons_to_tile_budget(
+            features, block, 5, 8,
+            max_pieces_per_block=4, geometry_diagnostics=diagnostics,
+        )
+        self.assertEqual([feat["id"] for feat in selected], ["large", "park", "water"])
+        self.assertEqual(diagnostics["tileFeatureBudget"]["overfullTiles"], 1)
+        self.assertEqual(diagnostics["tileFeatureBudget"]["omittedComponents"], 2)
+
+    def test_aggregate_piece_limit_never_writes_part_of_a_component(self):
+        block = box(0, 0, 80, 80)
+        large_park = styled_feature(
+            Polygon(box(0, 0, 30, 30).exterior.coords, [box(5, 5, 25, 25).exterior.coords]),
+            "large park",
+        )
+        small_park = styled_feature(box(40, 0, 45, 5), "small park")
+        with patch("funcs._decompose_hole_free", wraps=funcs._decompose_hole_free) as decompose:
+            selected = clip_polygons_to_tile_budget(
+                [large_park, small_park], block, 5, 6, max_pieces_per_block=2,
+            )
+        self.assertEqual([feat["id"] for feat in selected], ["small park"])
+        self.assertEqual([call.args[1] for call in decompose.call_args_list], [2, 1, 1])
+
+    def test_tile_budget_does_not_duplicate_invalid_geometry_samples(self):
+        feature = styled_feature(Point(5, 5), "invalid")
+        for block_limit in (2, 5):
+            with self.subTest(block_limit=block_limit):
+                diagnostics = {}
+                selected = clip_polygons_to_tile_budget(
+                    [
+                        feature,
+                        styled_feature(box(1, 10, 2, 13), "first"),
+                        styled_feature(box(5, 10, 8, 13), "second"),
+                        styled_feature(box(10, 10, 12, 13), "third"),
+                    ],
+                    box(0, 0, 30, 30), 1, 2,
+                    max_pieces_per_block=block_limit, geometry_diagnostics=diagnostics,
+                )
+                self.assertEqual([feat["id"] for feat in selected], ["second"])
+                self.assertEqual(diagnostics["droppedGeometryCount"], 1)
+                self.assertEqual(len(diagnostics["droppedGeometrySamples"]), 1)
 
     def test_writer_rejects_combined_count_over_firmware_limit(self):
         polygon = styled_feature(box(0, 0, 2, 2))
