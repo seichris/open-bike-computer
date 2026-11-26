@@ -123,6 +123,35 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         )
         self.assertIn("INFOPLIST_FILE = BikeComputer/Info.plist;", configurations["Release"])
 
+    def test_gpx_files_open_in_bicino_as_an_alternate_viewer(self):
+        # "Open in Bicino" for GPX from Komoot, Files or Safari. Bicino imports
+        # a copy, so it never claims the type or opens documents in place.
+        for name in ("Info.plist", "Info-Development.plist"):
+            info = load_plist(IOS_PROJECT / "BikeComputer" / name)
+            self.assertEqual(
+                info["CFBundleDocumentTypes"],
+                [{
+                    "CFBundleTypeName": "GPX Route",
+                    "CFBundleTypeRole": "Viewer",
+                    "LSHandlerRank": "Alternate",
+                    "LSItemContentTypes": ["com.topografix.gpx"],
+                }],
+                name,
+            )
+            self.assertIs(info["LSSupportsOpeningDocumentsInPlace"], False, name)
+            self.assertNotIn("UTExportedTypeDeclarations", info, name)
+            (gpx_type,) = info["UTImportedTypeDeclarations"]
+            self.assertEqual(gpx_type["UTTypeIdentifier"], "com.topografix.gpx", name)
+            self.assertEqual(gpx_type["UTTypeConformsTo"], ["public.xml"], name)
+            self.assertEqual(
+                gpx_type["UTTypeTagSpecification"],
+                {
+                    "public.filename-extension": ["gpx"],
+                    "public.mime-type": ["application/gpx+xml"],
+                },
+                name,
+            )
+
     def test_development_and_production_identities_are_separate(self):
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"

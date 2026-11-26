@@ -145,3 +145,31 @@ struct RouteSaveSheet: View {
         }
     }
 }
+
+/// Why a GPX file opened from another app could not be imported. It is a sheet,
+/// not an alert, so it shows even when another sheet was already up: the
+/// presenter replaces that sheet the same way it does for a valid file.
+struct OpenedGPXFailureSheet: View {
+    let message: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("openedGPXFailure")
+                } footer: {
+                    Text("Nothing was saved. Export the route as a GPX file again and open it in Bicino, or choose Import GPX in Saved Routes.")
+                }
+            }
+            .navigationTitle("Import GPX")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK") { dismiss() }
+                }
+            }
+        }
+    }
+}
