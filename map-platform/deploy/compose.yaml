@@ -1,4 +1,4 @@
-# control-plane-source-commit: 08c8b4cce7425466cf9041fd9e995d5450514abf
+# control-plane-source-commit: a41c1b395a803a8f929a71daa626be379459838b
 # worker-source-commit: 91f98d805120b78b7a03df96c3d5ba5811271540
 # promotion-source-commit: bc7451ebfbbcf1ba86382855c7b2d4464d4f1b4b
 
@@ -11,7 +11,7 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:a0e04381c08aa8798320beef4d412e42b8fc1f982a574dcc9e464f4142f701ca
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:680f21ee841a19c171977bd2c4765162e03433e777b2e4d8129e5e5aaa188075
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:449e78d79f96d1640e460084b75c74ebc1274ea48a1926e02425b8fe04a633eb
 
 # Coolify also loads the application's .env into each service. Explicitly
