@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from pathlib import Path
 
 from map_platform.request_limits import RequestBodyLimitMiddleware
 
@@ -176,3 +177,18 @@ class RequestBodyLimitMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestBodyLimitPatternTest(unittest.TestCase):
+    def test_trailing_wildcard_matches_one_path_segment(self):
+        middleware = RequestBodyLimitMiddleware(lambda *_: None, max_body_bytes=5,
+                                                body_limits={("PUT", "/v1/social/library/routes/*"): 10})
+        self.assertEqual(middleware._limit("PUT", "/v1/social/library/routes/0F8FAD5B-D9CB-469F-A165-70867728950E"), 10)
+        self.assertEqual(middleware._limit("PUT", "/v1/social/library/routes/"), 5)
+        self.assertEqual(middleware._limit("PUT", "/v1/social/library/routes/a/b"), 5)
+        self.assertEqual(middleware._limit("PATCH", "/v1/social/library/routes/a"), 5)
+        self.assertEqual(middleware._limit("PUT", "/v1/social/library/routesx"), 5)
+
+    def test_mounted_social_accepts_large_library_uploads(self):
+        source = Path(__file__).resolve().parents[1] / "map_platform" / "api.py"
+        self.assertIn('("PUT", "/v1/social/library/routes/*")', source.read_text())

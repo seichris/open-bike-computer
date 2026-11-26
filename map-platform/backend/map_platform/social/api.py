@@ -6,6 +6,7 @@ import hmac
 import os
 import re
 import time
+import uuid
 from fastapi import Depends, FastAPI, Header, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, delete, or_, select, text, update
@@ -22,10 +23,12 @@ from .media import S3Media
 from .features import SocialFeatures
 from .invite_preview import InvitePreviews
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
-                     DeviceRelease, FriendLiveState, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
+                     DeviceRelease, FriendLiveState, Join, LibraryRouteRename, LibraryRouteUpload, LiveState,
+                     ProfileEdit, QuickMessage, RideCreate,
                      RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion, WebsiteRouteDelete,
                      WebsiteRouteEdit, WebsiteRouteImport, WebsiteRouteList)
-from .service import SocialError, SocialService, digest, identifier, public_content, row
+from .service import (LIBRARY_SOURCE_PREFIX, SocialError, SocialService, digest, identifier, public_content,
+                      row)
 from . import website_routes
 
 INSTALLATION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
@@ -99,6 +102,8 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
             app.state.features.require("invitePreviews")
         elif parts[0] in {"routes", "activities", "media"}:
             app.state.features.require(parts[0])
+        elif parts[0] == "library":
+            app.state.features.require("routes")
         elif parts == ["me", "avatar"]:
             app.state.features.require("media")
 
@@ -296,7 +301,8 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
 
     def website_summaries(c, actor, content_id=None):
         """Card rows without archives: only small JSON members are read."""
-        condition = and_(content.c.owner == actor, content.c.kind == "route")
+        condition = and_(content.c.owner == actor, content.c.kind == "route",
+                         content.c.source.like(LIBRARY_SOURCE_PREFIX + "%"))
         if content_id is not None:
             condition = and_(condition, content.c.id == content_id)
         query = (select(content.c.id, content.c.title, content.c.visibility, content.c.revision, content.c.created,
@@ -326,18 +332,20 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
     async def website_route_import(data: WebsiteRouteImport, request: Request):
         principal = await website_principal(request, data)
         app.state.features.require("routes")
-        if await run_in_threadpool(website_routes.archive_provider, data.archive) != website_routes.PREVIEW_PROVIDER:
+        provider, route_id = await run_in_threadpool(website_routes.archive_identity, data.archive)
+        if provider != website_routes.PREVIEW_PROVIDER:
             # The website imports GPX files only; other providers keep their own paths.
             raise SocialError("route_not_redistributable")
         actor = await run_in_threadpool(website_actor, principal, True)
         await limit(actor, "requests", 600, 60)
-        await limit(actor, "publication", 30)
-        upload = RouteUpload(title=data.title, visibility="private", archive=data.archive,
-                             hashPayload=data.hashPayload, sharingRightsConfirmed=True)
-        extras = {"favorite": False, "elevationGainMeters": data.elevationGainMeters,
-                  "durationSeconds": data.durationSeconds}
-        result = await operation(request, (actor, principal),
-                                 lambda c, a: service.upload_route(c, a, upload, website=extras))
+        await limit(actor, "library", 600)
+        upload = LibraryRouteUpload(title=data.title, archive=data.archive, hashPayload=data.hashPayload)
+        extras = {"elevationGainMeters": data.elevationGainMeters, "durationSeconds": data.durationSeconds}
+        def perform(c, a):
+            # An archive with an existing route ID replaces only a newer revision.
+            item = service.put_library_route(c, a, library_route_id(route_id), upload, extras)
+            return {"kind": "route", "body": {}, "id": item["id"]}
+        result = await operation(request, (actor, principal), perform)
         return await website_summary(actor, result["id"])
 
     @app.patch("/internal/website/routes/{content_id}")
@@ -572,6 +580,44 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
             return {"status": "unrelated"}
         return await operation(request, auth, perform)
 
+    def library_route_id(route_id):
+        try:
+            return str(uuid.UUID(route_id)).upper()
+        except (ValueError, TypeError, AttributeError):
+            raise SocialError("not_found", 404) from None
+
+    def library_item(item):
+        library = item["body"].get("library") if isinstance(item.get("body"), dict) else None
+        library = library if isinstance(library, dict) else {}
+        return {"id": item["id"], "routeID": item["source"][len(LIBRARY_SOURCE_PREFIX):], "title": item["title"],
+                "revision": item["revision"], "created": item["created"],
+                "contentHash": library.get("contentHash"), "routeRevision": library.get("routeRevision"),
+                "providerID": library.get("providerID")}
+
+    @app.get("/library/routes")
+    def library_list(auth=Depends(authenticate)):
+        """The account's private route library: sync rows without archives."""
+        return read(lambda c: {"items": service.library_routes(c, auth[0])})
+
+    @app.put("/library/routes/{route_id}")
+    async def library_put(route_id: str, data: LibraryRouteUpload, request: Request, auth=Depends(authenticate)):
+        route_id = library_route_id(route_id)
+        await limit(auth[0], "library", 600)
+        extras = {"elevationGainMeters": data.elevationGainMeters, "durationSeconds": data.durationSeconds}
+        return await operation(request, auth, lambda c, a: library_item(
+            service.put_library_route(c, a, route_id, data, extras)))
+
+    @app.patch("/library/routes/{route_id}")
+    async def library_rename(route_id: str, data: LibraryRouteRename, request: Request, auth=Depends(authenticate)):
+        route_id = library_route_id(route_id)
+        return await operation(request, auth, lambda c, a: library_item(
+            service.rename_library_route(c, a, route_id, data.title)))
+
+    @app.delete("/library/routes/{route_id}")
+    async def library_delete(route_id: str, request: Request, auth=Depends(authenticate)):
+        route_id = library_route_id(route_id)
+        return await operation(request, auth, lambda c, a: service.delete_library_route(c, a, route_id))
+
     @app.get("/routes")
     @app.get("/activities")
     def list_content(request: Request, owner: str | None = None, after: str = "", auth=Depends(authenticate)):
@@ -580,6 +626,9 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
             listed = owner or auth[0]
             service.pair_allowed(c, auth[0], listed)
             condition = and_(content.c.owner == listed, content.c.kind == kind, content.c.id > after)
+            if kind == "route":
+                condition = and_(condition, or_(content.c.source.is_(None),
+                                                ~content.c.source.like(LIBRARY_SOURCE_PREFIX + "%")))
             if listed != auth[0]:
                 if not service.friends(c, auth[0], listed):
                     raise SocialError("not_found", 404)

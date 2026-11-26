@@ -6,7 +6,11 @@ from typing import Any
 
 
 class RequestBodyLimitMiddleware:
-    """Bound request bodies before framework JSON parsing allocates them."""
+    """Bound request bodies before framework JSON parsing allocates them.
+
+    `body_limits` keys are `(method, path)`. A path ending in `/*` matches
+    exactly one further path segment, for routes such as `/items/{id}`.
+    """
 
     def __init__(self, app: Callable[..., Awaitable[None]], max_body_bytes: int, body_limits: dict[tuple[str, str], int] | None = None):
         if max_body_bytes < 1:
@@ -20,7 +24,7 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        limit = self.body_limits.get((scope.get("method"), scope.get("path")), self.max_body_bytes)
+        limit = self._limit(scope.get("method"), scope.get("path") or "")
         content_length = self._content_length(scope)
         if content_length is not None and content_length > limit:
             await self._reject(send)
@@ -46,6 +50,19 @@ class RequestBodyLimitMiddleware:
             return await receive()
 
         await self.app(scope, replay_receive, send)
+
+    def _limit(self, method: str | None, path: str) -> int:
+        exact = self.body_limits.get((method, path))
+        if exact is not None:
+            return exact
+        for (limited_method, pattern), limit in self.body_limits.items():
+            if limited_method != method or not pattern.endswith("/*"):
+                continue
+            prefix = pattern[:-1]
+            segment = path[len(prefix):]
+            if path.startswith(prefix) and segment and "/" not in segment:
+                return limit
+        return self.max_body_bytes
 
     @staticmethod
     def _content_length(scope: dict[str, Any]) -> int | None:

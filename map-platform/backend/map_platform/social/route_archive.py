@@ -15,6 +15,23 @@ SOCIAL_PROVIDERS = (
     {'providerID': 'user.imported-gpx', 'attribution': 'User-provided GPX', 'storageScope': 'durable'},
     {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'phoneOnly'},
 )
+STRAVA_PROVIDER = {'providerID': 'strava.route', 'attribution': 'Strava', 'storageScope': 'durable'}
+# An account's private route library (synced between the app and bicino.com)
+# holds imported GPX and Strava API routes. Maintainer decision 2026-11-26:
+# Strava routes sync and are kept without the app's seven-day expiry. Library
+# rows are never shared, so Strava data stays with the account that imported it.
+LIBRARY_PROVIDERS = (SOCIAL_PROVIDERS[0], STRAVA_PROVIDER)
+
+
+def _strava_reference(reference):
+    """The app's `RouteSourceReferenceV1` for a Strava route URL."""
+    if not isinstance(reference, dict) or set(reference) != {'providerID', 'externalRouteID', 'canonicalURL'}:
+        return False
+    route_id = reference['externalRouteID']
+    return (reference['providerID'] == STRAVA_PROVIDER['providerID'] and isinstance(route_id, str)
+            and 1 <= len(route_id) <= 19 and route_id.isascii() and route_id.isdigit() and route_id[0] != '0'
+            and int(route_id) <= 2**63 - 1
+            and reference['canonicalURL'] == f'https://www.strava.com/routes/{route_id}')
 
 
 def _scaled(value):
@@ -47,10 +64,17 @@ def archive_fingerprint(body):
         return None
 
 
-def validate_archive(archive):
+def validate_archive(archive, library=False):
+    """Validate a stored route archive.
+
+    Shared routes accept imported GPX and saved Apple Maps archives without a
+    source reference or deadline. A private library row (`library=True`) also
+    accepts the app's Strava archive with its Strava URL and seven-day
+    `deleteAfter`; the server keeps the row regardless of that deadline.
+    """
     if set(archive)-{'schemaVersion','route','createdAt','contentHash','deleteAfter'}:
         raise ValueError('archive_fields')
-    if type(archive['schemaVersion']) is not int or archive['schemaVersion'] != 1 or archive.get('deleteAfter') is not None:
+    if type(archive['schemaVersion']) is not int or archive['schemaVersion'] != 1:
         raise ValueError('archive_version')
     if not math.isfinite(archive['createdAt']) or archive['createdAt'] < 0:
         raise ValueError('archive_date')
@@ -58,8 +82,16 @@ def validate_archive(archive):
     allowed={'id','revision','provider','sourceReference','localeIdentifier','transportType','source','destination','bounds','distanceMeters','expectedTravelTimeSeconds','name','points','steps','normalizationVersion'}
     if set(route)-allowed or not uuid.UUID(route['id']).int:
         raise ValueError('route_fields')
-    if (route['provider'] not in SOCIAL_PROVIDERS
-            or route.get('sourceReference') is not None or route['transportType'] != 'cycling'
+    strava = library and route.get('provider') == STRAVA_PROVIDER
+    if strava:
+        delete_after = archive.get('deleteAfter')
+        if (type(delete_after) not in {int, float} or not math.isfinite(delete_after)
+                or delete_after <= archive['createdAt'] or not _strava_reference(route.get('sourceReference'))):
+            raise ValueError('route_identity')
+    elif archive.get('deleteAfter') is not None or route.get('sourceReference') is not None:
+        raise ValueError('archive_version')
+    if (route['provider'] not in (LIBRARY_PROVIDERS if library else SOCIAL_PROVIDERS)
+            or route['transportType'] != 'cycling'
             or not type(route['revision']) is int or not 1 <= route['revision'] <= 2**32-1
             or not type(route['normalizationVersion']) is int or not 1 <= route['normalizationVersion'] <= 65535
             or not isinstance(route['localeIdentifier'],str) or not 1 <= len(route['localeIdentifier']) <= 128):

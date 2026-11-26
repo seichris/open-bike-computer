@@ -32,6 +32,8 @@ class SocialFeatures:
         values["groups"] = self.groups and self.routes
         # Protocol support, so updated clients stay disabled on older servers.
         values["savedMapKitRoutes"] = self.routes
+        # The private account route library (`/library/routes`), synced with bicino.com.
+        values["routeLibrary"] = self.routes
         values["hardware"] = self.hardware and values["groups"]
         values["invitePreviews"] = self.invitePreviews and values["groups"] and self.media
         return values

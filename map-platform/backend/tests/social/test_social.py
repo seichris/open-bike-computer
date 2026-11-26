@@ -357,7 +357,7 @@ class SocialTest(unittest.TestCase):
         from unittest.mock import patch
         with patch.dict(os.environ, {}, clear=True):
             features = SocialFeatures.from_environment()
-        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False, savedMapKitRoutes=False, friendSharing=False))
+        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False, savedMapKitRoutes=False, routeLibrary=False, friendSharing=False))
         self.client.app.state.features = features
         self.assertEqual(self.call('alice', 'GET', '/capabilities').json(), features.document())
         self.assertEqual(self.call('alice', 'GET', '/me').status_code, 200)

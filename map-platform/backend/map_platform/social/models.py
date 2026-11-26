@@ -160,6 +160,19 @@ class WebsiteDeletion(Input):
     nonce: str = Field(pattern=r"^[0-9a-f-]{36}$")
 
 
+class LibraryRouteUpload(Input):
+    title: str = Field(min_length=1, max_length=160)
+    archive: str = Field(min_length=100, max_length=1_900_000)
+    hashPayload: str = Field(min_length=100, max_length=1_900_000)
+    # Card fields the app knows from its own profile; the archive carries neither.
+    elevationGainMeters: float | None = Field(default=None, ge=0, le=100000)
+    durationSeconds: float | None = Field(default=None, gt=0, le=2_592_000)
+
+
+class LibraryRouteRename(Input):
+    title: str = Field(min_length=1, max_length=160)
+
+
 class WebsiteAccount(Input):
     """The account the website verified from its own session cookie."""
     uid: str = Field(min_length=1, max_length=128)
