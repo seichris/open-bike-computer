@@ -14,9 +14,24 @@ x-map-platform-images:
   control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:e16f7fb10f480ef9605994191ee874cb16f3ed4a2c93a2412a2aef76cfbb5a35
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:57c9ba46581af2863249c455826c5f4829c359be4b759cff8fab2de74f666da4
 
+# Coolify also loads the application's .env into each service. Explicitly
+# override Strava settings for services that have no role in the integration.
+x-strava-disabled: &strava-disabled
+  MAP_PLATFORM_STRAVA_ENABLED: '0'
+  MAP_PLATFORM_STRAVA_CLIENT_ID: ''
+  MAP_PLATFORM_STRAVA_CLIENT_SECRET: ''
+  MAP_PLATFORM_STRAVA_REDIRECT_URI: ''
+  MAP_PLATFORM_STRAVA_TOKEN_KEY_ID: ''
+  MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64: ''
+  MAP_PLATFORM_STRAVA_PREVIOUS_TOKEN_KEYS: ''
+  MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET: ''
+  MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION: ''
+  MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE: ''
+
 services:
   map-platform-valhalla:
     image: ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228
+    environment: *strava-disabled
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
@@ -50,6 +65,7 @@ services:
     mem_limit: 2g
     cpus: 1
     environment:
+      <<: *strava-disabled
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_AUTO_PROMOTION_ENABLED: '1'
@@ -213,6 +229,7 @@ services:
     mem_limit: ${MAP_PLATFORM_WORKER_MEMORY_LIMIT:-12g}
     command: ["map-platform", "worker-loop", "--idle-sleep-seconds", "10"]
     environment:
+      <<: *strava-disabled
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
@@ -290,6 +307,9 @@ services:
     image: *map-platform-control-plane-image
     command: ["map-platform", "maintenance-loop"]
     environment:
+      MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET: ''
+      MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION: ''
+      MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE: ''
       MAP_PLATFORM_REPO_ROOT: /app
       MAP_PLATFORM_DATA_ROOT: /data
       MAP_PLATFORM_SOURCE_INDEX: /app/backend/config/source-regions.json
