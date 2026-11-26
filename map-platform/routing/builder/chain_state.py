@@ -341,15 +341,20 @@ def describe(status):
     return "\n".join(lines)
 
 
+ELEVATION_KINDS = ("raw", "opened", "terrain", "hybrid")
+
+
 def elevation_sets(root):
     """Each elevation tile set of the run: its directory and its manifest's name.
 
     Without a terrain source `elevation/` holds the opened tiles the graph is
     graded with. With one it holds the hybrid, and the opened and the terrain
-    tiles lie beside it.
+    tiles lie beside it. The run's own setting decides, not what lies on the
+    scratch volume: a run without a terrain source may follow one with it,
+    whose `elevation-opened/` and `elevation-terrain/` are still there.
     """
     sets = {"raw": (root / "elevation-raw", "elevation-manifest.json")}
-    if (root / "elevation-terrain").is_dir():
+    if read_env(root / "builder.env").get("BICINO_TERRAIN"):
         sets["opened"] = (root / "elevation-opened", "elevation-manifest.json")
         sets["terrain"] = (root / "elevation-terrain", "terrain-manifest.json")
         sets["hybrid"] = (root / "elevation", "elevation-manifest.json")
@@ -381,8 +386,13 @@ def collect_evidence(root):
     `export/<label>/valhalla_tiles.tar` with its read-only identity.
     """
     export = root / "export"
+    sets = elevation_sets(root)
+    # Evidence of a tile set this run does not have is an earlier run's.
+    for kind in ELEVATION_KINDS:
+        if kind not in sets:
+            shutil.rmtree(export / "evidence" / f"elevation-{kind}", ignore_errors=True)
     copies = [(path / name, export / "evidence" / f"elevation-{kind}" / name)
-              for kind, (path, manifest) in elevation_sets(root).items() for name in (manifest, "cells.txt")]
+              for kind, (path, manifest) in sets.items() for name in (manifest, "cells.txt")]
     copies += [(path, export / "evidence" / "input" / path.name)
                for path in sorted((root / "input").glob("*.osm.pbf.*")) if path.stat().st_size < 4096]
     for label in ("ungraded", "graded"):

@@ -208,6 +208,7 @@ class ChainStateTests(ScratchCase):
         self.assertEqual(stale["reason"], "done under other settings: BICINO_TERRAIN was '', is now 'usgs-3dep-13'")
 
     def test_a_hybrid_run_records_every_tile_set(self):
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TERRAIN=usgs-3dep-13\n")
         self.finish(*chain_state.STAGES)
         self.write_gate_summary({"usgs-3dep-13-over-opened-400": []})
         sets = {"elevation-raw": "elevation-manifest.json", "elevation-opened": "elevation-manifest.json",
@@ -226,6 +227,18 @@ class ChainStateTests(ScratchCase):
                           "hybrid": "elevation"})
         self.assertEqual(json.loads((evidence / "elevation-terrain" / "terrain-manifest.json").read_text()),
                          {"set": "elevation-terrain"})
+        # The next run on this scratch has no terrain source. The earlier run's directories are still
+        # there, but `elevation/` now holds the opened tiles its graph is graded with, and nothing else counts.
+        (self.root / "builder.env").write_text(GRADED_ENV)
+        (self.root / "elevation" / "elevation-manifest.json").write_text('{"set": "opened again"}')
+        for marker in self.chain.glob("*.json"):
+            marker.unlink()
+        self.finish(*chain_state.STAGES)
+        result = chain_state.write_result(self.root, final=True, clock=self.clock)
+        self.assertEqual(result["elevation"], {"raw": {"set": "elevation-raw"}, "opened": {"set": "opened again"}})
+        self.assertEqual(sorted(path.name for path in evidence.glob("elevation-*")), ["elevation-opened", "elevation-raw"])
+        self.assertEqual(json.loads((evidence / "elevation-opened" / "elevation-manifest.json").read_text()),
+                         {"set": "opened again"})
 
     def test_work_done_under_other_settings_is_stale_not_reused(self):
         self.finish("images", "download", "inputs", "elevation", "build-ungraded", "build-graded")

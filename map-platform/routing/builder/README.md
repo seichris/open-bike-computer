@@ -195,7 +195,9 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
   `stale`. A new radius leaves the download and the ungraded build done and
   makes the elevation stage, the graded build and what follows stale. Adding
   or dropping a terrain source makes the ungraded build stale too, because
-  it changes that graph's tagging rules. A new map-platform image
+  it changes that graph's tagging rules. After a terrain source is dropped,
+  `elevation-opened/` and `elevation-terrain/` stay on scratch; the result
+  and the evidence follow the run's setting and leave them out. A new map-platform image
   does the same, and makes the audit inventory and the probes stale too. A stale stage does not
   start, the stages that need it are `blocked`, and the chain is `failed`
   until someone decides. The old work is never reused under the new settings
