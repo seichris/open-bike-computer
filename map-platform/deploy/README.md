@@ -270,7 +270,9 @@ encrypted rows without revoking the Strava grant and have those users reconnect.
 
 The production control plane stores an encrypted grant for each connected
 athlete. Each installation links independently and can use only the route
-permissions consented to on that installation. The next successful authorization
+permissions consented to on that installation. If the athlete removes private
+scope on a subsequent Strava authorization, prior links lose private route
+access until reauthorized. The next successful authorization
 for an athlete consolidates their legacy Production grants without revoking
 access. Disconnecting removes the installation’s link. Production maintenance
 revokes the provider grant when its last link is gone.
@@ -297,10 +299,13 @@ development API. Verify OAuth and route loading through the development app.
 
 To pause Dev forwarding, clear its bridge secret, access setting, and installation
 setting. Keep the updated production controller to resolve existing production
-links. An older controller cannot resolve the new links, and older maintenance
-does not account for them when revoking grants. Clearing the access setting in
-both APIs while keeping the bridge secret and the previous installation and
-athlete settings restores owner-only forwarding.
+links. Clearing the access setting in both APIs while keeping the bridge secret
+and the previous installation and athlete settings restores owner-only forwarding.
+Restore the pre-open controller and maintenance pins only if the
+`strava_athlete_links` table in the production Strava store is empty. The older
+controller can read legacy owner links, while older maintenance cannot see
+links to other athletes. If open links exist, roll forward with a compatible
+controller and keep Dev forwarding paused during recovery.
 
 ## Promotion flow
 

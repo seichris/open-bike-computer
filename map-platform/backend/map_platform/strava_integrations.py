@@ -46,6 +46,10 @@ STRAVA_INSTALLATION_ID_PATTERN = re.compile(r"inst_v2_[0-9a-f]{32}")
 _KNOWN_CALLBACK_SCOPES = frozenset({"read", "read_all"})
 _SHARED_OWNER_GRANT = "strava_shared_owner"
 _ATHLETE_GRANT_PREFIX = "strava_athlete_"
+_OWNER_LINKS = "shared_owner_links"
+_ATHLETE_LINKS = "strava_athlete_links"
+_LINK_TABLES = (_ATHLETE_LINKS, _OWNER_LINKS)
+_PROVIDER_LOCK_WAIT_SECONDS = 1.0
 
 
 class StravaIntegrationError(RuntimeError):
@@ -479,9 +483,10 @@ class StravaIntegrationStore:
                     connection, channel, linked_installation, now=connected_at,
                     keep_grant=installation_id,
                 )
+                table = _OWNER_LINKS if installation_id == _SHARED_OWNER_GRANT else _ATHLETE_LINKS
                 connection.execute(
-                    """
-                    INSERT INTO strava_athlete_links(
+                    f"""
+                    INSERT INTO {table}(
                         deployment_channel, installation_id, grant_id, last_used_at,
                         allows_private_routes
                     ) VALUES (?, ?, ?, ?, ?)
@@ -492,6 +497,13 @@ class StravaIntegrationStore:
                     (channel, linked_installation, installation_id, connected_at,
                      "read_all" in bundle.granted_scopes),
                 )
+                if "read_all" not in bundle.granted_scopes:
+                    # The provider may rotate its refresh token on this exchange.
+                    # Persist the latest grant and record the reduced consent.
+                    connection.execute(
+                        f"UPDATE {table} SET allows_private_routes = 0 WHERE grant_id = ?",
+                        (installation_id,),
+                    )
                 if channel == "production":
                     if migrate_production_links:
                         # Same-athlete legacy rows have already been consolidated.
@@ -533,33 +545,40 @@ class StravaIntegrationStore:
             if bundle.athlete_id != athlete_id:
                 continue
             if state == "active":
+                table = _OWNER_LINKS if grant_id == _SHARED_OWNER_GRANT else _ATHLETE_LINKS
                 connection.execute(
-                    """
-                    INSERT OR IGNORE INTO strava_athlete_links(
+                    f"""
+                    INSERT INTO {table}(
                         deployment_channel, installation_id, grant_id, last_used_at, allows_private_routes
-                    ) VALUES ('production', ?, ?, ?, ?)
+                    ) SELECT 'production', ?, ?, ?, ?
+                      WHERE NOT EXISTS (
+                          SELECT 1 FROM strava_installation_links
+                          WHERE deployment_channel = 'production' AND installation_id = ?
+                      )
                     """,
-                    (installation, grant_id, last_used, "read_all" in bundle.granted_scopes),
+                    (installation, grant_id, last_used, "read_all" in bundle.granted_scopes, installation),
                 )
             connection.execute("DELETE FROM connections WHERE installation_id = ?", (installation,))
 
     def use_connection_link(self, channel: str, installation_id: str) -> tuple[str, bool] | None:
         with self._transaction() as connection:
-            row = connection.execute(
-                """
-                UPDATE strava_athlete_links SET last_used_at = ?
-                WHERE deployment_channel = ? AND installation_id = ?
-                RETURNING grant_id, allows_private_routes
-                """,
-                (self._clock(), channel, installation_id),
-            ).fetchone()
-        return (str(row[0]), bool(row[1])) if row is not None else None
+            for table in _LINK_TABLES:
+                row = connection.execute(
+                    f"""
+                    UPDATE {table} SET last_used_at = ?
+                    WHERE deployment_channel = ? AND installation_id = ?
+                    RETURNING grant_id, allows_private_routes
+                    """,
+                    (self._clock(), channel, installation_id),
+                ).fetchone()
+                if row is not None:
+                    return str(row[0]), bool(row[1])
+        return None
 
     def expire_connection_links(self, *, cutoff: float) -> None:
         with self._transaction() as connection:
-            connection.execute(
-                "DELETE FROM strava_athlete_links WHERE last_used_at <= ?", (cutoff,)
-            )
+            for table in _LINK_TABLES:
+                connection.execute(f"DELETE FROM {table} WHERE last_used_at <= ?", (cutoff,))
 
     def unlink_connection(self, channel: str, installation_id: str) -> bool:
         """Remove one link and queue provider revocation only after the last link."""
@@ -571,28 +590,34 @@ class StravaIntegrationStore:
         connection: sqlite3.Connection, channel: str, installation_id: str, *, now: float,
         keep_grant: str | None = None,
     ) -> bool:
-        removed = connection.execute(
-            """
-            DELETE FROM strava_athlete_links
-            WHERE deployment_channel = ? AND installation_id = ?
-              AND (? IS NULL OR grant_id != ?)
-            RETURNING grant_id
-            """,
-            (channel, installation_id, keep_grant, keep_grant),
-        ).fetchone()
-        if removed is None:
-            return False
-        return bool(connection.execute(
-            """
-            UPDATE connections
-            SET state = 'pending_revocation', revocation_started_at = ?,
-                refresh_lease_id = NULL, refresh_lease_expires_at = NULL,
-                updated_at = ?
-            WHERE installation_id = ? AND state = 'active'
-              AND NOT EXISTS (SELECT 1 FROM strava_athlete_links WHERE grant_id = ?)
-            """,
-            (now, now, removed[0], removed[0]),
-        ).rowcount)
+        detached = []
+        for table in _LINK_TABLES:
+            removed = connection.execute(
+                f"""
+                DELETE FROM {table}
+                WHERE deployment_channel = ? AND installation_id = ?
+                  AND (? IS NULL OR grant_id != ?)
+                RETURNING grant_id
+                """,
+                (channel, installation_id, keep_grant, keep_grant),
+            ).fetchone()
+            if removed is not None:
+                detached.append(removed[0])
+        pending = False
+        for grant_id in detached:
+            cursor = connection.execute(
+                """
+                UPDATE connections
+                SET state = 'pending_revocation', revocation_started_at = ?,
+                    refresh_lease_id = NULL, refresh_lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE installation_id = ? AND state = 'active'
+                  AND NOT EXISTS (SELECT 1 FROM strava_installation_links WHERE grant_id = ?)
+                """,
+                (now, now, grant_id, grant_id),
+            )
+            pending |= cursor.rowcount > 0
+        return pending
 
     def connection(
         self,
@@ -776,7 +801,7 @@ class StravaIntegrationStore:
                     updated_at = ?
                 WHERE installation_id = ?
                   AND NOT EXISTS (
-                      SELECT 1 FROM strava_athlete_links WHERE grant_id = connections.installation_id
+                      SELECT 1 FROM strava_installation_links WHERE grant_id = connections.installation_id
                   )
                 """,
                 (revocation_started_at, now, installation_id),
@@ -849,7 +874,7 @@ class StravaIntegrationStore:
                 FROM connections
                 WHERE state = 'active' AND last_used_at <= ?
                   AND NOT EXISTS (
-                      SELECT 1 FROM strava_athlete_links WHERE grant_id = connections.installation_id
+                      SELECT 1 FROM strava_installation_links WHERE grant_id = connections.installation_id
                   )
                 ORDER BY last_used_at, installation_id
                 """,
@@ -934,38 +959,33 @@ class StravaIntegrationStore:
                 }
                 if "revocation_started_at" not in columns:
                     raise ValueError("Strava integration database schema is incomplete")
-                # Additive so the previous release can open the database during rollback.
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS strava_athlete_links(
-                        deployment_channel TEXT NOT NULL
-                            CHECK(deployment_channel IN ('development', 'production')),
-                        installation_id TEXT NOT NULL,
-                        grant_id TEXT NOT NULL REFERENCES connections(installation_id)
-                            ON DELETE CASCADE,
-                        last_used_at REAL NOT NULL,
-                        allows_private_routes INTEGER NOT NULL CHECK(allows_private_routes IN (0, 1)),
-                        PRIMARY KEY(deployment_channel, installation_id)
-                    )
-                    """
-                )
-                if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='shared_owner_links'"
-                ).fetchone():
-                    # Keep the schema readable by older builds. Their owner-only
-                    # query cannot interpret links to multiple athlete grants.
+                # The previous controller can still read and write the owner
+                # table. It must never interpret another athlete's link as the owner's.
+                for table in _LINK_TABLES:
                     connection.execute(
-                        """
-                        INSERT OR IGNORE INTO strava_athlete_links(
-                            deployment_channel, installation_id, grant_id, last_used_at, allows_private_routes
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {table}(
+                            deployment_channel TEXT NOT NULL
+                                CHECK(deployment_channel IN ('development', 'production')),
+                            installation_id TEXT NOT NULL,
+                            grant_id TEXT NOT NULL REFERENCES connections(installation_id)
+                                ON DELETE CASCADE,
+                            last_used_at REAL NOT NULL,
+                            allows_private_routes INTEGER NOT NULL CHECK(allows_private_routes IN (0, 1)),
+                            PRIMARY KEY(deployment_channel, installation_id)
                         )
-                        SELECT deployment_channel, installation_id, grant_id, last_used_at, allows_private_routes
-                        FROM shared_owner_links
                         """
                     )
-                    connection.execute("DELETE FROM shared_owner_links")
+                    connection.execute(
+                        f"CREATE INDEX IF NOT EXISTS {table}_grant ON {table}(grant_id)"
+                    )
                 connection.execute(
-                    "CREATE INDEX IF NOT EXISTS strava_athlete_links_grant ON strava_athlete_links(grant_id)"
+                    """
+                    CREATE VIEW IF NOT EXISTS strava_installation_links AS
+                    SELECT deployment_channel, installation_id, grant_id FROM strava_athlete_links
+                    UNION ALL
+                    SELECT deployment_channel, installation_id, grant_id FROM shared_owner_links
+                    """
                 )
                 connection.execute(
                     """
@@ -1027,12 +1047,25 @@ class StravaIntegrationStore:
         return connection
 
     @contextmanager
-    def serialize_provider_mutations(self) -> Iterator[None]:
-        # The API and maintenance run in different containers on the same
-        # persistent volume. Strava refresh and revocation affect an entire
-        # athlete grant, so serialize them with OAuth exchanges.
+    def serialize_provider_mutations(self, *, maintenance: bool = False) -> Iterator[None]:
+        # The API and maintenance use the same volume. OAuth does not know
+        # the provider athlete until exchange, so serialize it with grant mutations.
+        # Only the dedicated maintenance process may wait for the lock indefinitely.
         with self.path.with_suffix(".oauth.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if maintenance:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + _PROVIDER_LOCK_WAIT_SECONDS
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise StravaIntegrationError(
+                                "strava_temporarily_unavailable", status_code=503, retry_after_seconds=1,
+                            ) from None
+                        time.sleep(0.025)
             yield
 
     @contextmanager
@@ -1419,7 +1452,7 @@ class StravaIntegrationService:
                 "pendingRevocations": len(self.store.pending_revocation_ids()),
             }
         cutoff = now - self.config.connection_idle_days * 24 * 60 * 60
-        with self.store.serialize_provider_mutations():
+        with self.store.serialize_provider_mutations(maintenance=True):
             self.store.expire_connection_links(cutoff=cutoff)
             idle_ids = self.store.idle_connection_ids(cutoff=cutoff)
             for installation_id in idle_ids[:maximum_revocations]:
@@ -1435,7 +1468,7 @@ class StravaIntegrationService:
         expired = 0
         pending = self.store.pending_revocation_ids()
         for installation_id in pending[:maximum_revocations]:
-            with self.store.serialize_provider_mutations():
+            with self.store.serialize_provider_mutations(maintenance=True):
                 try:
                     record = self.store.connection(installation_id, include_pending=True)
                 except StravaIntegrationError:

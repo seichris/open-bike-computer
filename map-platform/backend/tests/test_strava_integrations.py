@@ -397,28 +397,71 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         self.assertEqual(self.client.routes_calls[-1][:2], ("44", "same-athlete"))
         self.assertFalse(self.store.pending_revocation_ids())
 
-    def test_existing_owner_links_survive_store_upgrade(self):
+    def test_upgraded_store_preserves_owner_view_for_older_controllers(self):
         owner_grant = "strava_shared_owner"
+        first = "inst_v2_" + "b" * 32
+        both_scopes = bundle(expires_at=int(self.clock()) + 3600)
         self.store.put_connection(
-            owner_grant, bundle(expires_at=int(self.clock()) + 3600), connected_at=self.clock()
+            owner_grant, both_scopes, connected_at=self.clock(), link=("development", INSTALLATION_ID)
+        )
+        self.store.put_connection(
+            "strava_athlete_random", replace(both_scopes, athlete_id="55"),
+            connected_at=self.clock(), link=("development", first),
+        )
+
+        upgraded = StravaIntegrationStore(self.store.path, key_ring=self.ring, clock=self.clock)
+        self.assertEqual(
+            upgraded.use_connection_link("development", INSTALLATION_ID), (owner_grant, True)
         )
         with sqlite3.connect(self.store.path) as connection:
-            connection.execute(
-                "CREATE TABLE shared_owner_links AS SELECT * FROM strava_athlete_links WHERE 0"
+            legacy_write = (
+                "UPDATE shared_owner_links SET last_used_at = ? "
+                "WHERE deployment_channel = ? AND installation_id = ? RETURNING allows_private_routes"
             )
-            connection.execute(
-                "INSERT INTO shared_owner_links VALUES ('development', ?, ?, ?, 1)",
-                (INSTALLATION_ID, owner_grant, self.clock()),
+            self.assertEqual(
+                connection.execute(legacy_write, (self.clock(), "development", INSTALLATION_ID)).fetchone(),
+                (1,),
+            )
+            self.assertIsNone(
+                connection.execute(legacy_write, (self.clock(), "development", first)).fetchone()
             )
 
-        for _ in range(2):
-            upgraded = StravaIntegrationStore(self.store.path, key_ring=self.ring, clock=self.clock)
-            self.assertEqual(
-                upgraded.use_connection_link("development", INSTALLATION_ID), (owner_grant, True)
-            )
-            self.assertEqual(upgraded.athlete_grant_id("44"), owner_grant)
-        with sqlite3.connect(self.store.path) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM shared_owner_links").fetchone(), (0,))
+    def test_provider_mutations_time_out_when_another_process_holds_lock(self):
+        with self.store.serialize_provider_mutations(maintenance=True):
+            with patch("map_platform.strava_integrations._PROVIDER_LOCK_WAIT_SECONDS", 0.05):
+                with self.assertRaises(StravaIntegrationError) as caught:
+                    with self.store.serialize_provider_mutations():
+                        self.fail("A second writer should not enter the lock")
+            self.assertEqual(caught.exception.status_code, 503)
+        with self.store.serialize_provider_mutations():
+            pass
+
+    def test_scope_reduction_is_persisted_for_all_links_to_the_athlete(self):
+        production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
+        service = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+            development_open=True,
+        )
+        first = "inst_v2_" + "b" * 32
+
+        def authorize(installation, scope, *, development=False):
+            started = service.start_oauth(installation, development=development)
+            state = parse_qs(urlparse(started.web_authorization_url).query)["state"][0]
+            result = service.complete_oauth(state=state, code="code", scope=scope, denied=False)
+            self.assertEqual(result.result, "connected")
+
+        authorize(INSTALLATION_ID, "read,read_all")
+        self.assertTrue(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
+        self.client.exchange_result = replace(self.client.exchange_result, refresh_token="newer-token")
+        authorize(first, "read", development=True)
+        grant_id = self.store.athlete_grant_id("44")
+        self.assertEqual(self.store.connection(grant_id).bundle.refresh_token, "newer-token")
+        self.assertEqual(self.store.use_connection_link("production", INSTALLATION_ID), (grant_id, False))
+        self.assertFalse(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
+
+        authorize(first, "read,read_all", development=True)
+        self.assertTrue(service.connection_status(first, development=True)["canReadPrivateRoutes"])
+        self.assertFalse(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
 
     def test_open_development_preserves_production_links_and_revokes_only_last_link(self):
         production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
