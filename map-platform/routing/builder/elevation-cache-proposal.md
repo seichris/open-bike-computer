@@ -1,7 +1,54 @@
-# Proposal: keep the elevation tiles between builds
+# Keeping the elevation tiles between builds
 
-Status: **proposed on 2026-11-26, not decided, nothing built.** A bucket costs
-money every month, so the decision is Chris's.
+Status: **the tiles are kept; the restore step is not built.** Chris decided
+on 2026-11-26 to keep the tiles of that day's builder (option 2 of
+[The choice](#the-choice)). The rest of this page is the proposal as it was
+put to him, with the prices and the check a build must make.
+
+## What is kept
+
+`gs://bicino-routing-elevation` in project `chiho-prod`: a private bucket in
+`europe-west4`, Nearline class, uniform access, public access prevented. It
+holds the two tile sets of the builder `bicino-valhalla-r400-261116`, stored
+on 2026-11-26 while that builder still ran:
+
+| Set | Prefix | Cells | Size |
+|---|---|---|---|
+| Raw Copernicus tiles | `copernicus-2021/raw-d53d9beb3206/` | 26,475 | 160.5 GB |
+| Opened at 400 m | `copernicus-2021/opened-400-7c6b3903ce03/` | 26,475 | 83.9 GB |
+
+- Each set is 19 tar files, one per ten degrees of latitude, and `meta.tar`
+  with the set's `elevation-manifest.json`, `cells.txt`, receipts and, for
+  the raw set, the source indexes. A prefix carries the first 12 hex digits
+  of the SHA-256 of its `elevation-manifest.json`.
+- [releases/elevation-cache-2026-11-26.json](../releases/elevation-cache-2026-11-26.json)
+  pins the bucket's content: both manifests' SHA-256 and every tar's size,
+  SHA-256 and MD5. The bucket's own `MANIFEST.json` is a copy; trust the
+  repository's.
+- The raw manifest is `d53d9beb…`, the one the 2026-11-25 build also wrote:
+  the raw tiles come out the same on every build. `build_elevation.py` was
+  the file on main (`42ca05a2…`).
+- 227.6 GiB at Nearline's list price is about $2.30 a month. Objects deleted
+  within 30 days are billed for 30.
+
+How it got there. The builder holds no credentials, and none were put on it.
+A resumable-upload session was opened for each tar from a signed-in laptop;
+a session's address allows the upload of its one object and nothing else,
+and refuses to overwrite. The builder packed each tar, uploaded it to its
+session and compared the size and MD5 the bucket reported. All 40 uploads
+took 10 minutes, six at a time. Afterwards every object's size, MD5 and
+generation was read back from the laptop and matched the builder's record.
+As a restore check, the smallest band and `meta.tar` of the 400 m set were
+downloaded: both tars matched their SHA-256, `cells.txt` hashed to the
+manifest's `cellListSha256`, and all 360 tiles of the band, unpacked,
+matched their lines in `cells.txt`.
+
+**Not built:** a build cannot use the bucket yet. That needs the restore
+step and the check described under
+[How a build would check the cached set](#how-a-build-would-check-the-cached-set),
+with the tar checksums of the pinned record as a first step, and a builder
+that may read the bucket (see [What it would take](#what-it-would-take)).
+Until then a build makes its tiles again.
 
 ## The problem
 
@@ -145,6 +192,8 @@ already approves, and a private bucket shares them with nobody.
 
 ## The choice
 
+Chris chose 2 on 2026-11-26.
+
 1. **Do nothing now.** Decide again when a method has passed the gate on a
    planet. That build's tiles would then be uploaded before its builder is
    deleted, so filling the bucket costs no extra build.
@@ -160,6 +209,5 @@ already approves, and a private bucket shares them with nobody.
    Once a graded graph is in production, every monthly refresh needs the
    same tiles, and the cache then pays for itself each month.
 
-My recommendation: 2 if Chris means to approve the hybrid and can act before
-the builder is gone, otherwise 1 now and 3 when a graded graph ships. It is
-Chris's decision.
+The recommendation was 2 if Chris meant to approve the hybrid and could act
+before the builder was gone, otherwise 1 and later 3.
