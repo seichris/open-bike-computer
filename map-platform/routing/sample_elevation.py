@@ -19,8 +19,17 @@ asks to approve one:
   version: it sizes the ellipse for each post row and reads the neighbouring
   cells' posts instead. Away from the box's edges, and where the ellipse
   has the same width, both give the same posts.
+- `tiles` resamples one GeoTIFF per cell onto that cell's posts. The USGS
+  3DEP 1/3 arc-second tiles (a lidar-derived bare-earth model of the United
+  States) come this way: one file per degree, on a grid three times finer
+  than the posts. `--fill` takes the posts a tile has no data for from
+  another elevation directory. The newest 3DEP tiles stop at the border, so
+  filling one with opened Copernicus tiles gives a border cell's hybrid
+  without the blend. build_elevation.py --terrain-sources is the production
+  version: it also cuts the tiles to the United States, because older tiles
+  carry fill beyond the border, and blends the edge.
 
-Both write the same gzipped HGT layout and manifest schema as
+All three write the same gzipped HGT layout and manifest schema as
 build_elevation.py. The manifest always records `bounds`, so build_graph.py
 accepts these tiles only for a `--sample` build.
 """
@@ -31,14 +40,13 @@ import hashlib
 import json
 import math
 import os
-import re
 import sys
 import urllib.request
 from pathlib import Path
 
 from build_elevation import (
-    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, encode_posts, fetch, hgt_name, hgt_path,
-    resample_into,
+    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, cell_of, encode_posts, fetch, hgt_name,
+    hgt_path, post_transform, resample_into,
 )
 
 FORMAT = "srtm-hgt-1-arcsecond-int16-big-endian-gzip"
@@ -49,13 +57,6 @@ def cells_in(bounds):
     if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
         raise ValueError("bounds must be whole degrees, west < east and south < north")
     return [(x, y) for y in range(south, north) for x in range(west, east)]
-
-
-def post_transform(longitude, latitude):
-    """Affine of the 3601 x 3601 posts of a cell, each post at a pixel centre."""
-    from affine import Affine
-
-    return Affine(STEP, 0, longitude - STEP / 2, 0, -STEP, latitude + 1 + STEP / 2)
 
 
 def write_hgt(out, cell, heights):
@@ -109,16 +110,6 @@ def cog_cell(dataset, cell):
     if array is not None:
         resample_into(heights, post_transform(*cell), array, transform, 0)
     return heights
-
-
-def cell_of(name):
-    """South-west corner (longitude, latitude) of an HGT cell name such as N40W074."""
-    match = re.fullmatch(r"([NS])(\d{2})([EW])(\d{3})", name)
-    if match:
-        cell = (int(match[4]) * (1 if match[3] == "E" else -1), int(match[2]) * (1 if match[1] == "N" else -1))
-        if hgt_name(*cell) == name:
-            return cell
-    raise ValueError(f"{name!r} is not an HGT cell name such as N40W074")
 
 
 def tile_sources(values, cells):

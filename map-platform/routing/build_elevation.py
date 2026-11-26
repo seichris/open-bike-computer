@@ -21,22 +21,38 @@ erosion and then a dilation over an ellipse of that many metres. The raw tiles
 go to `--raw` first, then each cell is opened from its own raw posts and a
 margin of its eight neighbours' raw posts into `--out`, so the ellipse spans
 cell borders and no cell depends on the order the cells were opened in.
+
+`--terrain-sources` adds a bare-earth source on top: the USGS 3DEP 1/3
+arc-second tiles that elevation-sources.json approves for routing. Each
+dated tile of its catalog is downloaded, checked against the catalog's size
+and ETag, and resampled onto its cell's posts in `--terrain`. The opened
+Copernicus tiles then go to `--opened`, and `--out` gets the hybrid: a post
+is 3DEP's where 3DEP has data and opened Copernicus's elsewhere. 3DEP's
+newest tiles stop at the border of the United States, but older ones carry
+fill for Mexico and Canada from other sources, so every tile is first cut to
+the source list's area, the United States. The opened surface lies under the
+ground, so the two would meet in a step. The difference between them at
+3DEP's edge is therefore carried into the Copernicus side and fades to zero
+over BLEND_POSTS posts. 3DEP's own posts are never changed.
 """
 
 import argparse
 import functools
 import gzip
 import hashlib
+import http.client
 import json
 import math
 import os
+import re
 import signal
 import sys
+import threading
 import time
 import urllib.request
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 POSTS = 3601
@@ -44,12 +60,28 @@ STEP = 1 / 3600
 NO_DATA = -32768
 MARGIN = 2 * STEP
 CELL_DEADLINE = 900
+# A 3DEP tile is up to 500 MB, twenty times a Copernicus cell: its download gets an hour.
+TERRAIN_DEADLINE = 3600
 ROUNDS = 3
+# A connection that closes in the middle of a body raises IncompleteRead, which is no OSError.
+TRANSFER_ERRORS = (OSError, http.client.HTTPException)
 METRES_PER_ARCSECOND = 30.87
 OPENING_RADII = (15, 1000)
 # Memory for one block of power-of-two runs in the opening, in float32 posts.
 RUN_TABLE_POSTS = 1 << 24
 NEIGHBOURS = tuple((dx, dy) for dy in (1, 0, -1) for dx in (-1, 0, 1) if (dx, dy) != (0, 0))
+# The USGS 3DEP 1/3 arc-second tiles: three pixels per post, six pixels of overlap on every side.
+TERRAIN_BUCKET = "https://prd-tnm.s3.amazonaws.com"
+TERRAIN_PREFIX = "StagedProducts/Elevation/13/TIFF/historical"
+TERRAIN_ADAPTER = "usgs-3dep-13-geotiff-v1"
+TERRAIN_PIXELS_PER_POST = 3
+TERRAIN_OVERLAP = 6
+TERRAIN_HEIGHTS = (-500, 7000)
+TERRAIN = "terrain"
+# Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
+BLEND_POSTS = 16
+FETCH_CONNECTIONS = 8
+FETCH_PART = 32 << 20
 GDAL_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
@@ -68,6 +100,23 @@ def hgt_path(out, longitude, latitude):
     """Gzipped, which Valhalla reads like plain HGT and halves the planet's 690 GB."""
     name = hgt_name(longitude, latitude)
     return out / name[:3] / f"{name}.hgt.gz"
+
+
+def cell_of(name):
+    """South-west corner (longitude, latitude) of an HGT cell name such as N40W074."""
+    match = re.fullmatch(r"([NS])(\d{2})([EW])(\d{3})", name)
+    if match:
+        cell = (int(match[4]) * (1 if match[3] == "E" else -1), int(match[2]) * (1 if match[1] == "N" else -1))
+        if hgt_name(*cell) == name:
+            return cell
+    raise ValueError(f"{name!r} is not an HGT cell name such as N40W074")
+
+
+def post_transform(longitude, latitude):
+    """Affine of the posts of a cell, each post at a pixel centre."""
+    from affine import Affine
+
+    return Affine(STEP, 0, longitude - STEP / 2, 0, -STEP, latitude + 1 + STEP / 2)
 
 
 def neighbour(longitude, latitude, dx, dy):
@@ -113,7 +162,7 @@ def fetch(url, attempts=6):
                 if len(data) != expected:
                     raise OSError(f"short read {len(data)} of {expected}")
                 return data, response.headers.get("ETag", "").strip('"')
-        except OSError:
+        except TRANSFER_ERRORS:
             if attempt == attempts - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -131,6 +180,269 @@ def resample_into(heights, transform, array, source_transform, shift):
         dst_transform=transform, dst_crs=crs, dst_nodata=float("nan"),
         init_dest_nodata=False, resampling=Resampling.bilinear, num_threads=1,
     )
+
+
+CATALOG_LINE = re.compile(r"([NS]\d{2}W\d{3}) (n\d{2}w\d{3}) (\d{8}) ([1-9]\d*) ([0-9a-f]{32}(?:-\d+)?)")
+
+
+def format_terrain_catalog(tiles):
+    """One line per cell: HGT cell, 3DEP tile, version date, bytes, S3 ETag."""
+    return "".join(f"{hgt_name(*cell)} {tile} {date} {size} {etag}\n"
+                   for cell, (tile, date, size, etag) in sorted(tiles.items(), key=lambda item: hgt_name(*item[0])))
+
+
+def parse_terrain_catalog(text):
+    """{cell: (tile, date, bytes, ETag)}; a 3DEP tile is named by its north-west corner."""
+    tiles = {}
+    for line in text.splitlines():
+        match = CATALOG_LINE.fullmatch(line)
+        if match is None:
+            raise ValueError(f"invalid terrain catalog line: {line!r}")
+        cell = cell_of(match[1])
+        if match[2] != f"n{cell[1] + 1:02d}w{-cell[0]:03d}" or cell in tiles:
+            raise ValueError(f"terrain catalog line names the wrong tile or repeats a cell: {line!r}")
+        tiles[cell] = (match[2], match[3], int(match[4]), match[5])
+    if format_terrain_catalog(tiles) != text:
+        raise ValueError("the terrain catalog is not sorted by cell")
+    return tiles
+
+
+TERRAIN_FIELDS = {
+    "id", "adapter", "title", "surfaceModel", "horizontalCrs", "verticalDatum", "verticalUnits", "origin",
+    "coverage", "area", "areaBytes", "areaSha256", "areaSource", "catalog", "catalogBytes", "catalogSha256",
+    "tileCount", "license", "attribution", "termsUrl", "attributionUrl", "modifications", "approvedForRouting",
+    "approvedAt", "approvedBy",
+}
+
+
+@dataclass(frozen=True)
+class TerrainSource:
+    """A bare-earth source of the routing elevation source list, one dated tile per cell.
+
+    `area` is the gzipped GeoJSON polygon the source is approved for. Posts
+    outside it are dropped, whatever the tiles hold there.
+    """
+    id: str
+    origin: str
+    tiles: dict
+    catalog_sha256: str
+    terms_url: str
+    attribution_url: str
+    area: Path
+    area_sha256: str
+
+    def tile_url(self, longitude, latitude):
+        tile, date, _, _ = self.tiles[(longitude, latitude)]
+        return f"{self.origin}/{tile}/USGS_13_{tile}_{date}.tif"
+
+    def identity(self):
+        return {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
+                "termsUrl": self.terms_url, "attributionUrl": self.attribution_url}
+
+
+def load_terrain_source(path):
+    """The one terrain source of elevation-sources.json, with its catalog checked against its pin."""
+    document = json.loads(path.read_text())
+    sources = document.get("terrain") if isinstance(document, dict) else None
+    if not isinstance(sources, list) or len(sources) != 1 or document.get("schemaVersion") != 1:
+        raise ValueError("the elevation source list must hold exactly one terrain source")
+    value = sources[0]
+    if not isinstance(value, dict) or set(value) != TERRAIN_FIELDS:
+        raise ValueError("invalid terrain source fields")
+    if (value["adapter"] != TERRAIN_ADAPTER or value["origin"] != f"{TERRAIN_BUCKET}/{TERRAIN_PREFIX}"
+            or value["surfaceModel"] != "dtm" or value["horizontalCrs"] != "EPSG:4269"
+            or value["verticalUnits"] != "m"
+            or not isinstance(value["id"], str) or re.fullmatch(r"[a-z][a-z0-9-]{2,63}", value["id"]) is None):
+        raise ValueError("unsupported terrain source contract")
+    if value["approvedForRouting"] is not True:
+        raise ValueError(f"{value['id']} is not approved for routing")
+    pinned = {}
+    for kind in ("catalog", "area"):
+        name = value[kind]
+        if not isinstance(name, str) or Path(name).name != name:
+            raise ValueError(f"the terrain {kind} must be a file beside the source list")
+        pinned[kind] = (path.parent / name).read_bytes()
+        if (len(pinned[kind]) != value[f"{kind}Bytes"]
+                or hashlib.sha256(pinned[kind]).hexdigest() != value[f"{kind}Sha256"]):
+            raise ValueError(f"{name} is not the {kind} the source list pins")
+    tiles = parse_terrain_catalog(pinned["catalog"].decode())
+    if len(tiles) != value["tileCount"]:
+        raise ValueError(f"{value['catalog']} holds {len(tiles)} tiles, not {value['tileCount']}")
+    for field in ("termsUrl", "attributionUrl"):
+        if not isinstance(value[field], str) or not value[field].startswith("https://"):
+            raise ValueError(f"terrain source {field} must be HTTPS")
+    return TerrainSource(value["id"], value["origin"], tiles, value["catalogSha256"], value["termsUrl"],
+                         value["attributionUrl"], path.parent / value["area"], value["areaSha256"])
+
+
+@functools.lru_cache(maxsize=2)
+def load_area(path, sha256):
+    """The area of a terrain source: its polygon, and the same prepared for containment tests."""
+    from shapely.geometry import shape
+    from shapely.prepared import prep
+
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise ValueError(f"{path.name} is not the area the source list pins")
+    feature = json.loads(gzip.decompress(data))
+    if feature.get("type") != "Feature" or feature["geometry"]["type"] not in ("Polygon", "MultiPolygon"):
+        raise ValueError(f"{path.name} must hold one GeoJSON polygon feature")
+    polygon = shape(feature["geometry"])
+    if polygon.is_empty or not polygon.is_valid:
+        raise ValueError(f"{path.name} holds no valid polygon")
+    return polygon, prep(polygon)
+
+
+def posts_in_area(cell, area):
+    """Which of a cell's posts lie in the area: True for all, False for none, or a mask of the posts.
+
+    A post is in when its own position is, not when the square around it touches the area.
+    """
+    from rasterio.features import rasterize
+    from shapely.geometry import box
+
+    polygon, prepared = area
+    longitude, latitude = cell
+    posts = box(longitude - STEP / 2, latitude - STEP / 2, longitude + 1 + STEP / 2, latitude + 1 + STEP / 2)
+    if prepared.contains(posts):
+        return True
+    part = polygon.intersection(posts)
+    if part.is_empty:
+        return False
+    return rasterize([(part, 1)], out_shape=(POSTS, POSTS), transform=post_transform(longitude, latitude),
+                     fill=0, dtype="uint8").astype(bool)
+
+
+def clip_to_area(heights, cell, area):
+    """Drop the posts outside the area; returns how many held data."""
+    import numpy as np
+
+    inside = posts_in_area(cell, area)
+    if inside is True:
+        return 0
+    outside = np.isfinite(heights) if inside is False else np.isfinite(heights) & ~inside
+    heights[outside] = np.nan
+    return int(outside.sum())
+
+
+def fetch_range(url, start, end, attempts=6):
+    """Bytes [start, end) of `url`, the size of the whole object and its ETag."""
+    request = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end - 1}"})
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = response.read()
+                total = response.headers.get("Content-Range", "").rpartition("/")[2]
+                if response.status != 206 or len(data) != end - start or not total.isdigit():
+                    raise OSError(f"range {start}-{end} of {url} came back as {response.status} with {len(data)} bytes")
+                return data, int(total), response.headers.get("ETag", "").strip('"')
+        except TRANSFER_ERRORS:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def fetch_to_file(url, path, size, connections=FETCH_CONNECTIONS):
+    """Download the `size` bytes of `url` into `path` over parallel ranges; returns its SHA-256 and ETag.
+
+    One connection to the USGS bucket carried about 1 MB/s on 2026-11-26, and
+    a tile is up to 500 MB.
+    """
+    parts = [(start, min(start + FETCH_PART, size)) for start in range(0, size, FETCH_PART)]
+    failed = threading.Event()
+    with path.open("wb") as stream:
+        stream.truncate(size)
+
+        def part(bounds):
+            # Once a part has failed for good, the rest are not asked for: the tile is not read to its end first.
+            if failed.is_set():
+                return None
+            try:
+                data, total, etag = fetch_range(url, *bounds)
+                if total != size:
+                    raise ValueError(f"{url} holds {total} bytes, not the catalog's {size}")
+            except BaseException:
+                failed.set()
+                raise
+            os.pwrite(stream.fileno(), data, bounds[0])
+            return etag
+
+        with ThreadPoolExecutor(connections) as pool:
+            etags = set(pool.map(part, parts))
+    if len(etags) != 1:
+        raise ValueError(f"{url} changed while it was read")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 22), b""):
+            digest.update(block)
+    return digest.hexdigest(), etags.pop()
+
+
+def terrain_posts(dataset, cell):
+    """A cell's posts from its own 3DEP tile, and how many of the tile's pixels hold no data.
+
+    The tile is refused unless it is laid out as the cell's tile is: float32,
+    NAD 83, three pixels per post and six pixels of overlap, so that a post
+    lies on a pixel corner. GDAL widens the bilinear kernel by the ratio of
+    the grids, so each post is a weighted mean of the six by six pixels around
+    it. NAD 83 is read as WGS 84: the two differ by a metre or two, far less
+    than the 30 m between posts.
+    """
+    import numpy as np
+
+    longitude, latitude = cell
+    fine = STEP / TERRAIN_PIXELS_PER_POST
+    edge = TERRAIN_OVERLAP * fine
+    side = (POSTS - 1) * TERRAIN_PIXELS_PER_POST + 2 * TERRAIN_OVERLAP
+    transform, crs = dataset.transform, dataset.crs
+    if (dataset.driver != "GTiff" or dataset.count != 1 or dataset.dtypes[0] != "float32" or dataset.nodata is None
+            or (dataset.width, dataset.height) != (side, side) or crs is None or crs.to_epsg() != 4269
+            or transform.b or transform.d
+            or not math.isclose(transform.a, fine, rel_tol=1e-6) or not math.isclose(transform.e, -fine, rel_tol=1e-6)
+            or abs(transform.c - (longitude - edge)) > fine / 100
+            or abs(transform.f - (latitude + 1 + edge)) > fine / 100):
+        raise ValueError(f"not the 3DEP 1/3 arc-second tile of {hgt_name(*cell)}")
+    array = dataset.read(1)
+    valid = (dataset.read_masks(1) != 0) & np.isfinite(array)
+    if np.any(valid & ((array < TERRAIN_HEIGHTS[0]) | (array > TERRAIN_HEIGHTS[1]))):
+        raise ValueError(f"3DEP elevations of {hgt_name(*cell)} lie outside {TERRAIN_HEIGHTS} m")
+    array[~valid] = np.nan
+    heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
+    resample_into(heights, post_transform(longitude, latitude), array, transform, 0)
+    return heights, int((~valid).sum())
+
+
+def build_terrain_cell(cell, chosen, out):
+    """Download the cell's dated 3DEP tile, check it against the catalog and write its posts inside the area."""
+    import rasterio
+
+    source = chosen[cell]
+    _, date, size, etag = source.tiles[cell]
+    url = source.tile_url(*cell)
+    scratch = out / "downloads" / f"{hgt_name(*cell)}.tif"
+    scratch.parent.mkdir(exist_ok=True)
+    try:
+        sha256, found = fetch_to_file(url, scratch, size)
+        if found != etag:
+            raise ValueError(f"{url} has ETag {found}, not the catalog's {etag}")
+        with rasterio.Env(**GDAL_OPTIONS), rasterio.open(scratch) as dataset:
+            heights, invalid = terrain_posts(dataset, cell)
+    finally:
+        scratch.unlink(missing_ok=True)
+    outside = clip_to_area(heights, cell, load_area(source.area, source.area_sha256))
+    return write_receipt(out, {
+        "cell": hgt_name(*cell),
+        "source": source.id,
+        "url": url,
+        "bytes": size,
+        "sha256": sha256,
+        "etag": etag,
+        "tileDate": date,
+        "invalidPixels": invalid,
+        "areaSha256": source.area_sha256,
+        "outsidePosts": outside,
+        **write_tile(out, cell, heights),
+    })
 
 
 def edge_window(dataset, longitude, latitude, cell, shift):
@@ -170,7 +482,6 @@ def edge_window(dataset, longitude, latitude, cell, shift):
 def build_cell(cell, chosen, out):
     import numpy as np
     import rasterio
-    from affine import Affine
     from rasterio.io import MemoryFile
 
     from map_platform.topography_raster import audited_copernicus_pixels
@@ -179,7 +490,7 @@ def build_cell(cell, chosen, out):
     source = chosen[cell]
     url = source.tile_url(longitude, latitude)
     heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
-    transform = Affine(STEP, 0, longitude - STEP / 2, 0, -STEP, latitude + 1 + STEP / 2)
+    transform = post_transform(longitude, latitude)
     used = []
     with rasterio.Env(**GDAL_OPTIONS):
         for dx, dy in NEIGHBOURS:
@@ -390,12 +701,14 @@ def row_latitudes(north, first_row, count):
     return (north * side - (first_row + np.arange(count))) / side
 
 
-def opening_window(cell, load, row_margin, column_margin):
-    """The cell's raw posts with margins of its neighbours' raw posts around them.
+def opening_window(cell, load, row_margin, column_margin, required=True):
+    """The cell's posts with margins of its neighbours' posts around them.
 
     Neighbouring tiles share their border posts. The southern tile's posts
-    win, then the eastern one's: their own Copernicus pixels gave those posts.
-    Every window that holds a post therefore gives it the same height.
+    win, then the eastern one's: for raw tiles, their own Copernicus pixels
+    gave those posts. Every window that holds a post therefore gives it the
+    same height. Without `required` the cell itself may have no tile, as a
+    cell beside the terrain source's coverage has none of its tiles.
     """
     import numpy as np
 
@@ -407,8 +720,8 @@ def opening_window(cell, load, row_margin, column_margin):
             found = (cell, 0) if dx == dy == 0 else neighbour(longitude, latitude, dx, dy)
             tile = None if found is None else load(found[0])
             if tile is None:
-                if dx == dy == 0:
-                    raise ValueError(f"{hgt_name(*cell)} has no raw tile")
+                if dx == dy == 0 and required:
+                    raise ValueError(f"{hgt_name(*cell)} has no tile")
                 continue
             top, left = row_margin - dy * side, column_margin + dx * side
             first_row, first_column = max(0, -top), max(0, -left)
@@ -492,11 +805,138 @@ def open_cell(cell, chosen, out, opening):
     })
 
 
+def _beside(array, outside):
+    """The array as seen from each post's four neighbours; `outside` beyond its edges."""
+    import numpy as np
+
+    padded = np.pad(array, 1, constant_values=outside)
+    return padded[:-2, 1:-1], padded[2:, 1:-1], padded[1:-1, :-2], padded[1:-1, 2:]
+
+
+def blend_fill(terrain, fill, band):
+    """Terrain posts where the terrain has data; elsewhere the fill, lifted to meet it at its edge.
+
+    The fill is another surface, so it differs from the terrain where the two
+    meet. A fill post one step from the terrain takes the mean difference
+    (terrain minus fill) of the terrain posts beside it; each further step
+    takes the mean of the posts a step nearer. That difference is added with a
+    weight falling linearly from the edge to nothing beyond `band` steps. A
+    post's result depends only on posts within `band` steps of it, so a window
+    with that margin gives every post what a blend of the whole planet would.
+    Returns the heights, the posts the terrain gave and the posts that were
+    lifted.
+    """
+    import numpy as np
+
+    known = np.isfinite(terrain)
+    heights = np.where(known, terrain, fill).astype("float32")
+    carried = np.where(known, terrain - fill, np.nan).astype("float32")
+    done = known.copy()
+    blended = np.zeros(known.shape, dtype=bool)
+    for step in range(1, band + 1):
+        up, down, left, right = _beside(done, False)
+        new = ~done & (up | down | left | right)
+        if not new.any():
+            break
+        finite = np.isfinite(carried)
+        up, down, left, right = _beside(np.where(finite, carried, np.float32(0)), np.float32(0))
+        total = up + down + left + right
+        up, down, left, right = _beside(finite.astype("int8"), 0)
+        count = up + down + left + right
+        reached = new & (count > 0)
+        carried[reached] = total[reached] / count[reached]
+        lifted = reached & np.isfinite(fill)
+        heights[lifted] = fill[lifted] + np.float32((band + 1 - step) / (band + 1)) * carried[lifted]
+        blended |= lifted
+        # A post beside terrain posts that carry nothing (the fill has no data under them) waits a step
+        # for the posts beside it, so no row is left out of the lift.
+        done |= reached
+    return heights, known, blended
+
+
+@dataclass(frozen=True)
+class Hybrid:
+    """Terrain tiles over opened Copernicus tiles, the fill blended at the terrain's edge."""
+    terrain: TerrainSource
+    tiles: Path
+    opened: Path
+    opening: Opening
+    band: int = BLEND_POSTS
+
+    def method(self):
+        return {"name": "terrain-over-opening", "terrain": self.terrain.id, "blendPosts": self.band,
+                "blend": "terrain minus fill at the terrain's edge, carried into the fill and faded linearly",
+                "fill": self.opening.method()}
+
+
+def hybrid_inputs(cell, chosen, hybrid):
+    """SHA-256 of every opened and terrain tile the cell's blend reads, by cell name; None while one is missing.
+
+    A cell with no terrain tile of its own or beside it is its opened tile
+    unchanged, and reads nothing else.
+    """
+    opened, terrain = {}, {}
+    for other in [cell] + [found[0] for found in (neighbour(*cell, dx, dy) for dx, dy in NEIGHBOURS) if found]:
+        if other in chosen:
+            receipt = _sourced_receipt(hybrid.opened, other, chosen)
+            if receipt is None or receipt.get("method") != hybrid.opening.method():
+                return None
+            opened[hgt_name(*other)] = receipt["hgtSha256"]
+        if other in hybrid.terrain.tiles:
+            receipt = current_terrain_receipt(hybrid.tiles, other, {other: hybrid.terrain})
+            if receipt is None:
+                return None
+            terrain[hgt_name(*other)] = receipt["hgtSha256"]
+    if not terrain:
+        opened = {hgt_name(*cell): opened[hgt_name(*cell)]}
+    return {"opened": opened, "terrain": terrain}
+
+
+def hybrid_cell(cell, chosen, out, hybrid):
+    name = hgt_name(*cell)
+    expected = None if cell not in chosen else hybrid_inputs(cell, chosen, hybrid)
+    if expected is None:
+        raise ValueError(f"{name} or a neighbour has no current opened or terrain tile")
+    read = {"opened": {}, "terrain": {}}
+
+    def loader(root, kind):
+        def load(other):
+            if hgt_name(*other) not in expected[kind]:
+                return None
+            posts, sha256 = read_tile(hgt_path(root, *other))
+            read[kind][hgt_name(*other)] = sha256
+            return posts
+        return load
+
+    margin = hybrid.band if expected["terrain"] else 0
+    inner = (slice(margin, margin + POSTS),) * 2
+    opened = opening_window(cell, loader(hybrid.opened, "opened"), margin, margin)
+    counts = {"terrainPosts": 0, "blendedPosts": 0}
+    if expected["terrain"]:
+        terrain = opening_window(cell, loader(hybrid.tiles, "terrain"), margin, margin, required=False)
+        heights, known, blended = blend_fill(terrain, opened, hybrid.band)
+        counts = {"terrainPosts": int(known[inner].sum()), "blendedPosts": int(blended[inner].sum())}
+        opened = heights
+    if read != expected:
+        raise ValueError(f"tiles around {name} do not match their receipts")
+    receipt = _sourced_receipt(hybrid.opened, cell, chosen)
+    return write_receipt(out, {
+        "cell": name,
+        "source": receipt["source"],
+        "url": receipt["url"],
+        "bytes": receipt["bytes"],
+        "method": hybrid.method(),
+        "inputTiles": read,
+        **counts,
+        **write_tile(out, cell, opened[inner]),
+    })
+
+
 _WORKER = {}
 
 
-def _start_worker(chosen, out, opening=None):
-    _WORKER.update(chosen=chosen, out=out, opening=opening)
+def _start_worker(chosen, out, opening=None, stage=None):
+    _WORKER.update(chosen=chosen, out=out, opening=opening, stage=stage)
 
 
 def _build(cell):
@@ -504,8 +944,13 @@ def _build(cell):
     # planet's 26,475 cells blocked in it for good, with no socket open. With no
     # handler installed, SIGALRM ends the worker, which breaks the pool so
     # build_pending retries.
-    signal.alarm(CELL_DEADLINE)
+    stage = _WORKER.get("stage")
+    signal.alarm(TERRAIN_DEADLINE if stage == TERRAIN else CELL_DEADLINE)
     try:
+        if isinstance(stage, Hybrid):
+            return hybrid_cell(cell, _WORKER["chosen"], _WORKER["out"], stage)
+        if stage == TERRAIN:
+            return build_terrain_cell(cell, _WORKER["chosen"], _WORKER["out"])
         if _WORKER.get("opening") is not None:
             return open_cell(cell, _WORKER["chosen"], _WORKER["out"], _WORKER["opening"])
         return build_cell(cell, _WORKER["chosen"], _WORKER["out"])
@@ -513,9 +958,9 @@ def _build(cell):
         signal.alarm(0)
 
 
-def run_pool(pending, chosen, out, jobs, opening=None):
+def run_pool(pending, chosen, out, jobs, opening=None, stage=None):
     started = time.monotonic()
-    with ProcessPoolExecutor(jobs, initializer=_start_worker, initargs=(chosen, out, opening)) as pool:
+    with ProcessPoolExecutor(jobs, initializer=_start_worker, initargs=(chosen, out, opening, stage)) as pool:
         futures = {pool.submit(_build, cell): cell for cell in pending}
         for done, future in enumerate(as_completed(futures), 1):
             future.result()
@@ -524,14 +969,25 @@ def run_pool(pending, chosen, out, jobs, opening=None):
                 print(f"{done}/{len(futures)} cells, {rate:.2f}/s", flush=True)
 
 
-def build_pending(cells, chosen, out, jobs, rounds=ROUNDS, opening=None):
-    """Build (or open) the cells without a current receipt, again after a worker dies."""
-    current = current_receipt if opening is None else functools.partial(current_opened_receipt, opening=opening)
+def build_pending(cells, chosen, out, jobs, rounds=ROUNDS, opening=None, stage=None):
+    """Build, open or blend the cells without a current receipt, again after a worker dies.
+
+    `stage` is TERRAIN for the terrain source's tiles, where `chosen` maps each
+    cell to that source, or a Hybrid for the final blend.
+    """
+    if isinstance(stage, Hybrid):
+        current, verb = functools.partial(current_hybrid_receipt, hybrid=stage), "blend"
+    elif stage == TERRAIN:
+        current, verb = current_terrain_receipt, "build"
+    elif opening is not None:
+        current, verb = functools.partial(current_opened_receipt, opening=opening), "open"
+    else:
+        current, verb = current_receipt, "build"
     for attempt in range(1, rounds + 1):
         pending = [cell for cell in cells if current(out, cell, chosen) is None]
-        print(f"{len(cells)} cells, {len(pending)} to {'build' if opening is None else 'open'}", flush=True)
+        print(f"{len(cells)} cells, {len(pending)} to {verb}", flush=True)
         try:
-            run_pool(pending, chosen, out, jobs, opening)
+            run_pool(pending, chosen, out, jobs, opening, stage)
             return
         except BrokenProcessPool as error:
             if attempt == rounds:
@@ -591,6 +1047,22 @@ def current_opened_receipt(out, cell, chosen, opening):
     return receipt
 
 
+def current_terrain_receipt(out, cell, chosen):
+    """The terrain tile's receipt if it came from the catalog's tile and was cut to the area pinned now."""
+    receipt = current_receipt(out, cell, chosen)
+    return receipt if receipt is not None and receipt.get("areaSha256") == chosen[cell].area_sha256 else None
+
+
+def current_hybrid_receipt(out, cell, chosen, hybrid):
+    """The blended cell's receipt if it used this method and the opened and terrain tiles there are now."""
+    receipt = _sourced_receipt(out, cell, chosen)
+    if receipt is None or receipt.get("method") != hybrid.method():
+        return None
+    if receipt.get("inputTiles") != hybrid_inputs(cell, chosen, hybrid):
+        return None
+    return receipt
+
+
 def with_neighbours(cells, chosen):
     """The cells and every catalog cell next to one of them: an opening reads their raw posts."""
     found = set(cells)
@@ -602,22 +1074,69 @@ def with_neighbours(cells, chosen):
     return sorted(found)
 
 
-def write_manifest(out, policy_path, policy, chosen, cells, bounds=None, opening=None):
+TERRAIN_SCHEMA = "bicino-valhalla-terrain-tiles-v1"
+
+
+def manifest_identity(directory, name="elevation-manifest.json"):
+    manifest = directory / name
+    return {"manifestSha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "cellListSha256": json.loads(manifest.read_text())["cellListSha256"]}
+
+
+def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
+    """The terrain tiles' own manifest. Its schema keeps build_graph.py from taking them for a whole set."""
+    receipts = [current_terrain_receipt(out, cell, {cell: terrain}) for cell in cells]
+    if not all(receipts):
+        raise ValueError("a cell has no receipt for its current terrain tile")
+    listing = "".join(f"{r['cell']} {r['hgtSha256']}\n" for r in sorted(receipts, key=lambda r: r["cell"]))
+    manifest = {
+        "schema": TERRAIN_SCHEMA,
+        "format": "srtm-hgt-1-arcsecond-int16-big-endian-gzip",
+        "posts": POSTS,
+        "noData": NO_DATA,
+        "resampling": "bilinear",
+        "sourceList": file_identity(list_path),
+        "source": terrain.identity(),
+        "bounds": bounds,
+        "catalogCells": len(terrain.tiles),
+        "cells": len(receipts),
+        "cellListSha256": hashlib.sha256(listing.encode()).hexdigest(),
+        "sourceBytes": sum(r["bytes"] for r in receipts),
+        "fileBytes": sum(r["fileBytes"] for r in receipts),
+        "noDataPosts": sum(r["noDataPosts"] for r in receipts),
+        "outsidePosts": sum(r["outsidePosts"] for r in receipts),
+    }
+    (out / "cells.txt").write_text(listing)
+    path = out / "terrain-manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    return path
+
+
+def write_manifest(out, policy_path, policy, chosen, cells, bounds=None, opening=None, hybrid=None):
     """`bounds` and `catalogCells` tell a partial run from a complete one.
 
     `method` is null for raw tiles. Opened tiles record the opening and the
-    raw manifest they were opened from.
+    raw manifest they were opened from. Hybrid tiles record the blend, the
+    opened and terrain manifests they read and the terrain source.
     """
     import rasterio
 
-    if opening is None:
+    terrain_sources = []
+    if hybrid is not None:
+        receipts = [current_hybrid_receipt(out, cell, chosen, hybrid) for cell in cells]
+        method = {**hybrid.method(), "inputs": {
+            "opened": manifest_identity(hybrid.opened),
+            "terrain": manifest_identity(hybrid.tiles, "terrain-manifest.json")}}
+        if all(receipts):
+            terrain_sources = [{**hybrid.terrain.identity(),
+                                "cells": sum(1 for r in receipts if r["terrainPosts"]),
+                                "posts": sum(r["terrainPosts"] for r in receipts),
+                                "blendedPosts": sum(r["blendedPosts"] for r in receipts)}]
+    elif opening is None:
         receipts, method = [current_receipt(out, cell, chosen) for cell in cells], None
     else:
         receipts = [current_opened_receipt(out, cell, chosen, opening) for cell in cells]
-        raw_manifest = opening.raw / "elevation-manifest.json"
-        method = {**opening.method(), "input": {
-            "manifestSha256": hashlib.sha256(raw_manifest.read_bytes()).hexdigest(),
-            "cellListSha256": json.loads(raw_manifest.read_text())["cellListSha256"]}}
+        method = {**opening.method(), "input": manifest_identity(opening.raw)}
     if not all(receipts):
         raise ValueError("a cell has no receipt for its current source")
     listing = "".join(f"{r['cell']} {r['hgtSha256']}\n" for r in sorted(receipts, key=lambda r: r["cell"]))
@@ -634,7 +1153,7 @@ def write_manifest(out, policy_path, policy, chosen, cells, bounds=None, opening
              "attributionUrl": s.attribution_url,
              "cells": sum(1 for r in receipts if r["source"] == s.id)}
             for s in policy.sources
-        ],
+        ] + terrain_sources,
         "runtime": {"rasterio": rasterio.__version__, "gdal": rasterio.__gdal_version__},
         "bounds": bounds,
         "catalogCells": len(chosen),
@@ -662,6 +1181,10 @@ def main():
     parser.add_argument("--opening-radius", type=float, metavar="METRES",
                         help="Write raw tiles to --raw, then open them over an ellipse of this radius into --out")
     parser.add_argument("--raw", type=Path, help="Raw tiles for --opening-radius, outside --out")
+    parser.add_argument("--terrain-sources", type=Path, metavar="FILE",
+                        help="elevation-sources.json: put its terrain source over the opened tiles")
+    parser.add_argument("--terrain", type=Path, help="The terrain source's tiles for --terrain-sources")
+    parser.add_argument("--opened", type=Path, help="The opened tiles when --terrain-sources makes --out the hybrid")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs must be between 1 and 64")
@@ -669,31 +1192,67 @@ def main():
         parser.error("--opening-radius and --raw go together")
     if args.opening_radius is not None and not OPENING_RADII[0] <= args.opening_radius <= OPENING_RADII[1]:
         parser.error(f"--opening-radius must be between {OPENING_RADII[0]} and {OPENING_RADII[1]} metres")
+    hybrid_arguments = (args.terrain_sources, args.terrain, args.opened)
+    if any(value is not None for value in hybrid_arguments) and (None in hybrid_arguments or args.raw is None):
+        parser.error("--terrain-sources, --terrain and --opened go together and need --opening-radius")
     out = args.out.resolve()
     raw = args.raw.resolve() if args.raw else out
+    separate = {"--out": out, "--raw": raw if args.raw else None,
+                "--terrain": args.terrain and args.terrain.resolve(), "--opened": args.opened and args.opened.resolve()}
+    separate = {name: path for name, path in separate.items() if path is not None}
     # Valhalla reads every tile below its elevation directory.
-    if args.raw and (raw.is_relative_to(out) or out.is_relative_to(raw)):
-        parser.error("--raw and --out must be separate directories, neither inside the other")
+    for name, path in separate.items():
+        for other, other_path in separate.items():
+            if name < other and (path.is_relative_to(other_path) or other_path.is_relative_to(path)):
+                parser.error(f"{name} and {other} must be separate directories, neither inside the other")
+    try:
+        terrain = load_terrain_source(args.terrain_sources) if args.terrain_sources else None
+    except (OSError, ValueError) as error:
+        parser.error(f"--terrain-sources: {error}")
     policy = TopographySourcePolicy.load(args.policy)
     (raw / "receipts").mkdir(parents=True, exist_ok=True)
     (raw / "index").mkdir(exist_ok=True)
     indexes = load_indexes(policy, raw / "index")
     chosen = choose_sources(policy.sources, indexes)
     cells = sorted(chosen)
-    raw_cells, raw_bounds = cells, args.bounds
+    # A blend reads the opened tiles of the cells beside it, and an opening the raw tiles beside those.
+    raw_cells, raw_bounds = opened_cells, opened_bounds = cells, args.bounds
     if args.bounds:
         west, south, east, north = args.bounds
-        cells = raw_cells = [(x, y) for x, y in cells if west <= x < east and south <= y < north]
-        if args.raw:
+        cells = raw_cells = opened_cells = [(x, y) for x, y in cells if west <= x < east and south <= y < north]
+        if terrain is not None:
+            opened_cells, opened_bounds = with_neighbours(cells, chosen), [west - 1, south - 1, east + 1, north + 1]
+            raw_cells, raw_bounds = with_neighbours(opened_cells, chosen), [west - 2, south - 2, east + 2, north + 2]
+        elif args.raw:
             raw_cells, raw_bounds = with_neighbours(cells, chosen), [west - 1, south - 1, east + 1, north + 1]
     build_pending(raw_cells, chosen, raw, args.jobs)
     manifest = write_manifest(raw, args.policy, policy, chosen, raw_cells, raw_bounds)
     if args.raw:
         print(f"Raw elevation manifest: {manifest}", flush=True)
         opening = Opening(args.opening_radius, raw)
+        opened = separate.get("--opened", out)
+        (opened / "receipts").mkdir(parents=True, exist_ok=True)
+        build_pending(opened_cells, chosen, opened, args.jobs, opening=opening)
+        manifest = write_manifest(opened, args.policy, policy, chosen, opened_cells, opened_bounds, opening)
+    if terrain is not None:
+        print(f"Opened elevation manifest: {manifest}", flush=True)
+        outside = sorted(hgt_name(*cell) for cell in terrain.tiles if cell not in chosen)
+        if outside:
+            print(f"{len(outside)} terrain tiles have no Copernicus cell and are left out: {' '.join(outside)}",
+                  flush=True)
+        terrain = replace(terrain, tiles={cell: tile for cell, tile in terrain.tiles.items() if cell in chosen})
+        tiles = separate["--terrain"]
+        (tiles / "receipts").mkdir(parents=True, exist_ok=True)
+        terrain_cells = [cell for cell in opened_cells if cell in terrain.tiles]
+        build_pending(terrain_cells, dict.fromkeys(terrain_cells, terrain), tiles, args.jobs, stage=TERRAIN)
+        manifest = write_terrain_manifest(tiles, args.terrain_sources, terrain, terrain_cells, opened_bounds)
+        print(f"Terrain manifest: {manifest}", flush=True)
+        # A bounded run built only the terrain tiles around its cells, which is all its blends read.
+        hybrid = Hybrid(replace(terrain, tiles={cell: terrain.tiles[cell] for cell in terrain_cells}),
+                        tiles, opened, opening)
         (out / "receipts").mkdir(parents=True, exist_ok=True)
-        build_pending(cells, chosen, out, args.jobs, opening=opening)
-        manifest = write_manifest(out, args.policy, policy, chosen, cells, args.bounds, opening)
+        build_pending(cells, chosen, out, args.jobs, stage=hybrid)
+        manifest = write_manifest(out, args.policy, policy, chosen, cells, args.bounds, opening, hybrid)
     print(f"Elevation manifest: {manifest}", flush=True)
 
 

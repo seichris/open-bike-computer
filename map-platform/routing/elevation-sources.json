@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Elevation sources approved for grading the bicycle routing graph, beside the Copernicus sources of map-platform/config/topography-source-policy-v2.json. Offline maps and the map-platform image do not read this file.",
+  "terrain": [
+    {
+      "id": "usgs-3dep-13",
+      "adapter": "usgs-3dep-13-geotiff-v1",
+      "title": "USGS 3D Elevation Program, 1/3 arc-second seamless DEM",
+      "surfaceModel": "dtm",
+      "horizontalCrs": "EPSG:4269",
+      "verticalDatum": "NAVD 88",
+      "verticalUnits": "m",
+      "origin": "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/historical",
+      "coverage": "Conterminous United States: the posts inside the area, from the cells that touch it",
+      "area": "united-states-conterminous-osm-r148838-v1054.geojson.gz",
+      "areaBytes": 542594,
+      "areaSha256": "11e69b88746a99dfc6f55f942443c3f38649a2f919f6ac8e71412433bb73a030",
+      "areaSource": "OpenStreetMap relation 148838 version 1054 of 2026-11-11, the boundary of the United States with its territorial sea, cut to longitudes -126 to -65 and latitudes 23 to 51. (c) OpenStreetMap contributors, ODbL.",
+      "catalog": "usgs-3dep-13-tiles-20261126.txt",
+      "catalogBytes": 67374,
+      "catalogSha256": "e5416be94671f182d8290a57812385276c9313fa25517811c4cc7a71a5928489",
+      "tileCount": 955,
+      "license": "Public domain",
+      "attribution": "Map services and data available from U.S. Geological Survey, National Geospatial Program.",
+      "termsUrl": "https://www.usgs.gov/faqs/what-are-terms-uselicensing-map-services-and-data-national-map",
+      "attributionUrl": "https://www.usgs.gov/3d-elevation-program",
+      "modifications": "Cut to the area, resampled from 1/3 to 1 arc-second posts, rounded to whole metres, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet 3DEP over 16 posts at the edge of 3DEP's data. Not endorsed by the USGS.",
+      "approvedForRouting": true,
+      "approvedAt": "2026-11-26",
+      "approvedBy": "Chris"
+    }
+  ]
+}
