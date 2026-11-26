@@ -31,12 +31,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
 
 from build_elevation import (
-    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, encode_posts, hgt_name, hgt_path,
+    GDAL_OPTIONS, MARGIN, METRES_PER_ARCSECOND, NO_DATA, POSTS, STEP, encode_posts, fetch, hgt_name, hgt_path,
     resample_into,
 )
 
@@ -108,6 +109,71 @@ def cog_cell(dataset, cell):
     if array is not None:
         resample_into(heights, post_transform(*cell), array, transform, 0)
     return heights
+
+
+def cell_of(name):
+    """South-west corner (longitude, latitude) of an HGT cell name such as N40W074."""
+    match = re.fullmatch(r"([NS])(\d{2})([EW])(\d{3})", name)
+    if match:
+        cell = (int(match[4]) * (1 if match[3] == "E" else -1), int(match[2]) * (1 if match[1] == "N" else -1))
+        if hgt_name(*cell) == name:
+            return cell
+    raise ValueError(f"{name!r} is not an HGT cell name such as N40W074")
+
+
+def tile_sources(values, cells):
+    """`CELL=SOURCE` arguments as {cell: source}, one for every cell of the bounds."""
+    sources = {}
+    for value in values:
+        name, separator, source = value.partition("=")
+        cell = cell_of(name)
+        if not separator or not source or cell in sources:
+            raise ValueError(f"--tile takes CELL=SOURCE once per cell, got {value!r}")
+        sources[cell] = source
+    if set(sources) != set(cells):
+        wrong = sorted(hgt_name(*cell) for cell in set(sources) ^ set(cells))
+        raise ValueError(f"--tile must name exactly the cells of --bounds; check {', '.join(wrong)}")
+    return sources
+
+
+def read_source(source):
+    """A tile's bytes and the identity its manifest entry records, from an HTTPS URL or a local file."""
+    if "://" in source:
+        if not source.startswith("https://"):
+            raise ValueError("a tile URL must be HTTPS")
+        data, etag = fetch(source)
+        identity = {"url": source, "etag": etag}
+    else:
+        path = Path(source).resolve(strict=True)
+        data, identity = path.read_bytes(), {"file": path.name}
+    return data, {**identity, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def tile_cell(dataset, cell):
+    """One cell's posts from a GeoTIFF in geographic coordinates.
+
+    Where the tile's grid is finer than the posts, GDAL widens the bilinear
+    kernel by the same ratio, so each post is a weighted mean of the pixels
+    around it, not a point sample. A 3DEP tile overlaps its neighbours by six
+    pixels, so it also holds the posts on the cell's borders. Its NAD 83
+    coordinates are read as WGS 84: the two differ by a metre or two, far
+    less than the 30 m between posts.
+    """
+    if dataset.crs is None or not dataset.crs.is_geographic:
+        raise ValueError("a tile must be in geographic coordinates")
+    # A neighbour's tile also reaches this cell's border posts, and a fill would hide the mix-up.
+    left, bottom, right, top = dataset.bounds
+    if not (left < cell[0] + 0.5 < right and bottom < cell[1] + 0.5 < top):
+        raise ValueError(f"the tile does not cover the middle of {hgt_name(*cell)}")
+    return cog_cell(dataset, cell)
+
+
+def fill_missing(heights, fallback):
+    """Posts without data take `fallback`'s; returns the posts and how many were filled."""
+    import numpy as np
+
+    wanted = ~np.isfinite(heights) & np.isfinite(fallback)
+    return np.where(wanted, fallback, heights), int(wanted.sum())
 
 
 def cog_identity(url):
@@ -236,6 +302,45 @@ def run_opening(args, out):
     return write_manifest(out, method, [source], entries, args.bounds)
 
 
+def run_tiles(args, out):
+    import numpy as np
+    import rasterio
+    from rasterio.io import MemoryFile
+
+    sources = tile_sources(args.tile, cells_in(args.bounds))
+    fill = None
+    if args.fill is not None:
+        fill = args.fill.resolve(strict=True)
+        fill_manifest = json.loads((fill / "elevation-manifest.json").read_text())
+        if fill_manifest.get("schema") != "bicino-valhalla-elevation-v1":
+            raise ValueError("--fill is not an elevation directory")
+    entries, tiles = [], []
+    with rasterio.Env(**GDAL_OPTIONS):
+        for cell in sorted(sources):
+            data, identity = read_source(sources[cell])
+            with MemoryFile(data) as memory, memory.open() as dataset:
+                heights = tile_cell(dataset, cell)
+            del data
+            if not np.isfinite(heights).any():
+                raise ValueError(f"{sources[cell]} holds no post of {hgt_name(*cell)}")
+            filled = 0
+            if fill is not None and hgt_path(fill, *cell).exists():
+                heights, filled = fill_missing(heights, read_hgt(hgt_path(fill, *cell)))
+            entry = write_hgt(out, cell, heights)
+            entries.append({**entry, "filledPosts": filled} if fill is not None else entry)
+            tiles.append({"cell": entry["cell"], **identity})
+            print(f"{entry['cell']}: {entry['noDataPosts']} no-data posts, {filled} filled", flush=True)
+    listed = [{"id": args.source_id, "tiles": tiles}]
+    method = {"name": "tiles", "resampling": "bilinear", "fill": None}
+    if fill is not None:
+        method["fill"] = {
+            "manifestSha256": hashlib.sha256((fill / "elevation-manifest.json").read_bytes()).hexdigest(),
+            "cellListSha256": fill_manifest["cellListSha256"], "method": fill_manifest.get("method")}
+        listed.append({"id": "fill-with-" + "+".join(s["id"] for s in fill_manifest["sources"] if s.get("cells")),
+                       "posts": sum(entry["filledPosts"] for entry in entries)})
+    return write_manifest(out, method, listed, entries, args.bounds)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -245,7 +350,12 @@ def main():
     opening = commands.add_parser("opening", help="Open build_elevation.py tiles")
     opening.add_argument("--input", required=True, type=Path, help="Tiles written by build_elevation.py")
     opening.add_argument("--radius", required=True, type=float, help="Ellipse radius in metres")
-    for command in (cog, opening):
+    tiles = commands.add_parser("tiles", help="Resample one GeoTIFF per cell onto HGT posts")
+    tiles.add_argument("--tile", action="append", required=True, metavar="CELL=SOURCE",
+                       help="The cell's GeoTIFF, an HTTPS URL or a local file, e.g. N40W074=USGS_13_n41w074.tif")
+    tiles.add_argument("--source-id", required=True, help="Name recorded in the manifest, e.g. usgs-3dep-13")
+    tiles.add_argument("--fill", type=Path, help="Elevation directory that fills the tiles' no-data posts")
+    for command in (cog, opening, tiles):
         command.add_argument("--out", required=True, type=Path, help="A new directory")
         command.add_argument("--bounds", required=True, type=int, nargs=4,
                              metavar=("WEST", "SOUTH", "EAST", "NORTH"))
@@ -256,9 +366,14 @@ def main():
         parser.error("--url must be HTTPS")
     if args.command == "opening" and not 15 <= args.radius <= 1000:
         parser.error("--radius must be between 15 and 1000 metres")
+    if args.command == "tiles":
+        try:
+            tile_sources(args.tile, cells_in(args.bounds))
+        except ValueError as error:
+            parser.error(str(error))
     out = args.out.resolve()
     out.mkdir(parents=True)
-    path = run_cog(args, out) if args.command == "cog" else run_opening(args, out)
+    path = {"cog": run_cog, "opening": run_opening, "tiles": run_tiles}[args.command](args, out)
     print(f"Elevation manifest: {path}", flush=True)
 
 

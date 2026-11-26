@@ -1000,6 +1000,123 @@ class SampleElevationTests(unittest.TestCase):
         expected[96, 196] = np.nan  # the no-data pixel stays a single no-data post
         np.testing.assert_allclose(posts, expected, atol=1e-3)
 
+    FIRST_POST = 1750
+
+    @classmethod
+    def fine_tile(cls, pixels, crs="EPSG:4269"):
+        """A GeoTIFF on the 3DEP 1/3 arc-second grid of cell N40W074.
+
+        It holds only the pixels around the middle of the cell: post
+        (FIRST_POST, FIRST_POST) lies on the pixel corner (6, 6), as the
+        cell's first post does in a whole tile with its six pixels of overlap.
+        """
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        fine = build_elevation.STEP / 3
+        shift = (3 * cls.FIRST_POST - 6) * fine
+        memory = MemoryFile()
+        with memory.open(driver="GTiff", width=pixels.shape[1], height=pixels.shape[0], count=1, dtype="float32",
+                         crs=crs, transform=Affine(fine, 0, -74 + shift, 0, -fine, 41 - shift),
+                         nodata=-999999) as dataset:
+            dataset.write(pixels, 1)
+        return memory
+
+    def test_tiles_average_a_finer_grid_onto_the_posts(self):
+        import numpy as np
+        import rasterio
+
+        first = self.FIRST_POST
+        rows, columns = np.mgrid[0:300, 0:300]
+        # A plane over the pixel centres; post (first + r, first + c) lies on the pixel corner 6 + 3r, 6 + 3c.
+        pixels = (200 + 0.1 * (rows + 0.5) + 0.2 * (columns + 0.5)).astype("float32")
+        pixels[12, 12] += 18  # one 10 m pixel beside post (first + 2, first + 2)
+        pixels[150:] = -999999
+        with self.fine_tile(pixels) as memory, memory.open() as dataset, rasterio.Env():
+            posts = sample_elevation.tile_cell(dataset, (-74, 40))
+            with self.assertRaisesRegex(ValueError, "middle of N41W074"):
+                sample_elevation.tile_cell(dataset, (-74, 41))
+        self.assertEqual(posts.shape, (build_elevation.POSTS,) * 2)
+        post_rows, post_columns = np.mgrid[0:46, 0:96]
+        plane = 200 + 0.1 * (6 + 3 * post_rows) + 0.2 * (6 + 3 * post_columns)
+        spike = posts[first:first + 46, first:first + 96] - plane
+        # The spike is spread over the posts around it and keeps its volume: a ninth of a post's area.
+        self.assertTrue(1 < spike[2, 2] < 2, spike[2, 2])
+        self.assertAlmostEqual(float(spike.sum()), 18 / 9, places=2)
+        spike[1:5, 1:5] = 0
+        np.testing.assert_allclose(spike, 0, atol=1e-3)
+        # Pixels without data give posts without data; so does the rest of the cell.
+        self.assertTrue(np.isnan(posts[first + 50:]).all() and np.isnan(posts[:, first + 100:]).all())
+        self.assertTrue(np.isnan(posts[:first - 3]).all() and np.isnan(posts[:, :first - 3]).all())
+        with self.fine_tile(pixels, crs="EPSG:32618") as memory, memory.open() as dataset:
+            with self.assertRaisesRegex(ValueError, "geographic"):
+                sample_elevation.tile_cell(dataset, (-74, 40))
+
+    def test_missing_posts_are_filled_from_another_tile_set(self):
+        import numpy as np
+
+        heights = np.array([[1, np.nan], [np.nan, 4]], dtype="float32")
+        fallback = np.array([[9, 8], [np.nan, 7]], dtype="float32")
+        filled, count = sample_elevation.fill_missing(heights, fallback)
+        self.assertEqual(count, 1)
+        np.testing.assert_array_equal(filled, np.array([[1, 8], [np.nan, 4]], dtype="float32"))
+
+    def test_tile_arguments_name_every_cell_once(self):
+        cells = [(-75, 40), (-74, 40)]
+        self.assertEqual(sample_elevation.cell_of("S35W059"), (-59, -35))
+        self.assertEqual(sample_elevation.tile_sources(["N40W074=a.tif", "N40W075=https://host/b.tif?x=1"], cells),
+                         {(-74, 40): "a.tif", (-75, 40): "https://host/b.tif?x=1"})
+        for bad in (["N40W074=a.tif"], ["N40W074=a.tif", "N40W074=b.tif", "N40W075=c.tif"],
+                    ["N40W074=a.tif", "N40W075=b.tif", "N41W074=c.tif"], ["N40W074", "N40W075=b.tif"],
+                    ["N40W74=a.tif", "N40W075=b.tif"], ["S00W074=a.tif", "N40W075=b.tif"]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                sample_elevation.tile_sources(bad, cells)
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            sample_elevation.read_source("http://host/a.tif")
+
+    def test_tiles_command_writes_a_filled_sample_and_its_sources(self):
+        import numpy as np
+
+        first = self.FIRST_POST
+        pixels = np.full((300, 300), 12.4, dtype="float32")
+        pixels[150:] = -999999
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.fine_tile(pixels) as memory:
+                (root / "USGS_13_n41w074_20260917.tif").write_bytes(memory.read())
+            fill = root / "opened"
+            fallback = np.full((build_elevation.POSTS,) * 2, 30, dtype="float32")
+            fallback[:, 3000:] = np.nan
+            sample_elevation.write_manifest(
+                fill, {"name": "grey-opening"}, [{"id": "copernicus-glo30"}],
+                [sample_elevation.write_hgt(fill, (-74, 40), fallback)], [-74, 40, -73, 41])
+            out = root / "hybrid"
+            arguments = ["sample_elevation.py", "tiles", "--source-id", "usgs-3dep-13", "--bounds", "-74", "40",
+                         "-73", "41", "--tile", f"N40W074={root / 'USGS_13_n41w074_20260917.tif'}",
+                         "--fill", str(fill), "--out", str(out)]
+            with patch("sys.argv", arguments), patch("builtins.print"):
+                sample_elevation.main()
+            posts = sample_elevation.read_hgt(build_elevation.hgt_path(out, -74, 40))
+            self.assertEqual((float(posts[first + 10, first + 10]), float(posts[first + 60, first + 10]),
+                              float(posts[0, 0])), (12, 30, 30))
+            self.assertTrue(np.isnan(posts[:, 3000:]).all())
+            manifest = json.loads((out / "elevation-manifest.json").read_text())
+            self.assertEqual(manifest["method"]["fill"]["cellListSha256"],
+                             json.loads((fill / "elevation-manifest.json").read_text())["cellListSha256"])
+            tile, = manifest["sources"][0]["tiles"]
+            self.assertEqual((tile["cell"], tile["file"]), ("N40W074", "USGS_13_n41w074_20260917.tif"))
+            self.assertEqual(tile["sha256"],
+                             hashlib.sha256((root / "USGS_13_n41w074_20260917.tif").read_bytes()).hexdigest())
+            filled = manifest["cellFiles"][0]["filledPosts"]
+            self.assertEqual(manifest["sources"][1], {"id": "fill-with-copernicus-glo30", "posts": filled, "cells": 1})
+            self.assertEqual(filled + manifest["noDataPosts"] + int((posts == 12).sum()), build_elevation.POSTS ** 2)
+            self.assertEqual(elevation_identity(out, sample=True)["sources"],
+                             ["usgs-3dep-13", "fill-with-copernicus-glo30"])
+            with patch("sys.argv", arguments[:-1] + [str(root / "again")] + ["--tile", "N41W074=x.tif"]), \
+                    patch("sys.stderr"), self.assertRaises(SystemExit):
+                sample_elevation.main()
+            self.assertFalse((root / "again").exists())
+
     def test_sample_manifests_are_only_accepted_for_sample_builds(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
