@@ -96,7 +96,7 @@ struct RouteSaveSheet: View {
             return "Saves this Apple Maps route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
         }
         if isPlannedBicinoRoute {
-            return "Saves this route and its instructions on this iPhone. Offline map tiles and Watch transfer are not included."
+            return "Saves this route and its instructions on this iPhone. Eligible routes sync privately to your Bicino account when you’re signed in. Offline map tiles and Watch transfer are not included."
         }
         return "Saves route guidance on this iPhone, not offline map tiles. You can send the saved route to Apple Watch separately."
     }
