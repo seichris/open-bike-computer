@@ -671,9 +671,7 @@ def _polygon_priority(feature_type, area, index):
     return feature_type.startswith("building."), -area, index
 
 
-def _clip_overfull_polygon_block(
-    features, bbox, budget, max_pieces_per_source, max_pieces_per_block, diagnostics,
-):
+def _clip_overfull_polygon_block(features, bbox, budget, max_pieces_per_source, diagnostics):
     # Rank the original OSM components by clipped area without storing their
     # decompositions. Only contenders for the remaining firmware slots are split.
     candidates = []
@@ -700,13 +698,13 @@ def _clip_overfull_polygon_block(
             pieces = clip_polygons(
                 [feat], bbox,
                 max_pieces_per_source=max_pieces_per_source - source_count,
-                max_pieces_per_block=max_pieces_per_block - (budget - remaining),
+                max_pieces_per_block=remaining,
                 geometry_diagnostics=diagnostics,
             )
         except _PolygonBlockLimitError:
-            # This component cannot fit even within the working set.
+            # Stop as soon as this component cannot fit the remaining slots.
             continue
-        if pieces and len(pieces) <= remaining:
+        if pieces:
             source_piece_counts[source] = source_count + len(pieces)
             kept[index] = pieces
             remaining -= len(pieces)
@@ -717,7 +715,7 @@ def _clip_overfull_polygon_block(
 
 
 def clip_polygons_to_tile_budget(
-    features, bbox, line_count, feature_limit, *, geometry_diagnostics=None,
+    features: list[dict], bbox, line_count, feature_limit, *, geometry_diagnostics=None,
     max_pieces_per_source=MAX_GENERIC_POLYGON_PIECES_PER_SOURCE,
     max_pieces_per_block=MAX_GENERIC_POLYGON_PIECES_PER_BLOCK,
 ):
@@ -745,7 +743,7 @@ def clip_polygons_to_tile_budget(
     if overfull:
         selected, omitted_components = _clip_overfull_polygon_block(
             features, bbox, min(polygon_budget, max_pieces_per_block),
-            max_pieces_per_source, max_pieces_per_block, geometry_diagnostics,
+            max_pieces_per_source, geometry_diagnostics,
         )
         omitted_pieces = 0
 

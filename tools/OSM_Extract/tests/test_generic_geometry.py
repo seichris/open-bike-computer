@@ -96,10 +96,12 @@ class GenericGeometryTests(unittest.TestCase):
             "large park",
         )
         small_park = styled_feature(box(40, 0, 45, 5), "small park")
-        selected = clip_polygons_to_tile_budget(
-            [large_park, small_park], block, 5, 6, max_pieces_per_block=2,
-        )
+        with patch("funcs._decompose_hole_free", wraps=funcs._decompose_hole_free) as decompose:
+            selected = clip_polygons_to_tile_budget(
+                [large_park, small_park], block, 5, 6, max_pieces_per_block=2,
+            )
         self.assertEqual([feat["id"] for feat in selected], ["small park"])
+        self.assertEqual([call.args[1] for call in decompose.call_args_list], [2, 1, 1])
 
     def test_tile_budget_does_not_duplicate_invalid_geometry_samples(self):
         feature = styled_feature(Point(5, 5), "invalid")
