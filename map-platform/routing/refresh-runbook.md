@@ -791,19 +791,42 @@ are in the sessions' notes folder on Chris's Mac, under
 On 2026-11-26 another session routed 58 legs in 36 tower downtowns outside
 the United States on the 400 m planet's two gate services, with New York
 and Chicago as controls. Its report and scripts are on the map VPS in
-`/root/bicino-routing-releases/opened-400-downtown-survey-20261126/`; the
-routes were not run again for this section. Of 92 routes in flat cities one
-breaks the 5% rule: Toronto, Rogers Centre to St Lawrence Market, Everyday
+`/root/bicino-routing-releases/opened-400-downtown-survey-20261126/`. Of
+92 routes in flat cities one breaks the 5% rule: Toronto, Rogers Centre to St Lawrence Market, Everyday
 from 2.006 to 2.710 km (+35.1%), leaving Front Street West for Adelaide
 Street. Union Station to Yonge-Dundas Square is 2.8% longer on Road, and 22%
 of it reads 6% or more. Melbourne's Collins Street (Road +7.5%) and Seoul's
 Teheran-ro (Everyday +8.2%) change on real slopes and were not judged; no
 other leg is more than 2.9% longer.
 
-Both Toronto legs are now in `elevation-probes.json` (flat, `planetOnly`),
-so a planet gate sees them. **A hybrid planet built as approved grades
-Toronto with the same opened tiles and would miss the gate on the first
-leg.**
+Both Toronto legs are now in `elevation-probes.json` as a flat city, so a
+planet gate sees them. **A hybrid planet built as approved grades Toronto
+with the same opened tiles and would miss the gate on the first leg.**
+
+A city sample shows the same, and that a terrain model repairs it. Toronto's
+box was cut from Geofabrik's `ontario-261125.osm.pbf` (1,016,225,213 bytes,
+SHA-256 `0edd1904…`, MD5 as published) by `prepare_sample.py`, with Canada's
+relation 1428125 merged in; Ontario's boundary is whole in the extract.
+Three sample graphs were built from it with `build_graph.py`'s build, none
+with `--all-bridges`: ungraded, graded with the cell opened at 400 m by
+`build_elevation.py`, and graded with MRDEM-30's terrain model read over
+the cell on 2026-11-26 (bilinear, onto the cell's own posts, heights left
+in CGVD2013) and written by `sample_elevation.py tiles`.
+
+| Leg, profile | Ungraded | Opened at 400 m | MRDEM-30 terrain |
+|---|---|---|---|
+| Rogers Centre to St Lawrence Market, Road | 2.006 km | 2.006 km, 20% at 6%+ | 2.006 km, 9% at 6%+ |
+| Rogers Centre to St Lawrence Market, Everyday | 2.006 km | **2.710 km (+35.1%)**, other streets | 2.006 km, 9% at 6%+ |
+| Union Station to Yonge-Dundas Square, Road | 1.416 km | 1.455 km (+2.8%), other streets | 1.416 km, 0% at 6%+ |
+| Union Station to Yonge-Dundas Square, Everyday | 1.455 km | 1.455 km, 16% at 6%+ | 1.455 km, 0% at 6%+ |
+
+The opened sample gives the survey's numbers, 2.006 to 2.710 km on the
+first leg and +2.8% on the second, so the sample stands for the planet here
+as it does in New York and Chicago. On MRDEM-30 all four routes are the
+ungraded ones. 9% of the first leg still reads 6% or more; the terrain model
+falls from 89 m at the Rogers Centre to 81 m at Simcoe Street, and which
+edges read steep was not looked at. The sample went through the tools by
+hand, not through `builder/rehearse.sh`.
 
 The heights below were read on a laptop from four sources: the Copernicus
 cell N43W080 built raw and opened at 400 m by `build_elevation.py`, the
@@ -859,13 +882,15 @@ Metres, each in its own height datum; the lake shows how far those differ.
   that was read here as lidar and Copernicus, without the product
   specification. The part that
   comes from Copernicus carries the Copernicus notice.
-- **MRDEM-30 is not an approved source, and nothing reads it.** Using it
-  needs Chris's approval, an entry in `elevation-sources.json`, a reader for
-  one projected file in place of 3DEP's degree tiles, Canada's boundary as
-  its area, and samples of Toronto and other Canadian downtowns.
+- **MRDEM-30 is not an approved source, and the build cannot read it.**
+  Using it needs Chris's approval, an entry in `elevation-sources.json`, a
+  reader for one projected file in place of 3DEP's degree tiles, Canada's
+  boundary as its area, a look at the seam with 3DEP along the border, and
+  samples of other Canadian downtowns.
 
-The readings and the scripts are in the sessions' notes folder on Chris's
-Mac, under `usgs-3dep-samples-20261126/toronto/`.
+The readings, the sample's report and manifests and the scripts are in the
+sessions' notes folder on Chris's Mac, under
+`usgs-3dep-samples-20261126/toronto/`.
 
 ### Tower-city samples
 
@@ -920,7 +945,7 @@ on that city. The planet rows are those of the 400 m planet's gate log (see
 So an elevation method should pass the tower-city samples before a planet
 is built with it. The 400 m opening would not have: the samples that chose
 it on the morning of 2026-11-26 held only New York's first leg, which does
-not change at 400 m. Copenhagen, Paris, London, Munich, Tokyo and Toronto are
+not change at 400 m. Copenhagen, Paris, London, Munich and Tokyo are still
 planet-only, and Amsterdam, Berlin and Stuttgart do not list their country's
 relation yet. Each run's result file, stage logs and gate report are in the
 sessions' notes folder on Chris's Mac, in
