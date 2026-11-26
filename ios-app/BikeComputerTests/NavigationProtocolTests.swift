@@ -856,6 +856,12 @@ struct NavigationProtocolTests {
             print("Delayed map startup regression passed")
             return
         }
+        if CommandLine.arguments.contains("--map-job-submission-only") {
+            await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
+            await testProductionMapJobSubmissionRetriesOnDirectOrigin()
+            print("Map job submission and reconciliation regressions passed")
+            return
+        }
         if CommandLine.arguments.contains("--firmware-install-intent-only") {
             testFirmwareLocalPreparationRecovery()
             await testFirmwareInstallRetainsOriginalDevice()
@@ -1174,6 +1180,7 @@ struct NavigationProtocolTests {
         await testDurableMapDownloads()
         testPendingOfflineMapJobBlocksEveryCreationIngress()
         await testOfflineMapJobCreatorReconcilesAmbiguousResponse()
+        await testProductionMapJobSubmissionRetriesOnDirectOrigin()
         await testOfflineMapPollerOutlivesLegacyAttemptLimit()
         await testOfflineMapPollerRetriesTransientFailure()
         await testOfflineMapPollerStopsOnTerminalAndCancellation()

@@ -1281,11 +1281,56 @@ enum OfflineMapJobPoller {
 enum OfflineMapJobCreator {
     static func create(
         request: OfflineMapJobRequest,
+        client: OfflineMapPlatformClient,
+        clientForReconciliation: (OfflineMapPlatformClient) async throws -> OfflineMapPlatformClient,
+        refreshUnavailableKey: (OfflineMapPlatformClient) async throws -> OfflineMapPlatformClient,
+        sleep: (UInt64) async throws -> Void,
+        onRetry: () -> Void
+    ) async throws -> OfflineMapJob {
+        let submissionOrigin = client.baseURL
+        let selector = client.endpointSelector
+        let keepsDirectRetries = selector == nil || (
+            selector?.channel == .production &&
+                submissionOrigin == BicinoEndpointSelector.Service.api.direct(in: .production)
+        )
+        var submissionClient = client
+        var reconciliationOrigin = submissionOrigin
+        var recoveredUnavailableKey = false
+
+        return try await create(
+            request: request,
+            maximumAttempts: keepsDirectRetries ? 3 : 1,
+            canResubmit: { reconciliationOrigin == submissionOrigin },
+            create: { identifiedRequest in
+                do {
+                    return try await submissionClient.createJob(identifiedRequest)
+                } catch ManagedAppAttestError.keyUnavailable where !recoveredUnavailableKey {
+                    recoveredUnavailableKey = true
+                    submissionClient = try await refreshUnavailableKey(submissionClient)
+                        .atOrigin(submissionOrigin)
+                    return try await submissionClient.createJob(identifiedRequest)
+                }
+            },
+            list: {
+                // A read can follow failover. An ambiguous submission stays on
+                // its original origin and stops if reconciliation switches.
+                let client = try await clientForReconciliation(submissionClient)
+                reconciliationOrigin = client.baseURL
+                return try await client.jobs()
+            },
+            sleep: sleep,
+            onRetry: onRetry
+        )
+    }
+
+    static func create(
+        request: OfflineMapJobRequest,
         maximumAttempts: Int = 3,
-        create: @escaping (OfflineMapJobRequest) async throws -> OfflineMapJob,
-        list: @escaping () async throws -> [OfflineMapJob],
-        sleep: @escaping (UInt64) async throws -> Void,
-        onRetry: @escaping () -> Void
+        canResubmit: () -> Bool = { true },
+        create: (OfflineMapJobRequest) async throws -> OfflineMapJob,
+        list: () async throws -> [OfflineMapJob],
+        sleep: (UInt64) async throws -> Void,
+        onRetry: () -> Void
     ) async throws -> OfflineMapJob {
         precondition(maximumAttempts > 0)
         var lastError: Error?
@@ -1309,12 +1354,11 @@ enum OfflineMapJobCreator {
                 lastError = error
             }
 
-            if attempt < maximumAttempts {
-                onRetry()
-                try await sleep(
-                    OfflineMapPollingRetryPolicy.delayNanoseconds(failureCount: attempt)
-                )
-            }
+            guard attempt < maximumAttempts, canResubmit() else { break }
+            onRetry()
+            try await sleep(
+                OfflineMapPollingRetryPolicy.delayNanoseconds(failureCount: attempt)
+            )
         }
         throw lastError ?? OfflineMapPlatformError.invalidResponse
     }
@@ -5129,27 +5173,18 @@ final class OfflineMapManager: ObservableObject {
         _ request: OfflineMapJobRequest,
         client: OfflineMapPlatformClient
     ) async throws -> OfflineMapJob {
-        var activeClient = try await bicinoServiceSession.clientForCurrentNetwork(client)
-        var recoveredUnavailableKey = false
+        let activeClient = try await bicinoServiceSession.clientForCurrentNetwork(client)
         return try await OfflineMapJobCreator.create(
             request: request,
-            maximumAttempts: activeClient.endpointSelector == nil ? 3 : 1,
-            create: { identifiedRequest in
-                do {
-                    return try await activeClient.createJob(identifiedRequest)
-                } catch ManagedAppAttestError.keyUnavailable
-                    where !recoveredUnavailableKey {
-                    recoveredUnavailableKey = true
-                    activeClient = try await self.ensureRegisteredInstallation(
-                        client: activeClient,
-                        honorRefreshBackoff: false
-                    )
-                    return try await activeClient.createJob(identifiedRequest)
-                }
+            client: activeClient,
+            clientForReconciliation: { client in
+                try await self.bicinoServiceSession.clientForCurrentNetwork(client)
             },
-            list: {
-                activeClient = try await self.bicinoServiceSession.clientForCurrentNetwork(activeClient)
-                return try await activeClient.jobs()
+            refreshUnavailableKey: { client in
+                try await self.ensureRegisteredInstallation(
+                    client: client,
+                    honorRefreshBackoff: false
+                )
             },
             sleep: { nanoseconds in
                 try await Task.sleep(nanoseconds: nanoseconds)
