@@ -3,8 +3,10 @@
 #
 #   sudo /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/install-chain.sh [--start]
 #
-# Starting it again after a failure runs the failed stage and everything
-# after it; stages that are done stay done.
+# Starting it again, after a failure or with other settings, starts every
+# stage's unit again. Each wrapper then decides from its marker: a stage that
+# is done stays done, a failed one runs, a stale one says so. A stage that is
+# running is left alone.
 set -euo pipefail
 # shellcheck source=config.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
@@ -33,6 +35,18 @@ systemctl reset-failed 'bicino-planet-*' 2>/dev/null || true
 systemctl start bicino-planet-sampler.service
 echo "installed: $(cd "$BICINO_BUILDER/units" && echo bicino-planet-*.service)"
 if [ "$start" -eq 1 ]; then
+  # A finished stage's unit stays active, and systemd would not start it
+  # again. Stop those, so that the marker and not systemd's memory says what
+  # is done. A unit that is still running its stage is "activating".
+  for unit in "$BICINO_BUILDER"/units/bicino-planet-*.service; do
+    unit=${unit##*/}
+    case "$unit" in
+      bicino-planet-sampler.service|bicino-planet-result.service) continue ;;
+    esac
+    if [ "$(systemctl show --property=ActiveState --value "$unit")" = active ]; then
+      systemctl stop "$unit"
+    fi
+  done
   systemctl start --no-block bicino-planet-result.service
   echo "chain started at $(bicino_now)"
 fi

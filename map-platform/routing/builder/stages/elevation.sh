@@ -13,9 +13,18 @@ bicino_is_graded || bicino_fail "the elevation stage needs BICINO_OPENING_RADIUS
 
 bounds=()
 if bicino_is_sample; then
-  read -r -a bounds < <(python3 -c 'import json, sys; print(*json.load(open(sys.argv[1]))["elevationBounds"])' \
-    "$BICINO_INPUT/sample/sample.json")
-  [ "${#bounds[@]}" -eq 4 ] || bicino_fail "the sample has no elevation bounds"
+  # From the city's box, not from the download stage's output: this stage
+  # does not wait for the download.
+  read -r -a bounds < <(python3 - "$BICINO_ROUTING" "$BICINO_SAMPLE_CITY" <<'PY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import prepare_sample
+cities = json.loads((Path(sys.argv[1]) / "elevation-probes.json").read_text())
+print(*prepare_sample.elevation_bounds(prepare_sample.find_city(cities, sys.argv[2])["bbox"]))
+PY
+  )
+  [ "${#bounds[@]}" -eq 4 ] || bicino_fail "no elevation bounds for the sample city $BICINO_SAMPLE_CITY"
   bounds=(--bounds "${bounds[@]}")
 fi
 mkdir -p "$BICINO_ELEVATION_RAW" "$BICINO_ELEVATION"

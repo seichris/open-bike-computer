@@ -107,7 +107,10 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    times and peaks here for the next sizing decision.
 8. If a stage failed, read its log, fix the cause and start the chain again
    (see [When a stage fails](builder/README.md#when-a-stage-fails)). Finished
-   stages are kept.
+   stages are kept. To build with another radius or snapshot on the same
+   builder, run `setup.sh` again: stages whose settings changed are reported
+   as stale and are neither reused nor deleted (see
+   [Build again with other settings](builder/README.md#build-again-with-other-settings)).
 
 A worldwide-gap build is not part of the chain. Run `setup.sh` without
 `--start` and build by hand on the scratch volume, under a transient systemd

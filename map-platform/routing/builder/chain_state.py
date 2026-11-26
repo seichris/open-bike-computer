@@ -8,6 +8,13 @@ While a stage runs, its wrapper holds a lock on `export/chain/<stage>.lock`.
 A marker that says running without that lock is an interrupted stage (the
 wrapper was killed or the machine restarted), never a running one.
 
+A marker also records the settings its stage ran under: the planet snapshot,
+the opening radius, the map-platform image and the sample, as far as the
+stage or a stage it needs depends on them, and the tools commit. A finished
+stage whose settings differ from `builder.env` is stale: its work is not
+reused under the new settings, and nothing deletes it. Only the tools commit
+may differ; the result then names the commit of every stage.
+
 `status` reads the markers and locks and prints where the chain stands.
 `result` writes the same, with the archive manifests, the qualification
 summaries and the gate summary, to `export/result.json`; `result --final`
@@ -17,8 +24,9 @@ The chain's state is one of:
 
 - not-started: no stage has a marker;
 - running: a stage is running, or the next one is about to start;
-- failed: a stage failed or was interrupted. Stages that need it never start;
-  a stage that does not need it and was already running finishes its work;
+- failed: a stage failed, was interrupted or is stale. Stages that need it
+  never start; a stage that does not need it and was already running finishes
+  its work;
 - stalled: nothing is running, nothing failed, and stages are still waiting.
   systemd is not driving the chain any more;
 - complete: every stage is done or skipped. `verdict` then holds the gate's
@@ -56,8 +64,15 @@ STAGES = {
     "qualify-graded": ("build-graded", "inputs"),
     "gate": ("qualify-ungraded", "qualify-graded"),
 }
+# The settings a stage's work depends on, beyond those of the stages it needs.
+STAGE_SETTINGS = {
+    "images": ("BICINO_MAP_PLATFORM_IMAGE",),
+    "download": ("BICINO_PLANET_DATE", "BICINO_SAMPLE_CITY", "BICINO_SAMPLE_REGION_URL"),
+    "elevation": ("BICINO_OPENING_RADIUS", "BICINO_SAMPLE_CITY"),
+}
 MARKED = ("running", "done", "skipped", "failed")
 FINISHED = ("done", "skipped")
+BROKEN = ("failed", "interrupted", "stale")
 # systemd starts the next stage within a moment of the last one ending. After
 # this long with nothing running and nothing failed, the chain has stalled.
 STALL_SECONDS = 120
@@ -117,6 +132,14 @@ def read_env(path):
     return values
 
 
+def stage_settings(stage, env):
+    """The settings the stage's work depends on: its own and those of every stage it needs."""
+    keys = set(STAGE_SETTINGS.get(stage, ()))
+    for need in STAGES[stage]:
+        keys.update(stage_settings(need, env))
+    return {key: env.get(key, "") for key in sorted(keys)}
+
+
 def read_marker(chain, stage):
     marker = read_json(chain / f"{stage}.json")
     if not isinstance(marker, dict) or marker.get("stage") != stage or marker.get("state") not in MARKED:
@@ -158,12 +181,17 @@ def mark(root, stage, state, *, exit_status=None, reason=None, note=None, clock=
     previous = read_marker(chain, stage) or {}
     now = now_text(clock)
     log = root / "export" / "logs" / f"{stage}.log"
+    env = read_env(root / "builder.env")
     marker = {
         "schema": STAGE_SCHEMA, "stage": stage, "state": state,
         "attempt": previous.get("attempt", 0), "startedAt": previous.get("startedAt"),
         "finishedAt": None, "seconds": None, "exitStatus": None,
         "reason": reason, "note": note, "log": f"logs/{stage}.log",
+        # What the stage ran under. A stage that ends keeps what it started with.
+        "settings": stage_settings(stage, env), "toolsCommit": env.get("BICINO_TOOLS_COMMIT") or None,
     }
+    if state in ("done", "failed") and previous.get("state") == "running":
+        marker.update(settings=previous.get("settings"), toolsCommit=previous.get("toolsCommit"))
     if state == "running":
         marker.update(attempt=previous.get("attempt", 0) + 1, startedAt=now)
     else:
@@ -177,9 +205,20 @@ def mark(root, stage, state, *, exit_status=None, reason=None, note=None, clock=
     return marker
 
 
+def changed_settings(marker, current):
+    """How the settings a finished stage ran under differ from today's, as text."""
+    ran = marker.get("settings")
+    if not isinstance(ran, dict):
+        return "its marker does not say what settings it ran under"
+    changes = [f"{key} was '{ran.get(key, '')}', is now '{value}'" for key, value in current.items()
+               if ran.get(key, "") != value]
+    return "; ".join(changes)
+
+
 def stage_states(root):
-    """Every stage with its state: marked states, interrupted, blocked or waiting."""
+    """Every stage with its state: marked states, interrupted, stale, blocked or waiting."""
     chain = root / "export" / "chain"
+    env = read_env(root / "builder.env")
     stages = {}
     for stage, needs in STAGES.items():
         marker = read_marker(chain, stage)
@@ -189,11 +228,15 @@ def stage_states(root):
             if marker["state"] == "running" and not lock_is_held(chain, stage):
                 entry["state"] = "interrupted"
                 entry["reason"] = "the stage's wrapper is gone and left no result"
+            elif marker["state"] in FINISHED:
+                changes = changed_settings(marker, stage_settings(stage, env))
+                if changes:
+                    entry.update(state="stale", was=marker["state"], reason=f"{marker['state']} under other settings: {changes}")
         stages[stage] = entry
     for stage, entry in stages.items():
         # STAGES is in chain order, so a stage's needs are settled before it.
         if entry["state"] == "waiting":
-            broken = [need for need in STAGES[stage] if stages[need]["state"] in ("failed", "interrupted", "blocked")]
+            broken = [need for need in STAGES[stage] if stages[need]["state"] in (*BROKEN, "blocked")]
             if broken:
                 entry.update(state="blocked", blockedBy=broken)
     return list(stages.values())
@@ -219,7 +262,7 @@ def chain_status(root, clock=time.time):
     now = clock()
     if all(state == "waiting" for state in states):
         state = "not-started"
-    elif any(state in ("failed", "interrupted") for state in states):
+    elif any(state in BROKEN for state in states):
         state = "failed"
     elif all(state in FINISHED for state in states):
         state = "complete"
@@ -271,6 +314,13 @@ def describe(status):
         lines.append(f"  {entry['stage']:<17} {entry['state']:<12} {detail}".rstrip())
         if entry["state"] == "failed":
             lines += [f"      | {line}" for line in entry.get("logTail", [])[-8:]]
+    commits = {}
+    for entry in status["stages"]:
+        if entry.get("toolsCommit") and entry["state"] != "waiting":
+            commits.setdefault(entry["toolsCommit"], []).append(entry["stage"])
+    if len(commits) > 1:
+        lines.append("  NOTE: the stages ran with different tools: "
+                     + "; ".join(f"{commit[:12]} ({', '.join(stages)})" for commit, stages in commits.items()))
     sampler = status.get("sampler")
     if sampler:
         lines.append(f"  scratch {sampler.get('diskUsedBytes', 0) / 1e9:.0f} GB (peak {sampler.get('peakDiskBytes', 0) / 1e9:.0f}),"

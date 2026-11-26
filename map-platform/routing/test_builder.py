@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -179,6 +180,60 @@ class ChainStateTests(ScratchCase):
         self.assertRegex(text, r"elevation\s+failed\s+\S+, 60 s, exit 1")
         self.assertRegex(text, r"build-graded\s+blocked\s+needs elevation")
 
+    def test_a_marker_records_the_settings_its_stage_depends_on(self):
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TOOLS_COMMIT=abc123\nBICINO_UNGRADED_THREADS=8\n")
+        self.finish("images", "download", "elevation", "build-graded")
+        markers = {stage: chain_state.read_marker(self.chain, stage) for stage in ("download", "elevation", "build-graded")}
+        self.assertEqual(markers["download"]["settings"], {"BICINO_PLANET_DATE": "261116", "BICINO_SAMPLE_CITY": "",
+                                                           "BICINO_SAMPLE_REGION_URL": ""})
+        self.assertEqual(markers["elevation"]["settings"], {"BICINO_MAP_PLATFORM_IMAGE": "", "BICINO_OPENING_RADIUS": "400",
+                                                            "BICINO_SAMPLE_CITY": ""})
+        # A graph build depends on everything the stages it needs depend on.
+        self.assertEqual(set(markers["build-graded"]["settings"]),
+                         set(markers["download"]["settings"]) | set(markers["elevation"]["settings"]))
+        self.assertEqual({marker["toolsCommit"] for marker in markers.values()}, {"abc123"})
+
+    def test_work_done_under_other_settings_is_stale_not_reused(self):
+        self.finish("images", "download", "inputs", "elevation", "build-ungraded", "build-graded")
+        (self.root / "builder.env").write_text("BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=300\n")
+        states = self.states()
+        # The download and the ungraded build do not depend on the radius.
+        self.assertEqual((states["download"], states["build-ungraded"], states["inputs"]), ("done", "done", "done"))
+        self.assertEqual((states["elevation"], states["build-graded"]), ("stale", "stale"))
+        self.assertEqual((states["qualify-ungraded"], states["qualify-graded"], states["gate"]), ("waiting", "blocked", "blocked"))
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        self.assertEqual(status["state"], "failed")
+        stale = next(entry for entry in status["stages"] if entry["stage"] == "elevation")
+        self.assertEqual(stale["reason"], "done under other settings: BICINO_OPENING_RADIUS was '400', is now '300'")
+        self.assertRegex(chain_state.describe(status), r"elevation\s+stale\s+done under other settings")
+        # The settings it ran under are still in its marker, and restoring them restores it.
+        self.assertEqual(chain_state.read_marker(self.chain, "elevation")["settings"]["BICINO_OPENING_RADIUS"], "400")
+        (self.root / "builder.env").write_text(GRADED_ENV)
+        self.assertEqual(self.states()["elevation"], "done")
+        # Another planet snapshot leaves nothing but the images.
+        (self.root / "builder.env").write_text("BICINO_PLANET_DATE=261123\nBICINO_OPENING_RADIUS=400\n")
+        self.assertEqual([stage for stage, state in self.states().items() if state == "done"], ["images", "inputs", "elevation"])
+
+    def test_newer_tools_keep_finished_work_and_the_result_says_so(self):
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TOOLS_COMMIT=" + "a" * 40 + "\n")
+        self.finish("images", "download")
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_TOOLS_COMMIT=" + "b" * 40 + "\n")
+        self.finish("elevation")
+        self.assertEqual({self.states()[stage] for stage in ("images", "download", "elevation")}, {"done"})
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        commits = {entry["stage"]: entry.get("toolsCommit") for entry in status["stages"]}
+        self.assertEqual((commits["download"], commits["elevation"], status["run"]["toolsCommit"]),
+                         ("a" * 40, "b" * 40, "b" * 40))
+        self.assertIn("NOTE: the stages ran with different tools: aaaaaaaaaaaa (images, download); bbbbbbbbbbbb (elevation)",
+                      chain_state.describe(status))
+
+    def test_a_marker_without_settings_is_never_trusted(self):
+        self.finish("download")
+        marker = json.loads((self.chain / "download.json").read_text())
+        del marker["settings"]
+        (self.chain / "download.json").write_text(json.dumps(marker))
+        self.assertEqual(self.states()["download"], "stale")
+
     def test_a_sample_run_is_marked_as_one(self):
         (self.root / "builder.env").write_text("BICINO_SAMPLE_CITY=New York\nBICINO_OPENING_RADIUS=200\n")
         status, _ = chain_state.chain_status(self.root, self.clock)
@@ -253,6 +308,33 @@ class RunStageTests(ScratchCase):
         self.assertIsNone(run_stage.skip_reason("build-ungraded", {}))
         self.assertIsNone(run_stage.skip_reason("inputs", {"BICINO_OPENING_RADIUS": "400"}))
         self.assertIn("sample", run_stage.skip_reason("inputs", {"BICINO_SAMPLE_CITY": "Berlin"}))
+
+    def test_stale_work_is_neither_reused_nor_run_over(self):
+        self.finish("images", "download")
+        self.assertEqual(self.run_stage("elevation"), 0)
+        (self.root / "builder.env").write_text("BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=300\n")
+        self.assertEqual(self.run_stage("elevation"), run_stage.STALE)
+        self.assertIn("BICINO_OPENING_RADIUS was '400', is now '300'", self.said.getvalue())
+        self.assertIn("delete", self.said.getvalue())
+        # The script did not run again, and the marker still tells what the tiles are.
+        self.assertEqual(self.ran_stages(), ["elevation "])
+        marker = chain_state.read_marker(self.chain, "elevation")
+        self.assertEqual((marker["state"], marker["settings"]["BICINO_OPENING_RADIUS"]), ("done", "400"))
+        self.assertEqual(self.run_stage("build-graded"), run_stage.BLOCKED)
+        # With its marker deleted the stage runs under the new settings.
+        (self.chain / "elevation.json").unlink()
+        self.assertEqual(self.run_stage("elevation"), 0)
+        self.assertEqual(chain_state.read_marker(self.chain, "elevation")["settings"]["BICINO_OPENING_RADIUS"], "300")
+
+    def test_a_stage_skipped_under_other_settings_runs_when_they_ask_for_it(self):
+        self.finish("images", "download")
+        (self.root / "builder.env").write_text("BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=\n")
+        self.assertEqual(self.run_stage("elevation"), 0)
+        self.assertEqual(chain_state.read_marker(self.chain, "elevation")["state"], "skipped")
+        (self.root / "builder.env").write_text(GRADED_ENV)
+        self.assertEqual(self.states()["elevation"], "stale")
+        self.assertEqual(self.run_stage("elevation"), 0)
+        self.assertEqual((chain_state.read_marker(self.chain, "elevation")["state"], self.ran_stages()), ("done", ["elevation "]))
 
     def test_a_second_wrapper_for_a_running_stage_refuses(self):
         self.hold_lock("download")
@@ -339,7 +421,14 @@ class UnitFileTests(unittest.TestCase):
         self.assertEqual(unit["Wants"][0].split(), [rehearse.SAMPLER, *stages])
         self.assertNotIn("Requires", unit)
         self.assertEqual(unit["ExecStart"], [f"{self.RUN}chain_state.py result --final"])
-        self.assertEqual(rehearse.ordered(self.UNITS)[-1], rehearse.RESULT)
+        order = rehearse.ordered(self.UNITS)
+        self.assertEqual(order[-1], rehearse.RESULT)
+        # The rehearsal runs a stage ahead of those it does not wait for, so a
+        # stage that reads the download's output without waiting for it fails there.
+        self.assertLess(order.index("bicino-planet-elevation.service"), order.index("bicino-planet-download.service"))
+        for stage, needs in chain_state.STAGES.items():
+            for need in needs:
+                self.assertLess(order.index(f"bicino-planet-{need}.service"), order.index(f"bicino-planet-{stage}.service"))
 
     def test_every_stage_has_an_executable_script(self):
         self.assertEqual(set(run_stage.SCRIPTS), set(chain_state.STAGES))
@@ -422,8 +511,13 @@ class ChainRehearsalTests(unittest.TestCase):
         self.assertEqual((self.result()["state"], self.result()["verdict"]), ("complete", "missed"))
 
     def test_a_killed_stage_is_recorded_and_a_restart_finishes(self):
-        self.stub("download.sh", "sleep 30")
+        beat = self.root / "beat.txt"
+        self.stub("download.sh", f'( while true; do date +%s%N > "{beat}"; sleep 0.1; done ) &\nsleep 30')
         self.assertEqual(self.start(kill_stage="download", kill_after=1.5), 1)
+        # Like a unit's control group, the kill takes the stage script and what it started.
+        last = beat.read_text()
+        time.sleep(0.5)
+        self.assertEqual(beat.read_text(), last)
         failed = next(entry for entry in self.result()["stages"] if entry["stage"] == "download")
         self.assertEqual((failed["state"], failed["reason"]),
                          ("failed", "systemd ended the stage: timeout (killed KILL)"))
@@ -867,6 +961,8 @@ class SampleTests(unittest.TestCase):
             for key in ("adminWays", "adminRelations"):
                 self.assertTrue(all(isinstance(number, int) for number in city.get(key, [])))
                 self.assertTrue(city.get("extract") or key not in city, city["city"])
+            # builder.env takes plain values only; a city's name goes into it as it is.
+            self.assertRegex(city["city"], r"^[A-Za-z0-9_.:/@+, -]+$")
         # Every sample city in the United States carries the country's relation.
         united_states = {city["city"] for city in self.CITIES if 148838 in city.get("adminRelations", [])}
         self.assertEqual(united_states, {"New York", "Chicago", "Houston", "San Francisco"})

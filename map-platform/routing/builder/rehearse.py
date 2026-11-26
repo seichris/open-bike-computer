@@ -14,11 +14,16 @@ and the gate on that city alone. The territory audit, the cross-border probes
 and the profile probe need a planet and are left out. A sample is never
 release evidence, and its result file says so.
 
-`--kill-stage` proves the failure path: the named stage's wrapper is killed
-after `--kill-after` seconds, as a systemd timeout would, and the chain is
-then started a second time, which must finish the build.
+`--kill-stage` proves the failure path: after `--kill-after` seconds every
+process of the named stage is killed, as a systemd timeout kills a unit's
+control group, and the chain is then started a second time, which must
+finish the build.
 
-Units run one after another here. systemd starts independent stages together.
+Units run one after another here, where systemd starts independent stages
+together. Of the units that may start, the one that became startable last
+runs first, so a stage runs ahead of the stages it does not wait for: the
+elevation stage before the download. A stage that reads another's output
+without naming it in its After= line then fails here too.
 """
 
 from __future__ import annotations
@@ -54,15 +59,16 @@ def load_units(units_dir):
 
 
 def ordered(units):
-    """Unit names with every unit after those its After= names."""
+    """Unit names with every unit after those its After= names, latest startable first."""
     after = {name: [other for value in unit.get("After", []) for other in value.split() if other in units]
              for name, unit in units.items()}
-    order = []
+    order, startable = [], []
     while len(order) < len(after):
-        ready = [name for name in after if name not in order and all(other in order for other in after[name])]
-        if not ready:
+        startable += [name for name in after if name not in order and name not in startable
+                      and all(other in order for other in after[name])]
+        if not startable:
             raise ValueError("the units' After= lines form a cycle")
-        order.extend(ready)
+        order.append(startable.pop())
     return order
 
 
@@ -90,6 +96,31 @@ def command_of(unit, key, root, interpreter=None):
     return command
 
 
+def kill_session(session):
+    """Kill every process of a session, as systemd kills a unit's control group."""
+    for _ in range(20):
+        if Path("/proc/self").exists():
+            candidates = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit()]
+        else:
+            listing = subprocess.run(["ps", "-axo", "pid="], capture_output=True, text=True).stdout
+            candidates = [int(pid) for pid in listing.split()]
+        members = []
+        for pid in candidates:
+            try:
+                if os.getsid(pid) == session:
+                    members.append(pid)
+            except OSError:
+                continue
+        if not members:
+            return
+        for pid in members:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.1)
+
+
 def start_unit(name, unit, root, kill_after=None, out=print, interpreter=None, output=None):
     """Run the unit as systemd would; returns its ExecStart's exit status."""
     environment = unit_environment(unit, root)
@@ -100,8 +131,11 @@ def start_unit(name, unit, root, kill_after=None, out=print, interpreter=None, o
     try:
         status = child.wait(timeout=kill_after)
     except subprocess.TimeoutExpired:
-        # A systemd timeout ends in SIGKILL for the whole control group.
-        os.killpg(child.pid, signal.SIGKILL)
+        # A systemd timeout ends in SIGKILL for the whole control group: the
+        # wrapper, the stage script and everything they started. Here those
+        # are the processes of the wrapper's session. Containers are in
+        # neither; the wrapper's --finalize removes them.
+        kill_session(child.pid)
         child.wait()
         status, result, code = "KILL", "timeout", "killed"
     if status != 0:

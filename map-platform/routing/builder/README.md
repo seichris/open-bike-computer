@@ -71,12 +71,20 @@ Each stage's state is in `export/chain/STAGE.json`:
 {"stage": "elevation", "state": "failed", "attempt": 1,
  "startedAt": "2026-11-26T05:44:11Z", "finishedAt": "2026-11-26T06:21:38Z", "seconds": 2247,
  "exitStatus": 1, "reason": "the stage script exited with status 1",
- "log": "logs/elevation.log", "logTail": ["..."]}
+ "log": "logs/elevation.log", "logTail": ["..."],
+ "settings": {"BICINO_MAP_PLATFORM_IMAGE": "ghcr.io/...", "BICINO_OPENING_RADIUS": "400", "BICINO_SAMPLE_CITY": ""},
+ "toolsCommit": "f3ec4e42..."}
 ```
 
 `state` is `running`, `done`, `skipped` or `failed`. While a stage runs, its
 wrapper holds a lock. A marker that says `running` without the lock is
 reported as `interrupted`: the wrapper was killed, or the machine restarted.
+
+`settings` are the settings the stage's work depends on, its own and those of
+the stages it needs: the planet snapshot, the opening radius, the
+map-platform image, the sample. A finished stage whose settings differ from
+`builder.env` is reported as `stale` (see
+[Build again with other settings](#build-again-with-other-settings)).
 
 The chain's state is one of:
 
@@ -84,7 +92,7 @@ The chain's state is one of:
 |---|---|
 | `not-started` | No stage has a marker. |
 | `running` | A stage is running, or the next is about to start. |
-| `failed` | A stage failed or was interrupted. Stages that need it are `blocked` and never start. A stage that does not need it and was already running finishes its own work, so that a retry has less to do. |
+| `failed` | A stage failed, was interrupted or is stale. Stages that need it are `blocked` and never start. A stage that does not need it and was already running finishes its own work, so that a retry has less to do. |
 | `stalled` | Nothing is running, nothing failed, and stages are still waiting for more than two minutes. systemd is not driving the chain. |
 | `complete` | Every stage is done or skipped. `verdict` is the gate's answer: `met`, `missed`, or `not-run` for an ungraded build. |
 
@@ -126,23 +134,46 @@ first other answer, including exit 7. Run it again once the connection works.
 
 1. Read the stage's line in the status and its log, `export/logs/STAGE.log`.
 2. Fix the cause.
-3. Start the chain again: `sudo systemctl start --no-block bicino-planet-result.service`.
+3. Start the chain again:
 
-A restart runs the failed stage and everything that was waiting for it.
-Finished stages are not run again. The download resumes, the elevation stage
-continues from its receipts, and a graph build starts over after removing
-what the failed attempt left.
+   ```sh
+   sudo /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/install-chain.sh --start
+   ```
 
-To run a finished stage again, delete its marker and restart its unit:
+That starts every stage's unit again, except one that is still running, and
+each wrapper decides from its marker. Finished stages are not run again. The
+failed stage and everything that was waiting for it run. The download
+resumes, the elevation stage continues from its receipts, and a graph build
+starts over after removing what the failed attempt left.
+
+To run a finished stage again, delete its marker and start the chain:
 
 ```sh
 rm /srv/bicino-routing-scratch/export/chain/gate.json
-sudo systemctl restart bicino-planet-gate.service
+sudo /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/install-chain.sh --start
 ```
 
 Do not restart the unit of a stage while another stage that needs it is
 running, and do not edit the tools under `tools/repo/`: the result names the
 commit they came from.
+
+### Build again with other settings
+
+Run `setup.sh` again with the new settings and `--start`. It rewrites
+`builder.env`, checks out the commit and starts the chain.
+
+- **Another tools commit only**, for example after a fix to one stage:
+  finished stages are kept. Each stage's marker and the result name the
+  commit that stage ran with, and the status notes that they differ.
+- **Another opening radius, planet snapshot, image or sample**: every
+  finished stage that depends on the changed setting is `stale`. A new radius
+  leaves the download and the ungraded build done and makes the elevation
+  stage, the graded build and what follows stale. A stale stage does not
+  start, the stages that need it are `blocked`, and the chain is `failed`
+  until someone decides. The old work is never reused under the new settings
+  and never deleted for you. To build it again, delete the stage's marker
+  and, for a graph build, its `build/planet-…` directory, then start the
+  chain. The elevation stage keeps its raw tiles and opens them again.
 
 ## Past failures and what covers them
 
@@ -167,16 +198,22 @@ This runs the real chain on one city of `elevation-probes.json`: its
 Geofabrik extract instead of the planet, the elevation cells around its box,
 two sample graphs, the smoke probes on its own legs and the gate on that city.
 `rehearse.py` stands in for systemd. It reads the unit files, orders them by
-their `After=` lines and runs each `ExecStart` as written. `--kill-stage
-build-graded` kills that stage once, as a systemd timeout would, and starts
-the chain again.
+their `After=` lines and runs each `ExecStart` as written, one unit at a
+time. Of the units that may start it runs the one that became startable last,
+so the elevation stage runs before the download: a stage that reads another
+stage's output without waiting for it fails in the rehearsal too.
+`--kill-stage elevation` kills every process of that stage once, as a systemd
+timeout kills a unit's control group, and starts the chain again.
 
 On 2026-11-26 Berlin at 200 m took 6.5 minutes on a laptop and gave the
 result of the 2026-11-25 Berlin sample: 8 routes, the longest 1.1% longer,
 targets met. It used 0.7 GB below the scratch directory; a city with a larger
 extract needs more. In a second run the graded build was killed after 45
 seconds. The stage was recorded as failed, its Valhalla container was
-removed, and the restarted chain rebuilt the graph and finished.
+removed, and the restarted chain rebuilt the graph and finished. A Shanghai
+run killed the elevation stage after 40 seconds: no retry loop survived it,
+the restarted stage built the six cells that were left of eight, and the
+chain finished.
 
 The same day the seven tower cities ran at 400 m, 3 to 11 minutes each,
 most of it the download of the extract. Their rows equalled the planet
@@ -189,8 +226,8 @@ of a state boundary: the chain ended `failed`, with the two qualification
 stages and the gate `blocked`.
 
 The rehearsal leaves out what needs a planet: the territory audit, the
-cross-border probes and the profile probe. Its units run one after another.
-Its result file says `"sample": true`. It is never release evidence.
+cross-border probes and the profile probe. Its result file says
+`"sample": true`. It is never release evidence.
 
 - An extract already at `ROOT/input/` with the published size is not
   downloaded again.
@@ -207,7 +244,9 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
 
 - **systemd itself.** That `Wants=` and `After=` start independent stages
   together and the result unit last, that `ExecStopPost=` gets
-  `SERVICE_RESULT` after a timeout, and that `TimeoutStartSec=` values fit.
+  `SERVICE_RESULT` after a timeout, that `TimeoutStartSec=` values fit, and
+  that `install-chain.sh --start` stops the units of finished stages and no
+  running one before it starts the chain again.
 - **`setup.sh`.** Masking the apt units on a fresh image, the wait for a
   running upgrade, the RAID 0 over the four local SSDs. Its commit checkout
   was tested against GitHub. The RAID commands are those of the 2026-11-26

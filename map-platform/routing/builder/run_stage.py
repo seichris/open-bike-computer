@@ -16,7 +16,10 @@ stage when a unit it needs is restarted. So a failed stage stops everything
 that needs it here, and the same rule holds without systemd.
 
 A stage that is already done is not run again, so restarting a unit or the
-whole chain is harmless. On 2026-11-26 a package upgrade restarted the
+whole chain is harmless. That holds only while `builder.env` still has the
+settings the stage ran under. After a change to the planet snapshot, the
+opening radius, the image or the sample, the stage is stale: the wrapper
+neither reuses its work nor deletes it, and says what to do. On 2026-11-26 a package upgrade restarted the
 hand-started units of a planet build, and every script ran again from its
 first line beside its own half-finished work. To run a finished stage again,
 delete its marker first.
@@ -55,6 +58,7 @@ SCRIPTS = {
 GRADED_ONLY = ("elevation", "build-graded", "qualify-graded", "gate")
 ALREADY_RUNNING = 75
 BLOCKED = 69
+STALE = 78
 LOCK_WAIT_SECONDS = 15
 
 
@@ -121,17 +125,24 @@ def run(root, stage, stages_dir=None):
         print(f"{stage} is already running under another wrapper", file=sys.stderr)
         return ALREADY_RUNNING
     with lock:
-        marker = chain_state.read_marker(export / "chain", stage)
-        if marker and marker["state"] in chain_state.FINISHED:
-            print(f"{stage}: already {marker['state']}, nothing to do")
+        entries = {entry["stage"]: entry for entry in chain_state.stage_states(root)}
+        mine = entries[stage]
+        if mine["state"] in chain_state.FINISHED:
+            print(f"{stage}: already {mine['state']}, nothing to do")
             return 0
+        if mine["state"] == "stale" and mine["was"] == "done":
+            # Its work belongs to other settings. Reusing it would mislabel the
+            # result, and deleting hours of work is not this wrapper's call.
+            print(f"{stage}: not started, it was {mine['reason']}. Restore the settings, or delete "
+                  f"{export / 'chain' / f'{stage}.json'} and the stage's old work to run it again.", file=sys.stderr)
+            return STALE
         reason = skip_reason(stage, chain_state.read_env(root / "builder.env"))
         if reason:
             chain_state.mark(root, stage, "skipped", note=reason)
             chain_state.write_result(root)
             print(f"{stage}: skipped, {reason}")
             return 0
-        states = {entry["stage"]: entry["state"] for entry in chain_state.stage_states(root)}
+        states = {name: entry["state"] for name, entry in entries.items()}
         unmet = [f"{need} ({states[need]})" for need in chain_state.STAGES[stage]
                  if states[need] not in chain_state.FINISHED]
         if unmet:
@@ -150,7 +161,10 @@ def run(root, stage, stages_dir=None):
             child = subprocess.Popen(
                 [str(stages_dir / script), *arguments], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                 env={**os.environ, "BICINO_SCRATCH": str(root), "BICINO_STAGE": stage},
-                start_new_session=True,
+                # A group of its own, so that a signal reaches the whole stage,
+                # in the wrapper's session, so that whatever ends the wrapper's
+                # session or control group ends the stage with it.
+                process_group=0,
             )
 
             def stop(number, _frame):
