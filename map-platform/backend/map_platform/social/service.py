@@ -406,7 +406,8 @@ class SocialService:
 
     @staticmethod
     def is_library_row(item):
-        return isinstance(item.get("source"), str) and item["source"].startswith(LIBRARY_SOURCE_PREFIX)
+        return (item.get("kind") == "route" and isinstance(item.get("source"), str)
+                and item["source"].startswith(LIBRARY_SOURCE_PREFIX))
 
     def library_row(self, c, actor, route_id):
         try:

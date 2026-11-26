@@ -530,7 +530,8 @@ def create_app(
             ("POST", "/v1/bicycle-detours"): 16 * 1024,
             ("POST", "/v1/bicycle-routes"): 16 * 1024,
             **({(method, path): 5*1024*1024 for method, path in (("PUT", "/v1/social/me/avatar"), ("POST", "/v1/social/routes"), ("POST", "/v1/social/activities"),
-                                                                          ("POST", "/v1/social/internal/website/routes"))}
+                                                                          ("POST", "/v1/social/internal/website/routes"),
+                                                                          ("PUT", "/v1/social/library/routes/*"))}
                if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true" else {}),
         },
     )
