@@ -6,7 +6,9 @@ The registry-only image uses the live production Strava controller
 compare that base to the healthy controller running in production.
 
 The build replaces the public approval registry and validates the `/app` file
-inventory against that immutable base. The entrypoint allows API and maintenance
+inventory against that immutable base. It checks durable delivery, rejects wrong
+signer and producer identities, and tests the build-104 compatibility anchor.
+The entrypoint allows API and maintenance
 commands. The production lock independently selects the approved generation
 worker and promotion scheduler.
 
@@ -41,6 +43,9 @@ gh workflow run map-platform-image.yml --ref main \
 
 Prepare a production Compose lock containing the controller from this profile,
 the exact worker digest recorded in the approval registry, and its promotion ID.
-Require image provenance and CI Gate before merging the lock. Verify the live
-controller, worker and scheduler health after deployment. Roll back the complete previous lock; never remove approval
-history or mutate already signed map bytes.
+Preserve the existing production credentials, volumes, generation policy and
+enabled integrations. Require image provenance and CI Gate before merging the
+lock. Verify the live controller, worker, scheduler and contract-aware map
+delivery after deployment. Check contract-aware delivery before any associated
+firmware release, as required for the original build-105 rollout. Roll back the
+complete previous lock and retain all approval history and signed map bytes.
