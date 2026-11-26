@@ -743,10 +743,13 @@ class ElevationHybridTests(ElevationOpeningTests):
             with self.assertRaisesRegex(ValueError, "no current opened or terrain tile"):
                 build_elevation.hybrid_cell((-84, 42), chosen, root / "out", hybrid)
 
-    def test_terrain_and_blend_stages_run_under_the_cell_deadline(self):
+    def test_terrain_and_blend_stages_run_under_a_deadline(self):
         source = self.terrain_source({})
         hybrid = build_elevation.Hybrid(source, Path("terrain"), Path("opened"), build_elevation.Opening(400.0, Path("raw")))
-        for stage, function in ((build_elevation.TERRAIN, "build_terrain_cell"), (hybrid, "hybrid_cell")):
+        # A terrain tile is twenty times a Copernicus cell, so its download gets longer.
+        self.assertGreater(build_elevation.TERRAIN_DEADLINE, build_elevation.CELL_DEADLINE)
+        for stage, function, deadline in ((build_elevation.TERRAIN, "build_terrain_cell", build_elevation.TERRAIN_DEADLINE),
+                                          (hybrid, "hybrid_cell", build_elevation.CELL_DEADLINE)):
             alarms = []
             with self.subTest(function=function), patch.object(build_elevation.signal, "alarm", alarms.append), \
                     patch.object(build_elevation, function, side_effect=OSError("offline")) as called, \
@@ -754,7 +757,50 @@ class ElevationHybridTests(ElevationOpeningTests):
                 with self.assertRaises(OSError):
                     build_elevation._build((-84, 42))
                 self.assertEqual(called.call_count, 1)
-                self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
+                self.assertEqual(alarms, [deadline, 0])
+
+    def test_a_connection_that_drops_in_the_middle_of_a_body_is_retried(self):
+        import http.client
+
+        class Response:
+            status = 206
+            headers = {"Content-Range": "bytes 4-7/20", "ETag": '"abc"', "Content-Length": "4"}
+
+            def __init__(self, failure):
+                self.failure = failure
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                if self.failure:
+                    raise self.failure
+                return b"data"
+
+        for failure in (http.client.IncompleteRead(b"da", 2), ConnectionResetError("reset"), TimeoutError("slow")):
+            answers = [Response(failure), Response(None)]
+            asked = []
+
+            def urlopen(request, timeout):
+                asked.append(request.get_header("Range") if hasattr(request, "get_header") else request)
+                return answers.pop(0)
+
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(build_elevation.urllib.request, "urlopen", urlopen), \
+                    patch.object(build_elevation.time, "sleep") as slept:
+                self.assertEqual(build_elevation.fetch_range("https://u/t.tif", 4, 8), (b"data", 20, "abc"))
+                self.assertEqual(asked, ["bytes=4-7", "bytes=4-7"])
+                self.assertEqual(slept.call_count, 1)
+                # The whole-file download of a Copernicus cell retries the same failures.
+                answers[:] = [Response(failure), Response(None)]
+                self.assertEqual(build_elevation.fetch("https://u/c.tif"), (b"data", "abc"))
+        with patch.object(build_elevation.urllib.request, "urlopen",
+                          lambda request, timeout: Response(http.client.IncompleteRead(b"", 4))), \
+                patch.object(build_elevation.time, "sleep"), self.assertRaises(http.client.IncompleteRead):
+            build_elevation.fetch_range("https://u/t.tif", 4, 8, attempts=2)
 
     def terrain_tile(self, cell, pixels, crs="EPSG:4269", shift=0):
         """A GeoTIFF laid out as the cell's 3DEP tile, at the tests' 41 posts."""

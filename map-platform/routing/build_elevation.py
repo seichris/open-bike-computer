@@ -38,6 +38,7 @@ import argparse
 import functools
 import gzip
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -56,7 +57,11 @@ STEP = 1 / 3600
 NO_DATA = -32768
 MARGIN = 2 * STEP
 CELL_DEADLINE = 900
+# A 3DEP tile is up to 500 MB, twenty times a Copernicus cell: its download gets an hour.
+TERRAIN_DEADLINE = 3600
 ROUNDS = 3
+# A connection that closes in the middle of a body raises IncompleteRead, which is no OSError.
+TRANSFER_ERRORS = (OSError, http.client.HTTPException)
 METRES_PER_ARCSECOND = 30.87
 OPENING_RADII = (15, 1000)
 # Memory for one block of power-of-two runs in the opening, in float32 posts.
@@ -154,7 +159,7 @@ def fetch(url, attempts=6):
                 if len(data) != expected:
                     raise OSError(f"short read {len(data)} of {expected}")
                 return data, response.headers.get("ETag", "").strip('"')
-        except OSError:
+        except TRANSFER_ERRORS:
             if attempt == attempts - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -268,7 +273,7 @@ def fetch_range(url, start, end, attempts=6):
                 if response.status != 206 or len(data) != end - start or not total.isdigit():
                     raise OSError(f"range {start}-{end} of {url} came back as {response.status} with {len(data)} bytes")
                 return data, int(total), response.headers.get("ETag", "").strip('"')
-        except OSError:
+        except TRANSFER_ERRORS:
             if attempt == attempts - 1:
                 raise
             time.sleep(2 ** attempt)
@@ -865,9 +870,9 @@ def _build(cell):
     # planet's 26,475 cells blocked in it for good, with no socket open. With no
     # handler installed, SIGALRM ends the worker, which breaks the pool so
     # build_pending retries.
-    signal.alarm(CELL_DEADLINE)
+    stage = _WORKER.get("stage")
+    signal.alarm(TERRAIN_DEADLINE if stage == TERRAIN else CELL_DEADLINE)
     try:
-        stage = _WORKER.get("stage")
         if isinstance(stage, Hybrid):
             return hybrid_cell(cell, _WORKER["chosen"], _WORKER["out"], stage)
         if stage == TERRAIN:
