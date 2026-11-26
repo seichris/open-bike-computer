@@ -11,7 +11,7 @@ nonisolated enum BicinoServiceSessionError: Error, Equatable {
 @MainActor
 final class BicinoServiceSession {
     let urlSession: URLSession
-    let developmentEndpointSelector: BicinoDevelopmentEndpointSelector?
+    let endpointSelector: BicinoEndpointSelector?
 
     private let defaults: UserDefaults
     private let installationCredentialStore:
@@ -28,16 +28,18 @@ final class BicinoServiceSession {
         urlSession: URLSession = .shared,
         appAttestService: OfflineMapAppAttestServicing? = nil,
         appAttestAppBuild: String? = nil,
-        developmentEndpointSelector: BicinoDevelopmentEndpointSelector? = nil
+        endpointSelector: BicinoEndpointSelector? = nil
     ) {
         self.defaults = defaults
         self.urlSession = urlSession
 #if HOST_TESTING
-        self.developmentEndpointSelector = developmentEndpointSelector
+        self.endpointSelector = endpointSelector
 #else
-        self.developmentEndpointSelector =
-            OfflineMapServiceConfig.defaultServerURLString == OfflineMapServiceConfig.developmentServerURLString
-            ? developmentEndpointSelector ?? .shared : nil
+        self.endpointSelector = switch OfflineMapServiceConfig.defaultServerURLString {
+        case OfflineMapServiceConfig.developmentServerURLString: endpointSelector ?? .development
+        case OfflineMapServiceConfig.productionServerURLString: endpointSelector ?? .production
+        default: nil
+        }
 #endif
         installationCredentialStore =
             OfflineMapInstallationCredentialStore(defaults: defaults)
@@ -77,20 +79,18 @@ final class BicinoServiceSession {
         mapStreamTrustCapabilities: String? =
             BikeMapStreamTrustStore.production.capabilityHeaderValue,
         mapStreamAppBuildIdentity: MapStreamAppBuildIdentity? = .current,
-        allowsDevelopmentProxy: Bool = true
+        allowsManagedProxy: Bool = true
     ) async throws -> OfflineMapPlatformClient {
         guard let configuredURL = URL(string: serverURLString),
               configuredURL.scheme != nil else {
             throw OfflineMapPlatformError.invalidBaseURL
         }
         let baseURL: URL
-        let selector: BicinoDevelopmentEndpointSelector?
-        if allowsDevelopmentProxy,
-           OfflineMapServerIdentity.normalized(configuredURL.absoluteString) ==
-             OfflineMapServiceConfig.developmentServerURLString,
-           let developmentEndpointSelector {
-            selector = developmentEndpointSelector
-            baseURL = try await developmentEndpointSelector.endpoint(for: .api)
+        let selector: BicinoEndpointSelector?
+        if allowsManagedProxy, let endpointSelector,
+           OfflineMapServerIdentity.normalized(configuredURL.absoluteString) == endpointSelector.channel.directAPI {
+            selector = endpointSelector
+            baseURL = try await endpointSelector.endpoint(for: .api)
         } else {
             selector = nil
             baseURL = configuredURL
@@ -120,12 +120,12 @@ final class BicinoServiceSession {
             managedAppAttestClient:
                 isManaged ? managedAppAttestClient : nil,
             session: urlSession,
-            developmentEndpointSelector: selector
+            endpointSelector: selector
         )
     }
 
     func clientForCurrentNetwork(_ client: OfflineMapPlatformClient) async throws -> OfflineMapPlatformClient {
-        guard let selector = client.developmentEndpointSelector else { return client }
+        guard let selector = client.endpointSelector else { return client }
         let origin = try await selector.endpoint(for: .api)
         return client.atOrigin(origin)
     }
@@ -139,7 +139,7 @@ final class BicinoServiceSession {
         )
         if let task = registrationTasks[key] {
             var registered = try await task.value.atOrigin(client.baseURL)
-            registered.developmentEndpointSelector = client.developmentEndpointSelector
+            registered.endpointSelector = client.endpointSelector
             return registered
         }
         let task = Task { @MainActor [weak self] in
@@ -171,13 +171,13 @@ final class BicinoServiceSession {
               let baseURL = managedServiceURL else {
             throw BicinoServiceSessionError.invalidEndpoint
         }
-        let allowsDevelopmentProxy = path == "/v1/bicycle-routes" ||
+        let allowsManagedProxy = path == "/v1/bicycle-routes" ||
             path == "/v1/bicycle-detours" || path == "/v1/route-elevation-profiles"
         var client = try await makeOfflineMapClient(
             serverURLString: baseURL.absoluteString,
             mapStreamTrustCapabilities: nil,
             mapStreamAppBuildIdentity: nil,
-            allowsDevelopmentProxy: allowsDevelopmentProxy
+            allowsManagedProxy: allowsManagedProxy
         )
         if refreshCredential || client.clientInstallationToken?.isEmpty != false {
             client = try await ensureRegisteredInstallation(
@@ -211,7 +211,7 @@ final class BicinoServiceSession {
         do {
             return try await execute(request)
         } catch {
-            developmentEndpointSelector?.recordConnectionFailure(
+            endpointSelector?.recordConnectionFailure(
                 error, for: .api, requestURL: request.url
             )
             throw error
@@ -475,7 +475,7 @@ final class BicinoServiceSession {
             mapStreamAppBuildIdentity: client.mapStreamAppBuildIdentity,
             managedAppAttestClient: client.managedAppAttestClient,
             session: urlSession,
-            developmentEndpointSelector: client.developmentEndpointSelector
+            endpointSelector: client.endpointSelector
         )
     }
 
