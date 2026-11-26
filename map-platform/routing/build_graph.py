@@ -109,7 +109,7 @@ def valhalla_build(work, admin_input, roads, threads, elevation=None, all_bridge
     /locate calls with HTTP 500.
 
     `all_bridges` builds with the image's tagging rules changed so that every
-    `bridge` value but `no` is a bridge (see graph_lua.py). A graph graded
+    `bridge` value but `no`, `false` and `0` is a bridge (see graph_lua.py). A graph graded
     with a terrain model needs it; its ungraded twin needs it too, so that
     the two differ in elevation alone.
     """
@@ -144,7 +144,7 @@ valhalla_build_extract -c /work/valhalla.json
 
 def graph_lua_identity(work):
     """What the manifest records about tagging rules that are not the image's own."""
-    return {"rule": "every bridge value but no is a bridge", "baseSha256": graph_lua.GRAPH_LUA_SHA256,
+    return {"rule": "every bridge value but no, false and 0 is a bridge", "baseSha256": graph_lua.GRAPH_LUA_SHA256,
             **file_identity(work / GRAPH_LUA)}
 
 
@@ -231,7 +231,8 @@ def main():
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
     parser.add_argument("--elevation", type=Path, help="HGT tiles written by build_elevation.py")
     parser.add_argument("--all-bridges", action="store_true",
-                        help="Mark every bridge value but no as a bridge; for terrain-graded graphs and their twins")
+                        help="Mark every bridge value that does not say no as a bridge; for terrain-graded graphs "
+                             "and their twins")
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")

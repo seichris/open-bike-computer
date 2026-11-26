@@ -178,8 +178,8 @@ production now.
    `--all-bridges` when the elevation holds a terrain model, and to the
    ungraded build it is compared with. [graph_lua.py](graph_lua.py) then
    writes out the rules the pinned image carries, with every `bridge` value
-   but `no` made a bridge, and the build stops unless Valhalla's log shows
-   it read them. The rules are checked against the SHA-256 of the image's
+   but `no`, `false` and `0` made a bridge, and the build stops unless
+   Valhalla's log shows it read them. The rules are checked against the SHA-256 of the image's
    own, so a new image needs the change reviewed again. The manifest's
    `builder.graphLua` records the changed rules.
 

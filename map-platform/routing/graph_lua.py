@@ -11,8 +11,8 @@ Michigan Avenue bridge in Chicago read 12% down and up.
 
 The pinned image carries the rules, graph.lua, inside valhalla_build_tiles.
 This writes them out with one line changed, so that every `bridge` value but
-`no` is a bridge, and build_graph.py --all-bridges points Valhalla at the
-result. The rules are checked against the SHA-256 of the image they were
+`no`, `false` and `0` is a bridge, and build_graph.py --all-bridges points
+Valhalla at the result. The rules are checked against the SHA-256 of the image they were
 read from, so another image stops the build until the change is reviewed
 for it.
 
@@ -28,8 +28,10 @@ from pathlib import Path
 # graph.lua of ghcr.io/valhalla/valhalla-scripted@sha256:b523b803..., Valhalla 3.9.2.
 GRAPH_LUA_SHA256 = "e594750d6dd407a55d627a5165da0901b7c1900411de96326bf2d4c1e7b2fe6e"
 BRIDGE_RULE = b'  kv["bridge"] = bridge[kv["bridge"]] or "false"\n'
-# The table still answers yes, 1 and no; any other value that is present counts as a bridge.
-ALL_BRIDGES_RULE = b'  kv["bridge"] = bridge[kv["bridge"]] or (kv["bridge"] and "true") or "false"\n'
+# The table still answers yes, 1 and no. Any other value that is present counts as a bridge, unless
+# it says no in another way.
+ALL_BRIDGES_RULE = (b'  kv["bridge"] = bridge[kv["bridge"]] or (kv["bridge"] and kv["bridge"] ~= "false"'
+                    b' and kv["bridge"] ~= "0" and "true") or "false"\n')
 
 
 def embedded_lua(binary):

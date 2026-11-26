@@ -706,7 +706,7 @@ also get real hills in place of the opened ones. Before a planet build:
 3. **Every bridge is graded as a bridge.** Done: Valhalla's tagging rules
    call a way a bridge only when `bridge` is `yes` or `1`.
    `build_graph.py --all-bridges` builds with those rules changed in one
-   line, so that every value but `no` is a bridge (see
+   line, so that every value but `no`, `false` and `0` is a bridge (see
    [graph_lua.py](graph_lua.py)). On the Chicago sample the Michigan Avenue
    edge then reads 0% up and 1% down on 3DEP, with a weighted grade of 0.0,
    where it read 12% both ways. The 6%+ share of the Magnificent Mile Road

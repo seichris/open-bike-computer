@@ -573,8 +573,10 @@ class BridgeRuleTests(unittest.TestCase):
         twice = b"\0" + self.LUA + graph_lua.BRIDGE_RULE + b"\0"
         with self.assertRaisesRegex(ValueError, "more than once"):
             graph_lua.all_bridges_lua(twice, hashlib.sha256(twice[1:-1]).hexdigest())
-        # yes, 1 and no keep the table's answer; any other value that is present becomes a bridge.
-        self.assertIn(b'bridge[kv["bridge"]] or (kv["bridge"] and "true") or "false"', graph_lua.ALL_BRIDGES_RULE)
+        # yes, 1 and no keep the table's answer. Any other value that is present becomes a bridge,
+        # unless it is false or 0.
+        self.assertEqual(graph_lua.ALL_BRIDGES_RULE, b'  kv["bridge"] = bridge[kv["bridge"]] or (kv["bridge"] and '
+                         b'kv["bridge"] ~= "false" and kv["bridge"] ~= "0" and "true") or "false"\n')
 
     def test_all_bridges_builds_with_the_changed_rules_and_records_them(self):
         with tempfile.TemporaryDirectory() as tmp:
