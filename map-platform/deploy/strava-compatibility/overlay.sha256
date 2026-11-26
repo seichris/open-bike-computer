@@ -1,0 +1,5 @@
+daf8f10c22bd1e4b25091eb04f0787e4295b336a6418693f5756ac357883b7d9  /app/map-platform/backend/map_platform/api.py
+9864958147cf6239370fdd22b0498df158128ea6877f84401fdeeee4103cfead  /app/map-platform/backend/map_platform/strava_client.py
+a3c8a1f857195b1ed11b9c76dd7d1c5ba9aea79587b8a9ef2eee115189c011f5  /app/map-platform/backend/map_platform/strava_development.py
+fecdb94e418146312825fa7ccd9bd602af10257abcea40ecf9b4854a84a30beb  /app/map-platform/backend/map_platform/strava_integrations.py
+23757988cc4f01432e29ce46dc5749ce802bfe356356d0bad58c137d24919197  /opt/bicino-strava/role_guard.py

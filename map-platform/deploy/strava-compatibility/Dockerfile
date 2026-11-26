@@ -8,6 +8,8 @@ COPY map-platform/backend/map_platform/api.py \
      map-platform/backend/map_platform/strava_integrations.py \
      /app/map-platform/backend/map_platform/
 COPY map-platform/deploy/client-compatibility/role_guard.py /opt/bicino-strava/role_guard.py
+COPY map-platform/deploy/strava-compatibility/overlay.sha256 /opt/bicino-strava/overlay.sha256
+RUN cd / && sha256sum --check --strict /opt/bicino-strava/overlay.sha256
 LABEL org.bicino.release-profile="production-strava-compatibility" \
       org.bicino.base-source="d101b43c5260a112e142b7d5595f05c465fa3fdb"
 ENTRYPOINT ["python", "/opt/bicino-strava/role_guard.py"]

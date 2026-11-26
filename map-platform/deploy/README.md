@@ -288,8 +288,10 @@ gh workflow run map-platform-image.yml --ref main -f release_profile=production-
 This overlays the Strava API and integration modules on the attested
 `d101b43c5260a112e142b7d5595f05c465fa3fdb` production controller. Recheck that
 base against the live production controller before using the profile. The
-validation stage checks the exact runtime file delta and runs the Strava
-tests. Review a control-plane-only Compose-lock PR with the attested
+runtime build verifies every overlay file against the reviewed SHA-256 manifest
+in `strava-compatibility/overlay.sha256`. Review and update that manifest when
+intentionally changing the overlay. The validation stage also checks the exact
+runtime file delta and runs the Strava tests. Review a control-plane-only Compose-lock PR with the attested
 candidate and the existing worker and promotion scheduler pins. Wait for its
 CI Gate and verify deploy health before turning on development forwarding.
 Use the regular development image promotion for the other channel.

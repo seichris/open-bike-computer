@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
@@ -357,6 +358,44 @@ class StravaIntegrationServiceTests(unittest.TestCase):
             bundle(expires_at=int(self.clock()) + 3_600),
             connected_at=self.clock(),
         )
+
+    def test_production_reconnects_after_owner_forwarding_is_paused(self):
+        production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
+        dev_installation = "inst_v2_" + "b" * 32
+        sharing = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+            development_owner=(dev_installation, "44"),
+        )
+        paused = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+        )
+
+        def authorize(service, installation, *, development=False):
+            started = service.start_oauth(installation, development=development)
+            state = parse_qs(urlparse(started.web_authorization_url).query)["state"][0]
+            result = service.complete_oauth(
+                state=state, code="code", scope="read,read_all", denied=False,
+            )
+            self.assertEqual(result.result, "connected")
+
+        authorize(sharing, INSTALLATION_ID)
+        authorize(sharing, dev_installation, development=True)
+        self.client.exchange_result = replace(self.client.exchange_result, access_token="same-athlete")
+        authorize(paused, INSTALLATION_ID)
+        sharing.athlete_routes(dev_installation, development=True, page=1)
+        self.assertEqual(self.client.routes_calls[-1][:2], ("44", "same-athlete"))
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+        self.assertFalse(self.store.pending_revocation_ids())
+
+        self.client.exchange_result = replace(
+            self.client.exchange_result, athlete_id="55", access_token="different-athlete",
+        )
+        authorize(paused, INSTALLATION_ID)
+        paused.athlete_routes(INSTALLATION_ID, page=1)
+        self.assertEqual(self.client.routes_calls[-1][:2], ("55", "different-athlete"))
+        sharing.athlete_routes(dev_installation, development=True, page=1)
+        self.assertEqual(self.client.routes_calls[-1][:2], ("44", "same-athlete"))
+        self.assertFalse(self.store.pending_revocation_ids())
 
     def test_oauth_connection_and_scope_status(self):
         start = self.service.start_oauth(INSTALLATION_ID)

@@ -1068,12 +1068,14 @@ class StravaIntegrationService:
                         "strava_oauth_session_invalid", status_code=409
                     )
                 scopes = _normalize_scopes(scope)
-                if self._development_owner is None:
-                    self._exchange_oauth(session, code, scopes, development)
-                else:
-                    # Serialize code exchanges with refreshes for the shared grant.
+                if self._development_owner is not None or (
+                    channel == "production" and self.store.connection_exists(_SHARED_OWNER_GRANT)
+                ):
+                    # Serialize exchanges with refreshes, including during a bridge pause.
                     with self._owner_oauth_lock:
                         self._exchange_oauth(session, code, scopes, development)
+                else:
+                    self._exchange_oauth(session, code, scopes, development)
                 result = "connected"
             except Exception:
                 result = "failed"
@@ -1110,10 +1112,19 @@ class StravaIntegrationService:
             refresh_token=token.refresh_token,
             expires_at=token.expires_at,
         )
-        if token.athlete_id == owner_athlete:
-            existing_owner = self.store.connection(_SHARED_OWNER_GRANT, include_pending=True)
+        existing_owner = (
+            self.store.connection(_SHARED_OWNER_GRANT, include_pending=True)
+            if token.athlete_id == owner_athlete
+            or (owner_athlete is None and session.deployment_channel == "production")
+            else None
+        )
+        # A paused bridge leaves the shared grant in place. Keep reconnects
+        # for the same Strava athlete on that grant to avoid revoking a duplicate.
+        if token.athlete_id == owner_athlete or (
+            existing_owner is not None and existing_owner.bundle.athlete_id == token.athlete_id
+        ):
             if existing_owner is not None and (
-                existing_owner.state != "active" or existing_owner.bundle.athlete_id != owner_athlete
+                existing_owner.state != "active" or existing_owner.bundle.athlete_id != token.athlete_id
             ):
                 raise StravaIntegrationError("strava_oauth_session_invalid", status_code=409)
             self.store.put_connection(
@@ -1127,9 +1138,7 @@ class StravaIntegrationService:
                 session.installation_id,
                 bundle,
                 connected_at=self._clock(),
-                previous_owner_link=(
-                    (session.deployment_channel, session.installation_id) if owner_athlete else None
-                ),
+                previous_owner_link=(session.deployment_channel, session.installation_id),
             )
 
     def _caller_channel(self, installation_id: str, development: bool) -> str:
