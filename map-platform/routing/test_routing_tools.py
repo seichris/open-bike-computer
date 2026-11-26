@@ -883,6 +883,10 @@ class TerrainSourceTests(unittest.TestCase):
                     load(change)
             with self.assertRaisesRegex(ValueError, "not the catalog"):
                 load(lambda value: None, catalog.replace("20260917", "20260918"))
+            for text in ("[]", '{"schemaVersion": 2, "terrain": [{}]}', '{"schemaVersion": 1, "terrain": []}'):
+                (root / "elevation-sources.json").write_text(text)
+                with self.subTest(text=text), self.assertRaisesRegex(ValueError, "exactly one terrain source"):
+                    build_elevation.load_terrain_source(root / "elevation-sources.json")
 
     def test_catalog_lines_name_one_dated_tile_per_cell(self):
         tiles = {(-74, 40): ("n41w074", "20260917", 165776270, "02fe0b7c39d43b570742e25e02c0462c"),

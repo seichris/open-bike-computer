@@ -94,8 +94,10 @@ production now.
    [Planet gate](refresh-runbook.md#planet-gate-for-copernicus-opened-at-200-m)).
    A planet opened at 400 m still lengthened one leg each in New York and
    Chicago. On city samples USGS 3DEP, a lidar terrain model of the United
-   States, kept both, so a hybrid of 3DEP and opened Copernicus is proposed
-   and waits for approval of the source (see
+   States, kept both. Chris approved 3DEP as an elevation source for routing
+   on 2026-11-26, and `build_elevation.py --terrain-sources` writes the
+   hybrid of 3DEP and opened Copernicus. No planet has been built with it
+   yet (see
    [USGS 3DEP](refresh-runbook.md#usgs-3dep-for-the-united-states-on-city-samples)).
    Compare a graded planet with an ungraded one before releasing it (see
    [Compare elevation sources](#compare-elevation-sources-on-city-samples)).
@@ -161,6 +163,64 @@ production now.
    0.5–0.65 s on the laptop core. A worker peaked at 0.92 GB. The opened
    tiles took 104 GB, 65% of the raw tiles' 160 GB, so `--out` needs at
    most another 160 GB beside `--raw`.
+
+   `--terrain-sources` puts a terrain model over the opened tiles.
+   [elevation-sources.json](elevation-sources.json) lists the terrain
+   sources approved for routing. It is kept apart from the topography source
+   policy, which accepts only Copernicus and is an input of the map-platform
+   image and of the offline-map worker's identity. It holds one source, the
+   USGS 3DEP 1/3 arc-second tiles of the conterminous United States, and
+   pins [a catalog](usgs-3dep-13-tiles-20261126.txt) of 968 dated tiles
+   (365 GB), one line per cell with the tile's date, size and S3 ETag.
+   [terrain_catalog.py](terrain_catalog.py) writes a new catalog from the
+   USGS bucket when the tiles should move; record its size, SHA-256 and tile
+   count in the source list.
+
+   ```sh
+   docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \
+     -v "$build_scratch/elevation-raw:/raw" -v "$build_scratch/elevation-opened:/opened" \
+     -v "$build_scratch/elevation-terrain:/terrain" -v "$build_scratch/elevation:/out" \
+     --entrypoint python3 "$map_platform_image" \
+     /routing/build_elevation.py --raw /raw --opened /opened --terrain /terrain --out /out \
+     --opening-radius 400 --terrain-sources /routing/elevation-sources.json --jobs 20 \
+     --policy /app/map-platform/config/topography-source-policy-v2.json
+   ```
+
+   The run then has four stages, each resumed from its receipts:
+
+   - **Raw** Copernicus tiles in `--raw`, as before.
+   - **Opened** tiles in `--opened`, where `--out` would hold them without
+     a terrain source.
+   - **Terrain** tiles in `--terrain`. Each catalog tile is downloaded over
+     eight parallel ranges, and the cell stops if its size or ETag is not
+     the catalog's, because the USGS has then replaced the tile. The tile
+     must be laid out as its cell's 3DEP tile is: float32, NAD 83, three
+     pixels per post, six pixels of overlap. Its SHA-256 goes into the
+     receipt and its posts into an HGT tile.
+   - **Hybrid** tiles in `--out`. A post is 3DEP's where 3DEP has data and
+     opened Copernicus's elsewhere.
+
+   3DEP ends at the border of the United States and at sea, and the opened
+   surface lies under the ground (a metre or two on flat land, far more on
+   ridges), so the two would meet in a step. The hybrid therefore lifts the
+   Copernicus side. A post within 16 posts of 3DEP's data takes the
+   difference between the two surfaces at 3DEP's edge, carried outward as
+   the mean of the posts a step nearer, with a weight that falls linearly to
+   nothing beyond the sixteenth post (about 500 m north to south). 3DEP's
+   own posts are never changed, so a waterfront beside towers keeps its
+   lidar heights. Each cell is blended from its own tiles and a margin of 16
+   posts of its neighbours', which gives every post the value a blend of the
+   whole planet would. A cell with no 3DEP tile of its own or beside it is
+   its opened tile unchanged.
+
+   A hybrid cell's receipt records the opened and terrain tiles it read, and
+   it is blended again when one of them changes. The manifest lists both
+   sources, and its `method` is `terrain-over-opening` with the opening and
+   the opened and terrain manifests. The terrain tiles have their own
+   `terrain-manifest.json`, with a schema `build_graph.py` does not accept,
+   so they cannot grade a graph by mistake. With `--bounds`, the run also
+   builds what the blend reads around the box: the opened and terrain tiles
+   of the neighbouring cells and the raw tiles two cells out.
 
    Then pass `--elevation "$build_scratch/elevation"` to `build_graph.py`. The
    build fails if Valhalla skips its elevation stage. Grade at build time: a

@@ -229,7 +229,7 @@ def load_terrain_source(path):
     """The one terrain source of elevation-sources.json, with its catalog checked against its pin."""
     document = json.loads(path.read_text())
     sources = document.get("terrain") if isinstance(document, dict) else None
-    if document.get("schemaVersion") != 1 or not isinstance(sources, list) or len(sources) != 1:
+    if not isinstance(sources, list) or len(sources) != 1 or document.get("schemaVersion") != 1:
         raise ValueError("the elevation source list must hold exactly one terrain source")
     value = sources[0]
     if not isinstance(value, dict) or set(value) != TERRAIN_FIELDS:

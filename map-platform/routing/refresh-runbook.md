@@ -491,9 +491,11 @@ trees removed. On 2026-11-26 it was tried on samples of New York, Chicago,
 San Francisco and Houston, and at seven border crossings.
 
 **3DEP fixes both legs, and a hybrid elevation set is worth a planet build:
-3DEP where it has data, Copernicus opened at 400 m elsewhere.** It needs
-Chris's approval of 3DEP as a source first; see the recommendation below.
-Nothing in production, in development or in the source policy changed.
+3DEP where it has data, Copernicus opened at 400 m elsewhere.** Chris
+approved 3DEP as an elevation source for routing on 2026-11-26, and
+`build_elevation.py` now writes the hybrid (see the recommendation below).
+No planet has been built with it. Nothing in production, in development or
+in the topography source policy changed.
 
 The source:
 
@@ -673,11 +675,22 @@ is the false part of the step a street would meet:
   route across a border meets the seam once, so no crossing is favoured.
   The streets that cross lie in valleys, where the opening changes little.
   A street across a hillside would meet the larger steps of the table.
-- **A blend removes it.** In a scratch test the difference between the
-  sources was ramped to zero over the 16 posts (about 500 m) inside 3DEP's
-  edge. The Calexico edges read 2% and 0% again, El Paso's bridges 1%, and
-  the steepest 60 m section at both crossings equalled opened Copernicus
-  alone.
+- **The build lifts the Copernicus side to meet 3DEP.** A first scratch
+  test ramped 3DEP down to the opened surface over the 16 posts inside its
+  own edge. That removed the step, but it also pulled real ground down: the
+  Calexico crossing stands at −4 m beside the New River's valley at −9 m,
+  and the opening had flattened the rise between them. `build_elevation.py
+  --terrain-sources` therefore leaves 3DEP's posts alone. It lifts the
+  opened posts within 16 posts (about 500 m) of 3DEP's data by the
+  difference at the edge, fading to nothing. On the Calexico cell built
+  that way, 3DEP's 4,364,089 posts are unchanged and 57,616 opened posts
+  are lifted. The difference between the two sides of the edge fell from
+  2 m at the median, 6 m at the 90th percentile and 163 m at the most to
+  0 m, 0 m and 15 m. The 163 m was a 528 m summit in the mountains at the
+  west end of the cell, which raw Copernicus also reads as 528 m and the
+  opening had cut to 365 m. In Valhalla the outbound crossing edge reads
+  1% in place of 4%. The inbound edge still reads 7%, and rightly: it runs
+  down into the river's valley, which 3DEP and raw Copernicus both show.
 
 #### Recommendation
 
