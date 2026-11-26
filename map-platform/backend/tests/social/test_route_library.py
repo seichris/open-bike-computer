@@ -24,6 +24,11 @@ def route_id_of(archive):
     return json.loads(archive['archive'])['route']['id']
 
 
+VALHALLA = {
+    'providerID': 'bicino.valhalla', 'attribution': '© OpenStreetMap contributors', 'storageScope': 'phoneOnly',
+}
+
+
 class RouteLibraryTest(RouteStoreCase):
     """The app's private route library, synced by route ID."""
 
@@ -96,6 +101,30 @@ class RouteLibraryTest(RouteStoreCase):
         self.assertEqual((card['favorite'], card['elevationGainMeters']), (True, 40), 'the star survives a reload')
         stale = self.put(archive_body(LINE, provider=STRAVA, route_id=route_id, revision=1))
         self.assertEqual(stale.json()['code'], 'stale_route_revision')
+
+    def test_saved_bicino_routes_sync_privately_and_render_on_the_website(self):
+        listing = self.native('alice', 'GET', '/library/routes').json()
+        self.assertCountEqual(listing['supportedProviders'],
+                              ['user.imported-gpx', 'strava.route', 'bicino.valhalla'])
+        self.assertEqual(listing['items'], [])
+
+        archive = archive_body(LINE, provider=VALHALLA)
+        created = self.put(archive, title='Gravel loop')
+        self.assertEqual(created.status_code, 200, created.text)
+        [row] = self.library()
+        [card] = self.listed()
+        self.assertEqual((row['providerID'], card['provider'], card['title'], card['visibility']),
+                         ('bicino.valhalla', 'bicino.valhalla', 'Gravel loop', 'private'))
+        self.assertTrue(card['preview'])
+        own_archive = self.native('alice', 'GET', f"/routes/{row['id']}").json()['body']['archive']
+        self.assertEqual(own_archive, archive['archive'])
+        self.assertEqual(self.native('bob', 'GET', f"/routes/{row['id']}").status_code, 404)
+        self.assertEqual(self.native('alice', 'POST', '/routes', dict(archive, title='x', visibility='friends',
+                         sharingRightsConfirmed=True)).json()['code'], 'route_not_redistributable')
+
+        for scope in ('activeOnly', 'durable'):
+            unsaved = archive_body(LINE, provider=dict(VALHALLA, storageScope=scope))
+            self.assertEqual(self.put(unsaved).json()['code'], 'route_not_redistributable')
 
     def test_rename_delete_and_account_isolation(self):
         archive = archive_body(LINE)

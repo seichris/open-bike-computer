@@ -357,12 +357,13 @@ When you're signed in to a Bicino account and the server advertises
 `routeLibrary`, Saved Routes syncs with the account's private route library,
 which bicino.com shows at `/account/routes`.
 
-- **Uploaded from the phone:** imported GPX and Strava routes, their renames
-  and newer revisions (a Strava reload).
+- **Uploaded from the phone:** imported GPX and Strava routes, saved Bicino
+  plans, and their renames and newer revisions.
 - **Downloaded to the phone:** GPX routes added on bicino.com or on another
-  phone. Strava routes come only from Strava itself.
-- **Not synced:** saved Apple Maps and Bicino-planned routes keep their
-  phone-only scope.
+  phone, and Bicino plans saved on another phone. Strava imports come from
+  Strava itself. The app syncs Bicino plans once the server advertises their
+  provider in the library response.
+- **Apple Maps:** these saved routes stay outside the account library.
 - **Deletions:** a delete on either side removes the route from the other.
   **Disconnect Strava and Delete Data** also deletes the account copies of
   Strava routes.

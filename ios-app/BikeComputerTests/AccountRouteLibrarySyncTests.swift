@@ -3,6 +3,7 @@ import Foundation
 
 private let gpx = AccountRouteSyncPlannerV1.gpxProviderID
 private let strava = AccountRouteSyncPlannerV1.stravaProviderID
+private let valhalla = AccountRouteSyncPlannerV1.valhallaProviderID
 
 private func local(_ id: String, _ title: String?, hash: String?, revision: Int = 1, provider: String = gpx) -> AccountLocalRouteV1 {
     AccountLocalRouteV1(routeID: id, title: title, contentHash: hash, revision: revision, providerID: provider)
@@ -26,6 +27,7 @@ private final class LibraryServer: SocialRideNetworking {
     var onPut: (() -> Void)?
     var onList: (() -> Void)?
     var onDownload: (() -> Void)?
+    var supportedProviders: [String]?
     var calls: [String] = []
 
     func item(_ routeID: String) -> [String: Any] {
@@ -39,7 +41,9 @@ private final class LibraryServer: SocialRideNetworking {
         let payload = try body.map { try JSONSerialization.jsonObject(with: $0) as! [String: Any] }
         if path == "library/routes", method == "GET" {
             onList?()
-            return try JSONSerialization.data(withJSONObject: ["items": rows.keys.sorted().map(item)])
+            var response: [String: Any] = ["items": rows.keys.sorted().map(item)]
+            if let supportedProviders { response["supportedProviders"] = supportedProviders }
+            return try JSONSerialization.data(withJSONObject: response)
         }
         if path.hasPrefix("routes/content-") {
             let routeID = String(path.dropFirst("routes/content-".count))
@@ -130,6 +134,7 @@ enum AccountRouteLibrarySyncTests {
     static func run() async throws {
         planner()
         try await roundTrip()
+        try await savedBicinoRoutes()
         print("Account route library sync tests passed")
     }
 
@@ -364,5 +369,38 @@ enum AccountRouteLibrarySyncTests {
         precondition(server.rows[c] == nil && server.rows[b] == nil, "an account switch ends the round")
         server.changeAccountOnNextPut = false
         precondition(sync.state(owner: "other").synced.isEmpty, "each account keeps its own sync state")
+    }
+
+    static func savedBicinoRoutes() async throws {
+        let suite = "bicino.accountRouteLibrarySync.valhalla.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let server = LibraryServer()
+        let phone = PhoneLibrary()
+        let sync = AccountRouteLibrarySync(client: server, store: phone, defaults: defaults,
+                                           currentGeneration: { server.generation }, currentOwner: { server.owner })
+        let localID = UUID().uuidString
+        let remoteID = UUID().uuidString
+        phone.routes[localID] = .init(title: "Plan on this phone", hash: "v1", revision: 1, provider: valhalla)
+        server.rows[remoteID] = .init(title: "Plan from another phone",
+            archive: PhoneLibrary.archive(remoteID, hash: "v2", revision: 1, provider: valhalla),
+            hash: "v2", routeRevision: 1, provider: valhalla, revision: 1)
+        await sync.sync(owner: "me")
+        precondition(server.rows[localID] == nil && phone.routes[remoteID] == nil,
+                     "without explicit server support saved Bicino plans do not sync")
+
+        server.supportedProviders = [gpx, strava, valhalla]
+        await sync.sync(owner: "me")
+        precondition(server.rows[localID]?.provider == valhalla && phone.routes[remoteID]?.provider == valhalla,
+                     "saved Bicino plans sync both ways without changing providers")
+        precondition(phone.routes[remoteID]?.title == "Plan from another phone")
+
+        server.supportedProviders = nil
+        server.rows[localID] = nil
+        await sync.sync(owner: "me")
+        precondition(phone.routes[localID] != nil, "rolling back the server keeps a previously synced plan on the phone")
+        server.supportedProviders = [gpx, strava, valhalla]
+        await sync.sync(owner: "me")
+        precondition(phone.routes[localID] == nil, "server-side deletions propagate again once the provider is enabled")
     }
 }

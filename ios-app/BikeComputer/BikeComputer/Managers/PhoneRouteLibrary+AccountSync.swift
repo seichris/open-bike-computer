@@ -1,8 +1,7 @@
 import Foundation
 
 /// The saved-route library as the account route sync sees it: imported GPX and
-/// Strava routes. Saved Apple Maps and Bicino-planned routes keep their
-/// phone-only storage scope and never leave the phone.
+/// Strava routes and saved Bicino plans. It excludes Apple Maps routes.
 extension PhoneRouteLibrary: AccountRouteLibraryStoreV1 {
     private func latestSummary(routeID: String) -> PlannedRouteSummaryV1? {
         routes.filter { $0.id.uuidString.uppercased() == routeID.uppercased() }

@@ -320,10 +320,11 @@ profile and locale, so editing one stop re-asks only the legs that changed.
   again. A route without a Bicino route stays on Apple Maps until the
   session ends.
 - **Try Again:** offline, `429` and `503`.
-- **Saving:** a Bicino plan saves as `bicino.valhalla` with phone-only scope
-  (`RouteProviderPolicyV1.valhallaSavedOnPhone`). It is never sent to the Watch
-  or shared. It gets route elevation with the `saved` source and detours with
-  the `valhalla` source.
+- **Saving:** a Bicino plan saves as `bicino.valhalla` with its original
+  OpenStreetMap attribution. It syncs to the private account library when
+  supported by the server. Its existing archive scope excludes Watch transfer
+  and social sharing. It gets route elevation with the `saved` source and
+  detours with the `valhalla` source.
 
 ## Privacy
 

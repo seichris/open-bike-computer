@@ -13,6 +13,8 @@ import hmac
 import json
 import math
 
+from .route_archive import VALHALLA_SAVED_PROVIDER
+
 SIGNATURE_HEADER = "X-Bicino-Website-Signature"
 KEY_LABEL = b"bicino-website-routes-v1"
 PROOF_WINDOW_SECONDS = 60
@@ -23,7 +25,7 @@ PREVIEW_PROVIDER = "user.imported-gpx"
 STRAVA_PROVIDER = "strava.route"
 # Geometry drawn on the website's OpenStreetMap thumbnails. Apple Maps routes
 # never get a map preview.
-PREVIEW_PROVIDERS = frozenset({PREVIEW_PROVIDER, STRAVA_PROVIDER})
+PREVIEW_PROVIDERS = frozenset({PREVIEW_PROVIDER, STRAVA_PROVIDER, VALHALLA_SAVED_PROVIDER["providerID"]})
 
 
 def derive_key(secret: str) -> bytes:

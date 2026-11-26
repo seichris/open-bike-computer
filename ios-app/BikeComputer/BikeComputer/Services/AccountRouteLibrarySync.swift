@@ -57,11 +57,10 @@ enum AccountRouteSyncActionV1: Equatable, Sendable {
 
 /// Decides one sync round. Pure, so every rule is testable without a phone or server.
 ///
-/// - The phone uploads its GPX and Strava routes, newer revisions (a reloaded
-///   Strava route) and renames.
-/// - GPX routes that exist only in the account (imported on bicino.com or on
-///   another phone) are downloaded. Strava routes are never downloaded: the
-///   phone gets those from Strava itself.
+/// - The phone uploads its GPX, Strava and saved Bicino routes, newer revisions
+///   and renames.
+/// - Remote-only GPX and Bicino routes are downloaded. The phone imports
+///   Strava routes from Strava itself.
 /// - A route deleted on one side is deleted on the other. A Strava route whose
 ///   phone lease expired still counts as present, so expiry never deletes it
 ///   from the account.
@@ -70,7 +69,10 @@ enum AccountRouteSyncActionV1: Equatable, Sendable {
 enum AccountRouteSyncPlannerV1 {
     static let gpxProviderID = "user.imported-gpx"
     static let stravaProviderID = "strava.route"
-    static let syncedProviderIDs: Set<String> = [gpxProviderID, stravaProviderID]
+    static let valhallaProviderID = "bicino.valhalla"
+    static let legacyProviderIDs: Set<String> = [gpxProviderID, stravaProviderID]
+    static let syncedProviderIDs = legacyProviderIDs.union([valhallaProviderID])
+    private static let downloadableProviderIDs: Set<String> = [gpxProviderID, valhallaProviderID]
     /// The account library's limits (`LibraryRouteUpload`, `validate_archive`).
     static let maximumTitleScalars = 160
     static let maximumPoints = 20_000
@@ -101,10 +103,12 @@ enum AccountRouteSyncPlannerV1 {
     static func plan(
         local: [AccountLocalRouteV1],
         remote: [AccountLibraryRouteV1],
-        state: AccountRouteSyncStateV1
+        state: AccountRouteSyncStateV1,
+        supportedProviders: Set<String> = legacyProviderIDs
     ) -> [AccountRouteSyncActionV1] {
+        let enabledProviders = syncedProviderIDs.intersection(supportedProviders)
         var localByID: [String: AccountLocalRouteV1] = [:]
-        for route in local where syncedProviderIDs.contains(route.providerID) {
+        for route in local where enabledProviders.contains(route.providerID) {
             localByID[route.routeID.uppercased()] = localByID[route.routeID.uppercased()] ?? route
         }
         var remoteByID: [String: AccountLibraryRouteV1] = [:]
@@ -147,7 +151,8 @@ enum AccountRouteSyncPlannerV1 {
         for routeID in remoteByID.keys.sorted()
         where localByID[routeID] == nil && !state.pendingDeletes.contains(routeID) {
             let server = remoteByID[routeID]!
-            guard server.providerID == gpxProviderID else { continue }
+            guard let provider = server.providerID, enabledProviders.contains(provider),
+                  downloadableProviderIDs.contains(provider) else { continue }
             actions.append(.download(routeID: routeID, contentID: server.id, title: server.title))
         }
         return actions
@@ -281,7 +286,10 @@ final class AccountRouteLibrarySync: ObservableObject {
             let recentDeletes = log.filter { $0.value >= horizon }
             if recentDeletes.count != log.count { saveDeletionLog(recentDeletes) }
             state.pendingDeletes = Set(recentDeletes.keys)
-            let actions = AccountRouteSyncPlannerV1.plan(local: store.accountSyncRoutes(), remote: page.items, state: state)
+            let actions = AccountRouteSyncPlannerV1.plan(
+                local: store.accountSyncRoutes(), remote: page.items, state: state,
+                supportedProviders: page.supportedProviders ?? AccountRouteSyncPlannerV1.legacyProviderIDs
+            )
             var stopUploads = false
             var failure: String?
             for action in actions {
@@ -388,5 +396,8 @@ final class AccountRouteLibrarySync: ObservableObject {
             path, method: method, body: encoded, contentType: "application/json", query: []))
     }
 
-    private struct LibraryPage: Decodable { let items: [AccountLibraryRouteV1] }
+    private struct LibraryPage: Decodable {
+        let items: [AccountLibraryRouteV1]
+        let supportedProviders: Set<String>?
+    }
 }

@@ -69,8 +69,8 @@ nonisolated enum RouteProviderPolicyV1 {
     )
 
     /// A Road, Gravel, Everyday or Mountain Create a Route plan saved through the
-    /// phone's save sheet. Phone only like a saved Apple Maps plan: kept on
-    /// this iPhone, never sent to the Watch or shared.
+    /// phone's save sheet. The stored scope excludes Watch transfer and
+    /// social sharing. Private account library sync is a separate policy.
     static let valhallaSavedOnPhone = RouteProviderMetadataV1(
         providerID: "bicino.valhalla",
         attribution: "© OpenStreetMap contributors",
