@@ -72,14 +72,15 @@ opened Copernicus tiles elsewhere (see
 in three ways:
 
 - **The elevation stage does more.** It first checks that the source list
-  holds that source, approved, with the catalog it pins. Then it downloads
-  the catalog's 968 tiles, 365 GB, and blends 26,475 cells. No builder has
-  run this yet, so its time is not known. A terrain worker holds a whole
-  tile; in the Chicago rehearsal the container with three workers peaked at
-  WORKER_PEAK. The stage keeps three more things on scratch: the opened
-  tiles (84 GB at 400 m), the terrain tiles and up to 0.5 GB per job of
-  downloads in flight. The 2026-11-25 run peaked at 1,225 GB of the
-  1,500 GiB.
+  holds that source, approved, with the area and the catalog it pins. Then
+  it downloads the catalog's 955 tiles, 364 GB, cuts them to the area and
+  blends 26,475 cells. No builder has run this yet, so its time is not
+  known. A terrain worker holds a whole tile: in the Chicago rehearsal the
+  container with three workers peaked at 3.8 GiB, about 1.3 GiB a worker,
+  which is 26 GiB for 20 jobs. The stage keeps three more things on
+  scratch: the opened tiles (84 GB at 400 m), the terrain tiles and up to
+  0.5 GB per job of downloads in flight. The 2026-11-25 run peaked at
+  1,225 GB of the 1,500 GiB.
 - **Both graphs are built with `--all-bridges`**, the ungraded one too, so
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
@@ -252,6 +253,23 @@ the gate `not-run`. A first Chicago run failed in both graph builds for want
 of a state boundary: the chain ended `failed`, with the two qualification
 stages and the gate `blocked`.
 
+With `--terrain usgs-3dep-13` the rehearsal grades with the hybrid:
+
+```sh
+map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Chicago --radius 400 --terrain usgs-3dep-13
+```
+
+On 2026-11-26 that run took 16 minutes on a laptop, 12 of them in the
+elevation stage: 25 raw cells, 9 opened cells, 9 terrain tiles (3.1 GB of
+downloads) and the hybrid of the city's one cell. Both graphs were built
+with `--all-bridges`, the gate found the same tagging rules in both
+manifests, and its report names the source
+`usgs-3dep-13-over-opened-400`: 4 routes, none longer, targets met, where
+the opened tiles alone make one leg 9.5% longer. The result lists four
+tile sets (`raw`, `opened`, `terrain`, `hybrid`), and their manifests are
+in `export/evidence/`. That run was made before the tiles were cut to the
+United States; Chicago's nine cells lie wholly inside it.
+
 The rehearsal leaves out what needs a planet: the territory audit, the
 cross-border probes and the profile probe. Its result file says
 `"sample": true`. It is never release evidence.
@@ -286,6 +304,10 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
 - **`sampler.sh` and `inputs`, the qualification stage's cross-border, audit
   and profile checks at planet size**, and all planet-scale times, disk and
   memory. The sampler is not part of the rehearsal.
+- **The hybrid at planet size.** 955 downloads from the USGS bucket and the
+  speed a builder gets from it, the blend of 26,475 cells, and a graph
+  build with `--all-bridges`. The rehearsal ran them for one cell and two
+  sample graphs.
 - **`builder_status.py` over real SSH**, through the VPS and with a Tailscale
   re-authentication pending. Tests fed it those replies.
 

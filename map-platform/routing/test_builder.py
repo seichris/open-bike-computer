@@ -883,7 +883,7 @@ done
             hybrid, runs = self.run_elevation_stage(
                 root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
             self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
-            self.assertIn("terrain source usgs-3dep-13: 968 tiles", hybrid.stdout)
+            self.assertIn("terrain source usgs-3dep-13: 955 tiles", hybrid.stdout)
             self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
             self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
                           "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "

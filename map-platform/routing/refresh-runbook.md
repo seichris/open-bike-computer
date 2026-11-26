@@ -80,7 +80,7 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    chain. Leave out `--opening-radius` to build only the ungraded planet,
    the graph production serves. Add `--terrain usgs-3dep-13` to grade with
    the hybrid of USGS 3DEP and opened Copernicus: the elevation stage then
-   also downloads 3DEP's 968 tiles (365 GB) and blends them in, and both
+   also downloads 3DEP's 955 tiles (364 GB) and blends them in, and both
    graphs are built with every bridge marked as one (see
    [the builder's page](builder/README.md#the-chain)). No builder has run
    that yet.
