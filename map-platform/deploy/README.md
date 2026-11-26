@@ -220,6 +220,8 @@ because both can revoke athlete tokens. Coolify injects its application environm
 file into every service. The production and development Compose manifests
 explicitly clear Strava credentials on services outside the integration and
 clear the owner bridge settings on every service except the API.
+Leave `BICINO_STRAVA_MASK` unset or empty. Its empty-default interpolation
+keeps Coolify from replacing a literal blank with a stored credential.
 The persistent `map-platform-data` volume contains the encrypted
 `strava-integrations.sqlite3`; it contains no plaintext token columns. Rotate
 token-encryption keys by placing retained `key-id=base64-key` entries (or a

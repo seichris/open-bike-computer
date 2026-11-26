@@ -31,6 +31,7 @@ class StravaComposeTests(unittest.TestCase):
         "MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR",
     )
 
+    _MASK = "${BICINO_STRAVA_MASK:-}"
     _COOLIFY_MANIFESTS = {"compose.yaml", "compose.development.yaml"}
     _BRIDGE_VARIABLES = (
         "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET",
@@ -75,7 +76,7 @@ class StravaComposeTests(unittest.TestCase):
                 self.assertIn(installation, api)
                 maintenance = self._service(compose, "map-platform-maintenance")
                 for variable in self._BRIDGE_VARIABLES:
-                    self.assertIn(f"{variable}: ''", maintenance)
+                    self.assertIn(f"{variable}: {self._MASK}", maintenance)
             else:
                 for service in (api, self._service(compose, "map-platform-maintenance")):
                     for variable in self._BRIDGE_VARIABLES:
@@ -83,7 +84,7 @@ class StravaComposeTests(unittest.TestCase):
             if path.name == "compose.yaml":
                 self.assertIn(f"{athlete}: ${{{athlete}:-}}", api)
             elif path.name == "compose.development.yaml":
-                self.assertIn(f"{athlete}: ''", api)
+                self.assertIn(f"{athlete}: {self._MASK}", api)
             else:
                 self.assertNotIn(athlete, api)
             worker = self._service(compose, "map-platform-worker")
@@ -99,7 +100,7 @@ class StravaComposeTests(unittest.TestCase):
             overrides = compose[start:compose.index("\n\n", start)]
             self.assertIn("MAP_PLATFORM_STRAVA_ENABLED: '0'", overrides)
             for variable in self._SHARED_VARIABLES[1:-1] + self._BRIDGE_VARIABLES:
-                self.assertIn(f"{variable}: ''", overrides)
+                self.assertIn(f"{variable}: {self._MASK}", overrides)
             worker = self._service(compose, "map-platform-worker")
             self.assertIn("<<: *strava-disabled", worker)
             if path.name == "compose.yaml":
