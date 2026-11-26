@@ -158,7 +158,10 @@ When the service is disabled, `available` is `false` and `provider` and
   fix Buenos Aires. The whole planet graded with that opening on 2026-11-25
   lengthened no flat-city route outside New York by more than 0.5%, but
   Midtown Manhattan's towers still read as steep streets and one New York
-  leg became 5.9% longer, so it was not shipped either. See [Refresh and rollback](../map-platform/routing/refresh-runbook.md#elevation-sources-on-city-samples)
+  leg became 5.9% longer, so it was not shipped either. On city samples a
+  400 m opening kept that leg and every other flat route while hill
+  avoidance still worked, at the cost of flattening short, steep hills such
+  as Lisbon's. See [Refresh and rollback](../map-platform/routing/refresh-runbook.md#elevation-sources-on-city-samples)
   before grading a graph again.
 
 The type also sets Valhalla's default speed on smooth flat roads (road
