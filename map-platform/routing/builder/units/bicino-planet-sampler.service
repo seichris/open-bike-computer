@@ -1,0 +1,12 @@
+# Scratch and memory use every 30 seconds, their peaks, and a heartbeat.
+[Unit]
+Description=Bicino planet builder: sample scratch and memory use
+
+[Service]
+Type=simple
+User=bicino
+Group=bicino
+Environment=BICINO_SCRATCH=/srv/bicino-routing-scratch
+ExecStart=/srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/sampler.sh
+Restart=always
+RestartSec=10

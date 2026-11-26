@@ -930,13 +930,11 @@ class ElevationComparisonTests(unittest.TestCase):
         self.assertEqual(len({city["city"] for city in cities}), len(cities))
         for city in cities:
             self.assertLessEqual({"city", "terrain", "bbox", "legs"}, set(city))
-            self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly", "reportOnly"})
-            # Report-only cities were never sampled, so they run only against planet services.
-            self.assertTrue(city.get("planetOnly") or not city.get("reportOnly"), city["city"])
+            self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly", "reportOnly",
+                                             "extract", "adminWays"})
             west, south, east, north = city["bbox"]
             self.assertTrue(west < east and south < north, city["city"])
-            # Planet-only cities keep the 2026-11-24 planet check's legs; a city sample needs three.
-            self.assertGreaterEqual(len(city["legs"]), 1 if city.get("planetOnly") else 3, city["city"])
+            self.assertGreaterEqual(len(city["legs"]), 1, city["city"])
             for leg in city["legs"]:
                 for latitude, longitude in (leg["origin"], leg["destination"]):
                     self.assertTrue(west < longitude < east and south < latitude < north, leg["name"])

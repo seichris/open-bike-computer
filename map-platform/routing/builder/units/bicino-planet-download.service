@@ -1,0 +1,18 @@
+# One stage of the planet build. run_stage.py records its state in export/chain/
+# and refuses to start it until the stages it needs are done (chain_state.py).
+[Unit]
+Description=Bicino planet builder: download and verify the OSM snapshot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=bicino
+Group=bicino
+SupplementaryGroups=docker
+Environment=BICINO_SCRATCH=/srv/bicino-routing-scratch
+EnvironmentFile=/srv/bicino-routing-scratch/builder.env
+ExecStart=/usr/bin/python3 /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/run_stage.py download
+ExecStopPost=/usr/bin/python3 /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/run_stage.py --finalize download
+TimeoutStartSec=3h

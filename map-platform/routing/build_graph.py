@@ -85,6 +85,8 @@ def run_valhalla(work, script, threads, log_name, volumes):
             [
                 "docker", "run", "--rm", "--network", "none", "--platform", PLATFORM,
                 "--user", f"{os.getuid()}:{os.getgid()}",
+                # The builder finds and removes a killed build's container by this.
+                "--label", f"bicino.work={work}",
                 "--volume", f"{work}:/work", *mounts,
                 "--entrypoint", "/bin/bash", IMAGE, "-euc", script, "_", str(threads),
             ],
@@ -144,9 +146,16 @@ def elevation_identity(elevation, sample=False):
     }
 
 
-def prepare_inputs(source, work, mask):
+def prepare_inputs(source, work, mask, admin_source=None, sample=False):
+    """The admin and road inputs for Valhalla.
+
+    A sample cut from a regional extract takes its boundaries from
+    `admin_source`, the uncut extract: Valhalla keeps only whole country and
+    state polygons, and a city's box cuts them. Its long routes always reach
+    past the extract, so only a release build must have every relation member.
+    """
     admin = work / "admin.osm.pbf"
-    run("osmium", "tags-filter", source, "r/boundary=administrative", "-o", admin)
+    run("osmium", "tags-filter", admin_source or source, "r/boundary=administrative", "-o", admin)
     roads = source
     if mask is not None:
         clipped = work / "complete-ways.osm.pbf"
@@ -165,7 +174,8 @@ def prepare_inputs(source, work, mask):
     run("osmium", "check-refs", roads)
     relations = work / "routing-relations.osm.pbf"
     run("osmium", "tags-filter", roads, *ROUTING_RELATIONS, "-o", relations)
-    run("osmium", "check-refs", "--check-relations", relations)
+    if not sample:
+        run("osmium", "check-refs", "--check-relations", relations)
     return admin, roads
 
 
@@ -191,7 +201,10 @@ def main():
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--mask", type=Path, help="Inclusion mask")
     parser.add_argument("--coverage", choices=COVERAGES, default="worldwide-gap")
-    parser.add_argument("--sample", action="store_true", help="Build a development sample")
+    parser.add_argument("--sample", action="store_true",
+                        help="Build a development sample; relations may miss members")
+    parser.add_argument("--admin-source", type=Path,
+                        help="With --sample: take administrative boundaries from this uncut extract")
     parser.add_argument("--policy", type=Path, default=Path(__file__).with_name("coverage.json"))
     parser.add_argument("--elevation", type=Path, help="HGT tiles written by build_elevation.py")
     args = parser.parse_args()
@@ -201,6 +214,9 @@ def main():
     error = argument_error(args.coverage, args.sample, args.mask, args.source_url)
     if error:
         parser.error(error)
+    if args.admin_source and not args.sample:
+        parser.error("--admin-source is for samples; a release takes its boundaries from --source")
+    admin_source = args.admin_source.resolve(strict=True) if args.admin_source else None
     source = args.source.resolve(strict=True)
     source_identity = file_identity(source)
     if source_identity["sha256"] != args.source_sha256:
@@ -211,7 +227,7 @@ def main():
     policy_identity = file_identity(args.policy) if mask else None
     elevation_record = elevation_identity(elevation, args.sample) if elevation else None
     work.mkdir(mode=0o700)
-    admin, roads = prepare_inputs(source, work, mask)
+    admin, roads = prepare_inputs(source, work, mask, admin_source, args.sample)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)
     valhalla_build(work, admin, roads, args.threads, elevation)
     archive = work / ARCHIVE_NAME
@@ -224,6 +240,7 @@ def main():
         "builder": {"image": IMAGE, "platform": PLATFORM, "threads": args.threads},
         "configuration": file_identity(work / "valhalla.json"),
         "admin": file_identity(work / "admin.sqlite"),
+        **({"adminSource": file_identity(admin_source)} if admin_source else {}),
         "elevation": elevation_record,
         "maskedInputBytes": roads.stat().st_size,
         "archive": {"name": ARCHIVE_NAME, "tiles": archive_tile_count(archive), **file_identity(archive)},

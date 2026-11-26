@@ -1,0 +1,16 @@
+# The end of the chain, and the unit that starts it:
+#   systemctl start --no-block bicino-planet-result.service
+# It wants every stage and runs after all of them, whether they passed, failed
+# or never started, and writes export/result.json.
+[Unit]
+Description=Bicino planet builder: write the result of the chain
+Wants=bicino-planet-sampler.service bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service
+After=bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service
+
+[Service]
+Type=oneshot
+User=bicino
+Group=bicino
+Environment=BICINO_SCRATCH=/srv/bicino-routing-scratch
+ExecStart=/usr/bin/python3 /srv/bicino-routing-scratch/tools/repo/map-platform/routing/builder/chain_state.py result --final
+TimeoutStartSec=30min

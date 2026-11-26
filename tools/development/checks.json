@@ -895,6 +895,23 @@
       ]
     },
     {
+      "id": "map-routing-tests",
+      "name": "Bicycle graph tools and planet builder unit tests",
+      "component": "map_backend",
+      "cwd": ".",
+      "command": "python3 -m unittest discover -s map-platform/routing",
+      "tools": [
+        "python3",
+        "bash"
+      ],
+      "pythonImports": [
+        "numpy",
+        "pyproj",
+        "rasterio",
+        "shapely"
+      ]
+    },
+    {
       "id": "osm-tests",
       "name": "OSM extraction unit tests",
       "component": "osm",

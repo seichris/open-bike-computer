@@ -36,6 +36,12 @@ production now.
    Confirm the credit-backed project and CPU and SSD quotas before provisioning.
    Stripe the temporary SSDs, keep the boot disk separate, and use a VM lifetime
    limit. The Linux builder only needs access to public inputs.
+
+   For a planet graph, the scripts in [builder/](builder/README.md) create
+   that builder, set it up and run steps 3 and 4 and the elevation gate as one
+   chain of systemd units that needs nobody watching. The
+   [runbook](refresh-runbook.md#build-on-an-ephemeral-vm) has the commands.
+   The steps below describe what the chain's stages run.
 2. Download the exact two files named in [coverage.json](coverage.json) from
    its pinned boundary base URL. For a policy refresh, fetch the official Apple
    page and run the mask tool with `--apple-html`. A difference must be reviewed
@@ -160,9 +166,13 @@ production now.
    sources used and the `method`: null for raw tiles, or the opening with
    its radius and the identity of the raw manifest it opened.
 
-   Use `--sample` for development input. Sample results are never worldwide
-   release evidence. Record peak scratch and memory, phase times, output size,
-   the policy and inventory, source and configuration hashes, and probe results.
+   Use `--sample` for development input, such as a city cut from a regional
+   extract by [prepare_sample.py](prepare_sample.py). A sample's relations may
+   lack members that lie outside the extract, and `--admin-source` takes its
+   administrative boundaries from the uncut extract. Sample results are never
+   worldwide release evidence. Record peak scratch and memory, phase times,
+   output size, the policy and inventory, source and configuration hashes, and
+   probe results.
 
 4. Run [probes.json](probes.json) with the pinned build image against the archive
    alone, passing `probe_graph.py --coverage planet` for a planet graph. A
@@ -234,21 +244,21 @@ San Francisco, Zurich, Wellington), each with a box and four or five legs.
 The 2026-11-25 results and the recommendation are in
 [Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples).
 
-Cities marked `planetOnly` hold the legs of the 2026-11-24 planet check that
-the sample cities lack: Copenhagen, Paris, London, Munich, New York, Tokyo
-and Dubai (flat) and Stuttgart (hilly), with one or two legs each. With them
-the file holds all 27 legs of that check. Apart from New York and
-Stuttgart, which were sampled on 2026-11-26 to choose the opening radius
-(see [Opening radius](refresh-runbook.md#opening-radius-on-city-samples)),
-they have never been built as samples, so they run only against planet
-services. Together
-with the sample cities they are the release gate for a graded planet: serve
-the graded and the ungraded planet from the same snapshot and run every city
-in one report, with no `--city`.
+A city that names a Geofabrik `extract` builds as a sample. To build one
+city at one opening radius and run the gate on it in one command, use
+[builder/rehearse.sh](builder/README.md#rehearse-on-a-city-sample); the steps
+below do the same by hand and also take other elevation sources.
+
+Cities marked `planetOnly` have never been built as samples and run only
+against planet services: Copenhagen, Paris, London, Munich and Tokyo, with
+one or two legs each of the 2026-11-24 planet check. With New York, Dubai
+and Stuttgart, which do build as samples, the file holds all 27 legs of
+that check. All cities together are the release gate for a graded planet:
+serve the graded and the ungraded planet from the same snapshot and run every
+city in one report, with no `--city`.
 
 The 200 m planet failed only in Midtown's tower core, so on 2026-11-26 Chris
-added high-rise cores to the gate. These are planet-only, flat and judged
-like the rest:
+added high-rise cores to the gate. These are flat and judged like the rest:
 - Chicago: two legs through the Loop.
 - Singapore: two legs through the CBD and Marina Bay.
 - Shanghai: two legs through Lujiazui.
@@ -265,20 +275,29 @@ marked `reportOnly`: `compare_elevation.py` routes and tabulates them, but
 no target counts them, and a person judges their length change and 6%+
 share.
 
-1. Download a dated Geofabrik extract that holds the whole city and its
-   state or province boundary (Valhalla keeps only country and state
-   polygons, so a cut state such as NorCal gives an empty admin database).
-   Record its SHA-256. Cut the city's box with `osmium extract -b
-   west,south,east,north --strategy complete_ways` and take
-   `osmium tags-filter "$region" r/boundary=administrative` as the admin input.
-   Check the state relation with `osmium check-refs -r`. The New York extract
-   lacks one member of New York State, and Valhalla then builds no admin
-   polygon; fetch the missing way from the OpenStreetMap API and merge it.
-   Box extracts fail `build_graph.py`'s check-refs, so build each sample by
-   calling `build_graph.valhalla_build(work, admin, roads, threads, elevation)`
-   directly. A city builds in 10 seconds to 2 minutes on a laptop under amd64
-   emulation; one build segfaulted in the elevation stage there and passed on
-   a retry.
+1. Download the city's Geofabrik extract, which `elevation-probes.json` names
+   as `extract`, and record its SHA-256. It holds the whole city and its
+   state or province boundary: Valhalla keeps only country and state
+   polygons, so a cut state such as NorCal gives an empty admin database.
+   [prepare_sample.py](prepare_sample.py) cuts the city's box with complete
+   ways into `roads.osm.pbf` and takes the boundaries of the whole extract
+   as `admin.osm.pbf`. The New York extract lacks one member of New York
+   State, and Valhalla then builds no admin polygon; the city lists that way
+   under `adminWays`, and the tool fetches it from the OpenStreetMap API and
+   merges it. `sample.json` records what was cut and `elevationBounds`, the
+   whole-degree bounds for step 2.
+
+   ```sh
+   python prepare_sample.py --city Chicago --region "$scratch/illinois-latest.osm.pbf" \
+     --region-url https://download.geofabrik.de/north-america/us/illinois-latest.osm.pbf \
+     --out "$scratch/chicago"
+   ```
+
+   Build each graph with `build_graph.py --sample --source
+   "$scratch/chicago/roads.osm.pbf" --admin-source
+   "$scratch/chicago/admin.osm.pbf"`, with and without `--elevation`. A city
+   builds in 10 seconds to 2 minutes on a laptop under amd64 emulation; one
+   build segfaulted in the elevation stage there and passed on a retry.
 2. Write the elevation tiles for the city's one-degree cells.
    `build_elevation.py --bounds W S E N` writes the production Copernicus
    tiles for those cells. [sample_elevation.py](sample_elevation.py) writes
@@ -333,6 +352,11 @@ share.
 ```sh
 tools/dev-env --map-backend python -m unittest discover -s map-platform/routing -v
 ```
+
+`tools/dev-check --check map-routing-tests` runs the same tests, and the Map
+Backend CI job runs them on every map-platform change. They cover these tools
+and the planet builder: its chain, its status command and, where `shellcheck`
+is installed, its shell scripts.
 
 To prove the road, gravel and everyday route profiles still change Valhalla's
 answer on a candidate graph, run [probe_profiles.py](probe_profiles.py) from the
