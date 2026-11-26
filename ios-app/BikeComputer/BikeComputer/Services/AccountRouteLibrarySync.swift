@@ -45,7 +45,7 @@ struct AccountRouteSyncStateV1: Codable, Equatable, Sendable {
 }
 
 enum AccountRouteSyncActionV1: Equatable, Sendable {
-    case upload(routeID: String)
+    case upload(routeID: String, remoteTitle: String? = nil)
     case renameRemote(routeID: String, title: String)
     case deleteRemote(routeID: String)
     case download(routeID: String, contentID: String, title: String)
@@ -94,6 +94,10 @@ enum AccountRouteSyncPlannerV1 {
             upload.hashPayload.count <= maximumArchiveCharacters && !upload.title.isEmpty
     }
 
+    static func preferredTitle(local: String, remote: String, lastAgreed: String?) -> String {
+        lastAgreed == remote ? local : remote
+    }
+
     static func plan(
         local: [AccountLocalRouteV1],
         remote: [AccountLibraryRouteV1],
@@ -126,12 +130,11 @@ enum AccountRouteSyncPlannerV1 {
             }
             if let hash = route.contentHash, hash != server.contentHash,
                route.revision > (server.routeRevision ?? 0), state.refused[routeID] != hash {
-                // The upload carries the phone's title too.
-                actions.append(.upload(routeID: routeID))
+                actions.append(.upload(routeID: routeID, remoteTitle: server.title))
                 continue
             }
             if let title = route.title, title != server.title {
-                if baseline?.title == server.title {
+                if preferredTitle(local: title, remote: server.title, lastAgreed: baseline?.title) == title {
                     actions.append(.renameRemote(routeID: routeID, title: title))
                 } else {
                     actions.append(.renameLocal(routeID: routeID, title: server.title))
@@ -241,6 +244,7 @@ final class AccountRouteLibrarySync: ObservableObject {
         var log = deletionLog()
         log[routeID.uuidString.uppercased()] = now()
         saveDeletionLog(log)
+        if isSyncing { rerunRequested = true }
     }
 
     // MARK: Rounds
@@ -267,29 +271,28 @@ final class AccountRouteLibrarySync: ObservableObject {
         guard let store else { return }
         let generation = currentGeneration()
         guard bound(owner, generation) else { return }
-        var log = deletionLog()
-        let horizon = now().addingTimeInterval(-Self.deletionLogLifetime)
-        if log.contains(where: { $0.value < horizon }) {
-            log = log.filter { $0.value >= horizon }
-            saveDeletionLog(log)
-        }
         var state = state(owner: owner)
-        state.pendingDeletes = Set(log.keys)
         do {
             let page = try JSONDecoder().decode(LibraryPage.self, from: await client.request(
                 "library/routes", method: "GET", body: nil, contentType: "application/json", query: []))
             guard bound(owner, generation) else { return }
+            let log = deletionLog()
+            let horizon = now().addingTimeInterval(-Self.deletionLogLifetime)
+            let recentDeletes = log.filter { $0.value >= horizon }
+            if recentDeletes.count != log.count { saveDeletionLog(recentDeletes) }
+            state.pendingDeletes = Set(recentDeletes.keys)
             let actions = AccountRouteSyncPlannerV1.plan(local: store.accountSyncRoutes(), remote: page.items, state: state)
             var stopUploads = false
             var failure: String?
             for action in actions {
                 guard bound(owner, generation) else { return }
                 do {
-                    try await apply(action, to: &state, store: store, stopUploads: &stopUploads)
+                    try await apply(action, to: &state, store: store, stopUploads: &stopUploads,
+                                    owner: owner, generation: generation)
                 } catch let error as SocialFailure where error == .accountChanged || error.endsAccountSession {
                     return
                 } catch SocialFailure.server(let code) where Self.permanentRefusals.contains(code) {
-                    if case .upload(let routeID) = action, let hash = (try? store.accountSyncUpload(routeID: routeID))?.contentHash {
+                    if case .upload(let routeID, _) = action, let hash = (try? store.accountSyncUpload(routeID: routeID))?.contentHash {
                         state.refused[routeID] = hash
                     }
                 } catch SocialFailure.server(let code) where ["content_quota", "rate_limited"].contains(code) {
@@ -316,9 +319,10 @@ final class AccountRouteLibrarySync: ObservableObject {
     static let permanentRefusals: Set<String> = ["route_not_redistributable", "route_id_mismatch", "stale_route_revision"]
 
     private func apply(_ action: AccountRouteSyncActionV1, to state: inout AccountRouteSyncStateV1,
-                       store: any AccountRouteLibraryStoreV1, stopUploads: inout Bool) async throws {
+                       store: any AccountRouteLibraryStoreV1, stopUploads: inout Bool,
+                       owner: String, generation: UUID) async throws {
         switch action {
-        case .upload(let routeID):
+        case .upload(let routeID, let remoteTitle):
             guard !stopUploads else { return }
             let upload = try store.accountSyncUpload(routeID: routeID)
             guard AccountRouteSyncPlannerV1.fitsAccountLibrary(upload) else {
@@ -326,9 +330,19 @@ final class AccountRouteLibrarySync: ObservableObject {
                 state.refused[routeID] = upload.contentHash
                 return
             }
-            var body: [String: Any] = ["title": upload.title, "archive": upload.archive, "hashPayload": upload.hashPayload]
+            let title = remoteTitle.map {
+                AccountRouteSyncPlannerV1.preferredTitle(local: upload.title, remote: $0,
+                                                         lastAgreed: state.synced[routeID]?.title)
+            } ?? upload.title
+            var body: [String: Any] = ["title": title, "archive": upload.archive, "hashPayload": upload.hashPayload]
             if let ascent = upload.elevationGainMeters, ascent.isFinite, ascent >= 0 { body["elevationGainMeters"] = ascent }
             let row = try await libraryRequest("library/routes/\(routeID)", method: "PUT", body: body)
+            guard bound(owner, generation) else { throw SocialFailure.accountChanged }
+            // Keep a rider rename or deletion made while the upload was in flight.
+            if row.title != upload.title, deletionLog()[routeID] == nil,
+               store.accountSyncRoutes().first(where: { $0.routeID == routeID })?.title == upload.title {
+                store.accountSyncRename(routeID: routeID, title: row.title)
+            }
             state.synced[routeID] = .init(contentHash: row.contentHash, title: row.title)
             state.refused[routeID] = nil
         case .renameRemote(let routeID, let title):
@@ -341,8 +355,11 @@ final class AccountRouteLibrarySync: ObservableObject {
             } catch SocialFailure.server("not_found") {}
             state.synced[routeID] = nil
         case .download(let routeID, let contentID, let title):
+            guard deletionLog()[routeID] == nil else { return }
             let item = try JSONDecoder().decode(SocialContent.self, from: await client.request(
                 "routes/\(contentID)", method: "GET", body: nil, contentType: "application/json", query: []))
+            guard bound(owner, generation) else { throw SocialFailure.accountChanged }
+            guard deletionLog()[routeID] == nil else { return }
             guard let raw = item.body.archive, let expected = item.body.sha256,
                   SHA256.hash(data: Data(raw.utf8)).map({ String(format: "%02x", $0) }).joined() == expected else {
                 throw SocialFailure.invalidResponse

@@ -24,6 +24,8 @@ private final class LibraryServer: SocialRideNetworking {
     var changeAccountOnNextPut = false
     var refuseUploads: String?
     var onPut: (() -> Void)?
+    var onList: (() -> Void)?
+    var onDownload: (() -> Void)?
     var calls: [String] = []
 
     func item(_ routeID: String) -> [String: Any] {
@@ -36,11 +38,13 @@ private final class LibraryServer: SocialRideNetworking {
         calls.append("\(method) \(path)")
         let payload = try body.map { try JSONSerialization.jsonObject(with: $0) as! [String: Any] }
         if path == "library/routes", method == "GET" {
+            onList?()
             return try JSONSerialization.data(withJSONObject: ["items": rows.keys.sorted().map(item)])
         }
         if path.hasPrefix("routes/content-") {
             let routeID = String(path.dropFirst("routes/content-".count))
             guard let row = rows[routeID] else { throw SocialFailure.server("not_found") }
+            onDownload?()
             let sha = SHA256.hash(data: Data(row.archive.utf8)).map { String(format: "%02x", $0) }.joined()
             return try JSONSerialization.data(withJSONObject: ["id": "content-\(routeID)", "owner": "me", "kind": "route",
                 "title": row.title, "visibility": "private", "revision": row.revision,
@@ -155,7 +159,7 @@ enum AccountRouteLibrarySyncTests {
 
         precondition(AccountRouteSyncPlannerV1.plan(local: [local("S", "Loop", hash: "s2", revision: 2, provider: strava)],
                      remote: [remote("S", "Loop", hash: "s1", revision: 1, provider: strava)], state: empty)
-                     == [.upload(routeID: "S")], "a reloaded Strava route replaces the older revision")
+                     == [.upload(routeID: "S", remoteTitle: "Loop")], "a reloaded Strava route replaces the older revision")
         precondition(AccountRouteSyncPlannerV1.plan(local: [local("S", "Loop", hash: "s1", provider: strava)],
                      remote: [remote("S", "Loop", hash: "s2", revision: 2, provider: strava)], state: empty)
                      == [.adopt(routeID: "S", contentHash: "s2", title: "Loop")], "an older phone copy never overwrites")
@@ -259,6 +263,71 @@ enum AccountRouteLibrarySyncTests {
         server.onPut = nil
         await sync.sync(owner: "me")
         precondition(server.rows[d] == nil && phone.routes[d] == nil, "the mid-round deletion reached the account")
+
+        // Deleting during the account listing must not schedule a fresh download.
+        let deletedDuringList = UUID().uuidString
+        phone.routes[deletedDuringList] = .init(title: "Delete during list", hash: "list1", revision: 1, provider: gpx)
+        await sync.sync(owner: "me")
+        precondition(server.rows[deletedDuringList] != nil)
+        server.onList = {
+            server.onList = nil
+            phone.riderDeletes(deletedDuringList)
+        }
+        await sync.sync(owner: "me")
+        precondition(!server.calls.contains("GET routes/content-\(deletedDuringList)"), "a deletion during listing prevents download")
+        precondition(phone.routes[deletedDuringList] == nil && server.rows[deletedDuringList] == nil,
+                     "a deletion during listing is applied on both sides")
+
+        // A local copy can be added and deleted while an archive is downloading.
+        let deletedDuringDownload = UUID().uuidString
+        server.rows[deletedDuringDownload] = .init(title: "Delete during download",
+            archive: PhoneLibrary.archive(deletedDuringDownload, hash: "download1", revision: 1, provider: gpx),
+            hash: "download1", routeRevision: 1, provider: gpx, revision: 1)
+        server.onDownload = {
+            server.onDownload = nil
+            phone.routes[deletedDuringDownload] = .init(title: "Delete during download",
+                                                       hash: "download1", revision: 1, provider: gpx)
+            phone.riderDeletes(deletedDuringDownload)
+        }
+        await sync.sync(owner: "me")
+        precondition(server.calls.contains("GET routes/content-\(deletedDuringDownload)"))
+        precondition(phone.routes[deletedDuringDownload] == nil && server.rows[deletedDuringDownload] == nil,
+                     "a stale download does not restore a deleted route")
+
+        let refreshedStrava = UUID().uuidString
+        phone.routes[refreshedStrava] = .init(title: "Original name", hash: "refresh1", revision: 1, provider: strava)
+        await sync.sync(owner: "me")
+        server.rows[refreshedStrava]!.title = "Website rename"
+        phone.routes[refreshedStrava]!.hash = "refresh2"
+        phone.routes[refreshedStrava]!.revision = 2
+        await sync.sync(owner: "me")
+        precondition(server.rows[refreshedStrava]?.routeRevision == 2 &&
+                     server.rows[refreshedStrava]?.title == "Website rename" &&
+                     phone.routes[refreshedStrava]?.title == "Website rename",
+                     "a content refresh preserves the website rename on both sides")
+
+        phone.routes[refreshedStrava]!.title = "Phone rename"
+        phone.routes[refreshedStrava]!.hash = "refresh3"
+        phone.routes[refreshedStrava]!.revision = 3
+        await sync.sync(owner: "me")
+        precondition(server.rows[refreshedStrava]?.routeRevision == 3 &&
+                     server.rows[refreshedStrava]?.title == "Phone rename",
+                     "a content refresh still uploads a phone rename when the website title is unchanged")
+
+        server.rows[refreshedStrava]!.title = "Second website rename"
+        phone.routes[refreshedStrava]!.hash = "refresh4"
+        phone.routes[refreshedStrava]!.revision = 4
+        server.onPut = {
+            phone.routes[refreshedStrava]!.title = "Rename during upload"
+            server.onPut = nil
+        }
+        await sync.sync(owner: "me")
+        precondition(phone.routes[refreshedStrava]?.title == "Rename during upload",
+                     "applying the upload response preserves a phone rename made while the request was in flight")
+        await sync.sync(owner: "me")
+        precondition(server.rows[refreshedStrava]?.routeRevision == 4 &&
+                     server.rows[refreshedStrava]?.title == "Rename during upload",
+                     "the next sync uploads the phone rename")
 
         // Over the library's limits: never sent, remembered.
         let huge = UUID().uuidString
