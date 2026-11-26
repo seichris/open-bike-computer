@@ -21,11 +21,10 @@ class StravaCompatibilityRuntimeTests(unittest.TestCase):
         base = inventory(Path("/opt/strava-base-app"))
         runtime = inventory(Path("/app"))
         package = "map-platform/backend/map_platform/"
-        self.assertEqual(base.keys() - runtime.keys(), set())
-        self.assertEqual(runtime.keys() - base.keys(), {package + "strava_development.py"})
+        self.assertEqual(base.keys(), runtime.keys())
         self.assertEqual(
             {name for name in base if runtime[name] != base[name]},
-            {package + "api.py", package + "strava_client.py", package + "strava_integrations.py"},
+            {package + "api.py", package + "strava_development.py", package + "strava_integrations.py"},
         )
 
     def test_runtime_rejects_worker_commands(self):

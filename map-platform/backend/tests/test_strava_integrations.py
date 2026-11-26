@@ -397,6 +397,107 @@ class StravaIntegrationServiceTests(unittest.TestCase):
         self.assertEqual(self.client.routes_calls[-1][:2], ("44", "same-athlete"))
         self.assertFalse(self.store.pending_revocation_ids())
 
+    def test_upgraded_store_preserves_owner_view_for_older_controllers(self):
+        owner_grant = "strava_shared_owner"
+        first = "inst_v2_" + "b" * 32
+        both_scopes = bundle(expires_at=int(self.clock()) + 3600)
+        self.store.put_connection(
+            owner_grant, both_scopes, connected_at=self.clock(), link=("development", INSTALLATION_ID)
+        )
+        self.store.put_connection(
+            "strava_athlete_random", replace(both_scopes, athlete_id="55"),
+            connected_at=self.clock(), link=("development", first),
+        )
+
+        upgraded = StravaIntegrationStore(self.store.path, key_ring=self.ring, clock=self.clock)
+        self.assertEqual(
+            upgraded.use_connection_link("development", INSTALLATION_ID), (owner_grant, True)
+        )
+        with sqlite3.connect(self.store.path) as connection:
+            legacy_write = (
+                "UPDATE shared_owner_links SET last_used_at = ? "
+                "WHERE deployment_channel = ? AND installation_id = ? RETURNING allows_private_routes"
+            )
+            self.assertEqual(
+                connection.execute(legacy_write, (self.clock(), "development", INSTALLATION_ID)).fetchone(),
+                (1,),
+            )
+            self.assertIsNone(
+                connection.execute(legacy_write, (self.clock(), "development", first)).fetchone()
+            )
+
+    def test_provider_mutations_time_out_when_another_process_holds_lock(self):
+        with self.store.serialize_provider_mutations(maintenance=True):
+            with patch("map_platform.strava_integrations._PROVIDER_LOCK_WAIT_SECONDS", 0.05):
+                with self.assertRaises(StravaIntegrationError) as caught:
+                    with self.store.serialize_provider_mutations():
+                        self.fail("A second writer should not enter the lock")
+            self.assertEqual(caught.exception.status_code, 503)
+        with self.store.serialize_provider_mutations():
+            pass
+
+    def test_scope_reduction_is_persisted_for_all_links_to_the_athlete(self):
+        production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
+        service = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+            development_open=True,
+        )
+        first = "inst_v2_" + "b" * 32
+
+        def authorize(installation, scope, *, development=False):
+            started = service.start_oauth(installation, development=development)
+            state = parse_qs(urlparse(started.web_authorization_url).query)["state"][0]
+            result = service.complete_oauth(state=state, code="code", scope=scope, denied=False)
+            self.assertEqual(result.result, "connected")
+
+        authorize(INSTALLATION_ID, "read,read_all")
+        self.assertTrue(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
+        self.client.exchange_result = replace(self.client.exchange_result, refresh_token="newer-token")
+        authorize(first, "read", development=True)
+        grant_id = self.store.athlete_grant_id("44")
+        self.assertEqual(self.store.connection(grant_id).bundle.refresh_token, "newer-token")
+        self.assertEqual(self.store.use_connection_link("production", INSTALLATION_ID), (grant_id, False))
+        self.assertFalse(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
+
+        authorize(first, "read,read_all", development=True)
+        self.assertTrue(service.connection_status(first, development=True)["canReadPrivateRoutes"])
+        self.assertFalse(service.connection_status(INSTALLATION_ID)["canReadPrivateRoutes"])
+
+    def test_open_development_preserves_production_links_and_revokes_only_last_link(self):
+        production = replace(config(self.ring), deployment_channel="production", return_scheme="bikecomputer")
+        service = StravaIntegrationService(
+            config=production, store=self.store, client=self.client, clock=self.clock,
+            development_open=True,
+        )
+        self.store.put_connection(
+            INSTALLATION_ID, bundle(expires_at=int(self.clock()) + 3600), connected_at=self.clock()
+        )
+        first = "inst_v2_" + "b" * 32
+        second = "inst_v2_" + "c" * 32
+
+        for installation, athlete_id in ((first, "44"), (second, "55")):
+            self.client.exchange_result = replace(
+                self.client.exchange_result, athlete_id=athlete_id,
+                access_token=f"access-{athlete_id}", refresh_token=f"refresh-{athlete_id}",
+            )
+            started = service.start_oauth(installation, development=True)
+            state = parse_qs(urlparse(started.web_authorization_url).query)["state"][0]
+            result = service.complete_oauth(
+                state=state, code="code", scope="read,read_all", denied=False,
+            )
+            self.assertEqual(result.result, "connected")
+
+        self.assertFalse(self.store.connection_exists(INSTALLATION_ID))
+        service.athlete_routes(INSTALLATION_ID, page=1)
+        self.assertEqual(self.client.routes_calls[-1], ("44", "access-44", 1))
+        self.assertFalse(service.disconnect(first, development=True)["revocationPending"])
+        self.assertEqual(service.maintenance()["completedRevocations"], 0)
+        self.assertTrue(service.connection_status(INSTALLATION_ID)["connected"])
+        self.assertTrue(service.disconnect(INSTALLATION_ID)["revocationPending"])
+        self.assertEqual(service.maintenance()["completedRevocations"], 1)
+        service.athlete_routes(second, development=True, page=1)
+        self.assertEqual(self.client.routes_calls[-1], ("55", "access-55", 1))
+
     def test_oauth_connection_and_scope_status(self):
         start = self.service.start_oauth(INSTALLATION_ID)
         state = parse_qs(urlparse(start.web_authorization_url).query)["state"][0]

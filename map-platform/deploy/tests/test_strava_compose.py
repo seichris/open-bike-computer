@@ -37,6 +37,7 @@ class StravaComposeTests(unittest.TestCase):
         "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET",
         "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION",
         "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE",
+        "MAP_PLATFORM_STRAVA_DEVELOPMENT_ACCESS",
     )
 
     def _service(self, compose: str, service: str) -> str:
@@ -67,13 +68,14 @@ class StravaComposeTests(unittest.TestCase):
                 self.assertNotIn(variable, worker, (path.name, variable))
 
     def test_development_bridge_configuration_is_scoped_to_the_apis(self):
-        bridge, installation, athlete = self._BRIDGE_VARIABLES
+        bridge, installation, athlete, access = self._BRIDGE_VARIABLES
         for path in self._COMPOSE_FILES:
             compose = path.read_text(encoding="utf-8")
             api = self._service(compose, "map-platform-api")
             if path.name in self._COOLIFY_MANIFESTS:
                 self.assertIn(bridge, api)
                 self.assertIn(installation, api)
+                self.assertIn(f"{access}: ${{{access}:-}}", api)
                 maintenance = self._service(compose, "map-platform-maintenance")
                 for variable in self._BRIDGE_VARIABLES:
                     self.assertIn(f"{variable}: {self._MASK}", maintenance)

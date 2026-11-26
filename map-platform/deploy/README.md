@@ -244,45 +244,38 @@ step. Verify `/healthz` reports `stravaIntegration: enabled`, then verify the
 authenticated capabilities response before allowing the iOS feature to start
 OAuth.
 
-### Owner-only development using the production registration
+### Development using the production Strava registration
 
-Keep the Strava **Authorization Callback Domain** at `maps.8o.vc`. Both
-channels use the production OAuth callback in this mode. The callback returns
-to the iOS scheme from the stored OAuth session. Update Bicino Dev to a build
-that accepts the exact production callback before enabling forwarding.
+Keep Strava’s **Authorization Callback Domain** at `maps.8o.vc` and use
+`https://maps.8o.vc/v1/integrations/strava/oauth/callback` in both channels.
+The server returns to the iOS scheme recorded in each OAuth session. Bicino
+Dev must be on a build that accepts the production callback.
 
-Set these Coolify variables on the APIs:
-
-| Variable | Production API | Development API |
+| Coolify variable | Production API | Development API |
 | --- | --- | --- |
-| `MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET` | A dedicated high-entropy URL-safe secret | Same secret |
-| `MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION` | Verified owner Bicino Dev installation ID | Same installation ID |
-| `MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE` | Verified owner Strava athlete ID | Unset |
+| `MAP_PLATFORM_STRAVA_DEVELOPMENT_ACCESS` | `all` | `all` |
+| `MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET` | Dedicated high-entropy URL-safe secret | Same secret |
 | `MAP_PLATFORM_STRAVA_ENABLED` | `1` | `0` |
 
-Generate the bridge secret with `secrets.token_urlsafe(32)`. Keep all Strava
-client and encryption credentials on the production API and maintenance. Remove
-those variables from the development Coolify application before activating
-forwarding. The development API starts only with complete forwarding settings
-and without local Strava credentials. The production endpoint checks the
-bridge secret, installation ID, and athlete identity returned by Strava.
-A registered but non-allowlisted development installation receives a disabled
-capability.
+Set `all` to enable Strava login for registered Bicino Dev installations.
+The development API verifies the installation credential. The production API
+accepts forwarded calls authenticated with the bridge secret. Each athlete
+signs in and grants consent in Strava. Both environments share the athlete
+capacity and rate limits of the Strava registration.
 
-During cutover, verify the sole prior development connection belongs to the
-owner. Check for legacy production connections for that athlete before
-enabling sharing. If one exists, have that installation explicitly reconnect
-through the production callback before enabling development forwarding. It
-replaces the legacy copy without revoking the shared grant. Keep concurrent
-standalone token use off after cutover. For an existing standalone development
-connection, retire the encrypted legacy row without calling Strava revocation.
-Have the owner reconnect on the updated Bicino Dev build.
+Generate the bridge secret with `secrets.token_urlsafe(32)`. Keep Strava
+client and encryption credentials on the production API and maintenance.
+If an older Dev deployment had standalone connections, retire their local
+encrypted rows without revoking the Strava grant and have those users reconnect.
 
-The owner's installations in each channel opt in separately. The production
-control plane stores a single encrypted provider grant. It enforces each
-installation's consent to private routes and expires unused links independently. Disconnect from one installation removes its
-link. The last link queues provider revocation in production maintenance.
-Other production athletes continue using the existing production flow.
+The production control plane stores an encrypted grant for each connected
+athlete. Each installation links independently and can use only the route
+permissions consented to on that installation. If the athlete removes private
+scope on a subsequent Strava authorization, prior links lose private route
+access until reauthorized. The next successful authorization
+for an athlete consolidates their legacy Production grants without revoking
+access. Disconnecting removes the installation’s link. Production maintenance
+revokes the provider grant when its last link is gone.
 
 Publish the production controller with the dedicated workflow profile:
 
@@ -291,7 +284,7 @@ gh workflow run map-platform-image.yml --ref main -f release_profile=production-
 ```
 
 This overlays the Strava API and integration modules on the attested
-`d101b43c5260a112e142b7d5595f05c465fa3fdb` production controller. Recheck that
+`08c8b4cce7425466cf9041fd9e995d5450514abf` production controller. Recheck that
 base against the live production controller before using the profile. The
 runtime build verifies every overlay file against the reviewed SHA-256 manifest
 in `strava-compatibility/overlay.sha256`. Review and update that manifest when
@@ -301,11 +294,18 @@ candidate and the existing worker and promotion scheduler pins. Wait for its
 CI Gate and verify deploy health before turning on development forwarding.
 Use the regular development image promotion for the other channel.
 
-To pause the feature, remove the development API's bridge variables with local
-Strava credentials still absent. Keep the updated production control plane so
-existing production links can be resolved. Recheck production connection
-status, the owner dev OAuth round trip, and the denial for another dev
-installation before calling the rollout complete.
+Deploy compatible production API and maintenance containers first, then the
+development API. Verify OAuth and route loading through the development app.
+
+To pause Dev forwarding, clear its bridge secret, access setting, and installation
+setting. Keep the updated production controller to resolve existing production
+links. Clearing the access setting in both APIs while keeping the bridge secret
+and the previous installation and athlete settings restores owner-only forwarding.
+Restore the pre-open controller and maintenance pins only if the
+`strava_athlete_links` table in the production Strava store is empty. The older
+controller can read legacy owner links, while older maintenance cannot see
+links to other athletes. If open links exist, roll forward with a compatible
+controller and keep Dev forwarding paused during recovery.
 
 ## Promotion flow
 
