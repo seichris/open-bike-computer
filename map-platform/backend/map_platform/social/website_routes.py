@@ -18,9 +18,12 @@ KEY_LABEL = b"bicino-website-routes-v1"
 PROOF_WINDOW_SECONDS = 60
 PREVIEW_MAX_POINTS = 120
 PREVIEW_STRIDE_POINTS = 1000
-# Only this provider's geometry is drawn on the website's OpenStreetMap
-# thumbnails. Saved Apple Maps routes stay listed without a map preview.
+# The website imports GPX files only.
 PREVIEW_PROVIDER = "user.imported-gpx"
+STRAVA_PROVIDER = "strava.route"
+# Geometry drawn on the website's OpenStreetMap thumbnails. Apple Maps routes
+# never get a map preview.
+PREVIEW_PROVIDERS = frozenset({PREVIEW_PROVIDER, STRAVA_PROVIDER})
 
 
 def derive_key(secret: str) -> bytes:
@@ -103,23 +106,30 @@ def encode_polyline(points) -> str:
     return "".join(result)
 
 
-def archive_provider(archive_text: str):
-    """The provider ID named by an archive, or None when it cannot be read."""
+def archive_identity(archive_text: str):
+    """(provider ID, route ID) named by an archive, or (None, None) when unreadable."""
     try:
-        provider = json.loads(archive_text)["route"]["provider"]["providerID"]
-    except (KeyError, TypeError, ValueError):
-        return None
-    return provider if isinstance(provider, str) else None
+        route = json.loads(archive_text)["route"]
+        provider, route_id = route["provider"]["providerID"], route["id"]
+    except (KeyError, TypeError, ValueError, RecursionError):
+        return None, None
+    if not isinstance(provider, str) or not isinstance(route_id, str):
+        return None, None
+    return provider, route_id
 
 
 def card_details(route):
-    """Card fields for a validated route: its provider and, for GPX only, a preview."""
+    """Card fields for a validated route: provider, preview and, for Strava, its route URL."""
     provider = route["provider"]["providerID"]
     preview = None
-    if provider == PREVIEW_PROVIDER:
+    if provider in PREVIEW_PROVIDERS:
         preview = encode_polyline(_simplify([(p["latitude"], p["longitude"]) for p in route["points"]],
                                             PREVIEW_MAX_POINTS))
-    return {"provider": provider, "preview": preview}
+    details = {"provider": provider, "preview": preview}
+    reference = route.get("sourceReference")
+    if provider == STRAVA_PROVIDER and isinstance(reference, dict):
+        details["sourceURL"] = reference.get("canonicalURL")
+    return details
 
 
 def summary(item):
@@ -142,5 +152,15 @@ def summary(item):
         "elevationGainMeters": number(details.get("elevationGainMeters")),
         "durationSeconds": number(details.get("durationSeconds")),
         "favorite": details.get("favorite") is True,
-        "preview": preview if isinstance(preview, str) and provider == PREVIEW_PROVIDER else None,
+        "preview": preview if isinstance(preview, str) and provider in PREVIEW_PROVIDERS else None,
+        "sourceURL": source_url(provider, details.get("sourceURL")),
     }
+
+
+def source_url(provider, value):
+    """Only a canonical Strava route URL is ever handed to the website."""
+    if provider != STRAVA_PROVIDER or not isinstance(value, str):
+        return None
+    prefix = "https://www.strava.com/routes/"
+    route_id = value[len(prefix):] if value.startswith(prefix) else ""
+    return value if route_id.isascii() and route_id.isdigit() and 1 <= len(route_id) <= 19 else None

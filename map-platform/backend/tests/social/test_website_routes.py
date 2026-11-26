@@ -31,18 +31,26 @@ class Identity:
         return AccountPrincipal('test', token, 1000000)
 
 
-def archive_body(points, provider=GPX, route_id=None):
+STRAVA = {'providerID': 'strava.route', 'attribution': 'Strava', 'storageScope': 'durable'}
+STRAVA_REFERENCE = {'providerID': 'strava.route', 'externalRouteID': '3405986242',
+                    'canonicalURL': 'https://www.strava.com/routes/3405986242'}
+
+
+def archive_body(points, provider=GPX, route_id=None, revision=1, name='Loop'):
     coordinates = [{'latitude': lat, 'longitude': lon} for lat, lon in points]
     archive = {'schemaVersion': 1, 'createdAt': 1000000000, 'route': {
-        'id': route_id or str(uuid.uuid4()).upper(), 'revision': 1, 'provider': provider,
+        'id': route_id or str(uuid.uuid4()).upper(), 'revision': revision, 'provider': provider,
         'localeIdentifier': 'en_US', 'transportType': 'cycling', 'normalizationVersion': 1,
         'source': {'coordinate': coordinates[0], 'label': 'GPX start'},
         'destination': {'coordinate': coordinates[-1], 'label': 'GPX destination'},
         'bounds': {'south': min(p[0] for p in points), 'west': min(p[1] for p in points),
                    'north': max(p[0] for p in points), 'east': max(p[1] for p in points)},
-        'distanceMeters': 2000, 'name': 'Loop', 'points': coordinates,
+        'distanceMeters': 2000, 'name': name, 'points': coordinates,
         'steps': [{'id': 1, 'geometryStartIndex': 0, 'geometryEndIndex': len(points) - 1,
                    'instruction': 'Arrive at GPX destination', 'maneuver': 'arrive', 'distanceMeters': 2000}]}}
+    if provider == STRAVA:
+        archive['route']['sourceReference'] = STRAVA_REFERENCE
+        archive['deleteAfter'] = archive['createdAt'] + 604_800_000
     payload = json.dumps(archive, separators=(',', ':'), sort_keys=True)
     archive['contentHash'] = hashlib.sha256(payload.encode()).hexdigest()
     return {'archive': json.dumps(archive), 'hashPayload': payload}
@@ -51,7 +59,9 @@ def archive_body(points, provider=GPX, route_id=None):
 LINE = [(1.30, 103.85), (1.301, 103.851), (1.302, 103.853), (1.304, 103.854)]
 
 
-class WebsiteRoutesTest(unittest.TestCase):
+class RouteStoreCase(unittest.TestCase):
+    """Shared social service, signed-website and native helpers."""
+
     def setUp(self):
         self.clock = 1000000.
         url = os.environ.get('BICINO_SOCIAL_TEST_DATABASE_URL', 'sqlite://')
@@ -110,6 +120,8 @@ class WebsiteRoutesTest(unittest.TestCase):
         with self.db.transaction() as c:
             return c.scalar(select(func.count()).select_from(accounts))
 
+
+class WebsiteRoutesTest(RouteStoreCase):
     def test_requests_are_verified_before_any_account_work(self):
         path = '/internal/website/routes/list'
         unsigned = self.client.post(path, json={'account': {'uid': 'alice', 'project': 'test',
@@ -150,17 +162,20 @@ class WebsiteRoutesTest(unittest.TestCase):
     def test_import_lists_and_shares_storage_with_native_routes(self):
         item = self.imported(elevationGainMeters=2353.4, durationSeconds=14400)
         self.assertEqual(set(item), {'id', 'title', 'visibility', 'revision', 'created', 'provider', 'distanceMeters',
-                                     'elevationGainMeters', 'durationSeconds', 'favorite', 'preview'})
+                                     'elevationGainMeters', 'durationSeconds', 'favorite', 'preview', 'sourceURL'})
         self.assertEqual((item['title'], item['visibility'], item['provider'], item['favorite']),
                          ('Sa Calobra loop', 'private', 'user.imported-gpx', False))
         self.assertEqual((item['elevationGainMeters'], item['durationSeconds']), (2353.4, 14400))
         self.assertEqual(item['preview'], website_routes.encode_polyline(LINE))
         self.assertEqual(self.listed(), [item])
-        # The iPhone app reads the same private route with its existing API.
-        native = self.native('alice', 'GET', '/routes').json()['items']
-        self.assertEqual([entry['id'] for entry in native], [item['id']])
+        # The iPhone app syncs the same private route through its library API.
+        [synced] = self.native('alice', 'GET', '/library/routes').json()['items']
+        self.assertEqual((synced['id'], synced['title'], synced['routeRevision'], synced['providerID']),
+                         (item['id'], 'Sa Calobra loop', 1, 'user.imported-gpx'))
+        self.assertEqual(self.native('alice', 'GET', '/routes').json()['items'], [], 'shared-route list stays separate')
         stored = self.native('alice', 'GET', f"/routes/{item['id']}").json()
         self.assertIn('archive', stored['body'])
+        self.assertNotIn('library', stored['body'])
         self.assertEqual(self.native('bob', 'GET', f"/routes/{item['id']}").status_code, 404)
         self.assertEqual(self.listed(uid='bob'), [])
 
@@ -185,45 +200,59 @@ class WebsiteRoutesTest(unittest.TestCase):
                          'route_not_redistributable')
         self.assertEqual(self.listed(), [])
 
-    def test_saved_apple_routes_are_listed_without_geometry(self):
+    def test_app_library_routes_appear_on_the_website(self):
         self.native('alice', 'GET', '/me')
-        body = dict(archive_body(LINE, provider=APPLE), title='Saved Apple route', visibility='private',
-                    sharingRightsConfirmed=True)
-        self.assertEqual(self.native('alice', 'POST', '/routes', body).status_code, 200)
-        [item] = self.listed()
-        self.assertEqual((item['provider'], item['preview'], item['elevationGainMeters']),
-                         ('apple.mapkit', None, None))
+        gpx = archive_body(LINE)
+        gpx_id = json.loads(gpx['archive'])['route']['id']
+        self.assertEqual(self.native('alice', 'PUT', f'/library/routes/{gpx_id}', dict(gpx, title='From the app')).status_code, 200)
+        strava = archive_body(LINE, provider=STRAVA)
+        strava_id = json.loads(strava['archive'])['route']['id']
+        put = self.native('alice', 'PUT', f'/library/routes/{strava_id}', dict(strava, title='Strava loop', elevationGainMeters=120.5))
+        self.assertEqual(put.status_code, 200, put.text)
+        cards = {card['title']: card for card in self.listed()}
+        self.assertEqual((cards['From the app']['provider'], cards['From the app']['preview'], cards['From the app']['sourceURL']),
+                         ('user.imported-gpx', website_routes.encode_polyline(LINE), None))
+        self.assertEqual((cards['Strava loop']['provider'], cards['Strava loop']['sourceURL'], cards['Strava loop']['elevationGainMeters']),
+                         ('strava.route', 'https://www.strava.com/routes/3405986242', 120.5))
+        self.assertEqual(cards['Strava loop']['preview'], website_routes.encode_polyline(LINE))
+        # Shared snapshots are copies of library routes and are not listed twice.
+        self.assertEqual(self.native('alice', 'POST', '/routes', dict(archive_body(LINE), title='Snapshot',
+                         visibility='private', sharingRightsConfirmed=True)).status_code, 200)
+        self.assertEqual(len(self.listed()), 2)
 
-    def test_native_gpx_routes_get_a_computed_preview(self):
+    def test_apple_maps_routes_never_enter_the_library(self):
         self.native('alice', 'GET', '/me')
-        body = dict(archive_body(LINE), title='From the app', visibility='private', sharingRightsConfirmed=True)
-        self.assertEqual(self.native('alice', 'POST', '/routes', body).status_code, 200)
-        [item] = self.listed()
-        self.assertEqual((item['provider'], item['preview']), ('user.imported-gpx', website_routes.encode_polyline(LINE)))
+        apple = archive_body(LINE, provider=APPLE)
+        route_id = json.loads(apple['archive'])['route']['id']
+        self.assertEqual(self.native('alice', 'PUT', f'/library/routes/{route_id}', dict(apple, title='Apple')).json()['code'],
+                         'route_not_redistributable')
 
     def test_card_fields_stay_with_the_owner_on_every_shared_path(self):
-        item = self.imported(elevationGainMeters=812.0, durationSeconds=9876)
-        self.assertEqual(self.website('PATCH', f"/internal/website/routes/{item['id']}", {'favorite': True}).status_code, 200)
-        own = self.native('alice', 'GET', f"/routes/{item['id']}").json()
-        self.assertNotIn('website', own['body'])
-        made_public = self.native('alice', 'PATCH', f"/routes/{item['id']}",
-                                  {'revision': 1, 'title': 'Loop', 'visibility': 'link'})
-        self.assertEqual(made_public.status_code, 200, made_public.text)
-        self.assertNotIn('website', made_public.json()['body'])
-        link = self.native('alice', 'POST', '/share-links', {'contentID': item['id']}).json()
+        self.native('alice', 'GET', '/me')
+        body = dict(archive_body(LINE), title='Shared', visibility='link', sharingRightsConfirmed=True)
+        snapshot = self.native('alice', 'POST', '/routes', body)
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertNotIn('website', snapshot.json()['body'])
+        link = self.native('alice', 'POST', '/share-links', {'contentID': snapshot.json()['id']}).json()
         shared = self.client.post('/shared/resolve', json={'code': link['url'].split('#')[-1]})
         self.assertEqual(shared.status_code, 200, shared.text)
         self.assertNotIn('website', json.dumps(shared.json()))
-        self.assertNotIn('9876', json.dumps(shared.json()))
-        ride = self.native('alice', 'POST', '/group-rides', {'routeID': item['id'], 'title': 'Saturday'})
+        ride = self.native('alice', 'POST', '/group-rides', {'routeID': snapshot.json()['id'], 'title': 'Saturday'})
         self.assertEqual(ride.status_code, 200, ride.text)
         self.assertNotIn('website', json.dumps(ride.json()))
         from map_platform.social.database import rides
         with self.db.transaction() as c:
             self.assertNotIn('website', c.scalar(select(rides.c.route)))
-        # The owner's library still has them.
+        # Library rows (with duration, star and elevation) can never be shared.
+        item = self.imported(elevationGainMeters=812.0, durationSeconds=9876)
+        self.assertEqual(self.native('alice', 'PATCH', f"/routes/{item['id']}",
+                                     {'revision': 1, 'title': 'Loop', 'visibility': 'link'}).json()['code'],
+                         'library_route_private')
+        self.assertEqual(self.native('alice', 'POST', '/group-rides', {'routeID': item['id'], 'title': 'Ride'}).json()['code'],
+                         'library_route_private')
+        self.assertEqual(self.native('alice', 'POST', '/share-links', {'contentID': item['id']}).status_code, 409)
         [card] = self.listed()
-        self.assertEqual((card['favorite'], card['durationSeconds'], card['elevationGainMeters']), (True, 9876, 812.0))
+        self.assertEqual((card['durationSeconds'], card['elevationGainMeters']), (9876, 812.0))
 
     def test_listing_reads_card_fields_without_archives(self):
         self.native('alice', 'GET', '/me')
@@ -231,7 +260,7 @@ class WebsiteRoutesTest(unittest.TestCase):
             owner = c.scalar(select(accounts.c.id).where(accounts.c.uid == 'alice'))
             c.execute(content.insert().values(
                 id=str(uuid.uuid4()), owner=owner, kind='route', title='Before cards', visibility='private',
-                revision=1, created=self.clock - 10, source=None, fingerprint='0' * 64,
+                revision=1, created=self.clock - 10, source='library:' + str(uuid.uuid4()).upper(), fingerprint='0' * 64,
                 body={'archive': 'not json', 'sha256': '0' * 64, 'hashPayload': '{}', 'distanceMeters': 1234.5}))
         item = self.imported()
         listed = self.listed()
