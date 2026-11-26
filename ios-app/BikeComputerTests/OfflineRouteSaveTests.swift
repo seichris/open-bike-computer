@@ -1322,9 +1322,17 @@ struct OfflineRouteSaveTests {
         check(content.contains("if OpenedGPXFile.isGPX(url) { presentOpenedGPX(url); return }") &&
             content.contains("case .importOpenedGPX(let draft):") &&
             openedGPX.contains("OpenedGPXFile.draft(") &&
-            openedGPX.contains("ContentSheetDestination.importOpenedGPX(draft)") &&
+            openedGPX.contains("destination = .importOpenedGPX(draft)") &&
             !openedGPX.contains("importGPX(") && !openedGPX.contains("saveOffline("),
             "A GPX opened from another app gets the same confirmation before the durable commit")
+        // A root alert cannot appear over an already presented sheet, so a
+        // rejected file is reported through the same sheet queue as a valid one.
+        check(openedGPX.contains("destination = .openedGPXFailure(") &&
+            openedGPX.contains("queuedSheetAfterDismiss = destination") &&
+            content.contains("OpenedGPXFailureSheet(message: message)") &&
+            panel.contains("struct OpenedGPXFailureSheet") &&
+            !content.contains("GPX Import Error"),
+            "A rejected opened GPX shows its reason even when another sheet is up")
         check(!section.contains(".sheet(") &&
             settings.contains("presentedSheet = .gpxRouteImport(draft)") &&
             settings.contains("RouteSaveSheet(library: routeLibrary, draft: draft)") &&
