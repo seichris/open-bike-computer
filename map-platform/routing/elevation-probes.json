@@ -193,6 +193,16 @@
     ]
   },
   {
+    "city": "Toronto",
+    "terrain": "flat",
+    "planetOnly": true,
+    "bbox": [-79.45, 43.62, -79.33, 43.69],
+    "legs": [
+      {"name": "Rogers Centre to St Lawrence Market", "origin": [43.6425, -79.3885], "destination": [43.6487, -79.3715]},
+      {"name": "Union Station to Yonge-Dundas Square", "origin": [43.6455, -79.3807], "destination": [43.6561, -79.3803]}
+    ]
+  },
+  {
     "city": "Singapore",
     "terrain": "flat",
     "bbox": [103.80, 1.26, 103.90, 1.32],

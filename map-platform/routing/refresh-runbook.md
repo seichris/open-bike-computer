@@ -776,14 +776,96 @@ also get real hills in place of the opened ones. Before a planet build:
 
 What a hybrid does not fix: high-rise cores outside the United States stay
 on Copernicus opened at 400 m. The gate's Singapore, Shanghai, Dubai and
-Tokyo legs kept their routes on the 400 m planet, but no leg tests Toronto,
-Vancouver, Seoul or Melbourne. Hill avoidance outside the United States
-also stays as weak as the 400 m opening leaves it.
+Tokyo legs kept their routes on the 400 m planet, and a survey of 36 more
+downtowns found one that did not, Toronto (see
+[below](#toronto-a-tower-downtown-the-hybrid-does-not-fix)). Hill avoidance
+outside the United States also stays as weak as the 400 m opening leaves it.
 
 The reports, tile and graph manifests and the scratch scripts were not
 copied to the map VPS, because this work was not to touch the hosts. They
 are in the sessions' notes folder on Chris's Mac, under
 `usgs-3dep-samples-20261126/`.
+
+#### Toronto: a tower downtown the hybrid does not fix
+
+On 2026-11-26 another session routed 58 legs in 36 tower downtowns outside
+the United States on the 400 m planet's two gate services, with New York
+and Chicago as controls. Its report and scripts are on the map VPS in
+`/root/bicino-routing-releases/opened-400-downtown-survey-20261126/`; the
+routes were not run again for this section. Of 92 routes in flat cities one
+breaks the 5% rule: Toronto, Rogers Centre to St Lawrence Market, Everyday
+from 2.006 to 2.710 km (+35.1%), leaving Front Street West for Adelaide
+Street. Union Station to Yonge-Dundas Square is 2.8% longer on Road, and 22%
+of it reads 6% or more. Melbourne's Collins Street (Road +7.5%) and Seoul's
+Teheran-ro (Everyday +8.2%) change on real slopes and were not judged; no
+other leg is more than 2.9% longer.
+
+Both Toronto legs are now in `elevation-probes.json` (flat, `planetOnly`),
+so a planet gate sees them. **A hybrid planet built as approved grades
+Toronto with the same opened tiles and would miss the gate on the first
+leg.**
+
+The heights below were read on a laptop from four sources: the Copernicus
+cell N43W080 built raw and opened at 400 m by `build_elevation.py`, the
+3DEP tile the catalog pins for that cell
+(`USGS_13_n44w080_20230227.tif`), and Canada's MRDEM-30 terrain model.
+Metres, each in its own height datum; the lake shows how far those differ.
+
+| Point | Copernicus raw | Opened at 400 m | USGS tile | MRDEM-30 terrain |
+|---|---|---|---|---|
+| Rogers Centre, Front Street West | 79 | 71 | 89.9 | 89.0 |
+| Front Street at Simcoe | 87 | 65 | 79.8 | 81.3 |
+| Union Station | 96 | 75 | 79.8 | 79.7 |
+| Front Street at Bay | 82 | 75 | 79.8 | 79.6 |
+| St Lawrence Market, Front Street East | 80 | 71 | 78.8 | 76.4 |
+| King at Bay | 106 | 77 | 82.7 | 82.8 |
+| Adelaide at Bay | 89 | 78 | 85.3 | 85.0 |
+| Queen at Bay | 85 | 79 | 87.9 | 89.9 |
+| Yonge-Dundas Square | 94 | 89 | 91.9 | 91.9 |
+| Lake Ontario off the harbour | 75 | 74 | 75.8 | 75.1 |
+
+- **The opening spreads pits.** In the downtown box (43.635° to 43.66° N,
+  79.40° to 79.36° W, 13,195 posts) raw Copernicus has 202 posts below the
+  lake's 74 m, the lowest at 53 m. Whether they are excavations open at
+  the time of the radar survey or radar errors between the towers was not
+  found out. Opened, 2,961 posts (22%) read below the lake. An opening gives a post the highest of
+  the lowest heights within 400 m, so where pits lie closer together than
+  that, every disk holds one and the ground between them sinks to the
+  pits. On the straight line between the first leg's ends the opened tile
+  reads 65 to 75 m, median 71 m, and both terrain models a median of 80 m:
+  Front Street becomes a trench up to 9 m below the lake, under King,
+  Adelaide and Queen Street at 77 to 79 m. This is the opposite of
+  Midtown's humps, and a larger radius would spread it further.
+- **3DEP holds heights there, and the build drops them on purpose.** The
+  tile has a height at every post of the cell and reads Front Street at 79
+  to 80 m. The footprint table published beside it
+  (`USGS_13_n44w080_20230227.gpkg`) names two New York lidar projects of
+  2019 and 2020 for the United States' shore, and for the rest only
+  "Photogrammetric mass points and breaklines" or "Unknown", without dates.
+  The approval covers lidar terrain inside the United States, and such fill
+  exists only in the cells that touch it, so the cut at the border stays.
+- **Canada publishes a terrain model that covers it.** MRDEM-30 of Natural
+  Resources Canada (Open Government Licence - Canada, record
+  `18752265-bda3-498c-a4ba-9dfe68cb98da` on open.canada.ca) is a 30 m
+  terrain model of all of Canada: the lidar mosaic (HRDEM) resampled from
+  1 m where it exists, and elsewhere Copernicus GLO-30 with a forest and a
+  settlement removal model applied. It is one cloud-optimised GeoTIFF of
+  83,854,027,098 bytes, last changed 2026-06-24, made to be read in ranges:
+  `https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif`,
+  in Canada Atlas Lambert (EPSG:3979) with heights in CGVD2013. At the ten
+  points it is within 2.4 m of the USGS tile. Its source layer reads 10 in
+  downtown Toronto, Montreal, Vancouver, Calgary and Ottawa and 1 in
+  Nunavut, northern Quebec, Yukon and on the Minnesota side of the border;
+  that was read here as lidar and Copernicus, without the product
+  specification. The part that
+  comes from Copernicus carries the Copernicus notice.
+- **MRDEM-30 is not an approved source, and nothing reads it.** Using it
+  needs Chris's approval, an entry in `elevation-sources.json`, a reader for
+  one projected file in place of 3DEP's degree tiles, Canada's boundary as
+  its area, and samples of Toronto and other Canadian downtowns.
+
+The readings and the scripts are in the sessions' notes folder on Chris's
+Mac, under `usgs-3dep-samples-20261126/toronto/`.
 
 ### Tower-city samples
 
@@ -838,7 +920,7 @@ on that city. The planet rows are those of the 400 m planet's gate log (see
 So an elevation method should pass the tower-city samples before a planet
 is built with it. The 400 m opening would not have: the samples that chose
 it on the morning of 2026-11-26 held only New York's first leg, which does
-not change at 400 m. Copenhagen, Paris, London, Munich and Tokyo are still
+not change at 400 m. Copenhagen, Paris, London, Munich, Tokyo and Toronto are
 planet-only, and Amsterdam, Berlin and Stuttgart do not list their country's
 relation yet. Each run's result file, stage logs and gate report are in the
 sessions' notes folder on Chris's Mac, in

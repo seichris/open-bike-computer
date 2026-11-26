@@ -339,7 +339,9 @@ below do the same by hand and also take other elevation sources.
 
 Cities marked `planetOnly` have never been built as samples and run only
 against planet services: Copenhagen, Paris, London, Munich and Tokyo, with
-one or two legs each of the 2026-11-24 planet check. With New York, Dubai
+one or two legs each of the 2026-11-24 planet check, and Toronto, whose two
+legs come from the downtown survey of 2026-11-26 (see the
+[runbook](refresh-runbook.md#toronto-a-tower-downtown-the-hybrid-does-not-fix)). With New York, Dubai
 and Stuttgart, which do build as samples, the file holds all 27 legs of
 that check. All cities together are the release gate for a graded planet:
 serve the graded and the ungraded planet from the same snapshot and run every
