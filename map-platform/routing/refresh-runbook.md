@@ -593,9 +593,15 @@ legs it turns the two missed legs into 0.0%. If the other legs repeat the
 four), which still meets the target of half. Riders in the United States
 also get real hills in place of the opened ones. Before a planet build:
 
-1. **Chris approves USGS 3DEP 1/3 arc-second as a production elevation
-   source.** It is not in `config/topography-source-policy-v2.json`, and no
-   planet may use it until it is.
+1. **Chris approves USGS 3DEP 1/3 arc-second as an elevation source for
+   routing, and decides where that is recorded.** It is not in
+   `config/topography-source-policy-v2.json`, and no planet may use it
+   before he approves it. That file cannot simply take it. Its loader
+   accepts only the Copernicus tiles (`copernicus-cog-v1`, a surface model
+   on EGM2008). It is also an input of the map-platform image and of the
+   offline-map worker's build identity, so a change to it rebuilds the image
+   and moves the signed worker. A source list for routing alone would do
+   neither.
 2. **`build_elevation.py` learns the hybrid.** That means a second source
    with one dated tile per cell, 3DEP's posts first and opened Copernicus
    for the rest, the blend inside 3DEP's edge, and receipts and a manifest
