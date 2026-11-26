@@ -892,6 +892,27 @@ class ElevationComparisonTests(unittest.TestCase):
         self.assertEqual(compare_elevation.total_climb([10, 11, 12, 13, 14, 9, 15]), 9.0)  # 3 m to 13, 6 m from 9
         self.assertEqual(compare_elevation.total_climb([10, 12, 10, 12], hysteresis=1), 4.0)
 
+    def test_report_only_cities_are_tabulated_but_never_judged(self):
+        towers = {**self.CITIES[0], "city": "Towertown", "reportOnly": True}
+        slopes = {**self.CITIES[1], "city": "Slopeville", "reportOnly": True}
+        valhalla = FakeGradedValhalla()
+        report = compare_elevation.run(valhalla, [*self.CITIES, towers, slopes], UNGRADED,
+                                       {"candidate": "http://graded:8002"})
+        self.assertEqual([row.get("reportOnly", False) for row in report["rows"]], [False, False, True, True])
+        # A detour, a failed route and a broken hilly leg in report-only cities change no verdict.
+        flat = report["rows"][2]["profiles"]
+        flat["everyday"]["sources"]["candidate"]["lengthChange"] = 0.3
+        flat["road"]["sources"]["candidate"] = {"error": "400/442"}
+        report["rows"][3]["hills"]["candidate"] = {"differs": None, "error": "400/442"}
+        report["rows"][3]["hills"]["ungraded"]["differs"] = True
+        table, failures = compare_elevation.summarize([report])
+        self.assertEqual(failures, {"candidate": []})
+        towertown = next(entry for entry in table if entry["city"] == "Towertown")
+        self.assertEqual((towertown["reportOnly"], towertown["maximumLengthChange"], towertown["errors"]), (True, 0.3, 1))
+        self.assertEqual(next(entry for entry in table if entry["city"] == "Slopeville")["errors"], 1)
+        self.assertNotIn("reportOnly", next(entry for entry in table if entry["city"] == "Flatville"))
+        self.assertIn("| candidate | Towertown (report only) | 1 (1 failed) |", compare_elevation.format_table(table))
+
     def test_use_hills_changing_an_ungraded_route_marks_the_comparison_broken(self):
         _, (_, failures) = self.compare(ungraded_avoids_hills=True)
         self.assertEqual(failures["ungraded"], ["use_hills changed 1 hilly legs without elevation"])
@@ -909,7 +930,9 @@ class ElevationComparisonTests(unittest.TestCase):
         self.assertEqual(len({city["city"] for city in cities}), len(cities))
         for city in cities:
             self.assertLessEqual({"city", "terrain", "bbox", "legs"}, set(city))
-            self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly"})
+            self.assertLessEqual(set(city), {"city", "terrain", "bbox", "legs", "planetOnly", "reportOnly"})
+            # Report-only cities were never sampled, so they run only against planet services.
+            self.assertTrue(city.get("planetOnly") or not city.get("reportOnly"), city["city"])
             west, south, east, north = city["bbox"]
             self.assertTrue(west < east and south < north, city["city"])
             # Planet-only cities keep the 2026-11-24 planet check's legs; a city sample needs three.
