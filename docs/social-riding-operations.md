@@ -108,6 +108,37 @@ the backend through its normal immutable image-lock promotions before delivering
 the app. This change adds no database migration and does not waive the existing
 deployment, provider-permission or physical acceptance gates.
 
+### bicino.com route library
+
+bicino.com `/account/routes` imports GPX files into the same account route
+store as native sharing: private `route` content rows owned by the signed-in
+account. The website builds the archive exactly as `GPXRouteImporterV1` does
+(`user.imported-gpx`, generated steps, Swift-compatible `hashPayload`), so
+the app's existing `GET /routes` and archive decoding read these rows.
+`POST /routes` validation, the redistribution check, the 500-item content
+quota and the 30-per-hour publication limit all apply unchanged.
+
+The website holds only its HTTP-only Firebase session cookie, not an ID token.
+Its server verifies that cookie (with revocation), then calls
+`/v1/social/internal/website/routes` (`POST …/list`, `POST`, `PATCH /{id}`,
+`DELETE /{id}`). Each request body names the account (`uid`, `project`,
+`issuedAt`, `nonce`). `X-Bicino-Website-Signature` is the hex HMAC-SHA256 of
+`METHOD\npath\nbody`, where `path` is below the `/v1/social` mount. The key is
+`HMAC-SHA256(BICINO_SOCIAL_DELETION_SECRET, "bicino-website-routes-v1")`.
+A deletion proof therefore never authorizes route access, and no new secret is
+deployed. Proofs expire after 60 seconds. Every mutation's nonce must also be
+its `Idempotency-Key`, so a replay returns the recorded result. Listing never
+creates a social account; the first import does.
+
+Website card fields live in `body.website`, which native decoders ignore:
+the provider, a backend-computed encoded polyline (at most 120 points, imported
+GPX only), elevation gain and duration read from the file, and the star. Saved
+Apple Maps routes are listed without geometry, because the website draws on
+OpenStreetMap tiles. Renaming uses the native optimistic `revision`. Starring
+changes no route content and needs no revision. Deletion stays available
+while the routes feature is rolled back. The bridge is charged per account
+subject (1,200 requests per hour) and then per account like native requests.
+
 ## Upgrade and lifecycle contracts
 
 Schema **4** requires the explicit migration job before API/worker startup.

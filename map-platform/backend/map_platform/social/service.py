@@ -332,7 +332,7 @@ class SocialService:
             raise SocialError("fresh_invitation_required", 409)
         return result
 
-    def upload_route(self, c, actor, data):
+    def upload_route(self, c, actor, data, website=None):
         self.db.lock(c, actor)
         self.active(c, actor)
         try:
@@ -364,10 +364,13 @@ class SocialService:
             raise SocialError("route_redistribution_not_permitted", 403)
         if c.scalar(select(func.count()).select_from(content).where(content.c.owner == actor)) >= 500:
             raise SocialError("content_quota", 429)
+        body = {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload, "distanceMeters": route["distanceMeters"]}
+        if website is not None:
+            # Website library card fields. Native decoders ignore this key.
+            body["website"] = website
         item = {"id": identifier(), "owner": actor, "kind": "route", "title": data.title,
                 "visibility": data.visibility, "revision": 1,
-                "body": {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload, "distanceMeters": route["distanceMeters"]},
-                "source": None, "created": self.now(), "fingerprint": fingerprint}
+                "body": body, "source": None, "created": self.now(), "fingerprint": fingerprint}
         c.execute(content.insert().values(**item))
         return item
 

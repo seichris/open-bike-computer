@@ -14,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
 from ..request_limits import RequestBodyLimitMiddleware
-from ..user_auth import FirebaseIdentity, IdentityUnavailable
+from ..user_auth import AccountPrincipal, FirebaseIdentity, IdentityUnavailable
 from .database import (RETRYABLE_SQLSTATES, Database, accounts, blocks, content, devices, friendships,
                        invites, links, media, members, messages, replays, rides)
 from .client_address import ClientAddressPolicy
@@ -23,8 +23,10 @@ from .features import SocialFeatures
 from .invite_preview import InvitePreviews
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
                      DeviceRelease, FriendLiveState, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
-                     RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion)
+                     RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion, WebsiteRouteDelete,
+                     WebsiteRouteEdit, WebsiteRouteImport, WebsiteRouteList)
 from .service import SocialError, SocialService, digest, identifier, public_content, row
+from . import website_routes
 
 INSTALLATION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 # Socket identity re-checks tolerate a provider outage this long before closing.
@@ -40,7 +42,10 @@ ANONYMOUS_LIMITS = {
     "deletion_receipt": 30,        # receipt confirmation, per network
     "push_release": 30,            # installation binding release, per network
     "website_deletion": 10,        # verified proofs, per account subject
+    "website_routes": 1200,        # signed route-library requests, per account subject
 }
+# Every route an account can hold fits in one website listing (content quota).
+WEBSITE_ROUTE_LIST_LIMIT = 500
 # Signed-in share-link resolution, per account, in addition to general quotas.
 ACCOUNT_LINK_RESOLVE_LIMIT = 120
 
@@ -227,6 +232,136 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
             # A duplicate proof can only continue the same verified deletion.
             return {"status": "deleting"}
         return await run_in_threadpool(service.db.run, perform)
+
+    def website_route_key():
+        secret = os.environ.get("BICINO_SOCIAL_DELETION_SECRET", "")
+        if len(secret) < 32:
+            raise SocialError("website_bridge_unconfigured", 503)
+        return website_routes.derive_key(secret)
+
+    async def website_principal(request, data):
+        """Verify a signed website route request before any database work.
+
+        The website verified its own session cookie (with revocation) for this
+        account. The signature binds method, path and the exact body, including
+        the account, a fresh timestamp and a nonce that is also the request's
+        idempotency key.
+        """
+        key = website_route_key()
+        raw = await request.body()
+        path = request.url.path.removeprefix(request.scope.get("root_path", ""))
+        signature = request.headers.get(website_routes.SIGNATURE_HEADER, "")
+        if not website_routes.valid_signature(key, request.method, path, raw, signature):
+            raise SocialError("website_proof_invalid", 401)
+        account = data.account
+        if account.project != os.environ.get("BICINO_FIREBASE_PROJECT_ID"):
+            raise SocialError("website_project_mismatch", 403)
+        if abs(service.now()-account.issuedAt) > website_routes.PROOF_WINDOW_SECONDS:
+            raise SocialError("website_proof_expired", 401)
+        if request.method != "POST" or not path.endswith("/list"):
+            if request.headers.get("Idempotency-Key") != account.nonce:
+                raise SocialError("idempotency_key_required")
+        await run_in_threadpool(service.anonymous_rate, "website_routes",
+                                digest(f"{account.project}:{account.uid}")[:32], ANONYMOUS_LIMITS["website_routes"])
+        return AccountPrincipal(account.project, account.uid, account.issuedAt)
+
+    def website_actor(principal, create):
+        """The account's social ID; a listing never creates an account."""
+        if create:
+            return service.account(principal)
+        def perform(c):
+            account = c.execute(select(accounts).where(and_(accounts.c.project == principal.project,
+                accounts.c.uid == principal.uid))).mappings().first()
+            if account is None:
+                return None
+            if account["state"] == "deleting":
+                raise SocialError("account_deleting", 403)
+            if account["state"] != "active":
+                raise SocialError("account_unavailable", 403)
+            return account["id"]
+        return service.db.run(perform)
+
+    async def website_owner(principal):
+        actor = await run_in_threadpool(website_actor, principal, False)
+        if actor is None:
+            raise SocialError("not_found", 404)
+        await limit(actor, "requests", 600, 60)
+        return actor
+
+    def website_route(c, actor, content_id):
+        item = row(c, content, content.c.id == content_id)
+        if item["owner"] != actor or item["kind"] != "route":
+            raise SocialError("not_found", 404)
+        return item
+
+    @app.post("/internal/website/routes/list")
+    async def website_route_list(data: WebsiteRouteList, request: Request):
+        principal = await website_principal(request, data)
+        app.state.features.require("routes")
+        actor = await run_in_threadpool(website_actor, principal, False)
+        if actor is None:
+            return {"items": []}
+        await limit(actor, "requests", 600, 60)
+        def perform(c):
+            values = c.execute(select(content).where(and_(content.c.owner == actor, content.c.kind == "route"))
+                               .order_by(content.c.created.desc(), content.c.id.desc())
+                               .limit(WEBSITE_ROUTE_LIST_LIMIT)).mappings()
+            return [dict(value) for value in values]
+        values = await run_in_threadpool(read, perform)
+        return {"items": await run_in_threadpool(lambda: [website_routes.summary(v) for v in values])}
+
+    @app.post("/internal/website/routes")
+    async def website_route_import(data: WebsiteRouteImport, request: Request):
+        principal = await website_principal(request, data)
+        app.state.features.require("routes")
+        provider, preview = await run_in_threadpool(website_routes.preview_for_archive, data.archive)
+        if provider != website_routes.PREVIEW_PROVIDER:
+            # The website imports GPX files only; other providers keep their own paths.
+            raise SocialError("route_not_redistributable")
+        actor = await run_in_threadpool(website_actor, principal, True)
+        await limit(actor, "requests", 600, 60)
+        await limit(actor, "publication", 30)
+        upload = RouteUpload(title=data.title, visibility="private", archive=data.archive,
+                             hashPayload=data.hashPayload, sharingRightsConfirmed=True)
+        details = {"provider": provider, "preview": preview, "favorite": False,
+                   "elevationGainMeters": data.elevationGainMeters, "durationSeconds": data.durationSeconds}
+        result = await operation(request, (actor, principal),
+                                 lambda c, a: service.upload_route(c, a, upload, website=details))
+        return website_routes.summary(result)
+
+    @app.patch("/internal/website/routes/{content_id}")
+    async def website_route_edit(content_id: str, data: WebsiteRouteEdit, request: Request):
+        principal = await website_principal(request, data)
+        app.state.features.require("routes")
+        if data.title is None and data.favorite is None:
+            raise SocialError("nothing_to_change", 422)
+        if data.title is not None and data.revision is None:
+            raise SocialError("revision_required", 422)
+        actor = await website_owner(principal)
+        def perform(c, actor):
+            service.db.lock(c, actor)
+            item = website_route(c, actor, content_id)
+            if data.title is not None and data.title != item["title"]:
+                item = service.edit_content(c, actor, content_id, ContentEdit(
+                    revision=data.revision, title=data.title, visibility=item["visibility"]))
+            if data.favorite is not None:
+                body = dict(item["body"])
+                body["website"] = dict(body.get("website") or {}, favorite=data.favorite)
+                c.execute(update(content).where(content.c.id == content_id).values(body=body))
+                item = dict(item, body=body)
+            return item
+        return website_routes.summary(await operation(request, (actor, principal), perform))
+
+    @app.delete("/internal/website/routes/{content_id}")
+    async def website_route_delete(content_id: str, data: WebsiteRouteDelete, request: Request):
+        # Like every deletion, available while the routes feature is rolled back.
+        principal = await website_principal(request, data)
+        actor = await website_owner(principal)
+        def perform(c, actor):
+            service.db.lock(c, actor)
+            website_route(c, actor, content_id)
+            return service.delete_content(c, actor, content_id)
+        return await operation(request, (actor, principal), perform)
 
     @app.get("/healthz")
     def health():

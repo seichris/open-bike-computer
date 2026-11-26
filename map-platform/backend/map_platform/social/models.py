@@ -158,3 +158,38 @@ class WebsiteDeletion(Input):
     authTime: int
     issuedAt: int
     nonce: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class WebsiteAccount(Input):
+    """The account the website verified from its own session cookie."""
+    uid: str = Field(min_length=1, max_length=128)
+    project: str = Field(min_length=1, max_length=128)
+    issuedAt: int
+    nonce: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class WebsiteRouteList(Input):
+    account: WebsiteAccount
+
+
+class WebsiteRouteImport(Input):
+    account: WebsiteAccount
+    title: str = Field(min_length=1, max_length=160)
+    archive: str = Field(min_length=100, max_length=1_900_000)
+    hashPayload: str = Field(min_length=100, max_length=1_900_000)
+    # Read from the rider's own GPX file; the archive contract carries neither.
+    elevationGainMeters: float | None = Field(default=None, ge=0, le=100000)
+    durationSeconds: float | None = Field(default=None, gt=0, le=2_592_000)
+
+
+class WebsiteRouteEdit(Input):
+    account: WebsiteAccount
+    # Renaming uses the same optimistic revision as native edits. Starring
+    # does not change the route, so it needs no revision.
+    revision: int | None = Field(default=None, ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    favorite: bool | None = None
+
+
+class WebsiteRouteDelete(Input):
+    account: WebsiteAccount
