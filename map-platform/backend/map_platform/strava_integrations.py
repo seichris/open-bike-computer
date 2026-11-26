@@ -473,12 +473,15 @@ class StravaIntegrationStore:
                 connection.execute(
                     """
                     INSERT INTO shared_owner_links(
-                        deployment_channel, installation_id, grant_id, last_used_at
-                    ) VALUES (?, ?, ?, ?)
+                        deployment_channel, installation_id, grant_id, last_used_at,
+                        allows_private_routes
+                    ) VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(deployment_channel, installation_id) DO UPDATE SET
-                        grant_id = excluded.grant_id, last_used_at = excluded.last_used_at
+                        grant_id = excluded.grant_id, last_used_at = excluded.last_used_at,
+                        allows_private_routes = excluded.allows_private_routes
                     """,
-                    (channel, linked_installation, installation_id, connected_at),
+                    (channel, linked_installation, installation_id, connected_at,
+                     "read_all" in bundle.granted_scopes),
                 )
                 if channel == "production":
                     # The authenticated installation now uses the shared grant.
@@ -488,15 +491,17 @@ class StravaIntegrationStore:
                         (linked_installation,),
                     )
 
-    def touch_owner_link(self, channel: str, installation_id: str) -> bool:
+    def use_owner_link(self, channel: str, installation_id: str) -> bool | None:
         with self._transaction() as connection:
-            return bool(connection.execute(
+            row = connection.execute(
                 """
                 UPDATE shared_owner_links SET last_used_at = ?
                 WHERE deployment_channel = ? AND installation_id = ?
+                RETURNING allows_private_routes
                 """,
                 (self._clock(), channel, installation_id),
-            ).rowcount)
+            ).fetchone()
+        return bool(row[0]) if row is not None else None
 
     def expire_owner_links(self, *, cutoff: float) -> None:
         with self._transaction() as connection:
@@ -861,6 +866,7 @@ class StravaIntegrationStore:
                         grant_id TEXT NOT NULL REFERENCES connections(installation_id)
                             ON DELETE CASCADE,
                         last_used_at REAL NOT NULL,
+                        allows_private_routes INTEGER NOT NULL CHECK(allows_private_routes IN (0, 1)),
                         PRIMARY KEY(deployment_channel, installation_id)
                     )
                     """
@@ -1133,17 +1139,20 @@ class StravaIntegrationService:
             raise StravaIntegrationError("strava_route_unavailable", status_code=404)
         return "development"
 
-    def _connection_id(self, installation_id: str, development: bool) -> str | None:
+    def _connection_access(
+        self, installation_id: str, development: bool,
+    ) -> tuple[str | None, bool]:
         _validate_installation_id(installation_id)
         channel = self._caller_channel(installation_id, development)
-        if self.store.touch_owner_link(channel, installation_id):
-            return _SHARED_OWNER_GRANT
-        return None if development else installation_id
+        allows_private = self.store.use_owner_link(channel, installation_id)
+        if allows_private is not None:
+            return _SHARED_OWNER_GRANT, allows_private
+        return (None if development else installation_id), True
 
     def connection_status(
         self, installation_id: str, *, development: bool = False,
     ) -> dict[str, object]:
-        connection_id = self._connection_id(installation_id, development)
+        connection_id, allows_private = self._connection_access(installation_id, development)
         if not self.config.enabled or self.config.key_ring is None:
             return {
                 "enabled": self.config.enabled,
@@ -1160,18 +1169,21 @@ class StravaIntegrationService:
                 "canReadPrivateRoutes": False,
             }
         self.store.touch_connection(record.installation_id, now=self._clock())
+        scopes = [
+            scope for scope in record.bundle.granted_scopes if scope != "read_all" or allows_private
+        ]
         return {
             "enabled": True,
             "connected": True,
-            "grantedScopes": list(record.bundle.granted_scopes),
-            "canReadPrivateRoutes": "read_all" in record.bundle.granted_scopes,
+            "grantedScopes": scopes,
+            "canReadPrivateRoutes": "read_all" in scopes,
             "connectedAt": _iso_timestamp(record.connected_at),
         }
 
     def disconnect(
         self, installation_id: str, *, development: bool = False,
     ) -> dict[str, object]:
-        connection_id = self._connection_id(installation_id, development)
+        connection_id, _ = self._connection_access(installation_id, development)
         if connection_id == _SHARED_OWNER_GRANT:
             with self._owner_oauth_lock:
                 pending = self.store.unlink_owner(
@@ -1213,8 +1225,9 @@ class StravaIntegrationService:
         development: bool = False,
     ) -> StravaAthleteRoutePage:
         client = self._require_enabled()
-        record = self._usable_connection(self._connection_id(installation_id, development))
-        if "read_all" not in record.bundle.granted_scopes:
+        connection_id, allows_private = self._connection_access(installation_id, development)
+        record = self._usable_connection(connection_id)
+        if not allows_private or "read_all" not in record.bundle.granted_scopes:
             raise StravaIntegrationError(
                 "strava_scope_required",
                 status_code=403,
@@ -1235,8 +1248,9 @@ class StravaIntegrationService:
     ) -> StravaRouteDownload:
         client = self._require_enabled()
         route_id = validate_strava_route_id(route_id)
-        record = self._usable_connection(self._connection_id(installation_id, development))
-        metadata = self._route_metadata(client, record, route_id)
+        connection_id, allows_private = self._connection_access(installation_id, development)
+        record = self._usable_connection(connection_id)
+        metadata = self._route_metadata(client, record, route_id, allows_private=allows_private)
         self._validate_cycling_route(metadata)
         try:
             gpx = client.export_gpx(route_id, record.bundle.access_token)
@@ -1260,8 +1274,9 @@ class StravaIntegrationService:
     ) -> StravaRouteValidation:
         client = self._require_enabled()
         route_id = validate_strava_route_id(route_id)
-        record = self._usable_connection(self._connection_id(installation_id, development))
-        metadata = self._route_metadata(client, record, route_id)
+        connection_id, allows_private = self._connection_access(installation_id, development)
+        record = self._usable_connection(connection_id)
+        metadata = self._route_metadata(client, record, route_id, allows_private=allows_private)
         self._validate_cycling_route(metadata)
         checked_at = self._clock()
         self.store.touch_connection(record.installation_id, now=checked_at)
@@ -1425,11 +1440,19 @@ class StravaIntegrationService:
         client: StravaClient,
         record: StravaConnectionRecord,
         route_id: str,
+        *,
+        allows_private: bool,
     ) -> StravaRouteMetadata:
         try:
-            return client.route_metadata(route_id, record.bundle.access_token)
+            metadata = client.route_metadata(route_id, record.bundle.access_token)
         except StravaClientError as exc:
             raise self._map_client_error(exc, record) from exc
+        if not allows_private and "read_all" in record.bundle.granted_scopes:
+            # An installation cannot inherit the private-route consent of
+            # another installation sharing the same provider grant.
+            if metadata.is_private is not False:
+                raise StravaIntegrationError("strava_route_unavailable", status_code=404)
+        return metadata
 
     @staticmethod
     def _validate_cycling_route(metadata: StravaRouteMetadata) -> None:

@@ -274,8 +274,8 @@ connection, retire the encrypted legacy row without calling Strava revocation.
 Have the owner reconnect on the updated Bicino Dev build.
 
 The owner's installations in each channel opt in separately. The production
-control plane stores a single encrypted provider grant and expires unused
-installation links independently. Disconnect from one installation removes its
+control plane stores a single encrypted provider grant. It enforces each
+installation's consent to private routes and expires unused links independently. Disconnect from one installation removes its
 link. The last link queues provider revocation in production maintenance.
 Other production athletes continue using the existing production flow.
 

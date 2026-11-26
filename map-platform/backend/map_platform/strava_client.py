@@ -134,6 +134,7 @@ class StravaRouteMetadata:
     route_id: str
     athlete_id: str
     route_type: int
+    is_private: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +291,7 @@ class StravaClient:
             route_id=response_route_id,
             athlete_id=athlete_id,
             route_type=route_type,
+            is_private=document.get("private") if isinstance(document.get("private"), bool) else None,
         )
 
     def athlete_routes(

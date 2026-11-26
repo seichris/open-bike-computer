@@ -3,6 +3,7 @@ FROM ghcr.io/seichris/open-bike-computer-map-platform@sha256:320a0c5b397e7657daf
 FROM production-base AS runtime
 
 COPY map-platform/backend/map_platform/api.py \
+     map-platform/backend/map_platform/strava_client.py \
      map-platform/backend/map_platform/strava_development.py \
      map-platform/backend/map_platform/strava_integrations.py \
      /app/map-platform/backend/map_platform/

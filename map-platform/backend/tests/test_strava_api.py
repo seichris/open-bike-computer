@@ -177,7 +177,7 @@ class StravaAPITests(unittest.TestCase):
                 "athlete": {"id": athlete_id},
             })
 
-        def finish_oauth(production, started, athlete_id, access_token):
+        def finish_oauth(production, started, athlete_id, access_token, *, scope="read,read_all"):
             self.assertEqual(started.status_code, 200)
             start = started.json()
             query = parse_qs(urlparse(start["webAuthorizationUrl"]).query)
@@ -185,7 +185,7 @@ class StravaAPITests(unittest.TestCase):
             queue_oauth(athlete_id, access_token)
             return production.get(
                 f"{prefix}/oauth/callback",
-                params={"state": query["state"][0], "code": "code", "scope": "read,read_all"},
+                params={"state": query["state"][0], "code": "code", "scope": scope},
             )
 
         with TestClient(production_app) as production, TestClient(development_app) as development:
@@ -241,7 +241,7 @@ class StravaAPITests(unittest.TestCase):
                 )
                 self.assertEqual(dev_login.json()["callbackScheme"], "bikecomputer-dev")
                 self.assertIn("bikecomputer-dev://strava/oauth-complete?result=connected",
-                              finish_oauth(production, dev_login, 44, "dev-login").text)
+                              finish_oauth(production, dev_login, 44, "dev-login", scope="read").text)
                 self.assertFalse(production.get(
                     f"{prefix}/connection", params=prod_params, headers=prod_headers
                 ).json()["connected"])
@@ -250,7 +250,34 @@ class StravaAPITests(unittest.TestCase):
                     f"{prefix}/oauth/start", params=prod_params, headers=prod_headers
                 )
                 self.assertIn("bikecomputer://strava/oauth-complete?result=connected",
-                              finish_oauth(production, prod_login, 44, "latest-login").text)
+                              finish_oauth(production, prod_login, 44, "prod-login").text)
+                dev_status = development.get(
+                    f"{prefix}/connection", params=self.params, headers=self.headers
+                ).json()
+                self.assertEqual(dev_status["grantedScopes"], ["read"])
+                self.assertFalse(dev_status["canReadPrivateRoutes"])
+                self.assertEqual(development.get(
+                    f"{prefix}/routes", params=self.params, headers=self.headers
+                ).status_code, 403)
+                route = {"id": int(ROUTE_ID), "athlete": {"id": 44}, "type": 1}
+                self.transport.queue_json(route | {"private": True})
+                denied = development.post(
+                    f"{prefix}/routes/{ROUTE_ID}/gpx",
+                    params=self.params, headers=self.headers,
+                )
+                self.assertEqual(denied.status_code, 404)
+                self.assertEqual(denied.json()["code"], "strava_route_unavailable")
+                self.transport.queue_json(route | {"private": False})
+                self.assertEqual(development.post(
+                    f"{prefix}/routes/{ROUTE_ID}/validate",
+                    params=self.params, headers=self.headers,
+                ).status_code, 200)
+
+                reconnect = development.post(
+                    f"{prefix}/oauth/start", params=self.params, headers=self.headers
+                )
+                self.assertIn("bikecomputer-dev://strava/oauth-complete?result=connected",
+                              finish_oauth(production, reconnect, 44, "latest-login").text)
                 self.transport.queue_json([])
                 listed = development.get(f"{prefix}/routes", params=self.params, headers=self.headers)
                 self.assertEqual(listed.status_code, 200)

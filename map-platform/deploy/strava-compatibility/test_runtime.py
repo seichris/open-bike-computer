@@ -25,7 +25,7 @@ class StravaCompatibilityRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.keys() - base.keys(), {package + "strava_development.py"})
         self.assertEqual(
             {name for name in base if runtime[name] != base[name]},
-            {package + "api.py", package + "strava_integrations.py"},
+            {package + "api.py", package + "strava_client.py", package + "strava_integrations.py"},
         )
 
     def test_runtime_rejects_worker_commands(self):
