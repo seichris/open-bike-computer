@@ -280,6 +280,7 @@ struct SocialRuntimeTests {
         sharedRideProgressIgnoresStationaryJitter()
         try await automaticJoinSharing()
         try await SocialSavedRouteSharingTests.run()
+        try await AccountRouteLibrarySyncTests.run()
         try await profileMutationSerialization()
         let fixture=RideFixture();fixture.lostFirst=true
         let live=LiveRideService(client:fixture,uptime:{fixture.seconds},pollNanoseconds:10_000_000)

@@ -59,6 +59,11 @@ nonisolated struct SavedRouteDisplayNames: Equatable {
             .compactMapValues { $0 as? String } ?? [:])
     }
 
+    /// The rider's own name for a route, if they renamed it.
+    func storedName(routeID: UUID) -> String? {
+        values[Self.key(routeID)]
+    }
+
     func displayName(routeID: UUID, defaultName: String) -> String {
         values[Self.key(routeID)] ?? defaultName
     }

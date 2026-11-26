@@ -577,12 +577,15 @@ final class PhoneRouteLibrary: ObservableObject {
         reload()
     }
 
+    /// The rider deletes an expired Strava route's reload row. Like any rider
+    /// deletion, the account route library deletes its copy too.
     func deleteExpiredStravaBookmark(
         _ bookmark: StravaRouteReloadBookmarkV1
     ) throws {
         _ = try stravaBookmarkStore.delete(routeID: bookmark.routeID)
         removeDisplayName(routeID: bookmark.routeID)
         reload()
+        onRouteDeletedByRider?(bookmark.routeID)
     }
 
     @discardableResult
@@ -602,6 +605,8 @@ final class PhoneRouteLibrary: ObservableObject {
         let removed = try stravaBookmarkStore.purge()
         for routeID in routeIDs { removeDisplayName(routeID: routeID) }
         reload()
+        // Disconnect and Delete Data also removes the account library's copies.
+        for routeID in routeIDs { onRouteDeletedByRider?(routeID) }
         guard removedLocally else { throw NavigationRouteFileStoreError.ioFailure }
         return removed
     }
@@ -745,7 +750,39 @@ final class PhoneRouteLibrary: ObservableObject {
         return name
     }
 
+    /// Renames a Strava route whose lease ended and that remains only as a
+    /// reload bookmark; the alias is reused when the route is reloaded.
+    func renameStravaBookmark(routeID: UUID, to proposedName: String) {
+        guard let bookmark = stravaBookmark(routeID: routeID) else { return }
+        var updated = displayNames
+        let name = updated.rename(routeID: routeID, defaultName: bookmark.localAlias ?? proposedName, to: proposedName)
+        do {
+            try stravaBookmarkStore.upsert(try bookmark.updating(localAlias: .some(name)))
+        } catch {
+            return
+        }
+        loadStravaBookmarks()
+        displayNames = updated
+        displayNames.persist(to: defaults)
+        publishRouteDisplayNames()
+    }
+
+    /// Called after the rider deletes a saved route or an expired Strava reload
+    /// row, and for each route a Strava disconnect purges, so the account route
+    /// library deletes it too. Lease expiry and Watch cleanup do not call it.
+    var onRouteDeletedByRider: ((UUID) -> Void)?
+
+    /// The rider's rename for a route, even while its archive is not on this phone.
+    func storedDisplayName(routeID: UUID) -> String? {
+        displayNames.storedName(routeID: routeID)
+    }
+
     func delete(_ summary: PlannedRouteSummaryV1) throws {
+        try deleteSavedRoute(summary)
+        onRouteDeletedByRider?(summary.id)
+    }
+
+    private func deleteSavedRoute(_ summary: PlannedRouteSummaryV1) throws {
         let identity = identity(for: summary)
         let key = Self.receiptKey(identity)
         if summary.providerID == RouteProviderPolicyV1.strava.providerID {

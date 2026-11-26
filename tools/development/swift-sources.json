@@ -947,6 +947,7 @@
         "ios-app/BikeComputer/BikeComputer/Services/SocialProfileMutationQueue.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialSavedRouteSharing.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/AccountRouteLibrarySync.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialLinkLoader.swift",
         "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
         "ios-app/BikeComputer/BikeComputer/Services/FriendLiveService.swift",
@@ -957,7 +958,8 @@
         "ios-app/BikeComputerTests/SocialMaintenanceTests.swift",
         "ios-app/BikeComputerTests/SocialRuntimeTests.swift",
         "ios-app/BikeComputerTests/FriendLiveServiceTests.swift",
-        "ios-app/BikeComputerTests/SocialSavedRouteSharingTests.swift"
+        "ios-app/BikeComputerTests/SocialSavedRouteSharingTests.swift",
+        "ios-app/BikeComputerTests/AccountRouteLibrarySyncTests.swift"
       ]
     },
     "route-elevation-core": {

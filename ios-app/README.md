@@ -351,6 +351,37 @@ and
 [`../map-platform/deploy/README.md`](../map-platform/deploy/README.md#strava-route-import-configuration)
 for the complete configuration and promotion contract.
 
+## Saved routes in your Bicino account
+
+When you're signed in to a Bicino account and the server advertises
+`routeLibrary`, Saved Routes syncs with the account's private route library,
+which bicino.com shows at `/account/routes`.
+
+- **Uploaded from the phone:** imported GPX and Strava routes, their renames
+  and newer revisions (a Strava reload).
+- **Downloaded to the phone:** GPX routes added on bicino.com or on another
+  phone. Strava routes come only from Strava itself.
+- **Not synced:** saved Apple Maps and Bicino-planned routes keep their
+  phone-only scope.
+- **Deletions:** a delete on either side removes the route from the other.
+  **Disconnect Strava and Delete Data** also deletes the account copies of
+  Strava routes.
+- **Expiry:** the phone's seven-day Strava lease is unchanged, but the account
+  copy is kept without expiry (maintainer decision, 2026-11-26), so bicino.com
+  keeps showing the route after the phone's copy has lapsed.
+- **When it runs:** after sign-in, when the app becomes active, and two seconds
+  after library changes. Each round lists the library once and sends only the
+  differences, and stops as soon as the signed-in account changes.
+- **Limits:** routes over the library's limits (20,000 points, or an archive
+  of about 1.9 MB) stay on the phone and are not retried until they change.
+  Titles longer than 160 characters are shortened in the account.
+- **Several accounts:** the phone's library syncs with whichever account is
+  signed in. A rider deletion is kept for 90 days and removes the route from
+  every account that holds it.
+- **Implementation:** `AccountRouteLibrarySync` holds the sync rules and its
+  host tests are in `AccountRouteLibrarySyncTests`. The server contract is in
+  `docs/social-riding-operations.md`.
+
 ## Watch + Bicino navigation without iPhone
 
 The Watch can own location, route progress, maneuvers, and the direct
