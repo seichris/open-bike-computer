@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app_attest_support import AppAttestTestClient
 from map_platform.api import create_app
 from map_platform.strava_client import StravaHTTPResponse
+from map_platform.strava_development import DEVELOPMENT_HEADER
 
 
 ROUTE_ID = "3009840108578231836"
@@ -134,6 +135,174 @@ class StravaAPITests(unittest.TestCase):
         self.assertEqual(callback.status_code, 200)
         self.assertIn("result=connected", callback.text)
         return start
+
+    def test_shared_registration_restricts_development_and_shares_owner_grant(self):
+        prefix = "/v1/integrations/strava"
+        bridge_secret = "a" * 43
+        bridge_environment = {
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_BRIDGE_SECRET": bridge_secret,
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_INSTALLATION": self.params["clientInstallationId"],
+        }
+        other_credential = self.app_attest.issue_installation(self.client)
+        other_params = {"clientInstallationId": other_credential["clientInstallationId"]}
+        other_headers = {"X-Installation-Token": other_credential["clientInstallationToken"]}
+
+        with patch.dict(os.environ, bridge_environment | {
+            "MAP_PLATFORM_DATA_ROOT": str(Path(self.temp.name) / "production"),
+            "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
+            "MAP_PLATFORM_STRAVA_REDIRECT_URI": f"https://maps.8o.vc{prefix}/oauth/callback",
+            "MAP_PLATFORM_STRAVA_DEVELOPMENT_ATHLETE": "44",
+        }):
+            production_app = create_app(
+                strava_transport=self.transport, app_attest_verifier=self.app_attest.verifier
+            )
+        with patch.dict(os.environ, bridge_environment | {
+            "MAP_PLATFORM_STRAVA_ENABLED": "0",
+            "MAP_PLATFORM_STRAVA_CLIENT_ID": "",
+            "MAP_PLATFORM_STRAVA_CLIENT_SECRET": "",
+            "MAP_PLATFORM_STRAVA_REDIRECT_URI": "",
+            "MAP_PLATFORM_STRAVA_TOKEN_KEY_ID": "",
+            "MAP_PLATFORM_STRAVA_TOKEN_KEY_BASE64": "",
+        }):
+            development_app = create_app(
+                strava_transport=self.transport, app_attest_verifier=self.app_attest.verifier
+            )
+
+        def queue_oauth(athlete_id, access_token):
+            self.transport.queue_json({
+                "token_type": "Bearer",
+                "access_token": access_token,
+                "refresh_token": f"refresh-{access_token}",
+                "expires_at": 2_100_000_000,
+                "athlete": {"id": athlete_id},
+            })
+
+        def finish_oauth(production, started, athlete_id, access_token, *, scope="read,read_all"):
+            self.assertEqual(started.status_code, 200)
+            start = started.json()
+            query = parse_qs(urlparse(start["webAuthorizationUrl"]).query)
+            self.assertEqual(query["redirect_uri"], [f"https://maps.8o.vc{prefix}/oauth/callback"])
+            queue_oauth(athlete_id, access_token)
+            return production.get(
+                f"{prefix}/oauth/callback",
+                params={"state": query["state"][0], "code": "code", "scope": scope},
+            )
+
+        with TestClient(production_app) as production, TestClient(development_app) as development:
+            prod_credential = self.app_attest.issue_installation(production)
+            prod_params = {"clientInstallationId": prod_credential["clientInstallationId"]}
+            prod_headers = {"X-Installation-Token": prod_credential["clientInstallationToken"]}
+
+            def route_to_production(transport, **request):
+                target = urlparse(request["url"])
+                self.assertEqual((target.scheme, target.netloc), ("https", "maps.8o.vc"))
+                self.assertEqual(dict(request["headers"]), {DEVELOPMENT_HEADER: bridge_secret})
+                reply = production.request(
+                    request["method"], f"{target.path}?{target.query}", headers=request["headers"]
+                )
+                return StravaHTTPResponse(
+                    reply.status_code, dict(reply.headers), reply.content, request["url"]
+                )
+
+            with patch("map_platform.strava_development.UrllibStravaTransport.request",
+                       autospec=True, side_effect=route_to_production):
+                for params, headers, enabled in (
+                    (self.params, self.headers, True), (other_params, other_headers, False)
+                ):
+                    cap = development.get("/v1/capabilities", params=params, headers=headers)
+                    self.assertEqual(cap.status_code, 200)
+                    self.assertEqual(cap.json()["integrations"]["stravaRouteImport"]["enabled"], enabled)
+                not_owner = development.post(
+                    f"{prefix}/oauth/start", params=other_params, headers=other_headers
+                )
+                self.assertEqual(not_owner.status_code, 404)
+                forged = production.post(
+                    f"{prefix}/oauth/start", params=self.params,
+                    headers={DEVELOPMENT_HEADER: "incorrect"},
+                )
+                self.assertEqual(forged.status_code, 404)
+                wrong_installation = production.post(
+                    f"{prefix}/oauth/start", params=other_params,
+                    headers={DEVELOPMENT_HEADER: bridge_secret},
+                )
+                self.assertEqual(wrong_installation.status_code, 404)
+
+                other_login = development.post(
+                    f"{prefix}/oauth/start", params=self.params, headers=self.headers
+                )
+                rejected = finish_oauth(production, other_login, 45, "other-account")
+                self.assertIn("bikecomputer-dev://strava/oauth-complete?result=failed", rejected.text)
+                self.assertFalse(development.get(
+                    f"{prefix}/connection", params=self.params, headers=self.headers
+                ).json()["connected"])
+
+                dev_login = development.post(
+                    f"{prefix}/oauth/start", params=self.params, headers=self.headers
+                )
+                self.assertEqual(dev_login.json()["callbackScheme"], "bikecomputer-dev")
+                self.assertIn("bikecomputer-dev://strava/oauth-complete?result=connected",
+                              finish_oauth(production, dev_login, 44, "dev-login", scope="read").text)
+                self.assertFalse(production.get(
+                    f"{prefix}/connection", params=prod_params, headers=prod_headers
+                ).json()["connected"])
+
+                prod_login = production.post(
+                    f"{prefix}/oauth/start", params=prod_params, headers=prod_headers
+                )
+                self.assertIn("bikecomputer://strava/oauth-complete?result=connected",
+                              finish_oauth(production, prod_login, 44, "prod-login").text)
+                dev_status = development.get(
+                    f"{prefix}/connection", params=self.params, headers=self.headers
+                ).json()
+                self.assertEqual(dev_status["grantedScopes"], ["read"])
+                self.assertFalse(dev_status["canReadPrivateRoutes"])
+                self.assertEqual(development.get(
+                    f"{prefix}/routes", params=self.params, headers=self.headers
+                ).status_code, 403)
+                route = {"id": int(ROUTE_ID), "athlete": {"id": 44}, "type": 1}
+                self.transport.queue_json(route | {"private": True})
+                denied = development.post(
+                    f"{prefix}/routes/{ROUTE_ID}/gpx",
+                    params=self.params, headers=self.headers,
+                )
+                self.assertEqual(denied.status_code, 404)
+                self.assertEqual(denied.json()["code"], "strava_route_unavailable")
+                self.transport.queue_json(route | {"private": False})
+                self.assertEqual(development.post(
+                    f"{prefix}/routes/{ROUTE_ID}/validate",
+                    params=self.params, headers=self.headers,
+                ).status_code, 200)
+
+                reconnect = development.post(
+                    f"{prefix}/oauth/start", params=self.params, headers=self.headers
+                )
+                self.assertIn("bikecomputer-dev://strava/oauth-complete?result=connected",
+                              finish_oauth(production, reconnect, 44, "latest-login").text)
+                self.transport.queue_json([])
+                listed = development.get(f"{prefix}/routes", params=self.params, headers=self.headers)
+                self.assertEqual(listed.status_code, 200)
+                self.assertEqual(listed.headers["cache-control"], "private, no-store")
+                self.assertEqual(self.transport.requests[-1]["headers"]["Authorization"],
+                                 "Bearer latest-login")
+                before = len(self.transport.requests)
+                disconnected = development.delete(
+                    f"{prefix}/connection", params=self.params, headers=self.headers
+                )
+                self.assertEqual(disconnected.json(), {"disconnected": True, "revocationPending": False})
+                self.assertEqual(len(self.transport.requests), before)
+                self.assertTrue(production.get(
+                    f"{prefix}/connection", params=prod_params, headers=prod_headers
+                ).json()["connected"])
+                last_link = production.delete(
+                    f"{prefix}/connection", params=prod_params, headers=prod_headers
+                )
+                self.assertEqual(last_link.json(), {"disconnected": True, "revocationPending": True})
+                self.assertEqual(len(self.transport.requests), before)
+                self.transport.queue_json({}, status=200)
+                maint = production_app.state.strava_integration.maintenance()
+                self.assertEqual(maint["completedRevocations"], 1)
+                self.assertEqual(len(self.transport.requests), before + 1)
+                self.assertTrue(self.transport.requests[-1]["url"].endswith("/oauth/revoke"))
 
     def test_capability_oauth_status_import_validate_and_disconnect(self):
         capabilities = self.client.get(

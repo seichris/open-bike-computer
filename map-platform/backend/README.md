@@ -98,13 +98,16 @@ private, no-store response exposes only route ID, name, distance, elevation,
 and ride/run type plus the next page number; neither the athlete ID nor any
 OAuth credential is returned to iOS.
 
-Register separate Strava applications for Development and Production. Their
-exact callbacks are:
+Standalone Strava integrations use separate registrations. Their exact
+callbacks are:
 
 - Development: `https://maps-dev.8o.vc/v1/integrations/strava/oauth/callback`
 - Production: `https://maps.8o.vc/v1/integrations/strava/oauth/callback`
 
-Configure the matching channel with:
+For owner-only development using the production registration, use the
+[shared Strava deployment configuration](../deploy/README.md#owner-only-development-using-the-production-registration).
+
+Configure each standalone provider with:
 
 ```text
 MAP_PLATFORM_STRAVA_ENABLED=1

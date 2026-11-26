@@ -343,10 +343,9 @@ connection for that app installation without modifying routes on Strava.
 
 The route catalog is held only in memory while the page is open. The
 integration is disabled by default and does not place a Strava client secret,
-athlete ID, access token, or refresh token in the app. Development and
-Production require separate Strava applications, exact callback URLs, backend
-secrets, encryption keys,
-and sufficient athlete capacity. See
+athlete ID, access token, or refresh token in the app. Standalone Development and Production integrations use separate Strava
+registrations. With owner-only development forwarding, both builds use the
+production Strava registration and return to their respective iOS schemes. See
 [`../map-platform/backend/README.md`](../map-platform/backend/README.md#strava-route-import)
 and
 [`../map-platform/deploy/README.md`](../map-platform/deploy/README.md#strava-route-import-configuration)
