@@ -279,6 +279,14 @@ production now.
    builds what the blend reads around the box: the opened and terrain tiles
    of the neighbouring cells and the raw tiles two cells out.
 
+   The terrain carries artifacts that the hybrid passes on: lidar pits on
+   lakes and farmland, blocks of zero heights. [terrain_artifacts.py](terrain_artifacts.py)
+   reads the terrain, opened and hybrid tiles for them, then measures the
+   graded graph's edges beside every steep hollow it found and reports the
+   roads with a false step. The planet builder runs it after every graded
+   build with terrain sources (see
+   [Terrain scan](builder/README.md#terrain-scan)).
+
    Then pass `--elevation "$build_scratch/elevation"` to `build_graph.py`. The
    build fails if Valhalla skips its elevation stage. Grade at build time: a
    finished build cannot be graded afterwards. Running the elevation stage on

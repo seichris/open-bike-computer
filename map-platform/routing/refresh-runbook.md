@@ -121,7 +121,11 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
 
    `result.json` holds every stage's state and times, both archive
    manifests, both elevation manifests, each archive's qualification summary,
-   the gate summary and the peak scratch and memory use. Record the build
+   the gate summary and the peak scratch and memory use. A build with
+   terrain sources also holds the terrain scan's report: artifact candidates
+   per source and the roads they give a false step, in
+   `evidence/terrain-scan/terrain-report.md` (see
+   [Terrain scan](builder/README.md#terrain-scan)). Record the build
    times and peaks here for the next sizing decision.
 8. If a stage failed, read its log, fix the cause and start the chain again
    (see [When a stage fails](builder/README.md#when-a-stage-fails)). Finished
@@ -1868,6 +1872,13 @@ builder's tiles and graphs looked for them:
   only the stored maximum slope shows how large a step is.
 - Open channels under bridges are not closed hollows, so these scans do not
   count them.
+
+The chain's `terrain-scan` stage now runs these scans on every graded build
+with terrain sources and writes the counts, by source and by road class,
+with the worst roads and hollows and their coordinates, to
+`export/evidence/terrain-scan/terrain-report.md` and to `result.json` (see
+[Terrain scan](builder/README.md#terrain-scan)). It counts bridges and
+tunnels apart, so on this build it would report at most 59 public-road ways.
 
 The result, the gate report, the manifests, the logs and the scans are on
 the map VPS in `/root/bicino-routing-releases/builder-h400-261116/`

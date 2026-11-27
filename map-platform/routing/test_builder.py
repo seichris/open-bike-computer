@@ -40,6 +40,9 @@ import run_stage  # noqa: E402
 
 SHELL_SCRIPTS = sorted(BUILDER.glob("*.sh")) + sorted((BUILDER / "stages").glob("*.sh"))
 GRADED_ENV = "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\n"
+# Every terrain source of the list in its order, as a run with terrain must name them.
+TERRAIN_IDS = ",".join(source["id"] for source in json.loads((ROUTING / "elevation-sources.json").read_text())["terrain"])
+TERRAIN_ENV = GRADED_ENV + f"BICINO_TERRAIN={TERRAIN_IDS}\n"
 
 
 def make_tile_set(directory, cells, method=None, seed=b""):
@@ -237,6 +240,35 @@ class ChainStateTests(ScratchCase):
         # A second collection keeps the links.
         chain_state.write_result(self.root, final=True, clock=self.clock)
         self.assertEqual((export / "ungraded" / "valhalla_tiles.tar").stat().st_nlink, 2)
+
+    def test_the_terrain_scan_reports_once_done_and_a_failed_scan_keeps_the_gates_verdict(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
+        scan = self.root / "export" / "evidence" / "terrain-scan"
+        scan.mkdir(parents=True)
+        (scan / "terrain-report.json").write_text('{"headline": "3 artifact candidates; 1 public-road way with a false step"}')
+        self.finish(*[stage for stage in chain_state.STAGES if stage != "terrain-scan"])
+        self.write_gate_summary({"opened-400": []})
+        # A report left by an earlier run is not this run's.
+        chain_state.mark(self.root, "terrain-scan", "running", clock=self.clock)
+        self.hold_lock("terrain-scan")
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        self.assertEqual((status["state"], status["verdict"], status["terrainScan"]), ("running", None, None))
+        self.clock.now += 60
+        chain_state.mark(self.root, "terrain-scan", "failed", exit_status=1, clock=self.clock)
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        # The gate does not wait for the scan, so its answer stands.
+        self.assertEqual((status["state"], status["verdict"], status["terrainScan"]), ("failed", "met", None))
+        self.assertTrue(chain_state.describe(status).startswith("chain: failed, gate met"))
+        chain_state.mark(self.root, "terrain-scan", "running", clock=self.clock)
+        chain_state.mark(self.root, "terrain-scan", "done", exit_status=0, clock=self.clock)
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        self.assertEqual((status["state"], status["verdict"]), ("complete", "met"))
+        self.assertEqual(status["terrainScan"]["headline"], "3 artifact candidates; 1 public-road way with a false step")
+        self.assertIn("  terrain scan: 3 artifact candidates; 1 public-road way with a false step", chain_state.describe(status))
+        # A gate that failed is no verdict, whatever else failed.
+        chain_state.mark(self.root, "gate", "running", clock=self.clock)
+        chain_state.mark(self.root, "gate", "failed", exit_status=1, clock=self.clock)
+        self.assertIsNone(chain_state.chain_status(self.root, self.clock)[0]["verdict"])
 
     def test_the_text_names_the_failure(self):
         self.finish("images", "download")
@@ -448,6 +480,17 @@ class RunStageTests(ScratchCase):
         self.assertIsNone(run_stage.skip_reason("build-ungraded", {}))
         self.assertIsNone(run_stage.skip_reason("inputs", {"BICINO_OPENING_RADIUS": "400"}))
         self.assertIn("sample", run_stage.skip_reason("inputs", {"BICINO_SAMPLE_CITY": "Berlin"}))
+
+    def test_the_terrain_scan_is_skipped_without_a_terrain_source(self):
+        self.script("exit 0", names=("terrain-scan.sh",))
+        self.finish("images", "download", "elevation", "build-graded")
+        self.assertEqual(self.run_stage("terrain-scan"), 0)
+        marker = chain_state.read_marker(self.chain, "terrain-scan")
+        self.assertEqual(marker["state"], "skipped")
+        self.assertIn("no terrain source", marker["note"])
+        self.assertEqual(self.ran_stages(), [])
+        self.assertIsNone(run_stage.skip_reason("terrain-scan", {"BICINO_OPENING_RADIUS": "400",
+                                                                 "BICINO_TERRAIN": TERRAIN_IDS}))
 
     def test_stale_work_is_neither_reused_nor_run_over(self):
         self.finish("images", "download")
@@ -669,8 +712,12 @@ class ChainRehearsalTests(unittest.TestCase):
         return json.loads((self.root / "export" / "result.json").read_text())
 
     def test_the_chain_runs_every_stage_in_order_and_writes_the_result(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
         (self.root / "export" / "evidence" / "gate").mkdir(parents=True)
         (self.root / "export" / "evidence" / "gate" / "gate-summary.json").write_text('{"failures": {"opened-400": []}}')
+        self.stub("terrain-scan.sh", 'mkdir -p "$BICINO_SCRATCH/export/evidence/terrain-scan"\n'
+                                     'echo \'{"headline": "0 artifact candidates"}\' > '
+                                     '"$BICINO_SCRATCH/export/evidence/terrain-scan/terrain-report.json"')
         self.assertEqual(self.start(), 0)
         ran = self.ran.read_text().split()
         self.assertEqual(sorted(ran), sorted(chain_state.STAGES))
@@ -680,6 +727,23 @@ class ChainRehearsalTests(unittest.TestCase):
         result = self.result()
         self.assertEqual((result["state"], result["verdict"], result["final"]), ("complete", "met", True))
         self.assertEqual({entry["state"] for entry in result["stages"]}, {"done"})
+        self.assertEqual(result["terrainScan"], {"headline": "0 artifact candidates"})
+
+    def test_a_failed_terrain_scan_holds_up_nothing_and_a_restart_runs_it_alone(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
+        (self.root / "export" / "evidence" / "gate").mkdir(parents=True)
+        (self.root / "export" / "evidence" / "gate" / "gate-summary.json").write_text('{"failures": {"opened-400": []}}')
+        self.stub("terrain-scan.sh", "echo '/locate failed 4 times'; exit 1")
+        self.assertEqual(self.start(), 1)
+        result = self.result()
+        states = {entry["stage"]: entry["state"] for entry in result["stages"]}
+        self.assertEqual((result["state"], result["verdict"]), ("failed", "met"))
+        self.assertEqual((states["terrain-scan"], states["gate"]), ("failed", "done"))
+        first = self.ran.read_text().split()
+        self.stub("terrain-scan.sh")
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.ran.read_text().split()[len(first):], ["terrain-scan"])
+        self.assertEqual((self.result()["state"], self.result()["verdict"]), ("complete", "met"))
 
     def test_a_failed_stage_stops_what_needs_it_and_a_restart_resumes(self):
         self.stub("elevation.sh", "echo 'third round lost a worker'; exit 1")
@@ -1135,6 +1199,7 @@ while [ $# -gt 0 ]; do
     case "$2" in
       *:/terrain) echo '{{}}' > "${{2%%:*}}/terrain-manifest.json" ;;
       */export/evidence/gate:/out) echo '{{"failures": {{}}}}' > "${{2%%:*}}/gate-summary.json" ;;
+      */export/evidence/terrain-scan:/out) echo '# Terrain scan' > "${{2%%:*}}/terrain-report.md" ;;
       *:/raw|*:/out|*:/opened) echo '{{}}' > "${{2%%:*}}/elevation-manifest.json" ;;
     esac
   fi
@@ -1181,19 +1246,24 @@ done
                     labelled += 1
             if "--name " in text or "docker network create" in text:
                 naming.add(script.name)
-        # Eight containers and the two networks of the gate and the profile probe.
-        self.assertEqual(labelled, 10)
+        # Eleven containers and the networks of the gate, the profile probe and the terrain scan.
+        self.assertEqual(labelled, 13)
         # test_two_scratch_roots_share_no_container_name_network_or_label runs each of these.
         self.assertEqual(naming, {script for _, script, *_ in self.NAMING_STAGES})
 
-    NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"))
+    NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"),
+                     ("terrain-scan", "terrain-scan.sh"))
 
     def built_scratch(self, directory):
-        """A scratch root that holds what the gate asks of the two graph builds."""
+        """A scratch root that holds what the gate and the terrain scan ask of the builds before them."""
         root = Path(directory).resolve()
         for label in ("ungraded", "graded"):
             (root / "build" / f"planet-{label}").mkdir(parents=True)
             (root / "build" / f"planet-{label}" / "manifest.json").write_text('{"builder": {}}')
+        for name, manifest in (("elevation-terrain", "terrain-manifest.json"), ("elevation-opened", "elevation-manifest.json"),
+                               ("elevation", "elevation-manifest.json")):
+            (root / name).mkdir(exist_ok=True)
+            (root / name / manifest).write_text("{}")
         return root
 
     def test_two_scratch_roots_share_no_container_name_network_or_label(self):
@@ -1204,7 +1274,8 @@ done
                 run_id = self.run_id(root)
                 calls = ""
                 for stage, script, *arguments in self.NAMING_STAGES:
-                    ran, called = self.run_stage_script(root, GRADED_ENV, stage, script, *arguments)
+                    env = TERRAIN_ENV if stage == "terrain-scan" else GRADED_ENV
+                    ran, called = self.run_stage_script(root, env, stage, script, *arguments)
                     calls += called
                     if script == "qualify.sh":
                         # The planet's checks, the profile probe last. The stand-in probes
@@ -1215,9 +1286,11 @@ done
                 lines = calls.splitlines()
                 names = docker_values(calls, "--name")
                 self.assertEqual(names, {f"bicino-elevation-{run_id}", f"bicino-profiles-graded-{run_id}",
-                                         f"bicino-gate-ungraded-{run_id}", f"bicino-gate-graded-{run_id}"})
+                                         f"bicino-gate-ungraded-{run_id}", f"bicino-gate-graded-{run_id}",
+                                         f"bicino-scan-graded-{run_id}"})
                 networks = docker_values(calls, "--network") - {"none"}
-                self.assertEqual(networks, {f"bicino-profiles-graded-{run_id}", f"bicino-gate-{run_id}"})
+                self.assertEqual(networks, {f"bicino-profiles-graded-{run_id}", f"bicino-gate-{run_id}",
+                                            f"bicino-scan-{run_id}"})
                 # Nothing is created or removed by a name that is not the run's own.
                 self.assertEqual({line.split()[-1] for line in lines if line.startswith("network ")}, networks)
                 removed = {name for line in lines if line.startswith("rm -f ") for name in line.split()[2:]}
@@ -1228,10 +1301,12 @@ done
                 self.assertEqual(calls.split().count("--label"),
                                  sum(line.startswith(("run ", "network create ")) for line in lines))
                 filters = docker_values(calls, "--filter")
-                self.assertEqual(filters, {f"label=bicino.stage=gate@{root}"})
+                self.assertEqual(filters, {f"label=bicino.stage=gate@{root}", f"label=bicino.stage=terrain-scan@{root}"})
                 # On its run's own network a service answers to the same name in every run.
                 self.assertEqual(docker_values(calls, "--network-alias"),
-                                 {"bicino-gate-ungraded", "bicino-gate-graded", "bicino-profiles-graded"})
+                                 {"bicino-gate-ungraded", "bicino-gate-graded", "bicino-profiles-graded",
+                                  "bicino-scan-graded"})
+                self.assertIn("/routing/terrain_artifacts.py roads --dir /out --url http://bicino-scan-graded:8002", calls)
                 self.assertIn("--ungraded http://bicino-gate-ungraded:8002 --graded opened-400=http://bicino-gate-graded:8002",
                               calls)
                 self.assertIn("/mp/routing/probe_profiles.py --origin http://bicino-profiles-graded:8002", calls)
