@@ -73,6 +73,9 @@ PY
     fetched=$?
     set -e
     echo "terrain files: fetch exit=$fetched"
+    # A tile kept in the bucket alone has no origin: the build would fail its
+    # cell after hours of others, so the stage stops now.
+    [ "$fetched" -ne 4 ] || bicino_fail "terrain tiles kept only in gs://bicino-routing-elevation were not fetched (see above)"
     hybrid+=(-v "$BICINO_ELEVATION_TERRAIN_FILES:/terrain-files:ro")
     terrain+=(--terrain-files /terrain-files)
   fi

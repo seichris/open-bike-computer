@@ -1857,11 +1857,17 @@ and [LINZ's lidar](elevation-sources.md#linzs-lidar-in-the-build)).
 - **Approved on 2026-11-27:** Sonny's LiDAR DTMs of Europe (1 arc-second)
   for the countries it builds wholly from national data and mainland
   Portugal, LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan,
-  and CEDD's 2020 lidar DTM of Hong Kong, whose terms for derived products
-  are still to be read. Sonny's tiles, from a copy of them in the
-  elevation bucket, and LINZ's lidar are read by the build; GSI's and
-  CEDD's each need a reader, a catalog, an area and city samples through
-  that reader before a planet build uses them.
+  and CEDD's 2020 lidar DTM of Hong Kong, whose terms list copying and
+  distribution but not adaptation. Chris decided the same day to use
+  CEDD's, on the reading that the build's processing is covered. Sonny's
+  tiles, from a copy of them in the elevation bucket, LINZ's lidar and
+  CEDD's lidar, from tiles kept in the bucket, are read by the build; GSI's
+  tiles need a reader, a catalog, an area and city samples through that
+  reader before a planet build uses them.
+- **Kept tiles** are made once and read from the bucket alone: CEDD's with
+  `terrain_catalog.py cedd-cells`, then `kept-catalog` for the catalog and
+  `mirror --source ID --from DIR` for the upload. A new survey needs a new
+  source id and prefix; an object in the bucket is never replaced.
 - **A new version of Sonny's tiles** needs a new catalog and area
   (`terrain_catalog.py sonny-tiles`), a new source id and a new `mirror`
   prefix in the source list, and then `terrain_catalog.py mirror --source

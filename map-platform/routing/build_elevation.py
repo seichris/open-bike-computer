@@ -146,6 +146,21 @@ LINZ_NO_DATA = -9999.0
 LINZ_HEIGHTS = (-10, 4000)
 LINZ_REJECT_MARGIN = 15
 LINZ_GDAL_OPTIONS = {"CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tiff"}
+# Terrain kept as HGT tiles in the elevation bucket. terrain_catalog.py makes them once from a publisher's files
+# that a build cannot read cell by cell, and a build reads them from that copy alone. The catalog pins each cell's
+# gzipped tile and the provenance file beside it, which names every file the tile was made from.
+KEPT_CATALOG_LINE = re.compile(r"([NS]\d{2}[EW]\d{3}) (\d{8}) ([1-9]\d*) ([0-9a-f]{64}) ([0-9a-f]{64})")
+# CEDD's 2020 lidar DTM of Hong Kong: 3,253 zips of one 0.5 m GeoTIFF each on HK1980 Grid, heights in metres above
+# Hong Kong Principal Datum, about 16 GB. Averaged to 5 m and resampled onto the posts of its two cells.
+CEDD_ADAPTER = "cedd-hk-lidar-dtm-2020-hgt-v1"
+CEDD_ORIGIN = "https://bulkdata.csdi.gov.hk/cedd/lidar/2020dtm"
+CEDD_EPSG = 2326
+CEDD_PIXEL = 5.0
+# Heights beyond these are not ground; Tai Mo Shan is 957 m. Dropped with the 5 m pixels within
+# CEDD_REJECT_MARGIN of them, 120 m as for MRDEM-30, when the tiles are made.
+CEDD_HEIGHTS = (-10, 1000)
+CEDD_REJECT_MARGIN = 24
+KEPT_RULES = {CEDD_ADAPTER: (CEDD_HEIGHTS, CEDD_REJECT_MARGIN)}
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -341,6 +356,28 @@ def parse_linz_catalog(text):
     return tiles
 
 
+def format_kept_catalog(tiles):
+    """One line per cell: the date its kept tile was made, the gzipped tile's bytes and SHA-256, and its provenance's."""
+    return "".join(f"{hgt_name(*cell)} {date} {size} {sha256} {provenance}\n"
+                   for cell, (provenance, date, size, sha256) in sorted(tiles.items(), key=lambda i: hgt_name(*i[0])))
+
+
+def parse_kept_catalog(text):
+    """{cell: (provenance SHA-256, date made, bytes, SHA-256)} of a source kept as HGT tiles."""
+    tiles = {}
+    for line in text.splitlines():
+        match = KEPT_CATALOG_LINE.fullmatch(line)
+        if match is None:
+            raise ValueError(f"invalid terrain catalog line: {line!r}")
+        cell = cell_of(match[1])
+        if cell in tiles:
+            raise ValueError(f"terrain catalog line repeats a cell: {line!r}")
+        tiles[cell] = (match[5], match[2], int(match[3]), match[4])
+    if format_kept_catalog(tiles) != text:
+        raise ValueError("the terrain catalog is not sorted by cell")
+    return tiles
+
+
 def format_cell_catalog(cells):
     """One HGT cell name per line: the cells a source of one object has a tile for."""
     return "".join(f"{name}\n" for name in sorted(hgt_name(*cell) for cell in cells))
@@ -371,6 +408,7 @@ TERRAIN_ADAPTERS = {
                     parse_cell_catalog),
     SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", {"mirror"}, parse_sonny_catalog),
     LINZ_ADAPTER: (LINZ_ORIGIN, f"EPSG:{LINZ_EPSG}", set(), parse_linz_catalog),
+    CEDD_ADAPTER: (CEDD_ORIGIN, f"EPSG:{CEDD_EPSG}", {"mirror"}, parse_kept_catalog),
 }
 OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
 OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -404,6 +442,8 @@ class TerrainSource:
         if self.origin_object is not None or self.adapter == LINZ_ADAPTER:
             return self.origin
         tile, date, _, _ = self.tiles[(longitude, latitude)]
+        if self.adapter in KEPT_RULES:
+            return f"{self.mirror}{self.mirror_file((longitude, latitude))[0]}"
         if self.adapter == SONNY_ADAPTER:
             file_id, _, key = tile.partition("/")
             return f"{self.origin}?id={file_id}&export=download&confirm=t" + (f"&resourcekey={key}" if key else "")
@@ -431,6 +471,10 @@ class TerrainSource:
             rejects = {"below": SONNY_HEIGHTS[0], "above": SONNY_HEIGHTS[1], "pixelsAround": SONNY_REJECT_MARGIN}
         elif self.adapter == LINZ_ADAPTER:
             rejects = {"below": LINZ_HEIGHTS[0], "above": LINZ_HEIGHTS[1], "pixelsAround": LINZ_REJECT_MARGIN}
+        elif self.adapter in KEPT_RULES:
+            # Applied when the tiles were made.
+            (below, above), around = KEPT_RULES[self.adapter]
+            rejects = {"below": below, "above": above, "pixelsAround": around}
         return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
                 "areaSha256": self.area_sha256, "rejects": rejects}
 
@@ -439,7 +483,14 @@ class TerrainSource:
         if self.adapter == SONNY_ADAPTER:
             _, _, size, sha256 = self.tiles[cell]
             return f"{hgt_name(*cell)}.zip", size, sha256
+        if self.adapter in KEPT_RULES:
+            _, _, size, sha256 = self.tiles[cell]
+            return f"{hgt_name(*cell)}.hgt.gz", size, sha256
         raise ValueError(f"{self.id} keeps no copy of its files")
+
+    def provenance_file(self, cell):
+        """The name and SHA-256 of the file beside a kept tile that names what it was made from."""
+        return f"{hgt_name(*cell)}.txt", self.tiles[cell][0]
 
     def identity(self):
         identity = {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
@@ -986,8 +1037,33 @@ def read_linz_cell(source, cell, out):
     return heights, read
 
 
+def read_kept_cell(source, cell, out):
+    """The cell's posts from its kept tile, which the build fetched from the bucket before it started, and what was read.
+
+    A kept source has no other place a build may read it from: its
+    publisher's files are a tile pyramid or many small zips, not cells. A
+    tile that was not fetched, or is not the catalog's, stops the cell.
+    """
+    _, date, size, sha256 = source.tiles[cell]
+    name = source.mirror_file(cell)[0]
+    copy = None if source.files is None else source.files / name
+    if copy is None or not copy.is_file():
+        raise ValueError(f"{source.id}: {name} was not fetched from {source.mirror}, and a build reads it from "
+                         "nowhere else (see elevation_cache.py fetch-terrain)")
+    data = copy.read_bytes()
+    found = hashlib.sha256(data).hexdigest()
+    if len(data) != size or found != sha256:
+        raise ValueError(f"{copy} has {len(data)} bytes with SHA-256 {found}, not the catalog's {size} bytes with "
+                         f"SHA-256 {sha256}")
+    try:
+        posts, _ = read_tile(copy)
+    except (OSError, EOFError, ValueError) as error:
+        raise ValueError(f"{copy} is not a gzipped HGT tile: {error}") from None
+    return posts, {"sha256": found, "readBytes": size, "tileDate": date, "via": "mirror"}
+
+
 TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell,
-                   LINZ_ADAPTER: read_linz_cell}
+                   LINZ_ADAPTER: read_linz_cell, CEDD_ADAPTER: read_kept_cell}
 
 
 def terrain_deadline(sources):
