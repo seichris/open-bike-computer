@@ -1867,13 +1867,286 @@ builder's tiles and graphs looked for them:
   median and 15% at most; Valhalla stores no weighted grade above 15%, so
   only the stored maximum slope shows how large a step is.
 - Open channels under bridges are not closed hollows, so these scans do not
-  count them.
+  count them. They are counted in
+  [False steps at crossings](#false-steps-at-crossings).
 
 The result, the gate report, the manifests, the logs and the scans are on
 the map VPS in `/root/bicino-routing-releases/builder-h400-261116/`
 (`diagnostics/` holds the scans). The road check's write-up and its list of
 roads are in the sessions' notes folder on Chris's Mac, under
 `mrdem-canada-20261127/pits/artifacts-20261127/road-check/`.
+
+### False steps at crossings
+
+A lidar terrain model is bare earth. It holds the ground under a bridge's
+deck, and OpenStreetMap often ends a bridge on the channel's bank, so the
+road beside the bridge reads the bank. Where a stream runs through a culvert
+the model may cut its channel through the road's fill. Valhalla grades a
+bridge or tunnel edge from the terrain at its two ends and clamps it to 3%;
+every other edge it samples every 60 m (Valhalla 3.9.2,
+`src/mjolnir/elevationbuilder.cc`). A road beside a bridge's end or over a
+culvert then reads a step it does not have. The road check of the first
+hybrid planet found 21 such steps at closed pits; open channels under
+bridges were beyond it.
+
+On 2026-11-27 every crossing in the two terrain areas was counted, the
+graph's stored grades were read on four city samples, and two fixes were
+compared.
+
+**Recommendation: build the next graded planet with
+`build_graph.py --crossings`**, which grades the road over such a crossing
+from its ends, as Valhalla grades a bridge. On Pittsburgh's sample it cut
+the sites storing a slope of 20% or more from 16 to 3 and made none steeper,
+and it put back the one gate leg the hybrid detoured; Chicago's and San
+Francisco's gate rows did not change. Filling the terrain under the road
+instead did less and made eight sites steeper. No chain stage writes the
+planet's site files yet; that, and the stage's cost on a builder, are the
+work before the build (see [What is not done](#what-is-not-done)).
+
+#### The count
+
+[crossing_steps.py](crossing_steps.py) `sites` reads an extract with
+osmium and keeps every highway bikes may use: motorway to tertiary,
+unclassified, residential, service and track, cycleway, path, bridleway and
+pedestrian, and motorways and footways only where a tag lets bikes on; and
+not where `access` is `no` or `private` without a bicycle tag that allows
+them. A site is one of:
+
+- `bridge-water` or `bridge-other`: a chain of bridge ways from one road end
+  to the other (every `bridge` value but `no`, `false`, `0`, as
+  `--all-bridges` has it), crossed by a mapped waterway or not;
+- `tunnel`: a chain of tunnel ways, portal to portal;
+- `culvert`: a road over a waterway line tagged as a culvert or covered;
+- `untagged`: a road over a waterway line with no bridge or culvert mapped;
+- `ford`: a road and a waterway that share a node; never counted.
+
+Each site's profile is the road 150 m before and after it (or its bridge
+or tunnel), followed onto the most nearly straight highway where a way ends,
+every 5 m, with bilinear heights as Valhalla samples them and every bridge
+or tunnel on the way a straight line between its ends. `measure` reads the
+heights from single cells of the kept hybrid set, by byte range from its
+tars, each checked against the set's cell list.
+
+A **false step** is the road check's rule: within 60 m of the crossing or
+of the bridge's or tunnel's ends the road reads 30% or more over 30 m, and
+20% or less once the low point is bridged. Bridging replaces the profile
+within 75 m by its upper convex hull, a straight line from solid ground on
+one side to solid ground on the other that never runs below the road (for a
+tunnel, the lower hull). Windows wholly on a bridge or in a tunnel are not
+judged, because Valhalla clamps those edges. A **false grade** is the looser
+measure that matters to routing: 10% or more over 60 m, Valhalla's
+sampling interval, that is 5% or less bridged, at a dip of 3 m or more.
+
+Inputs: the 62 Geofabrik extracts of 2026-11-26 for the 48 states, the
+District of Columbia and the 13 provinces and territories, and the kept
+hybrid tiles of 2026-11-27 (`terrain-2026-11-27/hybrid-400-9d183d968adb/`),
+1,806 cells. A site counts only inside the area of 3DEP or MRDEM-30
+(`--area`). Sites that two extracts both hold were counted once.
+
+**11,136 sites read a false step, 2,973 of them on public roads (2,277
+ways), and 77,251 read a false grade.** The road check's 61 public ways were
+the ones beside deep closed pits; open channels at bridges and unmapped
+stream crossings are the larger class, as it expected.
+
+| Kind | Sites | Measured | False steps | on public roads | False grades | on public roads | Graded from ends by (b) |
+|---|---|---|---|---|---|---|---|
+| Bridge over water | 386,471 | 384,009 | 667 | 358 | 17,175 | 12,817 | 33,981 |
+| Bridge over a road, railway or dry ground | 153,441 | 151,355 | 129 | 82 | 3,391 | 2,531 | 9,959 |
+| Tunnel | 76,686 | 72,505 | 199 | 104 | 562 | 299 | – |
+| Culvert | 803,795 | 796,825 | 450 | 151 | 18,233 | 12,850 | 4,042 |
+| Stream crossing, nothing mapped | 1,190,758 | 1,189,296 | 9,691 | 2,278 | 37,890 | 17,384 | 26,579 |
+| Ford | 127,567 | 127,249 | – | – | – | – | – |
+| All | 2,738,718 | 2,721,239 | 11,136 | 2,973 | 77,251 | 45,881 | 74,561 |
+
+Public roads are motorway to tertiary, unclassified and residential, as in
+the road check. A site not measured had no height near the crossing or a
+road too short to judge.
+
+- **By terrain model:** 3DEP 9,244 false steps (0.42% of its measured
+  sites) and 63,405 false grades (2.9%); MRDEM-30 1,892 (0.36%) and 13,846
+  (2.7%).
+- **By road:** tracks 5,598 false steps, minor roads 2,498, paths 2,152,
+  main roads 475, service roads 413. Of the public roads' 2,973, 2,398 are
+  paved and 575 unpaved; a road without a `surface` tag counts as paved,
+  a track, path or bridleway as unpaved.
+- **Where:** California 807 on public roads, Washington 782, Oregon 292,
+  British Columbia 287, then Tennessee 94 and Colorado 88. Most are
+  unmapped crossings of small streams on forest and rural roads in the
+  West: the mapped line spans a ravine that the lidar shows 20 to 50 m
+  deep, under a bridge nobody mapped, a fill the model cut, or a hollow the
+  real road winds around. In each case the bridged line is closer to the
+  road than the channel is. 582 of the unmapped crossings share a node with
+  the stream without a ford tag; 16 lie within 50 m of a mapped bridge's
+  end.
+- **The road check's examples:** County Road 10 at the Blue River bridge
+  reads 58% (4% bridged) and North Black River Road 37% (2%), both false
+  steps; Klickitat River Road's culvert reads 21% on the road's line and is
+  among the sites fix (b) grades from their ends.
+- **Tunnels** are an upper bound: a window across a portal mixes the
+  tunnel's straight line with the approach, which Valhalla grades as two
+  edges. US 189 in Provo Canyon reads 24% here and, by the road check,
+  stores 2%.
+
+The worst public roads:
+
+| Dip | Grade over 30 m (bridged) | Where | Road | Crossing |
+|---|---|---|---|---|
+| 64 m | 110% (5%) | 44.01240, -123.76857, Oregon | Highway 126, trunk | tunnel, 361 m |
+| 43 m | 102% (5%) | 46.69141, -121.55883, Washington | US 12, trunk | bridge over water, 118 m |
+| 52 m | 100% (8%) | 36.70315, -121.37241, California | Harlin Creek, residential | Harlan Creek, nothing mapped |
+| 39 m | 90% (2%) | 47.68832, -124.08909, Washington | C-3000, unclassified | Solleks River, nothing mapped |
+| 33 m | 86% (3%) | 36.36202, -106.43427, New Mexico | unnamed residential | Arroyo del Yeso, nothing mapped |
+| 33 m | 85% (7%) | 43.44338, -108.16982, Wyoming | US 20 / WY 789, trunk | tunnel, 88 m |
+| 20 m | 73% (13%) | 45.58965, -122.07554, Oregon | Historic Columbia River Highway, secondary | bridge over water, 14 m |
+| 31 m | 71% (2%) | 40.84021, -122.01640, California | Fenders Ferry Road, unclassified | bridge over water, 77 m |
+| 36 m | 65% (6%) | 39.10164, -79.72274, West Virginia | Corridor H, trunk | bridge over water |
+| 28 m | 55% (7%) | 49.18995, -118.11255, British Columbia | Paulson Bridge, Highway 3, trunk | bridge over water, 304 m |
+| 23 m | 58% (4%) | 39.92316, -106.34778, Colorado | County Road 10, tertiary | bridge over the Blue River |
+
+The full results are in the notes folder (see [Evidence](#evidence-of-the-crossing-count)).
+
+#### What the graph stores
+
+[prepare_sample.py](prepare_sample.py) cut four river cities in 3DEP, and
+each was built four ways from the same roads: without elevation, with the
+kept hybrid cells (`crossing_steps.py restore`), and with each fix. All four
+take `--all-bridges`. `crossing_steps.py stored` matched every site's road
+with `/trace_attributes` and read the steepest slope Valhalla stores on the
+edges within 60 m of the crossing:
+
+| City | Sites | Hybrid: 10%+ | 15%+ | 20%+ | Fix (a): 20%+ | Steeper | Fix (b): 10%+ | 15%+ | 20%+ | Steeper |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Pittsburgh | 270 | 49 | 17 | 16 | 13 | 8 | 28 | 5 | 3 | 0 |
+| Portland | 145 | 6 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 0 |
+| San Francisco | 371 | 30 | 14 | 12 | 11 | 2 | 25 | 13 | 11 | 0 |
+| Chicago | 371 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+"Steeper" counts the sites whose stored slope grew by more than 2 points.
+
+- **Pittsburgh** is where bridges cross hollows and streets. The hybrid
+  stores 28% at both ends of the Panther Hollow Bridge in Schenley Park,
+  24% at the ends of the East Sycamore Street and P J McArdle Roadway
+  bridges below Mount Washington, and 20% at the Swindell Bridge; the edge
+  beside the Panther Hollow Bridge has a weighted grade of 15%, the most
+  Valhalla stores. On the Road profile a route across the Panther
+  Hollow Bridge is 6.5% longer than without elevation, a detour. The three
+  sites still at 20% or more after fix (b) are Shaler Street, the Fritz
+  Street footway and the Turkey Run Trail, whose slopes stay steep once
+  bridged (12% to 17%): real hillside ways, which the rule leaves alone.
+- **Portland**'s Willamette bridges read clean: no site stores 15% or more,
+  and no leg changes.
+- **San Francisco**'s 12 sites at 20% or more are eight hillside streets
+  over mapped culverts (seven in the Portola, Sanchez Street in Noe Valley),
+  the Presidio's Ecology Trail, the two sidewalks at the Golden Gate
+  Bridge's north end, and a footway. All but the footway stay steep once
+  bridged, so fix (b) leaves them and fixes the footway (20% to 3%).
+- **Chicago**'s river bridges are mostly movable bridges, which
+  `--all-bridges` already grades from their ends; nothing stores 10%.
+
+#### Two fixes
+
+Both read the same sites and heights, and fix the same ones
+(`crossing_steps.fix_reach`): every false step, and every other site whose
+road reads at least 12% over 30 m near the crossing, at least 8 points less
+once bridged and at most 20%; in both cases the line must lift the road by
+at least 2 m. For a false step the line reaches 75 m, as in the count: no
+road has 30%. Short of that, it reaches 75 m beyond a bridge's ends but only
+45 m either side of a crossing without one, the width a channel cut through
+a road's fill takes in posts one arc-second apart, so that a real valley is
+not flattened.
+
+- **(a) Fill the terrain under the road** in the elevation build: every
+  post around the road's points is raised to the line's height at the
+  nearest point. A post holds one height, and at a bridge's end the road
+  passing under the bridge often lies within one post of the end: raising
+  the post would give that road a hump. Such posts were left alone, so
+  those ends kept their step (the Panther Hollow Bridge, which spans a road
+  and trails in the hollow). Where no road was guarded, raised posts
+  reached neighbouring paths and ramps: eight Pittsburgh sites and two in
+  San Francisco stored a steeper slope than before, up to 28% on a footway
+  that read 20%.
+- **(b) Grade the road from its ends** in the graph build
+  ([crossing_split.py](crossing_split.py), `build_graph.py --crossings`):
+  the road is cut at new nodes where the line meets solid ground, and the
+  stretch from there to the bridge's end, or across the crossing, is tagged
+  `bridge=yes` and `bicino:interpolated=crossing`. Valhalla grades it from
+  the terrain at its two ends and clamps it to 3%, and the nodes inside
+  take the interpolated height. The terrain is unchanged, so the road under
+  the bridge keeps its ground. Bicycle costing does not read the bridge
+  flag (Valhalla 3.9.2 `src/sif`), and the route service does not report
+  it. Pittsburgh's sample cut 94 ways and graded 163 pieces from their
+  ends, with 83 new nodes, 100 new ways and 118 relations given the pieces.
+- **(c) Change Valhalla's sampling**, for example to skip samples next to a
+  bridge, is not needed: (b) uses Valhalla's own interpolation, and the
+  pinned image and its `graph.lua` pin stay as they are.
+
+| Gate | Hybrid | Fix (a) | Fix (b) |
+|---|---|---|---|
+| Pittsburgh, 4 legs | misses: Panther Hollow Bridge, road, +6.5%, a detour | the same detour | meets: longest +0.1%, 6%+ share 2% |
+| Chicago, 2 legs | meets: 0.0% | 0.0% | 0.0% |
+| San Francisco, 4 hilly legs | `use_hills` changes 2/4, climb saved 6 m, longest +3.4% | the same | the same |
+
+San Francisco's identical row is the check that real climbs are kept: the
+fix grades only stretches next to crossings that read far steeper than
+their bridged line.
+
+On the count's terms, fix (b) would change 74,561 sites in the two areas,
+2.7% of them: 33,981 bridges over water and 9,959 other bridges, 4,042
+culverts and 26,579 unmapped crossings, 41,398 of them on 39,194 public-road
+ways. That is every false step outside tunnels and 22,488 of the 76,689
+false grades there; the other false grades are wider dips at crossings
+without a bridge, which the 45 m reach leaves alone.
+
+#### Pittsburgh in the gate
+
+Pittsburgh is added to [elevation-probes.json](elevation-probes.json) as a
+flat sample city with the Panther Hollow leg and three flat river crossings
+downtown (Allegheny, Monongahela and the Hot Metal Bridge), which keep its
+median honest. With the leg alone the median 6%+ share is 15% on any
+source: the park's own slopes. On the four legs the hybrid misses with the
+detour and fix (b) meets every target. Portland showed no false step on
+its bridges and is not added. Other Pittsburgh legs that the hybrid
+lengthens run over Mount Washington's real hills.
+
+#### What is not done
+
+- **The planet's site files.** `--crossings` takes site files; a chain
+  stage must write them for the United States and Canada from the planet
+  snapshot before the graded build (osmium extract into bands, then
+  `crossing_steps.py sites` in parallel), and the graded build stage must
+  pass them. This laptop took about 40 minutes, two processes at a time,
+  for the 62 extracts, and up to 10 GB of memory for British Columbia's
+  3 million waterways; a builder can run the bands side by side. Measuring
+  them from 1,806 cells of the kept set took 23 minutes. The tools need
+  pyosmium, numpy and shapely besides the osmium command; the builder runs
+  `build_graph.py` with its host's Python, which has none of the three
+  (`setup.sh` installs `osmium-tool` and `python3` only).
+- **The rewrite at planet size.** The osmChange file is built from the cut
+  ways and their parent relations only (`osmium getid`, `osmium
+  getparents`), and `osmium apply-changes` writes the planet once more:
+  about 80 GB of scratch and, by its speed on extracts, half an hour or
+  more. Not measured.
+- **Tunnels** are counted, not fixed: a tunnel mapped beyond its portal
+  puts the hill's height at the approach's end (Highway 126 in Oregon,
+  110%). Fix (b) could grade the approach from the portal's solid ground
+  the same way, with the lower hull; not tried.
+- **Narrow valleys**, where the mapped road lies over the drop beside it,
+  are not crossings; neither rule touches them unless a stream crosses
+  there.
+- **Fords** are real dips and stay.
+- Valhalla's 60 m sampling may or may not land in a step; the stored values
+  above are what it did on these graphs, and a rebuild with other edges can
+  land differently.
+
+#### Evidence of the crossing count
+
+In the sessions' notes folder on Chris's Mac, under
+`crossing-steps-20261127/`: the measured results of the eight groups of
+extracts and their summary, the extracts' URLs and MD5s, the four samples'
+stored grades, gate reports and graph manifests, Pittsburgh's osmChange
+file, and the scripts that drove them, with the prototype of fix (a)
+(`prototypes/`). The extracts, the site files (1.2 GB; the scripts write
+them again in about 40 minutes) and the samples' graphs were not kept.
 
 ## Pull, assemble, and install on Coolify
 

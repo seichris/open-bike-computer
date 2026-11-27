@@ -11,11 +11,12 @@ such an edge.
 
 For every site of crossing_steps.py's site files, the road's profile is
 read from `--elevation` as Valhalla reads it and bridged as
-crossing_steps.py bridges it: the upper convex hull, within 75 m of a
-bridge's ends or 45 m of a crossing without one. A site is fixed where the
-road reads at least 12% over 30 m near it, at least 8 points less once
-bridged and at most 20%, and the line lifts it by at least 2 m somewhere
-(crossing_steps.selected). Its road is then cut at new nodes where the line
+crossing_steps.py bridges it: the upper convex hull. A site is fixed where
+the road reads a false step (30% or more over 30 m near it, 20% or less
+bridged within 75 m), or where it reads at least 12%, at least 8 points less
+bridged and at most 20%, bridged within 75 m of a bridge's ends or 45 m of a
+crossing without one; in both cases the line must lift it by at least 2 m
+somewhere (crossing_steps.fix_reach). Its road is then cut at new nodes where the line
 meets solid ground on either side, and the stretch between them, from the
 crossing or the bridge's end out to that ground, is tagged `bridge=yes` and
 `bicino:interpolated=crossing`. The terrain itself is not changed, so a road
@@ -212,7 +213,6 @@ def split_way(way_id, nodes, tags, plan, ids):
     bounds = [0] + sorted(cut for cut in cuts if 0 < cut < len(new_refs) - 1) + [len(new_refs) - 1]
     pieces = []
     for number, (first, last) in enumerate(zip(bounds, bounds[1:])):
-        start, end = new_coords[first], new_coords[last]
         middle = point_along(new_coords[first:last + 1])
         piece_tags = dict(tags)
         if any(near_stretch(middle, stretch) for stretch in plan["stretches"]) and not (
@@ -220,7 +220,6 @@ def split_way(way_id, nodes, tags, plan, ids):
             piece_tags["bridge"] = "yes"
             piece_tags[TAG] = TAG_VALUE
         pieces.append((way_id if number == 0 else ids.next_way(), new_refs[first:last + 1], piece_tags))
-        del start, end
     return pieces, made
 
 
@@ -349,7 +348,7 @@ def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=pri
             members = members_after(relation, replacement)
             if members is not None:
                 changed_relations.append({**relation, "members": members, "version": relation["version"] + 1})
-        change = Path(out).with_suffix(".osc")
+        change = Path(out).with_name(Path(out).name.split(".")[0] + ".osc")
         change.write_text(change_xml(made, created, modified, changed_relations))
         subprocess.run(["osmium", "apply-changes", str(roads), str(change), "-o", str(out), "--overwrite"],
                        check=True)

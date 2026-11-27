@@ -305,13 +305,6 @@ def metres(lons, lats, lat0):
     return np.asarray(lons) * scale, np.asarray(lats) * METRES_PER_DEGREE_LATITUDE
 
 
-def degrees(xs, ys, lat0):
-    import numpy as np
-
-    scale = METRES_PER_DEGREE_LONGITUDE * math.cos(math.radians(lat0))
-    return np.asarray(xs) / scale, np.asarray(ys) / METRES_PER_DEGREE_LATITUDE
-
-
 class NodeIndex:
     """Which ways hold a node, and where."""
 
@@ -1237,15 +1230,17 @@ def measure_site(record, side_a, side_b, flags_a=None, flags_b=None, bridge_span
 # Which sites a fix lifts -------------------------------------------------------
 
 FIX_KINDS = ("bridge-water", "bridge-other", "culvert", "untagged")
-# A site is fixed where its road reads at least FIX_STEEP over 30 m, at most FIX_PLAUSIBLE once bridged, at least
-# FIX_DROP less once bridged, and the line lifts it by at least FIX_DIP somewhere.
+# A site is fixed where its road reads a false step, or where it reads at least FIX_STEEP over 30 m, at most
+# FIX_PLAUSIBLE once bridged within its reach and at least FIX_DROP less; in both cases the line must lift
+# it by at least FIX_DIP somewhere.
 FIX_STEEP = 0.12
 FIX_PLAUSIBLE = PLAUSIBLE
 FIX_DROP = 0.08
 FIX_DIP = 2.0
-# How far from a bridge's ends, or from a crossing without one, the line may reach. A channel the terrain
-# cuts through a road's fill reads in posts one arc-second apart, about 30 m, on either side of it; a
-# bridge's abutments and approach fills reach further.
+# How far from a bridge's ends, or from a crossing without one, the line may reach for a site that is no
+# false step. A channel the terrain cuts through a road's fill reads in posts one arc-second apart, about
+# 30 m, on either side of it, and a real valley is wider; a bridge's abutments and approach fills reach
+# further. A false step, 30% or more, is no road's grade, and its line reaches BRIDGE_SPAN everywhere.
 BRIDGE_REACH = BRIDGE_SPAN
 CROSSING_REACH = 45.0
 # A point the line lifts by less than this is on solid ground.
@@ -1253,30 +1248,44 @@ LIFT = 0.3
 
 
 def reach_of(record):
-    """How far the bridging line may reach from the crossing, or from a bridge's ends."""
+    """How far the bridging line may reach from the crossing, or from a bridge's ends, short of a false step."""
     return BRIDGE_REACH if record["span"] != SPAN_NONE else CROSSING_REACH
 
 
 def selected(measured, steep=FIX_STEEP, plausible=FIX_PLAUSIBLE, drop=FIX_DROP, dip=FIX_DIP):
-    """Whether a site's measure, bridged within its reach, calls for a fix."""
+    """Whether a site's measure, bridged within its reach, calls for a fix short of a false step."""
     return (measured.get("measured", False) and measured["grade"] >= steep and measured["bridgedGrade"] <= plausible
             and measured["grade"] - measured["bridgedGrade"] >= drop and measured["dip"] >= dip)
 
 
-def site_lift(record, side_a, side_b, flags_a, flags_b, steep=FIX_STEEP, plausible=FIX_PLAUSIBLE, dip=FIX_DIP, drop=FIX_DROP):
+def fix_reach(record, side_a, side_b, flags_a=None, flags_b=None, steep=FIX_STEEP, plausible=FIX_PLAUSIBLE,
+              dip=FIX_DIP, drop=FIX_DROP):
+    """(reach, measure) of a site a fix lifts, or None: a false step within BRIDGE_SPAN, else `selected`
+    within the site's own reach."""
+    if record["kind"] not in FIX_KINDS:
+        return None
+    wide = measure_site(record, side_a, side_b, flags_a, flags_b, bridge_span=BRIDGE_SPAN)
+    if wide.get("falseStep") and wide["dip"] >= dip:
+        return BRIDGE_SPAN, wide
+    reach = reach_of(record)
+    own = wide if reach == BRIDGE_SPAN else measure_site(record, side_a, side_b, flags_a, flags_b,
+                                                         bridge_span=reach)
+    return (reach, own) if selected(own, steep, plausible, drop, dip) else None
+
+
+def site_lift(record, side_a, side_b, flags_a, flags_b, steep=FIX_STEEP, plausible=FIX_PLAUSIBLE, dip=FIX_DIP,
+              drop=FIX_DROP):
     """The heights the road should have at each point of its two sides, or None when the site stays.
 
     Returns (lift_a, lift_b, measured): the line's height at each side point where it lifts the road by
-    more than LIFT, NaN elsewhere, and the site's measure, bridged within its reach, before the fill.
+    more than LIFT, NaN elsewhere, and the site's measure, bridged within the reach used, before the fix.
     """
     import numpy as np
 
-    if record["kind"] not in FIX_KINDS:
+    chosen = fix_reach(record, side_a, side_b, flags_a, flags_b, steep, plausible, dip, drop)
+    if chosen is None:
         return None
-    reach = reach_of(record)
-    measured = measure_site(record, side_a, side_b, flags_a, flags_b, bridge_span=reach)
-    if not selected(measured, steep, plausible, drop, dip):
-        return None
+    reach, measured = chosen
     span = record["spanLength"]
     positions, heights, _ = profile(side_a, side_b, span, flags_a, flags_b)
     zone = (positions >= -reach) & (positions <= span + reach) & ~np.isnan(heights)
@@ -1324,10 +1333,7 @@ def measure(site_files, source, out, jobs=6, log=print):
             entry = {key_: value for key_, value in record.items() if key_ != "sideA"}
             entry.update(measure_site(record, heights[a], heights[b], flags[a], flags[b]))
             if entry["measured"] and record["kind"] in FIX_KINDS:
-                reach = reach_of(record)
-                fixing = (entry if reach == BRIDGE_SPAN else
-                          measure_site(record, heights[a], heights[b], flags[a], flags[b], bridge_span=reach))
-                entry["fix"] = selected(fixing)
+                entry["fix"] = fix_reach(record, heights[a], heights[b], flags[a], flags[b]) is not None
             results.append(entry)
     document = {"schema": RESULTS_SCHEMA, "rule": rule(), "missingCells": missing, "duplicates": duplicates,
                 "regions": [{"file": Path(path).name, "region": meta["region"], "source": meta["source"],

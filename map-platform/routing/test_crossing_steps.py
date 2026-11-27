@@ -1,8 +1,6 @@
 import gzip
 import hashlib
-import io
 import json
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -412,6 +410,31 @@ class SplitTests(unittest.TestCase):
         replaced = crossing_split.members_after(relation, {7: pieces})
         self.assertEqual(replaced, [("w", pieces[1][0], "from"), ("n", 3, "via"), ("w", 8, "to")])
         self.assertIsNone(crossing_split.members_after(relation, {9: pieces}))
+
+
+class BuildFlagTests(unittest.TestCase):
+    def test_crossings_need_the_elevation_they_read(self):
+        import contextlib
+        import io
+        import sys
+        from unittest.mock import patch
+
+        import build_graph
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "roads.osm.pbf"
+            source.write_bytes(b"roads")
+            sites = Path(directory) / "sites.npz"
+            sites.write_bytes(b"sites")
+            argv = ["build_graph.py", "--sample", "--source", str(source), "--source-sha256",
+                    hashlib.sha256(b"roads").hexdigest(), "--source-url", "https://example.org/roads",
+                    "--work", str(Path(directory) / "work"), "--crossings", str(sites)]
+            errors = io.StringIO()
+            with patch.object(sys, "argv", argv), contextlib.redirect_stderr(errors), \
+                    self.assertRaises(SystemExit):
+                build_graph.main()
+            self.assertIn("--crossings reads the road's heights from --elevation", errors.getvalue())
+            self.assertFalse((Path(directory) / "work").exists())
 
 
 class StoredTests(unittest.TestCase):

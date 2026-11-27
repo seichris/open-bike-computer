@@ -1655,7 +1655,7 @@ class SampleTests(unittest.TestCase):
             self.assertRegex(city["city"], r"^[A-Za-z0-9_.:/@+, -]+$")
         # Every sample city in the United States carries the country's relation.
         united_states = {city["city"] for city in self.CITIES if 148838 in city.get("adminRelations", [])}
-        self.assertEqual(united_states, {"New York", "Chicago", "Houston", "San Francisco"})
+        self.assertEqual(united_states, {"New York", "Chicago", "Houston", "San Francisco", "Pittsburgh"})
 
     def test_a_sample_build_takes_boundaries_from_the_region_and_skips_the_relation_check(self):
         commands = []
