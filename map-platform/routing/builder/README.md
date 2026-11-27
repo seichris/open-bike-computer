@@ -81,12 +81,15 @@ ways:
   North America: it downloads 3DEP's 954 tiles that have a Copernicus cell,
   364 GB, reads the part of the MRDEM-30 object under each of 2,338 cells,
   about 60 MB of pixels a cell, cuts both to their areas, and blends 26,475
-  cells. Europe adds SONNY_TILES of Sonny's tiles, SONNY_GB GB of zips from Google
-  Drive, each cut to its countries. No builder has run this yet, so its
-  time is not known. MRDEM-30 is read from one object in `ca-central-1`; a
-  build stops when its size or ETag is no longer the pinned one, or when a
-  zip of Sonny's is not the one its catalog pins: Drive serves a page of
-  its own in place of a file that has had too many downloads that day. A terrain worker holds a whole 3DEP tile: in the Chicago
+  cells. Europe adds 848 of Sonny's tiles, 4.1 GB of zips from Google
+  Drive, each cut to its countries. The North American part ran on a
+  builder on 2026-11-27 (see the runbook's
+  [planet gate for the hybrid](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27));
+  no builder has read Sonny's tiles yet. MRDEM-30 is read from one object
+  in `ca-central-1`; a build stops when its size or ETag is no longer the
+  pinned one, or when a zip of Sonny's is not the one its catalog pins:
+  Drive serves a page of its own in place of a file that has had too many
+  downloads that day. A terrain worker holds a whole 3DEP tile: in the Chicago
   rehearsal the container with three workers peaked at 3.8 GiB, about
   1.3 GiB a worker, which is 26 GiB for 20 jobs. The stage keeps three more
   things on scratch: the opened tiles (84 GB at 400 m), the terrain tiles

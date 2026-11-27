@@ -84,7 +84,12 @@ as the third source of the list after 3DEP and MRDEM-30.
   harbour basins and fairways that the Belgian and Dutch models include
   (the Scheldt at Antwerp down to −24 m, the IJ at Amsterdam to −13 m).
   They are dropped and filled from opened Copernicus, as MRDEM-30's are. No
-  post is above 7,000 m.
+  post is above 7,000 m. Shallower hollows stay: the North American lidar
+  puts false steps under 61 public-road ways at stream crossings, culverts
+  and narrow valleys (see the
+  [hybrid planet gate](refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)),
+  and Europe's lidar will do the same in places. Nobody has scanned Sonny's
+  tiles for them.
 - **Google Drive.** Drive is the only host, and the files can be replaced
   or withdrawn at any time; a changed file stops the build. Drive answers a
   file that has had too many downloads in a day with a page of its own,
