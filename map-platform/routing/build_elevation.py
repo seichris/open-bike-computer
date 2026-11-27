@@ -22,18 +22,26 @@ go to `--raw` first, then each cell is opened from its own raw posts and a
 margin of its eight neighbours' raw posts into `--out`, so the ellipse spans
 cell borders and no cell depends on the order the cells were opened in.
 
-`--terrain-sources` adds a bare-earth source on top: the USGS 3DEP 1/3
-arc-second tiles that elevation-sources.json approves for routing. Each
-dated tile of its catalog is downloaded, checked against the catalog's size
-and ETag, and resampled onto its cell's posts in `--terrain`. The opened
-Copernicus tiles then go to `--opened`, and `--out` gets the hybrid: a post
-is 3DEP's where 3DEP has data and opened Copernicus's elsewhere. 3DEP's
-newest tiles stop at the border of the United States, but older ones carry
-fill for Mexico and Canada from other sources, so every tile is first cut to
-the source list's area, the United States. The opened surface lies under the
-ground, so the two would meet in a step. The difference between them at
-3DEP's edge is therefore carried into the Copernicus side and fades to zero
-over BLEND_POSTS posts. 3DEP's own posts are never changed.
+`--terrain-sources` adds the bare-earth sources that elevation-sources.json
+approves for routing, each inside its own area: the USGS 3DEP 1/3 arc-second
+tiles for the conterminous United States, and Natural Resources Canada's
+MRDEM-30 terrain model for Canada. A 3DEP cell is one dated tile of the
+source's catalog, downloaded and checked against the catalog's size and
+ETag. MRDEM-30 is one raster of all Canada on a 30 m Lambert grid; a cell
+reads the part of it under its posts in HTTP ranges, and the object's size
+and ETag must be the pinned ones before and after. Both are resampled onto
+the cell's posts and cut to the source's area: 3DEP's older tiles carry fill
+for Mexico and Canada from other sources, and MRDEM-30 holds heights beyond
+Canada's border. A cell on the border takes each post from the source whose
+area holds it; the result is one terrain tile per cell in `--terrain`.
+
+The opened Copernicus tiles then go to `--opened`, and `--out` gets the
+hybrid: a post is the terrain's where a terrain source has data and opened
+Copernicus's elsewhere. The opened surface lies under the ground, so the two
+would meet in a step. The difference between them at the terrain's edge is
+therefore carried into the Copernicus side and fades to zero over
+BLEND_POSTS posts. The terrain's own posts are never changed, and the two
+terrain sources meet at the border as they are.
 """
 
 import argparse
@@ -52,7 +60,7 @@ import time
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 POSTS = 3601
@@ -60,7 +68,8 @@ STEP = 1 / 3600
 NO_DATA = -32768
 MARGIN = 2 * STEP
 CELL_DEADLINE = 900
-# A 3DEP tile is up to 500 MB, twenty times a Copernicus cell: its download gets an hour.
+# A 3DEP tile is up to 500 MB, twenty times a Copernicus cell: its download gets an hour. A cell that reads
+# only a part of one object, as MRDEM-30's do, keeps the cell deadline.
 TERRAIN_DEADLINE = 3600
 ROUNDS = 3
 # A connection that closes in the middle of a body raises IncompleteRead, which is no OSError.
@@ -78,6 +87,15 @@ TERRAIN_PIXELS_PER_POST = 3
 TERRAIN_OVERLAP = 6
 TERRAIN_HEIGHTS = (-500, 7000)
 TERRAIN = "terrain"
+# Natural Resources Canada's MRDEM-30 terrain model: one cloud-optimised GeoTIFF of all Canada, 30 m pixels on
+# NAD83(CSRS) / Canada Atlas Lambert, heights in CGVD2013.
+MRDEM_ADAPTER = "nrcan-mrdem-30-cog-v1"
+MRDEM_URL = "https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif"
+MRDEM_EPSG = 3979
+MRDEM_PIXEL = 30.0
+MRDEM_NO_DATA = -32767.0
+# NAD83(CSRS) in degrees, the datum of MRDEM-30's grid: posts are placed in it so that no datum shift is applied.
+MRDEM_GEOGRAPHIC_EPSG = 4617
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -207,20 +225,48 @@ def parse_terrain_catalog(text):
     return tiles
 
 
+def format_cell_catalog(cells):
+    """One HGT cell name per line: the cells a source of one object has a tile for."""
+    return "".join(f"{name}\n" for name in sorted(hgt_name(*cell) for cell in cells))
+
+
+def parse_cell_catalog(text):
+    """{cell: None} of a catalog that names cells only."""
+    try:
+        cells = dict.fromkeys(cell_of(line) for line in text.splitlines())
+    except ValueError as error:
+        raise ValueError(f"invalid terrain catalog line: {error}") from None
+    if format_cell_catalog(cells) != text:
+        raise ValueError("the terrain catalog repeats a cell or is not sorted by cell")
+    return cells
+
+
 TERRAIN_FIELDS = {
     "id", "adapter", "title", "surfaceModel", "horizontalCrs", "verticalDatum", "verticalUnits", "origin",
     "coverage", "area", "areaBytes", "areaSha256", "areaSource", "catalog", "catalogBytes", "catalogSha256",
     "tileCount", "license", "attribution", "termsUrl", "attributionUrl", "modifications", "approvedForRouting",
     "approvedAt", "approvedBy",
 }
+# What each adapter's source must say besides: (origin, horizontal CRS, further fields, catalog parser).
+# A source of one object pins that object's size and ETag, as a tile catalog pins every tile's.
+TERRAIN_ADAPTERS = {
+    TERRAIN_ADAPTER: (f"{TERRAIN_BUCKET}/{TERRAIN_PREFIX}", "EPSG:4269", set(), parse_terrain_catalog),
+    MRDEM_ADAPTER: (MRDEM_URL, f"EPSG:{MRDEM_EPSG}", {"originBytes", "originEtag", "originModified"},
+                    parse_cell_catalog),
+}
+OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
+OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 @dataclass(frozen=True)
 class TerrainSource:
-    """A bare-earth source of the routing elevation source list, one dated tile per cell.
+    """A bare-earth source of the routing elevation source list.
 
-    `area` is the gzipped GeoJSON polygon the source is approved for. Posts
-    outside it are dropped, whatever the tiles hold there.
+    `tiles` maps each cell the source has a tile for to its dated tile, or to
+    None when the source is one object that every cell reads a part of;
+    `origin_object` is then that object's size and ETag. `area` is the gzipped
+    GeoJSON polygon the source is approved for. Posts outside it are dropped,
+    whatever the source holds there.
     """
     id: str
     origin: str
@@ -230,32 +276,62 @@ class TerrainSource:
     attribution_url: str
     area: Path
     area_sha256: str
+    adapter: str = TERRAIN_ADAPTER
+    origin_object: tuple = None
 
     def tile_url(self, longitude, latitude):
+        if self.origin_object is not None:
+            return self.origin
         tile, date, _, _ = self.tiles[(longitude, latitude)]
         return f"{self.origin}/{tile}/USGS_13_{tile}_{date}.tif"
 
+    def pin(self, cell):
+        """What a terrain tile's receipt names when this source, as pinned now, gave it posts."""
+        size, etag = self.origin_object or self.tiles[cell][2:]
+        return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
+                "areaSha256": self.area_sha256}
+
     def identity(self):
-        return {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
-                "termsUrl": self.terms_url, "attributionUrl": self.attribution_url}
+        identity = {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
+                    "termsUrl": self.terms_url, "attributionUrl": self.attribution_url}
+        if self.origin_object is not None:
+            identity["originBytes"], identity["originEtag"] = self.origin_object
+        return identity
 
 
-def load_terrain_source(path):
-    """The one terrain source of elevation-sources.json, with its catalog checked against its pin."""
+def load_terrain_sources(path):
+    """The terrain sources of elevation-sources.json in its order, each catalog and area checked against its pin."""
     document = json.loads(path.read_text())
-    sources = document.get("terrain") if isinstance(document, dict) else None
-    if not isinstance(sources, list) or len(sources) != 1 or document.get("schemaVersion") != 1:
-        raise ValueError("the elevation source list must hold exactly one terrain source")
-    value = sources[0]
-    if not isinstance(value, dict) or set(value) != TERRAIN_FIELDS:
+    values = document.get("terrain") if isinstance(document, dict) else None
+    if not isinstance(values, list) or not values or document.get("schemaVersion") != 2:
+        raise ValueError("the elevation source list must hold terrain sources under schemaVersion 2")
+    sources = [_terrain_source(path, value) for value in values]
+    if len({source.id for source in sources}) != len(sources):
+        raise ValueError("the elevation source list names a terrain source twice")
+    return tuple(sources)
+
+
+def _terrain_source(path, value):
+    named = value.get("adapter") if isinstance(value, dict) else None
+    adapter = TERRAIN_ADAPTERS.get(named) if isinstance(named, str) else None
+    if adapter is None:
+        raise ValueError("unsupported terrain source adapter")
+    origin, crs, further, parse_catalog = adapter
+    if set(value) != TERRAIN_FIELDS | further:
         raise ValueError("invalid terrain source fields")
-    if (value["adapter"] != TERRAIN_ADAPTER or value["origin"] != f"{TERRAIN_BUCKET}/{TERRAIN_PREFIX}"
-            or value["surfaceModel"] != "dtm" or value["horizontalCrs"] != "EPSG:4269"
+    if (value["origin"] != origin or value["surfaceModel"] != "dtm" or value["horizontalCrs"] != crs
             or value["verticalUnits"] != "m"
             or not isinstance(value["id"], str) or re.fullmatch(r"[a-z][a-z0-9-]{2,63}", value["id"]) is None):
         raise ValueError("unsupported terrain source contract")
     if value["approvedForRouting"] is not True:
         raise ValueError(f"{value['id']} is not approved for routing")
+    origin_object = None
+    if "originBytes" in further:
+        size, etag, modified = value["originBytes"], value["originEtag"], value["originModified"]
+        if (type(size) is not int or size <= 0 or not isinstance(etag, str) or OBJECT_ETAG.fullmatch(etag) is None
+                or not isinstance(modified, str) or OBJECT_DATE.fullmatch(modified) is None):
+            raise ValueError(f"{value['id']} must pin its origin's size, ETag and date")
+        origin_object = (size, etag)
     pinned = {}
     for kind in ("catalog", "area"):
         name = value[kind]
@@ -265,17 +341,40 @@ def load_terrain_source(path):
         if (len(pinned[kind]) != value[f"{kind}Bytes"]
                 or hashlib.sha256(pinned[kind]).hexdigest() != value[f"{kind}Sha256"]):
             raise ValueError(f"{name} is not the {kind} the source list pins")
-    tiles = parse_terrain_catalog(pinned["catalog"].decode())
+    tiles = parse_catalog(pinned["catalog"].decode())
     if len(tiles) != value["tileCount"]:
         raise ValueError(f"{value['catalog']} holds {len(tiles)} tiles, not {value['tileCount']}")
     for field in ("termsUrl", "attributionUrl"):
         if not isinstance(value[field], str) or not value[field].startswith("https://"):
             raise ValueError(f"terrain source {field} must be HTTPS")
     return TerrainSource(value["id"], value["origin"], tiles, value["catalogSha256"], value["termsUrl"],
-                         value["attributionUrl"], path.parent / value["area"], value["areaSha256"])
+                         value["attributionUrl"], path.parent / value["area"], value["areaSha256"],
+                         value["adapter"], origin_object)
 
 
-@functools.lru_cache(maxsize=2)
+@dataclass(frozen=True)
+class Terrain:
+    """The terrain sources of a build, in the order of the source list, and the cells they have tiles for.
+
+    `cells` maps a cell to the sources with a tile for it. The cell's terrain
+    tile takes each post from the first of them that has data there inside
+    its own area. The areas of the checked-in sources overlap only in the
+    sea around Machias Seal Island, which both countries claim.
+    """
+    sources: tuple
+    cells: dict
+
+    @classmethod
+    def over(cls, sources, keep):
+        """The sources over the cells of `keep` that one of them has a tile for."""
+        cells = {cell: tuple(source for source in sources if cell in source.tiles) for cell in keep}
+        return cls(tuple(sources), {cell: found for cell, found in cells.items() if found})
+
+    def ids(self):
+        return [source.id for source in self.sources]
+
+
+@functools.lru_cache(maxsize=4)
 def load_area(path, sha256):
     """The area of a terrain source: its polygon, and the same prepared for containment tests."""
     from shapely.geometry import shape
@@ -412,11 +511,10 @@ def terrain_posts(dataset, cell):
     return heights, int((~valid).sum())
 
 
-def build_terrain_cell(cell, chosen, out):
-    """Download the cell's dated 3DEP tile, check it against the catalog and write its posts inside the area."""
+def read_usgs_cell(source, cell, out):
+    """The cell's posts from its dated 3DEP tile, downloaded and checked against the catalog, and what was read."""
     import rasterio
 
-    source = chosen[cell]
     _, date, size, etag = source.tiles[cell]
     url = source.tile_url(*cell)
     scratch = out / "downloads" / f"{hgt_name(*cell)}.tif"
@@ -429,18 +527,144 @@ def build_terrain_cell(cell, chosen, out):
             heights, invalid = terrain_posts(dataset, cell)
     finally:
         scratch.unlink(missing_ok=True)
-    outside = clip_to_area(heights, cell, load_area(source.area, source.area_sha256))
+    return heights, {"sha256": sha256, "readBytes": size, "tileDate": date, "invalidPixels": invalid}
+
+
+def object_identity(url, attempts=6):
+    """Size and ETag of the object at `url`, from a HEAD request."""
+    request = urllib.request.Request(url, method="HEAD")
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return int(response.headers["Content-Length"]), response.headers.get("ETag", "").strip('"')
+        except TRANSFER_ERRORS:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def mrdem_window(dataset, cell):
+    """The pixels of the MRDEM-30 raster under the cell's posts, two posts and two pixels wider; None for none.
+
+    The raster is refused unless it is laid out as MRDEM-30 is: float32,
+    Canada Atlas Lambert on NAD83(CSRS), 30 m pixels, -32767 for no data.
+    A cell's box of longitudes and latitudes is no rectangle on that grid,
+    so its edges are followed point by point.
+    """
+    from rasterio.crs import CRS
+    from rasterio.warp import transform_bounds
+    from rasterio.windows import Window, from_bounds
+
+    transform, crs = dataset.transform, dataset.crs
+    if (dataset.driver != "GTiff" or dataset.count != 1 or dataset.dtypes[0] != "float32"
+            or dataset.nodata != MRDEM_NO_DATA or crs is None or crs.to_epsg() != MRDEM_EPSG
+            or transform.b or transform.d or not math.isclose(transform.a, MRDEM_PIXEL, rel_tol=1e-9)
+            or not math.isclose(transform.e, -MRDEM_PIXEL, rel_tol=1e-9)):
+        raise ValueError("not the MRDEM-30 raster")
+    longitude, latitude = cell
+    span = (POSTS - 1) * STEP
+    left, bottom, right, top = transform_bounds(
+        CRS.from_epsg(MRDEM_GEOGRAPHIC_EPSG), crs, longitude - MARGIN, latitude + 1 - span - MARGIN,
+        longitude + span + MARGIN, latitude + 1 + MARGIN, densify_pts=256)
+    wanted = from_bounds(left, bottom, right, top, transform)
+    column, row = max(math.floor(wanted.col_off) - 2, 0), max(math.floor(wanted.row_off) - 2, 0)
+    end_column = min(math.ceil(wanted.col_off + wanted.width) + 2, dataset.width)
+    end_row = min(math.ceil(wanted.row_off + wanted.height) + 2, dataset.height)
+    if end_column <= column or end_row <= row:
+        return None
+    return Window(column, row, end_column - column, end_row - row)
+
+
+def mrdem_posts(dataset, cell):
+    """A cell's posts from the MRDEM-30 raster, and the window, the SHA-256 and the no-data count of its pixels.
+
+    A post is the bilinear mean of the pixels around it. The grid's 30 m are
+    the posts' spacing from north to south and more than their spacing from
+    east to west, so nothing is averaged away. NAD83(CSRS) is read as WGS 84,
+    which is a metre or two from it. The heights stay in CGVD2013.
+    """
+    import numpy as np
+    from rasterio.crs import CRS
+    from rasterio.warp import Resampling, reproject
+
+    heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
+    window = mrdem_window(dataset, cell)
+    if window is None:
+        return heights, None, hashlib.sha256(b"").hexdigest(), 0
+    array = dataset.read(1, window=window)
+    sha256 = hashlib.sha256(array.tobytes()).hexdigest()
+    valid = (dataset.read_masks(1, window=window) != 0) & np.isfinite(array) & (array != MRDEM_NO_DATA)
+    if np.any(valid & ((array < TERRAIN_HEIGHTS[0]) | (array > TERRAIN_HEIGHTS[1]))):
+        raise ValueError(f"MRDEM-30 elevations of {hgt_name(*cell)} lie outside {TERRAIN_HEIGHTS} m")
+    array[~valid] = np.nan
+    reproject(
+        array, heights,
+        src_transform=dataset.window_transform(window), src_crs=dataset.crs, src_nodata=float("nan"),
+        dst_transform=post_transform(*cell), dst_crs=CRS.from_epsg(MRDEM_GEOGRAPHIC_EPSG), dst_nodata=float("nan"),
+        init_dest_nodata=False, resampling=Resampling.bilinear, num_threads=1,
+    )
+    return heights, window, sha256, int((~valid).sum())
+
+
+def read_mrdem_cell(source, cell, out):
+    """The cell's posts from the one MRDEM-30 object, read in ranges, and what was read.
+
+    The object has no dated copies, so it is the pinned one only while its
+    size and ETag say so. They are asked for before and after the read: a
+    cell never mixes two versions unseen.
+    """
+    import rasterio
+
+    url = source.tile_url(*cell)
+
+    def check():
+        found = object_identity(url)
+        if found != source.origin_object:
+            raise ValueError(f"{url} is {found[0]} bytes with ETag {found[1]}, not the pinned "
+                             f"{source.origin_object[0]} bytes with ETag {source.origin_object[1]}")
+
+    check()
+    with rasterio.Env(**GDAL_OPTIONS), rasterio.open("/vsicurl/" + url) as dataset:
+        heights, window, sha256, invalid = mrdem_posts(dataset, cell)
+    check()
+    pixels = 0 if window is None else window.width * window.height
+    return heights, {"sha256": sha256, "readBytes": 4 * pixels, "invalidPixels": invalid,
+                     "window": None if window is None else [window.col_off, window.row_off, window.width, window.height]}
+
+
+TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell}
+
+
+def terrain_deadline(sources):
+    """Seconds a cell may take to read these sources: longer when it downloads a whole tile."""
+    return TERRAIN_DEADLINE if any(source.origin_object is None for source in sources) else CELL_DEADLINE
+
+
+PIN_FIELDS = ("source", "url", "bytes", "etag", "areaSha256")
+
+
+def build_terrain_cell(cell, chosen, out):
+    """Write the cell's terrain tile: each source's posts inside its own area, the first source's where two give one.
+
+    The receipt names, for each source, what it read (`sha256` is the
+    downloaded tile's, or that of the pixels read from an object), how many
+    of its posts lay outside its area and how many posts it gave the tile.
+    """
+    import numpy as np
+
+    heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
+    parts = []
+    for source in chosen[cell]:
+        posts, part = TERRAIN_READERS[source.adapter](source, cell, out)
+        outside = clip_to_area(posts, cell, load_area(source.area, source.area_sha256))
+        gives = np.isfinite(posts) & ~np.isfinite(heights)
+        heights[gives] = posts[gives]
+        parts.append({**source.pin(cell), **part, "outsidePosts": outside, "posts": int(gives.sum())})
     return write_receipt(out, {
         "cell": hgt_name(*cell),
-        "source": source.id,
-        "url": url,
-        "bytes": size,
-        "sha256": sha256,
-        "etag": etag,
-        "tileDate": date,
-        "invalidPixels": invalid,
-        "areaSha256": source.area_sha256,
-        "outsidePosts": outside,
+        "sources": parts,
+        "bytes": sum(part["readBytes"] for part in parts),
+        "outsidePosts": sum(part["outsidePosts"] for part in parts),
         **write_tile(out, cell, heights),
     })
 
@@ -857,14 +1081,14 @@ def blend_fill(terrain, fill, band):
 @dataclass(frozen=True)
 class Hybrid:
     """Terrain tiles over opened Copernicus tiles, the fill blended at the terrain's edge."""
-    terrain: TerrainSource
+    terrain: Terrain
     tiles: Path
     opened: Path
     opening: Opening
     band: int = BLEND_POSTS
 
     def method(self):
-        return {"name": "terrain-over-opening", "terrain": self.terrain.id, "blendPosts": self.band,
+        return {"name": "terrain-over-opening", "terrain": self.terrain.ids(), "blendPosts": self.band,
                 "blend": "terrain minus fill at the terrain's edge, carried into the fill and faded linearly",
                 "fill": self.opening.method()}
 
@@ -882,8 +1106,8 @@ def hybrid_inputs(cell, chosen, hybrid):
             if receipt is None or receipt.get("method") != hybrid.opening.method():
                 return None
             opened[hgt_name(*other)] = receipt["hgtSha256"]
-        if other in hybrid.terrain.tiles:
-            receipt = current_terrain_receipt(hybrid.tiles, other, {other: hybrid.terrain})
+        if other in hybrid.terrain.cells:
+            receipt = current_terrain_receipt(hybrid.tiles, other, hybrid.terrain.cells)
             if receipt is None:
                 return None
             terrain[hgt_name(*other)] = receipt["hgtSha256"]
@@ -945,7 +1169,7 @@ def _build(cell):
     # handler installed, SIGALRM ends the worker, which breaks the pool so
     # build_pending retries.
     stage = _WORKER.get("stage")
-    signal.alarm(TERRAIN_DEADLINE if stage == TERRAIN else CELL_DEADLINE)
+    signal.alarm(terrain_deadline(_WORKER["chosen"].get(cell, ())) if stage == TERRAIN else CELL_DEADLINE)
     try:
         if isinstance(stage, Hybrid):
             return hybrid_cell(cell, _WORKER["chosen"], _WORKER["out"], stage)
@@ -972,8 +1196,8 @@ def run_pool(pending, chosen, out, jobs, opening=None, stage=None):
 def build_pending(cells, chosen, out, jobs, rounds=ROUNDS, opening=None, stage=None):
     """Build, open or blend the cells without a current receipt, again after a worker dies.
 
-    `stage` is TERRAIN for the terrain source's tiles, where `chosen` maps each
-    cell to that source, or a Hybrid for the final blend.
+    `stage` is TERRAIN for the terrain tiles, where `chosen` maps each cell to
+    the terrain sources with a tile for it, or a Hybrid for the final blend.
     """
     if isinstance(stage, Hybrid):
         current, verb = functools.partial(current_hybrid_receipt, hybrid=stage), "blend"
@@ -1048,9 +1272,26 @@ def current_opened_receipt(out, cell, chosen, opening):
 
 
 def current_terrain_receipt(out, cell, chosen):
-    """The terrain tile's receipt if it came from the catalog's tile and was cut to the area pinned now."""
-    receipt = current_receipt(out, cell, chosen)
-    return receipt if receipt is not None and receipt.get("areaSha256") == chosen[cell].area_sha256 else None
+    """The terrain tile's receipt if its sources are the cell's now, each as pinned and cut to its area now."""
+    path = out / "receipts" / f"{hgt_name(*cell)}.json"
+    if not path.exists():
+        return None
+    receipt = json.loads(path.read_text())
+    parts = receipt.get("sources")
+    if not isinstance(parts, list) or not all(isinstance(part, dict) for part in parts):
+        return None
+    if [{field: part.get(field) for field in PIN_FIELDS} for part in parts] != [s.pin(cell) for s in chosen[cell]]:
+        return None
+    return receipt
+
+
+def terrain_shares(terrain, receipts):
+    """Each source's identity with the tiles it gave posts to and those posts, from terrain tile receipts."""
+    shares = []
+    for source in terrain.sources:
+        posts = [part["posts"] for receipt in receipts for part in receipt["sources"] if part["source"] == source.id]
+        shares.append({**source.identity(), "cells": sum(1 for count in posts if count), "posts": sum(posts)})
+    return shares
 
 
 def current_hybrid_receipt(out, cell, chosen, hybrid):
@@ -1084,8 +1325,11 @@ def manifest_identity(directory, name="elevation-manifest.json"):
 
 
 def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
-    """The terrain tiles' own manifest. Its schema keeps build_graph.py from taking them for a whole set."""
-    receipts = [current_terrain_receipt(out, cell, {cell: terrain}) for cell in cells]
+    """The terrain tiles' own manifest. Its schema keeps build_graph.py from taking them for a whole set.
+
+    `terrain` holds every cell the sources list; `cells` are the ones this run built.
+    """
+    receipts = [current_terrain_receipt(out, cell, terrain.cells) for cell in cells]
     if not all(receipts):
         raise ValueError("a cell has no receipt for its current terrain tile")
     listing = "".join(f"{r['cell']} {r['hgtSha256']}\n" for r in sorted(receipts, key=lambda r: r["cell"]))
@@ -1096,9 +1340,9 @@ def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
         "noData": NO_DATA,
         "resampling": "bilinear",
         "sourceList": file_identity(list_path),
-        "source": terrain.identity(),
+        "sources": terrain_shares(terrain, receipts),
         "bounds": bounds,
-        "catalogCells": len(terrain.tiles),
+        "catalogCells": len(terrain.cells),
         "cells": len(receipts),
         "cellListSha256": hashlib.sha256(listing.encode()).hexdigest(),
         "sourceBytes": sum(r["bytes"] for r in receipts),
@@ -1117,21 +1361,29 @@ def write_manifest(out, policy_path, policy, chosen, cells, bounds=None, opening
 
     `method` is null for raw tiles. Opened tiles record the opening and the
     raw manifest they were opened from. Hybrid tiles record the blend, the
-    opened and terrain manifests they read and the terrain source.
+    opened and terrain manifests they read and the terrain sources: each
+    with the terrain tiles of these cells it gave posts to, and `terrain`
+    with the posts the blend took from terrain tiles and the fill posts it
+    lifted. A cell without a terrain tile still takes the border posts it
+    shares with one that has.
     """
     import rasterio
 
-    terrain_sources = []
+    terrain_sources, blend = [], {}
     if hybrid is not None:
         receipts = [current_hybrid_receipt(out, cell, chosen, hybrid) for cell in cells]
         method = {**hybrid.method(), "inputs": {
             "opened": manifest_identity(hybrid.opened),
             "terrain": manifest_identity(hybrid.tiles, "terrain-manifest.json")}}
         if all(receipts):
-            terrain_sources = [{**hybrid.terrain.identity(),
-                                "cells": sum(1 for r in receipts if r["terrainPosts"]),
-                                "posts": sum(r["terrainPosts"] for r in receipts),
-                                "blendedPosts": sum(r["blendedPosts"] for r in receipts)}]
+            tiles = [current_terrain_receipt(hybrid.tiles, cell, hybrid.terrain.cells)
+                     for cell in cells if cell in hybrid.terrain.cells]
+            if not all(tiles):
+                raise ValueError("a cell has no receipt for its current terrain tile")
+            terrain_sources = terrain_shares(hybrid.terrain, tiles)
+            blend = {"terrain": {"cells": sum(1 for r in receipts if r["terrainPosts"]),
+                                 "posts": sum(r["terrainPosts"] for r in receipts),
+                                 "blendedPosts": sum(r["blendedPosts"] for r in receipts)}}
     elif opening is None:
         receipts, method = [current_receipt(out, cell, chosen) for cell in cells], None
     else:
@@ -1154,6 +1406,7 @@ def write_manifest(out, policy_path, policy, chosen, cells, bounds=None, opening
              "cells": sum(1 for r in receipts if r["source"] == s.id)}
             for s in policy.sources
         ] + terrain_sources,
+        **blend,
         "runtime": {"rasterio": rasterio.__version__, "gdal": rasterio.__gdal_version__},
         "bounds": bounds,
         "catalogCells": len(chosen),
@@ -1182,8 +1435,8 @@ def main():
                         help="Write raw tiles to --raw, then open them over an ellipse of this radius into --out")
     parser.add_argument("--raw", type=Path, help="Raw tiles for --opening-radius, outside --out")
     parser.add_argument("--terrain-sources", type=Path, metavar="FILE",
-                        help="elevation-sources.json: put its terrain source over the opened tiles")
-    parser.add_argument("--terrain", type=Path, help="The terrain source's tiles for --terrain-sources")
+                        help="elevation-sources.json: put its terrain sources over the opened tiles")
+    parser.add_argument("--terrain", type=Path, help="The terrain tiles for --terrain-sources")
     parser.add_argument("--opened", type=Path, help="The opened tiles when --terrain-sources makes --out the hybrid")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 64:
@@ -1206,7 +1459,7 @@ def main():
             if name < other and (path.is_relative_to(other_path) or other_path.is_relative_to(path)):
                 parser.error(f"{name} and {other} must be separate directories, neither inside the other")
     try:
-        terrain = load_terrain_source(args.terrain_sources) if args.terrain_sources else None
+        sources = load_terrain_sources(args.terrain_sources) if args.terrain_sources else None
     except (OSError, ValueError) as error:
         parser.error(f"--terrain-sources: {error}")
     policy = TopographySourcePolicy.load(args.policy)
@@ -1220,7 +1473,7 @@ def main():
     if args.bounds:
         west, south, east, north = args.bounds
         cells = raw_cells = opened_cells = [(x, y) for x, y in cells if west <= x < east and south <= y < north]
-        if terrain is not None:
+        if sources is not None:
             opened_cells, opened_bounds = with_neighbours(cells, chosen), [west - 1, south - 1, east + 1, north + 1]
             raw_cells, raw_bounds = with_neighbours(opened_cells, chosen), [west - 2, south - 2, east + 2, north + 2]
         elif args.raw:
@@ -1234,22 +1487,23 @@ def main():
         (opened / "receipts").mkdir(parents=True, exist_ok=True)
         build_pending(opened_cells, chosen, opened, args.jobs, opening=opening)
         manifest = write_manifest(opened, args.policy, policy, chosen, opened_cells, opened_bounds, opening)
-    if terrain is not None:
+    if sources is not None:
         print(f"Opened elevation manifest: {manifest}", flush=True)
-        outside = sorted(hgt_name(*cell) for cell in terrain.tiles if cell not in chosen)
-        if outside:
-            print(f"{len(outside)} terrain tiles have no Copernicus cell and are left out: {' '.join(outside)}",
-                  flush=True)
-        terrain = replace(terrain, tiles={cell: tile for cell, tile in terrain.tiles.items() if cell in chosen})
+        for source in sources:
+            outside = sorted(hgt_name(*cell) for cell in source.tiles if cell not in chosen)
+            if outside:
+                print(f"{len(outside)} cells of {source.id} have no Copernicus cell and are left out: "
+                      f"{' '.join(outside)}", flush=True)
+        listed = Terrain.over(sources, sorted(chosen))
+        # A bounded run builds only the terrain tiles around its cells, which is all its blends read.
+        terrain = Terrain.over(sources, opened_cells)
         tiles = separate["--terrain"]
         (tiles / "receipts").mkdir(parents=True, exist_ok=True)
-        terrain_cells = [cell for cell in opened_cells if cell in terrain.tiles]
-        build_pending(terrain_cells, dict.fromkeys(terrain_cells, terrain), tiles, args.jobs, stage=TERRAIN)
-        manifest = write_terrain_manifest(tiles, args.terrain_sources, terrain, terrain_cells, opened_bounds)
+        terrain_cells = sorted(terrain.cells)
+        build_pending(terrain_cells, terrain.cells, tiles, args.jobs, stage=TERRAIN)
+        manifest = write_terrain_manifest(tiles, args.terrain_sources, listed, terrain_cells, opened_bounds)
         print(f"Terrain manifest: {manifest}", flush=True)
-        # A bounded run built only the terrain tiles around its cells, which is all its blends read.
-        hybrid = Hybrid(replace(terrain, tiles={cell: terrain.tiles[cell] for cell in terrain_cells}),
-                        tiles, opened, opening)
+        hybrid = Hybrid(terrain, tiles, opened, opening)
         (out / "receipts").mkdir(parents=True, exist_ok=True)
         build_pending(cells, chosen, out, args.jobs, stage=hybrid)
         manifest = write_manifest(out, args.policy, policy, chosen, cells, args.bounds, opening, hybrid)

@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "purpose": "Elevation sources approved for grading the bicycle routing graph, beside the Copernicus sources of map-platform/config/topography-source-policy-v2.json. Offline maps and the map-platform image do not read this file.",
+  "schemaVersion": 2,
+  "purpose": "Elevation sources approved for grading the bicycle routing graph, beside the Copernicus sources of map-platform/config/topography-source-policy-v2.json. Each terrain source is used inside its own area, and the first listed gives a post that two could. Offline maps and the map-platform image do not read this file.",
   "terrain": [
     {
       "id": "usgs-3dep-13",
@@ -27,6 +27,36 @@
       "modifications": "Cut to the area, resampled from 1/3 to 1 arc-second posts, rounded to whole metres, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet 3DEP over 16 posts at the edge of 3DEP's data. Not endorsed by the USGS.",
       "approvedForRouting": true,
       "approvedAt": "2026-11-26",
+      "approvedBy": "Chris"
+    },
+    {
+      "id": "nrcan-mrdem-30",
+      "adapter": "nrcan-mrdem-30-cog-v1",
+      "title": "Natural Resources Canada, Medium Resolution Digital Elevation Model (MRDEM-30), CanElevation Series, digital terrain model",
+      "surfaceModel": "dtm",
+      "horizontalCrs": "EPSG:3979",
+      "verticalDatum": "CGVD2013",
+      "verticalUnits": "m",
+      "origin": "https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif",
+      "originBytes": 83854027098,
+      "originEtag": "1bf055857edce86b1311967c8d88395e-9997",
+      "originModified": "2026-06-24T15:08:08Z",
+      "coverage": "Canada: the posts inside the area, from the cells that touch it",
+      "area": "canada-osm-r1428125-v649.geojson.gz",
+      "areaBytes": 280148,
+      "areaSha256": "3c17ff9b5e1fa63b6604b074793ca224dcbb2337c7809a85964798c4d472838d",
+      "areaSource": "OpenStreetMap relation 1428125 version 649 of 2026-11-01, the boundary of Canada with its territorial sea. (c) OpenStreetMap contributors, ODbL.",
+      "catalog": "nrcan-mrdem-30-cells-20261127.txt",
+      "catalogBytes": 19840,
+      "catalogSha256": "856d9aeb65925e7288e1a2e11edacae069ff92a631dfa678b13ec5a0a6e55ac0",
+      "tileCount": 2480,
+      "license": "Open Government Licence - Canada",
+      "attribution": "Contains information licensed under the Open Government Licence - Canada. Produced in part using Copernicus WorldDEM-30 (c) DLR e.V. 2010-2014 and (c) Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.",
+      "termsUrl": "https://open.canada.ca/en/open-government-licence-canada",
+      "attributionUrl": "https://open.canada.ca/data/en/dataset/18752265-bda3-498c-a4ba-9dfe68cb98da",
+      "modifications": "Cut to the area, resampled from the 30 m Lambert grid to 1 arc-second posts, rounded to whole metres, heights left in CGVD2013, joined to USGS 3DEP at the border as it is, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet the terrain over 16 posts at the edge of its data. Not endorsed by Natural Resources Canada.",
+      "approvedForRouting": true,
+      "approvedAt": "2026-11-27",
       "approvedBy": "Chris"
     }
   ]

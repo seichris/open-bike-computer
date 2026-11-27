@@ -83,12 +83,16 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    mounts the ext4 scratch volume at `/srv/bicino-routing-scratch`. It checks
    the tools out at the commit, writes the run's settings and starts the
    chain. Leave out `--opening-radius` to build only the ungraded planet,
-   the graph production serves. Add `--terrain usgs-3dep-13` to grade with
-   the hybrid of USGS 3DEP and opened Copernicus: the elevation stage then
-   also downloads 3DEP's 955 tiles (364 GB) and blends them in, and both
-   graphs are built with every bridge marked as one (see
-   [the builder's page](builder/README.md#the-chain)). No builder has run
-   that yet. Add `--elevation-cache elevation-cache-2026-11-26.json` to
+   the graph production serves. Add `--terrain usgs-3dep-13,nrcan-mrdem-30`
+   to grade with the hybrid of the terrain models and opened Copernicus:
+   the elevation stage then also downloads 3DEP's tiles (364 GB), reads
+   MRDEM-30 for Canada's cells and blends both in, and both graphs are
+   built with every bridge marked as one (see
+   [the builder's page](builder/README.md#the-chain)). `--terrain` names
+   every source of `elevation-sources.json` in its order; `setup.sh`
+   refuses any other value before the chain starts. No builder has run
+   that yet. Add
+   `--elevation-cache elevation-cache-2026-11-26.json` to
    restore the raw tiles and the tiles opened at 400 m from their bucket
    instead of building them for 2 hours 20 minutes. Every tar and every tile
    is checked against that record; a set that cannot be restored is built,
@@ -781,14 +785,17 @@ also get real hills in place of the opened ones. Before a planet build:
    the ungraded ones. A bridge split in mid-span over a deep gorge should
    read far worse on either source; no leg tests one.
 4. **Build the planet and run the gate.** Reading 3DEP adds up to 494 GB of
-   downloads to the elevation stage.
+   downloads to the elevation stage, and MRDEM-30 the reads of 2,338 cells
+   from one object.
 
-What a hybrid does not fix: high-rise cores outside the United States stay
+What a hybrid does not fix: high-rise cores outside its terrain models stay
 on Copernicus opened at 400 m. The gate's Singapore, Shanghai, Dubai and
 Tokyo legs kept their routes on the 400 m planet, and a survey of 36 more
 downtowns found one that did not, Toronto (see
-[below](#toronto-a-tower-downtown-the-hybrid-does-not-fix)). Hill avoidance
-outside the United States also stays as weak as the 400 m opening leaves it.
+[below](#toronto-a-tower-downtown-the-hybrid-does-not-fix)). Canada has
+since got a terrain model of its own (see
+[MRDEM-30 for Canada](#mrdem-30-for-canada)). Hill avoidance outside the
+United States and Canada stays as weak as the 400 m opening leaves it.
 
 The reports, tile and graph manifests and the scratch scripts were not
 copied to the map VPS, because this work was not to touch the hosts. They
@@ -888,18 +895,189 @@ Metres, each in its own height datum; the lake shows how far those differ.
   points it is within 2.4 m of the USGS tile. Its source layer reads 10 in
   downtown Toronto, Montreal, Vancouver, Calgary and Ottawa and 1 in
   Nunavut, northern Quebec, Yukon and on the Minnesota side of the border;
-  that was read here as lidar and Copernicus, without the product
-  specification. The part that
-  comes from Copernicus carries the Copernicus notice.
-- **MRDEM-30 is not an approved source, and the build cannot read it.**
-  Using it needs Chris's approval, an entry in `elevation-sources.json`, a
-  reader for one projected file in place of 3DEP's degree tiles, Canada's
-  boundary as its area, a look at the seam with 3DEP along the border, and
-  samples of other Canadian downtowns.
+  that was read here as lidar and Copernicus, and the product
+  specification, read afterwards, says the same. The part that comes from
+  Copernicus carries the Copernicus notice.
+- **MRDEM-30 was not an approved source then, and the build could not read
+  it.** Chris approved it the next day; the reader, Canada's boundary, the
+  seam with 3DEP and other Canadian downtowns are under
+  [MRDEM-30 for Canada](#mrdem-30-for-canada).
 
 The readings, the sample's report and manifests and the scripts are in the
 sessions' notes folder on Chris's Mac, under
 `usgs-3dep-samples-20261126/toronto/`.
+
+### MRDEM-30 for Canada
+
+On 2026-11-27 Chris approved MRDEM-30, Natural Resources Canada's terrain
+model, as an elevation source for routing in Canada. The approval is
+recorded in [elevation-sources.json](elevation-sources.json) beside 3DEP's,
+and `build_elevation.py --terrain-sources` now reads both (see
+[Build and release](README.md#build-and-release)). No planet has been built
+with either.
+
+- **What it is.** The Medium Resolution Digital Elevation Model of the
+  CanElevation Series, under the Open Government Licence - Canada (record
+  `18752265-bda3-498c-a4ba-9dfe68cb98da` on open.canada.ca; product
+  specification edition 1.2 of 2025-06-20). Its terrain model is the lidar
+  mosaic (HRDEM) resampled from 1 m to 30 m where Canada has lidar.
+  Elsewhere it is Copernicus GLO-30 with a forest and a settlement removal
+  model applied, and that part carries the Copernicus notice. A second
+  raster names the source of every pixel: 10 for lidar, 1 for GLO-30, 5 for
+  a strip where the two are blended. The specification gives the lidar part
+  a root-mean-square error of 1.0 m on open ground and 2.6 m under
+  vegetation against surveyed points, and the GLO-30 part 1.6 m and 5.0 m
+  against lidar. The lidar dates from 2006 on, with 2018 the median year.
+- **Cities are lidar.** In a 3 km box around the centre of 36 Canadian
+  cities the source raster reads lidar at every pixel of 32, among them
+  Toronto, Montreal, Vancouver, Calgary, Edmonton, Ottawa, Winnipeg, Quebec
+  City, Hamilton, Halifax, Victoria, Saskatoon, Regina and St. John's.
+  Kelowna reads 95% lidar, Niagara Falls 91% and Windsor 82%, the rest
+  being water or the other bank. Iqaluit is GLO-30 throughout.
+- **One object, read in parts.** The terrain model is one cloud-optimised
+  GeoTIFF of 83,854,027,098 bytes on a 30 m grid in Canada Atlas Lambert
+  (EPSG:3979), with heights in CGVD2013 and -32767 for no data. A cell
+  reads the pixels under its posts and resamples them bilinearly onto the
+  posts. The cells built here read 2,561 to 3,792 by 3,801 to 4,453 pixels,
+  39 to 68 MB of them, in 41 to 84 seconds on a laptop, the time of the
+  download.
+- **Pinned by size and ETag.** There are no dated copies. The source list
+  pins the object's size and ETag (`1bf05585…-9997`, last changed
+  2026-06-24), a cell asks for both before and after its read, and the
+  build stops when either differs. When NRCan replaces the object, someone
+  has to look at the new one and pin it; the old one cannot be read again,
+  so an earlier build cannot be repeated from the source.
+- **Cut to Canada.** MRDEM-30 reaches into the United States along shared
+  watersheds, as GLO-30 there. The build keeps its posts inside
+  OpenStreetMap's boundary of Canada with its territorial sea (relation
+  1428125, version 649). 2,480 cells touch that area and 2,338 of them
+  have a Copernicus cell. 95 cells also touch the United States and read
+  both sources.
+
+#### The seam between 3DEP and MRDEM-30
+
+The two terrain models meet at the border as they are; nothing is blended
+between them. Six border cells were built on a laptop with both sources.
+In each, every post is 3DEP's or MRDEM-30's according to the country it
+lies in. Between 0 and 1,504 posts of a cell have neither, where 3DEP has
+no data just inside the United States; the blend fills them from opened
+Copernicus.
+
+The table gives the height on Canada's side minus the height on the United
+States' side for every pair of neighbouring posts with one in each country,
+in metres (the tiles hold whole metres). The last column is the size of the
+same difference between neighbouring posts inside each country, within
+eight posts of the border: what the ground itself does over one post there.
+
+| Cell | Border | Pairs | Mean | Median | Size: median, 90th percentile | Inside the US; inside Canada |
+|---|---|---|---|---|---|---|
+| N49W123 | British Columbia and Washington, on land | 3,457 | -1.8 | -2 | 2, 4 | 0, 2; 0, 3 |
+| N49W098 | Manitoba and North Dakota, on land | 3,603 | -0.8 | -1 | 1, 1 | 0, 1; 0, 0 |
+| N45W073 | Quebec and Vermont, on land | 3,682 | -0.2 | 0 | 1, 4 | 1, 4; 1, 4 |
+| N47W070 | Quebec and Maine, on land | 6,032 | -0.3 | 0 | 1, 2 | 1, 3; 1, 3 |
+| N43W080 | Niagara River and Lake Ontario | 3,798 | -0.3 | -1 | 1, 2 | 0, 1; 0, 1 |
+| N42W084 | Detroit River and Lake Erie | 1,182 | -3.6 | -4 | 4, 5 | 0, 0; 0, 1 |
+
+- **On land the step is a metre or two in the west and less than a metre in
+  the east.** 3DEP's heights are in NAVD 88 and MRDEM-30's in CGVD2013.
+  The step is read here as the difference of the two datums, which grows
+  toward the Pacific; it was not checked against the geoid models. In
+  Quebec the step is lost in the slope of the ground. On the flat border
+  of Manitoba every second pair differs by a metre. In British Columbia
+  the border crossings read 8 m against 9 m at the Peace Arch, 20 against
+  22 on the Pacific Highway, 44 against 45 at Aldergrove and 12 against 13
+  at Sumas, where the ground is level on both sides.
+- **On the Detroit River and Lake Erie the step is 4 to 5 m, on water.**
+  Copernicus holds 170 m for that water, and MRDEM-30 keeps Copernicus's
+  value on the Great Lakes, where it has no lidar. 3DEP reads 174 to 175 m,
+  which is the lake's level. The step lies in mid-river. A road crosses it
+  only on a bridge or in the tunnel, which are graded from their ends when
+  the graph is built with `--all-bridges`.
+- **Why nothing is blended.** The blend at the terrain's edge lifts the
+  Copernicus side by what the two surfaces differ at the edge. Between the
+  two terrain models that would carry the water's 4 m onto the lidar
+  heights of Windsor's shore and of the islands in the river. A road that
+  crosses the land border meets a step of at most 2 m between two posts.
+  One datum for both would remove it and needs the geoid models of both
+  countries as further inputs; that was not done.
+
+#### Canadian cities through the chain
+
+On 2026-11-27 four cities ran through `builder/rehearse.sh` on a laptop
+with `--radius 400 --terrain usgs-3dep-13,nrcan-mrdem-30`, each cut from
+Geofabrik's province extract of 2026-11-25 with Canada's relation merged
+in. Calgary, Vancouver and Montreal are new in `elevation-probes.json`;
+Calgary's and Vancouver's legs are the downtown survey's, where both cities
+kept their routes on Copernicus opened at 400 m. Each run built the hybrid
+of the city's cell from the raw cells two out, nine opened cells and nine
+terrain tiles, built both graphs with `--all-bridges`, and ran the gate
+with the source `usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
+
+| City | Extract | Terrain tiles: both sources, MRDEM-30 alone, 3DEP alone | Read for them | Routes | Longest | Run |
+|---|---|---|---|---|---|---|
+| Toronto | `ontario-261125`, 1,016,225,213 bytes | 5, 4, 0 | 1.70 GB | 4 | 0.0% | interrupted twice |
+| Calgary | `alberta-261125`, 352,799,025 bytes | 0, 9, 0 | 0.50 GB | 4 | 0.0% | 9 min |
+| Montreal (report only) | `quebec-261125`, 1,169,186,859 bytes | 5, 3, 1 | 1.92 GB | 4 | +5.3% | 16 min |
+| Vancouver (report only) | `british-columbia-261125`, 1,248,798,415 bytes | 4, 4, 1 | 1.61 GB | 4 | 0.0% | 12 min |
+
+- **Toronto meets the gate.** All four routes are the ungraded ones,
+  among them Rogers Centre to St Lawrence Market on Everyday, 2.006 km,
+  which opened Copernicus alone sends 35.1% further. As on the hand-made
+  sample, 9% of that leg reads 6% or more and none of the other.
+- **Calgary meets the gate.** All four routes are the ungraded ones and
+  none of them reads 6% anywhere.
+- **Vancouver keeps its routes.** Three are the ungraded ones and the
+  fourth is 0.4% shorter. The peninsula has a ridge: 8% of Waterfront
+  Station to Yaletown and 18% of Coal Harbour to English Bay on Road read
+  6% or more.
+- **Montreal changes one route on a real climb.** The routes from the Old
+  Port to McGill climb 54 m, so the city is in the gate as a hilly one
+  that is reported and not judged. Gare Centrale to Place des Arts keeps its route
+  on both profiles; 12% of it reads 6% or more. Old Port to McGill is 1.1%
+  shorter on Road and 5.3% longer on Everyday, 3.164 km for 3.006 km; the
+  two Everyday routes read alike, 6% of each at 6% or more. `use_hills`
+  changes that leg and not the other. Nobody looked at the two routes on a
+  map.
+
+In the three runs that were not interrupted the elevation stage took 7 to
+11 minutes, most of it the downloads: up to six 3DEP tiles a city and the
+nine MRDEM-30 reads. One of Vancouver's 25 raw cells is open sea and has no
+Copernicus cell. The four gates were run again on the same graphs once the
+gate had learned to tell detours from swaps (see
+[below](#detours-and-swaps-how-a-longer-flat-route-is-judged)): Toronto,
+Calgary and Vancouver have neither.
+
+Another session was rehearsing on the same Docker host, and the chain's
+container names do not carry the scratch directory (see
+[the rehearsal](builder/README.md#rehearse-on-a-city-sample)): its runs
+removed this one's elevation container twice in Toronto's first minutes.
+The chain resumed from its receipts each time. The four runs above were
+then made from a copy of the tools in which the elevation container, the
+stage labels and the gate's network and services carry another name;
+nothing else in the copy differs.
+
+#### What is not known
+
+- No builder has read MRDEM-30. The 2,338 reads go to one object in
+  `ca-central-1`; how long they take from the builder's region, and whether
+  20 workers reading it at once are slowed down, is not known.
+- Nothing was built north of 53° N. The cells there are narrow in metres,
+  and MRDEM-30 is GLO-30 over most of the north.
+- A cell that reads MRDEM-30 alone now keeps the 15-minute cell deadline
+  in place of the hour a 3DEP download gets. That was changed after the
+  runs above and is covered by a unit test only.
+- The samples cover four cities, all of them lidar. Roads along the Great
+  Lakes' shores, where MRDEM-30's water lies up to 4 m under the lidar land
+  beside it, were not looked at, and no sample lies where MRDEM-30 is
+  GLO-30.
+- The licence asks for its attribution statement in a product that uses
+  the data, and the route API's `attribution` names OpenStreetMap alone.
+  The elevation credits have to go in when a graded graph ships; they are
+  in `elevation-sources.json`.
+
+The border cells' receipts, the seam's figures, the four runs' results,
+gate reports, manifests and logs and the scratch scripts are in the
+sessions' notes folder on Chris's Mac, under `mrdem-canada-20261127/`.
 
 ### Detours and swaps: how a longer flat route is judged
 
