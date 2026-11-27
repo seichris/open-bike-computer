@@ -122,6 +122,18 @@ class TowerMaskTests(unittest.TestCase):
         self.assertFalse(west[930, POSTS - 1 - 60])
         self.assertFalse(west[:800].any() or east[1100:].any())
 
+    def test_a_cell_outside_every_grid_is_named(self):
+        import numpy as np
+
+        # One file over N40W074 and the west half of N40W073, as two files of the grid meet inside a cell.
+        with grid(np.zeros((1202, 1802), dtype="float32"), -74 - 3 / 3600, 41 + 3 / 3600) as first, \
+                grid(np.zeros((1202, 700), dtype="float32"), -73 + 1800 / 3600, 41 + 3 / 3600) as second, \
+                first.open() as west, second.open() as east:
+            self.assertEqual(tower_mask.uncovered_cells([west], [(-74, 40), (-73, 40), (-74, 41)]),
+                             ["N40W073", "N41W074"])
+            self.assertEqual(tower_mask.uncovered_cells([west, east], [(-74, 40), (-73, 40)]), [])
+            self.assertEqual(tower_mask.uncovered_cells([], [(8, 47)]), ["N47E008"])
+
     def test_masked_posts_lose_their_height_and_the_rest_keep_theirs(self):
         import numpy as np
 
@@ -143,10 +155,16 @@ class TowerMaskTests(unittest.TestCase):
             sample_elevation.write_manifest(
                 opened, {"name": "grey-opening", "radiusMetres": 200}, [{"id": "copernicus-glo30"}],
                 [sample_elevation.write_hgt(opened, (-74, 40), terrain)], [-74, 40, -73, 41])
-            heights = np.full((30, 30), 60, dtype="float32")
+            # A grid over the whole cell and one grid cell more on every side, with one district of towers.
+            heights = np.zeros((1202, 1202), dtype="float32")
+            heights[336:366, 336:366] = 60       # posts 1005 to 1094, both ways
             file = root / "GHS_BUILT_H_ANBH_test.tif"
-            with grid(heights, -74 + 1005 / 3600, 41 - 1005 / 3600) as memory:
+            with grid(heights, -74 - 3 / 3600, 41 + 3 / 3600) as memory:
                 file.write_bytes(memory.read())
+            # The same district in a file that covers nothing else of the cell.
+            patch_file = root / "patch.tif"
+            with grid(np.full((30, 30), 60, dtype="float32"), -74 + 1005 / 3600, 41 - 1005 / 3600) as memory:
+                patch_file.write_bytes(memory.read())
             out = root / "masked"
             arguments = ["tower_mask.py", "--input", str(opened), "--heights", str(file), "--bounds", "-74", "40",
                          "-73", "41", "--out", str(out)]
@@ -185,6 +203,7 @@ class TowerMaskTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "part of the source"):
                 elevation_identity(out)
             for changed in (["--bounds", "-73", "40", "-72", "41"], ["--heights", str(root / "missing.tif")],
+                            ["--heights", str(patch_file)], ["--heights", str(opened / "elevation-manifest.json")],
                             ["--input", str(root)], ["--threshold", "0"], ["--margin", "5"],
                             ["--bounds", "-74", "40", "-66", "44"]):
                 refused = root / "refused"

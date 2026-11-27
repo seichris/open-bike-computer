@@ -43,6 +43,7 @@ manifest records the rule, the input and every height file, and always
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -50,8 +51,8 @@ import sys
 from pathlib import Path
 
 from build_elevation import (
-    METRES_PER_ARCSECOND, POSTS, _bands, dilate_rows, ellipse_spans, footprint_columns, footprint_rows, hgt_path,
-    row_latitudes,
+    METRES_PER_ARCSECOND, POSTS, _bands, dilate_rows, ellipse_spans, footprint_columns, footprint_rows, hgt_name,
+    hgt_path, row_latitudes,
 )
 from sample_elevation import cells_in, read_hgt, write_hgt, write_manifest
 
@@ -69,13 +70,40 @@ def window_shape(row_margin, column_margin):
     return POSTS + 2 * row_margin, POSTS + 2 * column_margin
 
 
+def check_grid(dataset):
+    """A height grid must be a north-up raster in geographic coordinates."""
+    if dataset.crs is None or not dataset.crs.is_geographic:
+        raise ValueError("a height grid must be in geographic coordinates")
+    transform = dataset.transform
+    if transform.b or transform.d or transform.a <= 0 or transform.e >= 0:
+        raise ValueError("a height grid must be north-up")
+
+
+def uncovered_cells(datasets, cells):
+    """Names of the cells with a corner that no height grid covers.
+
+    The grid is global and reads 0 where nothing is built, so a cell outside
+    every file is a wrong file, not a place without towers: it would come out
+    unmasked and look masked. A cell is far smaller than a file of the grid,
+    so four covered corners mean a covered cell.
+    """
+    def covered(longitude, latitude):
+        return any(dataset.bounds.left <= longitude <= dataset.bounds.right
+                   and dataset.bounds.bottom <= latitude <= dataset.bounds.top for dataset in datasets)
+
+    return [hgt_name(longitude, latitude) for longitude, latitude in cells
+            if not all(covered(longitude + dx, latitude + dy) for dx in (0, 1) for dy in (0, 1))]
+
+
 def building_heights(datasets, cell, row_margin, column_margin):
     """Building height at every post of `cell` and of a margin around it, 0 where no grid has a height.
 
     A post takes the grid cell it lies in: the grid is three times coarser
     than the posts and its heights are averages over a cell already. Each
     dataset is north-up in geographic coordinates; several may tile the area,
-    and where two cover a post the later one wins.
+    and where two cover a post the later one wins. A margin that reaches
+    past every file counts as unbuilt there, so pass the files beside a
+    cell at the edge of one too.
     """
     import numpy as np
 
@@ -87,11 +115,8 @@ def building_heights(datasets, cell, row_margin, column_margin):
     post_longitudes = (longitude * side + np.arange(columns) - column_margin) / side
     post_latitudes = ((latitude + 1) * side - np.arange(rows) + row_margin) / side
     for dataset in datasets:
-        if dataset.crs is None or not dataset.crs.is_geographic:
-            raise ValueError("a height grid must be in geographic coordinates")
+        check_grid(dataset)
         transform = dataset.transform
-        if transform.b or transform.d or transform.a <= 0 or transform.e >= 0:
-            raise ValueError("a height grid must be north-up")
         pixel_columns = np.floor((post_longitudes - transform.c) / transform.a).astype("int64")
         pixel_rows = np.floor((post_latitudes - transform.f) / transform.e).astype("int64")
         inside_columns = np.nonzero((pixel_columns >= 0) & (pixel_columns < dataset.width))[0]
@@ -201,23 +226,15 @@ def load_input(directory, bounds):
     return source_dir, manifest_path, manifest, present
 
 
-def run(args, out, source_dir, manifest_path, source_manifest, present, files):
-    import rasterio
-
+def run(args, out, source_dir, manifest_path, source_manifest, present, files, datasets):
     entries = []
-    with rasterio.Env():
-        datasets = [rasterio.open(path) for path in files]
-        try:
-            for cell in present:
-                zone = cell_zone(datasets, cell, args.threshold, args.smooth, args.margin)
-                heights, lost = mask_posts(read_hgt(hgt_path(source_dir, *cell)), zone)
-                entry = {**write_hgt(out, cell, heights), "maskedPosts": lost,
-                         "maskedKm2": round(lost * post_area_km2(cell[1] + 0.5), 2)}
-                entries.append(entry)
-                print(f"{entry['cell']}: {lost} posts masked, about {entry['maskedKm2']} km2", flush=True)
-        finally:
-            for dataset in datasets:
-                dataset.close()
+    for cell in present:
+        zone = cell_zone(datasets, cell, args.threshold, args.smooth, args.margin)
+        heights, lost = mask_posts(read_hgt(hgt_path(source_dir, *cell)), zone)
+        entry = {**write_hgt(out, cell, heights), "maskedPosts": lost,
+                 "maskedKm2": round(lost * post_area_km2(cell[1] + 0.5), 2)}
+        entries.append(entry)
+        print(f"{entry['cell']}: {lost} posts masked, about {entry['maskedKm2']} km2", flush=True)
     ids = "+".join(source["id"] for source in source_manifest["sources"] if source.get("cells"))
     masked = {"id": f"tower-mask-of-{ids}",
               "input": {"manifestSha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
@@ -254,15 +271,25 @@ def main():
     for name, value in (("--smooth", args.smooth), ("--margin", args.margin)):
         if value != 0 and not 15 <= value <= 2000:
             parser.error(f"{name} must be 0 or between 15 and 2000 metres")
+    import rasterio
+
     # The input and the height files are checked before --out exists.
-    try:
-        source = load_input(args.input, args.bounds)
-        files = [path.resolve(strict=True) for path in args.heights]
-    except (OSError, ValueError) as error:
-        parser.error(str(error))
-    out = args.out.resolve()
-    out.mkdir(parents=True)
-    path = run(args, out, *source, files)
+    with contextlib.ExitStack() as stack:
+        try:
+            source = load_input(args.input, args.bounds)
+            files = [path.resolve(strict=True) for path in args.heights]
+            stack.enter_context(rasterio.Env())
+            datasets = [stack.enter_context(rasterio.open(path)) for path in files]
+            for dataset in datasets:
+                check_grid(dataset)
+            missing = uncovered_cells(datasets, source[-1])
+            if missing:
+                raise ValueError(f"no file of --heights covers {', '.join(missing)}")
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+        out = args.out.resolve()
+        out.mkdir(parents=True)
+        path = run(args, out, *source, files, datasets)
     print(f"Elevation manifest: {path}", flush=True)
 
 
