@@ -194,6 +194,10 @@ production now.
    - **LINZ's New Zealand LiDAR 1m DEM**, approved on 2026-11-27: 424
      cloud-optimised sheets in a versioned public bucket, read at their 8 m
      overview inside LINZ's capture area, about 90% of the mainland.
+   - **CEDD's LiDAR DTM 2020 of Hong Kong**, approved on 2026-11-27: 3,253
+     zips of 0.5 m GeoTIFFs, made once into two cells kept in the elevation
+     bucket, which a build reads alone (see
+     [CEDD's lidar in the build](elevation-sources.md#cedds-lidar-in-the-build)).
 
    Each source pins two files:
 
@@ -222,7 +226,9 @@ production now.
      elevation bucket, which the source list names as Sonny's `mirror`.
      LINZ's [catalog](linz-nz-lidar-1m-dem-sheets-20261127.txt) names each
      sheet's version, size, ETag and NZTM bounds, and the sheets each of its
-     60 cells reads.
+     60 cells reads. CEDD's [catalog](cedd-hk-lidar-dtm-2020-tiles-20261127.txt)
+     pins each kept tile's size and SHA-256 and that of the provenance file
+     beside it, which names every zip the tile was made from.
 
    [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
    an `osmium export` of the relation, or of several for Sonny, 3DEP's

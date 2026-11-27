@@ -232,7 +232,7 @@ def main(argv=None):
     parser.add_argument("--city", required=True, help="A city of elevation-probes.json that names an extract")
     parser.add_argument("--radius", type=int, help="Opening radius in metres; without it only the ungraded sample is built")
     parser.add_argument("--terrain", help="The terrain source ids of elevation-sources.json, joined by commas as in "
-                                          "usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, to put over the opened tiles; needs --radius")
+                                          "usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020, to put over the opened tiles; needs --radius")
     parser.add_argument("--date", help="The extract's YYMMDD date on Geofabrik instead of the latest")
     parser.add_argument("--map-platform-image", help="A digest-pinned map-platform image already on this host")
     parser.add_argument("--jobs", type=int, default=4)

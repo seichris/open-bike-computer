@@ -89,8 +89,10 @@ cell's name. It never replaces an object; one of another size stops it.
 """
 
 import argparse
+import functools
 import gzip
 import hashlib
+import io
 import json
 import math
 import re
@@ -103,9 +105,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from build_elevation import (
-    LINZ_EPSG, LINZ_GEOGRAPHIC_EPSG, LINZ_ORIGIN, MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET,
-    TERRAIN_PREFIX, cell_of, format_cell_catalog, format_linz_catalog, format_sonny_catalog, format_terrain_catalog,
-    hgt_name, linz_box, linz_url, load_area, load_terrain_sources, sonny_posts,
+    CEDD_EPSG, CEDD_HEIGHTS, CEDD_PIXEL, CEDD_REJECT_MARGIN, KEPT_RULES, LINZ_EPSG, LINZ_GEOGRAPHIC_EPSG, LINZ_ORIGIN,
+    MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, cell_of, clip_to_area, drop_beyond,
+    format_cell_catalog, format_kept_catalog, format_linz_catalog, format_sonny_catalog, format_terrain_catalog,
+    hgt_name, hgt_path, linz_box, linz_url, load_area, load_terrain_sources, post_transform, sonny_posts, write_tile,
 )
 
 KEY = re.compile(r"/([ns])(\d{2})([ew])(\d{3})/USGS_13_\1\2\3\4_(\d{8})\.tif$")
@@ -381,33 +384,171 @@ def http_get(url):
         return response.read().decode()
 
 
-def mirror_files(source, held, download, upload, jobs=6):
+def mirror_files(source, held, read, upload, jobs=6):
     """Copy each file of the source's catalog that its bucket copy lacks; {name: "held" or "copied"}.
 
-    `held` maps the names the copy holds to their sizes. A file is uploaded
-    only once its download has the catalog's size and SHA-256.
+    `held` maps the names the copy holds to their sizes and `read(cell,
+    name)` gives a file's bytes. A kept source's provenance files go beside
+    its tiles. A file is uploaded only with the size and SHA-256 the catalog
+    pins (a provenance file's SHA-256 alone).
     """
     wanted = {}
     for cell in sorted(source.tiles):
         name, size, sha256 = source.mirror_file(cell)
-        if name in held and held[name] != size:
+        wanted[name] = (cell, size, sha256)
+        if source.adapter in KEPT_RULES:
+            name, sha256 = source.provenance_file(cell)
+            wanted[name] = (cell, None, sha256)
+    for name, (_, size, _) in wanted.items():
+        if name in held and size is not None and held[name] != size:
             raise ValueError(f"{source.mirror}{name} holds {held[name]} bytes, not the catalog's {size}")
-        wanted[name] = (source.tile_url(*cell), size, sha256)
 
     def copy(name):
         if name in held:
             return "held"
-        url, size, sha256 = wanted[name]
-        data, _ = download(url)
+        cell, size, sha256 = wanted[name]
+        data = read(cell, name)
         found = hashlib.sha256(data).hexdigest()
-        if len(data) != size or found != sha256:
-            raise ValueError(f"{url} gave {len(data)} bytes with SHA-256 {found}, not the catalog's {size} bytes "
-                             f"with SHA-256 {sha256}")
+        if (size is not None and len(data) != size) or found != sha256:
+            raise ValueError(f"{name} is not the catalog's: {len(data)} bytes with SHA-256 {found}, the catalog pins "
+                             f"{size or 'any size'} with SHA-256 {sha256}")
         upload(data, f"{source.mirror}{name}")
         return "copied"
 
     with ThreadPoolExecutor(jobs) as pool:
         return dict(zip(wanted, pool.map(copy, wanted)))
+
+
+def cedd_zip_pixels(data, name):
+    """The CEDD_PIXEL means of one CEDD zip's 0.5 m GeoTIFF and the HK1980 Grid corner (west, north) they start at.
+
+    A 5 m pixel is the mean of the 0.5 m pixels in it that have data, and
+    has none where none of them has. The zip must hold one GeoTIFF on
+    HK1980 Grid with 0.5 m pixels and whole 5 m blocks.
+    """
+    import numpy as np
+    from rasterio.io import MemoryFile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        members = [member for member in archive.namelist() if member.lower().endswith((".tif", ".tiff"))]
+        if len(members) != 1 or len(archive.namelist()) != 1:
+            raise ValueError(f"{name} holds {archive.namelist()}, not one GeoTIFF")
+        raster = archive.read(members[0])
+    factor = round(CEDD_PIXEL / 0.5)
+    with MemoryFile(raster) as memory, memory.open() as dataset:
+        transform = dataset.transform
+        # Some files place their corner a fraction of a micrometre off the grid.
+        corner = (round(transform.c / CEDD_PIXEL) * CEDD_PIXEL, round(transform.f / CEDD_PIXEL) * CEDD_PIXEL)
+        if (dataset.crs is None or dataset.crs.to_epsg() != CEDD_EPSG or dataset.count != 1
+                or max(abs(value - wanted) for value, wanted in zip(
+                    (transform.a, transform.b, transform.d, transform.e), (0.5, 0.0, 0.0, -0.5))) > 1e-9
+                or dataset.width % factor or dataset.height % factor
+                or abs(transform.c - corner[0]) > 0.001 or abs(transform.f - corner[1]) > 0.001):
+            raise ValueError(f"{name} is not a 0.5 m GeoTIFF on HK1980 Grid in whole {CEDD_PIXEL:g} m blocks")
+        # Files mark the pixels without data with -9999 or with 0; one that marks none would pass its fill as heights.
+        if dataset.nodata is None:
+            raise ValueError(f"{name} declares no value for pixels without data")
+        pixels = dataset.read(1, masked=True).astype("float64")
+    blocks = pixels.reshape(pixels.shape[0] // factor, factor, pixels.shape[1] // factor, factor)
+    return np.asarray(blocks.mean(axis=(1, 3)).filled(np.nan), dtype="float32"), corner
+
+
+def cedd_cells(entries, area, out, fetch, jobs=8, log=functools.partial(print, flush=True)):
+    """Write Hong Kong's kept tiles from CEDD's zips, `entries` being (name, URL) of each; the cells' records.
+
+    Every zip is downloaded into memory, pinned and averaged to 5 m. The
+    5 m pixels go into one mosaic on HK1980 Grid, the pixels that are not
+    ground are dropped with their margin, and each cell of the area is
+    resampled from it onto its posts and cut to the area. Beside each tile,
+    `provenance/CELL.txt` names the zips whose pixels reach the cell, with
+    their bytes and SHA-256, and `receipts/CELL.json` records the tile.
+    """
+    import numpy as np
+    from affine import Affine
+    from pyproj import Transformer
+    from rasterio.crs import CRS
+    from rasterio.warp import Resampling, reproject
+
+    def one(entry):
+        name, url = entry
+        data = fetch(url)
+        try:
+            pixels, corner = cedd_zip_pixels(data, name)
+        except (ValueError, zipfile.BadZipFile) as error:
+            return str(error)
+        return {"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}, pixels, corner
+
+    read, refused = [], []
+    with ThreadPoolExecutor(jobs) as pool:
+        for index, found in enumerate(pool.map(one, entries), 1):
+            (refused if isinstance(found, str) else read).append(found)
+            if index % 250 == 0:
+                log(f"{index} of {len(entries)} zips, {sum(pin['bytes'] for pin, _, _ in read)} bytes")
+    # Every zip is read before any is refused, so that one run names them all.
+    if refused:
+        raise ValueError(f"{len(refused)} zips refused: {'; '.join(refused[:10])}")
+    west = min(corner[0] for _, _, corner in read)
+    north = max(corner[1] for _, _, corner in read)
+    east = max(corner[0] + pixels.shape[1] * CEDD_PIXEL for _, pixels, corner in read)
+    south = min(corner[1] - pixels.shape[0] * CEDD_PIXEL for _, pixels, corner in read)
+    mosaic = np.full((round((north - south) / CEDD_PIXEL), round((east - west) / CEDD_PIXEL)), np.nan, dtype="float32")
+    to_degrees = Transformer.from_crs(CEDD_EPSG, 4326, always_xy=True)
+    for pin, pixels, (left, top) in read:
+        row, column = round((north - top) / CEDD_PIXEL), round((left - west) / CEDD_PIXEL)
+        window = mosaic[row:row + pixels.shape[0], column:column + pixels.shape[1]]
+        has = np.isfinite(pixels)
+        if np.isfinite(window[has]).any():
+            raise ValueError(f"{pin['name']} overlaps another zip's pixels")
+        window[has] = pixels[has]
+        right, bottom = left + pixels.shape[1] * CEDD_PIXEL, top - pixels.shape[0] * CEDD_PIXEL
+        corners = [to_degrees.transform(x, y) for x in (left, right) for y in (top, bottom)]
+        pin["degrees"] = (min(x for x, _ in corners), min(y for _, y in corners),
+                          max(x for x, _ in corners), max(y for _, y in corners))
+    valid = np.isfinite(mosaic)
+    dropped = drop_beyond(mosaic, valid, CEDD_HEIGHTS, CEDD_REJECT_MARGIN)
+    mosaic[~valid] = np.nan
+    log(json.dumps({"zips": len(read), "bytes": sum(pin["bytes"] for pin, _, _ in read), **dropped}))
+    records = []
+    out.mkdir(parents=True, exist_ok=True)
+    for cell in sorted(area_cells(area), key=lambda cell: hgt_name(*cell)):
+        longitude, latitude = cell
+        # The zips whose pixels reach the posts of the cell or the resampling's margin.
+        under = sorted((pin for pin, _, _ in read if pin["degrees"][0] <= longitude + 1.01
+                        and pin["degrees"][2] >= longitude - 0.01 and pin["degrees"][1] <= latitude + 1.01
+                        and pin["degrees"][3] >= latitude - 0.01), key=lambda pin: pin["name"])
+        if not under:
+            continue
+        posts = np.full((POSTS, POSTS), np.nan, dtype="float32")
+        reproject(mosaic, posts, src_transform=Affine(CEDD_PIXEL, 0, west, 0, -CEDD_PIXEL, north),
+                  src_crs=CRS.from_epsg(CEDD_EPSG), src_nodata=float("nan"), dst_transform=post_transform(*cell),
+                  dst_crs=CRS.from_epsg(4326), dst_nodata=float("nan"), init_dest_nodata=False,
+                  resampling=Resampling.bilinear, num_threads=1)
+        outside = clip_to_area(posts, cell, area)
+        if not np.isfinite(posts).any():
+            continue
+        entry = write_tile(out, cell, posts)
+        text = "".join(f"{pin['name']} {pin['bytes']} {pin['sha256']}\n" for pin in under)
+        name = hgt_name(*cell)
+        (out / "provenance").mkdir(parents=True, exist_ok=True)
+        (out / "provenance" / f"{name}.txt").write_text(text)
+        record = {"cell": name, "zips": len(under), "outsidePosts": outside, **entry, **dropped,
+                  "fileSha256": hashlib.sha256(hgt_path(out, *cell).read_bytes()).hexdigest(),
+                  "provenanceSha256": hashlib.sha256(text.encode()).hexdigest()}
+        (out / "receipts").mkdir(exist_ok=True)
+        (out / "receipts" / f"{name}.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n")
+        records.append(record)
+    return records
+
+
+def kept_catalog(cells, date):
+    """The catalog of a directory of kept tiles, from the receipts their maker wrote."""
+    tiles = {}
+    for path in sorted((cells / "receipts").glob("*.json")):
+        record = json.loads(path.read_text())
+        if record.get("empty"):
+            continue
+        tiles[cell_of(record["cell"])] = (record["provenanceSha256"], date, record["fileBytes"], record["fileSha256"])
+    return format_kept_catalog(tiles)
 
 
 def gcloud_sizes(prefix):
@@ -479,14 +620,45 @@ def main():
     copy.add_argument("--sources", type=Path, default=Path(__file__).with_name("elevation-sources.json"))
     copy.add_argument("--source", required=True, help="The id of a source whose entry names a mirror")
     copy.add_argument("--jobs", type=int, default=6)
+    copy.add_argument("--from", dest="made", type=Path,
+                      help="For a kept source: the directory its maker, such as cedd-cells, wrote the tiles to")
+    cedd = commands.add_parser("cedd-cells", help="Make Hong Kong's kept tiles from CEDD's 2020 lidar DTM zips")
+    cedd.add_argument("--index", required=True, type=Path, help="CSDI's tile index of the DTM_2020 layer, GeoJSON")
+    cedd.add_argument("--area", required=True, type=Path, help="The file `countries` wrote")
+    cedd.add_argument("--jobs", type=int, default=8)
+    cedd.add_argument("--out", required=True, type=Path, help="A new directory")
+    kept = commands.add_parser("kept-catalog", help="Write the catalog of kept tiles from their maker's receipts")
+    kept.add_argument("--cells", required=True, type=Path, help="The directory the maker wrote")
+    kept.add_argument("--date", required=True, help="The day the tiles were made, YYYYMMDD")
+    kept.add_argument("--out", required=True, type=Path, help="A new catalog file")
     args = parser.parse_args()
     if args.command == "mirror":
         found = [source for source in load_terrain_sources(args.sources) if source.id == args.source]
         if not found or found[0].mirror is None:
             parser.error(f"{args.sources.name} lists no source {args.source} with a mirror")
-        done = mirror_files(found[0], gcloud_sizes(found[0].mirror), http_download, gcloud_upload, args.jobs)
+        source = found[0]
+        if source.adapter in KEPT_RULES:
+            if args.made is None:
+                parser.error(f"{source.id} is made, not downloaded: name its maker's directory with --from")
+
+            def read(cell, name):
+                return (hgt_path(args.made, *cell) if name.endswith(".hgt.gz") else args.made / "provenance" / name
+                        ).read_bytes()
+        else:
+            def read(cell, name):
+                return http_download(source.tile_url(*cell))[0]
+        done = mirror_files(source, gcloud_sizes(source.mirror), read, gcloud_upload, args.jobs)
         print(f"{found[0].mirror}: {sum(state == 'copied' for state in done.values())} copied, "
               f"{sum(state == 'held' for state in done.values())} held already")
+        return
+    if args.command == "kept-catalog":
+        if re.fullmatch(r"\d{8}", args.date) is None:
+            parser.error("--date must be YYYYMMDD")
+        text = kept_catalog(args.cells, args.date)
+        with args.out.open("x") as stream:
+            stream.write(text)
+        print(f"{args.out.name}: {len(text.splitlines())} tiles, {len(text.encode())} bytes, "
+              f"sha256 {hashlib.sha256(text.encode()).hexdigest()}")
         return
     if args.command == "srtm-fill":
         blocks = []
@@ -585,6 +757,16 @@ def main():
         print(f"{args.out.name}: {len(tiles)} cells, {len(sheets)} sheets, "
               f"{sum(sheet[2] for sheet in sheets.values())} source bytes, {len(text.encode())} bytes, "
               f"sha256 {hashlib.sha256(text.encode()).hexdigest()}")
+        return
+    if args.command == "cedd-cells":
+        features = json.loads(args.index.read_text())["features"]
+        entries = [(feature["properties"]["Filename"], feature["properties"]["URL"]) for feature in features]
+        if len({name for name, _ in entries}) != len(entries):
+            parser.error("the index names a zip twice")
+        args.out.mkdir()
+        for record in cedd_cells(entries, area, args.out, lambda url: http_download(
+                urllib.parse.quote(url, safe=":/"))[0], args.jobs):
+            print(json.dumps({key: value for key, value in record.items() if key != "hgtSha256"}), flush=True)
         return
     if args.command == "sonny-tiles":
         listed = sonny_listing(http_get(args.folder))

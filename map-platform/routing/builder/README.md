@@ -68,7 +68,7 @@ takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded` and `gate` are skipped, and it takes about 4 hours.
 
-`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem` grades with the hybrid: the terrain
+`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
 have data, the opened Copernicus tiles elsewhere (see
 [Build and release](../README.md#build-and-release)). A build uses every
@@ -85,15 +85,22 @@ ways:
   cells. Europe adds 848 of Sonny's tiles, 4.1 GB of zips, each cut to its
   countries, and New Zealand 60 cells read from LINZ's 424 sheets at their
   8 m overview. A LINZ worker holds a cell's mosaic of 8 m pixels: up to
-  605 MB, with a peak of 2.2 GB in a laptop test of Wellington's cell. The
-  stage first fetches Sonny's zips from the copy in
+  605 MB, with a peak of 2.2 GB in a laptop test of Wellington's cell.
+  Hong Kong adds 2 cells kept as HGT tiles in the elevation bucket, made
+  once from CEDD's lidar. The stage first fetches Sonny's zips and the
+  kept tiles from their copies in
   `gs://bicino-routing-elevation` into `elevation-terrain-files/`, with the
   same account and token as kept tiles (see below), and keeps each only
   with the size and SHA-256 its catalog pins. A zip it could not fetch, and
   every zip when the builder has no account, is downloaded from Google
-  Drive instead; the log says how many (`terrain files: ...`).
-  `BICINO_TERRAIN_MIRROR_ENDPOINT=none` reads them all from Drive, and a
-  rehearsal may name a local stand-in, `http://127.0.0.1:PORT`. The North
+  Drive instead; the log says how many (`terrain files: ...`). A kept tile
+  has no other source: one that was not fetched fails its cell, and the
+  stage then fails. `BICINO_TERRAIN_MIRROR_ENDPOINT=none` reads Sonny's
+  zips from Drive and therefore fails Hong Kong's cells; a rehearsal may
+  name a local stand-in, `http://127.0.0.1:PORT`. A laptop has no
+  service account, so a rehearsal of a kept source needs the tiles in
+  `ROOT/elevation-terrain-files/` first: `elevation_cache.py fetch-terrain
+  --token-file` with a token of your own fetches them. The North
   American part ran on a builder on 2026-11-27 (see the runbook's
   [planet gate for the hybrid](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27));
   no builder has read Sonny's tiles yet. MRDEM-30 is read from one object
@@ -108,7 +115,7 @@ ways:
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
 - **The gate's source is named**
-  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25+linz-nz-lidar-1m-dem-over-opened-400`.
+  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25+linz-nz-lidar-1m-dem+cedd-hk-lidar-dtm-2020-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -410,7 +417,7 @@ With `--terrain` the rehearsal grades with the hybrid:
 
 ```sh
 map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Toronto --radius 400 \
-  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem
+  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020
 ```
 
 On 2026-11-26 Chicago ran with 3DEP alone, the one source of the list

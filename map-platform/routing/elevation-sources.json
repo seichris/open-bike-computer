@@ -113,6 +113,34 @@
       "approvedForRouting": true,
       "approvedAt": "2026-11-27",
       "approvedBy": "Chris"
+    },
+    {
+      "id": "cedd-hk-lidar-dtm-2020",
+      "adapter": "cedd-hk-lidar-dtm-2020-hgt-v1",
+      "title": "Civil Engineering and Development Department, HKSAR Government, LiDAR Data 2020: Digital Terrain Model",
+      "surfaceModel": "dtm",
+      "horizontalCrs": "EPSG:2326",
+      "verticalDatum": "Hong Kong Principal Datum",
+      "verticalUnits": "m",
+      "origin": "https://bulkdata.csdi.gov.hk/cedd/lidar/2020dtm",
+      "mirror": "gs://bicino-routing-elevation/terrain-sources/cedd-hk-lidar-dtm-2020/",
+      "coverage": "Hong Kong, where the 2019-2020 airborne lidar survey has data, which is its land: the posts inside the area, from the two cells that touch it, made once from the 3,253 zips of the survey's 0.5 m terrain model and kept in the elevation bucket",
+      "area": "hong-kong-osm-r913110-v225.geojson.gz",
+      "areaBytes": 12666,
+      "areaSha256": "28cac25956faa69ee85248da51b2c847bcc8b957c1f04eda6ac56631dd6a8b9b",
+      "areaSource": "OpenStreetMap relation 913110 version 225 (Hong Kong) as of 2026-11-27, ODbL (c) OpenStreetMap contributors",
+      "catalog": "cedd-hk-lidar-dtm-2020-tiles-20261127.txt",
+      "catalogBytes": 309,
+      "catalogSha256": "f145bc461e9fcafd4fd539d7427665ea44aa745d500cd855dfdf186d44438e8d",
+      "tileCount": 2,
+      "license": "HKSAR Government terms of use of data on the Common Spatial Data Infrastructure portal and DATA.GOV.HK: browse, download, distribute, reproduce, hyperlink to and print, for commercial and non-commercial purposes, free of charge, with the source identified",
+      "attribution": "LiDAR Data 2020 (Digital Terrain Model) of the Civil Engineering and Development Department, from the Common Spatial Data Infrastructure portal. The Government of the Hong Kong Special Administrative Region is the owner of the data.",
+      "termsUrl": "https://portal.csdi.gov.hk/csdi-webpage/doc/TNC",
+      "attributionUrl": "https://portal.csdi.gov.hk/geoportal/?datasetId=cedd_rcd_1629267205233_87895",
+      "modifications": "Each 0.5 m tile averaged to 5 m, pixels below -10 m or above 1,000 m dropped with the 5 m pixels within 24 of them, resampled from HK1980 Grid to 1 arc-second posts, cut to the area, rounded to whole metres, heights left above Hong Kong Principal Datum, kept as HGT tiles in the elevation bucket, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet the terrain over 16 posts at the edge of its data. Not endorsed by the HKSAR Government.",
+      "approvedForRouting": true,
+      "approvedAt": "2026-11-27",
+      "approvedBy": "Chris"
     }
   ]
 }

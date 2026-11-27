@@ -1369,15 +1369,18 @@ class ElevationHybridTests(ElevationOpeningTests):
         def upload(data, url):
             uploaded[url] = data
 
-        done = terrain_catalog.mirror_files(source, {"N47E008.zip": 6}, lambda url: (served[url], ""), upload)
+        def read(cell, name):
+            return served[source.tile_url(*cell)]
+
+        done = terrain_catalog.mirror_files(source, {"N47E008.zip": 6}, read, upload)
         self.assertEqual(done, {"N47E008.zip": "held", "N47E009.zip": "copied", "N52E013.zip": "copied"})
         self.assertEqual(uploaded, {"gs://bucket/copy/N47E009.zip": b"st-gallen", "gs://bucket/copy/N52E013.zip": b"berlin"})
         # Never another file than the pinned one, and never over an object.
         served[source.tile_url(13, 52)] = b"Berlin"
-        with self.assertRaisesRegex(ValueError, "not the catalog's 6 bytes"):
-            terrain_catalog.mirror_files(source, {}, lambda url: (served[url], ""), upload)
+        with self.assertRaisesRegex(ValueError, "N52E013.zip is not the catalog's: 6 bytes with SHA-256"):
+            terrain_catalog.mirror_files(source, {}, read, upload)
         with self.assertRaisesRegex(ValueError, "gs://bucket/copy/N47E009.zip holds 8 bytes, not the catalog's 9"):
-            terrain_catalog.mirror_files(source, {"N47E009.zip": 8}, lambda url: (served[url], ""), upload)
+            terrain_catalog.mirror_files(source, {"N47E009.zip": 8}, read, upload)
 
     def test_sonnys_catalog_names_each_cells_file_and_pins_it(self):
         tiles = {(8, 47): ("1SR2cz3aTvEesKawAbmbm6XxOhVFF7MNq", "20240715", 10188486, "c7" * 32),
@@ -1706,7 +1709,8 @@ class TerrainSourceTests(unittest.TestCase):
     ROUTING = Path(build_elevation.__file__).parent
 
     def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
-        source, canada, europe, zealand = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
+        source, canada, europe, zealand, hong_kong = build_elevation.load_terrain_sources(
+            self.ROUTING / "elevation-sources.json")
         self.assertEqual((source.id, len(source.tiles), source.origin_object), ("usgs-3dep-13", 955, None))
         self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
                                                    "historical/n41w074/USGS_13_n41w074_20260917.tif")
@@ -1789,11 +1793,27 @@ class TerrainSourceTests(unittest.TestCase):
         self.assertEqual([capture[1].contains(Point(x, y)) for x, y in (
             (174.7762, -41.2865), (174.7633, -36.8485), (172.6362, -43.5321), (170.5028, -45.8788),
             (168.6626, -45.0312), (-176.56, -43.95))], [True] * 5 + [False])
-        # Europe and New Zealand touch neither North American area, so every cell keeps the one source it has.
-        everywhere = build_elevation.Terrain.over((source, canada, europe, zealand), sorted(
-            set(source.tiles) | set(canada.tiles) | set(europe.tiles) | set(zealand.tiles)))
+        # CEDD's lidar of Hong Kong: two cells kept as HGT tiles in the elevation bucket, read from there alone.
+        self.assertEqual((hong_kong.id, sorted(hong_kong.tiles), hong_kong.mirror),
+                         ("cedd-hk-lidar-dtm-2020", [(113, 22), (114, 22)],
+                          "gs://bicino-routing-elevation/terrain-sources/cedd-hk-lidar-dtm-2020/"))
+        self.assertEqual(hong_kong.pin((114, 22)), {
+            "source": "cedd-hk-lidar-dtm-2020", "url": f"{hong_kong.mirror}N22E114.hgt.gz", "bytes": 1355799,
+            "etag": "40f550af0f00e82c5720f9fce618ad84cd7ea68871fa1f82933abde2ed8d74e4",
+            "areaSha256": hong_kong.area_sha256, "rejects": {"below": -10, "above": 1000, "pixelsAround": 24}})
+        self.assertEqual(hong_kong.provenance_file((114, 22)),
+                         ("N22E114.txt", "a7774cf4d6c078f369984d0f122ab4d643d697d5071e1e7f42495e11b7ed980b"))
+        hong_kong_area = build_elevation.load_area(hong_kong.area, hong_kong.area_sha256)
+        # Central, Tai Mo Shan and Lantau are inside; Shenzhen and Macau outside.
+        self.assertEqual([hong_kong_area[1].contains(Point(x, y)) for x, y in (
+            (114.1588, 22.2820), (114.1244, 22.4106), (113.9440, 22.2550), (114.0579, 22.5431), (113.5439, 22.1987))],
+            [True] * 3 + [False] * 2)
+        # Europe, New Zealand and Hong Kong touch neither North American area, so every cell keeps the one source
+        # it has.
+        everywhere = build_elevation.Terrain.over((source, canada, europe, zealand, hong_kong), sorted(
+            set(source.tiles) | set(canada.tiles) | set(europe.tiles) | set(zealand.tiles) | set(hong_kong.tiles)))
         self.assertEqual((len(everywhere.cells), sum(1 for found in everywhere.cells.values() if len(found) > 1)),
-                         (3340 + 848 + 60, 95))
+                         (3340 + 848 + 60 + 2, 95))
         document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1813,7 +1833,7 @@ class TerrainSourceTests(unittest.TestCase):
                 return build_elevation.load_terrain_sources(root / "elevation-sources.json")
 
             self.assertEqual([found.tiles for found in load(lambda value: None)],
-                             [source.tiles, canada.tiles, europe.tiles, zealand.tiles])
+                             [source.tiles, canada.tiles, europe.tiles, zealand.tiles, hong_kong.tiles])
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "not approved"),
                 (lambda value: value.update(approvedForRouting="yes"), "not approved"),
@@ -1858,6 +1878,15 @@ class TerrainSourceTests(unittest.TestCase):
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     load(change, index=2)
+            # A kept source is read from its bucket copy alone, so it must name one.
+            for change, message in (
+                (lambda value: value.pop("mirror"), "fields"),
+                (lambda value: value.update(mirror="https://storage.googleapis.com/x/"), "gs://BUCKET/PREFIX/"),
+                (lambda value: value.update(horizontalCrs="EPSG:4326"), "unsupported"),
+                (lambda value: value.update(tileCount=3), "not 3"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change, index=4)
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "linz-nz-lidar-1m-dem is not approved"),
                 (lambda value: value.update(origin=value["origin"].replace("dem_1m", "dsm_1m")), "unsupported"),
@@ -2096,6 +2125,177 @@ class SonnyCatalogTests(unittest.TestCase):
         self.assertEqual(build_elevation.parse_sonny_catalog(line), {(13, 48): tile})
         with self.assertRaisesRegex(ValueError, "not Sonny's tile of N48E014"):
             terrain_catalog.sonny_tile((14, 48), "1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK", fetch)
+
+
+class KeptTerrainTests(unittest.TestCase):
+    """Terrain kept as HGT tiles in the elevation bucket, and CEDD's tiles of Hong Kong, on 41-post tiles."""
+
+    POSTS = 41
+    MIRROR = "gs://bicino-routing-elevation/terrain-sources/cedd-hk-lidar-dtm-2020/"
+
+    def setUp(self):
+        for module in (build_elevation, terrain_catalog):
+            patcher = patch.object(module, "POSTS", self.POSTS)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def kept_source(self, tiles, files=None):
+        return build_elevation.TerrainSource(
+            "cedd-hk-lidar-dtm-2020", build_elevation.CEDD_ORIGIN, tiles, "c" * 64, "https://terms.example",
+            "https://credit.example", Path("area.geojson.gz"), "a" * 64, build_elevation.CEDD_ADAPTER, None,
+            self.MIRROR, files)
+
+    def kept_tile(self, cell, heights):
+        """A tile written as the makers write it; its bytes and the tiles entry that pins it."""
+        made = self.root / "made"
+        made.mkdir(exist_ok=True)
+        build_elevation.write_tile(made, cell, heights)
+        data = build_elevation.hgt_path(made, *cell).read_bytes()
+        return data, ("p" * 64, "20261127", len(data), hashlib.sha256(data).hexdigest())
+
+    def test_the_kept_catalog_pins_each_tile_and_its_provenance(self):
+        tiles = {(114, 22): ("1" * 64, "20261127", 120158, "2" * 64), (113, 22): ("3" * 64, "20261127", 9, "4" * 64)}
+        text = build_elevation.format_kept_catalog(tiles)
+        self.assertEqual(text, f"N22E113 20261127 9 {'4' * 64} {'3' * 64}\nN22E114 20261127 120158 {'2' * 64} {'1' * 64}\n")
+        self.assertEqual(build_elevation.parse_kept_catalog(text), tiles)
+        lines = text.splitlines(keepends=True)
+        for broken, message in ((lines[1] + lines[0], "not sorted"), (lines[0] + lines[0], "repeats a cell"),
+                                (text.replace("N22E113 20261127 9", "N22E113 2026-11-27 9"), "invalid"),
+                                (text.replace(" 9 ", " 0 "), "invalid")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                build_elevation.parse_kept_catalog(broken)
+
+    def test_a_kept_tile_is_read_from_the_fetched_copy_alone_and_as_pinned(self):
+        import numpy as np
+
+        cell = (114, 22)
+        heights = np.full((self.POSTS, self.POSTS), 52.0, dtype="float32")
+        heights[:5] = np.nan
+        data, tile = self.kept_tile(cell, heights)
+        files = self.root / "files"
+        files.mkdir()
+        source = self.kept_source({cell: tile}, files)
+        # What the receipt pins: the copy's URL, size and SHA-256, and the rule applied when the tile was made.
+        self.assertEqual(source.pin(cell), {
+            "source": "cedd-hk-lidar-dtm-2020", "url": f"{self.MIRROR}N22E114.hgt.gz", "bytes": len(data),
+            "etag": tile[3], "areaSha256": "a" * 64, "rejects": {"below": -10, "above": 1000, "pixelsAround": 24}})
+        self.assertEqual(source.provenance_file(cell), ("N22E114.txt", "p" * 64))
+        with self.assertRaisesRegex(ValueError, "N22E114.hgt.gz was not fetched from gs://.*fetch-terrain"):
+            build_elevation.read_kept_cell(source, cell, self.root)
+        with self.assertRaisesRegex(ValueError, "was not fetched"):
+            build_elevation.read_kept_cell(self.kept_source({cell: tile}), cell, self.root)
+        (files / "N22E114.hgt.gz").write_bytes(data)
+        posts, read = build_elevation.read_kept_cell(source, cell, self.root)
+        self.assertEqual(read, {"sha256": tile[3], "readBytes": len(data), "tileDate": "20261127", "via": "mirror"})
+        np.testing.assert_array_equal(posts, heights)
+        # Another file, or one the catalog pins that is not a tile, stops the cell.
+        (files / "N22E114.hgt.gz").write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+        with self.assertRaisesRegex(ValueError, "not the catalog's"):
+            build_elevation.read_kept_cell(source, cell, self.root)
+        (files / "N22E114.hgt.gz").write_bytes(b"not a tile")
+        broken = self.kept_source({cell: ("p" * 64, "20261127", 10, hashlib.sha256(b"not a tile").hexdigest())}, files)
+        with self.assertRaisesRegex(ValueError, "is not a gzipped HGT tile"):
+            build_elevation.read_kept_cell(broken, cell, self.root)
+
+    def test_a_kept_source_uploads_its_tiles_and_their_provenance_as_pinned(self):
+        import numpy as np
+
+        cell = (114, 22)
+        data, tile = self.kept_tile(cell, np.full((self.POSTS, self.POSTS), 7.0, dtype="float32"))
+        provenance = b"11NE14D(e842n820,e843n821).zip 5 0000\n"
+        source = self.kept_source({cell: (hashlib.sha256(provenance).hexdigest(), *tile[1:])})
+        files = {"N22E114.hgt.gz": data, "N22E114.txt": provenance}
+        uploaded = {}
+        done = terrain_catalog.mirror_files(source, {}, lambda cell, name: files[name],
+                                            lambda data, url: uploaded.update({url: data}))
+        self.assertEqual(done, {"N22E114.hgt.gz": "copied", "N22E114.txt": "copied"})
+        self.assertEqual(uploaded, {f"{self.MIRROR}N22E114.hgt.gz": data, f"{self.MIRROR}N22E114.txt": provenance})
+        files["N22E114.txt"] = provenance + b"x"
+        with self.assertRaisesRegex(ValueError, "N22E114.txt is not the catalog's"):
+            terrain_catalog.mirror_files(source, {"N22E114.hgt.gz": len(data)}, lambda cell, name: files[name],
+                                         lambda data, url: None)
+
+    def cedd_zip(self, left, top, pixels, crs="EPSG:2326", members=("tile.tif",), nodata=-9999.0):
+        """A zip of one 0.5 m GeoTIFF, as CEDD's are."""
+        from rasterio.io import MemoryFile
+        from rasterio.transform import from_origin
+
+        with MemoryFile() as memory:
+            with memory.open(driver="GTiff", width=pixels.shape[1], height=pixels.shape[0], count=1, dtype="float32",
+                             crs=crs, transform=from_origin(left, top, 0.5, 0.5), nodata=nodata) as dataset:
+                dataset.write(pixels.astype("float32"), 1)
+            raster = memory.read()
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for member in members:
+                archive.writestr(member, raster)
+        return stream.getvalue()
+
+    def test_a_cedd_zip_is_averaged_to_5_m_leaving_out_pixels_without_data(self):
+        import numpy as np
+
+        pixels = np.full((20, 30), 10.0)
+        pixels[:10, :10] = -9999.0
+        pixels[10:, 10:20] = np.where(np.arange(100).reshape(10, 10) % 2, -9999.0, 30.0)
+        pixels[:10, 20:] = np.arange(100).reshape(10, 10)
+        means, corner = terrain_catalog.cedd_zip_pixels(self.cedd_zip(842000.0, 820000.0, pixels), "a.zip")
+        self.assertEqual(corner, (842000.0, 820000.0))
+        np.testing.assert_allclose(means, [[np.nan, 10.0, 49.5], [10.0, 30.0, 10.0]])
+        # A corner a fraction of a micrometre off the grid is on it.
+        self.assertEqual(terrain_catalog.cedd_zip_pixels(self.cedd_zip(842000.0000000938, 820000.00000001, pixels),
+                                                         "a.zip")[1], (842000.0, 820000.0))
+        for data, message in ((self.cedd_zip(842000.0, 820000.0, pixels, crs="EPSG:32650"), "HK1980"),
+                              (self.cedd_zip(842000.0, 820000.0, pixels, nodata=None), "declares no value"),
+                              (self.cedd_zip(842002.5, 820000.0, pixels), "HK1980"),
+                              (self.cedd_zip(842000.0, 820000.0, pixels[:, :25]), "HK1980"),
+                              (self.cedd_zip(842000.0, 820000.0, pixels, members=("a.tif", "b.tif")), "not one GeoTIFF")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                terrain_catalog.cedd_zip_pixels(data, "a.zip")
+
+    def test_cedd_zips_make_a_cells_kept_tile_and_name_every_zip_it_read(self):
+        import numpy as np
+        from pyproj import Transformer
+
+        cell = (114, 22)
+        # Two zips side by side under the cell's first posts, which lie at its north-west corner.
+        x, y = Transformer.from_crs(4326, 2326, always_xy=True).transform(114.003, 22.997)
+        left, top = round(x / 5) * 5 - 200, round(y / 5) * 5 + 200
+        west = np.full((800, 400), 50.0)
+        east = np.full((800, 400), 80.0)
+        east[600:, 300:] = -60.0  # a pit, which is not ground
+        zips = {"west.zip": self.cedd_zip(left, top, west), "east.zip": self.cedd_zip(left + 200, top, east)}
+        area_path = self.root / "area.geojson.gz"
+        area_path.write_bytes(terrain_catalog.area_bytes(
+            {"type": "Feature", "properties": {}, "geometry": mapping(box(113.9, 22.2, 114.5, 23.0))}))
+        area = build_elevation.load_area(area_path, hashlib.sha256(area_path.read_bytes()).hexdigest())
+        out = self.root / "cells"
+        records = terrain_catalog.cedd_cells([(name, f"https://cedd.example/{name}") for name in sorted(zips)], area,
+                                             out, lambda url: zips[url.rpartition("/")[2]], jobs=2,
+                                             log=lambda line: None)
+        self.assertEqual([record["cell"] for record in records], ["N22E114"])
+        record = records[0]
+        posts, _ = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))
+        found = np.unique(posts[np.isfinite(posts)].round(1))
+        self.assertIn(50.0, found)
+        self.assertIn(80.0, found)
+        self.assertGreater(record["rejectedPixels"], 0)
+        self.assertEqual(record["rejectedHeights"], [-60.0, -60.0])
+        self.assertTrue(np.isnan(posts).any())
+        self.assertEqual((out / "provenance" / "N22E114.txt").read_text(), "".join(
+            f"{name} {len(zips[name])} {hashlib.sha256(zips[name]).hexdigest()}\n" for name in sorted(zips)))
+        # The catalog of what was made pins the tile and its provenance.
+        text = terrain_catalog.kept_catalog(out, "20261127")
+        # A zip that is not CEDD's layout stops the run, which names every such zip after reading them all.
+        zips["bad.zip"] = self.cedd_zip(left, top, west[:, :395])
+        with self.assertRaisesRegex(ValueError, r"^1 zips refused: bad.zip is not a 0.5 m GeoTIFF"):
+            terrain_catalog.cedd_cells([(name, name) for name in sorted(zips)], area, self.root / "again",
+                                       lambda url: zips[url], log=lambda line: None)
+        self.assertEqual(build_elevation.parse_kept_catalog(text), {cell: (
+            hashlib.sha256((out / "provenance" / "N22E114.txt").read_bytes()).hexdigest(), "20261127",
+            record["fileBytes"], hashlib.sha256(build_elevation.hgt_path(out, *cell).read_bytes()).hexdigest())})
 
 
 class ElevationManifestTests(unittest.TestCase):
