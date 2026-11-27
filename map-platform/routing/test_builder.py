@@ -2,6 +2,7 @@
 
 import contextlib
 import fcntl
+import functools
 import gzip
 import hashlib
 import http.server
@@ -40,6 +41,9 @@ import run_stage  # noqa: E402
 
 SHELL_SCRIPTS = sorted(BUILDER.glob("*.sh")) + sorted((BUILDER / "stages").glob("*.sh"))
 GRADED_ENV = "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\n"
+# Every terrain source of the list in its order, as a run with terrain must name them.
+TERRAIN_IDS = ",".join(source["id"] for source in json.loads((ROUTING / "elevation-sources.json").read_text())["terrain"])
+TERRAIN_ENV = GRADED_ENV + f"BICINO_TERRAIN={TERRAIN_IDS}\n"
 
 
 def make_tile_set(directory, cells, method=None, seed=b""):
@@ -237,6 +241,35 @@ class ChainStateTests(ScratchCase):
         # A second collection keeps the links.
         chain_state.write_result(self.root, final=True, clock=self.clock)
         self.assertEqual((export / "ungraded" / "valhalla_tiles.tar").stat().st_nlink, 2)
+
+    def test_the_terrain_scan_reports_once_done_and_a_failed_scan_keeps_the_gates_verdict(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
+        scan = self.root / "export" / "evidence" / "terrain-scan"
+        scan.mkdir(parents=True)
+        (scan / "terrain-report.json").write_text('{"headline": "3 artifact candidates; 1 public-road way with a false step"}')
+        self.finish(*[stage for stage in chain_state.STAGES if stage != "terrain-scan"])
+        self.write_gate_summary({"opened-400": []})
+        # A report left by an earlier run is not this run's.
+        chain_state.mark(self.root, "terrain-scan", "running", clock=self.clock)
+        self.hold_lock("terrain-scan")
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        self.assertEqual((status["state"], status["verdict"], status["terrainScan"]), ("running", None, None))
+        self.clock.now += 60
+        chain_state.mark(self.root, "terrain-scan", "failed", exit_status=1, clock=self.clock)
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        # The gate does not wait for the scan, so its answer stands.
+        self.assertEqual((status["state"], status["verdict"], status["terrainScan"]), ("failed", "met", None))
+        self.assertTrue(chain_state.describe(status).startswith("chain: failed, gate met"))
+        chain_state.mark(self.root, "terrain-scan", "running", clock=self.clock)
+        chain_state.mark(self.root, "terrain-scan", "done", exit_status=0, clock=self.clock)
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        self.assertEqual((status["state"], status["verdict"]), ("complete", "met"))
+        self.assertEqual(status["terrainScan"]["headline"], "3 artifact candidates; 1 public-road way with a false step")
+        self.assertIn("  terrain scan: 3 artifact candidates; 1 public-road way with a false step", chain_state.describe(status))
+        # A gate that failed is no verdict, whatever else failed.
+        chain_state.mark(self.root, "gate", "running", clock=self.clock)
+        chain_state.mark(self.root, "gate", "failed", exit_status=1, clock=self.clock)
+        self.assertIsNone(chain_state.chain_status(self.root, self.clock)[0]["verdict"])
 
     def test_the_text_names_the_failure(self):
         self.finish("images", "download")
@@ -448,6 +481,17 @@ class RunStageTests(ScratchCase):
         self.assertIsNone(run_stage.skip_reason("build-ungraded", {}))
         self.assertIsNone(run_stage.skip_reason("inputs", {"BICINO_OPENING_RADIUS": "400"}))
         self.assertIn("sample", run_stage.skip_reason("inputs", {"BICINO_SAMPLE_CITY": "Berlin"}))
+
+    def test_the_terrain_scan_is_skipped_without_a_terrain_source(self):
+        self.script("exit 0", names=("terrain-scan.sh",))
+        self.finish("images", "download", "elevation", "build-graded")
+        self.assertEqual(self.run_stage("terrain-scan"), 0)
+        marker = chain_state.read_marker(self.chain, "terrain-scan")
+        self.assertEqual(marker["state"], "skipped")
+        self.assertIn("no terrain source", marker["note"])
+        self.assertEqual(self.ran_stages(), [])
+        self.assertIsNone(run_stage.skip_reason("terrain-scan", {"BICINO_OPENING_RADIUS": "400",
+                                                                 "BICINO_TERRAIN": TERRAIN_IDS}))
 
     def test_stale_work_is_neither_reused_nor_run_over(self):
         self.finish("images", "download")
@@ -669,8 +713,12 @@ class ChainRehearsalTests(unittest.TestCase):
         return json.loads((self.root / "export" / "result.json").read_text())
 
     def test_the_chain_runs_every_stage_in_order_and_writes_the_result(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
         (self.root / "export" / "evidence" / "gate").mkdir(parents=True)
         (self.root / "export" / "evidence" / "gate" / "gate-summary.json").write_text('{"failures": {"opened-400": []}}')
+        self.stub("terrain-scan.sh", 'mkdir -p "$BICINO_SCRATCH/export/evidence/terrain-scan"\n'
+                                     'echo \'{"headline": "0 artifact candidates"}\' > '
+                                     '"$BICINO_SCRATCH/export/evidence/terrain-scan/terrain-report.json"')
         self.assertEqual(self.start(), 0)
         ran = self.ran.read_text().split()
         self.assertEqual(sorted(ran), sorted(chain_state.STAGES))
@@ -680,6 +728,23 @@ class ChainRehearsalTests(unittest.TestCase):
         result = self.result()
         self.assertEqual((result["state"], result["verdict"], result["final"]), ("complete", "met", True))
         self.assertEqual({entry["state"] for entry in result["stages"]}, {"done"})
+        self.assertEqual(result["terrainScan"], {"headline": "0 artifact candidates"})
+
+    def test_a_failed_terrain_scan_holds_up_nothing_and_a_restart_runs_it_alone(self):
+        (self.root / "builder.env").write_text(TERRAIN_ENV)
+        (self.root / "export" / "evidence" / "gate").mkdir(parents=True)
+        (self.root / "export" / "evidence" / "gate" / "gate-summary.json").write_text('{"failures": {"opened-400": []}}')
+        self.stub("terrain-scan.sh", "echo '/locate failed 4 times'; exit 1")
+        self.assertEqual(self.start(), 1)
+        result = self.result()
+        states = {entry["stage"]: entry["state"] for entry in result["stages"]}
+        self.assertEqual((result["state"], result["verdict"]), ("failed", "met"))
+        self.assertEqual((states["terrain-scan"], states["gate"]), ("failed", "done"))
+        first = self.ran.read_text().split()
+        self.stub("terrain-scan.sh")
+        self.assertEqual(self.start(), 0)
+        self.assertEqual(self.ran.read_text().split()[len(first):], ["terrain-scan"])
+        self.assertEqual((self.result()["state"], self.result()["verdict"]), ("complete", "met"))
 
     def test_a_failed_stage_stops_what_needs_it_and_a_restart_resumes(self):
         self.stub("elevation.sh", "echo 'third round lost a worker'; exit 1")
@@ -1055,13 +1120,19 @@ class ScriptTests(unittest.TestCase):
                      sample + kept + "BICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n": 0,
                      sample + kept + "BICINO_ELEVATION_CACHE_ENDPOINT=http://tiles.example:8123\n": 1,
                      sample + "BICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n": 1,
+                     # Terrain files come from the bucket the list names, a rehearsal's stand-in, or the origins.
+                     sample + "BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN_MIRROR_ENDPOINT=http://127.0.0.1:8123\n": 0,
+                     sample + "BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN_MIRROR_ENDPOINT=http://mirror.example:8123\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN_MIRROR_ENDPOINT=http://127.0.0.1:8123\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN_MIRROR_ENDPOINT=none\n": 0,
                      "BICINO_PLANET_DATE=261116\n": 0,
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
                      # Terrain: every source of the list, in its order, over opened tiles.
-                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 0,
-                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=nrcan-mrdem-30,usgs-3dep-13\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=other-dtm\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=USGS 3DEP\n": 1,
@@ -1078,7 +1149,7 @@ class ScriptTests(unittest.TestCase):
             (Path(directory) / "builder.env").write_text(
                 "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
             wrong = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
-            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30, not BICINO_TERRAIN=usgs-3dep-13",
+            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN=usgs-3dep-13",
                           wrong.stderr)
             setup = (BUILDER / "setup.sh").read_text()
             self.assertLess(setup.index('(. "$builder/config.sh" && bicino_validate_run)'),
@@ -1135,6 +1206,7 @@ while [ $# -gt 0 ]; do
     case "$2" in
       *:/terrain) echo '{{}}' > "${{2%%:*}}/terrain-manifest.json" ;;
       */export/evidence/gate:/out) echo '{{"failures": {{}}}}' > "${{2%%:*}}/gate-summary.json" ;;
+      */export/evidence/terrain-scan:/out) echo '# Terrain scan' > "${{2%%:*}}/terrain-report.md" ;;
       *:/raw|*:/out|*:/opened) echo '{{}}' > "${{2%%:*}}/elevation-manifest.json" ;;
     esac
   fi
@@ -1181,19 +1253,24 @@ done
                     labelled += 1
             if "--name " in text or "docker network create" in text:
                 naming.add(script.name)
-        # Eight containers and the two networks of the gate and the profile probe.
-        self.assertEqual(labelled, 10)
+        # Eleven containers and the networks of the gate, the profile probe and the terrain scan.
+        self.assertEqual(labelled, 13)
         # test_two_scratch_roots_share_no_container_name_network_or_label runs each of these.
         self.assertEqual(naming, {script for _, script, *_ in self.NAMING_STAGES})
 
-    NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"))
+    NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"),
+                     ("terrain-scan", "terrain-scan.sh"))
 
     def built_scratch(self, directory):
-        """A scratch root that holds what the gate asks of the two graph builds."""
+        """A scratch root that holds what the gate and the terrain scan ask of the builds before them."""
         root = Path(directory).resolve()
         for label in ("ungraded", "graded"):
             (root / "build" / f"planet-{label}").mkdir(parents=True)
             (root / "build" / f"planet-{label}" / "manifest.json").write_text('{"builder": {}}')
+        for name, manifest in (("elevation-terrain", "terrain-manifest.json"), ("elevation-opened", "elevation-manifest.json"),
+                               ("elevation", "elevation-manifest.json")):
+            (root / name).mkdir(exist_ok=True)
+            (root / name / manifest).write_text("{}")
         return root
 
     def test_two_scratch_roots_share_no_container_name_network_or_label(self):
@@ -1204,7 +1281,8 @@ done
                 run_id = self.run_id(root)
                 calls = ""
                 for stage, script, *arguments in self.NAMING_STAGES:
-                    ran, called = self.run_stage_script(root, GRADED_ENV, stage, script, *arguments)
+                    env = TERRAIN_ENV if stage == "terrain-scan" else GRADED_ENV
+                    ran, called = self.run_stage_script(root, env, stage, script, *arguments)
                     calls += called
                     if script == "qualify.sh":
                         # The planet's checks, the profile probe last. The stand-in probes
@@ -1215,9 +1293,11 @@ done
                 lines = calls.splitlines()
                 names = docker_values(calls, "--name")
                 self.assertEqual(names, {f"bicino-elevation-{run_id}", f"bicino-profiles-graded-{run_id}",
-                                         f"bicino-gate-ungraded-{run_id}", f"bicino-gate-graded-{run_id}"})
+                                         f"bicino-gate-ungraded-{run_id}", f"bicino-gate-graded-{run_id}",
+                                         f"bicino-scan-graded-{run_id}"})
                 networks = docker_values(calls, "--network") - {"none"}
-                self.assertEqual(networks, {f"bicino-profiles-graded-{run_id}", f"bicino-gate-{run_id}"})
+                self.assertEqual(networks, {f"bicino-profiles-graded-{run_id}", f"bicino-gate-{run_id}",
+                                            f"bicino-scan-{run_id}"})
                 # Nothing is created or removed by a name that is not the run's own.
                 self.assertEqual({line.split()[-1] for line in lines if line.startswith("network ")}, networks)
                 removed = {name for line in lines if line.startswith("rm -f ") for name in line.split()[2:]}
@@ -1228,10 +1308,12 @@ done
                 self.assertEqual(calls.split().count("--label"),
                                  sum(line.startswith(("run ", "network create ")) for line in lines))
                 filters = docker_values(calls, "--filter")
-                self.assertEqual(filters, {f"label=bicino.stage=gate@{root}"})
+                self.assertEqual(filters, {f"label=bicino.stage=gate@{root}", f"label=bicino.stage=terrain-scan@{root}"})
                 # On its run's own network a service answers to the same name in every run.
                 self.assertEqual(docker_values(calls, "--network-alias"),
-                                 {"bicino-gate-ungraded", "bicino-gate-graded", "bicino-profiles-graded"})
+                                 {"bicino-gate-ungraded", "bicino-gate-graded", "bicino-profiles-graded",
+                                  "bicino-scan-graded"})
+                self.assertIn("/routing/terrain_artifacts.py roads --dir /out --url http://bicino-scan-graded:8002", calls)
                 self.assertIn("--ungraded http://bicino-gate-ungraded:8002 --graded opened-400=http://bicino-gate-graded:8002",
                               calls)
                 self.assertIn("/mp/routing/probe_profiles.py --origin http://bicino-profiles-graded:8002", calls)
@@ -1279,10 +1361,16 @@ done
             self.assertNotIn("terrain", runs[0])
             self.assertFalse((root / "elevation-terrain").exists())
             hybrid, runs = self.run_elevation_stage(
-                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n")
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
+                      "BICINO_TERRAIN_MIRROR_ENDPOINT=none\n")
             self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
+            # Told to read every file from its origin, the stage fetches none and the build reads no copies.
+            self.assertNotIn("terrain files", hybrid.stdout)
+            self.assertNotIn("terrain-files", runs[0])
             self.assertIn("terrain source usgs-3dep-13: 955 cells", hybrid.stdout)
             self.assertIn("terrain source nrcan-mrdem-30: 2480 cells", hybrid.stdout)
+            self.assertIn("terrain source sonny-dtm-europe-1s-v25: 848 cells", hybrid.stdout)
+            self.assertIn("terrain source linz-nz-lidar-1m-dem: 60 cells", hybrid.stdout)
             self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
             self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
                           "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "
@@ -1292,12 +1380,35 @@ done
                 self.assertIn(f"sha256sum {root}/{manifest}", hybrid.stdout)
             # The build uses every source of the list. A run that names another one, only some of them or
             # another order stops before anything is built.
-            for named in ("other-dtm", "usgs-3dep-13", "nrcan-mrdem-30,usgs-3dep-13"):
+            for named in ("other-dtm", "usgs-3dep-13", "usgs-3dep-13,nrcan-mrdem-30", "usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25",
+                          "nrcan-mrdem-30,usgs-3dep-13,sonny-dtm-europe-1s-v25"):
                 unknown, runs = self.run_elevation_stage(
                     root, f"BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN={named}\n")
                 self.assertEqual((unknown.returncode, runs), (1, []), named)
-                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30, not BICINO_TERRAIN={named}",
+                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN={named}",
                               unknown.stderr)
+
+    def test_the_elevation_stage_fetches_terrain_files_from_their_bucket_copy_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            # The stand-in bucket holds none of Sonny's files: each is left to the build to read from Drive.
+            (root / "bucket").mkdir()
+            server, endpoint = rehearse.serve_bucket(root / "bucket", "bicino-routing-elevation")
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            ran, runs = self.run_elevation_stage(
+                root, "BICINO_SAMPLE_CITY=Berlin\n"
+                      "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n"
+                      "BICINO_OPENING_RADIUS=400\n"
+                      "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
+                      f"BICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            # Berlin's cells and the ring the blend reads, all Sonny's.
+            self.assertIn("terrain files: 9 in the bucket copies, 0 here already, 9 to fetch", ran.stdout)
+            self.assertIn("the bucket holds no terrain-sources/sonny-dtm-europe-1s-v25/N52E013.zip", ran.stdout)
+            self.assertLess(ran.stdout.index("terrain files: fetch exit=3"), ran.stdout.index("attempt=1 start="))
+            self.assertIn(f"-v {root}/elevation-terrain-files:/terrain-files:ro ", runs[0])
+            self.assertIn("--terrain /terrain --opened /opened --terrain-files /terrain-files --jobs 20", runs[0])
 
     def kept_tiles_scratch(self, directory, bucket="rehearsal-elevation"):
         """A scratch root whose tools hold a record of two small kept sets; returns it and the bucket's address."""
@@ -1348,7 +1459,7 @@ done
         with tempfile.TemporaryDirectory() as directory:
             # Under a terrain source the opened tiles lie beside the hybrid, which is always built.
             root, endpoint = self.kept_tiles_scratch(directory)
-            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n"
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                                                  f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             self.assertTrue((root / "elevation-opened" / "N52" / "N52E013.hgt.gz").exists())
@@ -1356,7 +1467,7 @@ done
             # What a restore for a run without the terrain source left beside elevation/ is not this run's.
             (root / "elevation.restoring" / "N52").mkdir(parents=True)
             (root / "elevation-opened.restoring").mkdir()
-            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n"
+            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                                                 f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertFalse((root / "elevation.restoring").exists())
@@ -1937,6 +2048,90 @@ class ElevationCacheTests(unittest.TestCase):
             elevation_cache.Token(metadata=metadata).header()
         with self.assertRaisesRegex(elevation_cache.CacheError, "gave no token"):
             elevation_cache.Token(metadata="http://127.0.0.1:9/token").header()
+
+    def mirrored_source_list(self, files):
+        """A source list of one Sonny source whose catalog pins `files`, {cell: bytes}, and whose copy is in the bucket."""
+        sys.path.insert(0, str(ROUTING))
+        import build_elevation
+
+        lists = self.root / "lists"
+        lists.mkdir()
+        tiles = {cell: ("1" * 33, "20240101", len(data), hashlib.sha256(data).hexdigest()) for cell, data in files.items()}
+        catalog = build_elevation.format_sonny_catalog(tiles).encode()
+        (lists / "catalog.txt").write_bytes(catalog)
+        (lists / "area.geojson.gz").write_bytes(b"area")
+        entry = next(value for value in json.loads((ROUTING / "elevation-sources.json").read_text())["terrain"]
+                     if value["adapter"] == build_elevation.SONNY_ADAPTER)
+        entry.update(catalog="catalog.txt", catalogBytes=len(catalog), catalogSha256=hashlib.sha256(catalog).hexdigest(),
+                     tileCount=len(tiles), area="area.geojson.gz", areaBytes=4, areaSha256=hashlib.sha256(b"area").hexdigest(),
+                     mirror=f"gs://{self.BUCKET}/terrain/sonny/")
+        (lists / "sources.json").write_text(json.dumps({"schemaVersion": 2, "terrain": [entry]}))
+        return lists / "sources.json"
+
+    def test_terrain_files_are_fetched_from_the_bucket_copy_as_pinned_or_left_to_the_origin(self):
+        files = {(8, 47): b"zurich", (9, 47): b"st-gallen", (13, 52): b"berlin", (14, 52): b"frankfurt-oder"}
+        sources = self.mirrored_source_list(files)
+        copy = self.bucket / "terrain" / "sonny"
+        copy.mkdir(parents=True)
+        (copy / "N47E008.zip").write_bytes(b"zurich")
+        (copy / "N47E009.zip").write_bytes(b"st-galleN")
+        (copy / "N52E013.zip").write_bytes(b"berlin")
+        into = self.root / "terrain-files"
+        fetch = functools.partial(elevation_cache.fetch_terrain, sources, into, endpoint=self.endpoint, jobs=2,
+                                  log=self.lines.append)
+        # A file the bucket does not hold, or not as pinned, is left to the build to read from Drive.
+        self.assertEqual(fetch(), 2)
+        held = into / "sonny-dtm-europe-1s-v25"
+        self.assertEqual(sorted(path.name for path in held.iterdir()), ["N47E008.zip", "N52E013.zip"])
+        self.assertEqual((held / "N52E013.zip").read_bytes(), b"berlin")
+        self.assertIn("terrain files: 4 in the bucket copies, 0 here already, 4 to fetch", self.lines)
+        self.assertIn("terrain files: fetched 2; the build reads 2 from their origins", self.lines)
+        self.assertTrue(any("the bucket holds no terrain/sonny/N52E014.zip" in line for line in self.lines))
+        self.assertTrue(any("terrain/sonny/N47E009.zip is not the pinned file" in line for line in self.lines))
+        # The next run asks only for what is missing; a copy that changed on disk is fetched again.
+        (held / "N47E008.zip").write_bytes(b"zurich!")
+        self.requests.clear()
+        self.lines.clear()
+        self.assertEqual(fetch(), 2)
+        self.assertIn("terrain files: 4 in the bucket copies, 1 here already, 3 to fetch", self.lines)
+        self.assertEqual(sorted(request[0].rpartition("/")[2] for request in self.requests),
+                         ["N47E008.zip", "N47E009.zip", "N52E014.zip"])
+        self.assertEqual((held / "N47E008.zip").read_bytes(), b"zurich")
+        # A bounded build reads the cells one beyond its bounds.
+        self.lines.clear()
+        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), 1)
+        self.assertIn("terrain files: 2 in the bucket copies, 1 here already, 1 to fetch", self.lines)
+        # Nothing to fetch needs no token.
+        (copy / "N52E014.zip").write_bytes(b"frankfurt-oder")
+        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), 0)
+        self.lines.clear()
+        self.assertEqual(elevation_cache.fetch_terrain(sources, into, bounds=[13, 52, 14, 53],
+                                                       token_file=self.root / "no-token", log=self.lines.append), 0)
+        self.assertEqual(self.lines, ["terrain files: 2 in the bucket copies, 2 here already, 0 to fetch"])
+        self.assertEqual(list(held.glob(".*")), [])
+
+    def test_terrain_files_are_not_asked_for_once_the_bucket_cannot_be_read(self):
+        files = {(8, 47): b"zurich", (9, 47): b"st-gallen", (13, 52): b"berlin"}
+        sources = self.mirrored_source_list(files)
+        into = self.root / "terrain-files"
+        # No token: nothing is asked, and the build reads every file from its origin.
+        self.assertEqual(elevation_cache.fetch_terrain(sources, into, token_file=self.root / "no-token",
+                                                       log=self.lines.append), 3)
+        self.assertTrue(self.lines[-1].startswith("terrain files: cannot read the bucket, so the build reads 3 files "
+                                                  "from their origins: cannot read the token file"))
+        # Refused: the first refusal stops the rest.
+        self.refuse["/N47E008.zip"] = 403
+        self.lines.clear()
+        self.assertEqual(elevation_cache.fetch_terrain(sources, into, endpoint=self.endpoint, jobs=1,
+                                                       log=self.lines.append), 3)
+        self.assertEqual(len(self.requests), 1)
+        self.assertTrue(any("may not read terrain/sonny/N47E008.zip (HTTP 403)" in line for line in self.lines))
+        # A source list whose catalog is not the pinned one stops before anything is fetched.
+        (sources.parent / "catalog.txt").write_text("")
+        with self.assertRaisesRegex(elevation_cache.CacheError, "cannot read the terrain sources: catalog.txt is not"):
+            elevation_cache.fetch_terrain(sources, into, endpoint=self.endpoint, log=self.lines.append)
+        self.assertEqual(elevation_cache.main(["fetch-terrain", "--sources", str(sources), "--into", str(into),
+                                               "--endpoint", self.endpoint]), 1)
 
     def test_a_redirect_is_an_error_not_a_second_address(self):
         elsewhere = []
