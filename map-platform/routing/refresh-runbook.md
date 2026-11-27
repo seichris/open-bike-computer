@@ -1100,6 +1100,9 @@ and other coasts have them too:
 
 The four rehearsals above were built before the rule. Vancouver's cell then
 held 341 pixels below -10 m, and its routes were the ungraded ones.
+Vancouver was rehearsed again with the rule, on the map-platform image the
+builder pulls: its eight MRDEM-30 cells dropped 104,666 pixels, the lowest
+at -279 m, the gate was met, and the four routes came out as before.
 
 #### What is not known
 
