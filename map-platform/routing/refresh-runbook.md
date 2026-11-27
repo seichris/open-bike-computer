@@ -1858,9 +1858,14 @@ builder's tiles and graphs looked for them:
   drop. 58 of the 61 are in 3DEP. Besides them, 44 service roads, 69 tracks
   and 63 bike or foot ways read such a step.
 - The graded graph stores the steps: at 204 of the 238 points the edge's
-  steepest stored slope is 20% or more. On the 61 public roads the edges'
-  weighted grade, which bicycle costing reads, is 10% at the median and
-  15% at most.
+  steepest stored slope is 20% or more. The two US 189 ways are the
+  exception: Valhalla grades a tunnel from its ends, and they store 2%. So
+  at most 59 public-road ways (52 paved, 7 unpaved) carry a false step in
+  the graph, and 53 of them store a slope of 20% or more; the five pit
+  artifacts store 28% to 64% (Chemin de Radford 64%). On the public roads
+  the edges' weighted grade, which bicycle costing reads, is 10% at the
+  median and 15% at most; Valhalla stores no weighted grade above 15%, so
+  only the stored maximum slope shows how large a step is.
 - Open channels under bridges are not closed hollows, so these scans do not
   count them.
 
