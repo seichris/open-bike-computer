@@ -1723,6 +1723,51 @@ is one:
 | New York, Port Authority to the United Nations | 17 m | 58 m | 0 m | 15 m | 22 m (3DEP) |
 | Chicago, Magnificent Mile to the South Loop | 26 m | 77 m | 0 m | 3 m | 16 m (3DEP) |
 
+#### Singapore, Shanghai, Dubai and São Paulo
+
+The same day the membrane was run on the gate's four tower cores that no
+approved terrain model covers. Each was cut from the dated Geofabrik extract
+the [tower-city samples](#tower-city-samples) used (2026-11-25; SHA-256
+prefixes `31b9cde91db4`, `58bf1ece308b`, `8b0ac30242ee` and `13205c5a3d00`),
+with China's and Brazil's relations merged in, and built ungraded, opened at
+400 m and at 200 m, with no data at 30 m, and with the membrane at its
+default of 25 m. Their 400 m rows equal the tower-city samples' and the
+planet gate's.
+
+The 25 m zones cover 269 km² of Shanghai's cell (69% of its box), 132 km²
+of São Paulo's (49%), 74 km² of Singapore's (36%) and 32 km² of Dubai's (2%).
+The grid reads Dubai's towers low: along its legs, Downtown and the Marina
+included, the mean building height is 10 to 13 m, so the zones touch them
+only at the Marina, and every Dubai route has the 200 m graph's length
+and grades.
+
+| City | Opened at 400 m | Opened at 200 m | No data (30 m) | Membrane at 25 m |
+|---|---|---|---|---|
+| Shanghai, 4 routes | 0.0%, 0% | 0.0%, 0% | 0.0%, 0% | 0.0%, 0% |
+| Singapore, 4 routes | 0.0%, 2% | **+10.8%**, 2% | 0.0%, 0% | 0.0%, 0% |
+| Dubai, 6 routes | 0.0%, 0% | 0.0%, 2% | 0.0%, 2% | 0.0%, 2% |
+| São Paulo, 4 routes (report only) | 0.0%, 15%; `use_hills` 1 of 2 | −6.0% to 0.0%, 11%; 0 of 2 | 0.0%, 0%; 0 of 2 | **+6.2%**, 0%; 0 of 2 |
+
+Each cell gives the longest length change and the median 6%+ share of the
+direct routes. Every source meets the targets on these four cities; with the
+eight cities above, the membrane and the no-data tiles meet them on all
+twelve, and the openings miss as before. No route or grade lookup failed.
+
+- **Singapore.** At 200 m, Tanjong Pagar to Marina Bay Sands on Everyday is
+  10.8% longer, a swap whose direct route reads 5% at 6%+. Masked or
+  membrane, all four routes are the ungraded ones and read no 6%+ grade.
+- **Shanghai is flat on every source.** Of the 67 km of streets read around
+  its legs, at most 0.1 km has a 6%+ section on any graph.
+- **São Paulo loses its ridge.** Avenida Paulista runs along a ridge, and
+  both legs lie wholly in the zone. The membrane reads Paulista at 770 to
+  783 m, 35 to 40 m below the 200 m tiles (809 to 819 m) and below the
+  400 m tiles too (792 to 808 m). Around the legs 6% of the street length
+  reads a 6%+ section, against 24% at 200 m and 18% at 400 m, and
+  `use_hills` changes neither leg. The Road leg to Praça da República takes
+  a route 6.2% longer, with 3% of it on 6%+ grades where the direct route
+  reads none. No terrain model covers São Paulo, so the ground's height and
+  how steep these streets are were not measured.
+
 #### Recommendation
 
 **The membrane at 25 m is the best candidate so far, but test it more
@@ -1736,14 +1781,15 @@ before a planet build.**
   and 190 m against 59, 53 and 73 m.
 - **It loses climb where a zone covers a hill.** Kelburn reads 45 m of
   88 m, and Russian Hill 80 m of 99 m, because the zone reaches over the
-  hill and a membrane has no crest.
+  hill and a membrane has no crest. São Paulo shows it at its largest:
+  the zone covers the Paulista ridge, which drops about 35 m, and avoiding
+  hills changes neither leg there.
 - **25 m was chosen on these samples.** 30 m leaves Midtown's edge on
   mid-rise plateaus and 20 m masks too much of the hilly cities; the
-  margin between them is small. Before a planet build, run it on the
-  gate's other sample cities (Singapore, Shanghai, Dubai, Hong Kong and
-  São Paulo, and Buenos Aires, Amsterdam, Houston and Berlin), and on
-  the wider survey of 252 downtowns, judging by the direct routes' 6%+
-  share as well as length.
+  margin between them is small. Singapore, Shanghai, Dubai and São Paulo
+  passed with it too. Before a planet build, run it on the low flat cities
+  (Buenos Aires, Amsterdam, Houston and Berlin) and on the wider survey of
+  252 downtowns, judging by the direct routes' 6%+ share as well as length.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
   States and Canada in the hybrid, and the four regional sources approved
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
@@ -1751,8 +1797,8 @@ before a planet build.**
   cities of these samples lie in the area of one of them, so once those
   have readers none is graded from opened Copernicus. The membrane matters
   for tower cores outside those areas: Singapore, Shanghai, Dubai and São
-  Paulo in the gate, and the survey's other downtowns. Those are the
-  samples to run next.
+  Paulo in the gate (see above), and the survey's other downtowns. Of
+  those four only Singapore needed it; São Paulo is where it costs most.
 - **A planet build needs the step in `build_elevation.py`.** The sample
   tool solves the membrane over the cells of `--bounds` together. A planet
   build would solve it per cell with a margin of the neighbours' tiles, as
@@ -1762,7 +1808,8 @@ before a planet build.**
 
 The reports, summaries, comparisons with the terrain models, the scratch
 scripts and the manifests are on the map VPS in
-`/root/bicino-routing-releases/tower-membrane-samples-20261127/`.
+`/root/bicino-routing-releases/tower-membrane-samples-20261127/`, and those
+of the four tower cities in `tower-membrane-four-cities-20261127/` beside it.
 
 ### Regional terrain models
 
