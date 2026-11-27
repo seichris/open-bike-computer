@@ -1779,9 +1779,12 @@ before. No route or grade lookup failed.
 #### Hong Kong and Buenos Aires
 
 The same evening the membrane was run on the two sample cities left: Hong
-Kong, the gate's other hilly tower core, whose CEDD lidar is approved but
-has no reader and terms still to be read, and Buenos Aires, the one low
-flat city of the samples that no approved terrain model covers. Hong Kong
+Kong, the gate's other hilly tower core, and Buenos Aires, the one low
+flat city of the samples that no approved terrain model covers. The
+hybrid build grades Hong Kong from CEDD's lidar since the same day (see
+[Regional terrain models](#regional-terrain-models)), so here it tests
+the rule against a terrain model rather than standing for a city the
+membrane would grade. Hong Kong
 was cut from Geofabrik's extract of 2026-11-25 (SHA-256 prefix
 `0fa7e9c37b4a`), the file the tower-city samples and the
 [regional terrain samples](elevation-sources.md#sample-results) used, with
@@ -1849,9 +1852,9 @@ first two routes have none.
   200 m, no-data and membrane graphs Causeway Bay to Tai Hang Road takes a
   route 17.7% longer on both profiles, as the Lands Department's model did
   in the regional samples; the lidar keeps the direct route and 400 m
-  stays within 0.5% of it. Once
-  CEDD's terms allow it and it has a reader, the lidar grades Hong Kong
-  and none of these variants applies there.
+  stays within 0.5% of it. The hybrid build grades Hong Kong from the
+  lidar, so none of these variants applies there; what it shows matters
+  for tower districts on a shore below a hill outside the terrain models.
 - **The membrane flattens Buenos Aires.** The heights around the zones its
   legs cross lie between 3 and 27 m (5th to 95th percentile). Along the
   legs the membrane lowers the 200 m tile by up to 26 m and raises it by at
@@ -1911,10 +1914,11 @@ such zones and the 252-downtown survey first.**
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
   (see [Regional terrain models](#regional-terrain-models)). All eight
   cities of these samples lie in the area of one of them, so once those
-  have readers none is graded from opened Copernicus. The membrane matters
+  have readers none is graded from opened Copernicus; Sonny's tiles,
+  LINZ's lidar and CEDD's lidar already have theirs. The membrane matters
   for tower cores outside those areas: Singapore, Shanghai, Dubai, São
-  Paulo and Buenos Aires in the gate (see above), Hong Kong until CEDD's
-  terms are read, and the survey's other downtowns. Of the five, the
+  Paulo and Buenos Aires in the gate (see above), and the survey's other
+  downtowns. Of the five, the
   membrane changed routes in Singapore and Buenos Aires, and São Paulo is
   where it costs most.
 - **A planet build needs the step in `build_elevation.py`.** The sample
