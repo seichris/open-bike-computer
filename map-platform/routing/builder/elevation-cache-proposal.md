@@ -1,7 +1,7 @@
 # Keeping the elevation tiles between builds
 
-Status: **the tiles are kept, a build can restore them, and a builder may
-read the bucket; no builder has done so yet.** Chris decided on 2026-11-26
+Status: **the tiles are kept, and the first hybrid build restored them on
+2026-11-27.** Chris decided on 2026-11-26
 to keep the tiles of that day's builder (option 2 of
 [The choice](#the-choice)), and on 2026-11-27 to have the restore step
 built and the builders' read-only service account created. How a build uses the tiles is on
@@ -62,17 +62,50 @@ It differs from the proposal below in three ways:
 
 **Still missing:**
 
-- **A restore on a real builder.** The service account
-  `bicino-routing-builder@chiho-prod.iam.gserviceaccount.com` exists since
-  2026-11-27 and can read this one bucket; `provision.sh --cache-reader`
-  attaches it to a builder, and no builder has been created with it. From
-  a laptop the tool has checked `meta.tar` of both sets and three small
-  bands of the real bucket (817 tiles), with a person's token. The whole
-  sets, the time and the token from the metadata server wait for the first
-  build that asks for them.
-- **An upload step** for a new set, such as the 3DEP terrain tiles.
-  `elevation_cache.py pack` writes the tars and the record; uploading them
-  is done by hand as described above.
+- **A restore step for the hybrid and terrain sets.** The `elevation` stage
+  restores the record's `raw` set and the `opened-RADIUS` set, nothing
+  else. The terrain set has a terrain manifest, which `restore` cannot read,
+  so its record lists it under `terrainSets`, outside `sets`.
+- **An upload step** for a new set. `elevation_cache.py pack` writes the
+  tars and the record of an elevation set; uploading them is done by hand
+  as described above.
+
+**Done on 2026-11-27:** the builder `bicino-valhalla-h400-261116`, created
+with `--cache-reader`, restored both sets with the token from its metadata
+server: the raw set in 430 seconds and the 400 m set in 297, every tile
+checked, and `build_elevation.py` then found all 26,475 receipts current.
+
+### Kept since 2026-11-27
+
+It was decided on 2026-11-27 to also keep the tiles of the first hybrid
+build, `bicino-valhalla-h400-261116` (see
+[the planet gate](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)):
+
+| Set | Prefix | Cells | Size |
+|---|---|---|---|
+| Hybrid: 3DEP and MRDEM-30 over Copernicus opened at 400 m | `terrain-2026-11-27/hybrid-400-9d183d968adb/` | 26,475 | 91.3 GB |
+| The 3DEP and MRDEM-30 terrain tiles alone | `terrain-2026-11-27/terrain-378dd534ec67/` | 3,197 | 19.0 GB |
+
+- [releases/elevation-cache-2026-11-27.json](../releases/elevation-cache-2026-11-27.json)
+  pins them as the first record pins its sets. It was written by
+  `elevation_cache.pack_set` for the hybrid set and by the same tar writer,
+  with `terrain-manifest.json` in its `meta.tar`, for the terrain set. The
+  tools were at `2a2dd797`.
+- The hybrid set is what the graded graph of that build was built with. A
+  later build can grade with it without reading 3DEP or MRDEM-30 again,
+  once a restore step for it exists. The terrain set lets a build blend the
+  terrain into another opening, or change the blend, without the 364 GB of
+  3DEP downloads and the MRDEM-30 reads. MRDEM-30 has no dated copies, so
+  once NRCan replaces the file the terrain set is the only copy of what was
+  read.
+- They were uploaded the same way as the first sets: a write-once session
+  per object, opened from a signed-in laptop, 30 objects in about three
+  minutes. The builder compared each object's size and MD5 with what the
+  bucket reported, the laptop read all 30 back, and the builder then ran
+  `elevation_cache.py verify` on the whole hybrid set as its service account.
+- Both sets with the first ones are about 330 GiB, about $3.30 a month at
+  Nearline's list price. `terrain-2026-11-27/README.txt` in the bucket
+  carries the sources' credits.
 - **A guard against deletion.** The bucket has Google's default 7-day soft
   delete and no retention policy or object hold. `elevation_cache.py verify`
   tells whether it still holds what the record pins.
