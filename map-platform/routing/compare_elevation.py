@@ -410,8 +410,9 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
             limit = targets["flatMaximumLengthChange"]
             if detours:
                 worst = max(detours, key=lambda route: route["lengthChange"])
-                missed.append(f"{len(detours)} flat {'route is a detour' if len(detours) == 1 else 'routes are detours'}"
-                              f" around steep readings, the longest {describe_long_route(worst)}")
+                noun = "route is a detour" if len(detours) == 1 else "routes are detours"
+                missed.append(f"{len(detours)} flat {noun} around steep readings, "
+                              f"the longest {describe_long_route(worst)}")
             if len(swaps) > max(1, targets["flatSwapShare"] * len(pooled["flatChange"])):
                 missed.append(f"{len(swaps)} of {len(pooled['flatChange'])} flat routes are more than {limit:.0%} "
                               f"longer without steep readings")
