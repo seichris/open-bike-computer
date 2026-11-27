@@ -1056,8 +1056,8 @@ no build changed.
   822 m on swissALTI3D, Stuttgart 480 and 526 m.
 - **On flat tower streets the lidar removes phantom steepness.** Along Hong
   Kong's tram corridor up to 10% of the direct route reads 6%+ on the opened
-  tiles and none on the 2020 lidar. Sha Tin and Tseung Kwan O, which a
-  downtown survey had labelled flat, are steep on the lidar too.
+  tiles and none on the 2020 lidar. Sha Tin and Tseung Kwan O, which the
+  252-downtown survey labels flat, are steep on the lidar too.
 - **The samples are judged on the direct routes.** The share of the
   ungraded route that reads 6%+ and the climb along it compare heights, as
   [Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged)

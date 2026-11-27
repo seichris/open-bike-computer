@@ -164,8 +164,8 @@ the same route for both `use_hills` values.
   description says it includes elevated roads and shows vegetation by its
   height. It reads 76 m of climb on the flat corridor and sends Causeway Bay
   to Tai Hang Road 17.7% further.
-- **Sha Tin and Tseung Kwan O are not flat.** The wide survey labels both as
-  flat ground, and the opened tiles read 27% and 23% of their direct routes
+- **Sha Tin and Tseung Kwan O are not flat.** The 252-downtown survey labels
+  both as flat ground, and the opened tiles read 27% and 23% of their direct routes
   as 6%+. The lidar reads 33% and 19%. The towns lie in valleys, and legs
   2.4 km long run 3 to 9 km over the hillsides. The lidar lowers single legs
   where towers stand (Tseung Kwan O west to north, from 53% to 37%), but
@@ -205,8 +205,8 @@ the same route for both `use_hills` values.
   four Tokyo hill legs (Shibuya to Roppongi, Iidabashi to Waseda, Meguro to
   Nakameguro, Akasaka-mitsuke to Azabu-juban), four Hong Kong hill legs
   (Sheung Wan to Mid-Levels, Wan Chai to Happy Valley, Admiralty to Kennedy
-  Road, Causeway Bay to Tai Hang Road), and the wide survey's eight legs each
-  for Sha Tin and Tseung Kwan O.
+  Road, Causeway Bay to Tai Hang Road), and the 252-downtown survey's eight
+  legs each for Sha Tin and Tseung Kwan O.
 - **Limits.** One to eight legs a city, on a laptop under amd64 emulation.
   The phantom-steepness result rests on two flat legs and one hill leg in
   Hong Kong. No leg crosses a seam between a candidate and the opened tiles,
