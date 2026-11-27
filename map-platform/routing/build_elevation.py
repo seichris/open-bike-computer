@@ -563,12 +563,17 @@ def object_identity(url, attempts=6):
 
 
 def mrdem_window(dataset, cell):
-    """The pixels of the MRDEM-30 raster under the cell's posts, two posts and two pixels wider; None for none.
+    """The pixels of the MRDEM-30 raster under the cell's posts and a margin around them; None for none.
 
     The raster is refused unless it is laid out as MRDEM-30 is: float32,
     Canada Atlas Lambert on NAD83(CSRS), 30 m pixels, -32767 for no data.
     A cell's box of longitudes and latitudes is no rectangle on that grid,
     so its edges are followed point by point.
+
+    The margin is two posts and two pixels for the resampling, and
+    MRDEM_REJECT_MARGIN pixels more: a pixel that a post is made of is then
+    read with every pixel that can have it dropped, so two cells give the
+    posts on their shared border the same heights.
     """
     from rasterio.crs import CRS
     from rasterio.warp import transform_bounds
@@ -586,9 +591,10 @@ def mrdem_window(dataset, cell):
         CRS.from_epsg(MRDEM_GEOGRAPHIC_EPSG), crs, longitude - MARGIN, latitude + 1 - span - MARGIN,
         longitude + span + MARGIN, latitude + 1 + MARGIN, densify_pts=256)
     wanted = from_bounds(left, bottom, right, top, transform)
-    column, row = max(math.floor(wanted.col_off) - 2, 0), max(math.floor(wanted.row_off) - 2, 0)
-    end_column = min(math.ceil(wanted.col_off + wanted.width) + 2, dataset.width)
-    end_row = min(math.ceil(wanted.row_off + wanted.height) + 2, dataset.height)
+    pad = 2 + MRDEM_REJECT_MARGIN
+    column, row = max(math.floor(wanted.col_off) - pad, 0), max(math.floor(wanted.row_off) - pad, 0)
+    end_column = min(math.ceil(wanted.col_off + wanted.width) + pad, dataset.width)
+    end_row = min(math.ceil(wanted.row_off + wanted.height) + pad, dataset.height)
     if end_column <= column or end_row <= row:
         return None
     return Window(column, row, end_column - column, end_row - row)

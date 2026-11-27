@@ -1124,6 +1124,51 @@ class ElevationHybridTests(ElevationOpeningTests):
         changed = ~dropped & (np.abs(posts - clean) > 1e-3)
         self.assertTrue(0 < int(changed.sum()) < 150, int(changed.sum()))
 
+    def test_a_pit_beyond_the_posts_still_has_its_wall_dropped_under_them(self):
+        import numpy as np
+        import rasterio
+        from rasterio.io import MemoryFile
+        from rasterio.warp import transform
+
+        cell = (-80, 43)
+        margin = build_elevation.MRDEM_REJECT_MARGIN
+        memory, _ = self.mrdem_raster(cell)
+        with memory, memory.open() as dataset:
+            profile, pixels = dataset.profile, dataset.read(1)
+            # The pixel under the posts' north-east corner, where a neighbouring cell's posts begin.
+            longitudes, latitudes = self.post_positions(cell)
+            (x,), (y,) = transform("EPSG:4617", dataset.crs, [float(longitudes.max())], [float(latitudes.max())])
+            row, column = dataset.index(x, y)
+
+        def posts_of(changed):
+            with MemoryFile() as file:
+                with file.open(**profile) as dataset:
+                    dataset.write(changed, 1)
+                with file.open() as dataset, rasterio.Env():
+                    return build_elevation.mrdem_posts(dataset, cell)
+
+        clean, window, _ = posts_of(pixels.copy())
+        # The window reaches the rule's margin beyond what the resampling alone needs.
+        self.assertGreaterEqual(window.col_off + window.width - 1 - column, 2 + margin)
+        self.assertGreaterEqual(row - window.row_off, 2 + margin)
+        pitted = pixels.copy()
+        pitted[row - 1:row + 2, column + margin] = -300.0        # a pit the posts do not reach
+        pitted[row - 1:row + 2, column:column + margin] = -9.0   # its wall, as far as the pixel under the post
+        posts, _, read = posts_of(pitted)
+        self.assertEqual(read["rejectedHeights"], [-300.0, -300.0])
+        self.assertGreater(read["rejectedPixels"], 3 * margin)
+        # The corner post is made of the pixels left, not of the wall: it stays within a metre of what it was,
+        # where the wall alone would pull it down by tens of metres.
+        corner, was = posts[0, -1], clean[0, -1]
+        self.assertTrue(np.isnan(corner) or abs(float(corner) - float(was)) < 1.0, (corner, was))
+        self.assertFalse((posts[np.isfinite(posts)] < float(np.nanmin(clean)) - 1.0).any())
+        # Without the pit the same wall is kept: it is in range, and ground for all the reader knows.
+        walled = pixels.copy()
+        walled[row - 1:row + 2, column:column + margin] = -9.0
+        kept = posts_of(walled)
+        self.assertEqual(kept[2]["rejectedPixels"], 0)
+        self.assertLess(float(np.nanmin(kept[0])), float(np.nanmin(clean)) - 10.0)
+
     def test_a_mask_is_spread_by_its_margin_along_rows_and_columns(self):
         import numpy as np
 
