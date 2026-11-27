@@ -96,6 +96,18 @@ MRDEM_PIXEL = 30.0
 MRDEM_NO_DATA = -32767.0
 # NAD83(CSRS) in degrees, the datum of MRDEM-30's grid: posts are placed in it so that no datum shift is applied.
 MRDEM_GEOGRAPHIC_EPSG = 4617
+# Heights beyond these are not ground in MRDEM-30. The Bay of Fundy's flats fall dry down to about 9 m under
+# the datum, and Mount Logan is 5,959 m high. The lidar part has pits at shorelines: at Holberg Inlet the
+# heights fall from the sea's -1 m to -695 m within ten pixels. Such pixels are dropped with the pixels
+# within MRDEM_REJECT_MARGIN of them, which are the walls of the pit.
+MRDEM_HEIGHTS = (-10, 7000)
+MRDEM_REJECT_MARGIN = 4
+# A read that stalls ends with an error after a minute, in place of the worker's death at the cell deadline.
+MRDEM_HTTP_OPTIONS = {
+    "GDAL_HTTP_CONNECTTIMEOUT": "30",
+    "GDAL_HTTP_LOW_SPEED_TIME": "60",
+    "GDAL_HTTP_LOW_SPEED_LIMIT": "1000",
+}
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -286,10 +298,17 @@ class TerrainSource:
         return f"{self.origin}/{tile}/USGS_13_{tile}_{date}.tif"
 
     def pin(self, cell):
-        """What a terrain tile's receipt names when this source, as pinned now, gave it posts."""
+        """What a terrain tile's receipt names when this source, as pinned and read now, gave it posts.
+
+        `rejects` is the rule by which a source's pixels are dropped as not
+        ground, or None. A tile read under another rule is built again.
+        """
         size, etag = self.origin_object or self.tiles[cell][2:]
+        rejects = None
+        if self.adapter == MRDEM_ADAPTER:
+            rejects = {"below": MRDEM_HEIGHTS[0], "above": MRDEM_HEIGHTS[1], "pixelsAround": MRDEM_REJECT_MARGIN}
         return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
-                "areaSha256": self.area_sha256}
+                "areaSha256": self.area_sha256, "rejects": rejects}
 
     def identity(self):
         identity = {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
@@ -544,12 +563,17 @@ def object_identity(url, attempts=6):
 
 
 def mrdem_window(dataset, cell):
-    """The pixels of the MRDEM-30 raster under the cell's posts, two posts and two pixels wider; None for none.
+    """The pixels of the MRDEM-30 raster under the cell's posts and a margin around them; None for none.
 
     The raster is refused unless it is laid out as MRDEM-30 is: float32,
     Canada Atlas Lambert on NAD83(CSRS), 30 m pixels, -32767 for no data.
     A cell's box of longitudes and latitudes is no rectangle on that grid,
     so its edges are followed point by point.
+
+    The margin is two posts and two pixels for the resampling, and
+    MRDEM_REJECT_MARGIN pixels more: a pixel that a post is made of is then
+    read with every pixel that can have it dropped, so two cells give the
+    posts on their shared border the same heights.
     """
     from rasterio.crs import CRS
     from rasterio.warp import transform_bounds
@@ -567,21 +591,41 @@ def mrdem_window(dataset, cell):
         CRS.from_epsg(MRDEM_GEOGRAPHIC_EPSG), crs, longitude - MARGIN, latitude + 1 - span - MARGIN,
         longitude + span + MARGIN, latitude + 1 + MARGIN, densify_pts=256)
     wanted = from_bounds(left, bottom, right, top, transform)
-    column, row = max(math.floor(wanted.col_off) - 2, 0), max(math.floor(wanted.row_off) - 2, 0)
-    end_column = min(math.ceil(wanted.col_off + wanted.width) + 2, dataset.width)
-    end_row = min(math.ceil(wanted.row_off + wanted.height) + 2, dataset.height)
+    pad = 2 + MRDEM_REJECT_MARGIN
+    column, row = max(math.floor(wanted.col_off) - pad, 0), max(math.floor(wanted.row_off) - pad, 0)
+    end_column = min(math.ceil(wanted.col_off + wanted.width) + pad, dataset.width)
+    end_row = min(math.ceil(wanted.row_off + wanted.height) + pad, dataset.height)
     if end_column <= column or end_row <= row:
         return None
     return Window(column, row, end_column - column, end_row - row)
 
 
+def spread(mask, margin):
+    """The mask with every pixel marked that lies within `margin` rows and columns of a marked one."""
+    for axis in (0, 1):
+        grown = mask.copy()
+        for shift in range(1, margin + 1):
+            ahead = [slice(None), slice(None)]
+            behind = [slice(None), slice(None)]
+            ahead[axis], behind[axis] = slice(shift, None), slice(None, -shift)
+            grown[tuple(behind)] |= mask[tuple(ahead)]
+            grown[tuple(ahead)] |= mask[tuple(behind)]
+        mask = grown
+    return mask
+
+
 def mrdem_posts(dataset, cell):
-    """A cell's posts from the MRDEM-30 raster, and the window, the SHA-256 and the no-data count of its pixels.
+    """A cell's posts from the MRDEM-30 raster, the window that was read and what its pixels were.
 
     A post is the bilinear mean of the pixels around it. The grid's 30 m are
     the posts' spacing from north to south and more than their spacing from
     east to west, so nothing is averaged away. NAD83(CSRS) is read as WGS 84,
     which is a metre or two from it. The heights stay in CGVD2013.
+
+    Pixels outside MRDEM_HEIGHTS are not ground. They are dropped with the
+    pixels around them and counted; their posts have no data, which the
+    hybrid fills from opened Copernicus like any other hole. The raster is
+    pinned, so stopping on them would stop every build.
     """
     import numpy as np
     from rasterio.crs import CRS
@@ -589,13 +633,24 @@ def mrdem_posts(dataset, cell):
 
     heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
     window = mrdem_window(dataset, cell)
+    read = {"sha256": hashlib.sha256(b"").hexdigest(), "invalidPixels": 0, "rejectedPixels": 0,
+            "rejectedHeights": None}
     if window is None:
-        return heights, None, hashlib.sha256(b"").hexdigest(), 0
+        return heights, None, read
     array = dataset.read(1, window=window)
-    sha256 = hashlib.sha256(array.tobytes()).hexdigest()
+    read["sha256"] = hashlib.sha256(array.tobytes()).hexdigest()
     valid = (dataset.read_masks(1, window=window) != 0) & np.isfinite(array) & (array != MRDEM_NO_DATA)
-    if np.any(valid & ((array < TERRAIN_HEIGHTS[0]) | (array > TERRAIN_HEIGHTS[1]))):
-        raise ValueError(f"MRDEM-30 elevations of {hgt_name(*cell)} lie outside {TERRAIN_HEIGHTS} m")
+    read["invalidPixels"] = int((~valid).sum())
+    beyond = valid & ((array < MRDEM_HEIGHTS[0]) | (array > MRDEM_HEIGHTS[1]))
+    if beyond.any():
+        read["rejectedHeights"] = [float(array[beyond].min()), float(array[beyond].max())]
+        rows, columns = np.nonzero(beyond)
+        # Only the box around the pixels beyond the range can change.
+        box = (slice(max(int(rows.min()) - MRDEM_REJECT_MARGIN, 0), int(rows.max()) + MRDEM_REJECT_MARGIN + 1),
+               slice(max(int(columns.min()) - MRDEM_REJECT_MARGIN, 0), int(columns.max()) + MRDEM_REJECT_MARGIN + 1))
+        dropped = spread(beyond[box], MRDEM_REJECT_MARGIN) & valid[box]
+        read["rejectedPixels"] = int(dropped.sum())
+        valid[box] &= ~dropped
     array[~valid] = np.nan
     reproject(
         array, heights,
@@ -603,7 +658,7 @@ def mrdem_posts(dataset, cell):
         dst_transform=post_transform(*cell), dst_crs=CRS.from_epsg(MRDEM_GEOGRAPHIC_EPSG), dst_nodata=float("nan"),
         init_dest_nodata=False, resampling=Resampling.bilinear, num_threads=1,
     )
-    return heights, window, sha256, int((~valid).sum())
+    return heights, window, read
 
 
 def read_mrdem_cell(source, cell, out):
@@ -624,11 +679,15 @@ def read_mrdem_cell(source, cell, out):
                              f"{source.origin_object[0]} bytes with ETag {source.origin_object[1]}")
 
     check()
-    with rasterio.Env(**GDAL_OPTIONS), rasterio.open("/vsicurl/" + url) as dataset:
-        heights, window, sha256, invalid = mrdem_posts(dataset, cell)
+    with rasterio.Env(**GDAL_OPTIONS, **MRDEM_HTTP_OPTIONS), rasterio.open("/vsicurl/" + url) as dataset:
+        heights, window, read = mrdem_posts(dataset, cell)
     check()
+    if read["rejectedPixels"]:
+        low, high = read["rejectedHeights"]
+        print(f"{hgt_name(*cell)}: dropped {read['rejectedPixels']} MRDEM-30 pixels at and around heights from "
+              f"{low:.0f} to {high:.0f} m, which are not ground", flush=True)
     pixels = 0 if window is None else window.width * window.height
-    return heights, {"sha256": sha256, "readBytes": 4 * pixels, "invalidPixels": invalid,
+    return heights, {**read, "readBytes": 4 * pixels,
                      "window": None if window is None else [window.col_off, window.row_off, window.width, window.height]}
 
 
@@ -640,7 +699,7 @@ def terrain_deadline(sources):
     return TERRAIN_DEADLINE if any(source.origin_object is None for source in sources) else CELL_DEADLINE
 
 
-PIN_FIELDS = ("source", "url", "bytes", "etag", "areaSha256")
+PIN_FIELDS = ("source", "url", "bytes", "etag", "areaSha256", "rejects")
 
 
 def build_terrain_cell(cell, chosen, out):
@@ -648,7 +707,8 @@ def build_terrain_cell(cell, chosen, out):
 
     The receipt names, for each source, what it read (`sha256` is the
     downloaded tile's, or that of the pixels read from an object), how many
-    of its posts lay outside its area and how many posts it gave the tile.
+    of its pixels were dropped as not ground, how many of its posts lay
+    outside its area and how many posts it gave the tile.
     """
     import numpy as np
 
@@ -665,6 +725,7 @@ def build_terrain_cell(cell, chosen, out):
         "sources": parts,
         "bytes": sum(part["readBytes"] for part in parts),
         "outsidePosts": sum(part["outsidePosts"] for part in parts),
+        "rejectedPixels": sum(part.get("rejectedPixels", 0) for part in parts),
         **write_tile(out, cell, heights),
     })
 
@@ -1182,15 +1243,41 @@ def _build(cell):
         signal.alarm(0)
 
 
+class CellsFailed(RuntimeError):
+    """Cells of a run failed. Every other cell of the run was still built."""
+
+
 def run_pool(pending, chosen, out, jobs, opening=None, stage=None):
+    """Build the cells in worker processes; every cell gets its turn, and the failed ones are named together.
+
+    A pool works through every queued cell whatever one of them does. So a
+    cell's error is noted and the run goes on, and at the end all failed
+    cells are reported at once: a second run does not stop at the next of
+    them. A worker that dies breaks the pool and is raised as it is, for
+    build_pending to start another round.
+    """
     started = time.monotonic()
+    failed = []
     with ProcessPoolExecutor(jobs, initializer=_start_worker, initargs=(chosen, out, opening, stage)) as pool:
         futures = {pool.submit(_build, cell): cell for cell in pending}
         for done, future in enumerate(as_completed(futures), 1):
-            future.result()
+            try:
+                future.result()
+            except BrokenProcessPool:
+                raise
+            except Exception as error:  # noqa: BLE001 - whatever a cell raises, the others still run
+                name = hgt_name(*futures[future])
+                if not failed and error.__cause__ is not None:
+                    # The worker's own traceback, once.
+                    print(error.__cause__, flush=True)
+                failed.append(name)
+                print(f"{name} failed: {type(error).__name__}: {error}", flush=True)
             if done % 100 == 0 or done == len(futures):
                 rate = done / max(time.monotonic() - started, 1)
-                print(f"{done}/{len(futures)} cells, {rate:.2f}/s", flush=True)
+                print(f"{done}/{len(futures)} cells, {rate:.2f}/s" + (f", {len(failed)} failed" if failed else ""),
+                      flush=True)
+    if failed:
+        raise CellsFailed(f"{len(failed)} of {len(pending)} cells failed: {' '.join(sorted(failed))}")
 
 
 def build_pending(cells, chosen, out, jobs, rounds=ROUNDS, opening=None, stage=None):
@@ -1289,8 +1376,10 @@ def terrain_shares(terrain, receipts):
     """Each source's identity with the tiles it gave posts to and those posts, from terrain tile receipts."""
     shares = []
     for source in terrain.sources:
-        posts = [part["posts"] for receipt in receipts for part in receipt["sources"] if part["source"] == source.id]
-        shares.append({**source.identity(), "cells": sum(1 for count in posts if count), "posts": sum(posts)})
+        parts = [part for receipt in receipts for part in receipt["sources"] if part["source"] == source.id]
+        shares.append({**source.identity(), "cells": sum(1 for part in parts if part["posts"]),
+                       "posts": sum(part["posts"] for part in parts),
+                       "rejectedPixels": sum(part.get("rejectedPixels", 0) for part in parts)})
     return shares
 
 
@@ -1349,6 +1438,7 @@ def write_terrain_manifest(out, list_path, terrain, cells, bounds=None):
         "fileBytes": sum(r["fileBytes"] for r in receipts),
         "noDataPosts": sum(r["noDataPosts"] for r in receipts),
         "outsidePosts": sum(r["outsidePosts"] for r in receipts),
+        "rejectedPixels": sum(r.get("rejectedPixels", 0) for r in receipts),
     }
     (out / "cells.txt").write_text(listing)
     path = out / "terrain-manifest.json"

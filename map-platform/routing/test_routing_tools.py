@@ -275,6 +275,58 @@ class ElevationReceiptTests(unittest.TestCase):
             with self.assertRaises(build_elevation.BrokenProcessPool):
                 build_elevation.build_pending(cells, {}, Path("."), 2, rounds=1)
 
+    def test_a_run_builds_every_cell_and_names_all_that_failed(self):
+        from concurrent.futures import Future
+
+        class Pool:
+            """A pool that runs each cell at once, in this process."""
+
+            def __init__(self, jobs, initializer, initargs):
+                initializer(*initargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def submit(self, function, cell):
+                future = Future()
+                try:
+                    future.set_result(function(cell))
+                except Exception as error:
+                    future.set_exception(error)
+                return future
+
+        cells = [(8, 47), (9, 47), (10, 47), (11, 47), (12, 47)]
+        built = []
+
+        def build(cell):
+            if cell in ((9, 47), (11, 47)):
+                raise ValueError(f"garbage in {cell}")
+            built.append(cell)
+
+        printed = io.StringIO()
+        with patch.object(build_elevation, "ProcessPoolExecutor", Pool), patch.object(build_elevation, "_build", build), \
+                patch.dict(build_elevation._WORKER), patch("sys.stdout", printed):
+            with self.assertRaisesRegex(build_elevation.CellsFailed, "^2 of 5 cells failed: N47E009 N47E011$"):
+                build_elevation.run_pool(cells, {}, Path("."), 2)
+            # The cells after a failed one were still built, and each failure has its line.
+            self.assertEqual(built, [(8, 47), (10, 47), (12, 47)])
+            self.assertIn("N47E009 failed: ValueError: garbage in (9, 47)\n", printed.getvalue())
+            self.assertIn("N47E011 failed: ValueError: garbage in (11, 47)\n", printed.getvalue())
+            self.assertIn("5/5 cells", printed.getvalue())
+            self.assertIn("2 failed", printed.getvalue())
+            # A clean run raises nothing.
+            build_elevation.run_pool([(8, 47), (10, 47)], {}, Path("."), 2)
+
+            # A dead worker is no cell's failure: the pool is broken, and build_pending starts another round.
+            def broken(cell):
+                raise build_elevation.BrokenProcessPool("a worker died")
+
+            with patch.object(build_elevation, "_build", broken), self.assertRaises(build_elevation.BrokenProcessPool):
+                build_elevation.run_pool(cells, {}, Path("."), 2)
+
     def test_each_cell_runs_under_a_deadline(self):
         alarms = []
         with patch.object(build_elevation.signal, "alarm", alarms.append), \
@@ -717,7 +769,9 @@ class ElevationHybridTests(ElevationOpeningTests):
                                                                       [(-85, 42)], [-86, 40, -81, 45])
             listed = json.loads(terrain_manifest.read_text())
             self.assertEqual((listed["catalogCells"], listed["cells"], listed["sourceBytes"]), (1, 1, 7))
-            self.assertEqual(listed["sources"], [{**source.identity(), "cells": 1, "posts": self.POSTS ** 2}])
+            self.assertEqual(listed["sources"], [{**source.identity(), "cells": 1, "posts": self.POSTS ** 2,
+                                                  "rejectedPixels": 0}])
+            self.assertEqual(listed["rejectedPixels"], 0)
             for cell in [(-85, 42), (-84, 42)]:
                 build_elevation.hybrid_cell(cell, chosen, root / "out", hybrid)
             manifest = json.loads(build_elevation.write_manifest(
@@ -730,7 +784,8 @@ class ElevationHybridTests(ElevationOpeningTests):
                              hashlib.sha256(terrain_manifest.read_bytes()).hexdigest())
             # The source gave its posts to one terrain tile of these cells.
             self.assertEqual([(s["id"], s["cells"]) for s in manifest["sources"]], [("glo30", 2), ("usgs-3dep-13", 1)])
-            self.assertEqual(manifest["sources"][1], {**source.identity(), "cells": 1, "posts": self.POSTS ** 2})
+            self.assertEqual(manifest["sources"][1], {**source.identity(), "cells": 1, "posts": self.POSTS ** 2,
+                                                      "rejectedPixels": 0})
             # The eastern cell has no tile of its own, but the border column it shares with the western one.
             self.assertEqual((manifest["terrain"]["cells"], manifest["terrain"]["posts"]),
                              (2, self.POSTS ** 2 + self.POSTS))
@@ -926,6 +981,13 @@ class ElevationHybridTests(ElevationOpeningTests):
                              ("usgs-3dep-13", "https://terrain.example/n41w074/USGS_13_n41w074_20260917.tif",
                               len(data), hashlib.sha256(data).hexdigest(), "20260917"))
             self.assertEqual(build_elevation.current_terrain_receipt(out, cell, {cell: (source,)}), receipt)
+            # A 3DEP tile's receipt from before receipts named a rule for dropping pixels is still current.
+            self.assertIsNone(part["rejects"])
+            earlier = json.loads(json.dumps(receipt))
+            del earlier["sources"][0]["rejects"]
+            build_elevation.write_receipt(out, earlier)
+            self.assertEqual(build_elevation.current_terrain_receipt(out, cell, {cell: (source,)}), earlier)
+            build_elevation.write_receipt(out, receipt)
             posts = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))[0]
             np.testing.assert_array_equal(posts[:, :half + 1], 31)
             self.assertTrue(np.isnan(posts[:, half + 1:]).all())
@@ -993,24 +1055,26 @@ class ElevationHybridTests(ElevationOpeningTests):
         cell = (-80, 43)
         memory, height = self.mrdem_raster(cell)
         with memory, memory.open() as dataset, rasterio.Env():
-            posts, window, sha256, invalid = build_elevation.mrdem_posts(dataset, cell)
+            posts, window, read = build_elevation.mrdem_posts(dataset, cell)
             pixels = dataset.read(1, window=window)
             # A cell the raster does not reach reads nothing and has no posts.
             empty = build_elevation.mrdem_posts(dataset, (-60, 50))
-        self.assertEqual((posts.shape, invalid, sha256),
-                         ((self.POSTS,) * 2, 0, hashlib.sha256(pixels.tobytes()).hexdigest()))
+        self.assertEqual(posts.shape, (self.POSTS,) * 2)
+        self.assertEqual(read, {"sha256": hashlib.sha256(pixels.tobytes()).hexdigest(), "invalidPixels": 0,
+                                "rejectedPixels": 0, "rejectedHeights": None})
         # The window holds the posts with a margin, and not the whole raster.
         self.assertTrue(45 <= window.width < 120 and 45 <= window.height < 120, window)
         # Bilinear means of a plane are the plane; the warp places a post within an eighth of a pixel.
         np.testing.assert_allclose(posts.ravel(), height(*self.post_positions(cell)), atol=0.12)
         self.assertTrue(np.isnan(empty[0]).all())
-        self.assertEqual(empty[1:], (None, hashlib.sha256(b"").hexdigest(), 0))
+        self.assertEqual(empty[1:], (None, {"sha256": hashlib.sha256(b"").hexdigest(), "invalidPixels": 0,
+                                            "rejectedPixels": 0, "rejectedHeights": None}))
         for raster in (self.mrdem_raster(cell, crs="EPSG:3978"), self.mrdem_raster(cell, pixel=20.0),
                        self.mrdem_raster(cell, nodata=-9999.0)):
             with raster[0] as other, other.open() as dataset, self.assertRaisesRegex(ValueError, "not the MRDEM-30"):
                 build_elevation.mrdem_posts(dataset, cell)
 
-    def test_mrdem_pixels_without_data_or_out_of_range(self):
+    def test_mrdem_pixels_without_data_and_pixels_that_are_not_ground(self):
         import numpy as np
         import rasterio
         from rasterio.io import MemoryFile
@@ -1029,13 +1093,93 @@ class ElevationHybridTests(ElevationOpeningTests):
 
         holed = pixels.copy()
         holed[:, 60:] = -32767
-        posts, window, _, invalid = posts_of(holed)
-        self.assertEqual(invalid, window.height * (window.col_off + window.width - 60))
+        posts, window, read = posts_of(holed)
+        self.assertEqual(read["invalidPixels"], window.height * (window.col_off + window.width - 60))
+        self.assertEqual((read["rejectedPixels"], read["rejectedHeights"]), (0, None))
         # The raster's east has no data: the eastern posts have none, the western ones all of it.
         self.assertTrue(np.isfinite(posts[:, :5]).all() and np.isnan(posts[:, -5:]).all())
-        pixels[50, 50] = 9000
-        with self.assertRaisesRegex(ValueError, "lie outside"):
-            posts_of(pixels)
+
+        # A pit as at Holberg Inlet: the raster is pinned, so its garbage is dropped and the cell is built.
+        clean, window, _ = posts_of(pixels.copy())
+        margin = build_elevation.MRDEM_REJECT_MARGIN
+        pitted = pixels.copy()
+        pitted[58:61, 57:62] = -694.5    # cannot be ground
+        pitted[57, 57:62] = -9.0         # the pit's wall: in range, and within the margin of the pit
+        pitted[72, 60] = -9.0            # low and alone: ground, for all the reader knows
+        corner = (window.row_off + 2, window.col_off + 2)
+        pitted[corner] = 9000.0          # a spike in the window's corner, beyond every post
+        posts, again, read = posts_of(pitted)
+        self.assertEqual(again, window)
+        self.assertEqual(read["rejectedHeights"], [-694.5, 9000.0])
+        # The pit with its margin on every side, and the spike with its margin as far as the window reaches.
+        self.assertEqual(read["rejectedPixels"], (3 + 2 * margin) * (5 + 2 * margin) + (3 + margin) ** 2)
+        self.assertEqual(read["invalidPixels"], 0)
+        # The posts over the pit have no data, and no post is lower than the low pixel that was kept.
+        dropped = np.isnan(posts)
+        self.assertTrue(100 < int(dropped.sum()) < 300, int(dropped.sum()))
+        self.assertGreaterEqual(float(np.nanmin(posts)), -9.01)
+        self.assertLess(float(np.nanmin(posts)), float(np.nanmin(clean)) - 50)
+        # Away from the pit and the low pixel every post is what it was.
+        np.testing.assert_allclose(posts[:4], clean[:4], atol=1e-3)
+        changed = ~dropped & (np.abs(posts - clean) > 1e-3)
+        self.assertTrue(0 < int(changed.sum()) < 150, int(changed.sum()))
+
+    def test_a_pit_beyond_the_posts_still_has_its_wall_dropped_under_them(self):
+        import numpy as np
+        import rasterio
+        from rasterio.io import MemoryFile
+        from rasterio.warp import transform
+
+        cell = (-80, 43)
+        margin = build_elevation.MRDEM_REJECT_MARGIN
+        memory, _ = self.mrdem_raster(cell)
+        with memory, memory.open() as dataset:
+            profile, pixels = dataset.profile, dataset.read(1)
+            # The pixel under the posts' north-east corner, where a neighbouring cell's posts begin.
+            longitudes, latitudes = self.post_positions(cell)
+            (x,), (y,) = transform("EPSG:4617", dataset.crs, [float(longitudes.max())], [float(latitudes.max())])
+            row, column = dataset.index(x, y)
+
+        def posts_of(changed):
+            with MemoryFile() as file:
+                with file.open(**profile) as dataset:
+                    dataset.write(changed, 1)
+                with file.open() as dataset, rasterio.Env():
+                    return build_elevation.mrdem_posts(dataset, cell)
+
+        clean, window, _ = posts_of(pixels.copy())
+        # The window reaches the rule's margin beyond what the resampling alone needs.
+        self.assertGreaterEqual(window.col_off + window.width - 1 - column, 2 + margin)
+        self.assertGreaterEqual(row - window.row_off, 2 + margin)
+        pitted = pixels.copy()
+        pitted[row - 1:row + 2, column + margin] = -300.0        # a pit the posts do not reach
+        pitted[row - 1:row + 2, column:column + margin] = -9.0   # its wall, as far as the pixel under the post
+        posts, _, read = posts_of(pitted)
+        self.assertEqual(read["rejectedHeights"], [-300.0, -300.0])
+        self.assertGreater(read["rejectedPixels"], 3 * margin)
+        # The corner post is made of the pixels left, not of the wall: it stays within a metre of what it was,
+        # where the wall alone would pull it down by tens of metres.
+        corner, was = posts[0, -1], clean[0, -1]
+        self.assertTrue(np.isnan(corner) or abs(float(corner) - float(was)) < 1.0, (corner, was))
+        self.assertFalse((posts[np.isfinite(posts)] < float(np.nanmin(clean)) - 1.0).any())
+        # Without the pit the same wall is kept: it is in range, and ground for all the reader knows.
+        walled = pixels.copy()
+        walled[row - 1:row + 2, column:column + margin] = -9.0
+        kept = posts_of(walled)
+        self.assertEqual(kept[2]["rejectedPixels"], 0)
+        self.assertLess(float(np.nanmin(kept[0])), float(np.nanmin(clean)) - 10.0)
+
+    def test_a_mask_is_spread_by_its_margin_along_rows_and_columns(self):
+        import numpy as np
+
+        mask = np.zeros((9, 12), dtype=bool)
+        mask[4, 5] = mask[0, 11] = True
+        grown = build_elevation.spread(mask, 2)
+        expected = np.zeros_like(mask)
+        expected[2:7, 3:8] = expected[0:3, 9:12] = True
+        np.testing.assert_array_equal(grown, expected)
+        self.assertEqual(int(mask.sum()), 2)
+        np.testing.assert_array_equal(build_elevation.spread(mask, 0), mask)
 
     def test_the_mrdem_object_must_be_the_pinned_one_before_and_after_a_cell_reads_it(self):
         import numpy as np
@@ -1064,7 +1208,14 @@ class ElevationHybridTests(ElevationOpeningTests):
             part, = receipt["sources"]
             self.assertEqual({field: part[field] for field in build_elevation.PIN_FIELDS}, {
                 "source": "nrcan-mrdem-30", "url": build_elevation.MRDEM_URL, "bytes": pinned[0], "etag": pinned[1],
-                "areaSha256": area[1]})
+                "areaSha256": area[1], "rejects": {"below": -10, "above": 7000, "pixelsAround": 4}})
+            self.assertEqual((part["rejectedPixels"], part["rejectedHeights"], receipt["rejectedPixels"]), (0, None, 0))
+            # A tile read before pixels that are not ground were dropped names no such rule, and is built again.
+            earlier = json.loads(json.dumps(receipt))
+            del earlier["sources"][0]["rejects"]
+            build_elevation.write_receipt(out, earlier)
+            self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: (source,)}))
+            build_elevation.write_receipt(out, receipt)
             # What was read is the window's pixels, not the 84 GB object.
             width, height_ = part["window"][2:]
             self.assertEqual((part["readBytes"], receipt["bytes"], part["posts"], part["outsidePosts"]),
@@ -1139,8 +1290,8 @@ class ElevationHybridTests(ElevationOpeningTests):
             for others in ((usgs,), (mrdem,), (mrdem, usgs)):
                 self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: others}))
             self.assertEqual(build_elevation.terrain_shares(terrain, [receipt]), [
-                {**usgs.identity(), "cells": 1, "posts": self.POSTS * 21},
-                {**mrdem.identity(), "cells": 1, "posts": self.POSTS * 20}])
+                {**usgs.identity(), "cells": 1, "posts": self.POSTS * 21, "rejectedPixels": 0},
+                {**mrdem.identity(), "cells": 1, "posts": self.POSTS * 20, "rejectedPixels": 0}])
 
     def test_an_objects_size_and_etag_come_from_a_head_request(self):
         class Response:
@@ -1247,7 +1398,9 @@ class TerrainSourceTests(unittest.TestCase):
         self.assertEqual(set(canada.tiles.values()), {None})
         self.assertEqual(canada.pin((-80, 43)), {
             "source": "nrcan-mrdem-30", "url": canada.origin, "bytes": 83854027098,
-            "etag": "1bf055857edce86b1311967c8d88395e-9997", "areaSha256": canada.area_sha256})
+            "etag": "1bf055857edce86b1311967c8d88395e-9997", "areaSha256": canada.area_sha256,
+            "rejects": {"below": -10, "above": 7000, "pixelsAround": 4}})
+        self.assertIsNone(source.pin((-74, 40))["rejects"])
         north = build_elevation.load_area(canada.area, canada.area_sha256)
         self.assertEqual(canada.area.name, "canada-osm-r1428125-v649.geojson.gz")
         self.assertEqual(sorted(canada.tiles), sorted(terrain_catalog.area_cells(north)))

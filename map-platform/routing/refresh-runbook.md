@@ -1056,6 +1056,51 @@ then made from a copy of the tools in which the elevation container, the
 stage labels and the gate's network and services carry another name;
 nothing else in the copy differs.
 
+#### Pits at shorelines
+
+The first planet build with MRDEM-30, on 2026-11-27, stopped in its terrain
+stage on cell N50W129: the reader refused heights below -500 m. The raster
+holds them. At Holberg Inlet on Vancouver Island (50.647° N, 127.993° W),
+which the source raster marks as lidar, the heights fall from the sea's
+-1 m to -694.5 m within ten pixels and climb back to the shore. NRCan's
+specification says that lidar leaves artifacts on water where the gaps in
+its returns were filled. The pit is one of about a hundred in that cell,
+and other coasts have them too:
+
+| Cell | Place | Valid pixels below -2 m | -5 m | -10 m | -20 m | Lowest |
+|---|---|---|---|---|---|---|
+| N50W129 | Holberg Inlet, Vancouver Island | 8,736 | 4,463 | 2,230 | 1,646 | -694.5 m |
+| N49W124 | Vancouver | 88,453 | 1,002 | 341 | 11 | -55.9 m |
+| N48W124 | Victoria | 18,392 | 8,154 | 2,174 | 10 | -23.3 m |
+| N44W064 | Halifax | 1,240 | 1,143 | 994 | 656 | -46.8 m |
+| N45W065 | Minas Basin, Bay of Fundy | 523,557 | 221,493 | 208 | 100 | -48.3 m |
+
+- **The rule.** A pixel below -10 m or above 7,000 m cannot be ground. The
+  reader drops it with the pixels within four of it, which are the walls of
+  the pit, and counts them in the cell's receipt and in the terrain
+  manifest (`rejectedPixels`). Their posts have no data, and the hybrid
+  fills them from opened Copernicus like any other hole. The raster is
+  pinned, so the same pixels come back on every read: stopping on them
+  stopped the build for good.
+- **Why -10 m.** The Bay of Fundy's flats fall dry at low tide and are real
+  ground down to about 9 m under the datum: 221,493 pixels of the Minas
+  Basin cell lie between -5 and -10 m, and 208 below. Ground lower than
+  that can only be the bottom of an open-pit mine near the sea. It would be
+  dropped too and filled from Copernicus.
+- **What it leaves.** Pits that stay above -10 m. With the rule, N50W129
+  drops 15,295 pixels and its tile's lowest post is -9 m, with 61 posts
+  below -5 m beside a sea at -1 m. A spike or a pit inside the range, on
+  land, is not found at all.
+- **Tiles built before the rule are built again.** A receipt names the rule
+  its source was read under. MRDEM-30 tiles from before name none and are
+  stale; 3DEP has no such rule, and its tiles keep their receipts.
+- **A run names every failed cell.** The build stopped at the first failed
+  cell it saw and said nothing of the others. It now builds every other
+  cell and ends with the names of all that failed.
+
+The four rehearsals above were built before the rule. Vancouver's cell then
+held 341 pixels below -10 m, and its routes were the ungraded ones.
+
 #### What is not known
 
 - No builder has read MRDEM-30. The 2,338 reads go to one object in
