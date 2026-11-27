@@ -1796,6 +1796,85 @@ yet, so `elevation-sources.json` and the build are unchanged.
   are still to be read. Each needs a reader, a catalog, an area and city
   samples through that reader before a planet build uses it.
 
+### Planet gate for the hybrid of 2026-11-27
+
+**The first planet graded with the hybrid met every target of the gate.**
+3DEP in the United States, MRDEM-30 in Canada and Copernicus opened at 400 m
+elsewhere. New York, Chicago, Toronto and Calgary keep every route, and no
+flat route anywhere is a detour or a swap. The build was approved on
+2026-11-27; it is not decided whether it ships.
+
+The build ran on `bicino-valhalla-h400-261116` (c4-highmem-24-lssd,
+europe-west4-b), from `planet-261116.osm.pbf`, with
+`setup.sh --opening-radius 400 --terrain usgs-3dep-13,nrcan-mrdem-30
+--elevation-cache elevation-cache-2026-11-26.json`. It was the first run of
+the unattended chain on a real builder. The images, download, inputs and
+ungraded build ran with tools `a1912b85`; the elevation stage onward with
+`2a2dd797`, after PR 928.
+
+| Archive | SHA-256 | Bytes | Tiles | Elevation manifest |
+|---|---|---|---|---|
+| Graded | `4e8a22e5817fefbaa7dc460aca5e49a5a1b1fb13d898ce6997eed4125dfb5480` | 107,553,546,240 | 209,979 | `9d183d96…` (hybrid) |
+| Ungraded | `29148e0275c9f77d3a8258390ad0b6b60e8e8343b35c029ad31caf10a5bee854` | 104,563,353,600 | 209,979 | none |
+
+Both graphs were built with `--all-bridges`, so the ungraded archive is not
+production's `abe5e72e…`.
+
+- **Qualification:** both archives passed smoke 17/17, cross-border 4/4,
+  the audit 281/298 with the 17 known exceptions, and profiles 5/5.
+- **Gate:** 25 cities. The longest flat routes are +0.3% (Buenos Aires)
+  and +0.2% (Houston); every other judged flat city is 0.0%, with no
+  detours and no swaps. `use_hills` changes 10 of the 17 hilly legs:
+  Lisbon 2/4, San Francisco 2/4, Zurich 3/4, Wellington 2/4, Stuttgart 1/1.
+  Montreal, a report-only city, has one route 5.3% longer.
+- **Times:** the download 44 minutes. The elevation stage restored the kept
+  Copernicus sets in 12 minutes (raw 430 s, 400 m 297 s). Its first run
+  stopped on two MRDEM-30 cells with heights hundreds of metres below sea
+  level (see [Pits at shorelines](#pits-at-shorelines)); with PR 928 the terrain round
+  took 35 minutes, two of its rounds each losing a worker to the 15-minute
+  cell deadline, and the blend of 26,475 cells 19.5 minutes. The ungraded
+  build took 4 h 22 min and the graded one 4 h 50 min beside it; the
+  qualification and the gate took under a minute. The chain took 7 hours
+  from start to result, with peaks of 1,271 GB of scratch and 52 GB of
+  memory.
+- **Kept:** the hybrid tiles and the terrain tiles are in the tile bucket
+  (see [what is kept](builder/elevation-cache-proposal.md#kept-since-2026-11-27)).
+
+**Known false grades.** Lidar terrain models put pits and channels under
+some roads that the gate's cities do not cross. Three read-only scans of the
+builder's tiles and graphs looked for them:
+
+- 63,989 narrow closed hollows lie at least 30 m deep, 20 m further under
+  Copernicus than the ground around them, with a step of 20 m or more
+  between two neighbouring posts; most are canyons, mines and quarries.
+- 61 public-road ways (54 paved, 7 unpaved) read a false step: 30% or
+  steeper over 30 m at the hollow, and 20% or less with it filled. Five are
+  pit artifacts: Chemin de Radford in Quebec, a 47 m dip; the Alberni
+  Highway and Van Horne Road near Coombs, BC; Pyramid Road in Georgia; and a
+  residential road in Texas. Twenty-one are stream crossings (bridge
+  approaches, culverts and unmapped crossings), where the lidar shows the
+  channel under the road; two are at the tunnel of US 189 in Provo Canyon;
+  33 are narrow valleys where the mapped road line lies partly over the
+  drop. 58 of the 61 are in 3DEP. Besides them, 44 service roads, 69 tracks
+  and 63 bike or foot ways read such a step.
+- The graded graph stores the steps: at 204 of the 238 points the edge's
+  steepest stored slope is 20% or more. The two US 189 ways are the
+  exception: Valhalla grades a tunnel from its ends, and they store 2%. So
+  at most 59 public-road ways (52 paved, 7 unpaved) carry a false step in
+  the graph, and 53 of them store a slope of 20% or more; the five pit
+  artifacts store 28% to 64% (Chemin de Radford 64%). On the public roads
+  the edges' weighted grade, which bicycle costing reads, is 10% at the
+  median and 15% at most; Valhalla stores no weighted grade above 15%, so
+  only the stored maximum slope shows how large a step is.
+- Open channels under bridges are not closed hollows, so these scans do not
+  count them.
+
+The result, the gate report, the manifests, the logs and the scans are on
+the map VPS in `/root/bicino-routing-releases/builder-h400-261116/`
+(`diagnostics/` holds the scans). The road check's write-up and its list of
+roads are in the sessions' notes folder on Chris's Mac, under
+`mrdem-canada-20261127/pits/artifacts-20261127/road-check/`.
+
 ## Pull, assemble, and install on Coolify
 
 Expose the approved immutable archive and receipt through a dedicated
