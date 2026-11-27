@@ -69,6 +69,9 @@ It differs from the proposal below in three ways:
 - **An upload step** for a new set. `elevation_cache.py pack` writes the
   tars and the record of an elevation set; uploading them is done by hand
   as described above.
+- **A guard against deletion.** The bucket has Google's default 7-day soft
+  delete and no retention policy or object hold. `elevation_cache.py verify`
+  tells whether it still holds what the record pins.
 
 **Done on 2026-11-27:** the builder `bicino-valhalla-h400-261116`, created
 with `--cache-reader`, restored both sets with the token from its metadata
@@ -102,13 +105,11 @@ build, `bicino-valhalla-h400-261116` (see
   per object, opened from a signed-in laptop, 30 objects in about three
   minutes. The builder compared each object's size and MD5 with what the
   bucket reported, the laptop read all 30 back, and the builder then ran
-  `elevation_cache.py verify` on the whole hybrid set as its service account.
+  `elevation_cache.py verify` on the whole hybrid set as its service account:
+  every tar and all 26,475 tiles matched, in 8 minutes.
 - Both sets with the first ones are about 330 GiB, about $3.30 a month at
   Nearline's list price. `terrain-2026-11-27/README.txt` in the bucket
   carries the sources' credits.
-- **A guard against deletion.** The bucket has Google's default 7-day soft
-  delete and no retention policy or object hold. `elevation_cache.py verify`
-  tells whether it still holds what the record pins.
 
 ## The problem
 
