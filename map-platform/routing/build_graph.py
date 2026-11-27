@@ -249,6 +249,9 @@ def main():
     parser.add_argument("--all-bridges", action="store_true",
                         help="Mark every bridge value that does not say no as a bridge; for terrain-graded graphs "
                              "and their twins")
+    parser.add_argument("--crossings", type=Path, nargs="+", metavar="SITES",
+                        help="Site files of crossing_steps.py: grade the road over every crossing whose terrain "
+                             "reads a false step from its ends, as a bridge (crossing_split.py); needs --elevation")
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")
@@ -271,8 +274,19 @@ def main():
     if needs_all_bridges(elevation_record) and not args.all_bridges:
         parser.error("--elevation holds a terrain model: pass --all-bridges, and to the ungraded build it is "
                      "compared with")
+    if args.crossings and elevation is None:
+        parser.error("--crossings reads the road's heights from --elevation")
+    crossing_sites = [path.resolve(strict=True) for path in args.crossings or []]
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask, admin_source, args.sample)
+    crossings = None
+    if crossing_sites:
+        import crossing_split
+
+        crossings, _ = crossing_split.run(roads, crossing_sites, elevation, work / "roads-crossings.osm.pbf",
+                                          work=work)
+        roads = work / "roads-crossings.osm.pbf"
+        run("osmium", "check-refs", roads)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)
     valhalla_build(work, admin, roads, args.threads, elevation, args.all_bridges)
     archive = work / ARCHIVE_NAME
@@ -288,6 +302,7 @@ def main():
         "admin": file_identity(work / "admin.sqlite"),
         **({"adminSource": file_identity(admin_source)} if admin_source else {}),
         "elevation": elevation_record,
+        "crossings": crossings,
         "maskedInputBytes": roads.stat().st_size,
         "archive": {"name": ARCHIVE_NAME, "tiles": archive_tile_count(archive), **file_identity(archive)},
     }

@@ -301,6 +301,21 @@ production now.
    own, so a new image needs the change reviewed again. The manifest's
    `builder.graphLua` records the changed rules.
 
+   A terrain model also holds the ground at a bridge's ends, which are often
+   mapped on the channel's bank, and the channel it cuts through a road's
+   fill over a culvert, so the road beside them reads a false step.
+   `--crossings SITES...` grades the road over such a crossing from its
+   ends, as Valhalla grades a bridge: [crossing_split.py](crossing_split.py)
+   reads the road's heights from `--elevation` at every site of the site
+   files [crossing_steps.py](crossing_steps.py) writes, cuts the road where
+   it meets solid ground on either side and tags the stretch between
+   `bridge=yes`, `bicino:interpolated=crossing`, through an osmChange file
+   that `osmium apply-changes` applies to the roads. The terrain is not
+   changed. The manifest's `crossings` records the site files, the rule and
+   what changed. It is opt-in, and no chain stage writes the planet's site
+   files yet (see
+   [False steps at crossings](refresh-runbook.md#false-steps-at-crossings)).
+
    Use `--sample` for development input, such as a city cut from a regional
    extract by [prepare_sample.py](prepare_sample.py). A sample's relations may
    lack members that lie outside the extract, and `--admin-source` takes its
@@ -412,6 +427,13 @@ marked `reportOnly`: `compare_elevation.py` routes and tabulates them, but
 no target counts them, and a person judges their length change and 6%+
 share.
 
+Pittsburgh, added on 2026-11-27, holds a bridge over a hollow where the
+3DEP terrain reads a false step at the bridge's ends: on the hybrid the
+Road route across Schenley Park's Panther Hollow Bridge is 6.5% longer and
+a detour. Three flat river crossings downtown keep the city's median
+honest. It is the gate's check on false steps at crossings (see
+[False steps at crossings](refresh-runbook.md#false-steps-at-crossings)).
+
 All seven tower cities build as samples since 2026-11-26. At 400 m their
 rows equalled the planet gate's in every column, and the two legs the planet
 missed are the two the samples miss (see
@@ -483,6 +505,12 @@ before building a planet with a new elevation method.
      --tile N32W117=https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/historical/n33w117/USGS_13_n33w117_20260915.tif \
      --fill "$scratch/dem/san-diego/opening-400" --out "$scratch/dem/san-diego/hybrid"
    ```
+
+   `crossing_steps.py restore --kept releases/elevation-cache-2026-11-27.json
+   --set hybrid-400 --bounds W S E N` writes the cells of a box from the
+   hybrid set kept in the tile bucket, read by byte range from its tars and
+   checked against its cell list; it needs the set's `meta.tar` and a token
+   file (see [Kept elevation tiles](builder/README.md#kept-elevation-tiles)).
 
    [tower_mask.py](tower_mask.py) takes any of these tile sets and writes
    no data where tall buildings dominate, so that Valhalla grades those
