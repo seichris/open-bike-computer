@@ -1744,18 +1744,22 @@ and grades.
 | City | Opened at 400 m | Opened at 200 m | No data (30 m) | Membrane at 25 m |
 |---|---|---|---|---|
 | Shanghai, 4 routes | 0.0%, 0% | 0.0%, 0% | 0.0%, 0% | 0.0%, 0% |
-| Singapore, 4 routes | 0.0%, 2% | **+10.8%**, 2% | 0.0%, 0% | 0.0%, 0% |
+| Singapore, 4 routes | 0.0%, 2% | +10.8% (a swap), 2% | 0.0%, 0% | 0.0%, 0% |
 | Dubai, 6 routes | 0.0%, 0% | 0.0%, 2% | 0.0%, 2% | 0.0%, 2% |
-| São Paulo, 4 routes (report only) | 0.0%, 15%; `use_hills` 1 of 2 | −6.0% to 0.0%, 11%; 0 of 2 | 0.0%, 0%; 0 of 2 | **+6.2%**, 0%; 0 of 2 |
+| São Paulo, 4 routes (report only) | 0.0%, 15%; `use_hills` 1 of 2 | −6.0% to 0.0%, 11%; 0 of 2 | 0.0%, 0%; 0 of 2 | +6.2%, 0%; 0 of 2 |
 
 Each cell gives the longest length change and the median 6%+ share of the
-direct routes. Every source meets the targets on these four cities; with the
-eight cities above, the membrane and the no-data tiles meet them on all
-twelve, and the openings miss as before. No route or grade lookup failed.
+direct routes. On the three cities the targets judge, every source meets
+them: the gate counts Singapore's +10.8% route at 200 m as a single swap
+within its limits. São Paulo is report-only, so no target counts it, and it
+is judged by hand below. With the eight cities above, the membrane and the
+no-data tiles meet the targets on all twelve, and the openings miss as
+before. No route or grade lookup failed.
 
 - **Singapore.** At 200 m, Tanjong Pagar to Marina Bay Sands on Everyday is
-  10.8% longer, a swap whose direct route reads 5% at 6%+. Masked or
-  membrane, all four routes are the ungraded ones and read no 6%+ grade.
+  10.8% longer, a swap whose direct route reads 5% at 6%+; the gate lets
+  one such swap pass. Masked or membrane, all four routes are the ungraded
+  ones and read no 6%+ grade.
 - **Shanghai is flat on every source.** Of the 67 km of streets read around
   its legs, at most 0.1 km has a 6%+ section on any graph.
 - **São Paulo loses its ridge.** Avenida Paulista runs along a ridge, and
@@ -1786,10 +1790,16 @@ before a planet build.**
   hills changes neither leg there.
 - **25 m was chosen on these samples.** 30 m leaves Midtown's edge on
   mid-rise plateaus and 20 m masks too much of the hilly cities; the
-  margin between them is small. Singapore, Shanghai, Dubai and São Paulo
-  passed with it too. Before a planet build, run it on the low flat cities
-  (Buenos Aires, Amsterdam, Houston and Berlin) and on the wider survey of
-  252 downtowns, judging by the direct routes' 6%+ share as well as length.
+  margin between them is small. Singapore, Shanghai and Dubai meet the
+  targets with it too, and São Paulo, which no target judges, loses its
+  ridge (see above). Before a planet build, run it on Hong Kong, the gate's
+  other hilly tower core: CEDD's lidar covers it, but its terms for derived
+  products are still to be read, so it may stay on opened Copernicus. Run
+  it on Buenos Aires, the one low flat city of the samples that no
+  approved terrain model covers, to see that the rule leaves low cities
+  alone; Amsterdam, Berlin and Houston will be graded from terrain models.
+  And run it on the wider survey of 252 downtowns, judging by the direct
+  routes' 6%+ share as well as length.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
   States and Canada in the hybrid, and the four regional sources approved
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
@@ -1798,7 +1808,8 @@ before a planet build.**
   have readers none is graded from opened Copernicus. The membrane matters
   for tower cores outside those areas: Singapore, Shanghai, Dubai and São
   Paulo in the gate (see above), and the survey's other downtowns. Of
-  those four only Singapore needed it; São Paulo is where it costs most.
+  those four only Singapore's routes changed with it, and São Paulo is
+  where it costs most.
 - **A planet build needs the step in `build_elevation.py`.** The sample
   tool solves the membrane over the cells of `--bounds` together. A planet
   build would solve it per cell with a margin of the neighbours' tiles, as
