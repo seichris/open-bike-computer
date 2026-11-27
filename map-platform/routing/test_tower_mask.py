@@ -257,6 +257,28 @@ class MembraneTests(unittest.TestCase):
                 np.testing.assert_array_equal(filled[outside], heights[outside])
                 self.assertTrue(np.isnan(filled[5, 5]))
 
+    def test_distances_are_in_metres(self):
+        import math
+
+        import numpy as np
+
+        # x^2 - y^2 in metres is harmonic, and a five-post stencil holds it exactly when east and west
+        # neighbours weigh 1/cos^2 of the latitude more: a plane would pass with any weights.
+        latitude = 60.0
+        row, column = np.mgrid[0:80, 0:100]
+        east = (column - 50) * build_elevation.METRES_PER_ARCSECOND * math.cos(math.radians(latitude))
+        north = (40 - row) * build_elevation.METRES_PER_ARCSECOND
+        saddle = ((east ** 2 - north ** 2) / 1000).astype("float32")
+        zone = np.zeros(saddle.shape, dtype=bool)
+        zone[10:70, 15:85] = True
+        heights = saddle.copy()
+        heights[zone] += 30
+        filled, _, _ = tower_mask.membrane_fill(heights, zone, np.full(80, latitude))
+        np.testing.assert_allclose(filled[zone], saddle[zone], atol=0.05)
+        # Spanned as if an arc-second measured the same both ways, the saddle bends by metres.
+        flat, _, _ = tower_mask.membrane_fill(heights, zone, np.zeros(80))
+        self.assertGreater(float(np.abs(flat - saddle)[zone].max()), 5)
+
     def test_posts_without_data_take_no_part(self):
         import numpy as np
 
@@ -327,13 +349,15 @@ class MembraneTests(unittest.TestCase):
             manifest = json.loads((out / "elevation-manifest.json").read_text())
             method = manifest["method"]
             self.assertEqual((method["masked"], method["membrane"]["name"]), ("membrane", "membrane"))
+            # Without --threshold a membrane takes its own default, the one that met the gate.
+            self.assertEqual(method["thresholdMetres"], tower_mask.MEMBRANE_THRESHOLD_METRES)
             self.assertEqual(method["membrane"]["unfilledPosts"], 0)
             self.assertEqual(manifest["noDataPosts"], 0)
             # Each cell counts the zone's posts on the border column they share; the membrane counts them once.
             import rasterio
 
             with rasterio.open(file) as dataset:
-                shared = int(tower_mask.cell_zone([dataset], (-74, 40))[:, 0].sum())
+                shared = int(tower_mask.cell_zone([dataset], (-74, 40), tower_mask.MEMBRANE_THRESHOLD_METRES)[:, 0].sum())
             masked = [entry["maskedPosts"] for entry in manifest["cellFiles"]]
             self.assertTrue(70 < shared < 100)
             self.assertEqual(sum(masked) - method["membrane"]["filledPosts"], shared)

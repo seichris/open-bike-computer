@@ -45,11 +45,11 @@ square. Posts without data outside the zone are left out (nothing flows
 across them), and a zone part that no height touches stays no data. The
 membrane is solved over all cells of `--bounds` together, so a zone that
 crosses their edge is spanned from the posts inside them only. On the city
-samples of 2026-11-27 it met the gate with `--threshold 25`.
+samples of 2026-11-27 it met the gate with a threshold of 25 m, its default.
 
     python tower_mask.py --input "$scratch/dem/new-york/open-200" --bounds -75 40 -73 41 \\
         --heights GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss_V1_0_R5_C11.tif \\
-        --fill membrane --threshold 25 --out "$scratch/dem/new-york/open-200-membrane"
+        --fill membrane --out "$scratch/dem/new-york/open-200-membrane"
 
 `--input` is a directory build_elevation.py or sample_elevation.py wrote. The
 manifest records the rule, the input and every height file, and always
@@ -73,8 +73,10 @@ from sample_elevation import cells_in, cut, mosaic, read_hgt, write_hgt, write_m
 
 SCHEMA = "bicino-valhalla-elevation-v1"
 SOURCE_ID = "ghs-built-h-anbh-r2023a"
-# Chosen on eight city samples on 2026-11-27; see the refresh runbook, "Switching elevation off in tower zones".
+# Chosen on eight city samples on 2026-11-27; see the refresh runbook, "Switching elevation off in tower zones"
+# and "A membrane in place of no data". At 30 m a membrane's edge in Midtown lies on mid-rise plateaus.
 THRESHOLD_METRES = 30.0
+MEMBRANE_THRESHOLD_METRES = 25.0
 SMOOTH_METRES = 150.0
 MARGIN_METRES = 200.0
 FILLS = ("none", "membrane")
@@ -406,14 +408,17 @@ def main():
                         help="GHS-BUILT-H ANBH GeoTIFFs in WGS 84 that cover the cells")
     parser.add_argument("--out", required=True, type=Path, help="A new directory")
     parser.add_argument("--bounds", required=True, type=int, nargs=4, metavar=("WEST", "SOUTH", "EAST", "NORTH"))
-    parser.add_argument("--threshold", type=float, default=THRESHOLD_METRES,
-                        help="Mean building height in metres from which a post is in a tower zone")
+    parser.add_argument("--threshold", type=float,
+                        help=f"Mean building height in metres from which a post is in a tower zone "
+                             f"(default {THRESHOLD_METRES:g}, or {MEMBRANE_THRESHOLD_METRES:g} with --fill membrane)")
     parser.add_argument("--smooth", type=float, default=SMOOTH_METRES,
                         help="Radius in metres of the ellipse the mean is taken over; 0 judges each grid cell alone")
     parser.add_argument("--margin", type=float, default=MARGIN_METRES, help="Metres a tower zone is grown by")
     parser.add_argument("--fill", choices=FILLS, default="none",
                         help="none: no data in tower zones; membrane: a surface spanned from the heights around them")
     args = parser.parse_args()
+    if args.threshold is None:
+        args.threshold = MEMBRANE_THRESHOLD_METRES if args.fill == "membrane" else THRESHOLD_METRES
     try:
         cells = cells_in(args.bounds)
     except ValueError as error:

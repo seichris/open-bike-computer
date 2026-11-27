@@ -493,13 +493,14 @@ before building a planet with a new elevation method.
    it masks and why no data is not ready for a planet are in
    [Switching elevation off in tower zones](refresh-runbook.md#switching-elevation-off-in-tower-zones).
    `--fill membrane` spans each zone with a surface from the heights around
-   it instead; with `--threshold 25` it met the gate on the samples (see
+   it instead; with its default threshold of 25 m it met the gate on the
+   samples (see
    [A membrane in place of no data](refresh-runbook.md#a-membrane-in-place-of-no-data)).
 
    ```sh
    python tower_mask.py --input "$scratch/dem/new-york/opening-200" --bounds -75 40 -73 41 \
      --heights "$scratch/ghsl/GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss_V1_0_R5_C11.tif" \
-     --fill membrane --threshold 25 --out "$scratch/dem/new-york/opening-200-membrane"
+     --fill membrane --out "$scratch/dem/new-york/opening-200-membrane"
    ```
 
 3. Build each city once without elevation and once per source. The admin
