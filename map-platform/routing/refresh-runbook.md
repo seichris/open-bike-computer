@@ -1104,15 +1104,22 @@ and other coasts have them too:
 - **A run names every failed cell.** The build reported the first failed
   cell it saw and said nothing of the others. It now builds every other
   cell and ends with the names of all that failed.
-- **A stalled read no longer costs fifteen minutes.** The first three
+- **A read that hangs still costs fifteen minutes.** The first three
   attempts of that build each ended 16.5 to 17.5 minutes after they began,
   however many cells were left. A pool works through its whole queue after
-  one cell fails, so they did not end on the bad cell: a read stalled a
-  minute or two into each attempt, its worker was killed at the 15-minute
-  cell deadline, and that broke the pool. GDAL has no transfer timeout
-  unless it is given one. An MRDEM-30 read now gives up after a minute
-  without data and the cell fails by name. Whether that works on a real
-  stall has not been seen yet.
+  one cell fails, so they did not end on the bad cell: a cell got no answer
+  a minute or two into each attempt, its worker was killed at the 15-minute
+  cell deadline, and that broke the pool. The reader then gave an MRDEM-30
+  read a limit of a minute without data (GDAL has no transfer timeout
+  unless it is given one). It did not help: in the next run two rounds
+  again ended with a dead worker, after 18 and 16 minutes, before the third
+  built the last two cells. So the hang is not a transfer that GDAL's limit
+  sees, and the log did not say what it is.
+- **A cell that hangs now says so.** Twenty seconds before its deadline it
+  prints its name, and a watchdog writes the stack of its worker, which
+  names the call it is blocked in. The worker still ends at the deadline
+  and the round still starts again: this finds the cause, it does not
+  remove it.
 
 A check that does not depend on sea level is to compare with the opened
 Copernicus surface, which no pit of the lidar is in. Counted on a laptop
