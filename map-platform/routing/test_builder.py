@@ -69,6 +69,37 @@ def files_of(directory):
     return {str(path.relative_to(directory)): path.read_bytes() for path in sorted(directory.rglob("*")) if path.is_file()}
 
 
+class FakeDocker:
+    """The containers and networks of one Docker host; stands in for `subprocess.run`.
+
+    Like Docker, `--filter label=KEY=VALUE` finds one only by the whole value.
+    """
+
+    def __init__(self, containers, networks=()):
+        self.containers = dict(containers)
+        self.networks = dict(networks)
+        self.calls = []
+
+    def __call__(self, command, **_kwargs):
+        self.calls.append(command)
+        found = ""
+        for listing, removal, held in ((["docker", "ps", "-aq"], ["docker", "rm", "-f"], self.containers),
+                                       (["docker", "network", "ls", "-q"], ["docker", "network", "rm"], self.networks)):
+            if command[:len(listing) + 1] == [*listing, "--filter"]:
+                key, _, value = command[-1].removeprefix("label=").partition("=")
+                found = "".join(f"{name}\n" for name, labels in held.items() if labels.get(key) == value)
+            elif command[:len(removal)] == removal:
+                for name in command[len(removal):]:
+                    del held[name]
+        return subprocess.CompletedProcess(command, 0, stdout=found, stderr="")
+
+
+def docker_values(calls, flag):
+    """Every value a stand-in Docker's calls give for a flag."""
+    words = calls.split()
+    return {words[index + 1] for index, word in enumerate(words) if word == flag}
+
+
 class Clock:
     def __init__(self, start=1_795_000_000):
         self.now = start
@@ -483,23 +514,51 @@ class RunStageTests(ScratchCase):
         self.assertEqual(chain_state.read_marker(self.chain, "download")["state"], "done")
 
     def test_leftover_containers_are_removed_by_their_label(self):
-        calls = []
-
-        def fake_run(command, **_kwargs):
-            calls.append(command)
-            return subprocess.CompletedProcess(command, 0, stdout="abc123\ndef456\n", stderr="")
-
+        # Another run on the same Docker host, in a directory whose path begins with this run's.
+        other = Path(f"{self.root}-2")
+        theirs = {"their-gate": {"bicino.stage": f"gate@{other}"},
+                  "their-elevation": {"bicino.stage": f"elevation@{other}"},
+                  "their-build": {"bicino.work": f"{other}/build/planet-graded"},
+                  # A checkout from before the label named the scratch root started this one: whose is it?
+                  "unnamed-gate": {"bicino.stage": "gate"}}
+        their_networks = {"their-gate-network": {"bicino.stage": f"gate@{other}"}, "bridge": {}}
+        docker = FakeDocker({"gate-1": {"bicino.stage": f"gate@{self.root}"},
+                             "gate-2": {"bicino.stage": f"gate@{self.root}"},
+                             "elevation": {"bicino.stage": f"elevation@{self.root}"},
+                             "build": {"bicino.work": f"{self.root}/build/planet-graded"}, **theirs},
+                            {"gate-network": {"bicino.stage": f"gate@{self.root}"}, **their_networks})
+        mine = f"label=bicino.stage=gate@{self.root}"
         with patch.object(run_stage.shutil, "which", return_value="/usr/bin/docker"), \
-                patch.object(run_stage.subprocess, "run", fake_run), (self.root / "log").open("w") as log:
-            run_stage.remove_containers(self.root, "gate", log)
-            self.assertEqual(calls, [["docker", "ps", "-aq", "--filter", "label=bicino.stage=gate"],
-                                     ["docker", "rm", "-f", "abc123", "def456"]])
+                patch.object(run_stage.subprocess, "run", docker), (self.root / "log").open("w") as log:
+            run_stage.remove_leftovers(self.root, "gate", log)
+            # The containers first: Docker keeps a network that a container is still on.
+            self.assertEqual(docker.calls, [["docker", "ps", "-aq", "--filter", mine],
+                                            ["docker", "rm", "-f", "gate-1", "gate-2"],
+                                            ["docker", "network", "ls", "-q", "--filter", mine],
+                                            ["docker", "network", "rm", "gate-network"]])
+            self.assertEqual(sorted(docker.containers), sorted(["elevation", "build", *theirs]))
+            self.assertEqual(docker.networks, their_networks)
             # A killed graph build leaves build_graph.py's container, labelled with its work directory.
-            del calls[:]
-            run_stage.remove_containers(self.root, "build-graded", log)
-        self.assertEqual([call[-1] for call in calls[:2]],
-                         ["label=bicino.stage=build-graded", f"label=bicino.work={self.root}/build/planet-graded"])
-        self.assertEqual(calls[2], ["docker", "rm", "-f", "abc123", "def456", "abc123", "def456"])
+            del docker.calls[:]
+            run_stage.remove_leftovers(self.root, "build-graded", log)
+            self.assertEqual([call[-1] for call in docker.calls[:2]],
+                             [f"label=bicino.stage=build-graded@{self.root}",
+                              f"label=bicino.work={self.root}/build/planet-graded"])
+            self.assertEqual(docker.calls[2], ["docker", "rm", "-f", "build"])
+            self.assertEqual([call[:3] for call in docker.calls[3:]], [["docker", "network", "ls"]] * 2)
+            # What systemd runs after it had to end a stage finds that stage's container, and only it.
+            chain_state.mark(self.root, "elevation", "running", clock=self.clock)
+            run_stage.finalize(self.root, "elevation", {"SERVICE_RESULT": "timeout", "EXIT_CODE": "killed", "EXIT_STATUS": "KILL"})
+        self.assertEqual(chain_state.read_marker(self.chain, "elevation")["state"], "failed")
+        self.assertEqual((docker.containers, docker.networks), (theirs, their_networks))
+
+    def test_two_scratch_roots_never_share_a_label(self):
+        roots = (Path("/srv/bicino-routing-scratch"), Path("/srv/bicino-routing-scratch-2"), self.root)
+        labels = [set(run_stage.container_labels(root, stage)) for root in roots for stage in run_stage.SCRIPTS]
+        self.assertEqual(sum(map(len, labels)), len(set().union(*labels)))
+        self.assertEqual(run_stage.container_labels(roots[0], "build-graded"),
+                         ["bicino.stage=build-graded@/srv/bicino-routing-scratch",
+                          "bicino.work=/srv/bicino-routing-scratch/build/planet-graded"])
 
 
 class UnitFileTests(unittest.TestCase):
@@ -633,7 +692,7 @@ class ChainRehearsalTests(unittest.TestCase):
         # The wrapper looked for leftover containers before the stage; it was
         # killed before it could look again, so ExecStopPost did.
         looked = (self.root / "docker.txt").read_text().splitlines()
-        self.assertEqual(looked.count("ps -aq --filter label=bicino.stage=download"), 2)
+        self.assertEqual(looked.count(f"ps -aq --filter label=bicino.stage=download@{self.root}"), 2)
         self.stub("download.sh")
         self.assertEqual(self.start(), 0)
         self.assertEqual(self.result()["state"], "complete")
@@ -949,9 +1008,20 @@ class ScriptTests(unittest.TestCase):
             unread = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
             self.assertEqual(unread.returncode, 1)
             self.assertIn("cannot read the terrain sources", unread.stderr)
+            # Without an id every run would give its containers the same names.
+            (Path(directory) / "builder.env").write_text("BICINO_PLANET_DATE=261116\n")
+            (Path(directory) / "bin").mkdir()
+            (Path(directory) / "bin" / "bash").symlink_to(shutil.which("bash"))
+            no_cksum = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory, PATH=f"{directory}/bin")
+            self.assertEqual(no_cksum.returncode, 1, no_cksum.stderr)
+            self.assertIn("cksum gave no id", no_cksum.stderr)
 
-    def run_elevation_stage(self, directory, env):
-        """Run the real elevation stage with stand-ins for Docker and the GNU tools; returns it and Docker's calls."""
+    def run_stage_script(self, directory, env, stage, script, *arguments):
+        """Run a real stage script with stand-ins for Docker and the GNU tools; returns it and Docker's calls.
+
+        The stand-in Docker's host holds a container as a file of its name in
+        ROOT/docker-host, with the container's label in it.
+        """
         root = Path(directory)
         (root / "tools" / "repo" / "map-platform").mkdir(parents=True, exist_ok=True)
         routing = root / "tools" / "repo" / "map-platform" / "routing"
@@ -960,16 +1030,29 @@ class ScriptTests(unittest.TestCase):
         (root / "builder.env").write_text(env)
         tools = root / "bin"
         tools.mkdir(exist_ok=True)
+        (root / "docker-host").mkdir(exist_ok=True)
         calls = root / "docker.txt"
         calls.write_text("")
-        # The stand-in Docker writes the manifest of every tile set it is given a directory for.
+        # The stand-in Docker lists its containers by their whole label and removes those it is
+        # told to. It writes the manifest of every tile set it is given a directory for, and a
+        # gate summary that meets the targets.
         (tools / "docker").write_text(f'''#!/bin/bash
 echo "$*" >> "{calls}"
+if [ "$1 $2 $3" = "ps -aq --filter" ]; then
+  for file in "{root}/docker-host"/*; do
+    if [ -f "$file" ] && [ "label=$(cat "$file")" = "$4" ]; then basename "$file"; fi
+  done
+fi
+if [ "$1" = rm ]; then
+  shift
+  for name in "$@"; do rm -f "{root}/docker-host/$name"; done
+fi
 [ "$1" = run ] || exit 0
 while [ $# -gt 0 ]; do
   if [ "$1" = -v ]; then
     case "$2" in
       *:/terrain) echo '{{}}' > "${{2%%:*}}/terrain-manifest.json" ;;
+      */export/evidence/gate:/out) echo '{{"failures": {{}}}}' > "${{2%%:*}}/gate-summary.json" ;;
       *:/raw|*:/out|*:/opened) echo '{{}}' > "${{2%%:*}}/elevation-manifest.json" ;;
     esac
   fi
@@ -980,10 +1063,130 @@ done
             (tools / name).write_text('#!/bin/bash\necho "$0 $*"\n')
         for tool in tools.iterdir():
             tool.chmod(0o755)
-        ran = subprocess.run(["bash", str(BUILDER / "stages" / "elevation.sh")], capture_output=True, text=True,
+        ran = subprocess.run(["bash", str(BUILDER / "stages" / script), *arguments], capture_output=True, text=True,
                              env={"PATH": f"{tools}:{os.environ['PATH']}", "BICINO_SCRATCH": str(root),
-                                  "BICINO_STAGE": "elevation"})
-        return ran, [line for line in calls.read_text().splitlines() if line.startswith("run ")]
+                                  "BICINO_STAGE": stage})
+        return ran, calls.read_text()
+
+    def run_elevation_stage(self, directory, env):
+        """Run the real elevation stage; returns it and the containers the stand-in Docker was told to run."""
+        ran, calls = self.run_stage_script(directory, env, "elevation", "elevation.sh")
+        return ran, [line for line in calls.splitlines() if line.startswith("run ")]
+
+    def run_id(self, root):
+        return self.source_config('echo "$BICINO_RUN_ID"', BICINO_SCRATCH=str(root)).stdout.strip()
+
+    def test_the_run_id_is_the_checksum_of_the_scratch_path(self):
+        # The builder's own. cksum is POSIX, so a laptop gives the same.
+        self.assertEqual(self.source_config('echo "$BICINO_RUN_ID"').stdout.strip(), "667907303")
+        self.assertEqual(self.run_id("/srv/bicino-routing-scratch/"), "667907303")
+        others = [self.run_id(root) for root in ("/srv/bicino-routing-scratch-2", "/srv/scratch/a", "/srv/scratch/b",
+                                                 "/srv/scratch/a b")]
+        self.assertEqual(len({"667907303", *others}), 5)
+        for run_id in others:
+            # Fit for the end of a container's name, a network's and a host name.
+            self.assertRegex(run_id, r"^[0-9]{1,10}$")
+
+    def test_every_container_and_network_of_a_stage_names_its_scratch_root(self):
+        label = '--label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH"'
+        labelled, naming = 0, set()
+        for script in [BUILDER / "config.sh", *sorted((BUILDER / "stages").glob("*.sh"))]:
+            text = script.read_text()
+            # A command with the lines it continues on.
+            for command in text.replace("\\\n", " ").splitlines():
+                if re.search(r"\bdocker (run|network create)\b", command) and not command.lstrip().startswith("#"):
+                    self.assertIn(label, command, f"{script.name}: {command.strip()[:70]}")
+                    labelled += 1
+            if "--name " in text or "docker network create" in text:
+                naming.add(script.name)
+        # Eight containers and the two networks of the gate and the profile probe.
+        self.assertEqual(labelled, 10)
+        # test_two_scratch_roots_share_no_container_name_network_or_label runs each of these.
+        self.assertEqual(naming, {script for _, script, *_ in self.NAMING_STAGES})
+
+    NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"))
+
+    def built_scratch(self, directory):
+        """A scratch root that holds what the gate asks of the two graph builds."""
+        root = Path(directory).resolve()
+        for label in ("ungraded", "graded"):
+            (root / "build" / f"planet-{label}").mkdir(parents=True)
+            (root / "build" / f"planet-{label}" / "manifest.json").write_text('{"builder": {}}')
+        return root
+
+    def test_two_scratch_roots_share_no_container_name_network_or_label(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            for directory in (first, second):
+                root = self.built_scratch(directory)
+                run_id = self.run_id(root)
+                calls = ""
+                for stage, script, *arguments in self.NAMING_STAGES:
+                    ran, called = self.run_stage_script(root, GRADED_ENV, stage, script, *arguments)
+                    calls += called
+                    if script == "qualify.sh":
+                        # The planet's checks, the profile probe last. The stand-in probes
+                        # reported nothing, so qualification.py then fails the stage.
+                        self.assertIn("== profiles exit=0", ran.stdout, ran.stdout + ran.stderr)
+                    else:
+                        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+                lines = calls.splitlines()
+                names = docker_values(calls, "--name")
+                self.assertEqual(names, {f"bicino-elevation-{run_id}", f"bicino-profiles-graded-{run_id}",
+                                         f"bicino-gate-ungraded-{run_id}", f"bicino-gate-graded-{run_id}"})
+                networks = docker_values(calls, "--network") - {"none"}
+                self.assertEqual(networks, {f"bicino-profiles-graded-{run_id}", f"bicino-gate-{run_id}"})
+                # Nothing is created or removed by a name that is not the run's own.
+                self.assertEqual({line.split()[-1] for line in lines if line.startswith("network ")}, networks)
+                removed = {name for line in lines if line.startswith("rm -f ") for name in line.split()[2:]}
+                self.assertEqual(removed, {f"bicino-elevation-{run_id}", f"bicino-profiles-graded-{run_id}"})
+                # Every container says which stage of which scratch root it is, and only such are looked for.
+                labels = docker_values(calls, "--label")
+                self.assertEqual(labels, {f"bicino.stage={stage}@{root}" for stage, *_ in self.NAMING_STAGES})
+                self.assertEqual(calls.split().count("--label"),
+                                 sum(line.startswith(("run ", "network create ")) for line in lines))
+                filters = docker_values(calls, "--filter")
+                self.assertEqual(filters, {f"label=bicino.stage=gate@{root}"})
+                # On its run's own network a service answers to the same name in every run.
+                self.assertEqual(docker_values(calls, "--network-alias"),
+                                 {"bicino-gate-ungraded", "bicino-gate-graded", "bicino-profiles-graded"})
+                self.assertIn("--ungraded http://bicino-gate-ungraded:8002 --graded opened-400=http://bicino-gate-graded:8002",
+                              calls)
+                self.assertIn("/mp/routing/probe_profiles.py --origin http://bicino-profiles-graded:8002", calls)
+                seen.append(names | networks | labels | filters)
+        self.assertEqual(seen[0] & seen[1], set())
+
+    def test_the_gate_removes_no_container_but_its_own(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.built_scratch(directory)
+            # Services a killed gate of this run left, another run's on the same Docker host, in
+            # a directory whose path begins with this run's, and one that a checkout from before
+            # the label named the scratch root started.
+            (root / "docker-host").mkdir()
+            for name, label in (("mine-1", f"gate@{root}"), ("mine-2", f"gate@{root}"), ("theirs", f"gate@{root}-2"),
+                                ("unnamed", "gate"), ("my-elevation", f"elevation@{root}")):
+                (root / "docker-host" / name).write_text(f"bicino.stage={label}")
+            ran, calls = self.run_stage_script(root, GRADED_ENV, "gate", "gate.sh")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("rm -f mine-1 mine-2\n", calls)
+            self.assertEqual(sorted(path.name for path in (root / "docker-host").iterdir()),
+                             ["my-elevation", "theirs", "unnamed"])
+
+    def test_the_elevation_stage_removes_no_container_but_its_own(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            mine, theirs = self.run_id(root), self.run_id(f"{root}-2")
+            # What a killed attempt of this run left, another run's container on the same
+            # Docker host, and one that a checkout from before the names had an id started.
+            (root / "docker-host").mkdir()
+            for name in (f"bicino-elevation-{mine}", f"bicino-elevation-{theirs}", "bicino-elevation"):
+                (root / "docker-host" / name).touch()
+            ran, runs = self.run_elevation_stage(root, GRADED_ENV)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertEqual(sorted(path.name for path in (root / "docker-host").iterdir()),
+                             sorted(["bicino-elevation", f"bicino-elevation-{theirs}"]))
+            self.assertIn(f" --name bicino-elevation-{mine} ", runs[0])
+            self.assertIn(f" --label bicino.stage=elevation@{root} ", runs[0])
 
     def test_the_elevation_stage_builds_the_hybrid_only_for_a_terrain_source(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -30,7 +30,7 @@ while read -r target sha256 url; do
 done < "$BICINO_AUDIT/downloads.txt"
 
 docker run --rm --init --platform "$BICINO_PLATFORM" --network none -u "$(id -u):$(id -g)" \
-  --label "bicino.stage=$BICINO_STAGE" \
+  --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \
   -v "$BICINO_ROUTING:/routing:ro" -v "$BICINO_AUDIT:/audit:ro" \
   --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" \
   /routing/coverage_audit.py generate --all-units --boundaries /audit/boundaries \

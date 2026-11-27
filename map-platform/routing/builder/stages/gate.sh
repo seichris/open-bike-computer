@@ -10,7 +10,7 @@ set -euo pipefail
 bicino_validate_run
 bicino_is_graded || bicino_fail "the gate needs a graded build"
 
-network=bicino-gate
+network=bicino-gate-$BICINO_RUN_ID
 source_name=$(bicino_graded_name)
 out=$BICINO_EVIDENCE/gate
 valhalla_image=$(bicino_valhalla_image)
@@ -29,23 +29,26 @@ mkdir -p "$out"
 rm -f "$out/gate-report.json" "$out/gate-summary.json" "$out/gate-summary.md"
 
 cleanup() {
-  bicino_remove_containers "bicino.stage=$BICINO_STAGE" || true
+  bicino_remove_containers "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup
-docker network create --internal "$network" >/dev/null
+docker network create --internal --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" "$network" >/dev/null
 
 # serve NAME ARCHIVE [ELEVATION]: a graded graph's tiles are mounted for /height.
+# The service answers to NAME on the gate's network. Its container's name is
+# the host's, and ends in the run's id.
 serve() {
   local name=$1 archive=$2 elevation=${3:-} options=() flags=""
   if [ -n "$elevation" ]; then
     options=(-v "$elevation:/elevation:ro")
     flags="--additional-data-elevation /elevation"
   fi
-  docker run -d --init --name "$name" --network "$network" --platform "$BICINO_PLATFORM" --cpus 4 --memory 8g \
-    --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE" \
-    -v "$archive:/graph/valhalla_tiles.tar:ro" "${options[@]}" --entrypoint /bin/bash "$valhalla_image" -ec "
+  docker run -d --init --name "$name-$BICINO_RUN_ID" --network "$network" --network-alias "$name" \
+    --platform "$BICINO_PLATFORM" --cpus 4 --memory 8g \
+    --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \
+    -v "$archive:/graph/valhalla_tiles.tar:ro" ${options[@]+"${options[@]}"} --entrypoint /bin/bash "$valhalla_image" -ec "
       valhalla_build_config --mjolnir-tile-extract /graph/valhalla_tiles.tar $flags > /tmp/valhalla.json
       exec valhalla_service /tmp/valhalla.json 4" >/dev/null
 }
@@ -60,7 +63,7 @@ fi
 # in_gate COMMAND...: the map-platform image on the gate's network; -i passes a script on stdin.
 in_gate() {
   docker run --rm --init -i --network "$network" --platform "$BICINO_PLATFORM" -u "$(id -u):$(id -g)" \
-    --label "bicino.stage=$BICINO_STAGE" -v "$BICINO_REPO/map-platform:/mp:ro" -v "$out:/out" \
+    --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" -v "$BICINO_REPO/map-platform:/mp:ro" -v "$out:/out" \
     --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" "$@"
 }
 
@@ -85,7 +88,7 @@ if any(height is not None for height in heights["bicino-gate-ungraded"]):
 PY
 
 echo "run start=$(bicino_now)"
-in_gate /mp/routing/compare_elevation.py run "${cities[@]}" \
+in_gate /mp/routing/compare_elevation.py run ${cities[@]+"${cities[@]}"} \
   --ungraded http://bicino-gate-ungraded:8002 --graded "$source_name=http://bicino-gate-graded:8002" \
   --out /out/gate-report.json
 echo "run end=$(bicino_now)"

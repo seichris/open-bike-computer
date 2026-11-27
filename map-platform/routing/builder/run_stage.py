@@ -24,10 +24,13 @@ hand-started units of a planet build, and every script ran again from its
 first line beside its own half-finished work. To run a finished stage again,
 delete its marker first.
 
-Containers a stage starts carry the label `bicino.stage=STAGE`, and a graph
-build's the label `bicino.work=DIRECTORY`. They are not in the unit's control
-group, so systemd cannot stop them; the wrapper removes them before and after
-the stage and when systemd had to end it.
+Containers a stage starts carry the label `bicino.stage=STAGE@SCRATCH`, and a
+graph build's the label `bicino.work=DIRECTORY`. They are not in the unit's
+control group, so systemd cannot stop them; the wrapper removes them before
+and after the stage and when systemd had to end it, and after them the
+networks the stage created, which carry the stage's label too. Both labels
+name the scratch directory, so the wrapper never finds the containers or the
+networks of another run on the same Docker host.
 """
 
 from __future__ import annotations
@@ -72,29 +75,36 @@ def skip_reason(stage, env):
 
 
 def container_labels(root, stage):
-    """The labels of the containers a stage starts.
+    """The labels of the containers a stage of this scratch root starts.
 
-    build_graph.py labels its Valhalla build with the work directory instead:
-    it knows nothing of stages.
+    The stage scripts write the first, on their networks too. build_graph.py
+    labels its Valhalla build with the work directory instead: it knows
+    nothing of stages.
     """
-    labels = [f"bicino.stage={stage}"]
+    labels = [f"bicino.stage={stage}@{root}"]
     if stage.startswith("build-"):
         labels.append(f"bicino.work={root / 'build' / ('planet-' + stage[len('build-'):])}")
     return labels
 
 
-def remove_containers(root, stage, log):
-    """Remove the stage's containers; a dead wrapper's would block the next attempt."""
+def remove_leftovers(root, stage, log):
+    """Remove the stage's containers, then its networks.
+
+    A dead wrapper's containers would block the next attempt. A network left
+    by a stage that is never run again would stay on the Docker host for good.
+    """
     if shutil.which("docker") is None:
         return
-    containers = []
-    for label in container_labels(root, stage):
-        found = subprocess.run(["docker", "ps", "-aq", "--filter", f"label={label}"], capture_output=True, text=True)
-        containers += found.stdout.split()
-    if containers:
-        log.write(f"removing containers of {stage}: {' '.join(containers)}\n")
-        log.flush()
-        subprocess.run(["docker", "rm", "-f", *containers], stdout=log, stderr=log)
+    labels = container_labels(root, stage)
+    for what, listing, removal in (("containers", ["docker", "ps", "-aq"], ["docker", "rm", "-f"]),
+                                   ("networks", ["docker", "network", "ls", "-q"], ["docker", "network", "rm"])):
+        found = []
+        for label in labels:
+            found += subprocess.run([*listing, "--filter", f"label={label}"], capture_output=True, text=True).stdout.split()
+        if found:
+            log.write(f"removing {what} of {stage}: {' '.join(found)}\n")
+            log.flush()
+            subprocess.run([*removal, *found], stdout=log, stderr=log)
 
 
 def take_lock(path, wait=LOCK_WAIT_SECONDS):
@@ -152,7 +162,7 @@ def run(root, stage, stages_dir=None):
         script, *arguments = SCRIPTS[stage]
         stages_dir = stages_dir or Path(__file__).resolve().parent / "stages"
         with (export / "logs" / f"{stage}.log").open("a") as log:
-            remove_containers(root, stage, log)
+            remove_leftovers(root, stage, log)
             started = chain_state.mark(root, stage, "running")
             chain_state.write_result(root)
             log.write(f"== {stage} attempt {started['attempt']} start={started['startedAt']}\n")
@@ -181,7 +191,7 @@ def run(root, stage, stages_dir=None):
                 for number, handler in previous.items():
                     signal.signal(number, handler)
             status = 128 - status if status < 0 else status
-            remove_containers(root, stage, log)
+            remove_leftovers(root, stage, log)
             log.write(f"== {stage} end={chain_state.now_text()} exit={status}\n")
         if status == 0:
             chain_state.mark(root, stage, "done", exit_status=0)
@@ -203,7 +213,7 @@ def finalize(root, stage, environ=os.environ):
     export = root / "export"
     (export / "logs").mkdir(parents=True, exist_ok=True)
     with (export / "logs" / f"{stage}.log").open("a") as log:
-        remove_containers(root, stage, log)
+        remove_leftovers(root, stage, log)
         entry = next(entry for entry in chain_state.stage_states(root) if entry["stage"] == stage)
         if entry["state"] != "interrupted":
             return 0

@@ -100,6 +100,17 @@ A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
 rule itself, so it also holds when a unit is started by hand.
 
+A stage's containers are not in its unit's control group. `run_stage.py`
+removes them before and after the stage, and when systemd had to end it,
+and then the networks the stage created. It finds them by their label,
+`bicino.stage=STAGE@SCRATCH` with the scratch directory's path, or
+`bicino.work=DIRECTORY` for a graph build. So it finds only what belongs to
+its own scratch directory, whatever else runs on the same Docker host. A
+container or a network that a stage names ends in the
+run's id, the number `printf %s SCRATCH | cksum` prints first. On the builder
+`docker ps` shows `bicino-elevation-667907303`,
+`bicino-gate-graded-667907303` and `bicino-profiles-graded-667907303`.
+
 Each stage's state is in `export/chain/STAGE.json`:
 
 ```json
@@ -321,6 +332,7 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 | 2026-11-25: `build_elevation.py` stopped when the third round of one run lost a worker to the 15-minute cell deadline, and waited for someone to run it again. | The elevation stage runs it up to four times. |
 | 2026-11-25: Docker took `build/planet-no-elevation/valhalla_tiles.tar` for a volume name and refused it. | Every path comes from `config.sh`, which rejects a relative scratch path. A test checks every mount. |
 | The hand-written qualification and gate scripts waited up to 180 seconds for Valhalla and then went on whether it answered or not. This never fired. | The wait fails the stage when Valhalla does not answer. |
+| 2026-11-27: two rehearsals shared a laptop's Docker. Every run named its elevation container `bicino-elevation` and labelled it `bicino.stage=elevation`, so the elevation stage of one removed the other's container. | A stage's label holds its scratch directory and its names end in the run's id (see [The chain](#the-chain)). Two rehearsals now [run at the same time](#rehearse-on-a-city-sample). |
 | Every run: the gate ran last, by hand, after about 7.5 hours. | The gate is a stage. On city samples it can run before a planet is built (see [Rehearse](#rehearse-on-a-city-sample)). |
 | Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | The raw and the 400 m tiles of 2026-11-26 are kept in a bucket, and `--elevation-cache` [restores them](#kept-elevation-tiles), checked tile by tile. No builder has done so yet. |
 
@@ -413,9 +425,28 @@ cross-border probes and the profile probe. Its result file says
 
 - An extract already at `ROOT/input/` with the published size is not
   downloaded again.
-- Run one rehearsal at a time on a Docker host. The containers' names and
-  stage labels do not carry the scratch directory, so a second run would
-  remove the first one's containers.
+- Several rehearsals can run at the same time on one Docker host, each with
+  its own `--root`. A run removes only containers labelled with its own
+  scratch directory, and its names end in its own id. On 2026-11-27 two
+  Berlin runs at 200 m, started together, took 6 minutes each and ended as
+  a run alone did that day: `complete`, with its two elevation manifests
+  and its gate report byte for byte. In a second pair one run's elevation
+  stage was killed after 30 seconds. Its `--finalize` removed its own
+  container, the other run's stage finished in its first attempt, and both
+  chains ended with that same gate report. Two gate stages started together
+  held four services at once, and each removed its own two. The graph
+  archives are no measure of this: Valhalla 3.9.2 gives a node tagged both
+  `barrier=gate` and `amenity=parking` either type from one build to the
+  next, in a build alone too.
+- A rehearsal that is killed as a whole, not one stage of it, leaves the
+  containers its running stage had started, and a gate's network: nothing
+  ran the stage's `--finalize`. No other run removes them. Start it again
+  with the same `--root`, spelled the same way, or remove them by the
+  stage's label:
+  `docker rm -f $(docker ps -aq --filter label=bicino.stage=gate@/absolute/scratch)`,
+  then the same with `docker network rm` and `docker network ls -q`.
+- A checkout from before 2026-11-27 still removes every container labelled
+  `bicino.stage=STAGE`. Its rehearsals disturb each other, and no newer one.
 - Without `--map-platform-image` the pinned image is pulled, about 2 GB.
 
 ## Not verified on a real builder
@@ -441,6 +472,10 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
 - **`sampler.sh` and `inputs`, the qualification stage's cross-border, audit
   and profile checks at planet size**, and all planet-scale times, disk and
   memory. The sampler is not part of the rehearsal.
+- **The stages' containers under the builder's own path.** Their names and
+  labels ran on a laptop under other scratch paths. The profile probe's
+  service and network ran there only by hand, on 2026-11-27, against two
+  Berlin sample graphs at once. A test pins the builder's id, `667907303`.
 - **The hybrid at planet size.** 955 downloads from the USGS bucket and the
   speed a builder gets from it, the blend of 26,475 cells, and a graph
   build with `--all-bridges`. The rehearsal ran them for one cell and two
