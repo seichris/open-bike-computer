@@ -44,8 +44,8 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    [kept elevation tiles](builder/README.md#kept-elevation-tiles), add
    `--cache-reader bicino-routing-builder@chiho-prod.iam.gserviceaccount.com`:
    the builder then runs as that account, which can read the tile bucket
-   and nothing else. The account must exist first
-   (`builder/cache-access.sh`); on 2026-11-27 it did not.
+   and nothing else. The account exists since 2026-11-27;
+   `builder/cache-access.sh --show` prints who may read the bucket.
 4. Read the builder's Ed25519 host key through the authenticated Compute
    Engine serial console, before the first connection:
 
