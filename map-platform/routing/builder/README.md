@@ -35,8 +35,8 @@ Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
 - `builder.env`: the run's settings, read by systemd and by the scripts.
 - `tools/repo/`: the tools, checked out at the run's commit.
 - `input/`, `elevation-raw/`, `elevation/`, `audit/`, `build/planet-ungraded/`, `build/planet-graded/`: the work.
-  `elevation/` holds the tiles the graded graph is built with. With a
-  terrain source these are the hybrid, and `elevation-opened/` and
+  `elevation/` holds the tiles the graded graph is built with. With
+  terrain sources these are the hybrid, and `elevation-opened/` and
   `elevation-terrain/` hold the opened Copernicus tiles and the terrain
   tiles it is made of.
 - `export/`: everything the VPS may read. `result.json`, `chain/` (markers), `logs/` (one log per stage and the sampler's series), `evidence/` (probe reports, the gate report, manifests), and `ungraded/` and `graded/` (each archive's manifest and a hard link to the archive).
@@ -55,7 +55,7 @@ download ┼─────────────┴─ build-graded ─┼─
 | `images` | Pull the pinned Valhalla and map-platform images. | 1 min |
 | `download` | Download the planet, check its published MD5, record its SHA-256. | 35 min |
 | `inputs` | Download the pinned Natural Earth layers and write the audit's inventory. | 1 min |
-| `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also download the terrain source's tiles and write the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. With `--elevation-cache`, [kept tiles are restored first](#kept-elevation-tiles) and only the rest is built. | 2 h 20 min without a terrain source and without kept tiles |
+| `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also read the terrain sources, write their tiles and the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. With `--elevation-cache`, [kept tiles are restored first](#kept-elevation-tiles) and only the rest is built. | 2 h 20 min without a terrain source and without kept tiles |
 | `build-ungraded` | `build_graph.py --coverage planet`, with `--all-bridges` when the run has a terrain source. | 3 h 25 min alone, 4 h 50 min beside the graded build |
 | `build-graded` | The same with `--elevation`. | 4 h 50 min |
 | `qualify-ungraded`, `qualify-graded` | Smoke probes, cross-border probes, the territory audit and the profile probe, with no network. | under 1 min each |
@@ -67,26 +67,33 @@ takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded` and `gate` are skipped, and it takes about 4 hours.
 
-`--terrain usgs-3dep-13` grades with the hybrid: the terrain source of
-[elevation-sources.json](../elevation-sources.json) where it has data, the
-opened Copernicus tiles elsewhere (see
-[Build and release](../README.md#build-and-release)). The run then differs
-in three ways:
+`--terrain usgs-3dep-13,nrcan-mrdem-30` grades with the hybrid: the terrain
+sources of [elevation-sources.json](../elevation-sources.json) where they
+have data, the opened Copernicus tiles elsewhere (see
+[Build and release](../README.md#build-and-release)). A build uses every
+source of that list, so `--terrain` names them all, in the list's order;
+the elevation stage stops when it names others, fewer or another order. The
+run then differs in three ways:
 
 - **The elevation stage does more.** It first checks that the source list
-  holds that source, approved, with the area and the catalog it pins. Then
-  it downloads the catalog's 955 tiles, 364 GB, cuts them to the area and
-  blends 26,475 cells. No builder has run this yet, so its time is not
-  known. A terrain worker holds a whole tile: in the Chicago rehearsal the
-  container with three workers peaked at 3.8 GiB, about 1.3 GiB a worker,
-  which is 26 GiB for 20 jobs. The stage keeps three more things on
-  scratch: the opened tiles (84 GB at 400 m), the terrain tiles and up to
-  0.5 GB per job of downloads in flight. The 2026-11-25 run peaked at
-  1,225 GB of the 1,500 GiB.
+  holds those sources, each approved, with the area and the catalog it
+  pins. Then it writes 3,197 terrain tiles: it downloads 3DEP's 954 tiles
+  that have a Copernicus cell, 364 GB, reads the part of the MRDEM-30
+  object under each of 2,338 cells, about 60 MB of pixels a cell, cuts
+  both to their areas, and blends 26,475 cells. No builder has run this
+  yet, so its time is not known. MRDEM-30 is read from one object in
+  `ca-central-1`; a build stops when its size or ETag is no longer the
+  pinned one. A terrain worker holds a whole 3DEP tile: in the Chicago
+  rehearsal the container with three workers peaked at 3.8 GiB, about
+  1.3 GiB a worker, which is 26 GiB for 20 jobs. The stage keeps three more
+  things on scratch: the opened tiles (84 GB at 400 m), the terrain tiles
+  and up to 0.5 GB per job of downloads in flight. The 2026-11-25 run
+  peaked at 1,225 GB of the 1,500 GiB.
 - **Both graphs are built with `--all-bridges`**, the ungraded one too, so
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
-- **The gate's source is named** `usgs-3dep-13-over-opened-400`.
+- **The gate's source is named**
+  `usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -283,12 +290,14 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 - **Another tools commit only**, for example after a fix to one stage:
   finished stages are kept. Each stage's marker and the result name the
   commit that stage ran with, and the status notes that they differ.
-- **Another opening radius, terrain source, planet snapshot, image or
-  sample**: every finished stage that depends on the changed setting is
-  `stale`. A new radius leaves the download and the ungraded build done and
-  makes the elevation stage, the graded build and what follows stale. Adding
-  or dropping a terrain source makes the ungraded build stale too, because
-  it changes that graph's tagging rules. After a terrain source is dropped,
+- **Another opening radius, other terrain sources, another planet snapshot,
+  image or sample**: every finished stage that depends on the changed
+  setting is `stale`. A new radius leaves the download and the ungraded
+  build done and makes the elevation stage, the graded build and what
+  follows stale. Another `--terrain` makes the ungraded build stale too,
+  also when both runs have terrain sources and the tagging rules stay the
+  same: the chain compares settings, not their effect. After the terrain
+  sources are dropped,
   `elevation-opened/` and `elevation-terrain/` stay on scratch; the result
   and the evidence follow the run's setting and leave them out. A new map-platform image
   does the same, and makes the audit inventory and the probes stale too. A stale stage does not
@@ -351,22 +360,31 @@ the gate `not-run`. A first Chicago run failed in both graph builds for want
 of a state boundary: the chain ended `failed`, with the two qualification
 stages and the gate `blocked`.
 
-With `--terrain usgs-3dep-13` the rehearsal grades with the hybrid:
+With `--terrain` the rehearsal grades with the hybrid:
 
 ```sh
-map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Chicago --radius 400 --terrain usgs-3dep-13
+map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Toronto --radius 400 \
+  --terrain usgs-3dep-13,nrcan-mrdem-30
 ```
 
-On 2026-11-26 that run took 16 minutes on a laptop, 12 of them in the
-elevation stage: 25 raw cells, 9 opened cells, 9 terrain tiles (3.1 GB of
-downloads) and the hybrid of the city's one cell. Both graphs were built
-with `--all-bridges`, the gate found the same tagging rules in both
-manifests, and its report names the source
-`usgs-3dep-13-over-opened-400`: 4 routes, none longer, targets met, where
-the opened tiles alone make one leg 9.5% longer. The result lists four
-tile sets (`raw`, `opened`, `terrain`, `hybrid`), and their manifests are
-in `export/evidence/`. That run was made before the tiles were cut to the
-United States; Chicago's nine cells lie wholly inside it.
+On 2026-11-26 Chicago ran with 3DEP alone, the one source of the list
+then, in 16 minutes on a laptop, 12 of them in the elevation stage: 25 raw
+cells, 9 opened cells, 9 terrain tiles (3.1 GB of downloads) and the hybrid
+of the city's one cell. Both graphs were built with `--all-bridges`, the
+gate found the same tagging rules in both manifests, and its report names
+the source `usgs-3dep-13-over-opened-400`: 4 routes, none longer, targets
+met, where the opened tiles alone make one leg 9.5% longer. The result
+lists four tile sets (`raw`, `opened`, `terrain`, `hybrid`), and their
+manifests are in `export/evidence/`. That run was made before the tiles
+were cut to the United States; Chicago's nine cells lie wholly inside it.
+
+On 2026-11-27 Toronto, Calgary, Montreal and Vancouver ran with both
+sources (see
+[Canadian cities through the chain](../refresh-runbook.md#canadian-cities-through-the-chain)).
+Calgary took 9 minutes, Vancouver 12 and Montreal 16. Of Toronto's nine
+terrain tiles five read a 3DEP tile and MRDEM-30 and four MRDEM-30 alone,
+1.7 GB in all. The gate's source was
+`usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
 
 `--pack-cache DIR` packs a run's raw and opened tiles as the bucket holds
 them, with a record. `--elevation-cache DIR` then rehearses a build that

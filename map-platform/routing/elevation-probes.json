@@ -204,6 +204,41 @@
     ]
   },
   {
+    "city": "Calgary",
+    "terrain": "flat",
+    "bbox": [-114.11, 51.03, -114.03, 51.07],
+    "extract": "north-america/canada/alberta",
+    "adminRelations": [1428125],
+    "legs": [
+      {"name": "Eau Claire to the Calgary Tower", "origin": [51.053, -114.069], "destination": [51.0443, -114.0631]},
+      {"name": "City Hall to 8th Street SW", "origin": [51.046, -114.0577], "destination": [51.0467, -114.081]}
+    ]
+  },
+  {
+    "city": "Vancouver",
+    "terrain": "flat",
+    "reportOnly": true,
+    "bbox": [-123.17, 49.26, -123.09, 49.3],
+    "extract": "north-america/canada/british-columbia",
+    "adminRelations": [1428125],
+    "legs": [
+      {"name": "Waterfront Station to Yaletown", "origin": [49.2858, -123.1116], "destination": [49.2745, -123.1219]},
+      {"name": "Coal Harbour to English Bay", "origin": [49.2905, -123.126], "destination": [49.2866, -123.143]}
+    ]
+  },
+  {
+    "city": "Montreal",
+    "terrain": "hilly",
+    "reportOnly": true,
+    "bbox": [-73.6, 45.48, -73.53, 45.53],
+    "extract": "north-america/canada/quebec",
+    "adminRelations": [1428125],
+    "legs": [
+      {"name": "Gare Centrale to Place des Arts", "origin": [45.4999, -73.5665], "destination": [45.5081, -73.5669]},
+      {"name": "Old Port to McGill University", "origin": [45.5045, -73.554], "destination": [45.5048, -73.5772]}
+    ]
+  },
+  {
     "city": "Singapore",
     "terrain": "flat",
     "bbox": [103.80, 1.26, 103.90, 1.32],

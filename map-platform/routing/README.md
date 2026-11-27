@@ -97,10 +97,14 @@ production now.
    A planet opened at 400 m still lengthened one leg each in New York and
    Chicago. On city samples USGS 3DEP, a lidar terrain model of the United
    States, kept both. Chris approved 3DEP as an elevation source for routing
-   on 2026-11-26, and `build_elevation.py --terrain-sources` writes the
-   hybrid of 3DEP and opened Copernicus. No planet has been built with it
-   yet (see
-   [USGS 3DEP](refresh-runbook.md#usgs-3dep-for-the-united-states-on-city-samples)).
+   on 2026-11-26. That hybrid would still lengthen a leg in downtown
+   Toronto, where the opening spreads pits of the Copernicus surface, so on
+   2026-11-27 Chris also approved MRDEM-30, Natural Resources Canada's
+   terrain model, for Canada. `build_elevation.py --terrain-sources` writes
+   the hybrid of both and opened Copernicus. No planet has been built with
+   it yet (see
+   [USGS 3DEP](refresh-runbook.md#usgs-3dep-for-the-united-states-on-city-samples)
+   and [MRDEM-30](refresh-runbook.md#mrdem-30-for-canada)).
    Compare a graded planet with an ungraded one before releasing it (see
    [Compare elevation sources](#compare-elevation-sources-on-city-samples)).
 
@@ -166,26 +170,44 @@ production now.
    tiles took 104 GB, 65% of the raw tiles' 160 GB, so `--out` needs at
    most another 160 GB beside `--raw`.
 
-   `--terrain-sources` puts a terrain model over the opened tiles.
+   `--terrain-sources` puts terrain models over the opened tiles.
    [elevation-sources.json](elevation-sources.json) lists the terrain
    sources approved for routing. It is kept apart from the topography source
    policy, which accepts only Copernicus and is an input of the map-platform
-   image and of the offline-map worker's identity. It holds one source, the
-   USGS 3DEP 1/3 arc-second tiles of the conterminous United States, and
-   pins two files:
+   image and of the offline-map worker's identity. A build uses every source
+   of the list, each inside its own area. It holds two:
 
-   - **The area**: OpenStreetMap's boundary of the United States with its
+   - **USGS 3DEP**, the 1/3 arc-second lidar tiles of the conterminous
+     United States, approved on 2026-11-26.
+   - **MRDEM-30**, Natural Resources Canada's 30 m terrain model of Canada,
+     approved on 2026-11-27. It is one 84 GB raster on a Lambert grid, made
+     for reading in parts. It is lidar where Canada has lidar, which
+     includes the centre of every larger city, and elsewhere Copernicus
+     GLO-30 with forests and settlements taken out by NRCan.
+
+   Each source pins two files:
+
+   - **The area**: OpenStreetMap's boundary of the country with its
      territorial sea, as a gzipped GeoJSON polygon. The newest 3DEP tiles
      hold no data beyond the border, but older ones carry fill for Mexico
-     and Canada from other sources, which nobody tested or approved. Every
-     post outside the area is dropped.
-   - **[A catalog](usgs-3dep-13-tiles-20261126.txt)** of 955 dated tiles
-     (364 GB), one for every cell that touches the area, with the tile's
-     date, size and S3 ETag.
+     and Canada from other sources, and MRDEM-30 reaches into the United
+     States along shared watersheds. Nobody tested or approved either there,
+     so every post outside a source's area is dropped. The two countries'
+     relations share the border's ways. Their areas overlap only in the sea
+     around Machias Seal Island, which both claim; the source listed first
+     gives the posts it has there.
+   - **A catalog** of the cells that touch the area. For 3DEP it names
+     [955 dated tiles](usgs-3dep-13-tiles-20261126.txt) (364 GB), each with
+     its date, size and S3 ETag. MRDEM-30 has no dated copies, so
+     [its catalog](nrcan-mrdem-30-cells-20261127.txt) names 2,480 cells and
+     the source list pins the size and ETag of the one object.
 
-   [terrain_catalog.py](terrain_catalog.py) writes both, the area from an
-   `osmium export` of the relation and the catalog from the USGS bucket.
-   Record their sizes and SHA-256 and the tile count in the source list.
+   [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
+   an `osmium export` of the relation, 3DEP's catalog from the USGS bucket
+   and MRDEM-30's from its area. Record their sizes and SHA-256, the tile
+   count and MRDEM-30's size, ETag and date in the source list. When NRCan
+   replaces the object, a build stops until the new size and ETag are
+   pinned; an earlier version cannot be read again.
 
    ```sh
    docker run --rm -u "$(id -u):$(id -g)" -v "$routing_tools:/routing:ro" \
@@ -202,32 +224,47 @@ production now.
    - **Raw** Copernicus tiles in `--raw`, as before.
    - **Opened** tiles in `--opened`, where `--out` would hold them without
      a terrain source.
-   - **Terrain** tiles in `--terrain`. Each catalog tile is downloaded over
-     eight parallel ranges, and the cell stops if its size or ETag is not
-     the catalog's, because the USGS has then replaced the tile. The tile
-     must be laid out as its cell's 3DEP tile is: float32, NAD 83, three
-     pixels per post, six pixels of overlap. Its SHA-256 goes into the
-     receipt and its posts inside the area into an HGT tile. A tile is cut
-     again when the area changes.
-   - **Hybrid** tiles in `--out`. A post is 3DEP's where 3DEP has data and
-     opened Copernicus's elsewhere.
+   - **Terrain** tiles in `--terrain`, one per cell that a source has a
+     tile for; the 95 cells on the border of the two countries read both.
+     - A 3DEP tile is downloaded over eight parallel ranges, and the cell
+       stops if its size or ETag is not the catalog's, because the USGS has
+       then replaced the tile. The tile must be laid out as its cell's 3DEP
+       tile is: float32, NAD 83, three pixels per post, six pixels of
+       overlap.
+     - MRDEM-30 is read in ranges: the pixels under the cell's posts, about
+       60 MB of them. The object's size and ETag must be the pinned ones
+       before and after the read. The raster must be laid out as MRDEM-30
+       is: float32, Canada Atlas Lambert, 30 m pixels.
 
-   Cut to its area, 3DEP ends at the border of the United States and at sea,
-   and the opened surface lies under the ground (a metre or two on flat land, far more on
-   ridges), so the two would meet in a step. The hybrid therefore lifts the
-   Copernicus side. A post within 16 posts of 3DEP's data takes the
-   difference between the two surfaces at 3DEP's edge, carried outward as
-   the mean of the posts a step nearer, with a weight that falls linearly to
-   nothing beyond the sixteenth post (about 500 m north to south). 3DEP's
-   own posts are never changed, so a waterfront beside towers keeps its
-   lidar heights. Each cell is blended from its own tiles and a margin of 16
-   posts of its neighbours', which gives every post the value a blend of the
-   whole planet would. A cell with no 3DEP tile of its own or beside it is
-   its opened tile unchanged.
+     Each source's posts are cut to its area and put into one HGT tile. The
+     receipt names, for each source, what it read, its SHA-256 (the tile's,
+     or that of the pixels read) and the posts it gave. A tile is built
+     again when a source's area, tile or object changes.
+   - **Hybrid** tiles in `--out`. A post is the terrain tile's where it has
+     data and opened Copernicus's elsewhere.
+
+   The terrain ends at the outer borders of the two countries and at sea,
+   and the opened surface lies under the ground (a metre or two on flat
+   land, far more on ridges), so the two would meet in a step. The hybrid
+   therefore lifts the Copernicus side. A post within 16 posts of the
+   terrain's data takes the difference between the two surfaces at the
+   terrain's edge, carried outward as the mean of the posts a step nearer,
+   with a weight that falls linearly to nothing beyond the sixteenth post
+   (about 500 m north to south). The terrain's own posts are never changed,
+   so a waterfront beside towers keeps its lidar heights. Each cell is
+   blended from its own tiles and a margin of 16 posts of its neighbours',
+   which gives every post the value a blend of the whole planet would. A
+   cell with no terrain tile of its own or beside it is its opened tile
+   unchanged.
+
+   3DEP and MRDEM-30 meet at the border as they are. Their heights are in
+   different datums, NAVD 88 and CGVD2013, and the tiles hold whole metres
+   (see [the seam](refresh-runbook.md#the-seam-between-3dep-and-mrdem-30)).
 
    A hybrid cell's receipt records the opened and terrain tiles it read, and
-   it is blended again when one of them changes. The manifest lists both
-   sources, and its `method` is `terrain-over-opening` with the opening and
+   it is blended again when one of them changes. The manifest lists every
+   source, the terrain sources with the terrain tiles they gave posts to,
+   and its `method` is `terrain-over-opening` with the opening and
    the opened and terrain manifests. The terrain tiles have their own
    `terrain-manifest.json`, with a schema `build_graph.py` does not accept,
    so they cannot grade a graph by mistake. With `--bounds`, the run also

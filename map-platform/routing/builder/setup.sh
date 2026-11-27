@@ -3,7 +3,7 @@
 # builder as user bicino, piped over SSH so nothing has to be copied first:
 #
 #   ssh -F CONFIG builder 'bash -s -- --commit SHA --planet-date 261116 --opening-radius 400 \
-#     --terrain usgs-3dep-13 --elevation-cache elevation-cache-2026-11-26.json --start' \
+#     --terrain usgs-3dep-13,nrcan-mrdem-30 --elevation-cache elevation-cache-2026-11-26.json --start' \
 #     < map-platform/routing/builder/setup.sh
 #
 #   --commit SHA               the open-bike-computer commit whose tools run (40 hex digits)
@@ -11,9 +11,10 @@
 #   --opening-radius METRES    grade a second graph with Copernicus opened at this
 #                              radius and run the gate; without it only the
 #                              ungraded planet is built
-#   --terrain ID               put this terrain source of elevation-sources.json
+#   --terrain ID[,ID...]       put the terrain sources of elevation-sources.json
 #                              over the opened tiles, and build both graphs with
-#                              every bridge marked as one
+#                              every bridge marked as one; names every source of
+#                              that list, in its order
 #   --elevation-cache RECORD   restore the elevation tiles this record under
 #                              releases/ keeps in a bucket instead of building
 #                              them; the builder needs provision.sh --cache-reader
@@ -53,7 +54,8 @@ done
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "--commit takes a full commit SHA"
 [[ "$planet_date" =~ ^[0-9]{6}$ ]] || fail "--planet-date takes YYMMDD"
 [[ -z "$opening_radius" || "$opening_radius" =~ ^[0-9]{2,4}$ ]] || fail "--opening-radius takes whole metres"
-[[ -z "$terrain" || "$terrain" =~ ^[a-z][a-z0-9-]{2,63}$ ]] || fail "--terrain takes a terrain source id"
+[[ -z "$terrain" || "$terrain" =~ ^[a-z][a-z0-9-]{2,63}(,[a-z][a-z0-9-]{2,63})*$ ]] \
+  || fail "--terrain takes terrain source ids joined by commas"
 [[ -z "$terrain" || -n "$opening_radius" ]] || fail "--terrain needs --opening-radius"
 [[ -z "$cache" || "$cache" =~ ^elevation-cache-[a-z0-9-]+\.json$ ]] || fail "--elevation-cache takes a record's file name under releases/"
 [[ -z "$cache" || -n "$opening_radius" ]] || fail "--elevation-cache needs --opening-radius"

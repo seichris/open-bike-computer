@@ -879,12 +879,12 @@ class ScriptTests(unittest.TestCase):
             loaded = self.source_config('echo "$BICINO_SAMPLE_CITY|$BICINO_OPENING_RADIUS|$(bicino_graded_name)"',
                                         BICINO_SCRATCH=directory, BICINO_OPENING_RADIUS="200")
             self.assertEqual(loaded.stdout.strip(), "New York|400|opened-400")
-            env.write_text("BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
+            env.write_text("BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n")
             hybrid = self.source_config('echo "$(bicino_graded_name)|$BICINO_ELEVATION|$BICINO_ELEVATION_OPENED|'
                                         '$BICINO_ELEVATION_TERRAIN"; bicino_is_hybrid', BICINO_SCRATCH=directory)
             self.assertEqual((hybrid.returncode, hybrid.stdout.strip()),
-                             (0, f"usgs-3dep-13-over-opened-400|{directory}/elevation|{directory}/elevation-opened|"
-                                 f"{directory}/elevation-terrain"))
+                             (0, f"usgs-3dep-13+nrcan-mrdem-30-over-opened-400|{directory}/elevation|"
+                                 f"{directory}/elevation-opened|{directory}/elevation-terrain"))
             for line in ("BICINO_PLANET_DATE=$(touch pwned)", "PATH=/tmp", "BICINO_X='quoted'", "echo hello"):
                 env.write_text(line + "\n")
                 rejected = self.source_config("echo unreachable", BICINO_SCRATCH=directory)
@@ -915,6 +915,9 @@ class ScriptTests(unittest.TestCase):
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 0,
                      "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=USGS 3DEP\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13 nrcan-mrdem-30\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_MAP_PLATFORM_IMAGE=ghcr.io/seichris/open-bike-computer-map-platform:latest\n": 1,
                      "BICINO_SAMPLE_CITY=Berlin\n": 1,
                      "BICINO_SAMPLE_CITY=Berlin\nBICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n": 0}
@@ -967,9 +970,10 @@ done
             self.assertNotIn("terrain", runs[0])
             self.assertFalse((root / "elevation-terrain").exists())
             hybrid, runs = self.run_elevation_stage(
-                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n")
             self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
-            self.assertIn("terrain source usgs-3dep-13: 955 tiles", hybrid.stdout)
+            self.assertIn("terrain source usgs-3dep-13: 955 cells", hybrid.stdout)
+            self.assertIn("terrain source nrcan-mrdem-30: 2480 cells", hybrid.stdout)
             self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
             self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
                           "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "
@@ -977,11 +981,14 @@ done
             for manifest in ("elevation-raw/elevation-manifest.json", "elevation/elevation-manifest.json",
                              "elevation-opened/elevation-manifest.json", "elevation-terrain/terrain-manifest.json"):
                 self.assertIn(f"sha256sum {root}/{manifest}", hybrid.stdout)
-            # A terrain source the source list does not hold stops the stage before anything is built.
-            unknown, runs = self.run_elevation_stage(
-                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=other-dtm\n")
-            self.assertEqual((unknown.returncode, runs), (1, []))
-            self.assertIn("elevation-sources.json holds usgs-3dep-13, not BICINO_TERRAIN=other-dtm", unknown.stderr)
+            # The build uses every source of the list. A run that names another one, only some of them or
+            # another order stops before anything is built.
+            for named in ("other-dtm", "usgs-3dep-13", "nrcan-mrdem-30,usgs-3dep-13"):
+                unknown, runs = self.run_elevation_stage(
+                    root, f"BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN={named}\n")
+                self.assertEqual((unknown.returncode, runs), (1, []), named)
+                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30, not BICINO_TERRAIN={named}",
+                              unknown.stderr)
 
     def kept_tiles_scratch(self, directory, bucket="rehearsal-elevation"):
         """A scratch root whose tools hold a record of two small kept sets; returns it and the bucket's address."""
@@ -1032,7 +1039,7 @@ done
         with tempfile.TemporaryDirectory() as directory:
             # Under a terrain source the opened tiles lie beside the hybrid, which is always built.
             root, endpoint = self.kept_tiles_scratch(directory)
-            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13\n"
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n"
                                                  f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             self.assertTrue((root / "elevation-opened" / "N52" / "N52E013.hgt.gz").exists())
@@ -1040,7 +1047,7 @@ done
             # What a restore for a run without the terrain source left beside elevation/ is not this run's.
             (root / "elevation.restoring" / "N52").mkdir(parents=True)
             (root / "elevation-opened.restoring").mkdir()
-            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13\n"
+            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n"
                                                 f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertFalse((root / "elevation.restoring").exists())
@@ -1103,8 +1110,8 @@ done
         self.assertIn('echo "BICINO_ELEVATION_CACHE=$cache"', setup)
         with tempfile.TemporaryDirectory() as directory:
             rehearse.write_env(Path(directory), "Chicago", "https://example/illinois.osm.pbf", 400, None, 4, 4,
-                               "usgs-3dep-13")
-            self.assertIn("BICINO_TERRAIN=usgs-3dep-13\n", (Path(directory) / "builder.env").read_text())
+                               "usgs-3dep-13,nrcan-mrdem-30")
+            self.assertIn("BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n", (Path(directory) / "builder.env").read_text())
             rehearse.write_env(Path(directory), "Berlin", "https://example/berlin.osm.pbf", 200, None, 4, 4)
             self.assertIn("BICINO_TERRAIN=\nBICINO_ELEVATION_CACHE=\nBICINO_ELEVATION_CACHE_ENDPOINT=\n",
                           (Path(directory) / "builder.env").read_text())

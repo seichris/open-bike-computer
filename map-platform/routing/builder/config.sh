@@ -70,8 +70,9 @@ BICINO_ELEVATION_ATTEMPTS=${BICINO_ELEVATION_ATTEMPTS:-4}
 
 # Empty builds only the ungraded planet, the graph production serves today.
 BICINO_OPENING_RADIUS=${BICINO_OPENING_RADIUS:-}
-# The id of the terrain source of elevation-sources.json to put over the
-# opened tiles, such as usgs-3dep-13. Empty grades with opened Copernicus alone.
+# The terrain sources of elevation-sources.json to put over the opened tiles:
+# every id of that list in its order, joined by commas, such as
+# usgs-3dep-13,nrcan-mrdem-30. Empty grades with opened Copernicus alone.
 BICINO_TERRAIN=${BICINO_TERRAIN:-}
 # A record under releases/ of elevation tiles kept in a bucket, such as
 # elevation-cache-2026-11-26.json. The elevation stage restores the record's
@@ -121,8 +122,8 @@ bicino_validate_run() {
     bicino_fail "BICINO_OPENING_RADIUS must be whole metres or empty, got: $BICINO_OPENING_RADIUS"
   fi
   if bicino_is_hybrid; then
-    [[ "$BICINO_TERRAIN" =~ ^[a-z][a-z0-9-]{2,63}$ ]] \
-      || bicino_fail "BICINO_TERRAIN must be a terrain source id or empty, got: $BICINO_TERRAIN"
+    [[ "$BICINO_TERRAIN" =~ ^[a-z][a-z0-9-]{2,63}(,[a-z][a-z0-9-]{2,63})*$ ]] \
+      || bicino_fail "BICINO_TERRAIN must be terrain source ids joined by commas, or empty, got: $BICINO_TERRAIN"
     bicino_is_graded || bicino_fail "BICINO_TERRAIN needs BICINO_OPENING_RADIUS: the terrain lies over opened tiles"
   fi
   if bicino_uses_cache; then
@@ -178,7 +179,7 @@ bicino_roads_file() {
 
 bicino_graded_name() {
   if bicino_is_hybrid; then
-    echo "$BICINO_TERRAIN-over-opened-$BICINO_OPENING_RADIUS"
+    echo "${BICINO_TERRAIN//,/+}-over-opened-$BICINO_OPENING_RADIUS"
   else
     echo "opened-$BICINO_OPENING_RADIUS"
   fi

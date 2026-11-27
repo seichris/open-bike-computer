@@ -541,12 +541,19 @@ class ElevationHybridTests(ElevationOpeningTests):
 
     AREA = Path("area.geojson.gz")
 
+    @staticmethod
+    def terrain(*sources):
+        """The sources over every cell one of them has a tile for."""
+        return build_elevation.Terrain.over(sources, sorted({cell for source in sources for cell in source.tiles}))
+
     def write_terrain(self, directory, source, tiles):
+        import numpy as np
+
         (directory / "receipts").mkdir(parents=True)
         for cell, heights in tiles.items():
+            part = {**source.pin(cell), "readBytes": 7, "outsidePosts": 0, "posts": int(np.isfinite(heights).sum())}
             build_elevation.write_receipt(directory, {
-                "cell": build_elevation.hgt_name(*cell), "source": source.id, "url": source.tile_url(*cell),
-                "bytes": 7, "areaSha256": source.area_sha256, "outsidePosts": 0,
+                "cell": build_elevation.hgt_name(*cell), "sources": [part], "bytes": 7, "outsidePosts": 0,
                 **build_elevation.write_tile(directory, cell, heights)})
 
     def hybrid_setup(self, root, cells, terrain_tiles):
@@ -556,7 +563,8 @@ class ElevationHybridTests(ElevationOpeningTests):
         source = self.terrain_source(terrain_tiles)
         self.write_terrain(root / "terrain", source, terrain_tiles)
         (root / "out" / "receipts").mkdir(parents=True)
-        return chosen, build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+        return chosen, build_elevation.Hybrid(self.terrain(source), root / "terrain", root / "opened", opening,
+                                              self.BAND)
 
     def test_the_fill_is_lifted_to_the_terrain_and_fades_out(self):
         import numpy as np
@@ -634,7 +642,8 @@ class ElevationHybridTests(ElevationOpeningTests):
             source = self.terrain_source(terrain_tiles)
             self.write_terrain(root / "terrain", source, terrain_tiles)
             (root / "out" / "receipts").mkdir(parents=True)
-            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            hybrid = build_elevation.Hybrid(self.terrain(source), root / "terrain", root / "opened", opening,
+                                            self.BAND)
             receipt = build_elevation.hybrid_cell(centre, chosen, root / "out", hybrid)
 
             def stored(directory, cell):
@@ -674,7 +683,8 @@ class ElevationHybridTests(ElevationOpeningTests):
             source = self.terrain_source({})
             self.write_terrain(root / "terrain", source, {})
             (root / "out" / "receipts").mkdir(parents=True)
-            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            hybrid = build_elevation.Hybrid(self.terrain(source), root / "terrain", root / "opened", opening,
+                                            self.BAND)
             receipt = build_elevation.hybrid_cell((-84, 42), chosen, root / "out", hybrid)
             path = build_elevation.hgt_path(Path(), -84, 42)
             self.assertEqual((root / "out" / path).read_bytes(), (root / "opened" / path).read_bytes())
@@ -694,7 +704,8 @@ class ElevationHybridTests(ElevationOpeningTests):
             source = self.terrain_source({(-85, 42): west})
             self.write_terrain(root / "terrain", source, {(-85, 42): west})
             (root / "out" / "receipts").mkdir(parents=True)
-            hybrid = build_elevation.Hybrid(source, root / "terrain", root / "opened", opening, self.BAND)
+            hybrid = build_elevation.Hybrid(self.terrain(source), root / "terrain", root / "opened", opening,
+                                            self.BAND)
             policy_path = root / "policy.json"
             policy_path.write_text("{}")
             list_path = root / "elevation-sources.json"
@@ -702,8 +713,11 @@ class ElevationHybridTests(ElevationOpeningTests):
             build_elevation.write_manifest(root / "raw", policy_path, self.Policy, chosen, cells, [-87, 39, -80, 46])
             build_elevation.write_manifest(root / "opened", policy_path, self.Policy, chosen, cells,
                                            [-86, 40, -81, 45], opening)
-            terrain_manifest = build_elevation.write_terrain_manifest(root / "terrain", list_path, source,
+            terrain_manifest = build_elevation.write_terrain_manifest(root / "terrain", list_path, hybrid.terrain,
                                                                       [(-85, 42)], [-86, 40, -81, 45])
+            listed = json.loads(terrain_manifest.read_text())
+            self.assertEqual((listed["catalogCells"], listed["cells"], listed["sourceBytes"]), (1, 1, 7))
+            self.assertEqual(listed["sources"], [{**source.identity(), "cells": 1, "posts": self.POSTS ** 2}])
             for cell in [(-85, 42), (-84, 42)]:
                 build_elevation.hybrid_cell(cell, chosen, root / "out", hybrid)
             manifest = json.loads(build_elevation.write_manifest(
@@ -711,15 +725,20 @@ class ElevationHybridTests(ElevationOpeningTests):
                 hybrid).read_text())
             method = manifest["method"]
             self.assertEqual((method["name"], method["terrain"], method["blendPosts"], method["fill"]["name"]),
-                             ("terrain-over-opening", "usgs-3dep-13", self.BAND, "grey-opening"))
+                             ("terrain-over-opening", ["usgs-3dep-13"], self.BAND, "grey-opening"))
             self.assertEqual(method["inputs"]["terrain"]["manifestSha256"],
                              hashlib.sha256(terrain_manifest.read_bytes()).hexdigest())
+            # The source gave its posts to one terrain tile of these cells.
+            self.assertEqual([(s["id"], s["cells"]) for s in manifest["sources"]], [("glo30", 2), ("usgs-3dep-13", 1)])
+            self.assertEqual(manifest["sources"][1], {**source.identity(), "cells": 1, "posts": self.POSTS ** 2})
             # The eastern cell has no tile of its own, but the border column it shares with the western one.
-            self.assertEqual([(s["id"], s["cells"]) for s in manifest["sources"]], [("glo30", 2), ("usgs-3dep-13", 2)])
-            self.assertEqual(manifest["sources"][1]["posts"], self.POSTS ** 2 + self.POSTS)
+            self.assertEqual((manifest["terrain"]["cells"], manifest["terrain"]["posts"]),
+                             (2, self.POSTS ** 2 + self.POSTS))
             # The eastern cell's posts within the band of that column are lifted, bar the few without data.
-            blended = manifest["sources"][1]["blendedPosts"]
+            blended = manifest["terrain"]["blendedPosts"]
             self.assertTrue(self.POSTS * (self.BAND - 1) <= blended <= self.POSTS * self.BAND, blended)
+            # Opened tiles name no terrain.
+            self.assertNotIn("terrain", json.loads((root / "opened" / "elevation-manifest.json").read_text()))
             identity = elevation_identity(root / "out", sample=True)
             self.assertEqual((identity["sources"], identity["method"]), (["glo30", "usgs-3dep-13"], method))
             # A graph graded with it must mark every bridge; opened or raw tiles alone need not.
@@ -734,9 +753,10 @@ class ElevationHybridTests(ElevationOpeningTests):
             # A changed terrain tile, another band or a missing opened neighbour makes the receipt stale.
             self.assertIsNotNone(build_elevation.current_hybrid_receipt(root / "out", (-84, 42), chosen, hybrid))
             self.assertIsNone(build_elevation.current_hybrid_receipt(
-                root / "out", (-84, 42), chosen, build_elevation.Hybrid(source, hybrid.tiles, hybrid.opened, opening, 3)))
+                root / "out", (-84, 42), chosen,
+                build_elevation.Hybrid(hybrid.terrain, hybrid.tiles, hybrid.opened, opening, 3)))
             self.write_terrain(root / "terrain2", source, {(-85, 42): west + 1})
-            moved = build_elevation.Hybrid(source, root / "terrain2", hybrid.opened, opening, self.BAND)
+            moved = build_elevation.Hybrid(hybrid.terrain, root / "terrain2", hybrid.opened, opening, self.BAND)
             self.assertIsNone(build_elevation.current_hybrid_receipt(root / "out", (-84, 42), chosen, moved))
             build_elevation.write_tile(root / "terrain", (-85, 42), west + 2)
             with self.assertRaisesRegex(ValueError, "do not match"):
@@ -748,17 +768,28 @@ class ElevationHybridTests(ElevationOpeningTests):
 
     def test_terrain_and_blend_stages_run_under_a_deadline(self):
         source = self.terrain_source({})
-        hybrid = build_elevation.Hybrid(source, Path("terrain"), Path("opened"), build_elevation.Opening(400.0, Path("raw")))
-        # A terrain tile is twenty times a Copernicus cell, so its download gets longer.
+        hybrid = build_elevation.Hybrid(self.terrain(source), Path("terrain"), Path("opened"),
+                                        build_elevation.Opening(400.0, Path("raw")))
+        # A terrain tile is twenty times a Copernicus cell, so its download gets longer. A cell that reads a
+        # part of one object downloads no tile and keeps the cell deadline.
         self.assertGreater(build_elevation.TERRAIN_DEADLINE, build_elevation.CELL_DEADLINE)
-        for stage, function, deadline in ((build_elevation.TERRAIN, "build_terrain_cell", build_elevation.TERRAIN_DEADLINE),
-                                          (hybrid, "hybrid_cell", build_elevation.CELL_DEADLINE)):
+        tiled = self.terrain_source([(-84, 42)])
+        ranged = build_elevation.TerrainSource(
+            "nrcan-mrdem-30", build_elevation.MRDEM_URL, {(-84, 42): None, (-80, 44): None}, "c" * 64,
+            "https://terms.example", "https://credit.example", self.AREA, "a" * 64, build_elevation.MRDEM_ADAPTER,
+            (83854027098, "1b" * 16 + "-9997"))
+        terrain = {(-84, 42): (tiled, ranged), (-80, 44): (ranged,)}
+        for stage, function, cell, deadline in (
+                (build_elevation.TERRAIN, "build_terrain_cell", (-84, 42), build_elevation.TERRAIN_DEADLINE),
+                (build_elevation.TERRAIN, "build_terrain_cell", (-80, 44), build_elevation.CELL_DEADLINE),
+                (hybrid, "hybrid_cell", (-84, 42), build_elevation.CELL_DEADLINE)):
             alarms = []
-            with self.subTest(function=function), patch.object(build_elevation.signal, "alarm", alarms.append), \
+            chosen = terrain if stage == build_elevation.TERRAIN else {}
+            with self.subTest(function=function, cell=cell), patch.object(build_elevation.signal, "alarm", alarms.append), \
                     patch.object(build_elevation, function, side_effect=OSError("offline")) as called, \
-                    patch.dict(build_elevation._WORKER, chosen={}, out=Path("."), opening=None, stage=stage):
+                    patch.dict(build_elevation._WORKER, chosen=chosen, out=Path("."), opening=None, stage=stage):
                 with self.assertRaises(OSError):
-                    build_elevation._build((-84, 42))
+                    build_elevation._build(cell)
                 self.assertEqual(called.call_count, 1)
                 self.assertEqual(alarms, [deadline, 0])
 
@@ -889,29 +920,249 @@ class ElevationHybridTests(ElevationOpeningTests):
             source = build_elevation.TerrainSource(
                 "usgs-3dep-13", "https://terrain.example", {cell: ("n41w074", "20260917", len(data), etag)},
                 "c" * 64, "https://terms.example", "https://credit.example", *area)
-            receipt = build_elevation.build_terrain_cell(cell, {cell: source}, out)
-            self.assertEqual((receipt["url"], receipt["bytes"], receipt["sha256"], receipt["tileDate"]),
-                             ("https://terrain.example/n41w074/USGS_13_n41w074_20260917.tif", len(data),
-                              hashlib.sha256(data).hexdigest(), "20260917"))
-            self.assertEqual(build_elevation.current_terrain_receipt(out, cell, {cell: source}), receipt)
+            receipt = build_elevation.build_terrain_cell(cell, {cell: (source,)}, out)
+            part, = receipt["sources"]
+            self.assertEqual((part["source"], part["url"], part["bytes"], part["sha256"], part["tileDate"]),
+                             ("usgs-3dep-13", "https://terrain.example/n41w074/USGS_13_n41w074_20260917.tif",
+                              len(data), hashlib.sha256(data).hexdigest(), "20260917"))
+            self.assertEqual(build_elevation.current_terrain_receipt(out, cell, {cell: (source,)}), receipt)
             posts = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))[0]
             np.testing.assert_array_equal(posts[:, :half + 1], 31)
             self.assertTrue(np.isnan(posts[:, half + 1:]).all())
-            self.assertEqual((receipt["outsidePosts"], receipt["areaSha256"]), (self.POSTS * half, area[1]))
+            self.assertEqual((receipt["outsidePosts"], part["outsidePosts"], part["areaSha256"], part["posts"]),
+                             (self.POSTS * half, self.POSTS * half, area[1], self.POSTS * (half + 1)))
+            self.assertEqual((receipt["bytes"], receipt["noDataPosts"]), (len(data), self.POSTS * half))
             self.assertEqual(list((out / "downloads").iterdir()), [])
-            # Another area makes the tile stale: it was cut to the old one.
+            # Another area makes the tile stale: it was cut to the old one. So does another dated tile.
             moved = build_elevation.TerrainSource(
                 "usgs-3dep-13", "https://terrain.example", source.tiles, "c" * 64, "https://terms.example",
                 "https://credit.example", area[0], "b" * 64)
-            self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: moved}))
-            self.assertIsNotNone(build_elevation.current_receipt(out, cell, {cell: moved}))
+            self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: (moved,)}))
+            newer = build_elevation.TerrainSource(
+                "usgs-3dep-13", "https://terrain.example", {cell: ("n41w074", "20261001", len(data), etag)},
+                "c" * 64, "https://terms.example", "https://credit.example", *area)
+            self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: (newer,)}))
             # A tile the USGS has replaced since the catalog was written stops the cell.
             stale = build_elevation.TerrainSource(
                 "usgs-3dep-13", "https://terrain.example", {cell: ("n41w074", "20260917", len(data), "f" * 32)},
                 "c" * 64, "https://terms.example", "https://credit.example", *area)
             with self.assertRaisesRegex(ValueError, "not the catalog's"):
-                build_elevation.build_terrain_cell(cell, {cell: stale}, out)
+                build_elevation.build_terrain_cell(cell, {cell: (stale,)}, out)
             self.assertEqual(list((out / "downloads").iterdir()), [])
+
+    def mrdem_raster(self, cell, crs="EPSG:3979", pixel=30.0, nodata=-32767.0, side=120, shift=0):
+        """A GeoTIFF laid out as MRDEM-30 around the tests' 41 posts of the cell, its heights a plane on the grid.
+
+        Returns the file and a function giving the plane's height at longitudes and latitudes.
+        """
+        import numpy as np
+        from affine import Affine
+        from rasterio.io import MemoryFile
+        from rasterio.warp import transform
+
+        half = (self.POSTS - 1) / 2 * build_elevation.STEP
+        (x,), (y,) = transform("EPSG:4617", "EPSG:3979", [cell[0] + half], [cell[1] + 1 - half])
+        left, top = pixel * (round(x / pixel) - side // 2) + shift, pixel * (round(y / pixel) + side // 2)
+
+        def plane(xs, ys):
+            return 100 + 0.01 * (np.asarray(xs) - left) + 0.02 * (top - np.asarray(ys))
+
+        rows, columns = np.mgrid[0:side, 0:side]
+        pixels = plane(left + (columns + 0.5) * pixel, top - (rows + 0.5) * pixel).astype("float32")
+        memory = MemoryFile()
+        with memory.open(driver="GTiff", width=side, height=side, count=1, dtype="float32", crs=crs, nodata=nodata,
+                         transform=Affine(pixel, 0, left, 0, -pixel, top)) as dataset:
+            dataset.write(pixels, 1)
+
+        def height(longitudes, latitudes):
+            xs, ys = transform("EPSG:4617", "EPSG:3979", list(longitudes), list(latitudes))
+            return plane(xs, ys)
+
+        return memory, height
+
+    def post_positions(self, cell):
+        import numpy as np
+
+        rows, columns = np.mgrid[0:self.POSTS, 0:self.POSTS]
+        return (cell[0] + columns * build_elevation.STEP).ravel(), (cell[1] + 1 - rows * build_elevation.STEP).ravel()
+
+    def test_the_mrdem_raster_gives_a_cells_posts_and_no_other_raster_passes(self):
+        import numpy as np
+        import rasterio
+
+        cell = (-80, 43)
+        memory, height = self.mrdem_raster(cell)
+        with memory, memory.open() as dataset, rasterio.Env():
+            posts, window, sha256, invalid = build_elevation.mrdem_posts(dataset, cell)
+            pixels = dataset.read(1, window=window)
+            # A cell the raster does not reach reads nothing and has no posts.
+            empty = build_elevation.mrdem_posts(dataset, (-60, 50))
+        self.assertEqual((posts.shape, invalid, sha256),
+                         ((self.POSTS,) * 2, 0, hashlib.sha256(pixels.tobytes()).hexdigest()))
+        # The window holds the posts with a margin, and not the whole raster.
+        self.assertTrue(45 <= window.width < 120 and 45 <= window.height < 120, window)
+        # Bilinear means of a plane are the plane; the warp places a post within an eighth of a pixel.
+        np.testing.assert_allclose(posts.ravel(), height(*self.post_positions(cell)), atol=0.12)
+        self.assertTrue(np.isnan(empty[0]).all())
+        self.assertEqual(empty[1:], (None, hashlib.sha256(b"").hexdigest(), 0))
+        for raster in (self.mrdem_raster(cell, crs="EPSG:3978"), self.mrdem_raster(cell, pixel=20.0),
+                       self.mrdem_raster(cell, nodata=-9999.0)):
+            with raster[0] as other, other.open() as dataset, self.assertRaisesRegex(ValueError, "not the MRDEM-30"):
+                build_elevation.mrdem_posts(dataset, cell)
+
+    def test_mrdem_pixels_without_data_or_out_of_range(self):
+        import numpy as np
+        import rasterio
+        from rasterio.io import MemoryFile
+
+        cell = (-80, 43)
+        memory, _ = self.mrdem_raster(cell)
+        with memory, memory.open() as dataset:
+            profile, pixels = dataset.profile, dataset.read(1)
+
+        def posts_of(changed):
+            with MemoryFile() as file:
+                with file.open(**profile) as dataset:
+                    dataset.write(changed, 1)
+                with file.open() as dataset, rasterio.Env():
+                    return build_elevation.mrdem_posts(dataset, cell)
+
+        holed = pixels.copy()
+        holed[:, 60:] = -32767
+        posts, window, _, invalid = posts_of(holed)
+        self.assertEqual(invalid, window.height * (window.col_off + window.width - 60))
+        # The raster's east has no data: the eastern posts have none, the western ones all of it.
+        self.assertTrue(np.isfinite(posts[:, :5]).all() and np.isnan(posts[:, -5:]).all())
+        pixels[50, 50] = 9000
+        with self.assertRaisesRegex(ValueError, "lie outside"):
+            posts_of(pixels)
+
+    def test_the_mrdem_object_must_be_the_pinned_one_before_and_after_a_cell_reads_it(self):
+        import numpy as np
+
+        cell = (-80, 43)
+        memory, height = self.mrdem_raster(cell)
+        pinned = (83854027098, "1b" * 16 + "-9997")
+        with tempfile.TemporaryDirectory() as tmp, memory:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            area = self.write_area(out / "area.geojson.gz", [(-81, 42), (-78, 42), (-78, 45), (-81, 45)])
+            source = build_elevation.TerrainSource(
+                "nrcan-mrdem-30", build_elevation.MRDEM_URL, {cell: None}, "c" * 64, "https://terms.example",
+                "https://credit.example", *area, build_elevation.MRDEM_ADAPTER, pinned)
+            opened = []
+
+            def open_raster(path):
+                opened.append(path)
+                return memory.open()
+
+            with patch("rasterio.open", open_raster), \
+                    patch.object(build_elevation, "object_identity", return_value=pinned) as asked:
+                receipt = build_elevation.build_terrain_cell(cell, {cell: (source,)}, out)
+            self.assertEqual(opened, ["/vsicurl/" + build_elevation.MRDEM_URL])
+            self.assertEqual(asked.call_count, 2)
+            part, = receipt["sources"]
+            self.assertEqual({field: part[field] for field in build_elevation.PIN_FIELDS}, {
+                "source": "nrcan-mrdem-30", "url": build_elevation.MRDEM_URL, "bytes": pinned[0], "etag": pinned[1],
+                "areaSha256": area[1]})
+            # What was read is the window's pixels, not the 84 GB object.
+            width, height_ = part["window"][2:]
+            self.assertEqual((part["readBytes"], receipt["bytes"], part["posts"], part["outsidePosts"]),
+                             (4 * width * height_, 4 * width * height_, self.POSTS ** 2, 0))
+            posts = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))[0]
+            np.testing.assert_allclose(posts.ravel(), height(*self.post_positions(cell)), atol=0.62)
+            self.assertEqual(build_elevation.current_terrain_receipt(out, cell, {cell: (source,)}), receipt)
+            self.assertEqual(source.identity()["originEtag"], pinned[1])
+            # A replaced object makes the tile stale and stops the next read, whenever the change shows.
+            replaced = build_elevation.TerrainSource(
+                "nrcan-mrdem-30", build_elevation.MRDEM_URL, {cell: None}, "c" * 64, "https://terms.example",
+                "https://credit.example", *area, build_elevation.MRDEM_ADAPTER, (pinned[0], "2c" * 16 + "-9997"))
+            self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: (replaced,)}))
+            for answers in ([(pinned[0] + 1, pinned[1])], [pinned, (pinned[0], "2c" * 16 + "-9997")]):
+                with self.subTest(answers=answers), patch("rasterio.open", open_raster), \
+                        patch.object(build_elevation, "object_identity", side_effect=answers), \
+                        self.assertRaisesRegex(ValueError, "not the pinned"):
+                    build_elevation.build_terrain_cell(cell, {cell: (source,)}, out)
+
+    def test_a_border_cell_takes_each_post_from_the_source_whose_area_holds_it(self):
+        import numpy as np
+
+        cell = (-80, 43)
+        step = build_elevation.STEP
+        side = (self.POSTS - 1) * 3 + 12
+        with self.terrain_tile(cell, np.full((side, side), 31.4, dtype="float32")) as tile:
+            data = tile.read()
+        etag = hashlib.md5(data).hexdigest()
+        memory, height = self.mrdem_raster(cell)
+        pinned = (83854027098, "1b" * 16 + "-9997")
+        with tempfile.TemporaryDirectory() as tmp, memory:
+            out = Path(tmp)
+            (out / "receipts").mkdir()
+            # The first area ends between post columns 20 and 21; the second begins between columns 17 and 18,
+            # so both hold columns 18 to 20.
+            east, west = -80 + 20.5 * step, -80 + 17.5 * step
+            first = self.write_area(out / "first.geojson.gz", [(-81, 42), (east, 42), (east, 45), (-81, 45)])
+            second = self.write_area(out / "second.geojson.gz", [(west, 42), (-78, 42), (-78, 45), (west, 45)])
+            usgs = build_elevation.TerrainSource(
+                "usgs-3dep-13", "https://terrain.example", {cell: ("n44w080", "20230227", len(data), etag)},
+                "c" * 64, "https://terms.example", "https://credit.example", *first)
+            mrdem = build_elevation.TerrainSource(
+                "nrcan-mrdem-30", build_elevation.MRDEM_URL, {cell: None, (-79, 43): None}, "d" * 64,
+                "https://terms.example", "https://credit.example", *second, build_elevation.MRDEM_ADAPTER, pinned)
+            terrain = build_elevation.Terrain.over((usgs, mrdem), [(-81, 43), cell, (-79, 43)])
+            self.assertEqual((terrain.ids(), terrain.cells), (
+                ["usgs-3dep-13", "nrcan-mrdem-30"], {cell: (usgs, mrdem), (-79, 43): (mrdem,)}))
+            import rasterio
+            open_file = rasterio.open
+
+            def open_raster(path):
+                return memory.open() if str(path).startswith("/vsicurl/") else open_file(path)
+
+            def fetch_range(url, start, end):
+                return data[start:end], len(data), etag
+
+            with patch("rasterio.open", open_raster), patch.object(build_elevation, "fetch_range", fetch_range), \
+                    patch.object(build_elevation, "object_identity", return_value=pinned):
+                receipt = build_elevation.build_terrain_cell(cell, terrain.cells, out)
+            posts = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))[0]
+            np.testing.assert_array_equal(posts[:, :21], 31)
+            longitudes, latitudes = self.post_positions(cell)
+            np.testing.assert_allclose(posts[:, 21:], height(longitudes, latitudes).reshape(posts.shape)[:, 21:],
+                                       atol=0.62)
+            self.assertEqual([(part["source"], part["posts"], part["outsidePosts"]) for part in receipt["sources"]],
+                             [("usgs-3dep-13", self.POSTS * 21, self.POSTS * 20),
+                              ("nrcan-mrdem-30", self.POSTS * 20, self.POSTS * 18)])
+            self.assertEqual((receipt["outsidePosts"], receipt["noDataPosts"]), (self.POSTS * 38, 0))
+            self.assertEqual(receipt["bytes"], len(data) + receipt["sources"][1]["readBytes"])
+            self.assertEqual(build_elevation.current_terrain_receipt(out, cell, terrain.cells), receipt)
+            # The tile is stale once the cell's sources are others, fewer or in another order.
+            for others in ((usgs,), (mrdem,), (mrdem, usgs)):
+                self.assertIsNone(build_elevation.current_terrain_receipt(out, cell, {cell: others}))
+            self.assertEqual(build_elevation.terrain_shares(terrain, [receipt]), [
+                {**usgs.identity(), "cells": 1, "posts": self.POSTS * 21},
+                {**mrdem.identity(), "cells": 1, "posts": self.POSTS * 20}])
+
+    def test_an_objects_size_and_etag_come_from_a_head_request(self):
+        class Response:
+            headers = {"Content-Length": "83854027098", "ETag": '"1bf0-9997"'}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        asked = []
+
+        def urlopen(request, timeout):
+            asked.append((request.get_method(), request.full_url))
+            if len(asked) == 1:
+                raise ConnectionResetError("reset")
+            return Response()
+
+        with patch.object(build_elevation.urllib.request, "urlopen", urlopen), patch.object(build_elevation.time, "sleep"):
+            self.assertEqual(build_elevation.object_identity("https://u/o.tif"), (83854027098, "1bf0-9997"))
+        self.assertEqual(asked, [("HEAD", "https://u/o.tif")] * 2)
 
     @staticmethod
     def write_area(path, ring):
@@ -972,8 +1223,8 @@ class TerrainSourceTests(unittest.TestCase):
     ROUTING = Path(build_elevation.__file__).parent
 
     def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
-        source = build_elevation.load_terrain_source(self.ROUTING / "elevation-sources.json")
-        self.assertEqual((source.id, len(source.tiles)), ("usgs-3dep-13", 955))
+        source, canada = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
+        self.assertEqual((source.id, len(source.tiles), source.origin_object), ("usgs-3dep-13", 955, None))
         self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
                                                    "historical/n41w074/USGS_13_n41w074_20260917.tif")
         # The conterminous United States only: nothing in Alaska, Hawaii or the territories.
@@ -989,22 +1240,50 @@ class TerrainSourceTests(unittest.TestCase):
         self.assertEqual([area[1].contains(Point(x, y)) for x, y in (
             (-117.0382, 32.5330), (-106.4850, 31.7380), (-83.0300, 42.3100),
             (-117.0300, 32.5480), (-106.4850, 31.7600), (-83.0500, 42.3350))], [False] * 3 + [True] * 3)
+        # Canada's source is one object, pinned by size and ETag, over the cells that touch Canada.
+        self.assertEqual((canada.id, len(canada.tiles), canada.origin_object, canada.tile_url(-80, 43)), (
+            "nrcan-mrdem-30", 2480, (83854027098, "1bf055857edce86b1311967c8d88395e-9997"),
+            "https://canelevation-dem.s3.ca-central-1.amazonaws.com/mrdem-30/mrdem-30-dtm.tif"))
+        self.assertEqual(set(canada.tiles.values()), {None})
+        self.assertEqual(canada.pin((-80, 43)), {
+            "source": "nrcan-mrdem-30", "url": canada.origin, "bytes": 83854027098,
+            "etag": "1bf055857edce86b1311967c8d88395e-9997", "areaSha256": canada.area_sha256})
+        north = build_elevation.load_area(canada.area, canada.area_sha256)
+        self.assertEqual(canada.area.name, "canada-osm-r1428125-v649.geojson.gz")
+        self.assertEqual(sorted(canada.tiles), sorted(terrain_catalog.area_cells(north)))
+        # Windsor, Toronto, Vancouver and Alert are inside; Detroit, Niagara Falls NY, Point Roberts and Hyder outside.
+        self.assertEqual([north[1].contains(Point(x, y)) for x, y in (
+            (-83.0300, 42.3100), (-79.3790, 43.6462), (-123.1207, 49.2827), (-62.35, 82.5),
+            (-83.0500, 42.3350), (-79.0550, 43.0850), (-123.0700, 48.9850), (-130.02, 55.917))], [True] * 4 + [False] * 4)
+        # The two countries share the border's ways. Their areas overlap only in the sea around Machias Seal
+        # Island, which both claim; there the first source gives the posts it has.
+        both = [part for part in area[0].intersection(north[0]).geoms if part.area > 0]
+        self.assertEqual(len(both), 1)
+        self.assertTrue(box(-67.31, 44.29, -66.92, 44.76).contains(both[0]) and 0.06 < both[0].area < 0.07, both[0].bounds)
+        strip = box(-123.2, 48.9, -95.2, 49.1)
+        self.assertAlmostEqual(area[0].union(north[0]).intersection(strip).area, strip.area, places=9)
+        terrain = build_elevation.Terrain.over((source, canada), sorted(set(source.tiles) | set(canada.tiles)))
+        self.assertEqual((len(terrain.cells), sum(1 for found in terrain.cells.values() if len(found) == 2)), (3340, 95))
+        self.assertEqual(terrain.cells[(-80, 43)], (source, canada))
         document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            catalog = (self.ROUTING / document["terrain"][0]["catalog"]).read_text()
+            files = {value[kind]: (self.ROUTING / value[kind]).read_bytes()
+                     for value in document["terrain"] for kind in ("catalog", "area")}
+            catalog = files[document["terrain"][0]["catalog"]].decode()
+            area_bytes = files[document["terrain"][0]["area"]]
 
-            area_bytes = (self.ROUTING / document["terrain"][0]["area"]).read_bytes()
-
-            def load(change, catalog_text=catalog, area=area_bytes):
+            def load(change, catalog_text=catalog, area=area_bytes, index=0):
                 value = json.loads(json.dumps(document))
-                change(value["terrain"][0])
+                change(value["terrain"][index])
                 (root / "elevation-sources.json").write_text(json.dumps(value))
+                for name, data in files.items():
+                    (root / name).write_bytes(data)
                 (root / document["terrain"][0]["catalog"]).write_text(catalog_text)
                 (root / document["terrain"][0]["area"]).write_bytes(area)
-                return build_elevation.load_terrain_source(root / "elevation-sources.json")
+                return build_elevation.load_terrain_sources(root / "elevation-sources.json")
 
-            self.assertEqual(load(lambda value: None).tiles, source.tiles)
+            self.assertEqual([found.tiles for found in load(lambda value: None)], [source.tiles, canada.tiles])
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "not approved"),
                 (lambda value: value.update(approvedForRouting="yes"), "not approved"),
@@ -1015,17 +1294,66 @@ class TerrainSourceTests(unittest.TestCase):
                 (lambda value: value.update(area="../" + value["area"]), "beside the source list"),
                 (lambda value: value.update(termsUrl="http://usgs.example"), "HTTPS"),
                 (lambda value: value.pop("approvedBy"), "fields"),
+                (lambda value: value.update(originBytes=1, originEtag="0" * 32), "fields"),
+                (lambda value: value.update(adapter="other-dem-v1"), "adapter"),
+                (lambda value: value.update(id="nrcan-mrdem-30"), "twice"),
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     load(change)
+            for change, message in (
+                (lambda value: value.update(approvedForRouting=False), "nrcan-mrdem-30 is not approved"),
+                (lambda value: value.update(origin=value["origin"].replace("dtm", "dsm")), "unsupported"),
+                (lambda value: value.update(horizontalCrs="EPSG:4269"), "unsupported"),
+                (lambda value: value.update(originBytes="83854027098"), "size, ETag and date"),
+                (lambda value: value.update(originBytes=True), "size, ETag and date"),
+                (lambda value: value.update(originEtag="W/1bf0"), "size, ETag and date"),
+                (lambda value: value.update(originModified="24 June 2026"), "size, ETag and date"),
+                (lambda value: value.pop("originEtag"), "fields"),
+                (lambda value: value.update(tileCount=2479), "not 2479"),
+                (lambda value: value.update(catalog=document["terrain"][0]["catalog"]), "not the catalog"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change, index=1)
             with self.assertRaisesRegex(ValueError, "not the catalog"):
                 load(lambda value: None, catalog.replace("20260917", "20260918"))
             with self.assertRaisesRegex(ValueError, "not the area"):
                 load(lambda value: None, area=area_bytes + b"x")
-            for text in ("[]", '{"schemaVersion": 2, "terrain": [{}]}', '{"schemaVersion": 1, "terrain": []}'):
+            one = {**document, "schemaVersion": 1, "terrain": document["terrain"][:1]}
+            for text in ("[]", '{"schemaVersion": 2, "terrain": []}', '{"schemaVersion": 2}', json.dumps(one)):
                 (root / "elevation-sources.json").write_text(text)
-                with self.subTest(text=text), self.assertRaisesRegex(ValueError, "exactly one terrain source"):
-                    build_elevation.load_terrain_source(root / "elevation-sources.json")
+                with self.subTest(text=text), self.assertRaisesRegex(ValueError, "under schemaVersion 2"):
+                    build_elevation.load_terrain_sources(root / "elevation-sources.json")
+            for text in ('{"schemaVersion": 2, "terrain": [{}]}', '{"schemaVersion": 2, "terrain": ["usgs-3dep-13"]}',
+                         '{"schemaVersion": 2, "terrain": [{"adapter": ["usgs-3dep-13-geotiff-v1"]}]}'):
+                (root / "elevation-sources.json").write_text(text)
+                with self.subTest(text=text), self.assertRaisesRegex(ValueError, "adapter"):
+                    build_elevation.load_terrain_sources(root / "elevation-sources.json")
+
+    def test_a_cell_catalog_names_each_cell_once_in_order(self):
+        cells = {(-80, 43): None, (-53, 47): None, (-141, 60): None}
+        text = build_elevation.format_cell_catalog(cells)
+        self.assertEqual(text, "N43W080\nN47W053\nN60W141\n")
+        self.assertEqual(build_elevation.parse_cell_catalog(text), cells)
+        for bad in ("N47W053\nN43W080\n", text + "N60W141\n", "N43W080", text.replace("N43W080", "n44w080"),
+                    text.replace("N47W053", "N47W053 n48w053 20260917 5 " + "0" * 32)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                build_elevation.parse_cell_catalog(bad)
+
+    def test_the_cells_of_an_area_are_those_a_post_of_which_can_lie_in_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # One arc-second short of whole degrees: the eastern and northern neighbours' border posts are not reached.
+            edge = build_elevation.STEP
+            path, sha256 = ElevationHybridTests.write_area(
+                Path(tmp) / "area.geojson.gz",
+                [(-80.5, 43.5), (-79 - edge, 43.5), (-79 - edge, 45 - edge), (-80.5, 45 - edge)])
+            area = build_elevation.load_area(path, sha256)
+            self.assertEqual(terrain_catalog.area_cells(area), [(-81, 43), (-81, 44), (-80, 43), (-80, 44)])
+            # An area that ends on whole degrees shares those lines of posts with the cells around it.
+            path, sha256 = ElevationHybridTests.write_area(
+                Path(tmp) / "whole.geojson.gz", [(-80, 43), (-79, 43), (-79, 44), (-80, 44)])
+            whole = terrain_catalog.area_cells(build_elevation.load_area(path, sha256))
+            self.assertEqual(len(whole), 9)
+            self.assertEqual(build_elevation.format_cell_catalog(whole).splitlines()[4], "N43W080")
 
     def test_catalog_lines_name_one_dated_tile_per_cell(self):
         tiles = {(-74, 40): ("n41w074", "20260917", 165776270, "02fe0b7c39d43b570742e25e02c0462c"),
@@ -1088,9 +1416,13 @@ class TerrainSourceTests(unittest.TestCase):
             country("United States", "2", [(-170, 20), (-70, 20), (-70, 60), (-170, 60)]),
             country("United States", "4", [(-100, 30), (-90, 30), (-90, 40), (-100, 40)]),
             country("Canada", "2", [(-140, 49), (-60, 49), (-60, 70), (-140, 70)])]}
-        feature = terrain_catalog.area_feature(export, "United States", "a test")
-        self.assertEqual(feature["properties"], {"name": "United States", "source": "a test", "box": [-126, 23, -65, 51]})
         from shapely.geometry import shape
+        feature = terrain_catalog.area_feature(export, "United States", "a test", terrain_catalog.CONTERMINOUS_BOX)
+        self.assertEqual(feature["properties"], {"name": "United States", "source": "a test", "box": [-126, 23, -65, 51]})
+        # Without a box the polygon is the whole country.
+        whole = terrain_catalog.area_feature(export, "Canada", "a test")
+        self.assertEqual(whole["properties"], {"name": "Canada", "source": "a test"})
+        self.assertEqual(shape(whole["geometry"]).bounds, (-140.0, 49.0, -60.0, 70.0))
         self.assertEqual(shape(feature["geometry"]).bounds, (-126.0, 23.0, -70.0, 51.0))
         data = terrain_catalog.area_bytes(feature)
         self.assertEqual(data, terrain_catalog.area_bytes(json.loads(json.dumps(feature))))
@@ -1102,8 +1434,8 @@ class TerrainSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not one"):
                 terrain_catalog.area_feature(export, name, "a test")
         export["features"].append(country("Hawaii only", "2", [(-160, 19), (-155, 19), (-155, 22), (-160, 22)]))
-        with self.assertRaisesRegex(ValueError, "no valid polygon"):
-            terrain_catalog.area_feature(export, "Hawaii only", "a test")
+        with self.assertRaisesRegex(ValueError, "no valid polygon inside"):
+            terrain_catalog.area_feature(export, "Hawaii only", "a test", terrain_catalog.CONTERMINOUS_BOX)
 
 
 class ElevationManifestTests(unittest.TestCase):
