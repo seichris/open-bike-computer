@@ -2213,6 +2213,15 @@ class KeptTerrainTests(unittest.TestCase):
                                             lambda data, url: uploaded.update({url: data}))
         self.assertEqual(done, {"N22E114.hgt.gz": "copied", "N22E114.txt": "copied"})
         self.assertEqual(uploaded, {f"{self.MIRROR}N22E114.hgt.gz": data, f"{self.MIRROR}N22E114.txt": provenance})
+        # A provenance file the copy holds is read back and must be the catalog's.
+        held = {"N22E114.hgt.gz": len(data), "N22E114.txt": len(provenance)}
+        bucket = {f"{self.MIRROR}N22E114.txt": provenance}
+        self.assertEqual(terrain_catalog.mirror_files(source, held, None, None, read_held=bucket.get),
+                         {"N22E114.hgt.gz": "held", "N22E114.txt": "held"})
+        bucket[f"{self.MIRROR}N22E114.txt"] = provenance + b"x"
+        for read_held in (bucket.get, None):
+            with self.assertRaisesRegex(ValueError, "N22E114.txt is not the provenance file the catalog pins"):
+                terrain_catalog.mirror_files(source, held, None, None, read_held=read_held)
         files["N22E114.txt"] = provenance + b"x"
         with self.assertRaisesRegex(ValueError, "N22E114.txt is not the catalog's"):
             terrain_catalog.mirror_files(source, {"N22E114.hgt.gz": len(data)}, lambda cell, name: files[name],

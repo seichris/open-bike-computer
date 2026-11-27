@@ -384,13 +384,15 @@ def http_get(url):
         return response.read().decode()
 
 
-def mirror_files(source, held, read, upload, jobs=6):
+def mirror_files(source, held, read, upload, jobs=6, read_held=None):
     """Copy each file of the source's catalog that its bucket copy lacks; {name: "held" or "copied"}.
 
     `held` maps the names the copy holds to their sizes and `read(cell,
     name)` gives a file's bytes. A kept source's provenance files go beside
     its tiles. A file is uploaded only with the size and SHA-256 the catalog
-    pins (a provenance file's SHA-256 alone).
+    pins (a provenance file's SHA-256 alone). A provenance file the copy
+    holds already is read back with `read_held(url)` and must hash to the
+    catalog's, since an object is never replaced.
     """
     wanted = {}
     for cell in sorted(source.tiles):
@@ -404,9 +406,13 @@ def mirror_files(source, held, read, upload, jobs=6):
             raise ValueError(f"{source.mirror}{name} holds {held[name]} bytes, not the catalog's {size}")
 
     def copy(name):
-        if name in held:
-            return "held"
         cell, size, sha256 = wanted[name]
+        if name in held:
+            if size is None and (read_held is None
+                                 or hashlib.sha256(read_held(f"{source.mirror}{name}")).hexdigest() != sha256):
+                raise ValueError(f"{source.mirror}{name} is not the provenance file the catalog pins, and an object "
+                                 "is never replaced: give the remade tiles a new source id and prefix")
+            return "held"
         data = read(cell, name)
         found = hashlib.sha256(data).hexdigest()
         if (size is not None and len(data) != size) or found != sha256:
@@ -564,6 +570,11 @@ def gcloud_sizes(prefix):
     return sizes
 
 
+def gcloud_read(url):
+    """An object's bytes."""
+    return subprocess.run(["gcloud", "storage", "cat", url], check=True, capture_output=True).stdout
+
+
 def gcloud_upload(data, url):
     """Upload `data` to a gs:// URL that holds no object yet."""
     import tempfile
@@ -647,7 +658,7 @@ def main():
         else:
             def read(cell, name):
                 return http_download(source.tile_url(*cell))[0]
-        done = mirror_files(source, gcloud_sizes(source.mirror), read, gcloud_upload, args.jobs)
+        done = mirror_files(source, gcloud_sizes(source.mirror), read, gcloud_upload, args.jobs, gcloud_read)
         print(f"{found[0].mirror}: {sum(state == 'copied' for state in done.values())} copied, "
               f"{sum(state == 'held' for state in done.values())} held already")
         return

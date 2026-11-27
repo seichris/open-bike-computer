@@ -96,7 +96,8 @@ BICINO_ELEVATION_CACHE_ENDPOINT=${BICINO_ELEVATION_CACHE_ENDPOINT:-}
 # Where a hybrid build fetches the files a terrain source keeps a copy of in a
 # bucket: empty for the bucket the source list names, at Google, as the
 # builder's service account; http://127.0.0.1:PORT for a rehearsal's stand-in,
-# which gets no token; none to read every file from its source's origin.
+# which gets no token; none to read every file from its source's origin, which
+# a run with a source kept in the bucket alone (GSI, CEDD) may not.
 BICINO_TERRAIN_MIRROR_ENDPOINT=${BICINO_TERRAIN_MIRROR_ENDPOINT:-}
 BICINO_PLANET_DATE=${BICINO_PLANET_DATE:-}
 BICINO_TOOLS_COMMIT=${BICINO_TOOLS_COMMIT:-}
@@ -145,6 +146,19 @@ print(",".join(source.id for source in sources))
 PY
 }
 
+# The ids of the listed terrain sources kept as tiles in the bucket alone,
+# which no origin serves, joined by commas.
+bicino_kept_terrain() {
+  python3 - "$BICINO_ROUTING" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import build_elevation
+sources = build_elevation.load_terrain_sources(Path(sys.argv[1]) / "elevation-sources.json")
+print(",".join(source.id for source in sources if source.adapter in build_elevation.KEPT_RULES))
+PY
+}
+
 bicino_validate_run() {
   [ -d "$BICINO_ROUTING" ] || bicino_fail "no routing tools at $BICINO_ROUTING"
   [[ "$BICINO_RUN_ID" =~ ^[0-9]{1,10}$ ]] || bicino_fail "cksum gave no id for $BICINO_SCRATCH, got: $BICINO_RUN_ID"
@@ -165,6 +179,11 @@ bicino_validate_run() {
     listed=$(bicino_listed_terrain) || bicino_fail "cannot read the terrain sources of $BICINO_ROUTING/elevation-sources.json"
     [ "$listed" = "$BICINO_TERRAIN" ] \
       || bicino_fail "elevation-sources.json holds $listed, not BICINO_TERRAIN=$BICINO_TERRAIN"
+    if [ "$BICINO_TERRAIN_MIRROR_ENDPOINT" = none ]; then
+      local kept
+      kept=$(bicino_kept_terrain) || bicino_fail "cannot read the terrain sources of $BICINO_ROUTING/elevation-sources.json"
+      [ -z "$kept" ] || bicino_fail "BICINO_TERRAIN_MIRROR_ENDPOINT=none cannot read $kept: their tiles are kept in the bucket alone"
+    fi
   fi
   if bicino_uses_cache; then
     [[ "$BICINO_ELEVATION_CACHE" =~ ^elevation-cache-[a-z0-9-]+\.json$ ]] \

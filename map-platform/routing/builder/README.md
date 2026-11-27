@@ -100,10 +100,11 @@ ways:
   with the size and SHA-256 its catalog pins. A zip it could not fetch, and
   every zip when the builder has no account, is downloaded from Google
   Drive instead; the log says how many (`terrain files: ...`). A kept tile
-  has no other source: one that was not fetched fails its cell, and the
-  stage then fails. `BICINO_TERRAIN_MIRROR_ENDPOINT=none` reads Sonny's
-  zips from Drive and therefore fails Hong Kong's cells; a rehearsal may
-  name a local stand-in, `http://127.0.0.1:PORT`. A laptop has no
+  has no other source: when one cannot be fetched the stage stops before
+  the build starts, rather than fail Hong Kong's cells after hours of
+  others. For the same reason `BICINO_TERRAIN_MIRROR_ENDPOINT=none`, which
+  reads every file from its origin, is refused while the list holds a kept
+  source; a rehearsal may name a local stand-in, `http://127.0.0.1:PORT`. A laptop has no
   service account, so a rehearsal of a kept source needs the tiles in
   `ROOT/elevation-terrain-files/` first: `elevation_cache.py fetch-terrain
   --token-file` with a token of your own fetches them. The North
