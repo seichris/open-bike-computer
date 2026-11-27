@@ -523,8 +523,8 @@ terrain tiles five read a 3DEP tile and MRDEM-30 and four MRDEM-30 alone,
 
 On 2026-11-27 Toronto and Chicago ran again with the
 [terrain scan](#terrain-scan), with the two sources the list held before
-Sonny's tiles of Europe were added; no European sample has run through the
-scan. A sample scans its city's one hybrid cell,
+Sonny's tiles of Europe and LINZ's of New Zealand were added; no sample of
+those has run through the scan. A sample scans its city's one hybrid cell,
 N43W080 and N41W088; the eight cells around it have terrain tiles and no
 hybrid, and the report counts them as skipped. The stage took 4 to 5
 seconds and both gates were met.
