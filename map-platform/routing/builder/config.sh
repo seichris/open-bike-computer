@@ -73,6 +73,13 @@ BICINO_OPENING_RADIUS=${BICINO_OPENING_RADIUS:-}
 # The id of the terrain source of elevation-sources.json to put over the
 # opened tiles, such as usgs-3dep-13. Empty grades with opened Copernicus alone.
 BICINO_TERRAIN=${BICINO_TERRAIN:-}
+# A record under releases/ of elevation tiles kept in a bucket, such as
+# elevation-cache-2026-11-26.json. The elevation stage restores the record's
+# sets instead of building them, and builds a set it cannot restore. Empty
+# builds every tile.
+BICINO_ELEVATION_CACHE=${BICINO_ELEVATION_CACHE:-}
+# Rehearsals only: this machine's stand-in for the bucket, instead of Google.
+BICINO_ELEVATION_CACHE_ENDPOINT=${BICINO_ELEVATION_CACHE_ENDPOINT:-}
 BICINO_PLANET_DATE=${BICINO_PLANET_DATE:-}
 BICINO_TOOLS_COMMIT=${BICINO_TOOLS_COMMIT:-}
 
@@ -102,6 +109,10 @@ bicino_is_hybrid() {
   [ -n "$BICINO_TERRAIN" ]
 }
 
+bicino_uses_cache() {
+  [ -n "$BICINO_ELEVATION_CACHE" ]
+}
+
 bicino_validate_run() {
   [ -d "$BICINO_ROUTING" ] || bicino_fail "no routing tools at $BICINO_ROUTING"
   [[ "$BICINO_MAP_PLATFORM_IMAGE" =~ ^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$ ]] \
@@ -113,6 +124,20 @@ bicino_validate_run() {
     [[ "$BICINO_TERRAIN" =~ ^[a-z][a-z0-9-]{2,63}$ ]] \
       || bicino_fail "BICINO_TERRAIN must be a terrain source id or empty, got: $BICINO_TERRAIN"
     bicino_is_graded || bicino_fail "BICINO_TERRAIN needs BICINO_OPENING_RADIUS: the terrain lies over opened tiles"
+  fi
+  if bicino_uses_cache; then
+    [[ "$BICINO_ELEVATION_CACHE" =~ ^elevation-cache-[a-z0-9-]+\.json$ ]] \
+      || bicino_fail "BICINO_ELEVATION_CACHE must name a record under releases/, such as elevation-cache-2026-11-26.json, got: $BICINO_ELEVATION_CACHE"
+    bicino_is_graded || bicino_fail "BICINO_ELEVATION_CACHE needs BICINO_OPENING_RADIUS: an ungraded build reads no elevation"
+    [ -f "$BICINO_ROUTING/releases/$BICINO_ELEVATION_CACHE" ] \
+      || bicino_fail "no record $BICINO_ROUTING/releases/$BICINO_ELEVATION_CACHE"
+  fi
+  if [ -n "$BICINO_ELEVATION_CACHE_ENDPOINT" ]; then
+    # A planet build reads the bucket the record names, at Google, and nothing else.
+    { bicino_is_sample && bicino_uses_cache; } \
+      || bicino_fail "BICINO_ELEVATION_CACHE_ENDPOINT is for a sample rehearsal with BICINO_ELEVATION_CACHE"
+    [[ "$BICINO_ELEVATION_CACHE_ENDPOINT" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] \
+      || bicino_fail "BICINO_ELEVATION_CACHE_ENDPOINT must be http://127.0.0.1:PORT, got: $BICINO_ELEVATION_CACHE_ENDPOINT"
   fi
   local name
   for name in BICINO_ELEVATION_JOBS BICINO_UNGRADED_THREADS BICINO_GRADED_THREADS BICINO_ELEVATION_ATTEMPTS; do

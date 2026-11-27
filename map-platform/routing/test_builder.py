@@ -2,6 +2,9 @@
 
 import contextlib
 import fcntl
+import gzip
+import hashlib
+import http.server
 import io
 import json
 import os
@@ -11,10 +14,14 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +32,7 @@ sys.path.insert(0, str(BUILDER))
 import build_graph  # noqa: E402
 import builder_status  # noqa: E402
 import chain_state  # noqa: E402
+import elevation_cache  # noqa: E402
 import prepare_sample  # noqa: E402
 import qualification  # noqa: E402
 import rehearse  # noqa: E402
@@ -32,6 +40,33 @@ import run_stage  # noqa: E402
 
 SHELL_SCRIPTS = sorted(BUILDER.glob("*.sh")) + sorted((BUILDER / "stages").glob("*.sh"))
 GRADED_ENV = "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\n"
+
+
+def make_tile_set(directory, cells, method=None, seed=b""):
+    """A finished tile set as build_elevation.py leaves it, with small tiles."""
+    listing = ""
+    (directory / "receipts").mkdir(parents=True)
+    for cell in sorted(cells):
+        payload = (cell.encode() + seed) * 512
+        digest = hashlib.sha256(payload).hexdigest()
+        tile = directory / cell[:3] / f"{cell}.hgt.gz"
+        tile.parent.mkdir(exist_ok=True)
+        tile.write_bytes(gzip.compress(payload, mtime=0))
+        (directory / "receipts" / f"{cell}.json").write_text(json.dumps({"cell": cell, "hgtSha256": digest}) + "\n")
+        listing += f"{cell} {digest}\n"
+    (directory / "cells.txt").write_text(listing)
+    manifest = {"schema": "bicino-valhalla-elevation-v1", "method": method, "cells": len(cells),
+                "cellListSha256": hashlib.sha256(listing.encode()).hexdigest(), "fileBytes": 1,
+                "sources": [{"id": "copernicus-test", "indexSha256": "0" * 64, "cells": len(cells)}],
+                "policy": {"sha256": "1" * 64}, "runtime": {"rasterio": "1.4.4"}}
+    (directory / "elevation-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    if method is None:
+        (directory / "index").mkdir()
+        (directory / "index" / "copernicus-test.tileList.txt").write_text("the source's own list\n")
+
+
+def files_of(directory):
+    return {str(path.relative_to(directory)): path.read_bytes() for path in sorted(directory.rglob("*")) if path.is_file()}
 
 
 class Clock:
@@ -277,6 +312,29 @@ class ChainStateTests(ScratchCase):
                          ("a" * 40, "b" * 40, "b" * 40))
         self.assertIn("NOTE: the stages ran with different tools: aaaaaaaaaaaa (images, download); bbbbbbbbbbbb (elevation)",
                       chain_state.describe(status))
+
+    def test_the_status_says_what_was_restored_and_a_record_makes_no_work_stale(self):
+        self.finish("images", "download", "inputs", "elevation", "build-ungraded", "build-graded")
+        record = "elevation-cache-2026-11-26.json"
+        report = self.root / "export" / "evidence" / "elevation-cache.json"
+        chain_state.write_json(report, {"record": record, "sets": {
+            "raw": {"restored": True, "seconds": 412, "tilesAsRecorded": True},
+            "opened-400": {"restored": False, "kept": True, "reason": "may not read N0.tar (HTTP 403)"},
+            "opened-200": {"restored": False, "kept": False, "reason": "holds no set"}}})
+        # Without the setting, the report is an earlier run's.
+        self.assertIsNone(chain_state.chain_status(self.root, self.clock)[0]["elevationRestore"])
+        (self.root / "builder.env").write_text(GRADED_ENV + f"BICINO_ELEVATION_CACHE={record}\n")
+        status, _ = chain_state.chain_status(self.root, self.clock)
+        # The tiles are the same tiles however they arrived: the finished stages stand.
+        self.assertEqual(self.states()["elevation"], "done")
+        self.assertEqual(self.states()["build-graded"], "done")
+        self.assertEqual(status["run"]["elevationCache"], record)
+        self.assertEqual(status["elevationRestore"]["sets"]["raw"]["seconds"], 412)
+        self.assertIn(f"  kept tiles of {record}: raw restored in 412 s; opened-400 NOT restored and built instead "
+                      "(may not read N0.tar (HTTP 403)); opened-200 not kept, built", chain_state.describe(status))
+        self.assertEqual(chain_state.build_result(self.root, clock=self.clock)["elevationRestore"]["record"], record)
+        (self.root / "builder.env").write_text(GRADED_ENV + "BICINO_ELEVATION_CACHE=elevation-cache-2027-01-01.json\n")
+        self.assertIsNone(chain_state.chain_status(self.root, self.clock)[0]["elevationRestore"])
 
     def test_a_marker_without_settings_is_never_trusted(self):
         self.finish("download")
@@ -773,7 +831,8 @@ class ScriptTests(unittest.TestCase):
                 subprocess.run(["bash", "-n", str(script)], check=True)
                 if script.name != "config.sh":
                     self.assertTrue(script.stat().st_mode & stat.S_IXUSR, script.name)
-        for tool in ("chain_state.py", "run_stage.py", "builder_status.py", "qualification.py", "rehearse.py"):
+        for tool in ("chain_state.py", "run_stage.py", "builder_status.py", "qualification.py", "rehearse.py",
+                     "elevation_cache.py"):
             self.assertTrue((BUILDER / tool).stat().st_mode & stat.S_IXUSR, tool)
 
     @unittest.skipUnless(shutil.which("shellcheck") or os.environ.get("BICINO_REQUIRE_SHELLCHECK"),
@@ -789,7 +848,8 @@ class ScriptTests(unittest.TestCase):
         mounts = 0
         for script in SHELL_SCRIPTS:
             for source in re.findall(r"(?<!printf )(?:-v|--volume)\s+(\"\S+)", script.read_text()):
-                if source.startswith("/var/run/docker.sock") or source == '"$root:$root"':
+                # rehearse.sh takes only absolute paths for its root and its directory of packed tiles.
+                if source.startswith("/var/run/docker.sock") or source in ('"$root:$root"', '"$directory:$directory")'):
                     continue
                 mounts += 1
                 self.assertRegex(source, absolute, f"{script.name}: {source}")
@@ -834,8 +894,21 @@ class ScriptTests(unittest.TestCase):
     def test_a_run_is_validated_before_any_stage_works(self):
         with tempfile.TemporaryDirectory() as directory:
             routing = Path(directory) / "tools" / "repo" / "map-platform" / "routing"
-            routing.mkdir(parents=True)
+            (routing / "releases").mkdir(parents=True)
+            (routing / "releases" / "elevation-cache-2026-11-26.json").write_text("{}")
+            kept = "BICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE=elevation-cache-2026-11-26.json\n"
+            sample = ("BICINO_SAMPLE_CITY=Berlin\n"
+                      "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n")
             cases = {"BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\n": 0,
+                     # Kept tiles: a record of this checkout, for a graded run; only a rehearsal asks elsewhere than Google.
+                     "BICINO_PLANET_DATE=261116\n" + kept: 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_ELEVATION_CACHE=elevation-cache-2026-11-26.json\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE=elevation-cache-2099.json\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE=../builder.env\n": 1,
+                     "BICINO_PLANET_DATE=261116\n" + kept + "BICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n": 1,
+                     sample + kept + "BICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n": 0,
+                     sample + kept + "BICINO_ELEVATION_CACHE_ENDPOINT=http://tiles.example:8123\n": 1,
+                     sample + "BICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n": 1,
                      "BICINO_PLANET_DATE=261116\n": 0,
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
@@ -910,6 +983,95 @@ done
             self.assertEqual((unknown.returncode, runs), (1, []))
             self.assertIn("elevation-sources.json holds usgs-3dep-13, not BICINO_TERRAIN=other-dtm", unknown.stderr)
 
+    def kept_tiles_scratch(self, directory, bucket="rehearsal-elevation"):
+        """A scratch root whose tools hold a record of two small kept sets; returns it and the bucket's address."""
+        root = Path(directory).resolve()
+        routing = root / "tools" / "repo" / "map-platform" / "routing"
+        (routing / "releases").mkdir(parents=True)
+        for entry in ROUTING.iterdir():
+            if entry.name != "releases":
+                (routing / entry.name).symlink_to(entry)
+        make_tile_set(root / "built" / "raw", ("N52E013", "N52E014"))
+        make_tile_set(root / "built" / "opened", ("N52E013",), {"name": "grey-opening", "radiusMetres": 400.0}, b"opened")
+        elevation_cache.pack(routing / "releases" / "elevation-cache-rehearsal.json", root / "bucket",
+                             "rehearsal-elevation", "rehearsal",
+                             [("raw", root / "built" / "raw"), ("opened-400", root / "built" / "opened")])
+        server, endpoint = rehearse.serve_bucket(root / "bucket", bucket)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return root, endpoint
+
+    KEPT_ENV = ("BICINO_SAMPLE_CITY=Berlin\n"
+                "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n"
+                "BICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE=elevation-cache-rehearsal.json\n")
+
+    def test_the_elevation_stage_restores_kept_tiles_before_it_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, endpoint = self.kept_tiles_scratch(directory)
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertLess(ran.stdout.index("cache: every kept set is restored"), ran.stdout.index("attempt=1 start="))
+            # build_elevation.py still runs: it finds a receipt for every restored cell.
+            self.assertEqual(len(runs), 1)
+            report = json.loads((root / "export" / "evidence" / "elevation-cache.json").read_text())
+            self.assertEqual({name: (entry["restored"], entry["directory"]) for name, entry in report["sets"].items()},
+                             {"raw": (True, f"{root}/elevation-raw"), "opened-400": (True, f"{root}/elevation")})
+            self.assertEqual(files_of(root / "elevation-raw" / "N52"), files_of(root / "built" / "raw" / "N52"))
+            # The stand-in build wrote the manifests again and left the tiles alone.
+            self.assertIn("raw: the tiles are the recorded ones; the build wrote the manifest again", ran.stdout)
+            self.assertEqual((report["sets"]["raw"]["tilesAsRecorded"], report["sets"]["raw"]["manifestAsRecorded"]),
+                             (True, False))
+            # A run without a record keeps neither an earlier run's report nor what a killed restore left.
+            for name in ("elevation-raw", "elevation", "elevation-opened"):
+                (root / f"{name}.restoring" / "N52").mkdir(parents=True)
+            plain, _ = self.run_elevation_stage(root, self.KEPT_ENV.replace("BICINO_ELEVATION_CACHE=elevation-cache-rehearsal.json\n", ""))
+            self.assertEqual(plain.returncode, 0, plain.stdout + plain.stderr)
+            self.assertNotIn("cache:", plain.stdout)
+            self.assertFalse((root / "export" / "evidence" / "elevation-cache.json").exists())
+            self.assertEqual(sorted(path.name for path in root.glob("*.restoring")), [])
+        with tempfile.TemporaryDirectory() as directory:
+            # Under a terrain source the opened tiles lie beside the hybrid, which is always built.
+            root, endpoint = self.kept_tiles_scratch(directory)
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13\n"
+                                                 f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertTrue((root / "elevation-opened" / "N52" / "N52E013.hgt.gz").exists())
+            self.assertFalse((root / "elevation" / "N52").exists())
+            # What a restore for a run without the terrain source left beside elevation/ is not this run's.
+            (root / "elevation.restoring" / "N52").mkdir(parents=True)
+            (root / "elevation-opened.restoring").mkdir()
+            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13\n"
+                                                f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
+            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertFalse((root / "elevation.restoring").exists())
+            self.assertFalse((root / "elevation" / "restore.json").exists())
+
+    def test_the_elevation_stage_builds_the_tiles_it_cannot_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # The address serves another bucket: every object is missing.
+            root, endpoint = self.kept_tiles_scratch(directory, bucket="another-bucket")
+            env = self.KEPT_ENV + f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n"
+            ran, runs = self.run_elevation_stage(root, env)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("cache: restore exit=3; building the tiles that were not restored", ran.stdout)
+            self.assertEqual(len(runs), 1)
+            report_path = root / "export" / "evidence" / "elevation-cache.json"
+            report = json.loads(report_path.read_text())
+            self.assertEqual([entry["restored"] for entry in report["sets"].values()], [False, False])
+            self.assertIn("the bucket holds no rehearsal/raw-", report["sets"]["raw"]["reason"])
+            # Nothing of the record reached the directories the build then wrote to.
+            for name in ("elevation-raw", "elevation"):
+                self.assertEqual(sorted(path.name for path in (root / name).iterdir()), ["elevation-manifest.json"])
+                self.assertFalse((root / f"{name}.restoring").exists())
+            # A second attempt finds the built tiles, leaves them alone and keeps why they were built.
+            server, good = rehearse.serve_bucket(root / "bucket", "rehearsal-elevation")
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            again, _ = self.run_elevation_stage(root, env.replace(endpoint, good))
+            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn("the bucket holds no rehearsal/raw-", json.loads(report_path.read_text())["sets"]["raw"]["reason"])
+            self.assertEqual(sorted(path.name for path in (root / "elevation-raw").iterdir()), ["elevation-manifest.json"])
+
     def test_a_terrain_source_marks_every_bridge_in_both_builds_and_the_gate_checks_it(self):
         build = (BUILDER / "stages" / "build.sh").read_text()
         rule = build.index("if bicino_is_hybrid; then\n  arguments+=(--all-bridges)\nfi")
@@ -936,12 +1098,21 @@ done
         self.assertIn('--terrain) terrain=${2:-}; shift 2 ;;', setup)
         self.assertIn('[[ -z "$terrain" || -n "$opening_radius" ]] || fail "--terrain needs --opening-radius"', setup)
         self.assertIn('echo "BICINO_TERRAIN=$terrain"', setup)
+        self.assertIn('--elevation-cache) cache=${2:-}; shift 2 ;;', setup)
+        self.assertIn('[[ -z "$cache" || -n "$opening_radius" ]] || fail "--elevation-cache needs --opening-radius"', setup)
+        self.assertIn('echo "BICINO_ELEVATION_CACHE=$cache"', setup)
         with tempfile.TemporaryDirectory() as directory:
             rehearse.write_env(Path(directory), "Chicago", "https://example/illinois.osm.pbf", 400, None, 4, 4,
                                "usgs-3dep-13")
             self.assertIn("BICINO_TERRAIN=usgs-3dep-13\n", (Path(directory) / "builder.env").read_text())
             rehearse.write_env(Path(directory), "Berlin", "https://example/berlin.osm.pbf", 200, None, 4, 4)
-            self.assertIn("BICINO_TERRAIN=\n", (Path(directory) / "builder.env").read_text())
+            self.assertIn("BICINO_TERRAIN=\nBICINO_ELEVATION_CACHE=\nBICINO_ELEVATION_CACHE_ENDPOINT=\n",
+                          (Path(directory) / "builder.env").read_text())
+            rehearse.write_env(Path(directory), "Berlin", "https://example/berlin.osm.pbf", 200, None, 4, 4,
+                               cache="elevation-cache-rehearsal.json", endpoint="http://127.0.0.1:8123")
+            self.assertIn("BICINO_ELEVATION_CACHE=elevation-cache-rehearsal.json\n"
+                          "BICINO_ELEVATION_CACHE_ENDPOINT=http://127.0.0.1:8123\n",
+                          (Path(directory) / "builder.env").read_text())
 
     def test_setup_masks_package_upgrades_before_it_installs_anything(self):
         setup = (BUILDER / "setup.sh").read_text()
@@ -999,6 +1170,41 @@ class CloudScriptTests(unittest.TestCase):
                      "--instance-termination-action=DELETE", "--no-service-account", "--no-scopes",
                      "--image-family=ubuntu-2404-lts-amd64", "--metadata=ssh-keys=bicino:ssh-ed25519 "):
             self.assertIn(flag, instance)
+
+    def test_a_builder_that_restores_kept_tiles_may_read_storage_and_nothing_else(self):
+        reader = "bicino-routing-builder@chiho-prod.iam.gserviceaccount.com"
+        created = self.run_script("provision.sh", "--job", "r400-261116", "--ssh-source", "203.0.113.7/32",
+                                  "--ssh-key", str(self.key), "--cache-reader", reader, "--create")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        instance = self.gcloud_calls()[3]
+        self.assertIn(f"--service-account={reader} --scopes=https://www.googleapis.com/auth/devstorage.read_only ", instance)
+        self.assertNotIn("--no-service-account", instance)
+        self.assertEqual(instance.count("--scopes"), 1)
+        self.calls.unlink()
+        for bad in ("default", "someone@gmail.com", f"{reader} --scopes=cloud-platform"):
+            refused = self.run_script("provision.sh", "--job", "r400", "--ssh-source", "203.0.113.7/32",
+                                      "--ssh-key", str(self.key), "--cache-reader", bad, "--create")
+            self.assertEqual(refused.returncode, 1, bad)
+        self.assertEqual(self.gcloud_calls(), [])
+
+    def test_bucket_access_is_one_keyless_account_that_reads_one_bucket(self):
+        planned = self.run_script("cache-access.sh")
+        self.assertEqual((planned.returncode, self.gcloud_calls()), (0, []))
+        self.assertIn("plan only: nothing was created", planned.stdout)
+        created = self.run_script("cache-access.sh", "--create")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        account, grant = self.gcloud_calls()
+        self.assertTrue(account.startswith("iam service-accounts create bicino-routing-builder --project chiho-prod "))
+        self.assertTrue(grant.startswith("storage buckets add-iam-policy-binding gs://bicino-routing-elevation "))
+        self.assertIn("--member=serviceAccount:bicino-routing-builder@chiho-prod.iam.gserviceaccount.com "
+                      "--role=roles/storage.objectViewer", grant)
+        text = (BUILDER / "cache-access.sh").read_text()
+        for never in ("keys create", "projects add-iam-policy-binding", "objectAdmin", "objectCreator"):
+            self.assertNotIn(never, text)
+        self.assertIn("--cache-reader bicino-routing-builder@chiho-prod.iam.gserviceaccount.com", created.stdout)
+        self.calls.unlink()
+        self.assertEqual(self.run_script("cache-access.sh", "--account", "x", "--create").returncode, 1)
+        self.assertEqual(self.gcloud_calls(), [])
 
     def test_bad_arguments_stop_before_gcloud(self):
         cases = [["--job", "R400", "--ssh-source", "203.0.113.7/32", "--ssh-key", str(self.key)],
@@ -1141,6 +1347,471 @@ class SampleTests(unittest.TestCase):
             self.assertEqual(command[command.index("--label") + 1], f"bicino.work={work}")
 
 
+class ElevationCacheTests(unittest.TestCase):
+    """Restoring kept elevation tiles, from a stand-in for the bucket."""
+
+    CELLS = ("N52E013", "N52E014", "N53E013", "S01W001", "S10E120")
+    BUCKET = "test-elevation"
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        self.built = {"raw": self.root / "built" / "raw", "opened-400": self.root / "built" / "opened"}
+        make_tile_set(self.built["raw"], self.CELLS)
+        make_tile_set(self.built["opened-400"], self.CELLS, {"name": "grey-opening", "radiusMetres": 400.0}, b"opened")
+        self.bucket = self.root / "bucket"
+        self.record = self.root / "elevation-cache-test.json"
+        elevation_cache.pack(self.record, self.bucket, self.BUCKET, "family", list(self.built.items()))
+        self.raw = self.root / "scratch" / "elevation-raw"
+        self.opened = self.root / "scratch" / "elevation"
+        self.report = self.root / "scratch" / "export" / "evidence" / "elevation-cache.json"
+        # What the stand-in was asked: (set/tar, Range, Authorization). `refuse` and `cut` make it misbehave.
+        self.requests, self.refuse, self.cut, self.lines = [], {}, {}, []
+        test = self
+
+        class Bucket(rehearse.BucketHandler):
+            def key(self):
+                name = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+                return f"{name.split('/')[-2].rpartition('-')[0]}/{name.split('/')[-1]}"
+
+            def do_GET(self):
+                test.requests.append((self.key(), self.headers.get("Range"), self.headers.get("Authorization")))
+                if self.key() in test.refuse:
+                    self.send_error(test.refuse[self.key()])
+                else:
+                    super().do_GET()
+
+            def send_body(self, stream):
+                # Send only the first bytes once, as a connection that drops.
+                self.wfile.write(stream.read(test.cut.pop(self.key()))) if self.key() in test.cut else super().send_body(stream)
+
+        server, self.endpoint = rehearse.serve_bucket(self.bucket, self.BUCKET, Bucket)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        pause = patch.object(elevation_cache.time, "sleep", lambda seconds: None)
+        pause.start()
+        self.addCleanup(pause.stop)
+
+    def restore(self, wanted=None, jobs=1):
+        return elevation_cache.restore(self.record, wanted or [("raw", self.raw, True)], self.report,
+                                       endpoint=self.endpoint, jobs=jobs, log=self.lines.append)
+
+    def reason(self, name="raw", directory=None):
+        """Why the set was not restored; nothing of it may be left on disk."""
+        directory = directory or self.raw
+        report = self.restore([(name, directory, True)])
+        self.assertFalse(report["sets"][name]["restored"])
+        self.assertEqual(elevation_cache.failed_sets(report), [name])
+        self.assertFalse(directory.exists() and any(directory.iterdir()))
+        self.assertFalse(elevation_cache.staging_of(directory).exists())
+        return report["sets"][name]["reason"]
+
+    def tar_path(self, set_name, shard):
+        return self.bucket / json.loads(self.record.read_text())["sets"][set_name]["prefix"] / shard
+
+    def repack(self, set_name, shard, change, count=False):
+        """Rewrite one tar in the bucket and pin the record to the new bytes, as a bucket that lies would hold it."""
+        path = self.tar_path(set_name, shard)
+        with tarfile.open(path) as archive:
+            members = {member.name: archive.extractfile(member).read() for member in archive}
+        others = change(members) or []
+        with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+            for info in others:
+                archive.addfile(info)
+        record = json.loads(self.record.read_text())
+        entry = next(entry for entry in record["sets"][set_name]["shards"] if entry["name"] == shard)
+        entry.update(bytes=path.stat().st_size, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        if count:
+            entry["files"] = len(members)
+        self.record.write_text(json.dumps(record))
+
+    def test_a_restored_set_is_the_built_set_file_for_file(self):
+        report = self.restore([("raw", self.raw, True), ("opened-400", self.opened, False),
+                               ("opened-200", self.root / "scratch" / "other", False)], jobs=2)
+        self.assertEqual(elevation_cache.failed_sets(report), [])
+        for name, directory in (("raw", self.raw), ("opened-400", self.opened)):
+            restored = files_of(directory)
+            receipt = json.loads(restored.pop("restore.json"))
+            self.assertEqual(restored, files_of(self.built[name]))
+            self.assertFalse(elevation_cache.staging_of(directory).exists())
+            entry = json.loads(self.record.read_text())["sets"][name]
+            self.assertEqual((receipt["manifestSha256"], receipt["cellListSha256"], receipt["cells"], receipt["record"]),
+                             (entry["manifestSha256"], entry["cellListSha256"], 5, "elevation-cache-test.json"))
+            self.assertEqual(report["sets"][name]["directory"], str(directory))
+        # A set the record does not keep is no failure: it is built.
+        self.assertEqual((report["sets"]["opened-200"]["restored"], report["sets"]["opened-200"]["kept"]), (False, False))
+        self.assertFalse((self.root / "scratch" / "other").exists())
+        self.assertEqual(json.loads(self.report.read_text()), report)
+        # Four tars a set: its bands and meta.tar. The stand-in is not Google and got no token.
+        self.assertEqual(sorted(key for key, _, _ in self.requests),
+                         sorted(f"{name}/{tar}" for name in ("raw", "opened-400")
+                                for tar in ("N5.tar", "S0.tar", "S1.tar", "meta.tar")))
+        self.assertEqual({token for _, _, token in self.requests}, {None})
+        # A second run finds the receipts and asks the bucket for nothing.
+        self.requests.clear()
+        again = self.restore([("raw", self.raw, True), ("opened-400", self.opened, False)])
+        self.assertEqual(([entry["restored"] for entry in again["sets"].values()], self.requests), ([True, True], []))
+
+    def test_a_tar_that_is_not_the_pinned_file_is_refused(self):
+        path = self.tar_path("raw", "N5.tar")
+        data = bytearray(path.read_bytes())
+        data[700] ^= 1
+        path.write_bytes(data)
+        self.assertRegex(self.reason(), r"N5\.tar is not the pinned file: SHA-256 [0-9a-f]{64}, the record has")
+        path.write_bytes(bytes(data) + b"\0" * 512)
+        self.assertIn("N5.tar is longer than its pinned", self.reason())
+        path.write_bytes(bytes(data)[:-1024])
+        self.assertIn("N5.tar: the transfer ended at byte", self.reason())
+
+    def test_a_tile_is_checked_against_the_cell_list_whatever_its_tar_claims(self):
+        other = gzip.compress(b"heights of somewhere else", mtime=0)
+        self.repack("raw", "N5.tar", lambda members: members.update({"N52/N52E014.hgt.gz": other}))
+        self.assertIn("N5.tar: the tile N52E014 does not match its line in cells.txt", self.reason())
+        self.repack("raw", "N5.tar", lambda members: members.update({"N52/N52E014.hgt.gz": b"not gzip at all"}))
+        self.assertIn("N52E014 is not a gzipped tile", self.reason())
+        twice = gzip.compress(b"x", mtime=0) * 2
+        self.repack("raw", "N5.tar", lambda members: members.update({"N52/N52E014.hgt.gz": twice}))
+        self.assertIn("N52E014 is not one gzipped tile", self.reason())
+
+    def test_a_band_holds_its_own_tiles_once_and_nothing_else(self):
+        tile = self.built["raw"] / "S01" / "S01W001.hgt.gz"
+        link = tarfile.TarInfo("N52/N52E015.hgt.gz")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        cases = {
+            "'N52/notes.txt' is not a tile of this band": lambda members: members.update({"N52/notes.txt": b"x"}),
+            "'../N52E013.hgt.gz' is not a tile": lambda members: members.update({"../N52E013.hgt.gz": b"x"}),
+            "'/tmp/N52/N52E013.hgt.gz' is not a tile": lambda members: members.update({"/tmp/N52/N52E013.hgt.gz": b"x"}),
+            "'S01/S01W001.hgt.gz' is not a tile of this band": lambda members: members.update({"S01/S01W001.hgt.gz": tile.read_bytes()}),
+            "'N52/N52E015.hgt.gz' is not a plain file": lambda members: [link],
+            "N5.tar holds 2 tiles; the record has 3": lambda members: members.pop("N53/N53E013.hgt.gz") and None,
+        }
+        pristine = (self.tar_path("raw", "N5.tar").read_bytes(), self.record.read_text())
+        for expected, change in cases.items():
+            with self.subTest(expected=expected):
+                self.tar_path("raw", "N5.tar").write_bytes(pristine[0])
+                self.record.write_text(pristine[1])
+                self.repack("raw", "N5.tar", change)
+                self.assertIn(expected, self.reason())
+        self.assertFalse((self.root / "scratch" / "N52E013.hgt.gz").exists())
+
+    def test_the_manifest_the_cell_list_and_the_receipts_must_be_the_pinned_ones(self):
+        pristine = (self.tar_path("raw", "meta.tar").read_bytes(), self.record.read_text())
+        listing = (self.built["raw"] / "cells.txt").read_text()
+        moved = listing.replace("N52E013 ", "N51E013 ")
+        receipt = json.dumps({"cell": "N52E013", "hgtSha256": "0" * 64}).encode()
+        cases = {
+            "elevation-manifest.json is not the manifest the record pins":
+                lambda members: members.update({"elevation-manifest.json": members["elevation-manifest.json"] + b" "}),
+            "cells.txt does not hash to the cellListSha256": lambda members: members.update({"cells.txt": moved.encode()}),
+            "the receipt of N52E013 does not name the tile cells.txt names":
+                lambda members: members.update({"receipts/N52E013.json": receipt}),
+            "1 cells have a receipt or a line in cells.txt, not both": lambda members: members.pop("receipts/S10E120.json") and None,
+            "unexpected member 'receipts/../../escape.json'": lambda members: members.update({"receipts/../../escape.json": b"{}"}),
+            "meta.tar holds no cells.txt": lambda members: members.pop("cells.txt") and None,
+        }
+        for expected, change in cases.items():
+            with self.subTest(expected=expected):
+                self.tar_path("raw", "meta.tar").write_bytes(pristine[0])
+                self.record.write_text(pristine[1])
+                self.repack("raw", "meta.tar", change, count=True)
+                self.assertIn(expected, self.reason())
+        # The record's word is what counts: a manifest that is whole but another one is refused.
+        self.tar_path("raw", "meta.tar").write_bytes(pristine[0])
+        record = json.loads(pristine[1])
+        record["sets"]["raw"]["manifestSha256"] = "0" * 64
+        self.record.write_text(json.dumps(record))
+        self.assertIn("is not the manifest the record pins", self.reason())
+        self.assertFalse((self.root / "escape.json").exists() or (self.root / "scratch" / "escape.json").exists())
+
+    def test_a_transfer_that_drops_is_taken_up_where_it_stopped(self):
+        self.cut["raw/N5.tar"] = 1000
+        report = self.restore()
+        self.assertTrue(report["sets"]["raw"]["restored"], self.lines)
+        self.assertEqual([(key, wanted) for key, wanted, _ in self.requests if key == "raw/N5.tar"],
+                         [("raw/N5.tar", None), ("raw/N5.tar", "bytes=1000-")])
+        restored = files_of(self.raw)
+        del restored["restore.json"]
+        self.assertEqual(restored, files_of(self.built["raw"]))
+
+    def test_a_bucket_that_refuses_says_what_the_builder_lacks(self):
+        self.refuse["raw/meta.tar"] = 403
+        self.assertIn("may not read family/raw-", self.reason())
+        self.assertIn("roles/storage.objectViewer on the bucket", self.reason())
+        self.refuse["raw/meta.tar"] = 404
+        self.assertIn("the bucket holds no family/raw-", self.reason())
+        # A server in trouble is asked again, six times in all, and then given up on.
+        self.requests.clear()
+        self.refuse["raw/meta.tar"] = 503
+        self.assertIn("meta.tar: HTTP 503, after 6 attempts", self.reason())
+        self.assertEqual(len(self.requests), 6)
+        # The first request of a restore tells: nothing else was asked for.
+        self.assertEqual({key for key, _, _ in self.requests}, {"raw/meta.tar"})
+
+    def test_the_token_is_the_builders_own_and_goes_only_to_google(self):
+        asked = []
+
+        class Metadata(http.server.BaseHTTPRequestHandler):
+            answer = (200, {"access_token": "t0ken", "expires_in": 3599, "token_type": "Bearer"})
+
+            def do_GET(self):
+                asked.append(self.headers.get("Metadata-Flavor"))
+                status, body = type(self).answer
+                data = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *arguments):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Metadata)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        metadata = f"http://127.0.0.1:{server.server_address[1]}/token"
+        token = elevation_cache.Token(metadata=metadata)
+        self.assertEqual((token.header(), token.header()), ({"Authorization": "Bearer t0ken"},) * 2)
+        self.assertEqual(asked, ["Google"])
+        token.header(refresh=True)
+        self.assertEqual(len(asked), 2)
+        saved = self.root / "token"
+        saved.write_text("from-a-laptop\n")
+        self.assertEqual(elevation_cache.Token(token_file=saved).header(), {"Authorization": "Bearer from-a-laptop"})
+        # Any other address gets no token, whatever this machine could give.
+        self.assertEqual(elevation_cache.Token(self.endpoint, metadata=metadata).header(), {})
+        self.assertEqual(elevation_cache.Token(self.endpoint, token_file=saved).header(), {})
+        # A builder without a service account says how to get one.
+        Metadata.answer = (404, {})
+        with self.assertRaisesRegex(elevation_cache.CacheError, r"no service account.*provision\.sh --cache-reader"):
+            elevation_cache.Token(metadata=metadata).header()
+        with self.assertRaisesRegex(elevation_cache.CacheError, "gave no token"):
+            elevation_cache.Token(metadata="http://127.0.0.1:9/token").header()
+
+    def test_a_redirect_is_an_error_not_a_second_address(self):
+        elsewhere = []
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/storage/"):
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/elsewhere")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    elsewhere.append(self.path)
+                    self.send_error(500)
+
+            def log_message(self, *arguments):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = elevation_cache.object_url(f"http://127.0.0.1:{server.server_address[1]}", self.BUCKET, "family/meta.tar")
+        with self.assertRaisesRegex(elevation_cache.CacheError, "family/meta.tar: HTTP 302"):
+            elevation_cache.fetch_object(url, elevation_cache.Token(self.endpoint), self.root / "download", 10, "0" * 64)
+        self.assertEqual(elsewhere, [])
+
+    def test_a_directory_that_holds_other_files_is_left_alone(self):
+        self.raw.mkdir(parents=True)
+        (self.raw / "N52").mkdir()
+        (self.raw / "N52" / "N52E013.hgt.gz").write_bytes(b"a tile this build wrote")
+        report = self.restore()
+        self.assertIn("holds files that were not restored from this set; it is left alone", report["sets"]["raw"]["reason"])
+        self.assertEqual(files_of(self.raw), {"N52/N52E013.hgt.gz": b"a tile this build wrote"})
+        self.assertEqual(self.requests, [])
+        # An empty directory, as setup.sh leaves it, is fine.
+        self.opened.mkdir(parents=True)
+        self.assertTrue(self.restore([("opened-400", self.opened, True)])["sets"]["opened-400"]["restored"])
+
+    def test_restored_tiles_a_later_build_wrote_over_are_not_called_restored(self):
+        self.assertTrue(self.restore()["sets"]["raw"]["restored"])
+        # A build under other settings wrote its own tiles and cell list into the directory.
+        (self.raw / "cells.txt").write_text("N52E013 " + "0" * 64 + "\n")
+        self.requests.clear()
+        report = self.restore()
+        self.assertFalse(report["sets"]["raw"]["restored"])
+        self.assertIn("holds files that were not restored from this set", report["sets"]["raw"]["reason"])
+        self.assertEqual(self.requests, [])
+        self.assertTrue((self.raw / "restore.json").exists())
+
+    def test_every_failure_is_reported_and_leaves_nothing_behind(self):
+        # A fault of the tool itself is no reason to stop the build, and no secret either.
+        with patch.object(elevation_cache, "restore_meta", side_effect=RuntimeError("a bug")), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertIn("the restore tool failed: RuntimeError: a bug", self.reason())
+        self.assertIn("Traceback", errors.getvalue())
+        # A record that cannot be used: every set says so, and the bucket is not asked.
+        self.requests.clear()
+        usable = self.record.read_text()
+        self.record.write_text(usable.replace("bicino-routing-elevation-cache-v1", "v0"))
+        report = self.restore([("raw", self.raw, True), ("opened-400", self.opened, False)])
+        self.assertEqual(elevation_cache.failed_sets(report), ["raw", "opened-400"])
+        self.assertIn("is not a usable record: its schema is not", report["sets"]["opened-400"]["reason"])
+        self.assertEqual(json.loads(self.report.read_text()), report)
+        self.assertEqual(self.requests, [])
+        # What an attempt at a set the record no longer keeps left beside its directory is removed.
+        self.record.write_text(usable)
+        left = elevation_cache.staging_of(self.opened)
+        (left / "N52").mkdir(parents=True)
+        report = self.restore([("opened-200", self.opened, False)])
+        self.assertEqual((report["sets"]["opened-200"]["kept"], left.exists()), (False, False))
+
+    def test_a_proxy_named_by_the_environment_is_not_used(self):
+        # urllib reads the proxies when the tool starts, so this needs a process of its own.
+        # Through this proxy nothing would arrive.
+        environment = {key: value for key, value in os.environ.items() if key.lower() != "no_proxy"}
+        environment.update(http_proxy="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9", all_proxy="http://127.0.0.1:9")
+        ran = subprocess.run([sys.executable, str(BUILDER / "elevation_cache.py"), "verify", "--record", str(self.record),
+                              "--set", "raw", "--band", "S0.tar", "--work", str(self.root / "work"),
+                              "--endpoint", self.endpoint], capture_output=True, text=True, env=environment, timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertIn("meta.tar, S0.tar of gs://test-elevation/family/raw-", ran.stdout)
+
+    def test_a_killed_restore_keeps_its_finished_bands_and_no_others(self):
+        record = elevation_cache.load_record(self.record)
+        self.refuse["raw/S1.tar"] = 403
+        with self.assertRaises(elevation_cache.CacheError):
+            # restore_set alone leaves what it assembled, as a kill does.
+            elevation_cache.restore_set(record, "raw", self.raw, endpoint=self.endpoint, jobs=1, log=self.lines.append)
+        staging = elevation_cache.staging_of(self.raw)
+        self.assertTrue((staging / "N52" / "N52E013.hgt.gz").exists())
+        (staging / "S10").mkdir()
+        (staging / "S10" / "S10E120.hgt.gz.partial").write_bytes(b"half a tile")
+        self.assertFalse(self.raw.exists())
+        self.refuse.clear()
+        self.requests.clear()
+        self.assertTrue(self.restore()["sets"]["raw"]["restored"])
+        self.assertEqual([key for key, _, _ in self.requests], ["raw/meta.tar", "raw/S1.tar"])
+        restored = files_of(self.raw)
+        del restored["restore.json"]
+        self.assertEqual(restored, files_of(self.built["raw"]))
+        # A finished band that has since lost a tile is not moved into place.
+        with self.assertRaises(elevation_cache.CacheError):
+            self.refuse["opened-400/S1.tar"] = 403
+            elevation_cache.restore_set(record, "opened-400", self.opened, endpoint=self.endpoint, jobs=1,
+                                        log=self.lines.append)
+        self.refuse.clear()
+        (elevation_cache.staging_of(self.opened) / "N52" / "N52E014.hgt.gz").unlink()
+        report = self.restore([("opened-400", self.opened, True)])
+        self.assertIn("opened-400: 1 cells are missing and 0 are extra", report["sets"]["opened-400"]["reason"])
+        self.assertFalse(self.opened.exists() or elevation_cache.staging_of(self.opened).exists())
+        # What an attempt at another set left is not built on.
+        other = self.root / "scratch" / "other"
+        left = elevation_cache.staging_of(other) / ".shards"
+        left.mkdir(parents=True)
+        (left / "state.json").write_text(json.dumps({"set": "raw", "manifestSha256": "0" * 64, "cellListSha256": "0" * 64}))
+        (left / "N5.tar.done").write_text(json.dumps({"sha256": record.sets["raw"]["shards"][0]["sha256"]}))
+        self.requests.clear()
+        self.assertTrue(self.restore([("raw", other, True)])["sets"]["raw"]["restored"])
+        self.assertEqual(len(self.requests), 4)
+
+    def test_after_the_build_the_report_says_whether_the_tiles_are_still_the_recorded_ones(self):
+        self.restore()
+        entry = elevation_cache.compare(self.report, log=self.lines.append)["sets"]["raw"]
+        self.assertEqual((entry["tilesAsRecorded"], entry["manifestAsRecorded"]), (True, True))
+        # The build writes the manifest again; with another runtime it is other bytes over the same tiles.
+        manifest = self.raw / "elevation-manifest.json"
+        manifest.write_text(manifest.read_text().replace("1.4.4", "1.5.0"))
+        entry = elevation_cache.compare(self.report, log=self.lines.append)["sets"]["raw"]
+        self.assertEqual((entry["tilesAsRecorded"], entry["manifestAsRecorded"]), (True, False))
+        self.assertIn("raw: the tiles are the recorded ones; the build wrote the manifest again", self.lines[-1])
+        # A source that moved makes the build write cells again.
+        (self.raw / "cells.txt").write_text("N52E013 " + "0" * 64 + "\n")
+        entry = elevation_cache.compare(self.report, log=self.lines.append)["sets"]["raw"]
+        self.assertIs(entry["tilesAsRecorded"], False)
+        self.assertIn("the tiles are no longer the ones elevation-cache-test.json pins", self.lines[-1])
+        self.assertIs(json.loads(self.report.read_text())["sets"]["raw"]["tilesAsRecorded"], False)
+
+    def test_verify_checks_the_bucket_and_keeps_nothing(self):
+        work = self.root / "work"
+        elevation_cache.verify(self.record, "raw", work, endpoint=self.endpoint, jobs=1, log=self.lines.append)
+        self.assertIn("every tar of gs://test-elevation/family/raw-", self.lines[-1])
+        elevation_cache.verify(self.record, "raw", work, only=["S0.tar"], endpoint=self.endpoint, log=self.lines.append)
+        self.assertEqual([key for key, _, _ in self.requests[-2:]], ["raw/meta.tar", "raw/S0.tar"])
+        self.assertEqual(list(work.iterdir()), [])
+        with self.assertRaisesRegex(elevation_cache.CacheError, "no band tar N9.tar"):
+            elevation_cache.verify(self.record, "raw", work, only=["N9.tar"], endpoint=self.endpoint, log=self.lines.append)
+        path = self.tar_path("raw", "S0.tar")
+        path.write_bytes(path.read_bytes()[:-1] + b"x")
+        with self.assertRaisesRegex(elevation_cache.CacheError, "S0.tar is not the pinned file"):
+            elevation_cache.verify(self.record, "raw", work, endpoint=self.endpoint, jobs=1, log=self.lines.append)
+        self.assertEqual(list(work.iterdir()), [])
+
+    def test_a_record_must_be_whole_to_be_used(self):
+        pristine = json.loads(self.record.read_text())
+        self.assertEqual(elevation_cache.record_problems(pristine), [])
+
+        def broken(change):
+            record = json.loads(json.dumps(pristine))
+            change(record)
+            self.record.write_text(json.dumps(record))
+            with self.assertRaises(elevation_cache.CacheError) as raised:
+                elevation_cache.load_record(self.record)
+            return str(raised.exception)
+
+        raw = lambda record: record["sets"]["raw"]  # noqa: E731
+        self.assertIn("schema", broken(lambda record: record.update(schema="other")))
+        self.assertIn("bucket", broken(lambda record: record.update(bucket="gs://Bucket/")))
+        self.assertIn("holds no sets", broken(lambda record: record.update(sets={})))
+        self.assertIn("prefix", broken(lambda record: raw(record).update(prefix="../other")))
+        self.assertIn("manifestSha256", broken(lambda record: raw(record).pop("manifestSha256")))
+        self.assertIn("one meta.tar", broken(lambda record: raw(record)["shards"].pop()))
+        self.assertIn("neither meta.tar nor a band", broken(lambda record: raw(record)["shards"][0].update(name="../N5.tar")))
+        self.assertIn("has no SHA-256", broken(lambda record: raw(record)["shards"][0].update(sha256="abc")))
+        self.assertIn("the bands hold 4 tiles for 5 cells", broken(lambda record: raw(record)["shards"].pop(1)))
+        self.record.write_text("not json")
+        with self.assertRaisesRegex(elevation_cache.CacheError, "cannot read the record"):
+            elevation_cache.load_record(self.record)
+
+    def test_only_a_finished_set_is_packed_and_the_same_bytes_every_time(self):
+        first = json.loads(self.record.read_text())
+        self.assertEqual([shard["name"] for shard in first["sets"]["raw"]["shards"]],
+                         ["N5.tar", "S0.tar", "S1.tar", "meta.tar"])
+        self.assertEqual([shard["files"] for shard in first["sets"]["raw"]["shards"]], [3, 1, 1, 8])
+        self.assertTrue(first["sets"]["opened-400"]["prefix"].startswith("family/opened-400-"))
+        again = elevation_cache.pack(self.root / "again.json", self.root / "again", self.BUCKET, "family",
+                                     list(self.built.items()))
+        self.assertEqual(again["sets"], first["sets"])
+        (self.built["raw"] / "S10" / "S10E120.hgt.gz").unlink()
+        with self.assertRaisesRegex(elevation_cache.CacheError, "the tiles on disk are not the cells of cells.txt"):
+            elevation_cache.pack(self.root / "bad.json", self.root / "bad", self.BUCKET, "family", [("raw", self.built["raw"])])
+
+    def test_the_command_tells_restored_from_not_restored(self):
+        arguments = ["restore", "--record", str(self.record), "--report", str(self.report), "--jobs", "1",
+                     "--endpoint", self.endpoint + "/", "--set", "raw", str(self.raw)]
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(elevation_cache.main([*arguments, "--set-if-kept", "opened-200", str(self.opened)]), 0)
+            self.assertIn("raw: restored 5 cells into", output.getvalue())
+            self.refuse["opened-400/meta.tar"] = 403
+            self.assertEqual(elevation_cache.main([*arguments, "--set-if-kept", "opened-400", str(self.opened)]),
+                             elevation_cache.NOT_RESTORED)
+            # A set that must be there and is not kept is a failure too.
+            self.assertEqual(elevation_cache.main([*arguments, "--set", "opened-200", str(self.opened)]),
+                             elevation_cache.NOT_RESTORED)
+            self.assertEqual(elevation_cache.main(["compare", "--report", str(self.report)]), 0)
+            self.assertEqual(elevation_cache.main(["check", "--record", str(self.record)]), 0)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            elevation_cache.main(["restore", "--record", str(self.record), "--set", "raw", "relative/dir"])
+
+    def test_the_stand_in_serves_only_the_buckets_own_files(self):
+        (self.root / "secret").write_text("outside the bucket")
+        for path in (f"/storage/v1/b/{self.BUCKET}/o/..%2Fsecret?alt=media",
+                     f"/storage/v1/b/other/o/{urllib.parse.quote(str(self.tar_path('raw', 'S0.tar').relative_to(self.bucket)), safe='')}?alt=media",
+                     "/secret"):
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                urllib.request.urlopen(self.endpoint + path)
+            refused.exception.close()
+            self.assertEqual(refused.exception.code, 404, path)
+
+
 class ElevationCacheRecordTests(unittest.TestCase):
     """The pinned record of the tiles kept in the bucket must stay checkable."""
 
@@ -1165,6 +1836,14 @@ class ElevationCacheRecordTests(unittest.TestCase):
                 # The prefix names the set by its manifest.
                 self.assertTrue(tiles["prefix"].endswith(f"-{tiles['manifestSha256'][:12]}/"), tiles["prefix"])
                 self.assertRegex(tiles["cellListSha256"], r"^[0-9a-f]{64}$")
+
+    def test_the_restore_tool_accepts_the_record(self):
+        record = elevation_cache.load_record(ROUTING / "releases" / "elevation-cache-2026-11-26.json")
+        self.assertEqual((record.bucket, sorted(record.sets)), ("bicino-routing-elevation", ["opened-400", "raw"]))
+        self.assertEqual(elevation_cache.object_url(elevation_cache.GOOGLE, record.bucket,
+                                                    record.sets["raw"]["prefix"] + "N0.tar"),
+                         "https://storage.googleapis.com/storage/v1/b/bicino-routing-elevation/o/"
+                         "copernicus-2021%2Fraw-d53d9beb3206%2FN0.tar?alt=media")
 
     def test_the_opened_set_names_the_raw_set_it_was_opened_from(self):
         raw, opened = self.RECORD["sets"]["raw"], self.RECORD["sets"]["opened-400"]

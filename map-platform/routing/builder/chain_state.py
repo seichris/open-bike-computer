@@ -67,6 +67,9 @@ STAGES = {
 # The settings a stage's work depends on, beyond those of the stages it needs.
 # The map-platform image counts only for the stages that run it: a graph
 # build without elevation is the same graph whatever that image is.
+# BICINO_ELEVATION_CACHE is not among them: a restored tile is checked against
+# the cell list the build would write, so the record changes how the tiles
+# arrive and not which tiles they are. What was restored is in the result.
 IMAGE = "BICINO_MAP_PLATFORM_IMAGE"
 STAGE_SETTINGS = {
     "images": (IMAGE,),
@@ -90,6 +93,7 @@ ENV_KEYS = {
     "BICINO_PLANET_DATE": "planetDate",
     "BICINO_OPENING_RADIUS": "openingRadiusMetres",
     "BICINO_TERRAIN": "terrainSource",
+    "BICINO_ELEVATION_CACHE": "elevationCache",
     "BICINO_TOOLS_COMMIT": "toolsCommit",
     "BICINO_MAP_PLATFORM_IMAGE": "mapPlatformImage",
     "BICINO_SAMPLE_CITY": "sampleCity",
@@ -267,6 +271,20 @@ def gate_verdict(root, stages):
     return ("missed" if any(summary["failures"].values()) else "met"), summary
 
 
+def restore_report(root, env):
+    """What the elevation stage restored from the run's record of kept tiles, and why not.
+
+    None when the run asks for no record, or when the report is of another
+    record: that one is an earlier run's.
+    """
+    record = env.get("BICINO_ELEVATION_CACHE")
+    report = read_json(root / "export" / "evidence" / "elevation-cache.json")
+    if not record or not isinstance(report, dict) or report.get("record") != record \
+            or not isinstance(report.get("sets"), dict):
+        return None
+    return report
+
+
 def chain_status(root, clock=time.time):
     stages = stage_states(root)
     states = [entry["state"] for entry in stages]
@@ -296,6 +314,7 @@ def chain_status(root, clock=time.time):
         "finishedAt": max(times) if times and state in ("complete", "failed") and "running" not in states else None,
         "run": run,
         "stages": stages,
+        "elevationRestore": restore_report(root, env),
         "sampler": read_json(root / "export" / "chain" / "sampler.json"),
     }
     return status, summary
@@ -333,6 +352,18 @@ def describe(status):
     if len(commits) > 1:
         lines.append("  NOTE: the stages ran with different tools: "
                      + "; ".join(f"{commit[:12]} ({', '.join(stages)})" for commit, stages in commits.items()))
+    restore = status.get("elevationRestore")
+    if restore:
+        parts = []
+        for name, entry in restore["sets"].items():
+            if entry.get("restored"):
+                rebuilt = ", some cells built again" if entry.get("tilesAsRecorded") is False else ""
+                parts.append(f"{name} restored in {entry.get('seconds')} s{rebuilt}")
+            elif entry.get("kept", True):
+                parts.append(f"{name} NOT restored and built instead ({entry.get('reason')})")
+            else:
+                parts.append(f"{name} not kept, built")
+        lines.append(f"  kept tiles of {restore['record']}: " + "; ".join(parts))
     sampler = status.get("sampler")
     if sampler:
         lines.append(f"  scratch {sampler.get('diskUsedBytes', 0) / 1e9:.0f} GB (peak {sampler.get('peakDiskBytes', 0) / 1e9:.0f}),"

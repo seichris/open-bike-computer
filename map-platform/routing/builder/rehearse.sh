@@ -14,9 +14,20 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 checkout=$(cd "$here/../../.." && pwd)
 root=
 arguments=()
+mounts=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) root=${2:-}; shift 2 ;;
+    --pack-cache|--elevation-cache)
+      # A directory of packed elevation tiles, at the same path inside.
+      directory=${2:-}
+      case "$directory" in
+        /*) ;;
+        *) echo "error: $1 takes an absolute path" >&2; exit 64 ;;
+      esac
+      mkdir -p "$directory"
+      mounts+=(-v "$directory:$directory")
+      arguments+=("$1" "$directory"); shift 2 ;;
     *) arguments+=("$1"); shift ;;
   esac
 done
@@ -36,5 +47,5 @@ find "$repo" -name __pycache__ -type d -prune -exec rm -rf {} +
 image=bicino-builder-rehearsal:1
 docker build --quiet --tag "$image" --file "$here/rehearsal.Dockerfile" "$here" >/dev/null
 exec docker run --rm --init \
-  -v /var/run/docker.sock:/var/run/docker.sock -v "$root:$root" \
+  -v /var/run/docker.sock:/var/run/docker.sock -v "$root:$root" ${mounts[@]+"${mounts[@]}"} \
   "$image" python3 "$repo/map-platform/routing/builder/rehearse.py" --root "$root" ${arguments[@]+"${arguments[@]}"}
