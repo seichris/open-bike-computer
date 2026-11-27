@@ -1116,22 +1116,31 @@ and other coasts have them too:
 
 A check that does not depend on sea level is to compare with the opened
 Copernicus surface, which no pit of the lidar is in. Counted on a laptop
-after the rule, with
-`terrain_below_fill.py` from the notes folder:
+after the rule, with `terrain_below_fill.py` from the notes folder:
 
-| Cell | Terrain posts 20 to 50 m below the opened surface | 50 to 100 m | More than 100 m |
-|---|---|---|---|
-| N50W089, Lake Nipigon, boreal forest | 149 | 44 | 24, to 202 m |
-| N50W129, Holberg Inlet, coastal rainforest | 59,990 | 161 | 0 |
+| Cell | Terrain posts 20 to 50 m below the opened surface | 50 to 100 m | More than 100 m | More than 50 m below a flat opened surface |
+|---|---|---|---|---|
+| N50W089, Lake Nipigon, boreal forest | 149 | 44 | 24, to 202 m | 65 |
+| N50W129, Holberg Inlet, coastal rainforest | 59,990 | 161 | 0 | 0 |
+| N49W123, Coast Mountains north of the Fraser | 1,097,794 | 25,350 | 2,452, to 304 m | 6 |
 
-Real ground lies under the radar's surface by the height of the forest: 10
-to 20 m for 35,016 posts of the Ontario cell, and 30 to 50 m for 11,660
-posts of the coastal one, up to 81 m. So dropping terrain posts more than
-50 m below the opened surface would cut real ground under tall forest, and
-100 m would not, while it still takes the 24 worst posts of Lake Nipigon.
-Such a check would change the blend for every cell and both terrain
+- **Forest.** Real ground lies under the radar's surface by the height of
+  the forest: 10 to 20 m for 35,016 posts of the Ontario cell, and 30 to
+  50 m for 11,660 posts of the coastal one, up to 81 m.
+- **Steep ground.** In the mountain cell correct lidar terrain lies up to
+  304 m below the opened surface, because Copernicus is wrong on steep
+  slopes. A check that dropped every terrain post far below the opened
+  surface would put those errors back in place of the lidar, at any limit
+  that still catches a pit.
+- **Flat water.** The pits lie where the opened surface is flat: the
+  heights of the seven by seven posts around a post differ by 2 m at most.
+  Counted there, the Ontario cell keeps 65 of its 68 posts more than 50 m
+  down, the mountain cell 6 of 27,802 and the forest cell none.
+
+So a check would have to drop terrain far below a flat opened surface, not
+far below any. It would change the blend for every cell and both terrain
 sources. It is not in the build and is Chris's to decide; the same script
-counts the posts on a builder's tiles.
+counts the posts on a builder's tiles, both ways.
 
 The four rehearsals above were built before the rule. Vancouver's cell then
 held 341 pixels below -10 m, and its routes were the ungraded ones.
