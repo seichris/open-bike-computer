@@ -103,8 +103,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from build_elevation import (
-    MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, cell_of, format_cell_catalog,
-    format_sonny_catalog, format_terrain_catalog, hgt_name, load_area, load_terrain_sources, sonny_posts,
+    LINZ_EPSG, LINZ_GEOGRAPHIC_EPSG, LINZ_ORIGIN, MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET,
+    TERRAIN_PREFIX, cell_of, format_cell_catalog, format_linz_catalog, format_sonny_catalog, format_terrain_catalog,
+    hgt_name, linz_box, linz_url, load_area, load_terrain_sources, sonny_posts,
 )
 
 KEY = re.compile(r"/([ns])(\d{2})([ew])(\d{3})/USGS_13_\1\2\3\4_(\d{8})\.tif$")
@@ -337,6 +338,44 @@ def http_download(url):
         return data, response.headers["Last-Modified"]
 
 
+VERSION_ENTRY = re.compile(r"<Version>(.*?)</Version>", re.DOTALL)
+
+
+def parse_versions(xml):
+    """(key, version, bytes, ETag) of the latest version of every object on a page of an S3 version listing."""
+    found = []
+    for entry in VERSION_ENTRY.findall(xml):
+        fields = {name: re.search(rf"<{name}>([^<]*)</{name}>", entry)
+                  for name in ("Key", "VersionId", "IsLatest", "Size", "ETag")}
+        if not all(fields.values()):
+            raise ValueError("an S3 version listing entry lacks its key, version, size or ETag")
+        if fields["IsLatest"][1] == "true":
+            found.append((fields["Key"][1], fields["VersionId"][1], int(fields["Size"][1]),
+                          fields["ETag"][1].replace("&quot;", "").strip('"')))
+    key = re.search(r"<NextKeyMarker>([^<]+)</NextKeyMarker>", xml)
+    version = re.search(r"<NextVersionIdMarker>([^<]+)</NextVersionIdMarker>", xml)
+    if "<IsTruncated>true</IsTruncated>" in xml and key is None:
+        raise ValueError("a truncated S3 version listing names no next page")
+    return found, (key[1], version[1] if version else "") if key else None
+
+
+def linz_cells(bounds, area):
+    """The cells whose box of 8 m pixels meets the sheet's bounds and that touch the area."""
+    from rasterio.crs import CRS
+    from rasterio.warp import transform_bounds
+
+    west, south, east, north = transform_bounds(CRS.from_epsg(LINZ_EPSG), CRS.from_epsg(LINZ_GEOGRAPHIC_EPSG),
+                                                *bounds, densify_pts=256)
+    cells = []
+    for x in range(math.floor(west) - 1, math.floor(east) + 1):
+        for y in range(math.floor(south) - 1, math.floor(north) + 1):
+            left, bottom, right, top = linz_box((x, y))
+            if left < bounds[2] and right > bounds[0] and bottom < bounds[3] and top > bounds[1] \
+                    and touches_area((x, y), area):
+                cells.append((x, y))
+    return cells
+
+
 def http_get(url):
     with urllib.request.urlopen(url, timeout=120) as response:
         return response.read().decode()
@@ -424,6 +463,13 @@ def main():
     union.add_argument("--box", type=float, nargs=4, metavar=("WEST", "SOUTH", "EAST", "NORTH"))
     union.add_argument("--source", required=True, help="Where the polygons come from, recorded in the file")
     union.add_argument("--out", required=True, type=Path, help="A new .geojson.gz file")
+    polygon = commands.add_parser("polygon", help="Write an area from a publisher's GeoJSON polygon")
+    polygon.add_argument("--geojson", required=True, type=Path, help="A GeoJSON Feature or FeatureCollection")
+    polygon.add_argument("--source", required=True, help="Where the polygon comes from, recorded in the file")
+    polygon.add_argument("--out", required=True, type=Path, help="A new .geojson.gz file")
+    linz = commands.add_parser("linz-sheets", help="Pin the latest version of every LINZ sheet a cell of the area reads")
+    linz.add_argument("--area", required=True, type=Path, help="The file `polygon` wrote")
+    linz.add_argument("--out", required=True, type=Path, help="A new catalog file")
     sonny = commands.add_parser("sonny-tiles", help="Pin Sonny's tile of every cell that touches the area")
     sonny.add_argument("--area", required=True, type=Path, help="The file `countries` wrote")
     sonny.add_argument("--folder", default=SONNY_FOLDER, help="The Drive folder's embedded view")
@@ -482,6 +528,19 @@ def main():
             stream.write(data)
         print(f"{args.out.name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}")
         return
+    if args.command == "polygon":
+        from shapely.geometry import mapping, shape
+        from shapely.ops import unary_union
+        document = json.loads(args.geojson.read_text())
+        features = document["features"] if document.get("type") == "FeatureCollection" else [document]
+        merged = unary_union([shape(feature["geometry"]) for feature in features])
+        if merged.is_empty or not merged.is_valid or merged.geom_type not in ("Polygon", "MultiPolygon"):
+            parser.error("the GeoJSON holds no valid polygon")
+        data = area_bytes({"type": "Feature", "properties": {"source": args.source}, "geometry": mapping(merged)})
+        with args.out.open("xb") as stream:
+            stream.write(data)
+        print(f"{args.out.name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}")
+        return
     if args.command == "area":
         cut = None if args.box is None else tuple(int(value) if value.is_integer() else value for value in args.box)
         try:
@@ -494,6 +553,39 @@ def main():
         return
     pinned = args.area.resolve(strict=True)
     area = load_area(pinned, hashlib.sha256(pinned.read_bytes()).hexdigest())
+    if args.command == "linz-sheets":
+        import rasterio
+        from build_elevation import GDAL_OPTIONS, LINZ_GDAL_OPTIONS
+        bucket, _, prefix = LINZ_ORIGIN.partition(".amazonaws.com/")
+        bucket += ".amazonaws.com"
+        objects, marker = [], None
+        while True:
+            query = {"versions": "", "prefix": prefix + "/", "max-keys": "1000"}
+            if marker:
+                query.update({"key-marker": marker[0], "version-id-marker": marker[1]})
+            page, marker = parse_versions(http_get(f"{bucket}/?{urllib.parse.urlencode(query)}"))
+            objects += page
+            if marker is None:
+                break
+        tiles = {}
+        with rasterio.Env(**{**GDAL_OPTIONS, **LINZ_GDAL_OPTIONS}):
+            for key, version, size, etag in sorted(objects):
+                name = re.fullmatch(re.escape(prefix) + r"/([A-Z]{2}\d{2})\.tiff", key)
+                if name is None:
+                    continue
+                with rasterio.open("/vsicurl/" + linz_url(LINZ_ORIGIN, name[1], version)) as dataset:
+                    bounds = tuple(round(value) for value in dataset.bounds)
+                for cell in linz_cells(bounds, area):
+                    tiles.setdefault(cell, []).append((name[1], version, size, etag, bounds))
+                print(f"{name[1]} {size} bytes {bounds}", flush=True)
+        text = format_linz_catalog({cell: tuple(sorted(found)) for cell, found in tiles.items()})
+        with args.out.open("x") as stream:
+            stream.write(text)
+        sheets = {sheet[0]: sheet for found in tiles.values() for sheet in found}
+        print(f"{args.out.name}: {len(tiles)} cells, {len(sheets)} sheets, "
+              f"{sum(sheet[2] for sheet in sheets.values())} source bytes, {len(text.encode())} bytes, "
+              f"sha256 {hashlib.sha256(text.encode()).hexdigest()}")
+        return
     if args.command == "sonny-tiles":
         listed = sonny_listing(http_get(args.folder))
         wanted = {cell: drive_file for cell, drive_file in listed.items() if touches_area(cell, area)}

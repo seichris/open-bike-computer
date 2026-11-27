@@ -175,7 +175,7 @@ production now.
    sources approved for routing. It is kept apart from the topography source
    policy, which accepts only Copernicus and is an input of the map-platform
    image and of the offline-map worker's identity. A build uses every source
-   of the list, each inside its own area. It holds three:
+   of the list, each inside its own area. It holds four:
 
    - **USGS 3DEP**, the 1/3 arc-second lidar tiles of the conterminous
      United States, approved on 2026-11-26.
@@ -191,6 +191,9 @@ production now.
      [Regional terrain models](elevation-sources.md)). One person's
      compilation, one zip of an HGT file per cell in a public Google Drive
      folder; the posts are the cell's own, in each country's height datum.
+   - **LINZ's New Zealand LiDAR 1m DEM**, approved on 2026-11-27: 424
+     cloud-optimised sheets in a versioned public bucket, read at their 8 m
+     overview inside LINZ's capture area, about 90% of the mainland.
 
    Each source pins two files:
 
@@ -217,6 +220,9 @@ production now.
      a file that has had too many downloads that day with a page of its
      own, which the hash stops. A copy of every file is kept in the
      elevation bucket, which the source list names as Sonny's `mirror`.
+     LINZ's [catalog](linz-nz-lidar-1m-dem-sheets-20261127.txt) names each
+     sheet's version, size, ETag and NZTM bounds, and the sheets each of its
+     60 cells reads.
 
    [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
    an `osmium export` of the relation, or of several for Sonny, 3DEP's

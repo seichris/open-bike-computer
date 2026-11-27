@@ -25,14 +25,16 @@ recommendation below with its caveats. A source joins
 `elevation-sources.json` with its reader in `build_elevation.py`, its
 catalog, its area and the approval fields, as 3DEP and MRDEM-30 did, and
 passes city samples through that reader before a planet is built with it.
-Sonny's tiles are in the list (see [below](#sonnys-tiles-in-the-build)); the
-other three are not yet.
+Sonny's tiles and LINZ's lidar are in the list (see
+[Sonny's tiles](#sonnys-tiles-in-the-build) and
+[LINZ's lidar](#linzs-lidar-in-the-build)); GSI's tiles and CEDD's lidar are
+not.
 
 | Source | Approved area | Licence and credit | State |
 |---|---|---|---|
 | Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build, from a copy in the elevation bucket |
-| LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Not read yet |
-| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet: a crawl of about 400,000 tiles at a rate GSI accepts |
+| LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Read by the build |
+| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet. GSI offers no bulk file without an account, so on 2026-11-27 Chris chose one slow crawl of its PNG tiles into HGT cells kept in the elevation bucket, which builds read instead of GSI's server |
 | CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Not read: the terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
 
 The [pits at shorelines](refresh-runbook.md#pits-at-shorelines) found in
@@ -130,6 +132,41 @@ as the third source of the list after 3DEP and MRDEM-30.
   too, so the chain stops before the gate there; serving the two graphs
   and running `compare_elevation.py` by hand gave the row above.
   Stuttgart's elevation stage took 180 s with the terrain and 80 s without.
+
+## LINZ's lidar in the build
+
+`build_elevation.py --terrain-sources` reads LINZ's New Zealand LiDAR 1m
+DEM since 2026-11-27, as the fourth source of the list.
+
+- **Catalog.** [The catalog](linz-nz-lidar-1m-dem-sheets-20261127.txt)
+  names the 424 sheets of the national mosaic (377 GB at 1 m), each by
+  the version the bucket held on 2026-11-27, its size and its ETag. It
+  also lists, for each of the 60 cells that touch the capture area, the
+  sheets under it: 14 for Wellington's cell. The bucket keeps every
+  version, so a pinned version can be read even after LINZ replaces the
+  sheet; Wellington's BQ31 has four versions since 2024.
+- **Reading.** A cell reads its sheets' third overview, 8 m pixels, in
+  HTTP ranges, after checking each version's size and ETag. The pixels go
+  into one mosaic on NZTM2000, so that pixels that are not ground are
+  dropped with their margin across a sheet's edge, and the posts are
+  resampled from it onto NZGD2000. Wellington's cell read 605 MB of pixels
+  in 87 s on a laptop and peaked at 2.2 GB of memory, more than a 3DEP
+  worker.
+- **Area.** [The area](linz-nz-lidar-capture-area-20260917.geojson.gz) is
+  the capture area LINZ publishes with the mosaic: where it has lidar,
+  about 90% of the mainland. The Chatham Islands are outside it.
+- **Not ground.** Pixels below −10 m or above 4,000 m, Aoraki being
+  3,724 m, are dropped with the pixels within 15 of them, 120 m as for
+  MRDEM-30.
+- **Rehearsal.** Wellington ran through the build chain with all four
+  sources (`builder/rehearse.sh --radius 400 --terrain
+  usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem`).
+  Eight terrain tiles read 4.8 GB of pixels from LINZ's sheets, and the
+  elevation stage took 251 s. The gate was met: 8 routes, 40% of the direct
+  routes read 6%+ at the median, and `use_hills` changes 3 of 4 legs. The
+  longest change is the Everyday route from the railway station to
+  Hataitai, 4.64 km on the ungraded graph and 6.57 km graded: it leaves
+  Mount Victoria for the shared path through the tunnel, as in the samples.
 
 ## Recommendation
 
