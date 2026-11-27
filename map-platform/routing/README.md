@@ -333,6 +333,8 @@ Judge an elevation source on small city graphs before grading a planet.
 San Francisco, Zurich, Wellington), each with a box and four or five legs.
 The 2026-11-25 results and the recommendation are in
 [Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples).
+Terrain models of other regions, surveyed and sampled on 2026-11-27, are in
+[Regional terrain models](elevation-sources.md).
 
 A city that names a Geofabrik `extract` builds as a sample. To build one
 city at one opening radius and run the gate on it in one command, use
@@ -437,6 +439,21 @@ before building a planet with a new elevation method.
      --fill "$scratch/dem/san-diego/opening-400" --out "$scratch/dem/san-diego/hybrid"
    ```
 
+   [tower_mask.py](tower_mask.py) takes any of these tile sets and writes
+   no data where tall buildings dominate, so that Valhalla grades those
+   streets flat, as the graph without elevation does. The zones come from
+   the building heights of GHS-BUILT-H R2023A (ANBH, 3 arc-seconds, WGS 84;
+   CC BY 4.0, © European Union): pass the grid's GeoTIFFs that cover the
+   cells as `--heights`. It is a sample tool like the others. The rule, what
+   it masks and why it is not ready for a planet are in
+   [Switching elevation off in tower zones](refresh-runbook.md#switching-elevation-off-in-tower-zones).
+
+   ```sh
+   python tower_mask.py --input "$scratch/dem/new-york/opening-200" --bounds -75 40 -73 41 \
+     --heights "$scratch/ghsl/GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss_V1_0_R5_C11.tif" \
+     --out "$scratch/dem/new-york/opening-200-mask"
+   ```
+
 3. Build each city once without elevation and once per source. The admin
    input must also hold the country's relation with all its members. A state
    extract cuts it, and Valhalla then builds the state polygon alone and no
@@ -466,8 +483,12 @@ before building a planet with a new elevation method.
    bodies, compares lengths with the ungraded routes, reads the share of
    route length on 6%+ grades back with `/trace_attributes`, and in hilly
    cities flips `use_hills` between 0 and 1. `summary` exits non-zero when
-   a source misses a target. The same commands, without `--city`, are the
-   planet release gate.
+   a source misses a target. A flat route more than 5% longer misses one
+   as a detour, where its direct route reads steep on that source.
+   Otherwise it is a swap, listed under the table, and misses one only when
+   it is more than 15% longer or swaps are many (see
+   [Detours and swaps](refresh-runbook.md#detours-and-swaps-how-a-longer-flat-route-is-judged)).
+   The same commands, without `--city`, are the planet release gate.
 
    ```sh
    tools/dev-env --map-backend python map-platform/routing/compare_elevation.py run \
