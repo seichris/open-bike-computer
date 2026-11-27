@@ -1,6 +1,6 @@
 #!/bin/bash
-# Write the raw Copernicus tiles, then open them at the run's radius. With a
-# terrain source, also write its tiles and put them over the opened ones.
+# Write the raw Copernicus tiles, then open them at the run's radius. With
+# terrain sources, also write their tiles and put them over the opened ones.
 #
 # With BICINO_ELEVATION_CACHE the raw tiles and, if the record keeps them, the
 # tiles opened at this radius are first restored from the bucket. A restored
@@ -37,22 +37,20 @@ fi
 mkdir -p "$BICINO_ELEVATION_RAW" "$BICINO_ELEVATION"
 sha256sum "$BICINO_ROUTING/build_elevation.py"
 
-# hybrid and terrain hold the mounts and arguments of a terrain source; manifests, what the run must leave.
+# hybrid and terrain hold the mounts and arguments of the terrain sources; manifests, what the run must leave.
 hybrid=()
 terrain=()
 manifests=("$BICINO_ELEVATION_RAW/elevation-manifest.json" "$BICINO_ELEVATION/elevation-manifest.json")
 directories=("$BICINO_ELEVATION_RAW" "$BICINO_ELEVATION")
 if bicino_is_hybrid; then
-  # The source list must hold this source, approved, with the catalog it pins.
-  python3 - "$BICINO_ROUTING" "$BICINO_TERRAIN" <<'PY'
+  # bicino_validate_run has checked that the run names the list's sources.
+  python3 - "$BICINO_ROUTING" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import build_elevation
-source = build_elevation.load_terrain_source(Path(sys.argv[1]) / "elevation-sources.json")
-if source.id != sys.argv[2]:
-    sys.exit(f"error: elevation-sources.json holds {source.id}, not BICINO_TERRAIN={sys.argv[2]}")
-print(f"terrain source {source.id}: {len(source.tiles)} tiles, catalog {source.catalog_sha256}")
+for source in build_elevation.load_terrain_sources(Path(sys.argv[1]) / "elevation-sources.json"):
+    print(f"terrain source {source.id}: {len(source.tiles)} cells, catalog {source.catalog_sha256}")
 PY
   mkdir -p "$BICINO_ELEVATION_OPENED" "$BICINO_ELEVATION_TERRAIN"
   sha256sum "$BICINO_ROUTING/elevation-sources.json"
