@@ -70,24 +70,27 @@ def files_of(directory):
 
 
 class FakeDocker:
-    """The containers of one Docker host; stands in for `subprocess.run`.
+    """The containers and networks of one Docker host; stands in for `subprocess.run`.
 
-    Like Docker, `ps --filter label=KEY=VALUE` finds a container only by the whole value.
+    Like Docker, `--filter label=KEY=VALUE` finds one only by the whole value.
     """
 
-    def __init__(self, containers):
+    def __init__(self, containers, networks=()):
         self.containers = dict(containers)
+        self.networks = dict(networks)
         self.calls = []
 
     def __call__(self, command, **_kwargs):
         self.calls.append(command)
         found = ""
-        if command[:4] == ["docker", "ps", "-aq", "--filter"]:
-            key, _, value = command[4].removeprefix("label=").partition("=")
-            found = "".join(f"{name}\n" for name, labels in self.containers.items() if labels.get(key) == value)
-        elif command[:3] == ["docker", "rm", "-f"]:
-            for name in command[3:]:
-                del self.containers[name]
+        for listing, removal, held in ((["docker", "ps", "-aq"], ["docker", "rm", "-f"], self.containers),
+                                       (["docker", "network", "ls", "-q"], ["docker", "network", "rm"], self.networks)):
+            if command[:len(listing) + 1] == [*listing, "--filter"]:
+                key, _, value = command[-1].removeprefix("label=").partition("=")
+                found = "".join(f"{name}\n" for name, labels in held.items() if labels.get(key) == value)
+            elif command[:len(removal)] == removal:
+                for name in command[len(removal):]:
+                    del held[name]
         return subprocess.CompletedProcess(command, 0, stdout=found, stderr="")
 
 
@@ -518,28 +521,36 @@ class RunStageTests(ScratchCase):
                   "their-build": {"bicino.work": f"{other}/build/planet-graded"},
                   # A checkout from before the label named the scratch root started this one: whose is it?
                   "unnamed-gate": {"bicino.stage": "gate"}}
+        their_networks = {"their-gate-network": {"bicino.stage": f"gate@{other}"}, "bridge": {}}
         docker = FakeDocker({"gate-1": {"bicino.stage": f"gate@{self.root}"},
                              "gate-2": {"bicino.stage": f"gate@{self.root}"},
                              "elevation": {"bicino.stage": f"elevation@{self.root}"},
-                             "build": {"bicino.work": f"{self.root}/build/planet-graded"}, **theirs})
+                             "build": {"bicino.work": f"{self.root}/build/planet-graded"}, **theirs},
+                            {"gate-network": {"bicino.stage": f"gate@{self.root}"}, **their_networks})
+        mine = f"label=bicino.stage=gate@{self.root}"
         with patch.object(run_stage.shutil, "which", return_value="/usr/bin/docker"), \
                 patch.object(run_stage.subprocess, "run", docker), (self.root / "log").open("w") as log:
-            run_stage.remove_containers(self.root, "gate", log)
-            self.assertEqual(docker.calls, [["docker", "ps", "-aq", "--filter", f"label=bicino.stage=gate@{self.root}"],
-                                            ["docker", "rm", "-f", "gate-1", "gate-2"]])
+            run_stage.remove_leftovers(self.root, "gate", log)
+            # The containers first: Docker keeps a network that a container is still on.
+            self.assertEqual(docker.calls, [["docker", "ps", "-aq", "--filter", mine],
+                                            ["docker", "rm", "-f", "gate-1", "gate-2"],
+                                            ["docker", "network", "ls", "-q", "--filter", mine],
+                                            ["docker", "network", "rm", "gate-network"]])
             self.assertEqual(sorted(docker.containers), sorted(["elevation", "build", *theirs]))
+            self.assertEqual(docker.networks, their_networks)
             # A killed graph build leaves build_graph.py's container, labelled with its work directory.
             del docker.calls[:]
-            run_stage.remove_containers(self.root, "build-graded", log)
+            run_stage.remove_leftovers(self.root, "build-graded", log)
             self.assertEqual([call[-1] for call in docker.calls[:2]],
                              [f"label=bicino.stage=build-graded@{self.root}",
                               f"label=bicino.work={self.root}/build/planet-graded"])
             self.assertEqual(docker.calls[2], ["docker", "rm", "-f", "build"])
+            self.assertEqual([call[:3] for call in docker.calls[3:]], [["docker", "network", "ls"]] * 2)
             # What systemd runs after it had to end a stage finds that stage's container, and only it.
             chain_state.mark(self.root, "elevation", "running", clock=self.clock)
             run_stage.finalize(self.root, "elevation", {"SERVICE_RESULT": "timeout", "EXIT_CODE": "killed", "EXIT_STATUS": "KILL"})
         self.assertEqual(chain_state.read_marker(self.chain, "elevation")["state"], "failed")
-        self.assertEqual(docker.containers, theirs)
+        self.assertEqual((docker.containers, docker.networks), (theirs, their_networks))
 
     def test_two_scratch_roots_never_share_a_label(self):
         roots = (Path("/srv/bicino-routing-scratch"), Path("/srv/bicino-routing-scratch-2"), self.root)
@@ -981,7 +992,8 @@ class ScriptTests(unittest.TestCase):
     def run_stage_script(self, directory, env, stage, script, *arguments):
         """Run a real stage script with stand-ins for Docker and the GNU tools; returns it and Docker's calls.
 
-        The stand-in Docker's host holds a container as a file of its name in ROOT/docker-host.
+        The stand-in Docker's host holds a container as a file of its name in
+        ROOT/docker-host, with the container's label in it.
         """
         root = Path(directory)
         (root / "tools" / "repo" / "map-platform").mkdir(parents=True, exist_ok=True)
@@ -994,10 +1006,16 @@ class ScriptTests(unittest.TestCase):
         (root / "docker-host").mkdir(exist_ok=True)
         calls = root / "docker.txt"
         calls.write_text("")
-        # The stand-in Docker removes the containers it is told to. It writes the manifest of
-        # every tile set it is given a directory for, and a gate summary that meets the targets.
+        # The stand-in Docker lists its containers by their whole label and removes those it is
+        # told to. It writes the manifest of every tile set it is given a directory for, and a
+        # gate summary that meets the targets.
         (tools / "docker").write_text(f'''#!/bin/bash
 echo "$*" >> "{calls}"
+if [ "$1 $2 $3" = "ps -aq --filter" ]; then
+  for file in "{root}/docker-host"/*; do
+    if [ -f "$file" ] && [ "label=$(cat "$file")" = "$4" ]; then basename "$file"; fi
+  done
+fi
 if [ "$1" = rm ]; then
   shift
   for name in "$@"; do rm -f "{root}/docker-host/$name"; done
@@ -1042,31 +1060,39 @@ done
             # Fit for the end of a container's name, a network's and a host name.
             self.assertRegex(run_id, r"^[0-9]{1,10}$")
 
-    def test_every_container_a_stage_starts_names_its_scratch_root(self):
+    def test_every_container_and_network_of_a_stage_names_its_scratch_root(self):
         label = '--label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH"'
-        runs, naming = 0, set()
+        labelled, naming = 0, set()
         for script in [BUILDER / "config.sh", *sorted((BUILDER / "stages").glob("*.sh"))]:
             text = script.read_text()
-            started = len(re.findall(r"(?m)^\s*(?:&& )?docker run\b", text))
-            self.assertEqual(text.count(label), started, script.name)
-            runs += started
+            # A command with the lines it continues on.
+            for command in text.replace("\\\n", " ").splitlines():
+                if re.search(r"\bdocker (run|network create)\b", command) and not command.lstrip().startswith("#"):
+                    self.assertIn(label, command, f"{script.name}: {command.strip()[:70]}")
+                    labelled += 1
             if "--name " in text or "docker network create" in text:
                 naming.add(script.name)
-        self.assertEqual(runs, 8)
+        # Eight containers and the two networks of the gate and the profile probe.
+        self.assertEqual(labelled, 10)
         # test_two_scratch_roots_share_no_container_name_network_or_label runs each of these.
         self.assertEqual(naming, {script for _, script, *_ in self.NAMING_STAGES})
 
     NAMING_STAGES = (("elevation", "elevation.sh"), ("qualify-graded", "qualify.sh", "graded"), ("gate", "gate.sh"))
 
+    def built_scratch(self, directory):
+        """A scratch root that holds what the gate asks of the two graph builds."""
+        root = Path(directory).resolve()
+        for label in ("ungraded", "graded"):
+            (root / "build" / f"planet-{label}").mkdir(parents=True)
+            (root / "build" / f"planet-{label}" / "manifest.json").write_text('{"builder": {}}')
+        return root
+
     def test_two_scratch_roots_share_no_container_name_network_or_label(self):
         seen = []
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
             for directory in (first, second):
-                root = Path(directory).resolve()
+                root = self.built_scratch(directory)
                 run_id = self.run_id(root)
-                for label in ("ungraded", "graded"):
-                    (root / "build" / f"planet-{label}").mkdir(parents=True)
-                    (root / "build" / f"planet-{label}" / "manifest.json").write_text('{"builder": {}}')
                 calls = ""
                 for stage, script, *arguments in self.NAMING_STAGES:
                     ran, called = self.run_stage_script(root, GRADED_ENV, stage, script, *arguments)
@@ -1090,7 +1116,8 @@ done
                 # Every container says which stage of which scratch root it is, and only such are looked for.
                 labels = docker_values(calls, "--label")
                 self.assertEqual(labels, {f"bicino.stage={stage}@{root}" for stage, *_ in self.NAMING_STAGES})
-                self.assertEqual(calls.split().count("--label"), sum(line.startswith("run ") for line in lines))
+                self.assertEqual(calls.split().count("--label"),
+                                 sum(line.startswith(("run ", "network create ")) for line in lines))
                 filters = docker_values(calls, "--filter")
                 self.assertEqual(filters, {f"label=bicino.stage=gate@{root}"})
                 # On its run's own network a service answers to the same name in every run.
@@ -1101,6 +1128,22 @@ done
                 self.assertIn("/mp/routing/probe_profiles.py --origin http://bicino-profiles-graded:8002", calls)
                 seen.append(names | networks | labels | filters)
         self.assertEqual(seen[0] & seen[1], set())
+
+    def test_the_gate_removes_no_container_but_its_own(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.built_scratch(directory)
+            # Services a killed gate of this run left, another run's on the same Docker host, in
+            # a directory whose path begins with this run's, and one that a checkout from before
+            # the label named the scratch root started.
+            (root / "docker-host").mkdir()
+            for name, label in (("mine-1", f"gate@{root}"), ("mine-2", f"gate@{root}"), ("theirs", f"gate@{root}-2"),
+                                ("unnamed", "gate"), ("my-elevation", f"elevation@{root}")):
+                (root / "docker-host" / name).write_text(f"bicino.stage={label}")
+            ran, calls = self.run_stage_script(root, GRADED_ENV, "gate", "gate.sh")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            self.assertIn("rm -f mine-1 mine-2\n", calls)
+            self.assertEqual(sorted(path.name for path in (root / "docker-host").iterdir()),
+                             ["my-elevation", "theirs", "unnamed"])
 
     def test_the_elevation_stage_removes_no_container_but_its_own(self):
         with tempfile.TemporaryDirectory() as directory:

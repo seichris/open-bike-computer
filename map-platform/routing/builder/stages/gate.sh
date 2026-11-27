@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 cleanup
-docker network create --internal "$network" >/dev/null
+docker network create --internal --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" "$network" >/dev/null
 
 # serve NAME ARCHIVE [ELEVATION]: a graded graph's tiles are mounted for /height.
 # The service answers to NAME on the gate's network. Its container's name is

@@ -57,8 +57,9 @@ BICINO_EVIDENCE=$BICINO_EXPORT/evidence
 # Several runs can share one Docker host, as rehearsals on a laptop do, and
 # container and network names are the host's. So every name a stage gives ends
 # in the cksum of its scratch path, 667907303 for the builder's default, and
-# every container a stage starts carries the label
-# bicino.stage=STAGE@SCRATCH. Nothing here removes a container by anything else.
+# every container a stage starts and every network it creates carries the
+# label bicino.stage=STAGE@SCRATCH. A stage removes a container or a network
+# by that label or by such a name, and by nothing else.
 BICINO_RUN_ID=$(printf '%s' "$BICINO_SCRATCH" | cksum)
 BICINO_RUN_ID=${BICINO_RUN_ID%% *}
 

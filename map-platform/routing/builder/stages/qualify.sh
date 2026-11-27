@@ -87,7 +87,7 @@ network=$service
 echo "== profiles start=$(bicino_now)"
 docker rm -f "$service" >/dev/null 2>&1 || true
 docker network rm "$network" >/dev/null 2>&1 || true
-docker network create --internal "$network" >/dev/null
+docker network create --internal --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" "$network" >/dev/null
 docker run -d --init --name "$service" --network "$network" --network-alias "$host" \
   --platform "$BICINO_PLATFORM" --cpus 2 --memory 2g \
   --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \

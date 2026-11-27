@@ -93,11 +93,12 @@ the units and starts independent stages together; `run_stage.py` enforces the
 rule itself, so it also holds when a unit is started by hand.
 
 A stage's containers are not in its unit's control group. `run_stage.py`
-removes them before and after the stage, and when systemd had to end it. It
-finds them by their label, `bicino.stage=STAGE@SCRATCH` with the scratch
-directory's path, or `bicino.work=DIRECTORY` for a graph build. So it finds
-only the containers of its own scratch directory, whatever else runs on the
-same Docker host. A container or a network that a stage names ends in the
+removes them before and after the stage, and when systemd had to end it,
+and then the networks the stage created. It finds them by their label,
+`bicino.stage=STAGE@SCRATCH` with the scratch directory's path, or
+`bicino.work=DIRECTORY` for a graph build. So it finds only what belongs to
+its own scratch directory, whatever else runs on the same Docker host. A
+container or a network that a stage names ends in the
 run's id, the number `printf %s SCRATCH | cksum` prints first. On the builder
 `docker ps` shows `bicino-elevation-667907303`,
 `bicino-gate-graded-667907303` and `bicino-profiles-graded-667907303`.
@@ -419,10 +420,12 @@ cross-border probes and the profile probe. Its result file says
   `barrier=gate` and `amenity=parking` either type from one build to the
   next, in a build alone too.
 - A rehearsal that is killed as a whole, not one stage of it, leaves the
-  containers its running stage had started: nothing ran the stage's
-  `--finalize`. No other run removes them. Start it again with the same
-  `--root`, or remove them by the stage's label:
-  `docker rm -f $(docker ps -aq --filter label=bicino.stage=gate@/absolute/scratch)`.
+  containers its running stage had started, and a gate's network: nothing
+  ran the stage's `--finalize`. No other run removes them. Start it again
+  with the same `--root`, spelled the same way, or remove them by the
+  stage's label:
+  `docker rm -f $(docker ps -aq --filter label=bicino.stage=gate@/absolute/scratch)`,
+  then the same with `docker network rm` and `docker network ls -q`.
 - A checkout from before 2026-11-27 still removes every container labelled
   `bicino.stage=STAGE`. Its rehearsals disturb each other, and no newer one.
 - Without `--map-platform-image` the pinned image is pulled, about 2 GB.
