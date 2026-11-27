@@ -1396,6 +1396,122 @@ class ElevationHybridTests(ElevationOpeningTests):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 build_elevation.parse_sonny_catalog(broken)
 
+    def linz_sheets(self, cell, plane, split=None, pixel=8.0, crs="EPSG:2193", shift=0, pit=None):
+        """Two in-memory sheets at the 8 m overview that cover the cell's box, split at a column; heights on a plane.
+
+        `pit` is a height put in the first sheet's last column, half way down.
+        """
+        import numpy as np
+        import rasterio
+        from affine import Affine
+        from rasterio.io import MemoryFile
+
+        west, south, east, north = build_elevation.linz_box(cell)
+        west, north = west - 80, north + 80
+        width, height = round((east + 80 - west) / 8), round((north - south + 80) / 8)
+        split = split or width // 2
+        sheets = []
+        for index, (first, last) in enumerate(((0, split), (split, width))):
+            left = west + first * 8
+            transform = Affine(pixel, 0, left + shift, 0, -pixel, north)
+            columns = np.arange(first, last) * 8 + west + 4
+            rows = north - 4 - np.arange(height) * 8
+            heights = plane(columns[None, :], rows[:, None]).astype("float32")
+            if pit is not None and index == 0:
+                heights[height // 2, -1] = pit
+            memory = MemoryFile()
+            with memory.open(driver="GTiff", width=last - first, height=height, count=1, dtype="float32", crs=crs,
+                             transform=transform, nodata=-9999.0) as dataset:
+                dataset.write(heights, 1)
+            bounds = (round(left), round(north - height * 8), round(left + (last - first) * 8), round(north))
+            sheets.append(((f"BQ3{index + 1}", "v" * 32, 100 + index, "0" * 32, bounds), memory))
+        return sheets
+
+    def test_linz_sheets_give_a_cells_posts_across_their_edge_and_no_other_sheet_passes(self):
+        import numpy as np
+        from rasterio.warp import transform
+
+        cell = (174, -42)
+
+        def plane(x, y):
+            return 100 + 0.01 * (x - 1_750_000) + 0.02 * (y - 5_420_000)
+
+        sheets = self.linz_sheets(cell, plane)
+        datasets = [(sheet, memory.open()) for sheet, memory in sheets]
+        try:
+            posts, read = build_elevation.linz_posts(datasets, cell)
+        finally:
+            for _, dataset in datasets:
+                dataset.close()
+        self.assertEqual(read["sheets"], ["BQ31", "BQ32"])
+        self.assertEqual((read["invalidPixels"], read["rejectedPixels"]), (0, 0))
+        self.assertTrue(np.isfinite(posts).all())
+        # Posts on both sides of the sheets' edge lie on the plane, read at their NZTM position.
+        step = build_elevation.STEP
+        for row, column in ((0, 0), (20, 20), (40, 40), (10, 35)):
+            (x,), (y,) = transform("EPSG:4167", "EPSG:2193", [174 + column * step], [-41 - row * step])
+            self.assertAlmostEqual(float(posts[row, column]), float(plane(x, y)), delta=0.05)
+        # A pit on one sheet's edge is dropped with its margin on both sheets.
+        pitted = self.linz_sheets(cell, plane, pit=-60.0)
+        datasets = [(sheet, memory.open()) for sheet, memory in pitted]
+        try:
+            posts, read = build_elevation.linz_posts(datasets, cell)
+        finally:
+            for _, dataset in datasets:
+                dataset.close()
+        margin = build_elevation.LINZ_REJECT_MARGIN
+        self.assertEqual(read["rejectedHeights"], [-60.0, -60.0])
+        self.assertEqual(read["rejectedPixels"], (2 * margin + 1) ** 2)
+        self.assertTrue(np.isnan(posts).any())
+        # Only sheets laid out as the catalog says pass.
+        for wrong in (self.linz_sheets(cell, plane, pixel=16.0), self.linz_sheets(cell, plane, crs="EPSG:3857"),
+                      self.linz_sheets(cell, plane, shift=8)):
+            datasets = [(sheet, memory.open()) for sheet, memory in wrong]
+            try:
+                with self.assertRaisesRegex(ValueError, "not LINZ's sheet BQ31 at its 8 m overview"):
+                    build_elevation.linz_posts(datasets, cell)
+            finally:
+                for _, dataset in datasets:
+                    dataset.close()
+
+    def test_linzs_catalog_pins_each_sheets_version_and_each_cells_sheets(self):
+        sheet = ("BQ31", "DodWRHAUJE46xi.22NA3hC311ulZYS7L", 509806020, "f9550225fb2526ca684796b139c48d38-42",
+                 (1732000, 5406000, 1756000, 5442000))
+        other = ("BQ32", "nk4_RRlf3zejc8fkNXKaciWJUUB391l4", 1090754564, "63e95ad88961f4fcba8e67fb3c303892-42",
+                 (1756000, 5406000, 1780000, 5442000))
+        tiles = {(174, -42): (sheet, other), (175, -42): (other,)}
+        text = build_elevation.format_linz_catalog(tiles)
+        self.assertEqual(text.splitlines(), [
+            "sheet BQ31 DodWRHAUJE46xi.22NA3hC311ulZYS7L 509806020 f9550225fb2526ca684796b139c48d38-42 "
+            "1732000 5406000 1756000 5442000",
+            "sheet BQ32 nk4_RRlf3zejc8fkNXKaciWJUUB391l4 1090754564 63e95ad88961f4fcba8e67fb3c303892-42 "
+            "1756000 5406000 1780000 5442000",
+            "cell S42E174 BQ31 BQ32", "cell S42E175 BQ32"])
+        self.assertEqual(build_elevation.parse_linz_catalog(text), tiles)
+        for broken, message in (
+                (text.replace("cell S42E175 BQ32", "cell S42E175 BQ33"), "unknown sheet"),
+                (text.replace("cell S42E174 BQ31 BQ32", "cell S42E174 BQ32 BQ31"), "unknown sheet"),
+                (text + "cell S42E175 BQ32\n", "repeats a cell"),
+                (text.replace(" 1756000 5442000\n", " 1732000 5442000\n", 1), "empty bounds"),
+                (text.replace("cell S42E174 BQ31 BQ32\n", ""), "unknown sheet|no cell reads"),
+                (text.replace("sheet BQ31", "sheet bq31"), "invalid")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                build_elevation.parse_linz_catalog(broken)
+        source = build_elevation.TerrainSource(
+            "linz-nz-lidar-1m-dem", build_elevation.LINZ_ORIGIN, tiles, "f" * 64, "https://terms.example",
+            "https://credit.example", self.AREA, "a" * 64, build_elevation.LINZ_ADAPTER)
+        pinned = hashlib.sha256((f"BQ31 {sheet[1]} {sheet[2]} {sheet[3]}\n"
+                                 f"BQ32 {other[1]} {other[2]} {other[3]}\n").encode()).hexdigest()
+        self.assertEqual(source.pin((174, -42)), {
+            "source": "linz-nz-lidar-1m-dem", "url": build_elevation.LINZ_ORIGIN, "bytes": sheet[2] + other[2],
+            "etag": pinned, "areaSha256": "a" * 64, "rejects": {"below": -10, "above": 4000, "pixelsAround": 15}})
+        self.assertEqual(build_elevation.linz_url(build_elevation.LINZ_ORIGIN, *sheet[:2]),
+                         build_elevation.LINZ_ORIGIN + "/BQ31.tiff?versionId=DodWRHAUJE46xi.22NA3hC311ulZYS7L")
+        # A cell reads only the pinned versions: a sheet whose size or ETag differs stops it before it is read.
+        with patch.object(build_elevation, "object_identity", lambda url: (1, "0" * 32)), \
+                self.assertRaisesRegex(ValueError, "not the catalog's 509806020 bytes"):
+            build_elevation.read_linz_cell(source, (174, -42), Path("unused"))
+
     def test_the_mrdem_object_must_be_the_pinned_one_before_and_after_a_cell_reads_it(self):
         import numpy as np
 
@@ -1590,7 +1706,7 @@ class TerrainSourceTests(unittest.TestCase):
     ROUTING = Path(build_elevation.__file__).parent
 
     def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
-        source, canada, europe = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
+        source, canada, europe, zealand = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
         self.assertEqual((source.id, len(source.tiles), source.origin_object), ("usgs-3dep-13", 955, None))
         self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
                                                    "historical/n41w074/USGS_13_n41w074_20260917.tif")
@@ -1656,11 +1772,28 @@ class TerrainSourceTests(unittest.TestCase):
             (17.11, 48.15), (10.75, 59.91), (2.65, 39.57),
             (-8.61, 41.15), (-8.42, 41.55), (-16.91, 32.65), (12.50, 41.90), (19.04, 47.50), (-6.26, 53.35),
             (15.98, 45.81), (9.52, 47.14), (1.52, 42.51))], [True] * 9 + [False] * 9)
-        # Europe touches neither North American area, so every cell keeps the one source it has.
-        everywhere = build_elevation.Terrain.over((source, canada, europe), sorted(
-            set(source.tiles) | set(canada.tiles) | set(europe.tiles)))
+        # LINZ's lidar of New Zealand: the latest version of each sheet the 60 cells of its capture area read.
+        self.assertEqual((zealand.id, len(zealand.tiles), zealand.tile_url(174, -42)),
+                         ("linz-nz-lidar-1m-dem", 60, build_elevation.LINZ_ORIGIN))
+        wellington = zealand.tiles[(174, -42)]
+        self.assertEqual([sheet[0] for sheet in wellington], [
+            "BP28", "BP29", "BP30", "BP31", "BP32", "BQ28", "BQ29", "BQ30", "BQ31", "BQ32", "BR28", "BR29", "BS28",
+            "BS29"])
+        self.assertEqual(wellington[8], ("BQ31", "DodWRHAUJE46xi.22NA3hC311ulZYS7L", 509806020,
+                                         "f9550225fb2526ca684796b139c48d38-42", (1732000, 5406000, 1756000, 5442000)))
+        self.assertEqual(zealand.pin((174, -42))["etag"],
+                         "170c465a4749f56438ecf69ba6f4e6846b1bce07dada65a36c10d7607d067d20")
+        capture = build_elevation.load_area(zealand.area, zealand.area_sha256)
+        self.assertTrue(all(terrain_catalog.touches_area(cell, capture) for cell in zealand.tiles))
+        # Wellington, Auckland, Christchurch, Dunedin and Queenstown are inside; the Chatham Islands outside.
+        self.assertEqual([capture[1].contains(Point(x, y)) for x, y in (
+            (174.7762, -41.2865), (174.7633, -36.8485), (172.6362, -43.5321), (170.5028, -45.8788),
+            (168.6626, -45.0312), (-176.56, -43.95))], [True] * 5 + [False])
+        # Europe and New Zealand touch neither North American area, so every cell keeps the one source it has.
+        everywhere = build_elevation.Terrain.over((source, canada, europe, zealand), sorted(
+            set(source.tiles) | set(canada.tiles) | set(europe.tiles) | set(zealand.tiles)))
         self.assertEqual((len(everywhere.cells), sum(1 for found in everywhere.cells.values() if len(found) > 1)),
-                         (3340 + 848, 95))
+                         (3340 + 848 + 60, 95))
         document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1680,7 +1813,7 @@ class TerrainSourceTests(unittest.TestCase):
                 return build_elevation.load_terrain_sources(root / "elevation-sources.json")
 
             self.assertEqual([found.tiles for found in load(lambda value: None)],
-                             [source.tiles, canada.tiles, europe.tiles])
+                             [source.tiles, canada.tiles, europe.tiles, zealand.tiles])
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "not approved"),
                 (lambda value: value.update(approvedForRouting="yes"), "not approved"),
@@ -1725,6 +1858,15 @@ class TerrainSourceTests(unittest.TestCase):
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     load(change, index=2)
+            for change, message in (
+                (lambda value: value.update(approvedForRouting=False), "linz-nz-lidar-1m-dem is not approved"),
+                (lambda value: value.update(origin=value["origin"].replace("dem_1m", "dsm_1m")), "unsupported"),
+                (lambda value: value.update(horizontalCrs="EPSG:4167"), "unsupported"),
+                (lambda value: value.update(tileCount=59), "not 59"),
+                (lambda value: value.update(catalog=document["terrain"][2]["catalog"]), "not the catalog"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change, index=3)
             with self.assertRaisesRegex(ValueError, "not the catalog"):
                 load(lambda value: None, catalog.replace("20260917", "20260918"))
             with self.assertRaisesRegex(ValueError, "not the area"):

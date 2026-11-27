@@ -1065,8 +1065,8 @@ class ScriptTests(unittest.TestCase):
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
                      # Terrain: every source of the list, in its order, over opened tiles.
-                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n": 0,
-                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=nrcan-mrdem-30,usgs-3dep-13\n": 1,
@@ -1085,7 +1085,7 @@ class ScriptTests(unittest.TestCase):
             (Path(directory) / "builder.env").write_text(
                 "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
             wrong = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
-            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25, not BICINO_TERRAIN=usgs-3dep-13",
+            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN=usgs-3dep-13",
                           wrong.stderr)
             setup = (BUILDER / "setup.sh").read_text()
             self.assertLess(setup.index('(. "$builder/config.sh" && bicino_validate_run)'),
@@ -1286,7 +1286,7 @@ done
             self.assertNotIn("terrain", runs[0])
             self.assertFalse((root / "elevation-terrain").exists())
             hybrid, runs = self.run_elevation_stage(
-                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n"
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                       "BICINO_TERRAIN_MIRROR_ENDPOINT=none\n")
             self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
             # Told to read every file from its origin, the stage fetches none and the build reads no copies.
@@ -1295,6 +1295,7 @@ done
             self.assertIn("terrain source usgs-3dep-13: 955 cells", hybrid.stdout)
             self.assertIn("terrain source nrcan-mrdem-30: 2480 cells", hybrid.stdout)
             self.assertIn("terrain source sonny-dtm-europe-1s-v25: 848 cells", hybrid.stdout)
+            self.assertIn("terrain source linz-nz-lidar-1m-dem: 60 cells", hybrid.stdout)
             self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
             self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
                           "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "
@@ -1304,12 +1305,12 @@ done
                 self.assertIn(f"sha256sum {root}/{manifest}", hybrid.stdout)
             # The build uses every source of the list. A run that names another one, only some of them or
             # another order stops before anything is built.
-            for named in ("other-dtm", "usgs-3dep-13", "usgs-3dep-13,nrcan-mrdem-30",
+            for named in ("other-dtm", "usgs-3dep-13", "usgs-3dep-13,nrcan-mrdem-30", "usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25",
                           "nrcan-mrdem-30,usgs-3dep-13,sonny-dtm-europe-1s-v25"):
                 unknown, runs = self.run_elevation_stage(
                     root, f"BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN={named}\n")
                 self.assertEqual((unknown.returncode, runs), (1, []), named)
-                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25, not BICINO_TERRAIN={named}",
+                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN={named}",
                               unknown.stderr)
 
     def test_the_elevation_stage_fetches_terrain_files_from_their_bucket_copy_first(self):
@@ -1323,7 +1324,8 @@ done
             ran, runs = self.run_elevation_stage(
                 root, "BICINO_SAMPLE_CITY=Berlin\n"
                       "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n"
-                      "BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n"
+                      "BICINO_OPENING_RADIUS=400\n"
+                      "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                       f"BICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             # Berlin's cells and the ring the blend reads, all Sonny's.
@@ -1382,7 +1384,7 @@ done
         with tempfile.TemporaryDirectory() as directory:
             # Under a terrain source the opened tiles lie beside the hybrid, which is always built.
             root, endpoint = self.kept_tiles_scratch(directory)
-            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n"
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                                                  f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             self.assertTrue((root / "elevation-opened" / "N52" / "N52E013.hgt.gz").exists())
@@ -1390,7 +1392,7 @@ done
             # What a restore for a run without the terrain source left beside elevation/ is not this run's.
             (root / "elevation.restoring" / "N52").mkdir(parents=True)
             (root / "elevation-opened.restoring").mkdir()
-            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25\n"
+            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
                                                 f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertFalse((root / "elevation.restoring").exists())

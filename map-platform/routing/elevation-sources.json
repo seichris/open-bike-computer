@@ -86,6 +86,33 @@
       "approvedForRouting": true,
       "approvedAt": "2026-11-27",
       "approvedBy": "Chris"
+    },
+    {
+      "id": "linz-nz-lidar-1m-dem",
+      "adapter": "linz-nz-lidar-1m-dem-cog-v1",
+      "title": "Toitu Te Whenua Land Information New Zealand, New Zealand LiDAR 1m DEM",
+      "surfaceModel": "dtm",
+      "horizontalCrs": "EPSG:2193",
+      "verticalDatum": "NZVD2016",
+      "verticalUnits": "m",
+      "origin": "https://nz-elevation.s3.ap-southeast-2.amazonaws.com/new-zealand/new-zealand/dem_1m/2193",
+      "coverage": "New Zealand where the national lidar mosaic has data, about 90% of the mainland: the posts inside the capture area, from the cells that touch it",
+      "area": "linz-nz-lidar-capture-area-20260917.geojson.gz",
+      "areaBytes": 922532,
+      "areaSha256": "37587096f32cae827458bffae156d46a793418973eccf7de3e1844a5255314d7",
+      "areaSource": "Toitu Te Whenua Land Information New Zealand: capture area of the New Zealand LiDAR 1m DEM (STAC collection 01JE4ZZWAG19KPKRHYJJP02HC9 of s3://nz-elevation, updated 2026-09-17), CC BY 4.0",
+      "catalog": "linz-nz-lidar-1m-dem-sheets-20261127.txt",
+      "catalogBytes": 56398,
+      "catalogSha256": "0c04b5e24c1f50f57c8d213a317c59ff9f8479bb859d62226b49011da66faf5d",
+      "tileCount": 60,
+      "license": "CC BY 4.0",
+      "attribution": "Sourced from the LINZ Data Service and licensed by Toitu Te Whenua Land Information New Zealand for re-use under the Creative Commons Attribution 4.0 International licence.",
+      "termsUrl": "https://www.linz.govt.nz/products-services/data/licensing-and-using-data/attributing-elevation-or-aerial-imagery-data",
+      "attributionUrl": "https://github.com/linz/elevation",
+      "modifications": "Read at the sheets' 8 m overview, pixels below -10 m or above 4,000 m dropped with the pixels within fifteen of them, cut to the capture area, resampled from NZTM2000 to 1 arc-second posts, rounded to whole metres, heights left in NZVD2016, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet the terrain over 16 posts at the edge of its data. Not endorsed by Toitu Te Whenua Land Information New Zealand.",
+      "approvedForRouting": true,
+      "approvedAt": "2026-11-27",
+      "approvedBy": "Chris"
     }
   ]
 }
