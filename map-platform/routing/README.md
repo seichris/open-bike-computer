@@ -175,7 +175,7 @@ production now.
    sources approved for routing. It is kept apart from the topography source
    policy, which accepts only Copernicus and is an input of the map-platform
    image and of the offline-map worker's identity. A build uses every source
-   of the list, each inside its own area. It holds two:
+   of the list, each inside its own area. It holds three:
 
    - **USGS 3DEP**, the 1/3 arc-second lidar tiles of the conterminous
      United States, approved on 2026-11-26.
@@ -184,6 +184,13 @@ production now.
      for reading in parts. It is lidar where Canada has lidar, which
      includes the centre of every larger city, and elsewhere Copernicus
      GLO-30 with forests and settlements taken out by NRCan.
+   - **Sonny's LiDAR Digital Terrain Models of Europe**, version 25,
+     approved on 2026-11-27 for the 20 countries it builds from national
+     lidar and photogrammetry terrain models and for mainland Portugal
+     outside a patch of SRTM around Porto (see
+     [Regional terrain models](elevation-sources.md)). One person's
+     compilation, one zip of an HGT file per cell in a public Google Drive
+     folder; the posts are the cell's own, in each country's height datum.
 
    Each source pins two files:
 
@@ -195,16 +202,26 @@ production now.
      so every post outside a source's area is dropped. The two countries'
      relations share the border's ways. Their areas overlap only in the sea
      around Machias Seal Island, which both claim; the source listed first
-     gives the posts it has there.
+     gives the posts it has there. Sonny's area is the union of the 21
+     countries' relations, Portugal cut to its mainland and less the patch
+     where Sonny's tiles hold SRTM's posts, which `terrain_catalog.py
+     srtm-fill` finds by comparing them with SRTM post by post.
    - **A catalog** of the cells that touch the area. For 3DEP it names
      [955 dated tiles](usgs-3dep-13-tiles-20261126.txt) (364 GB), each with
      its date, size and S3 ETag. MRDEM-30 has no dated copies, so
      [its catalog](nrcan-mrdem-30-cells-20261127.txt) names 2,480 cells and
-     the source list pins the size and ETag of the one object.
+     the source list pins the size and ETag of the one object. Sonny's
+     [catalog](sonny-dtm-europe-1s-v25-tiles-20261127.txt) names each
+     cell's Drive file, with the resource key a file made before 2021
+     needs, and pins its size and SHA-256: Drive gives no ETag, and answers
+     a file that has had too many downloads that day with a page of its
+     own, which the hash stops. A copy of every file is kept in the
+     elevation bucket, which the source list names as Sonny's `mirror`.
 
    [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
-   an `osmium export` of the relation, 3DEP's catalog from the USGS bucket
-   and MRDEM-30's from its area. Record their sizes and SHA-256, the tile
+   an `osmium export` of the relation, or of several for Sonny, 3DEP's
+   catalog from the USGS bucket, MRDEM-30's from its area and Sonny's by
+   downloading every tile of its Drive folder that touches the area. Record their sizes and SHA-256, the tile
    count and MRDEM-30's size, ETag and date in the source list. When NRCan
    replaces the object, a build stops until the new size and ETag are
    pinned; an earlier version cannot be read again.
@@ -218,6 +235,12 @@ production now.
      --opening-radius 400 --terrain-sources /routing/elevation-sources.json --jobs 20 \
      --policy /app/map-platform/config/topography-source-policy-v2.json
    ```
+
+   With `--terrain-files DIR` a source with a `mirror` reads its files
+   from `DIR/SOURCE-ID/` first, where
+   `builder/elevation_cache.py fetch-terrain --sources elevation-sources.json --into DIR`
+   put them from the bucket; the builder's elevation stage does both. A
+   file that is not there is read from the source's origin.
 
    The run then has four stages, each resumed from its receipts:
 

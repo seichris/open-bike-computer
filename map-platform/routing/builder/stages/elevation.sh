@@ -56,6 +56,26 @@ PY
   sha256sum "$BICINO_ROUTING/elevation-sources.json"
   hybrid=(-v "$BICINO_ELEVATION_OPENED:/opened" -v "$BICINO_ELEVATION_TERRAIN:/terrain")
   terrain=(--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened)
+  if [ "$BICINO_TERRAIN_MIRROR_ENDPOINT" != none ]; then
+    # The files a source keeps a copy of in a bucket are fetched first, so
+    # that the build reads them from disk; a file that is not fetched, the
+    # build reads from the source's origin. Fetched files stay for the next
+    # attempt and run, and are checked again before they are used.
+    mkdir -p "$BICINO_ELEVATION_TERRAIN_FILES"
+    mirror=()
+    if [ -n "$BICINO_TERRAIN_MIRROR_ENDPOINT" ]; then
+      mirror=(--endpoint "$BICINO_TERRAIN_MIRROR_ENDPOINT")
+    fi
+    set +e
+    python3 "$BICINO_BUILDER/elevation_cache.py" fetch-terrain --sources "$BICINO_ROUTING/elevation-sources.json" \
+      --into "$BICINO_ELEVATION_TERRAIN_FILES" --jobs "$BICINO_ELEVATION_JOBS" ${mirror[@]+"${mirror[@]}"} \
+      ${bounds[@]+"${bounds[@]}"}
+    fetched=$?
+    set -e
+    echo "terrain files: fetch exit=$fetched"
+    hybrid+=(-v "$BICINO_ELEVATION_TERRAIN_FILES:/terrain-files:ro")
+    terrain+=(--terrain-files /terrain-files)
+  fi
   manifests+=("$BICINO_ELEVATION_OPENED/elevation-manifest.json" "$BICINO_ELEVATION_TERRAIN/terrain-manifest.json")
   directories+=("$BICINO_ELEVATION_OPENED" "$BICINO_ELEVATION_TERRAIN")
 fi
