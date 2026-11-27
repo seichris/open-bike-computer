@@ -1514,21 +1514,21 @@ class ElevationComparisonTests(unittest.TestCase):
 
     def test_a_longer_flat_route_is_a_detour_only_where_the_direct_route_reads_steep(self):
         quiet = [(0.0, 0.0)] * 39
-        report = self.flat_report([*quiet, (0.2, 0.01)])
+        report = self.flat_report([*quiet, (0.1, 0.01)])
         table, failures = compare_elevation.summarize([report])
         self.assertEqual(failures, {"candidate": []})  # a swap: listed, not missed
-        self.assertEqual((table[0]["detours"], table[0]["swaps"], table[0]["maximumLengthChange"]), (0, 1, 0.2))
+        self.assertEqual((table[0]["detours"], table[0]["swaps"], table[0]["maximumLengthChange"]), (0, 1, 0.1))
         self.assertEqual(compare_elevation.long_flat_routes(report["rows"], "candidate"), [
             {"source": "candidate", "city": "Flatville", "leg": "Leg 39", "profile": "road",
-             "lengthChange": 0.2, "directSteepShare": 0.01, "verdict": "swap"}])
-        self.assertIn("| candidate | Flatville | 40 | 0.0% | +20.0% | 0, 1 |", compare_elevation.format_table(table))
+             "lengthChange": 0.1, "directSteepShare": 0.01, "verdict": "swap"}])
+        self.assertIn("| candidate | Flatville | 40 | 0.0% | +10.0% | 0, 1 |", compare_elevation.format_table(table))
 
         _, failures = compare_elevation.summarize([self.flat_report([*quiet, (0.2, 0.06)])])
         self.assertEqual(failures["candidate"], [
             "1 flat route is a detour around steep readings, the longest Flatville, Leg 39, road: +20.0%, "
             "6% of the direct route at 6%+"])
-        # Exactly at a limit is neither long nor steep.
-        _, failures = compare_elevation.summarize([self.flat_report([*quiet, (0.05, 0.9), (0.2, 0.05)])])
+        # Exactly at a limit is neither long, steep nor a large swap.
+        _, failures = compare_elevation.summarize([self.flat_report([*quiet, (0.05, 0.9), (0.15, 0.05)])])
         self.assertEqual(failures, {"candidate": []})
 
     def test_an_unread_direct_route_cannot_turn_a_detour_into_a_swap(self):
@@ -1539,13 +1539,19 @@ class ElevationComparisonTests(unittest.TestCase):
             "direct route's grades unread"])
 
     def test_swaps_miss_the_targets_only_when_they_are_many(self):
-        swaps = [(0.2, 0.0), (0.3, 0.02)]
+        swaps = [(0.1, 0.0), (0.12, 0.02)]
         _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 38, *swaps])])
         self.assertEqual(failures["candidate"], ["2 of 40 flat routes are more than 5% longer without steep readings"])
         _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 98, *swaps])])
         self.assertEqual(failures, {"candidate": []})  # 2 of 100 is within 3%
-        _, failures = compare_elevation.summarize([self.flat_report([(0.0, 0.0), (0.0, 0.0), (0.2, 0.0)])])
-        self.assertEqual(failures, {"candidate": []})  # one swap is always only listed
+        _, failures = compare_elevation.summarize([self.flat_report([(0.0, 0.0), (0.0, 0.0), (0.1, 0.0)])])
+        self.assertEqual(failures, {"candidate": []})  # one small swap is only listed, however few the routes
+
+    def test_one_large_swap_misses_the_targets(self):
+        _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 99, (0.2, 0.0)])])
+        self.assertEqual(failures["candidate"], [
+            "1 flat route is more than 15% longer without steep readings, the longest Flatville, Leg 99, road: "
+            "+20.0%, 0% of the direct route at 6%+"])
 
     def test_a_source_that_ignores_hills_misses_the_targets(self):
         _, (_, failures) = self.compare(avoids_hills=False)

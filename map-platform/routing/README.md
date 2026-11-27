@@ -467,8 +467,9 @@ before building a planet with a new elevation method.
    route length on 6%+ grades back with `/trace_attributes`, and in hilly
    cities flips `use_hills` between 0 and 1. `summary` exits non-zero when
    a source misses a target. A flat route more than 5% longer misses one
-   only as a detour, where its direct route reads steep on that source;
-   otherwise it is a swap and is listed under the table (see
+   as a detour, where its direct route reads steep on that source.
+   Otherwise it is a swap, listed under the table, and misses one only when
+   it is more than 15% longer or swaps are many (see
    [Detours and swaps](refresh-runbook.md#detours-and-swaps-how-a-longer-flat-route-is-judged)).
    The same commands, without `--city`, are the planet release gate.
 

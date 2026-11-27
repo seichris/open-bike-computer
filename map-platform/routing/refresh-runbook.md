@@ -914,8 +914,8 @@ direct route, the ungraded one, reads on the graded graph:
   Any detour misses the gate. A direct route whose grades could not be read
   counts as steep.
 - **Swap.** The direct route does not read steep. Swaps are listed under
-  the table. They miss the gate only when there is more than one and they
-  are more than 3% of the flat routes.
+  the table. They miss the gate when one is more than 15% longer, or when
+  there is more than one and they are more than 3% of the flat routes.
 
 The survey used the two gate services of the planet opened at 400 m
 (archive `33ec2c77…`) before their builder was deleted. It routed eight
@@ -946,10 +946,12 @@ probes, both graphs' route shapes and the analysis are on the map VPS in
   (0.0%). New York's direct routes still read 6%+ on a median 16% of their
   length, and Toronto's on 8%.
 
-The two limits come from these figures. The survey's swaps read at most 4.7%
+The limits come from these figures. The survey's swaps read at most 4.7%
 steep and the gate's known detours 12% to 28%, so the split is at 5%, the
 flat median target applied to one route. The survey's swap rate was 0.74% of
-flat routes, and the allowance is about four times that.
+flat routes, and the allowance is about four times that. Two of the 19
+swaps were more than 15% longer, 0.08% of the flat routes, so a swap that
+large is rare enough for a person to look at before a graph ships.
 
 Past reports, judged again:
 
@@ -971,8 +973,10 @@ at 400 m the planet still has detours in New York, Chicago and Toronto.
 
 The rule has two known limits. A street can read steep and keep its route:
 Toronto's Union Station to Yonge-Dundas Square leg is 2.8% longer with 22%
-of it on 6%+ grades, and no target catches it. And a swap of any size is
-tolerated when it is alone, so read the list under the table.
+of it on 6%+ grades, and no target catches it. And a real detour whose
+direct route reads steep on 5% or less of its length, such as one false
+ramp on a few edges, passes as a swap when it is alone and at most 15%
+longer, so read the list under the table.
 
 ### Tower-city samples
 

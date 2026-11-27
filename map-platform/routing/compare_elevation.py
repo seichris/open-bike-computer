@@ -40,9 +40,9 @@ city, and fails when a source misses the targets:
   two routes about the same, and a one-step change of grade on an edge or
   two tips it: on 2026-11-27, 2,572 generated routes in 165 flat tower
   downtowns on the planet opened at 400 m had 29 routes more than 5% longer
-  and 20 more than 5% shorter, a mean change of +0.04%. Swaps are listed
-  and miss a target only when there is more than one and they are more than
-  3% of the flat routes;
+  and 20 more than 5% shorter, a mean change of +0.04%. Swaps are listed.
+  They miss a target when one is more than 15% longer, or when there is
+  more than one and they are more than 3% of the flat routes;
 - hilly cities: at least half the legs change with ``use_hills``, and over
   the legs that change, the hill-avoiding route has less of its length on
   6%+ grades at the median. The table also counts the legs where it has
@@ -97,6 +97,7 @@ TARGETS = {
     "flatMaximumLengthChange": 0.05,
     "flatDetourSteepShare": 0.05,
     "flatSwapShare": 0.03,
+    "flatSwapMaximumLengthChange": 0.15,
     "flatMedianSteepShare": 0.05,
     "hillyChangedShare": 0.5,
     "steepShareTolerance": 0.02,
@@ -412,6 +413,12 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
                 worst = max(detours, key=lambda route: route["lengthChange"])
                 noun = "route is a detour" if len(detours) == 1 else "routes are detours"
                 missed.append(f"{len(detours)} flat {noun} around steep readings, "
+                              f"the longest {describe_long_route(worst)}")
+            large = [route for route in swaps if route["lengthChange"] > targets["flatSwapMaximumLengthChange"]]
+            if large:
+                worst = max(large, key=lambda route: route["lengthChange"])
+                missed.append(f"{len(large)} flat {'route is' if len(large) == 1 else 'routes are'} more than "
+                              f"{targets['flatSwapMaximumLengthChange']:.0%} longer without steep readings, "
                               f"the longest {describe_long_route(worst)}")
             if len(swaps) > max(1, targets["flatSwapShare"] * len(pooled["flatChange"])):
                 missed.append(f"{len(swaps)} of {len(pooled['flatChange'])} flat routes are more than {limit:.0%} "
