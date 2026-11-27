@@ -1129,8 +1129,8 @@ class ScriptTests(unittest.TestCase):
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
                      # Terrain: every source of the list, in its order, over opened tiles.
-                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 0,
-                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=nrcan-mrdem-30,usgs-3dep-13\n": 1,
@@ -1149,7 +1149,7 @@ class ScriptTests(unittest.TestCase):
             (Path(directory) / "builder.env").write_text(
                 "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
             wrong = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
-            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN=usgs-3dep-13",
+            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020, not BICINO_TERRAIN=usgs-3dep-13",
                           wrong.stderr)
             setup = (BUILDER / "setup.sh").read_text()
             self.assertLess(setup.index('(. "$builder/config.sh" && bicino_validate_run)'),
@@ -1360,21 +1360,30 @@ done
             self.assertEqual(len(runs), 1)
             self.assertNotIn("terrain", runs[0])
             self.assertFalse((root / "elevation-terrain").exists())
-            hybrid, runs = self.run_elevation_stage(
-                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
+            # Hong Kong's tiles are kept in the bucket alone, so a run may not read every file from its origin.
+            told, runs = self.run_elevation_stage(
+                root, "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n"
                       "BICINO_TERRAIN_MIRROR_ENDPOINT=none\n")
+            self.assertEqual((told.returncode, runs), (1, []))
+            self.assertIn("BICINO_TERRAIN_MIRROR_ENDPOINT=none cannot read cedd-hk-lidar-dtm-2020: their tiles are "
+                          "kept in the bucket alone", told.stderr)
+            # A sample reads a stand-in for the bucket, which holds none of Berlin's files.
+            (root / "bucket").mkdir()
+            server, endpoint = rehearse.serve_bucket(root / "bucket", "bicino-routing-elevation")
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            hybrid, runs = self.run_elevation_stage(root, self.BERLIN + f"BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n"
+                                                    f"BICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
             self.assertEqual(hybrid.returncode, 0, hybrid.stdout + hybrid.stderr)
-            # Told to read every file from its origin, the stage fetches none and the build reads no copies.
-            self.assertNotIn("terrain files", hybrid.stdout)
-            self.assertNotIn("terrain-files", runs[0])
             self.assertIn("terrain source usgs-3dep-13: 955 cells", hybrid.stdout)
             self.assertIn("terrain source nrcan-mrdem-30: 2480 cells", hybrid.stdout)
             self.assertIn("terrain source sonny-dtm-europe-1s-v25: 848 cells", hybrid.stdout)
             self.assertIn("terrain source linz-nz-lidar-1m-dem: 60 cells", hybrid.stdout)
+            self.assertIn("terrain source cedd-hk-lidar-dtm-2020: 2 cells", hybrid.stdout)
             self.assertIn(f"-v {root}/elevation-opened:/opened -v {root}/elevation-terrain:/terrain", runs[0])
             self.assertIn("/routing/build_elevation.py --raw /raw --out /out --opening-radius 400 "
                           "--terrain-sources /routing/elevation-sources.json --terrain /terrain --opened /opened "
-                          "--jobs 20", runs[0])
+                          "--terrain-files /terrain-files --jobs 20", runs[0])
             for manifest in ("elevation-raw/elevation-manifest.json", "elevation/elevation-manifest.json",
                              "elevation-opened/elevation-manifest.json", "elevation-terrain/terrain-manifest.json"):
                 self.assertIn(f"sha256sum {root}/{manifest}", hybrid.stdout)
@@ -1385,7 +1394,7 @@ done
                 unknown, runs = self.run_elevation_stage(
                     root, f"BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN={named}\n")
                 self.assertEqual((unknown.returncode, runs), (1, []), named)
-                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem, not BICINO_TERRAIN={named}",
+                self.assertIn(f"elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020, not BICINO_TERRAIN={named}",
                               unknown.stderr)
 
     def test_the_elevation_stage_fetches_terrain_files_from_their_bucket_copy_first(self):
@@ -1397,11 +1406,7 @@ done
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
             ran, runs = self.run_elevation_stage(
-                root, "BICINO_SAMPLE_CITY=Berlin\n"
-                      "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n"
-                      "BICINO_OPENING_RADIUS=400\n"
-                      "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
-                      f"BICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
+                root, self.BERLIN + f"BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\nBICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             # Berlin's cells and the ring the blend reads, all Sonny's.
             self.assertIn("terrain files: 9 in the bucket copies, 0 here already, 9 to fetch", ran.stdout)
@@ -1409,6 +1414,20 @@ done
             self.assertLess(ran.stdout.index("terrain files: fetch exit=3"), ran.stdout.index("attempt=1 start="))
             self.assertIn(f"-v {root}/elevation-terrain-files:/terrain-files:ro ", runs[0])
             self.assertIn("--terrain /terrain --opened /opened --terrain-files /terrain-files --jobs 20", runs[0])
+            # Hong Kong's tiles are kept in the bucket alone: when they cannot be fetched, the stage stops before
+            # the build, which would fail their cells after every other.
+            stopped, runs = self.run_elevation_stage(
+                root, "BICINO_SAMPLE_CITY=Hong Kong\n"
+                      "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/asia/china/hong-kong-latest.osm.pbf\n"
+                      f"BICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\nBICINO_TERRAIN_MIRROR_ENDPOINT={endpoint}\n")
+            self.assertEqual((stopped.returncode, runs), (1, []), stopped.stdout + stopped.stderr)
+            self.assertIn("2 kept terrain tiles were not fetched, and no build can read them from anywhere else: "
+                          "N22E113.hgt.gz N22E114.hgt.gz", stopped.stderr)
+            self.assertIn("terrain tiles kept only in gs://bicino-routing-elevation were not fetched", stopped.stderr)
+
+    BERLIN = ("BICINO_SAMPLE_CITY=Berlin\n"
+              "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n"
+              "BICINO_OPENING_RADIUS=400\n")
 
     def kept_tiles_scratch(self, directory, bucket="rehearsal-elevation"):
         """A scratch root whose tools hold a record of two small kept sets; returns it and the bucket's address."""
@@ -1459,7 +1478,7 @@ done
         with tempfile.TemporaryDirectory() as directory:
             # Under a terrain source the opened tiles lie beside the hybrid, which is always built.
             root, endpoint = self.kept_tiles_scratch(directory)
-            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
+            ran, runs = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n"
                                                  f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
             self.assertTrue((root / "elevation-opened" / "N52" / "N52E013.hgt.gz").exists())
@@ -1467,7 +1486,7 @@ done
             # What a restore for a run without the terrain source left beside elevation/ is not this run's.
             (root / "elevation.restoring" / "N52").mkdir(parents=True)
             (root / "elevation-opened.restoring").mkdir()
-            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem\n"
+            again, _ = self.run_elevation_stage(root, self.KEPT_ENV + "BICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020\n"
                                                 f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint}\n")
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertFalse((root / "elevation.restoring").exists())
@@ -2049,8 +2068,11 @@ class ElevationCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(elevation_cache.CacheError, "gave no token"):
             elevation_cache.Token(metadata="http://127.0.0.1:9/token").header()
 
-    def mirrored_source_list(self, files):
-        """A source list of one Sonny source whose catalog pins `files`, {cell: bytes}, and whose copy is in the bucket."""
+    def mirrored_source_list(self, files, kept=None):
+        """A source list of one Sonny source whose catalog pins `files`, {cell: bytes}, and whose copy is in the bucket.
+
+        With `kept`, {cell: bytes}, a source kept as tiles in the bucket alone follows it.
+        """
         sys.path.insert(0, str(ROUTING))
         import build_elevation
 
@@ -2065,7 +2087,18 @@ class ElevationCacheTests(unittest.TestCase):
         entry.update(catalog="catalog.txt", catalogBytes=len(catalog), catalogSha256=hashlib.sha256(catalog).hexdigest(),
                      tileCount=len(tiles), area="area.geojson.gz", areaBytes=4, areaSha256=hashlib.sha256(b"area").hexdigest(),
                      mirror=f"gs://{self.BUCKET}/terrain/sonny/")
-        (lists / "sources.json").write_text(json.dumps({"schemaVersion": 2, "terrain": [entry]}))
+        terrain = [entry]
+        if kept:
+            text = build_elevation.format_kept_catalog(
+                {cell: ("0" * 64, "20261127", len(data), hashlib.sha256(data).hexdigest()) for cell, data in kept.items()})
+            (lists / "kept.txt").write_text(text)
+            value = next(value for value in json.loads((ROUTING / "elevation-sources.json").read_text())["terrain"]
+                         if value["adapter"] in build_elevation.KEPT_RULES)
+            value.update(catalog="kept.txt", catalogBytes=len(text), catalogSha256=hashlib.sha256(text.encode()).hexdigest(),
+                         tileCount=len(kept), area="area.geojson.gz", areaBytes=4,
+                         areaSha256=hashlib.sha256(b"area").hexdigest(), mirror=f"gs://{self.BUCKET}/terrain/kept/")
+            terrain.append(value)
+        (lists / "sources.json").write_text(json.dumps({"schemaVersion": 2, "terrain": terrain}))
         return lists / "sources.json"
 
     def test_terrain_files_are_fetched_from_the_bucket_copy_as_pinned_or_left_to_the_origin(self):
@@ -2080,35 +2113,54 @@ class ElevationCacheTests(unittest.TestCase):
         fetch = functools.partial(elevation_cache.fetch_terrain, sources, into, endpoint=self.endpoint, jobs=2,
                                   log=self.lines.append)
         # A file the bucket does not hold, or not as pinned, is left to the build to read from Drive.
-        self.assertEqual(fetch(), 2)
+        self.assertEqual(fetch(), (2, []))
         held = into / "sonny-dtm-europe-1s-v25"
         self.assertEqual(sorted(path.name for path in held.iterdir()), ["N47E008.zip", "N52E013.zip"])
         self.assertEqual((held / "N52E013.zip").read_bytes(), b"berlin")
         self.assertIn("terrain files: 4 in the bucket copies, 0 here already, 4 to fetch", self.lines)
-        self.assertIn("terrain files: fetched 2; the build reads 2 from their origins", self.lines)
+        self.assertIn("terrain files: fetched 2; the build reads 2 files from their origins", self.lines)
         self.assertTrue(any("the bucket holds no terrain/sonny/N52E014.zip" in line for line in self.lines))
         self.assertTrue(any("terrain/sonny/N47E009.zip is not the pinned file" in line for line in self.lines))
         # The next run asks only for what is missing; a copy that changed on disk is fetched again.
         (held / "N47E008.zip").write_bytes(b"zurich!")
         self.requests.clear()
         self.lines.clear()
-        self.assertEqual(fetch(), 2)
+        self.assertEqual(fetch(), (2, []))
         self.assertIn("terrain files: 4 in the bucket copies, 1 here already, 3 to fetch", self.lines)
         self.assertEqual(sorted(request[0].rpartition("/")[2] for request in self.requests),
                          ["N47E008.zip", "N47E009.zip", "N52E014.zip"])
         self.assertEqual((held / "N47E008.zip").read_bytes(), b"zurich")
         # A bounded build reads the cells one beyond its bounds.
         self.lines.clear()
-        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), 1)
+        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), (1, []))
         self.assertIn("terrain files: 2 in the bucket copies, 1 here already, 1 to fetch", self.lines)
         # Nothing to fetch needs no token.
         (copy / "N52E014.zip").write_bytes(b"frankfurt-oder")
-        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), 0)
+        self.assertEqual(fetch(bounds=[13, 52, 14, 53]), (0, []))
         self.lines.clear()
         self.assertEqual(elevation_cache.fetch_terrain(sources, into, bounds=[13, 52, 14, 53],
-                                                       token_file=self.root / "no-token", log=self.lines.append), 0)
+                                                       token_file=self.root / "no-token", log=self.lines.append), (0, []))
         self.assertEqual(self.lines, ["terrain files: 2 in the bucket copies, 2 here already, 0 to fetch"])
         self.assertEqual(list(held.glob(".*")), [])
+
+    def test_a_kept_tile_that_is_not_fetched_is_named_since_no_origin_serves_it(self):
+        sources = self.mirrored_source_list({(8, 47): b"zurich"}, kept={(113, 22): b"lantau", (114, 22): b"kowloon"})
+        (self.bucket / "terrain" / "kept").mkdir(parents=True)
+        (self.bucket / "terrain" / "kept" / "N22E113.hgt.gz").write_bytes(b"lantau")
+        into = self.root / "terrain-files"
+        self.assertEqual(elevation_cache.fetch_terrain(sources, into, endpoint=self.endpoint, jobs=1,
+                                                       log=self.lines.append), (2, ["N22E114.hgt.gz"]))
+        self.assertEqual((into / "cedd-hk-lidar-dtm-2020" / "N22E113.hgt.gz").read_bytes(), b"lantau")
+        self.assertIn("terrain files: fetched 1; the build reads 1 files from their origins, and 1 kept tiles, which "
+                      "have no other source, are missing: N22E114.hgt.gz", self.lines)
+        # Without a token every kept tile is missing, and the command exits so that the stage stops.
+        self.assertEqual(elevation_cache.fetch_terrain(sources, into, token_file=self.root / "no-token",
+                                                       log=self.lines.append), (2, ["N22E114.hgt.gz"]))
+        self.assertEqual(elevation_cache.main(["fetch-terrain", "--sources", str(sources), "--into", str(into),
+                                               "--endpoint", self.endpoint]), elevation_cache.KEPT_NOT_FETCHED)
+        (self.bucket / "terrain" / "kept" / "N22E114.hgt.gz").write_bytes(b"kowloon")
+        self.assertEqual(elevation_cache.main(["fetch-terrain", "--sources", str(sources), "--into", str(into),
+                                               "--endpoint", self.endpoint]), elevation_cache.NOT_RESTORED)
 
     def test_terrain_files_are_not_asked_for_once_the_bucket_cannot_be_read(self):
         files = {(8, 47): b"zurich", (9, 47): b"st-gallen", (13, 52): b"berlin"}
@@ -2116,14 +2168,14 @@ class ElevationCacheTests(unittest.TestCase):
         into = self.root / "terrain-files"
         # No token: nothing is asked, and the build reads every file from its origin.
         self.assertEqual(elevation_cache.fetch_terrain(sources, into, token_file=self.root / "no-token",
-                                                       log=self.lines.append), 3)
-        self.assertTrue(self.lines[-1].startswith("terrain files: cannot read the bucket, so the build reads 3 files "
-                                                  "from their origins: cannot read the token file"))
+                                                       log=self.lines.append), (3, []))
+        self.assertTrue(self.lines[-1].startswith("terrain files: cannot read the bucket (cannot read the token file"))
+        self.assertTrue(self.lines[-1].endswith("; the build reads 3 files from their origins"))
         # Refused: the first refusal stops the rest.
         self.refuse["/N47E008.zip"] = 403
         self.lines.clear()
         self.assertEqual(elevation_cache.fetch_terrain(sources, into, endpoint=self.endpoint, jobs=1,
-                                                       log=self.lines.append), 3)
+                                                       log=self.lines.append), (3, []))
         self.assertEqual(len(self.requests), 1)
         self.assertTrue(any("may not read terrain/sonny/N47E008.zip (HTTP 403)" in line for line in self.lines))
         # A source list whose catalog is not the pinned one stops before anything is fetched.

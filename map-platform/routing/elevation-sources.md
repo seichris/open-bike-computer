@@ -25,17 +25,17 @@ recommendation below with its caveats. A source joins
 `elevation-sources.json` with its reader in `build_elevation.py`, its
 catalog, its area and the approval fields, as 3DEP and MRDEM-30 did, and
 passes city samples through that reader before a planet is built with it.
-Sonny's tiles and LINZ's lidar are in the list (see
-[Sonny's tiles](#sonnys-tiles-in-the-build) and
-[LINZ's lidar](#linzs-lidar-in-the-build)); GSI's tiles and CEDD's lidar are
-not.
+Sonny's tiles, LINZ's lidar and CEDD's lidar are in the list (see
+[Sonny's tiles](#sonnys-tiles-in-the-build),
+[LINZ's lidar](#linzs-lidar-in-the-build) and
+[CEDD's lidar](#cedds-lidar-in-the-build)); GSI's tiles are not yet.
 
 | Source | Approved area | Licence and credit | State |
 |---|---|---|---|
 | Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build, from a copy in the elevation bucket |
 | LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Read by the build |
 | GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet. GSI offers no bulk file without an account, so on 2026-11-27 Chris chose one slow crawl of its PNG tiles into HGT cells kept in the elevation bucket, which builds read instead of GSI's server |
-| CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Not read: the terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
+| CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Read by the build, from tiles kept in the elevation bucket. The terms list copying and distribution, not adaptation; Chris decided on 2026-11-27 to use it, on the reading that the build's processing is covered |
 
 The [pits at shorelines](refresh-runbook.md#pits-at-shorelines) found in
 MRDEM-30 apply to these too: a lidar model can hold slots a few pixels wide
@@ -167,6 +167,57 @@ DEM since 2026-11-27, as the fourth source of the list.
   longest change is the Everyday route from the railway station to
   Hataitai, 4.64 km on the ungraded graph and 6.57 km graded: it leaves
   Mount Victoria for the shared path through the tunnel, as in the samples.
+
+## CEDD's lidar in the build
+
+`build_elevation.py --terrain-sources` reads CEDD's LiDAR DTM 2020 of Hong
+Kong since 2026-11-27, as the fifth source of the list. Its terms let
+anyone copy, distribute and reproduce the data, commercially too, with the
+source named; they do not list adaptation. Chris decided the same day to
+use it, on the reading that turning the heights into routing elevation
+inside the build is covered.
+
+- **Kept tiles.** CEDD publishes the model as 3,253 zips of one 0.5 m
+  GeoTIFF each, 14.1 GB, which no build should download.
+  `terrain_catalog.py cedd-cells` made Hong Kong's two cells from them once,
+  in 49 minutes on a laptop: each zip averaged to 5 m, the 5 m pixels laid
+  into one mosaic on HK1980 Grid, and the posts resampled from it onto the
+  cells and cut to the area. The tiles, 1.8 MB, are kept in
+  `gs://bicino-routing-elevation/terrain-sources/cedd-hk-lidar-dtm-2020/`,
+  which the source list names as the source's `mirror`, and a build reads
+  them from there alone (`elevation_cache.py fetch-terrain`). A tile that
+  was not fetched stops its cell.
+- **Catalog.** [The catalog](cedd-hk-lidar-dtm-2020-tiles-20261127.txt)
+  pins each tile's size and SHA-256 and the SHA-256 of the provenance file
+  beside it in the bucket, which names every zip the cell was made from
+  with its size and SHA-256: 728 for N22E113 and 2,705 for N22E114.
+- **The zips.** Every zip holds one GeoTIFF on HK1980 Grid with 0.5 m
+  pixels. The ones checked mark pixels without data with −9,999, and
+  14NE15A with 0; the maker refuses a file that marks none. 14NE15A also
+  places its corner a fraction of a micrometre off the grid, which the
+  maker takes as on it.
+- **Area.** [The area](hong-kong-osm-r913110-v225.geojson.gz) is Hong
+  Kong's OpenStreetMap relation 913110 as of 2026-11-27. The lidar has no
+  data over water, so its coverage inside the area is Hong Kong's land;
+  269 posts on the Shenzhen side of the border were cut.
+- **Heights.** They stay in metres above Hong Kong Principal Datum, as
+  Sonny's tiles keep each country's datum, and the blend takes up the step
+  to Copernicus over its 16 posts. The kept tiles read Tai Mo Shan at
+  955 m (957 m), Victoria Peak at 546 m (552 m) and Queen's Road Central at
+  5 m.
+- **Not ground.** Pixels below −10 m or above 1,000 m are dropped with the
+  5 m pixels within 24 of them, 120 m as for MRDEM-30, when the tiles are
+  made: 27,562 pixels, those from −30.6 to −10.0 m and the pixels around
+  them. None is above 1,000 m.
+- **Rehearsal.** Hong Kong ran through the build chain with all five
+  sources (`builder/rehearse.sh --radius 400 --terrain
+  usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020`),
+  with the kept tiles fetched first with an operator's token. The
+  elevation stage took 145 s and read the two kept tiles. Hong Kong is a
+  report-only city, and the gate was met: 4 routes, none longer graded,
+  none of the direct routes reads 6%+ (the survey's tram-corridor sample
+  read up to 10% on opened Copernicus), and `use_hills` changes neither of
+  the 2 hilly legs.
 
 ## Recommendation
 

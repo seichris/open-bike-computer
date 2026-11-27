@@ -33,7 +33,9 @@ that the build reads them from disk and not from the source's own origin. A
 file is kept only with the size and SHA-256 the source's catalog pins. One the
 bucket does not hold as pinned is left out, and so is every file not yet
 fetched once the bucket cannot be read at all: the build then reads those from
-the origin.
+the origin. A source kept as tiles in the bucket (GSI, CEDD) has no origin a
+build may read: a kept tile that was not fetched makes the command exit with
+4, and the elevation stage stops before the build starts.
 
 `compare` tells, after the build, whether a restored set is still the one the
 record pins. `verify` checks the bucket against the record and keeps nothing.
@@ -82,6 +84,8 @@ MAX_TILE = 64 << 20
 MAX_SMALL_FILE = 64 << 20
 # Restore exits with this when a set was not restored and must be built instead.
 NOT_RESTORED = 3
+# fetch-terrain exits with this when a tile kept in the bucket alone was not fetched: no build can read it.
+KEPT_NOT_FETCHED = 4
 
 HEX = re.compile(r"[0-9a-f]{64}")
 BAND_SHARD = re.compile(r"([NS]\d)\.tar")
@@ -746,7 +750,7 @@ def holds(path, size, sha256):
 
 
 def mirrored_files(sources_path, into, bounds=None, endpoint=GOOGLE):
-    """(source id, URL, path, size, SHA-256) of every file a build reads from a source's bucket copy.
+    """(source id, URL, path, size, SHA-256, kept) of every file a build reads from a source's bucket copy.
 
     The sources are read as build_elevation.py, beside this directory, reads
     them, so a catalog or area that is not the pinned one stops here. A build
@@ -771,30 +775,40 @@ def mirrored_files(sources_path, into, bounds=None, endpoint=GOOGLE):
         for cell in cells:
             name, size, sha256 = source.mirror_file(cell)
             files.append((source.id, object_url(endpoint, bucket, prefix + name), Path(into) / source.id / name,
-                          size, sha256))
+                          size, sha256, source.adapter in build_elevation.KEPT_RULES))
     return files
 
 
 def fetch_terrain(sources_path, into, *, bounds=None, endpoint=GOOGLE, token_file=None, jobs=6, attempts=3,
                   log=say):
-    """Fetch the terrain files that sources keep a copy of in a bucket into INTO/SOURCE-ID/; the number left out."""
+    """Fetch the terrain files that sources keep a copy of in a bucket into INTO/SOURCE-ID/.
+
+    Returns how many files were left out and the names of the kept tiles
+    among them, which no build can read from anywhere else.
+    """
     files = mirrored_files(sources_path, into, bounds, endpoint)
-    wanted = [entry for entry in files if not holds(*entry[2:])]
+    wanted = [entry for entry in files if not holds(*entry[2:5])]
     log(f"terrain files: {len(files)} in the bucket copies, {len(files) - len(wanted)} here already, "
         f"{len(wanted)} to fetch")
     if not wanted:
-        return 0
+        return 0, []
+
+    def left_out(entries, reason):
+        kept = sorted(entry[2].name for entry in entries if entry[5])
+        log(f"terrain files: {reason}; the build reads {len(entries) - len(kept)} files from their origins"
+            + (f", and {len(kept)} kept tiles, which have no other source, are missing: {' '.join(kept[:5])}"
+               if kept else ""))
+        return len(entries), kept
+
     token = Token(endpoint, token_file)
     try:
         token.header()
     except CacheError as error:
-        log(f"terrain files: cannot read the bucket, so the build reads {len(wanted)} files from their origins: "
-            f"{error}")
-        return len(wanted)
+        return left_out(wanted, f"cannot read the bucket ({error})")
     stopped = threading.Event()
 
     def fetch(entry):
-        _, url, path, size, sha256 = entry
+        _, url, path, size, sha256, _ = entry
         if stopped.is_set():
             return "not fetched"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -813,11 +827,11 @@ def fetch_terrain(sources_path, into, *, bounds=None, endpoint=GOOGLE, token_fil
         return None
 
     with ThreadPoolExecutor(jobs) as pool:
-        problems = [problem for problem in pool.map(fetch, wanted) if problem is not None]
-    log(f"terrain files: fetched {len(wanted) - len(problems)}; the build reads {len(problems)} from their origins")
-    for problem in sorted(set(problems))[:5]:
+        problems = list(pool.map(fetch, wanted))
+    missing = [entry for entry, problem in zip(wanted, problems) if problem is not None]
+    for problem in sorted({problem for problem in problems if problem is not None})[:5]:
         log(f"terrain files: {problem}")
-    return len(problems)
+    return left_out(missing, f"fetched {len(wanted) - len(missing)}")
 
 
 def main(argv=None):
@@ -879,8 +893,12 @@ def main(argv=None):
         if args.command == "fetch-terrain":
             if not 1 <= args.jobs <= 64:
                 parser.error("--jobs must be between 1 and 64")
-            left = fetch_terrain(args.sources, args.into, bounds=args.bounds, endpoint=args.endpoint.rstrip("/"),
-                                 token_file=args.token_file, jobs=args.jobs)
+            left, kept = fetch_terrain(args.sources, args.into, bounds=args.bounds,
+                                       endpoint=args.endpoint.rstrip("/"), token_file=args.token_file, jobs=args.jobs)
+            if kept:
+                print(f"error: {len(kept)} kept terrain tiles were not fetched, and no build can read them from "
+                      f"anywhere else: {' '.join(kept)}", file=sys.stderr)
+                return KEPT_NOT_FETCHED
             return NOT_RESTORED if left else 0
         if args.command == "compare":
             compare(args.report)
