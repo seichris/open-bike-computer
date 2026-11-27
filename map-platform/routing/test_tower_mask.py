@@ -225,5 +225,119 @@ class TowerMaskTests(unittest.TestCase):
                 self.assertFalse(refused.exists())
 
 
+class MembraneTests(unittest.TestCase):
+    @staticmethod
+    def plane(rows, columns, latitude):
+        """A plane in metres: 4% up to the north and 2% up to the east."""
+        import math
+
+        import numpy as np
+
+        row, column = np.mgrid[0:rows, 0:columns]
+        east = column * build_elevation.METRES_PER_ARCSECOND * math.cos(math.radians(latitude))
+        north = (rows - row) * build_elevation.METRES_PER_ARCSECOND
+        return (50 + 0.04 * north + 0.02 * east).astype("float32")
+
+    def test_a_slope_across_a_zone_stays_and_a_plateau_on_it_goes(self):
+        import numpy as np
+
+        for latitude in (0.0, 40.0, -60.0):
+            with self.subTest(latitude=latitude):
+                plane = self.plane(120, 160, latitude)
+                heights = plane.copy()
+                heights[50:70, 60:100] += 40     # the towers the opening kept
+                heights[5, 5] = np.nan
+                zone = np.zeros(heights.shape, dtype=bool)
+                zone[30:90, 40:130] = True
+                filled, count, unfilled = tower_mask.membrane_fill(heights, zone, np.full(120, latitude))
+                self.assertEqual((count, unfilled), (int(zone.sum()), 0))
+                # A plane in metres is its own membrane, whatever an arc-second of longitude measures.
+                np.testing.assert_allclose(filled[zone], plane[zone], atol=0.02)
+                outside = ~zone & np.isfinite(heights)
+                np.testing.assert_array_equal(filled[outside], heights[outside])
+                self.assertTrue(np.isnan(filled[5, 5]))
+
+    def test_posts_without_data_take_no_part(self):
+        import numpy as np
+
+        # A street between a quay at 10 m and a terrace at 20 m, with no data north and south of it.
+        heights = np.full((7, 12), np.nan, dtype="float32")
+        heights[2:5, 0] = 10
+        heights[2:5, 11] = 20
+        heights[2:5, 1:11] = 99
+        zone = np.zeros(heights.shape, dtype=bool)
+        zone[2:5, 1:11] = True
+        # A zone part no height touches stays no data, and so does a zone post without data.
+        zone[0, 3:6] = True
+        heights[0, 3:6] = 50
+        zone[6, 0] = True
+        filled, count, unfilled = tower_mask.membrane_fill(heights, zone, np.zeros(7))
+        self.assertEqual((count, unfilled), (30, 3))
+        np.testing.assert_allclose(filled[3, 1:11], 10 + np.arange(1, 11) * 10 / 11, atol=0.02)
+        np.testing.assert_allclose(filled[2], filled[4])
+        self.assertTrue(np.isnan(filled[0]).all() and np.isnan(filled[6]).all())
+
+    def test_zone_parts_join_only_across_edges(self):
+        import numpy as np
+
+        zone = np.array([[1, 1, 0, 0, 0],
+                         [0, 1, 0, 1, 1],
+                         [1, 0, 0, 1, 0],
+                         [1, 1, 1, 1, 0]], dtype=bool)
+        parts = tower_mask.zone_parts(zone)
+        self.assertEqual(sorted((top, left, posts.astype(int).tolist()) for top, left, posts in parts),
+                         [(0, 0, [[1, 1], [0, 1]]),
+                          (1, 0, [[0, 0, 0, 1, 1], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0]])])
+        rebuilt = np.zeros(zone.shape, dtype=bool)
+        for top, left, posts in parts:
+            rebuilt[top:top + posts.shape[0], left:left + posts.shape[1]] |= posts
+        np.testing.assert_array_equal(rebuilt, zone)
+
+    def test_command_spans_one_membrane_over_two_cells(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opened = root / "opened"
+            # One plane over N40W075 and N40W074, a plateau of towers on it across the meridian between them.
+            plane = 100 + np.round(self.plane(POSTS, 2 * POSTS - 1, 40.5) - 50)
+            raised = plane.copy()
+            raised[880:930, 3540:3660] += 40
+            entries = [sample_elevation.write_hgt(opened, cell, sample_elevation.cut(raised, -75, 41, cell))
+                       for cell in ((-75, 40), (-74, 40))]
+            sample_elevation.write_manifest(opened, {"name": "grey-opening", "radiusMetres": 200},
+                                            [{"id": "copernicus-glo30"}], entries, [-75, 40, -73, 41])
+            heights = np.zeros((1212, 2412), dtype="float32")
+            heights[294:320, 1186:1226] = 50     # posts 864 to 941 down, 3540 to 3659 across
+            file = root / "GHS_BUILT_H_ANBH_test.tif"
+            with grid(heights, -75 - 18 / 3600, 41 + 18 / 3600) as memory:
+                file.write_bytes(memory.read())
+            out = root / "membrane"
+            arguments = ["tower_mask.py", "--input", str(opened), "--heights", str(file), "--bounds", "-75", "40",
+                         "-73", "41", "--fill", "membrane", "--out", str(out)]
+            with patch("sys.argv", arguments), patch("builtins.print"):
+                tower_mask.main()
+            west = sample_elevation.read_hgt(build_elevation.hgt_path(out, -75, 40))
+            east = sample_elevation.read_hgt(build_elevation.hgt_path(out, -74, 40))
+            np.testing.assert_array_equal(west[:, -1], east[:, 0])
+            # The plateau is gone: the membrane lies on the plane, within the metre a tile rounds to.
+            self.assertLessEqual(float(np.abs(west[870:940, 3530:] - plane[870:940, 3530:3601]).max()), 1)
+            self.assertLessEqual(float(np.abs(east[870:940, :70] - plane[870:940, 3600:3670]).max()), 1)
+            self.assertTrue(np.isfinite(west).all() and np.isfinite(east).all())
+            manifest = json.loads((out / "elevation-manifest.json").read_text())
+            method = manifest["method"]
+            self.assertEqual((method["masked"], method["membrane"]["name"]), ("membrane", "membrane"))
+            self.assertEqual(method["membrane"]["unfilledPosts"], 0)
+            self.assertEqual(manifest["noDataPosts"], 0)
+            # Each cell counts the zone's posts on the border column they share; the membrane counts them once.
+            import rasterio
+
+            with rasterio.open(file) as dataset:
+                shared = int(tower_mask.cell_zone([dataset], (-74, 40))[:, 0].sum())
+            masked = [entry["maskedPosts"] for entry in manifest["cellFiles"]]
+            self.assertTrue(70 < shared < 100)
+            self.assertEqual(sum(masked) - method["membrane"]["filledPosts"], shared)
+
+
 if __name__ == "__main__":
     unittest.main()
