@@ -17,7 +17,8 @@
 #
 # The account and the grant stay until someone removes them, and cost nothing.
 # Creating them changes who can read the project's data, so --create needs
-# Chris's go-ahead once.
+# Chris's go-ahead once. He gave it on 2026-11-27 for the defaults, and they
+# exist since then.
 set -euo pipefail
 
 project=chiho-prod
@@ -75,7 +76,7 @@ run gcloud storage buckets add-iam-policy-binding "gs://$bucket" --project "$pro
   || fail "the grant failed; run cache-access.sh --create again in a minute"
 
 if [ "$action" = create ]; then
-  echo "created $email; next: provision.sh ... --cache-reader $email"
+  echo "$email may read gs://$bucket; next: provision.sh ... --cache-reader $email"
 else
   echo "plan only: nothing was created. Add --create once Chris has agreed."
   echo "builders would then be created with: provision.sh ... --cache-reader $email"

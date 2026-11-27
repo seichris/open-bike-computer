@@ -1,9 +1,10 @@
 # Keeping the elevation tiles between builds
 
-Status: **the tiles are kept and a build can restore them; no builder may
-read the bucket yet.** Chris decided on 2026-11-26 to keep the tiles of that
-day's builder (option 2 of [The choice](#the-choice)) and on 2026-11-27 to
-have the restore step built. How a build uses the tiles is on
+Status: **the tiles are kept, a build can restore them, and a builder may
+read the bucket; no builder has done so yet.** Chris decided on 2026-11-26
+to keep the tiles of that day's builder (option 2 of
+[The choice](#the-choice)), and on 2026-11-27 to have the restore step
+built and the builders' read-only service account created. How a build uses the tiles is on
 [the builder's page](README.md#kept-elevation-tiles). From
 [The problem](#the-problem) on, this page is the proposal as it was put to
 him, with the prices.
@@ -61,14 +62,14 @@ It differs from the proposal below in three ways:
 
 **Still missing:**
 
-- **A builder that may read the bucket.** `cache-access.sh` prints the two
-  commands for a service account that can read this one bucket;
-  `provision.sh --cache-reader` attaches it. Neither has been run: creating
-  the account needs Chris's go-ahead.
-- **A restore on a real builder.** From a laptop the tool has checked
-  `meta.tar` of both sets and three small bands of the real bucket (817
-  tiles). The whole sets, the time and the token from the metadata server
-  wait for the first build that asks for them.
+- **A restore on a real builder.** The service account
+  `bicino-routing-builder@chiho-prod.iam.gserviceaccount.com` exists since
+  2026-11-27 and can read this one bucket; `provision.sh --cache-reader`
+  attaches it to a builder, and no builder has been created with it. From
+  a laptop the tool has checked `meta.tar` of both sets and three small
+  bands of the real bucket (817 tiles), with a person's token. The whole
+  sets, the time and the token from the metadata server wait for the first
+  build that asks for them.
 - **An upload step** for a new set, such as the 3DEP terrain tiles.
   `elevation_cache.py pack` writes the tars and the record; uploading them
   is done by hand as described above.

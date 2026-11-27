@@ -194,10 +194,15 @@ account without any role in the project, and `roles/storage.objectViewer`
 for it on this one bucket. It is safe to run again. The builder's scope
 allows storage reads only.
 The token is sent to `storage.googleapis.com` and to no other address, and
-a redirect is an error. **The account does not exist yet**: creating it
-needs Chris's go-ahead once, and until then a build with
-`--elevation-cache` reports `this machine has no service account` and builds
-its tiles.
+a redirect is an error.
+
+The account exists since 2026-11-27:
+`bicino-routing-builder@chiho-prod.iam.gserviceaccount.com`, with that one
+grant, no key and no role in the project (`cache-access.sh --show` prints
+who may read the bucket). The grant failed on the first run, a moment after
+the account was made, and the second run made it. A builder created without
+`--cache-reader` still holds no credentials: with `--elevation-cache` it
+reports `this machine has no service account` and builds its tiles.
 
 **The record does not make finished work stale.** A restored tile is checked
 against the cell list the build itself would write, so a record changes how
@@ -307,7 +312,7 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 | 2026-11-25: Docker took `build/planet-no-elevation/valhalla_tiles.tar` for a volume name and refused it. | Every path comes from `config.sh`, which rejects a relative scratch path. A test checks every mount. |
 | The hand-written qualification and gate scripts waited up to 180 seconds for Valhalla and then went on whether it answered or not. This never fired. | The wait fails the stage when Valhalla does not answer. |
 | Every run: the gate ran last, by hand, after about 7.5 hours. | The gate is a stage. On city samples it can run before a planet is built (see [Rehearse](#rehearse-on-a-city-sample)). |
-| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | The raw and the 400 m tiles of 2026-11-26 are kept in a bucket, and `--elevation-cache` [restores them](#kept-elevation-tiles), checked tile by tile. No builder has done so yet: the service account that may read the bucket is not created. |
+| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | The raw and the 400 m tiles of 2026-11-26 are kept in a bucket, and `--elevation-cache` [restores them](#kept-elevation-tiles), checked tile by tile. No builder has done so yet. |
 
 ## Rehearse on a city sample
 
@@ -423,9 +428,11 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   sample graphs.
 - **`builder_status.py` over real SSH**, through the VPS and with a Tailscale
   re-authentication pending. Tests fed it those replies.
-- **Restoring kept tiles on a builder.** `cache-access.sh` against Google
-  Cloud, a VM created with `--cache-reader`, the token from its metadata
-  server, and a read of the bucket as that account. The restore of both
+- **Restoring kept tiles on a builder.** A VM created with
+  `--cache-reader`, the token from its metadata server, and a read of the
+  bucket as that account. The account and its grant were read back on
+  2026-11-27, but nothing has read the bucket as the account: a laptop
+  login may not ask for its tokens. The restore of both
   whole sets, 244 GB: its time, the scratch it needs while the tars are
   unpacked (each tar lies beside its tiles until it is checked), and
   `build_elevation.py` finding all 26,475 receipts current. From a laptop,
