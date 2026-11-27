@@ -27,6 +27,14 @@ The builder reads the bucket as its service account, with a token from the
 metadata server. The token goes to Google's address and nowhere else;
 `--endpoint`, for rehearsals, gets none.
 
+`fetch-terrain` fetches, before a hybrid build, the files of the terrain
+sources that keep a copy of them in a bucket (the source list's `mirror`), so
+that the build reads them from disk and not from the source's own origin. A
+file is kept only with the size and SHA-256 the source's catalog pins. One the
+bucket does not hold as pinned is left out, and so is every file not yet
+fetched once the bucket cannot be read at all: the build then reads those from
+the origin.
+
 `compare` tells, after the build, whether a restored set is still the one the
 record pins. `verify` checks the bucket against the record and keeps nothing.
 `pack` writes a set's tar files and a record, for a rehearsal or before a new
@@ -48,13 +56,14 @@ import re
 import shutil
 import sys
 import tarfile
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,6 +95,10 @@ META_FILES = ("cells.txt", "elevation-manifest.json")
 
 class CacheError(Exception):
     """The set cannot be restored; the message says why."""
+
+
+class NotPinned(CacheError):
+    """The bucket holds no such object, or not the pinned one."""
 
 
 class NotEmpty(CacheError):
@@ -274,7 +287,7 @@ def fetch_object(url, token, path, size, sha256, *, attempts=ATTEMPTS):
                             break
                         held += len(chunk)
                         if held > size:
-                            raise CacheError(f"{name} is longer than its pinned {size} bytes")
+                            raise NotPinned(f"{name} is longer than its pinned {size} bytes")
                         out.write(chunk)
                         digest.update(chunk)
                 if held == size:
@@ -289,7 +302,7 @@ def fetch_object(url, token, path, size, sha256, *, attempts=ATTEMPTS):
                     raise CacheError(f"may not read {name} (HTTP {error.code}): the builder's service account needs "
                                      "roles/storage.objectViewer on the bucket") from None
                 elif error.code == 404:
-                    raise CacheError(f"the bucket holds no {name}") from None
+                    raise NotPinned(f"the bucket holds no {name}") from None
                 elif error.code in (408, 429) or error.code >= 500:
                     problem = f"HTTP {error.code}"
                 else:
@@ -300,7 +313,7 @@ def fetch_object(url, token, path, size, sha256, *, attempts=ATTEMPTS):
                 raise CacheError(f"{name}: {problem}, after {attempts} attempts")
             time.sleep(min(60, 2 ** attempt))
     if digest.hexdigest() != sha256:
-        raise CacheError(f"{name} is not the pinned file: SHA-256 {digest.hexdigest()}, the record has {sha256}")
+        raise NotPinned(f"{name} is not the pinned file: SHA-256 {digest.hexdigest()}, the record has {sha256}")
 
 
 # Restore -------------------------------------------------------------------
@@ -718,6 +731,95 @@ def pack(record_path, out, bucket, family, sets):
     return record
 
 
+# Terrain files --------------------------------------------------------------
+
+
+def holds(path, size, sha256):
+    """Whether the file is there with this size and SHA-256."""
+    if not path.is_file() or path.stat().st_size != size:
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == sha256
+
+
+def mirrored_files(sources_path, into, bounds=None, endpoint=GOOGLE):
+    """(source id, URL, path, size, SHA-256) of every file a build reads from a source's bucket copy.
+
+    The sources are read as build_elevation.py, beside this directory, reads
+    them, so a catalog or area that is not the pinned one stops here. A build
+    bounded by whole degrees reads the terrain of the cells one beyond them.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import build_elevation
+
+    try:
+        sources = build_elevation.load_terrain_sources(Path(sources_path))
+    except (OSError, ValueError) as error:
+        raise CacheError(f"cannot read the terrain sources: {error}") from None
+    files = []
+    for source in sources:
+        if source.mirror is None:
+            continue
+        bucket, prefix = build_elevation.MIRROR.fullmatch(source.mirror).groups()
+        cells = sorted(source.tiles)
+        if bounds is not None:
+            west, south, east, north = bounds
+            cells = [(x, y) for x, y in cells if west - 1 <= x < east + 1 and south - 1 <= y < north + 1]
+        for cell in cells:
+            name, size, sha256 = source.mirror_file(cell)
+            files.append((source.id, object_url(endpoint, bucket, prefix + name), Path(into) / source.id / name,
+                          size, sha256))
+    return files
+
+
+def fetch_terrain(sources_path, into, *, bounds=None, endpoint=GOOGLE, token_file=None, jobs=6, attempts=3,
+                  log=say):
+    """Fetch the terrain files that sources keep a copy of in a bucket into INTO/SOURCE-ID/; the number left out."""
+    files = mirrored_files(sources_path, into, bounds, endpoint)
+    wanted = [entry for entry in files if not holds(*entry[2:])]
+    log(f"terrain files: {len(files)} in the bucket copies, {len(files) - len(wanted)} here already, "
+        f"{len(wanted)} to fetch")
+    if not wanted:
+        return 0
+    token = Token(endpoint, token_file)
+    try:
+        token.header()
+    except CacheError as error:
+        log(f"terrain files: cannot read the bucket, so the build reads {len(wanted)} files from their origins: "
+            f"{error}")
+        return len(wanted)
+    stopped = threading.Event()
+
+    def fetch(entry):
+        _, url, path, size, sha256 = entry
+        if stopped.is_set():
+            return "not fetched"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.partial")
+        try:
+            fetch_object(url, token, partial, size, sha256, attempts=attempts)
+        except NotPinned as error:
+            partial.unlink(missing_ok=True)
+            return str(error)
+        except CacheError as error:
+            # Not this file's fault: a bucket that cannot be read now is not tried for the others.
+            partial.unlink(missing_ok=True)
+            stopped.set()
+            return str(error)
+        os.replace(partial, path)
+        return None
+
+    with ThreadPoolExecutor(jobs) as pool:
+        problems = [problem for problem in pool.map(fetch, wanted) if problem is not None]
+    log(f"terrain files: fetched {len(wanted) - len(problems)}; the build reads {len(problems)} from their origins")
+    for problem in sorted(set(problems))[:5]:
+        log(f"terrain files: {problem}")
+    return len(problems)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -745,6 +847,15 @@ def main(argv=None):
     verifying.add_argument("--jobs", type=int, default=6)
     verifying.add_argument("--endpoint", default=GOOGLE)
     verifying.add_argument("--token-file", type=Path)
+    fetching = commands.add_parser("fetch-terrain",
+                                   help="Fetch terrain sources' files from their copy in a bucket before a build")
+    fetching.add_argument("--sources", required=True, type=Path, help="The elevation source list")
+    fetching.add_argument("--into", required=True, type=Path, help="The files go to INTO/SOURCE-ID/")
+    fetching.add_argument("--bounds", type=int, nargs=4, metavar=("WEST", "SOUTH", "EAST", "NORTH"),
+                          help="The bounds given to build_elevation.py")
+    fetching.add_argument("--jobs", type=int, default=6)
+    fetching.add_argument("--endpoint", default=GOOGLE, help="For rehearsals: another address; it gets no token")
+    fetching.add_argument("--token-file", type=Path)
     packing = commands.add_parser("pack", help="Write the tars and the record of finished tile sets")
     packing.add_argument("--record", required=True, type=Path, help="The record file to write")
     packing.add_argument("--out", required=True, type=Path, help="Where the tars go, below each set's prefix")
@@ -765,6 +876,12 @@ def main(argv=None):
             missing = failed_sets(report) + [name for name, _, required in wanted
                                              if required and not report["sets"][name].get("kept", True)]
             return NOT_RESTORED if missing else 0
+        if args.command == "fetch-terrain":
+            if not 1 <= args.jobs <= 64:
+                parser.error("--jobs must be between 1 and 64")
+            left = fetch_terrain(args.sources, args.into, bounds=args.bounds, endpoint=args.endpoint.rstrip("/"),
+                                 token_file=args.token_file, jobs=args.jobs)
+            return NOT_RESTORED if left else 0
         if args.command == "compare":
             compare(args.report)
         elif args.command == "verify":

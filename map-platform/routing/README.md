@@ -215,7 +215,8 @@ production now.
      cell's Drive file, with the resource key a file made before 2021
      needs, and pins its size and SHA-256: Drive gives no ETag, and answers
      a file that has had too many downloads that day with a page of its
-     own, which the hash stops.
+     own, which the hash stops. A copy of every file is kept in the
+     elevation bucket, which the source list names as Sonny's `mirror`.
 
    [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
    an `osmium export` of the relation, or of several for Sonny, 3DEP's
@@ -234,6 +235,12 @@ production now.
      --opening-radius 400 --terrain-sources /routing/elevation-sources.json --jobs 20 \
      --policy /app/map-platform/config/topography-source-policy-v2.json
    ```
+
+   With `--terrain-files DIR` a source with a `mirror` reads its files
+   from `DIR/SOURCE-ID/` first, where
+   `builder/elevation_cache.py fetch-terrain --sources elevation-sources.json --into DIR`
+   put them from the bucket; the builder's elevation stage does both. A
+   file that is not there is read from the source's origin.
 
    The run then has four stages, each resumed from its receipts:
 

@@ -45,6 +45,8 @@ BICINO_ELEVATION_RAW=$BICINO_SCRATCH/elevation-raw
 BICINO_ELEVATION=$BICINO_SCRATCH/elevation
 BICINO_ELEVATION_OPENED=$BICINO_SCRATCH/elevation-opened
 BICINO_ELEVATION_TERRAIN=$BICINO_SCRATCH/elevation-terrain
+# Terrain sources' files that the elevation stage fetched from a bucket copy.
+BICINO_ELEVATION_TERRAIN_FILES=$BICINO_SCRATCH/elevation-terrain-files
 BICINO_AUDIT=$BICINO_SCRATCH/audit
 BICINO_WORK=$BICINO_SCRATCH/work
 # The VPS pulls from export/ with a read-only identity: markers, logs,
@@ -91,6 +93,11 @@ BICINO_TERRAIN=${BICINO_TERRAIN:-}
 BICINO_ELEVATION_CACHE=${BICINO_ELEVATION_CACHE:-}
 # Rehearsals only: this machine's stand-in for the bucket, instead of Google.
 BICINO_ELEVATION_CACHE_ENDPOINT=${BICINO_ELEVATION_CACHE_ENDPOINT:-}
+# Where a hybrid build fetches the files a terrain source keeps a copy of in a
+# bucket: empty for the bucket the source list names, at Google, as the
+# builder's service account; http://127.0.0.1:PORT for a rehearsal's stand-in,
+# which gets no token; none to read every file from its source's origin.
+BICINO_TERRAIN_MIRROR_ENDPOINT=${BICINO_TERRAIN_MIRROR_ENDPOINT:-}
 BICINO_PLANET_DATE=${BICINO_PLANET_DATE:-}
 BICINO_TOOLS_COMMIT=${BICINO_TOOLS_COMMIT:-}
 
@@ -172,6 +179,11 @@ bicino_validate_run() {
       || bicino_fail "BICINO_ELEVATION_CACHE_ENDPOINT is for a sample rehearsal with BICINO_ELEVATION_CACHE"
     [[ "$BICINO_ELEVATION_CACHE_ENDPOINT" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] \
       || bicino_fail "BICINO_ELEVATION_CACHE_ENDPOINT must be http://127.0.0.1:PORT, got: $BICINO_ELEVATION_CACHE_ENDPOINT"
+  fi
+  if [ -n "$BICINO_TERRAIN_MIRROR_ENDPOINT" ] && [ "$BICINO_TERRAIN_MIRROR_ENDPOINT" != none ]; then
+    bicino_is_sample || bicino_fail "BICINO_TERRAIN_MIRROR_ENDPOINT is for a sample rehearsal, or none"
+    [[ "$BICINO_TERRAIN_MIRROR_ENDPOINT" =~ ^http://127\.0\.0\.1:[0-9]{2,5}$ ]] \
+      || bicino_fail "BICINO_TERRAIN_MIRROR_ENDPOINT must be http://127.0.0.1:PORT or none, got: $BICINO_TERRAIN_MIRROR_ENDPOINT"
   fi
   local name
   for name in BICINO_ELEVATION_JOBS BICINO_UNGRADED_THREADS BICINO_GRADED_THREADS BICINO_ELEVATION_ATTEMPTS; do

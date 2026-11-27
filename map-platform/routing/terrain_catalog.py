@@ -77,6 +77,15 @@ made before 2021, its resource key), date, size and SHA-256:
 
 Then record the files' names, sizes and SHA-256, the tile or cell count and,
 for MRDEM-30, the object's size, ETag and date in elevation-sources.json.
+
+A source whose list entry names a `mirror` is read from that copy in the
+elevation bucket first (builder/elevation_cache.py fetch-terrain). `mirror`
+fills the copy, with gcloud signed in as someone who may write to the bucket:
+it downloads each file of the catalog the copy lacks from the source's origin,
+checks its size and SHA-256 against the catalog and uploads it under the
+cell's name. It never replaces an object; one of another size stops it.
+
+    python terrain_catalog.py mirror --source sonny-dtm-europe-1s-v25
 """
 
 import argparse
@@ -85,6 +94,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -94,7 +104,7 @@ from pathlib import Path
 
 from build_elevation import (
     MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, cell_of, format_cell_catalog,
-    format_sonny_catalog, format_terrain_catalog, hgt_name, load_area, sonny_posts,
+    format_sonny_catalog, format_terrain_catalog, hgt_name, load_area, load_terrain_sources, sonny_posts,
 )
 
 KEY = re.compile(r"/([ns])(\d{2})([ew])(\d{3})/USGS_13_\1\2\3\4_(\d{8})\.tif$")
@@ -298,7 +308,11 @@ def sonny_listing(html):
         if name is None:
             continue
         key = re.search(r"resourcekey=([A-Za-z0-9_-]+)", entry[2].replace("&amp;", "&"))
-        found[cell_of(name[1])] = entry[1] + (f"/{key[1]}" if key else "")
+        cell = cell_of(name[1])
+        # Drive allows two files of one name, such as a corrected tile beside the old one: pin neither.
+        if cell in found:
+            raise ValueError(f"the folder lists {name[1]}.zip twice")
+        found[cell] = entry[1] + (f"/{key[1]}" if key else "")
     return found
 
 
@@ -326,6 +340,59 @@ def http_download(url):
 def http_get(url):
     with urllib.request.urlopen(url, timeout=120) as response:
         return response.read().decode()
+
+
+def mirror_files(source, held, download, upload, jobs=6):
+    """Copy each file of the source's catalog that its bucket copy lacks; {name: "held" or "copied"}.
+
+    `held` maps the names the copy holds to their sizes. A file is uploaded
+    only once its download has the catalog's size and SHA-256.
+    """
+    wanted = {}
+    for cell in sorted(source.tiles):
+        name, size, sha256 = source.mirror_file(cell)
+        if name in held and held[name] != size:
+            raise ValueError(f"{source.mirror}{name} holds {held[name]} bytes, not the catalog's {size}")
+        wanted[name] = (source.tile_url(*cell), size, sha256)
+
+    def copy(name):
+        if name in held:
+            return "held"
+        url, size, sha256 = wanted[name]
+        data, _ = download(url)
+        found = hashlib.sha256(data).hexdigest()
+        if len(data) != size or found != sha256:
+            raise ValueError(f"{url} gave {len(data)} bytes with SHA-256 {found}, not the catalog's {size} bytes "
+                             f"with SHA-256 {sha256}")
+        upload(data, f"{source.mirror}{name}")
+        return "copied"
+
+    with ThreadPoolExecutor(jobs) as pool:
+        return dict(zip(wanted, pool.map(copy, wanted)))
+
+
+def gcloud_sizes(prefix):
+    """{name: bytes} of the objects directly under a gs:// prefix."""
+    listed = subprocess.run(["gcloud", "storage", "ls", "-l", prefix], capture_output=True, text=True)
+    if listed.returncode != 0 and "matched no objects" not in listed.stderr:
+        raise OSError(f"gcloud storage ls {prefix}: {listed.stderr.strip()}")
+    sizes = {}
+    for line in listed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2].startswith(prefix):
+            sizes[parts[2][len(prefix):]] = int(parts[0])
+    return sizes
+
+
+def gcloud_upload(data, url):
+    """Upload `data` to a gs:// URL that holds no object yet."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile() as handle:
+        handle.write(data)
+        handle.flush()
+        subprocess.run(["gcloud", "storage", "cp", "--if-generation-match=0", "--quiet", handle.name, url],
+                       check=True, capture_output=True)
 
 
 def main():
@@ -362,7 +429,19 @@ def main():
     sonny.add_argument("--folder", default=SONNY_FOLDER, help="The Drive folder's embedded view")
     sonny.add_argument("--jobs", type=int, default=4)
     sonny.add_argument("--out", required=True, type=Path, help="A new catalog file")
+    copy = commands.add_parser("mirror", help="Copy a source's pinned files to its copy in the elevation bucket")
+    copy.add_argument("--sources", type=Path, default=Path(__file__).with_name("elevation-sources.json"))
+    copy.add_argument("--source", required=True, help="The id of a source whose entry names a mirror")
+    copy.add_argument("--jobs", type=int, default=6)
     args = parser.parse_args()
+    if args.command == "mirror":
+        found = [source for source in load_terrain_sources(args.sources) if source.id == args.source]
+        if not found or found[0].mirror is None:
+            parser.error(f"{args.sources.name} lists no source {args.source} with a mirror")
+        done = mirror_files(found[0], gcloud_sizes(found[0].mirror), http_download, gcloud_upload, args.jobs)
+        print(f"{found[0].mirror}: {sum(state == 'copied' for state in done.values())} copied, "
+              f"{sum(state == 'held' for state in done.values())} held already")
+        return
     if args.command == "srtm-fill":
         blocks = []
         for path in sorted(args.sonny.glob("*.zip")):

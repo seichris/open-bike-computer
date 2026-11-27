@@ -69,7 +69,7 @@ import urllib.request
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 POSTS = 3601
@@ -124,6 +124,8 @@ MRDEM_HTTP_OPTIONS = {
 # height datum. A Drive file has no ETag, so the catalog pins each zip's SHA-256 in its place.
 SONNY_ADAPTER = "sonny-dtm-europe-1s-hgt-v1"
 SONNY_ORIGIN = "https://drive.usercontent.google.com/download"
+# A copy of a source's files in a storage bucket, named by cell: `gs://BUCKET/PREFIX/` with a slash at the end.
+MIRROR = re.compile(r"gs://([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)+)")
 # Heights beyond these are not ground, as in MRDEM-30. The polders of the Netherlands lie down to about 7 m under
 # the datum and the Alps reach 4,808 m. Such posts are dropped with the posts within SONNY_REJECT_MARGIN of them.
 SONNY_HEIGHTS = (-10, 7000)
@@ -312,7 +314,7 @@ TERRAIN_ADAPTERS = {
     TERRAIN_ADAPTER: (f"{TERRAIN_BUCKET}/{TERRAIN_PREFIX}", "EPSG:4269", set(), parse_terrain_catalog),
     MRDEM_ADAPTER: (MRDEM_URL, f"EPSG:{MRDEM_EPSG}", {"originBytes", "originEtag", "originModified"},
                     parse_cell_catalog),
-    SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", set(), parse_sonny_catalog),
+    SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", {"mirror"}, parse_sonny_catalog),
 }
 OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
 OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -338,6 +340,9 @@ class TerrainSource:
     area_sha256: str
     adapter: str = TERRAIN_ADAPTER
     origin_object: tuple = None
+    # The bucket copy, and the directory a build fetched it into before it started (see elevation_cache.py).
+    mirror: str = None
+    files: Path = None
 
     def tile_url(self, longitude, latitude):
         if self.origin_object is not None:
@@ -363,6 +368,13 @@ class TerrainSource:
             rejects = {"below": SONNY_HEIGHTS[0], "above": SONNY_HEIGHTS[1], "pixelsAround": SONNY_REJECT_MARGIN}
         return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
                 "areaSha256": self.area_sha256, "rejects": rejects}
+
+    def mirror_file(self, cell):
+        """The name, bytes and SHA-256 of the cell's file in the mirror."""
+        if self.adapter == SONNY_ADAPTER:
+            _, _, size, sha256 = self.tiles[cell]
+            return f"{hgt_name(*cell)}.zip", size, sha256
+        raise ValueError(f"{self.id} keeps no copy of its files")
 
     def identity(self):
         identity = {"id": self.id, "catalogSha256": self.catalog_sha256, "areaSha256": self.area_sha256,
@@ -405,6 +417,9 @@ def _terrain_source(path, value):
                 or not isinstance(modified, str) or OBJECT_DATE.fullmatch(modified) is None):
             raise ValueError(f"{value['id']} must pin its origin's size, ETag and date")
         origin_object = (size, etag)
+    mirror = value.get("mirror")
+    if "mirror" in further and (not isinstance(mirror, str) or MIRROR.fullmatch(mirror) is None):
+        raise ValueError(f"{value['id']} must name its copy as gs://BUCKET/PREFIX/")
     pinned = {}
     for kind in ("catalog", "area"):
         name = value[kind]
@@ -422,7 +437,7 @@ def _terrain_source(path, value):
             raise ValueError(f"terrain source {field} must be HTTPS")
     return TerrainSource(value["id"], value["origin"], tiles, value["catalogSha256"], value["termsUrl"],
                          value["attributionUrl"], path.parent / value["area"], value["areaSha256"],
-                         value["adapter"], origin_object)
+                         value["adapter"], origin_object, mirror)
 
 
 @dataclass(frozen=True)
@@ -780,14 +795,20 @@ def sonny_posts(data, cell):
 
 
 def read_sonny_cell(source, cell, out):
-    """The cell's posts from its zip on Google Drive, downloaded and checked against the catalog, and what was read.
+    """The cell's posts from its zip, checked against the catalog, and what was read.
 
-    Drive answers a file it will not serve, for one with too many recent
-    downloads, with a page of its own; the size and SHA-256 catch it.
+    The zip is the copy the build fetched from the bucket where there is one,
+    and otherwise downloaded from Google Drive. Drive answers a file it will
+    not serve, for one with too many recent downloads, with a page of its
+    own; the size and SHA-256 catch it.
     """
     _, date, size, sha256 = source.tiles[cell]
-    url = source.tile_url(*cell)
-    data, _ = fetch(url)
+    copy = None if source.files is None else source.files / source.mirror_file(cell)[0]
+    if copy is not None and copy.is_file():
+        url, data, via = str(copy), copy.read_bytes(), "mirror"
+    else:
+        url = source.tile_url(*cell)
+        data, via = fetch(url)[0], "origin"
     found = hashlib.sha256(data).hexdigest()
     if len(data) != size or found != sha256:
         raise ValueError(f"{url} gave {len(data)} bytes with SHA-256 {found}, not the catalog's {size} bytes "
@@ -797,7 +818,7 @@ def read_sonny_cell(source, cell, out):
         low, high = read["rejectedHeights"]
         print(f"{hgt_name(*cell)}: dropped {read['rejectedPixels']} posts of Sonny's tile at and around heights "
               f"from {low:.0f} to {high:.0f} m, which are not ground", flush=True)
-    return heights, {"sha256": found, "readBytes": size, "tileDate": date, **read}
+    return heights, {"sha256": found, "readBytes": size, "tileDate": date, "via": via, **read}
 
 
 TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell}
@@ -1675,6 +1696,9 @@ def main():
                         help="elevation-sources.json: put its terrain sources over the opened tiles")
     parser.add_argument("--terrain", type=Path, help="The terrain tiles for --terrain-sources")
     parser.add_argument("--opened", type=Path, help="The opened tiles when --terrain-sources makes --out the hybrid")
+    parser.add_argument("--terrain-files", type=Path, metavar="DIR",
+                        help="Copies of terrain sources' files, fetched from their mirror by elevation_cache.py, "
+                             "under DIR/SOURCE-ID/; a source reads its own origin for a file that is not there")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs must be between 1 and 64")
@@ -1685,6 +1709,8 @@ def main():
     hybrid_arguments = (args.terrain_sources, args.terrain, args.opened)
     if any(value is not None for value in hybrid_arguments) and (None in hybrid_arguments or args.raw is None):
         parser.error("--terrain-sources, --terrain and --opened go together and need --opening-radius")
+    if args.terrain_files is not None and args.terrain_sources is None:
+        parser.error("--terrain-files needs --terrain-sources")
     out = args.out.resolve()
     raw = args.raw.resolve() if args.raw else out
     separate = {"--out": out, "--raw": raw if args.raw else None,
@@ -1699,6 +1725,9 @@ def main():
         sources = load_terrain_sources(args.terrain_sources) if args.terrain_sources else None
     except (OSError, ValueError) as error:
         parser.error(f"--terrain-sources: {error}")
+    if args.terrain_files is not None:
+        files = args.terrain_files.resolve()
+        sources = tuple(replace(source, files=files / source.id) for source in sources)
     policy = TopographySourcePolicy.load(args.policy)
     (raw / "receipts").mkdir(parents=True, exist_ok=True)
     (raw / "index").mkdir(exist_ok=True)

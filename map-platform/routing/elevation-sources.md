@@ -30,7 +30,7 @@ other three are not yet.
 
 | Source | Approved area | Licence and credit | State |
 |---|---|---|---|
-| Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build. Open: a copy kept outside Google Drive |
+| Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build, from a copy in the elevation bucket |
 | LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Not read yet |
 | GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet: a crawl of about 400,000 tiles at a rate GSI accepts |
 | CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Not read: the terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
@@ -90,13 +90,22 @@ as the third source of the list after 3DEP and MRDEM-30.
   [hybrid planet gate](refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)),
   and Europe's lidar will do the same in places. Nobody has scanned Sonny's
   tiles for them.
-- **Google Drive.** Drive is the only host, and the files can be replaced
-  or withdrawn at any time; a changed file stops the build. Drive answers a
-  file that has had too many downloads in a day with a page of its own,
-  which the SHA-256 check also stops, and the cell fails until Drive serves
-  the file again. A planet build makes 848 downloads, 4.1 GB. A copy in the
-  elevation bucket would remove the dependence; that is still to be
-  decided.
+- **A copy in the elevation bucket.** Drive is Sonny's only host, and the
+  files can be replaced or withdrawn at any time. Drive also answers a file
+  that has had too many downloads in a day with a page of its own, so a
+  planet build's 848 downloads could fail cells until Drive served them
+  again. On 2026-11-27 Chris chose to keep a copy: the 848 zips, 4.11 GB,
+  each checked against the catalog, are in
+  `gs://bicino-routing-elevation/terrain-sources/sonny-dtm-europe-1s-v25/`,
+  which the source list names as the source's `mirror`. Before a hybrid
+  build the elevation stage fetches them with the builder's read-only
+  account (`builder/elevation_cache.py fetch-terrain`), and the reader takes
+  that copy before Drive. A file the bucket does not hold as pinned is read
+  from Drive, as is every file when the bucket cannot be read; either way
+  the zip must have the catalog's SHA-256. Where a tile came from is in its
+  receipt (`via`) and is not part of what it pins, so a tile read from Drive
+  is not built again. `terrain_catalog.py mirror` fills the copy for a new
+  catalog.
 - **Rehearsals.** Five cities ran through the build chain on a laptop
   (`builder/rehearse.sh --radius 400 --terrain
   usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25`), each with Sonny's

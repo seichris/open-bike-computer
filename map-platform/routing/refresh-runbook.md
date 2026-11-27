@@ -1795,9 +1795,15 @@ five cities ran through the build chain with them (see
   for the countries it builds wholly from national data and mainland
   Portugal, LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan,
   and CEDD's 2020 lidar DTM of Hong Kong, whose terms for derived products
-  are still to be read. Sonny's tiles are read by the build; each of the
-  others needs a reader, a catalog, an area and city samples through that
-  reader before a planet build uses it.
+  are still to be read. Sonny's tiles are read by the build, from a copy
+  of them in the elevation bucket; each of the others needs a reader, a
+  catalog, an area and city samples through that reader before a planet
+  build uses it.
+- **A new version of Sonny's tiles** needs a new catalog and area
+  (`terrain_catalog.py sonny-tiles`), a new source id and a new `mirror`
+  prefix in the source list, and then `terrain_catalog.py mirror --source
+  ID`, signed in with gcloud as someone who may write to the bucket, before
+  a build reads it.
 
 ### Planet gate for the hybrid of 2026-11-27
 

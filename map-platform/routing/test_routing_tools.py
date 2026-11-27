@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import urllib.parse
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1336,6 +1337,47 @@ class ElevationHybridTests(ElevationOpeningTests):
             with self.subTest(answer=answer[:20]), patch.object(build_elevation, "fetch", fetch), \
                     self.assertRaisesRegex(ValueError, "not the catalog's"):
                 build_elevation.read_sonny_cell(source, cell, Path("unused"))
+        # The copy a build fetched from the bucket is read in place of Drive's; with none there, Drive's.
+        with tempfile.TemporaryDirectory() as directory:
+            files = Path(directory)
+            copied = replace(source, files=files)
+            (files / "N47E008.zip").write_bytes(data)
+            fetched.clear()
+            with patch.object(build_elevation, "fetch", fetch):
+                posts, read = build_elevation.read_sonny_cell(copied, cell, Path("unused"))
+                self.assertEqual((fetched, read["via"], read["sha256"]), ([], "mirror", sha256))
+                (files / "N47E008.zip").unlink()
+                answers = [data]
+                self.assertEqual(build_elevation.read_sonny_cell(copied, cell, Path("unused"))[1]["via"], "origin")
+                self.assertEqual(fetched, [source.tile_url(*cell)])
+                # A copy that is not the catalog's stops the cell, as Drive's would.
+                (files / "N47E008.zip").write_bytes(self.sonny_zip("N47E008.hgt", heights + 1))
+                with self.assertRaisesRegex(ValueError, f"{files}/N47E008.zip gave .* not the catalog's"):
+                    build_elevation.read_sonny_cell(copied, cell, Path("unused"))
+        self.assertEqual(copied.mirror_file(cell), ("N47E008.zip", len(data), sha256))
+        # Where the files come from is not what the receipt pins: a tile read from either is the same tile.
+        self.assertEqual(copied.pin(cell), source.pin(cell))
+
+    def test_the_bucket_copy_gets_each_file_once_and_only_as_pinned(self):
+        files = {(8, 47): b"zurich", (9, 47): b"st-gallen", (13, 52): b"berlin"}
+        tiles = {cell: (f"{cell[0]:033d}", "20240101", len(data), hashlib.sha256(data).hexdigest())
+                 for cell, data in files.items()}
+        source = replace(self.sonny_source(tiles), mirror="gs://bucket/copy/")
+        served = {source.tile_url(*cell): data for cell, data in files.items()}
+        uploaded = {}
+
+        def upload(data, url):
+            uploaded[url] = data
+
+        done = terrain_catalog.mirror_files(source, {"N47E008.zip": 6}, lambda url: (served[url], ""), upload)
+        self.assertEqual(done, {"N47E008.zip": "held", "N47E009.zip": "copied", "N52E013.zip": "copied"})
+        self.assertEqual(uploaded, {"gs://bucket/copy/N47E009.zip": b"st-gallen", "gs://bucket/copy/N52E013.zip": b"berlin"})
+        # Never another file than the pinned one, and never over an object.
+        served[source.tile_url(13, 52)] = b"Berlin"
+        with self.assertRaisesRegex(ValueError, "not the catalog's 6 bytes"):
+            terrain_catalog.mirror_files(source, {}, lambda url: (served[url], ""), upload)
+        with self.assertRaisesRegex(ValueError, "gs://bucket/copy/N47E009.zip holds 8 bytes, not the catalog's 9"):
+            terrain_catalog.mirror_files(source, {"N47E009.zip": 8}, lambda url: (served[url], ""), upload)
 
     def test_sonnys_catalog_names_each_cells_file_and_pins_it(self):
         tiles = {(8, 47): ("1SR2cz3aTvEesKawAbmbm6XxOhVFF7MNq", "20240715", 10188486, "c7" * 32),
@@ -1536,7 +1578,8 @@ class ElevationHybridTests(ElevationOpeningTests):
                           ["--terrain-sources", sources, "--terrain", "t", "--opened", "o"],
                           [*opened, "--terrain-sources", sources, "--terrain", "out/t", "--opened", "o"],
                           [*opened, "--terrain-sources", sources, "--terrain", "t", "--opened", "raw"],
-                          [*opened, "--terrain-sources", "missing.json", "--terrain", "t", "--opened", "o"]):
+                          [*opened, "--terrain-sources", "missing.json", "--terrain", "t", "--opened", "o"],
+                          [*opened, "--terrain-files", "f"]):
             argv = ["build_elevation.py", "--policy", "missing.json", "--out", "out", *arguments]
             with self.subTest(arguments=arguments), patch("sys.argv", argv), \
                     patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
@@ -1594,6 +1637,8 @@ class TerrainSourceTests(unittest.TestCase):
         # Sonny's tiles of Europe: a Drive file per cell, pinned by size and SHA-256, cut to the countries it builds
         # from national terrain models and to mainland Portugal outside the patch of SRTM around Porto.
         self.assertEqual((europe.id, len(europe.tiles), europe.origin_object), ("sonny-dtm-europe-1s-v25", 848, None))
+        # A copy of every file is kept in the elevation bucket, which a build reads before Drive.
+        self.assertEqual(europe.mirror, "gs://bicino-routing-elevation/terrain-sources/sonny-dtm-europe-1s-v25/")
         self.assertEqual(europe.tile_url(-10, 38), "https://drive.usercontent.google.com/download?"
                                                    "id=1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK&export=download&confirm=t")
         self.assertTrue(europe.tile_url(13, 48).endswith("&resourcekey=0-yUN8-e7SYxqkNXtDmq8yAg"))
@@ -1671,6 +1716,11 @@ class TerrainSourceTests(unittest.TestCase):
                 (lambda value: value.update(origin="https://drive.google.com/uc"), "unsupported"),
                 (lambda value: value.update(horizontalCrs="EPSG:3035"), "unsupported"),
                 (lambda value: value.update(tileCount=847), "not 847"),
+                (lambda value: value.pop("mirror"), "fields"),
+                (lambda value: value.update(mirror="gs://bicino-routing-elevation"), "gs://BUCKET/PREFIX/"),
+                (lambda value: value.update(mirror="https://storage.googleapis.com/b/"), "gs://BUCKET/PREFIX/"),
+                (lambda value: value.update(mirror="gs://Bucket/terrain/"), "gs://BUCKET/PREFIX/"),
+                (lambda value: value.update(mirror="gs://bucket/../terrain/"), "gs://BUCKET/PREFIX/"),
                 (lambda value: value.update(area=document["terrain"][1]["area"]), "not the area"),
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
@@ -1876,6 +1926,11 @@ class SonnyCatalogTests(unittest.TestCase):
         self.assertEqual(terrain_catalog.sonny_listing(html), {
             (-10, 38): "1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK",
             (13, 48): "0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg"})
+        # Two files of one name leave the cell's tile in doubt.
+        twice = html + html.split("</a></div>")[0].replace("1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK",
+                                                           "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") + "</a></div>"
+        with self.assertRaisesRegex(ValueError, "lists N38W010.zip twice"):
+            terrain_catalog.sonny_listing(twice)
         stream = io.BytesIO()
         heights = np.full((self.POSTS, self.POSTS), 3, dtype=">i2")
         heights[0, 0] = -40

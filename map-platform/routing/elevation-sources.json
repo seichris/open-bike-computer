@@ -68,6 +68,7 @@
       "verticalDatum": "Each country's own height datum, as in the national source",
       "verticalUnits": "m",
       "origin": "https://drive.usercontent.google.com/download",
+      "mirror": "gs://bicino-routing-elevation/terrain-sources/sonny-dtm-europe-1s-v25/",
       "coverage": "Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom and mainland Portugal outside a patch of SRTM around Porto: the posts inside the area, from the cells that touch it",
       "area": "sonny-europe-osm-20261127.geojson.gz",
       "areaBytes": 2034655,
