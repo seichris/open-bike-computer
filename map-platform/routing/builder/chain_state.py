@@ -32,6 +32,10 @@ The chain's state is one of:
 - complete: every stage is done or skipped. `verdict` then holds the gate's
   answer: met, missed, or not-run for a build without elevation.
 
+The gate does not wait for the terrain scan, so a chain whose scan failed
+still says what the gate found: its state is failed and its verdict met or
+missed. The terrain scan's report is in `terrainScan` once that stage is done.
+
 Only the standard library is used: this runs on the bare builder.
 """
 
@@ -63,6 +67,8 @@ STAGES = {
     "qualify-ungraded": ("build-ungraded", "inputs"),
     "qualify-graded": ("build-graded", "inputs"),
     "gate": ("qualify-ungraded", "qualify-graded"),
+    # Informs, and holds up nothing: the gate does not wait for it.
+    "terrain-scan": ("build-graded",),
 }
 # The settings a stage's work depends on, beyond those of the stages it needs.
 # The map-platform image counts only for the stages that run it: a graph
@@ -81,6 +87,7 @@ STAGE_SETTINGS = {
     "qualify-ungraded": (IMAGE,),
     "qualify-graded": (IMAGE,),
     "gate": (IMAGE,),
+    "terrain-scan": (IMAGE,),
 }
 MARKED = ("running", "done", "skipped", "failed")
 FINISHED = ("done", "skipped")
@@ -285,6 +292,13 @@ def restore_report(root, env):
     return report
 
 
+def terrain_scan_report(root, stages):
+    """The terrain scan's short report once its stage is done; an earlier run's report is not this one's."""
+    scan = next(entry for entry in stages if entry["stage"] == "terrain-scan")
+    report = read_json(root / "export" / "evidence" / "terrain-scan" / "terrain-report.json")
+    return report if scan["state"] == "done" and isinstance(report, dict) else None
+
+
 def chain_status(root, clock=time.time):
     stages = stage_states(root)
     states = [entry["state"] for entry in stages]
@@ -300,7 +314,10 @@ def chain_status(root, clock=time.time):
         state = "running"
     else:
         state = "stalled"
-    verdict, summary = gate_verdict(root, stages) if state == "complete" else (None, None)
+    verdict, summary = None, None
+    gate = next(entry for entry in stages if entry["stage"] == "gate")
+    if state == "complete" or (state == "failed" and gate["state"] == "done"):
+        verdict, summary = gate_verdict(root, stages)
     env = read_env(root / "builder.env")
     run = {name: env.get(key) or None for key, name in ENV_KEYS.items()}
     status = {
@@ -315,6 +332,7 @@ def chain_status(root, clock=time.time):
         "run": run,
         "stages": stages,
         "elevationRestore": restore_report(root, env),
+        "terrainScan": terrain_scan_report(root, stages),
         "sampler": read_json(root / "export" / "chain" / "sampler.json"),
     }
     return status, summary
@@ -323,7 +341,7 @@ def chain_status(root, clock=time.time):
 def describe(status):
     """The status as text: one headline, one line per stage."""
     headline = f"chain: {status['state']}"
-    if status["state"] == "complete":
+    if status.get("verdict"):
         headline += f", gate {status['verdict']}"
     if status.get("sample"):
         headline += " (SAMPLE REHEARSAL, not release evidence)"
@@ -352,6 +370,9 @@ def describe(status):
     if len(commits) > 1:
         lines.append("  NOTE: the stages ran with different tools: "
                      + "; ".join(f"{commit[:12]} ({', '.join(stages)})" for commit, stages in commits.items()))
+    scan = status.get("terrainScan")
+    if scan:
+        lines.append(f"  terrain scan: {scan.get('headline')}")
     restore = status.get("elevationRestore")
     if restore:
         parts = []

@@ -40,16 +40,20 @@ Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
   `elevation-terrain/` hold the opened Copernicus tiles and the terrain
   tiles it is made of. `elevation-terrain-files/` holds the terrain
   sources' files fetched from their copy in the elevation bucket.
-- `export/`: everything the VPS may read. `result.json`, `chain/` (markers), `logs/` (one log per stage and the sampler's series), `evidence/` (probe reports, the gate report, manifests), and `ungraded/` and `graded/` (each archive's manifest and a hard link to the archive).
+- `export/`: everything the VPS may read. `result.json`, `chain/` (markers), `logs/` (one log per stage and the sampler's series), `evidence/` (probe reports, the gate report, the [terrain scan](#terrain-scan), manifests), and `ungraded/` and `graded/` (each archive's manifest and a hard link to the archive).
 
 ## The chain
 
 ```text
 images ──┬─ inputs ─────────────────────┬─ qualify-ungraded ─┐
          ├─ elevation ─┐                │                    │
-download ┼─────────────┴─ build-graded ─┼─ qualify-graded ───┴─ gate ─ result
-         └─ build-ungraded ─────────────┘
+download ┼─────────────┴─ build-graded ─┼─ qualify-graded ───┴─ gate ─┬─ result
+         └─ build-ungraded ─────────────┘                             │
+                          build-graded ── terrain-scan ───────────────┘
 ```
+
+The terrain scan needs only the graded build, and nothing waits for it but
+the result.
 
 | Stage | Work | Time on a `c4-highmem-24-lssd` |
 |---|---|---|
@@ -61,12 +65,14 @@ download ┼─────────────┴─ build-graded ─┼─
 | `build-graded` | The same with `--elevation`. | 4 h 50 min |
 | `qualify-ungraded`, `qualify-graded` | Smoke probes, cross-border probes, the territory audit and the profile probe, with no network. | under 1 min each |
 | `gate` | Serve both archives and run `compare_elevation.py` over every city. | 1 min |
+| `terrain-scan` | With terrain sources: look for artifacts in the terrain tiles and measure the graded graph's edges beside them; write the [terrain report](#terrain-scan). | not measured on a builder; see below |
 | `result` | Write `export/result.json` and link the archives into `export/`. | seconds |
 
 The times are from the 2026-11-25 and 2026-11-26 builds. The whole chain
 takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
-`qualify-graded` and `gate` are skipped, and it takes about 4 hours.
+`qualify-graded`, `gate` and `terrain-scan` are skipped, and it takes about
+4 hours. Without `--terrain`, `terrain-scan` is skipped.
 
 `--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
@@ -183,6 +189,88 @@ be made.
 current state. Once the chain ends it also holds both archive manifests, both
 elevation manifests, each archive's qualification summary and the gate
 summary, with `"final": true`.
+
+## Terrain scan
+
+Every lidar terrain model brings its own artifacts: MRDEM-30 has pits a few
+pixels wide on lakes and farmland, 3DEP blocks of zero heights on a plain and
+on a reservoir. The hybrid carries a terrain post unchanged wherever the
+terrain has one, so the graded graph stores such a pit as a grade. On the
+first hybrid planet (2026-11-27) they were found by hand, with scratch
+scripts run on the builder and a laptop after the chain: 61 public-road ways
+with a false step, 5 of them at pit artifacts (see
+[Planet gate for the hybrid](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)).
+The `terrain-scan` stage now does the same on every graded build with
+terrain sources. It runs [`terrain_artifacts.py`](../terrain_artifacts.py)
+three times:
+
+1. `scan`, with no network, over every cell that has a terrain, an opened
+   and a hybrid tile. It counts the terrain posts more than 20, 50, 100 and
+   200 m below opened Copernicus, everywhere and where that surface is flat,
+   and lists the closed hollows: hybrid posts that are terrain posts and lie
+   30 m or more under ground on all eight sides within about 370 m. A
+   hollow that lies less than 20 m further under opened Copernicus than the
+   ground around it is left out, because Copernicus shows it too: valleys,
+   mines and quarries. A hollow is steep when two neighbouring posts of it
+   differ by 20 m or more, and an **artifact candidate** when it is a steep,
+   narrow hole in level ground: the ground around it spreads 25 m at most,
+   and less than 1% of a box about 2.5 km across lies more than 30 m under
+   the box's median. The pits found by hand lay in ground spread 3 to 22 m,
+   canyons in 138 to 369 m; a lidar pit took under 1% of such a box, a mine
+   or a quarry 2 to 45%. A floor at 0 m or below with ground 100 m higher
+   around it is a candidate however wide: a block of zero heights, as 3DEP
+   has on a plain in South Dakota.
+2. `roads`, against the graded archive, which the stage serves on an
+   internal network of its own. For every steep hollow it asks `/locate`
+   with bicycle costing for the edges around it and reads the heights along
+   each edge within 60 m of the hollow, as they are and with the hollow
+   filled. A **false step** is a dip of 5 m or more that reads 30% or more
+   over 30 m, and 20% or less filled. On the hand count's measurements this
+   rule gives its 61 ways. Bridges and tunnels are counted apart, because
+   Valhalla grades them from their ends, which leaves 59 of them.
+3. `report`, which writes the short report.
+
+The report is in three places:
+
+- `export/evidence/terrain-scan/terrain-report.md`, for people: artifact
+  candidates per source, ways with a false step by road class and paved or
+  unpaved, the worst public roads with coordinates and the slopes the graph
+  stores, and the deepest candidates with coordinates. `terrain-report.json`
+  holds the same.
+- `export/result.json` under `terrainScan`, once the stage is done.
+- A line of the status, so `builder_status.py` shows it:
+
+  ```text
+    terrain scan: 1 artifact candidate (nrcan-mrdem-30 1); 1 public-road way with a false step (1 paved, 0 unpaved)
+  ```
+
+Beside the report, `scan.json` holds every cell's counts, `pits.jsonl.gz`
+every steep hollow with the patch of the hybrid around it, and
+`roads.json.gz` every edge measured, with the shape of each that has a false
+step.
+
+**The report informs.** What it finds never fails the stage or the chain.
+The stage fails only when the scan could not be made: a tile set is
+missing, the service does not answer, or a `/locate` lookup failed four
+times. The report is still written then and names the lookups that failed.
+The gate does not wait for the scan, so a chain whose scan failed is
+`failed` and still says what the gate found (`chain: failed, gate met`). To
+run the scan again, delete `export/chain/terrain-scan.json` and start the
+chain.
+
+**What it does not find:** a hollow within 12 posts of a tile's edge on
+that side; most of a hollow wider than about 740 m, whose rim posts are
+compared with more of the hollow and so read as shown by Copernicus;
+hollows less than 30 m deep; and open channels: a river under a bridge
+whose deck the lidar removed is not closed. A candidate is not a verdict
+either: a sinkhole or a pond in level ground looks the same.
+
+**Time.** The scan uses `BICINO_ELEVATION_JOBS` workers, 20 on the builder.
+A cell took 2 seconds and 1.1 GB on a laptop, so 20 workers need about
+22 GB. By hand on 2026-11-27 the same reads took about 25 and 5 minutes at
+4 cores for the 3,197 terrain cells, and the lookups of 63,989 steep
+hollows 286 seconds at 4 at once. No builder has run the stage yet; its
+unit allows 3 hours.
 
 ## Kept elevation tiles
 
@@ -374,6 +462,7 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 | The hand-written qualification and gate scripts waited up to 180 seconds for Valhalla and then went on whether it answered or not. This never fired. | The wait fails the stage when Valhalla does not answer. |
 | 2026-11-27: two rehearsals shared a laptop's Docker. Every run named its elevation container `bicino-elevation` and labelled it `bicino.stage=elevation`, so the elevation stage of one removed the other's container. | A stage's label holds its scratch directory and its names end in the run's id (see [The chain](#the-chain)). Two rehearsals now [run at the same time](#rehearse-on-a-city-sample). |
 | Every run: the gate ran last, by hand, after about 7.5 hours. | The gate is a stage. On city samples it can run before a planet is built (see [Rehearse](#rehearse-on-a-city-sample)). |
+| 2026-11-27: the first hybrid planet's terrain artifacts and the roads they touch were found only by hand, with scratch scripts on the builder and a laptop, after the chain had ended. | The `terrain-scan` stage runs those scans on every graded build with terrain sources and writes [its report](#terrain-scan) beside the gate's. |
 | Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | The raw and the 400 m tiles of 2026-11-26 are kept in a bucket, and `--elevation-cache` [restores them](#kept-elevation-tiles), checked tile by tile. No builder has done so yet. |
 
 ## Rehearse on a city sample
@@ -438,6 +527,29 @@ Calgary took 9 minutes, Vancouver 12 and Montreal 16. Of Toronto's nine
 terrain tiles five read a 3DEP tile and MRDEM-30 and four MRDEM-30 alone,
 1.7 GB in all. The gate's source was
 `usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
+
+On 2026-11-27 Toronto and Chicago ran again with the
+[terrain scan](#terrain-scan), with the two sources the list held before
+Sonny's tiles of Europe and LINZ's of New Zealand were added; no sample of
+those has run through the scan. A sample scans its city's one hybrid cell,
+N43W080 and N41W088; the eight cells around it have terrain tiles and no
+hybrid, and the report counts them as skipped. The stage took 4 to 5
+seconds and both gates were met.
+
+- **Toronto** had no steep hollow. Its 19 closed groups are gorges and
+  creek ravines (the Niagara Whirlpool, Spencer Gorge, Sixteen Mile Creek),
+  which Copernicus shows or whose walls are gentle. Then a pit of 3 by 3
+  posts, 40 m deep, was planted under Boston Avenue in Leslieville, in the
+  terrain and the hybrid tile, and the graded sample was built again. The
+  scan listed it as the one artifact candidate (MRDEM-30, 43.66611,
+  -79.34083) and found three residential ways with a false step: Boston
+  Avenue dips 40 m and reads 84% over 30 m, 3% with the pit filled, and the
+  graph stores 44% down.
+- **Chicago** had nine steep hollows and no candidate. The Elmhurst quarry
+  is the case the width rule is for: Copernicus does not show its depth and
+  the ground around it is level (spread 8 m), but it takes 2.5% of its box.
+  McCook Reservoir, dug in the McCook quarry, and the Route 45 quarry lie in
+  rugged ground. None is near the sample's roads.
 
 `--pack-cache DIR` packs a run's raw and opened tiles as the bucket holds
 them, with a record. `--elevation-cache DIR` then rehearses a build that
@@ -539,6 +651,9 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   speed a builder gets from it, the blend of 26,475 cells, and a graph
   build with `--all-bridges`. The rehearsal ran them for one cell and two
   sample graphs.
+- **The terrain scan at planet size.** Its time and memory with 20
+  workers over about 3,200 terrain cells, and some 64,000 `/locate`
+  lookups against the planet graph. It ran on city samples only.
 - **`builder_status.py` over real SSH**, through the VPS and with a Tailscale
   re-authentication pending. Tests fed it those replies.
 - **Restoring kept tiles on a builder.** Shown on 2026-11-27 by the first
