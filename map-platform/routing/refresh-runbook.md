@@ -952,6 +952,33 @@ sessions' notes folder on Chris's Mac, in
 `planet-builder-rehearsal-evidence-20261126.tgz`; the map VPS could not be
 reached that day.
 
+### Regional terrain models
+
+On 2026-11-27 the terrain models of regions outside the United States and
+Canada were surveyed from their publishers' pages, and five were tried on
+city samples against Copernicus opened at 400 m. The survey, the results and
+what a reader for further sources needs are in
+[Regional terrain models](elevation-sources.md). No source was approved and
+no build changed.
+
+- **A terrain model pays where hills are narrow.** On the same routes Lisbon
+  climbs 546 m on the opened tiles and 913 m on Portugal's lidar (in Sonny's
+  compiled Europe tiles), and `use_hills` then changes all four legs
+  instead of two. Wellington goes from 910 to 1,228 m on LINZ's lidar, and
+  Tokyo's short slopes from 121 to 225 m on GSI's DEM5A.
+- **It does not where slopes are broad.** Zurich reads 847 m opened and
+  822 m on swissALTI3D, Stuttgart 480 and 526 m.
+- **On flat tower streets the lidar removes phantom steepness.** Along Hong
+  Kong's tram corridor up to 10% of the direct route reads 6%+ on the opened
+  tiles and none on the 2020 lidar. Sha Tin and Tseung Kwan O, which a
+  downtown survey had labelled flat, are steep on the lidar too.
+- **Judge a source on the direct routes.** The share of the ungraded route
+  that reads 6%+ and the climb along it compare heights. A leg that got
+  longer is often a near-tie that flipped.
+- **To put to Chris, in order:** Sonny's LiDAR DTMs of Europe (1
+  arc-second), LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan
+  and, after a reading of its terms, CEDD's 2020 lidar DTM of Hong Kong.
+
 ## Pull, assemble, and install on Coolify
 
 Expose the approved immutable archive and receipt through a dedicated

@@ -331,6 +331,8 @@ Judge an elevation source on small city graphs before grading a planet.
 San Francisco, Zurich, Wellington), each with a box and four or five legs.
 The 2026-11-25 results and the recommendation are in
 [Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples).
+Terrain models of other regions, surveyed and sampled on 2026-11-27, are in
+[Regional terrain models](elevation-sources.md).
 
 A city that names a Geofabrik `extract` builds as a sample. To build one
 city at one opening radius and run the gate on it in one command, use
