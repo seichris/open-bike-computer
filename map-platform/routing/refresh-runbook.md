@@ -961,6 +961,264 @@ sessions' notes folder on Chris's Mac, in
 `planet-builder-rehearsal-evidence-20261126.tgz`; the map VPS could not be
 reached that day.
 
+### Switching elevation off in tower zones
+
+On 2026-11-27 another way to get past the towers was tried on city samples:
+keep the 200 m opening, which keeps the hills, and write no data into the
+tiles where tall buildings dominate, so that Valhalla grades those streets
+as the graph without elevation does. [tower_mask.py](tower_mask.py) is that
+step. It is a sample tool: its manifests record `bounds`, so `build_graph.py`
+takes its tiles only for a `--sample` build.
+
+**On these samples the masked tiles meet every gate target: all 14 routes of
+the seven tower-city legs are the ungraded ones, and the hills keep 11% more
+climb than at 400 m. They are not ready for a planet build, because a tower
+zone on a real slope becomes a flat corridor; Wellington shows it** (see the
+recommendation below). Nothing in production or development changed.
+
+Eight cities were built four times each from the same box: ungraded, opened
+at 400 m, opened at 200 m, and opened at 200 m with the mask. The boxes are
+those of the earlier samples, cut by `prepare_sample.py` with the country
+relation where the city lists one, from Geofabrik extracts of 2026-11-24
+(Toronto's of 2026-11-25). The tiles were opened by `build_elevation.py
+--opening-radius R --raw RAW --bounds ...`. The opened-400 sample rows equal
+the 400 m planet's: New York +28.2%, Chicago +9.5%, Toronto +35.1% and +2.8%.
+
+#### What Valhalla does with a post without data
+
+Valhalla 3.9.2, the pinned image, was read and then tested. In its source,
+the height of a point is the bilinear mean of the four posts around it,
+leaving out those without data (`skadi/sample.cc`), an edge is sampled every
+60 m, and a section with a sample without data gets the grade 0
+(`skadi/util.cc`, `weighted_grade`). Bicycle costing reads only an edge's
+weighted grade.
+
+The test was a Chicago sample graded with a synthetic tile: a plane that
+rises 4% to the east and 4% to the north, once whole and once with a
+rectangle of no data over the Loop (4,745 posts). On a plane every street
+has a known grade, so anything steeper is an artefact. 8,743 edge traversals
+were read back from both graphs and from the ungraded one with
+`/trace_attributes`:
+
+| Where the edge lies | Edges read | On the graph with the hole |
+|---|---|---|
+| Inside the hole | 1,542 | Every one reads 0% up, 0% down and a weighted grade of 0, bridges and tunnels too |
+| Outside | 6,943 | Every one reads what it reads on the whole plane |
+| Across the boundary, streets | 225 | No cliff: the steepest section is 5%, against 7% on the whole plane. 15 traversals of edges up to 127 m long read 1 point steeper than on the plane |
+| Across the boundary, bridges, tunnels and a ferry | 33 | 14 read a weighted grade of 3.3 and a steepest section of 3%, uphill out of the hole and downhill into it; 12 of them read something else on the plane |
+
+- **A bridge, tunnel or ferry with one end in the hole is the one artefact.**
+  Valhalla grades these from the heights of their two ends, takes the end
+  without data as −32,768 m, and then clamps such edges to 3%. So the edge
+  reads as a gentle slope, never as a cliff. On the masked sample graphs of
+  this section, 0 such edges were found around New York's, Toronto's and
+  Wellington's legs, 4 around Chicago's (0.34 km; 3 of them read 3%) and 2
+  around San Francisco's (neither reads 3%).
+- **`/height` answers `null` for such a point.** `compare_elevation.py`
+  leaves those samples out of a route's climb. The backend never asks
+  Valhalla for heights; its route profiles come from its own elevation
+  providers.
+
+#### The mask
+
+- **Source.** GHS-BUILT-H R2023A of the European Commission's Joint
+  Research Centre: the average net building height (ANBH) of 2018 on a
+  3 arc-second grid in WGS 84, made from AW3D30, SRTM30 and Sentinel-2. Its
+  pixel edges lie half an arc-second off whole arc-seconds, so every grid
+  cell holds exactly three by three posts. It is published as 10-degree
+  tiles (up to about 80 MB each) and as one 5.5 GB archive under
+  `https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_H_GLOBE_R2023A/GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss/V1-0/`.
+- **Licence.** CC BY 4.0, © European Union (the `copyright.txt` beside the
+  data): reuse is allowed with credit and a note of what was changed. It is
+  not an approved input of any build. Using it for a planet needs Chris's
+  approval and a place for the credit.
+- **OpenStreetMap heights were not used.** A rule on them would mask by
+  how well a city is mapped. Of the building ways in the eight boxes, 98%
+  carry `height` or `building:levels` in New York and 85% in San
+  Francisco, but 49% in Chicago, 19% in Toronto and 7% in Wellington
+  (Lisbon and Stuttgart 29%, Zurich 26%).
+- **Rule.** A post's building height is that of its grid cell. A post is in
+  a tower zone when the mean of those heights over an ellipse of 150 m is
+  30 m or more, and so is every post within 200 m of such a post. The mean
+  leaves a single tower among low roofs alone; the margin covers the slope
+  that the plateau's edge left in the opened tiles.
+- **Why 30 m and 200 m.** Around each city's legs every edge of a grid of
+  routes was read from the 200 m graph (66 to 192 km of streets a city),
+  and each rule was scored by how much of the length that reads 6% or more
+  it switches off. That steepness is phantom in the three tower cities and
+  real in the five hilly ones:
+
+  | Threshold, mean, margin | New York | Chicago | Toronto | Lisbon | San Francisco | Zurich | Wellington | Stuttgart |
+  |---|---|---|---|---|---|---|---|---|
+  | 25 m, 150 m, 200 m | 75% | 96% | 98% | 12% | 17% | 1% | 23% | 2% |
+  | **30 m, 150 m, 200 m** | **62%** | **95%** | **98%** | **1%** | **9%** | **0%** | **12%** | **0%** |
+  | 30 m, 150 m, 100 m | 48% | 92% | 94% | 1% | 7% | 0% | 7% | 0% |
+  | 35 m, 150 m, 200 m | 35% | 94% | 93% | 0% | 7% | 0% | 5% | 0% |
+
+  At 30 m and 200 m the direct routes of all seven tower-city legs lose
+  their steep sections (at most 3% of a route is left, on Midtown to
+  Brooklyn, which reads 2 to 4% at 400 m too). A margin of 100 m leaves 9% of
+  Port Authority to the United Nations steep. At 25 m the whole of
+  Wellington's CBD to Kelburn leg is masked; at 30 m, 38% of it. In New
+  York the rule covers 89% of the length that reads 10% or more; the rest
+  of the steep length lies among lower buildings.
+- **What it masks.** Share of each city's box, and places checked by name:
+
+  | City | Masked | Inside | Outside |
+  |---|---|---|---|
+  | New York | 20.4 of 211 km² (9.7%) | Times Square, 5th Avenue at 42nd Street, Port Authority, United Nations, Wall Street, City Hall, Upper East Side, Downtown Brooklyn | Central Park, Greenwich Village, Park Slope, Williamsburg |
+  | Chicago | 11.0 of 65 km² (17.0%) | The Loop, Magnificent Mile, Union Station, South Loop, West Loop | Lincoln Park, Pilsen |
+  | Toronto | 8.0 of 76 km² (10.5%) | Union Station, Rogers Centre, St Lawrence Market, Yonge-Dundas Square, King at Bay | Kensington Market, the Annex, Cabbagetown |
+  | Lisbon | 2.4 of 197 km² (1.2%) | Saldanha | Baixa, Graça, Castelo, Estrela, Campo de Ourique, Amoreiras |
+  | San Francisco | 4.8 of 204 km² (2.4%) | Financial District, Ferry Building, SoMa | Nob Hill, Russian Hill, Pacific Heights, Twin Peaks, Castro, the Wiggle |
+  | Zurich | 0 of 181 km² | – | Hauptbahnhof, Hardbrücke, Fluntern, Oerlikon, Hönggerberg |
+  | Wellington | 4.4 of 182 km² (2.4%) | Lambton Quay, The Terrace, Kelburn | Te Aro, Mount Victoria, Hataitai, the railway station, Brooklyn |
+  | Stuttgart | 0 of 245 km² | – | Hauptbahnhof, Schlossplatz, Degerloch |
+
+- **The grid overstates heights on a steep slope.** It reads 26 m at the
+  houses of Kelburn and 27 to 31 m at Victoria University, on the hillside
+  above Wellington's towers (44 to 48 m on Lambton Quay and The Terrace),
+  and 3 m in the Botanic Garden beside them. That is why Kelburn is masked.
+- **Cost.** The step took 1.5 s a cell on a laptop.
+
+#### Routes
+
+`compare_elevation.py run` routed every leg of the eight cities against the
+four services, and `summary` judged the reports together. The flat columns
+cover the 14 routes of New York, Chicago and Toronto; the hilly ones the 17
+legs of Lisbon, San Francisco, Zurich, Wellington and Stuttgart.
+
+| Source | Flat routes: median length change | Longest | Routes over 5% longer | Median 6%+ share | 6%+ share of the direct routes: median, most | Hilly legs `use_hills` changes | Median 6%+ share saved | Targets |
+|---|---|---|---|---|---|---|---|---|
+| Opened at 400 m | 0.0% | +35.1% | 3 | 9% | 13%, 28% | 12 of 17 | 2 pts | missed |
+| Opened at 200 m | +2.3% | +62.0% | 5 | 16% | 27%, 59% | 12 of 17 | 5 pts | missed |
+| **Opened at 200 m, tower zones masked** | **0.0%** | **0.0%** | **0** | **0%** | **0%, 3%** | **11 of 17** | **6 pts** | **met** |
+
+"Direct routes" are the ungraded routes measured on the graded graph: how
+steep the source thinks the streets are that a rider would take. No route or
+grade lookup failed, the ungraded graphs gave the same route for both
+`use_hills` values on all 17 hilly legs, and the verdicts are the same with
+any one source as `--referee`.
+
+| Leg, profile | Ungraded | Opened at 400 m | Opened at 200 m | 200 m, masked |
+|---|---|---|---|---|
+| New York, Midtown to Brooklyn, Road | 9.01 km | 0.0% | +4.3% | 0.0% |
+| New York, Midtown to Brooklyn, Everyday | 8.87 km | 0.0% | +5.9% | 0.0% |
+| New York, Port Authority to the United Nations, Road | 2.09 km | **+28.2%** | **+62.0%** | 0.0% |
+| New York, Port Authority to the United Nations, Everyday | 2.68 km | 0.0% | **+29.6%** | 0.0% |
+| New York, City Hall to Bowling Green, both | 1.21 km | 0.0% | 0.0% | 0.0% |
+| Chicago, Union Station to Michigan Avenue, Road | 2.56 km | 0.0% | −0.5% | 0.0% |
+| Chicago, Union Station to Michigan Avenue, Everyday | 2.56 km | 0.0% | **+29.8%** | 0.0% |
+| Chicago, Magnificent Mile to the South Loop, Road | 2.71 km | **+9.5%** | +1.9% | 0.0% |
+| Chicago, Magnificent Mile to the South Loop, Everyday | 2.97 km | 0.0% | −7.0% | 0.0% |
+| Toronto, Rogers Centre to St Lawrence Market, Road | 2.01 km | 0.0% | 0.0% | 0.0% |
+| Toronto, Rogers Centre to St Lawrence Market, Everyday | 2.01 km | **+35.1%** | **+35.1%** | 0.0% |
+| Toronto, Union Station to Yonge-Dundas Square, Road | 1.42 km | +2.8% | +2.8% | 0.0% |
+| Toronto, Union Station to Yonge-Dundas Square, Everyday | 1.46 km | 0.0% | 0.0% | 0.0% |
+
+- **Every tower-city route is the ungraded route again**, shape for shape.
+  City Hall to Bowling Green shows why length alone is a poor judge: its
+  route never moved, but 36% of it read 6% or more at 200 m and 13% at
+  400 m. Masked, it reads 0%.
+- **Around the legs the phantom steepness is gone, not only on them.** Of
+  the streets read around New York's legs, 9.5 of 164 km had a section of
+  6% or more on the 200 m graph and 3.5 km have one on the masked graph;
+  around Chicago's, 5.3 of 98 km became 0.3 km; around Toronto's, 1.8 of
+  66 km became none.
+- **Lisbon, Zurich and Stuttgart are untouched.** Every route and every
+  figure of theirs equals the 200 m graph's.
+- **San Francisco keeps its routes.** All eight are within 2 m of the
+  200 m graph's lengths, and `use_hills` changes the same two legs. The masked Financial
+  District takes the lower end of Market Street out of the legs from the
+  Ferry Building.
+- **Wellington is worse than at 200 m.** `use_hills` changes one leg of
+  four where it changed two, and the Everyday leg from the railway station
+  to Hataitai is 6.62 km (+42.5%), where the 200 m graph gives 5.53 km
+  (+19.1%) and the 400 m graph the direct 4.64 km. Its Road leg is 19.1%
+  longer where the 200 m graph kept it. The longer route buys nothing:
+  judged on the 200 m heights it climbs 175 m with 21% of its length on
+  6%+ grades, against 158 m and 20% for the 200 m graph's route. From the
+  CBD to Kelburn the masked graph gives one route for both `use_hills`
+  values, and reads it as flat with no climb, where the 200 m tiles see
+  97 m. The gate's targets do not judge any of this: Wellington is a hilly
+  city, where only the count of changed legs and the pooled 6%+ share
+  count.
+
+#### Climb
+
+Climb along the ungraded Everyday route of each hilly leg, from each tile
+set's heights every 20 m, counting a rise once it reaches 3 m. For the
+masked tiles only stretches with heights count, which is the climb Valhalla
+still grades:
+
+| Leg | Opened at 400 m | Opened at 200 m | 200 m, masked | Route without data |
+|---|---|---|---|---|
+| Lisbon, Cais do Sodré to Graça | 59 m | 99 m | 99 m | 0% |
+| San Francisco, North Beach to Pacific Heights (Russian Hill) | 53 m | 92 m | 87 m | 8% |
+| Wellington, railway station to Hataitai (Mount Victoria) | 73 m | 173 m | 172 m | 22% |
+| Wellington, CBD to Kelburn | 82 m | 93 m | 79 m | 38% |
+| Wellington, Thorndon to Karori | 170 m | 185 m | 102 m | 41% |
+| San Francisco, Ferry Building to Castro | 62 m | 62 m | 38 m | 50% |
+| All 17 hilly legs | 1,723 m | 2,070 m | 1,919 m | – |
+
+The 400 m tiles report 17% less climb than the 200 m tiles, as on
+2026-11-26. The masked tiles keep 93% of the 200 m climb, 11% more than
+400 m, and 95% or more of it on the three hills the 400 m opening
+flattened most. What they lose is in Wellington's masked hillside and on
+Market Street.
+
+#### Toronto's pits
+
+The mask also covers the pits. In the downtown box of
+[Toronto](#toronto-a-tower-downtown-the-hybrid-does-not-fix) (13,195 posts)
+the 200 m tiles read 1,136 posts below the lake's 74 m, against 2,961 at
+400 m and 202 raw: a smaller ellipse spreads the pits less. 891 of the
+1,136 lie in the mask. Of the 245 outside, 143 are water or shore and 102
+are land that the terrain model reads at 77 to 83 m and the tiles at 63 to
+73 m. Measured against MRDEM-30, 1,844 posts read 5 m or more too low and
+1,659 of them (90%) are masked; the rest lie west of the Rogers Centre and
+east of the St Lawrence Market, outside the tower zone. Front Street is
+masked from end to end, and no street read around the two legs keeps a
+section of 6% or more. The pits need no rule of their own for these legs.
+The ones outside the mask were not routed over.
+
+#### Recommendation
+
+**Do not build a planet with this mask as it is. Take the idea further.**
+
+- **It does what it was meant to do.** On these samples 200 m with the mask
+  meets every gate target, which neither radius does alone, and it keeps
+  Lisbon's Graça at 99 m of climb against 59 m at 400 m, Russian Hill at
+  87 m against 53 m and Mount Victoria at 172 m against 73 m.
+- **A tower zone on a slope is the open problem.** Switching elevation off
+  is right where the ground is flat and wrong where it climbs: the graph
+  then prefers the masked streets because it cannot see their slope.
+  Wellington's CBD is the one case in these samples. Hong Kong's Central
+  and São Paulo's Avenida Paulista, both in the gate as report-only, were
+  not run and are likely to be the same, and so is the hillside behind any
+  tower core where the grid overstates heights.
+- **Two ways to close it, neither tested.** Fill a tower zone with a smooth
+  surface spanned from the heights around it, instead of no data: the
+  towers go and a slope across the zone stays, and the 3% on bridges goes
+  too. Or leave elevation on where the ground under the zone slopes; the
+  broad slope of the 200 m tiles inside the masks does not separate the
+  cases cleanly (Wellington's median is 6.8% over 300 m, but the plateaus
+  of Chicago and New York reach 6 to 8% at their edges).
+- **The rule was chosen on the cities it was judged on.** Three tower
+  cities picked the threshold. Before a planet build, run the rule on the
+  gate's other sample cities: Singapore, Shanghai, Dubai, Hong Kong and São
+  Paulo for the towers, and Buenos Aires, Amsterdam, Houston and Berlin to
+  see that it leaves low cities alone.
+- **A planet build would also need:** Chris's approval of GHS-BUILT-H as an
+  input and its credit; the step inside `build_elevation.py`, reading the
+  5.5 GB grid per cell and recording it in the receipts; and a look at the
+  grid's date. It describes 2018, and Copernicus was flown from 2011 to
+  2015, so the grid should hold every tower the tiles hold.
+
+The reports, summaries, tile and graph manifests, the mask pictures and the
+scratch scripts are on the map VPS in
+`/root/bicino-routing-releases/tower-mask-samples-20261127/`.
+
 ## Pull, assemble, and install on Coolify
 
 Expose the approved immutable archive and receipt through a dedicated

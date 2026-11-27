@@ -437,6 +437,21 @@ before building a planet with a new elevation method.
      --fill "$scratch/dem/san-diego/opening-400" --out "$scratch/dem/san-diego/hybrid"
    ```
 
+   [tower_mask.py](tower_mask.py) takes any of these tile sets and writes
+   no data where tall buildings dominate, so that Valhalla grades those
+   streets flat, as the graph without elevation does. The zones come from
+   the building heights of GHS-BUILT-H R2023A (ANBH, 3 arc-seconds, WGS 84;
+   CC BY 4.0, © European Union): pass the grid's GeoTIFFs that cover the
+   cells as `--heights`. It is a sample tool like the others. The rule, what
+   it masks and why it is not ready for a planet are in
+   [Switching elevation off in tower zones](refresh-runbook.md#switching-elevation-off-in-tower-zones).
+
+   ```sh
+   python tower_mask.py --input "$scratch/dem/new-york/opening-200" --bounds -75 40 -73 41 \
+     --heights "$scratch/ghsl/GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss_V1_0_R5_C11.tif" \
+     --out "$scratch/dem/new-york/opening-200-mask"
+   ```
+
 3. Build each city once without elevation and once per source. The admin
    input must also hold the country's relation with all its members. A state
    extract cuts it, and Valhalla then builds the state polygon alone and no
