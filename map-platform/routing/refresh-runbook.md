@@ -1091,12 +1091,47 @@ and other coasts have them too:
   drops 15,295 pixels and its tile's lowest post is -9 m, with 61 posts
   below -5 m beside a sea at -1 m. A spike or a pit inside the range, on
   land, is not found at all.
+- **Inland the rule sees only the deepest pits.** A second cell stopped the
+  same build, N50W089 in north-western Ontario. Its pits are trenches a few
+  pixels wide on Lake Nipigon, which lies at 260 m: lidar again. The ones
+  that reach -912 m are dropped, 4,781 pixels with their margins. Others
+  bottom out between 17 and 222 m, never come near -10 m, and stay: 47
+  pixels more than 20 m under the lake, 3 more than 200 m. They lie on
+  water, so they matter where a road runs within a pixel of the shore.
 - **Tiles built before the rule are built again.** A receipt names the rule
   its source was read under. MRDEM-30 tiles from before name none and are
   stale; 3DEP has no such rule, and its tiles keep their receipts.
-- **A run names every failed cell.** The build stopped at the first failed
+- **A run names every failed cell.** The build reported the first failed
   cell it saw and said nothing of the others. It now builds every other
   cell and ends with the names of all that failed.
+- **A stalled read no longer costs fifteen minutes.** The first three
+  attempts of that build each ended 16.5 to 17.5 minutes after they began,
+  however many cells were left. A pool works through its whole queue after
+  one cell fails, so they did not end on the bad cell: a read stalled a
+  minute or two into each attempt, its worker was killed at the 15-minute
+  cell deadline, and that broke the pool. GDAL has no transfer timeout
+  unless it is given one. An MRDEM-30 read now gives up after a minute
+  without data and the cell fails by name. Whether that works on a real
+  stall has not been seen yet.
+
+A check that does not depend on sea level is to compare with the opened
+Copernicus surface, which no pit of the lidar is in. Counted on a laptop
+after the rule, with
+`terrain_below_fill.py` from the notes folder:
+
+| Cell | Terrain posts 20 to 50 m below the opened surface | 50 to 100 m | More than 100 m |
+|---|---|---|---|
+| N50W089, Lake Nipigon, boreal forest | 149 | 44 | 24, to 202 m |
+| N50W129, Holberg Inlet, coastal rainforest | 59,990 | 161 | 0 |
+
+Real ground lies under the radar's surface by the height of the forest: 10
+to 20 m for 35,016 posts of the Ontario cell, and 30 to 50 m for 11,660
+posts of the coastal one, up to 81 m. So dropping terrain posts more than
+50 m below the opened surface would cut real ground under tall forest, and
+100 m would not, while it still takes the 24 worst posts of Lake Nipigon.
+Such a check would change the blend for every cell and both terrain
+sources. It is not in the build and is Chris's to decide; the same script
+counts the posts on a builder's tiles.
 
 The four rehearsals above were built before the rule. Vancouver's cell then
 held 341 pixels below -10 m, and its routes were the ungraded ones.
