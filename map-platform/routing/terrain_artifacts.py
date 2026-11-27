@@ -46,7 +46,9 @@ roads   For every steep group, asks the service's /locate (bicycle costing) for 
         counted; a road that dives into a pit and climbs out is. Bridges and tunnels are counted apart: Valhalla
         grades them from their ends. An edge beside several hollows counts once, with its worst.
 
-        Writes roads.json.gz. Exits 1 when a lookup failed, after writing what it found.
+        Writes roads.json.gz. Exits 1 when a lookup failed, after writing what it found. When STOP_AFTER hollows
+        in a row fail, the service is taken to be gone and the rest are not looked up, rather than each waiting
+        out its retries.
 
 report  Writes terrain-report.json and terrain-report.md: artifact candidates per source, ways with a false step
         by road class and paved or unpaved, and the worst of both with coordinates. It judges nothing: the stage
@@ -65,6 +67,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import urllib.request
 from collections import Counter, defaultdict
@@ -102,6 +105,7 @@ SPAN = 30             # metres over which an edge's grade is read
 DIP = 5               # metres the hollow lowers an edge
 STEP_GRADE = 0.30
 FILLED_GRADE = 0.20
+STOP_AFTER = 25       # hollows in a row whose lookups failed: the service is gone
 LISTED = 25           # rows of each list in the report
 DIRECTIONS = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
 PAVED = ("paved_smooth", "paved", "paved_rough")
@@ -234,7 +238,8 @@ def scan_cell(name):
     masks = source_masks(cell, ids, _STATE["sources"])
 
     def source_at(row, column):
-        return next(name for name, mask in masks.items() if mask is None or mask[row, column])
+        # The build clips every source to its area, so a terrain post lies in one; the first is the fallback.
+        return next((name for name, mask in masks.items() if mask is None or mask[row, column]), ids[0])
 
     terrain = np.isfinite(ground)
     carried = terrain & (heights == ground)
@@ -603,10 +608,34 @@ def edges_of(answers):
     return found
 
 
-def look_up(item, url, near=NEAR, wait=2):
-    answers = []
-    for start in range(0, len(item["points"]), BATCH):
-        answers += locate(url, item["points"][start:start + BATCH], wait=wait)
+class Breaker:
+    """Stops the lookups once `limit` hollows in a row have failed, so that a dead service costs no more retries."""
+
+    def __init__(self, limit):
+        self.limit, self.in_a_row, self.tripped = limit, 0, False
+        self.lock = threading.Lock()
+
+    def check(self):
+        if self.tripped:
+            raise RuntimeError("not looked up: the service had stopped answering")
+
+    def record(self, failed):
+        with self.lock:
+            self.in_a_row = self.in_a_row + 1 if failed else 0
+            self.tripped = self.tripped or self.in_a_row >= self.limit
+
+
+def look_up(item, url, near=NEAR, wait=2, breaker=None):
+    breaker = breaker or Breaker(math.inf)
+    breaker.check()
+    try:
+        answers = []
+        for start in range(0, len(item["points"]), BATCH):
+            answers += locate(url, item["points"][start:start + BATCH], wait=wait)
+    except Exception:
+        breaker.record(failed=True)
+        raise
+    breaker.record(failed=False)
     measured, filled = [], None
     group = item["group"]
     pit = {key: group[key] for key in ("latitude", "longitude", "source", "closedDepth", "lowest", "steepestStep",
@@ -635,20 +664,24 @@ def steep_groups(directory):
                 yield row["cell"], index, group
 
 
-def roads(directory, url, jobs=4, near=NEAR, say=print, wait=2):
+def roads(directory, url, jobs=4, near=NEAR, say=print, wait=2, stop_after=STOP_AFTER):
     """Look up and measure the edges beside every steep group; returns the exit status."""
     directory = Path(directory)
     started = time.monotonic()
     items = [prepare(*group) for group in steep_groups(directory)]
     say(f"{len(items)} steep groups, {sum(len(item['points']) for item in items)} /locate points")
-    best, failed, done = {}, [], 0
+    best, failed, done, said = {}, [], 0, False
+    breaker = Breaker(stop_after)
     with ThreadPoolExecutor(max(1, jobs)) as pool:
-        futures = [pool.submit(look_up, item, url, near, wait) for item in items]
+        futures = [pool.submit(look_up, item, url, near, wait, breaker) for item in items]
         for item, future in zip(items, futures):
             try:
                 measured = future.result()
             except Exception as error:  # noqa: BLE001 - every failed group is counted and named
                 failed.append({"cell": item["cell"], "group": item["index"], "error": f"{error}"[:300]})
+                if breaker.tripped and not said:
+                    said = True
+                    say(f"{stop_after} hollows in a row could not be looked up; the rest are not tried")
                 continue
             done += 1
             for record in measured:

@@ -245,7 +245,7 @@ class TerrainScanTests(unittest.TestCase):
         self.assertGreaterEqual(patch_["closed"][ta.PATCH + 1][ta.PATCH + 1], 40)
         self.assertEqual(patch_["closed"][0][0], 0)
 
-    def roads(self, edges, broken=False):
+    def roads(self, edges, broken=False, **options):
         FakeValhalla.edges, FakeValhalla.broken, FakeValhalla.asked = edges, broken, []
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeValhalla)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -255,7 +255,8 @@ class TerrainScanTests(unittest.TestCase):
         out.mkdir(exist_ok=True)
         (out / "pits.jsonl.gz").write_bytes((self.root / "out" / "pits.jsonl.gz").read_bytes())
         (out / "scan.json").write_bytes((self.root / "out" / "scan.json").read_bytes())
-        status = ta.roads(out, f"http://127.0.0.1:{server.server_address[1]}", jobs=2, say=lambda _text: None, wait=0)
+        options = {"jobs": 2, **options}
+        status = ta.roads(out, f"http://127.0.0.1:{server.server_address[1]}", say=lambda _text: None, wait=0, **options)
         with gzip.open(out / "roads.json.gz", "rt") as stream:
             return status, json.load(stream), out
 
@@ -328,6 +329,14 @@ class TerrainScanTests(unittest.TestCase):
         report = ta.report(out, say=lambda _text: None)
         self.assertEqual(report["roads"]["lookupsFailed"], len(self.steep))
         self.assertTrue(report["headline"].endswith(f"{len(self.steep)} lookups FAILED"), report["headline"])
+
+    def test_a_service_that_stops_answering_is_not_asked_for_every_hollow(self):
+        status, found, _ = self.roads(self.road_edges(), broken=True, jobs=1, stop_after=1)
+        self.assertEqual(status, 1)
+        self.assertEqual(len(found["failed"]), len(self.steep))
+        # The first hollow was asked four times; the others not at all.
+        self.assertEqual(len(FakeValhalla.asked), 4)
+        self.assertEqual(found["failed"][-1]["error"], "not looked up: the service had stopped answering")
 
     def test_without_a_road_check_the_report_says_so(self):
         out = self.root / "scan-only"
