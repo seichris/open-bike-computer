@@ -31,6 +31,11 @@ and after the stage and when systemd had to end it, and after them the
 networks the stage created, which carry the stage's label too. Both labels
 name the scratch directory, so the wrapper never finds the containers or the
 networks of another run on the same Docker host.
+
+`--finalize` takes the stage's lock like a run does. systemd runs it after
+every stop of the unit, also when the unit's wrapper only found the stage
+running under another wrapper and left: that stage keeps its lock, and what
+it started is not touched.
 """
 
 from __future__ import annotations
@@ -107,13 +112,13 @@ def remove_leftovers(root, stage, log):
             subprocess.run([*removal, *found], stdout=log, stderr=log)
 
 
-def take_lock(path, wait=LOCK_WAIT_SECONDS):
+def take_lock(path, wait=None):
     """The stage's lock, or None while another wrapper holds it.
 
     A status reader holds the lock shared for an instant, hence the wait.
     """
     lock = path.open("ab")
-    deadline = time.monotonic() + wait
+    deadline = time.monotonic() + (LOCK_WAIT_SECONDS if wait is None else wait)
     while True:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -209,19 +214,31 @@ def finalize(root, stage, environ=os.environ):
 
     systemd runs this after the unit stops, whatever stopped it: a timeout,
     an out-of-memory kill, a restart. EXIT_STATUS is a number or a signal name.
+
+    It also runs after a wrapper that never ran the stage, such as one that
+    found the stage running under another wrapper. So it takes the stage's
+    lock first. While a live wrapper holds it, the stage is that wrapper's:
+    its containers are in use, and it will record its own result.
     """
     export = root / "export"
+    (export / "chain").mkdir(parents=True, exist_ok=True)
     (export / "logs").mkdir(parents=True, exist_ok=True)
-    with (export / "logs" / f"{stage}.log").open("a") as log:
+    lock = take_lock(export / "chain" / f"{stage}.lock")
+    if lock is None:
+        print(f"{stage} is running under another wrapper: nothing to finalize")
+        return 0
+    with lock, (export / "logs" / f"{stage}.log").open("a") as log:
         remove_leftovers(root, stage, log)
-        entry = next(entry for entry in chain_state.stage_states(root) if entry["stage"] == stage)
-        if entry["state"] != "interrupted":
+        # With the lock in hand, a marker that still says running is a dead wrapper's.
+        marker = chain_state.read_marker(export / "chain", stage)
+        if not marker or marker["state"] != "running":
             return 0
         result, code, status = (environ.get(key, "?") for key in ("SERVICE_RESULT", "EXIT_CODE", "EXIT_STATUS"))
         chain_state.mark(root, stage, "failed", exit_status=int(status) if status.isdigit() else None,
                          reason=f"systemd ended the stage: {result} ({code} {status})")
         log.write(f"== {stage} ended by systemd at {chain_state.now_text()}: {result} ({code} {status})\n")
-    chain_state.write_result(root)
+        log.flush()
+        chain_state.write_result(root)
     return 0
 
 

@@ -104,8 +104,10 @@ A stage's containers are not in its unit's control group. `run_stage.py`
 removes them before and after the stage, and when systemd had to end it,
 and then the networks the stage created. It finds them by their label,
 `bicino.stage=STAGE@SCRATCH` with the scratch directory's path, or
-`bicino.work=DIRECTORY` for a graph build. So it finds only what belongs to
-its own scratch directory, whatever else runs on the same Docker host. A
+`bicino.work=DIRECTORY` for a graph build, with the directory as the builder
+names it: `build_graph.py` keeps a symbolic link in that path. So it finds
+only what belongs to its own scratch directory, whatever else runs on the
+same Docker host. A
 container or a network that a stage names ends in the
 run's id, the number `printf %s SCRATCH | cksum` prints first. On the builder
 `docker ps` shows `bicino-elevation-667907303`,
@@ -125,6 +127,16 @@ Each stage's state is in `export/chain/STAGE.json`:
 `state` is `running`, `done`, `skipped` or `failed`. While a stage runs, its
 wrapper holds a lock. A marker that says `running` without the lock is
 reported as `interrupted`: the wrapper was killed, or the machine restarted.
+
+A second wrapper for a running stage waits 15 seconds for the lock and then
+leaves with status 75. That happens when a unit is started while a wrapper
+that was started by hand runs its stage, or when a second rehearsal is
+started on a scratch directory. systemd runs the unit's `ExecStopPost`,
+`run_stage.py --finalize`, after that wrapper too, as after every stop of
+the unit. So `--finalize` takes the lock before it removes anything. While
+the stage's own wrapper holds it, `--finalize` leaves the stage and its
+containers alone. Once that wrapper is gone without a result, the same call
+removes what it left and records the stage as failed.
 
 `settings` are the settings the stage's work depends on, its own and those of
 the stages it needs: the planet snapshot, the opening radius, the terrain source, the sample
@@ -447,6 +459,19 @@ cross-border probes and the profile probe. Its result file says
   then the same with `docker network rm` and `docker network ls -q`.
 - A checkout from before 2026-11-27 still removes every container labelled
   `bicino.stage=STAGE`. Its rehearsals disturb each other, and no newer one.
+- One rehearsal at a time on a `--root`: `rehearse.sh` first replaces the
+  tools below it, which a rehearsal that is still running there reads. Its
+  stages are safe from a second start, though. On 2026-11-27, while a
+  Berlin run's elevation stage ran, that stage's `ExecStart` and
+  `ExecStopPost` were run a second time on the same root. The wrapper left
+  with status 75, `--finalize` found the lock held and removed nothing, and
+  the stage finished in its first attempt. The same on the tools of that
+  morning removed the running container: its first attempt ended with
+  status 137, and the stage's second attempt built the tiles.
+  In another run a graph build got the same second start: its container
+  stayed, and the build finished in its first attempt. That run's elevation
+  stage had been killed after 30 seconds, and `--finalize` removed its
+  container and recorded the stage as failed, as before.
 - Without `--map-platform-image` the pinned image is pulled, about 2 GB.
 
 ## Not verified on a real builder
@@ -457,9 +482,12 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
 
 - **systemd itself.** That `Wants=` and `After=` start independent stages
   together and the result unit last, that `ExecStopPost=` gets
-  `SERVICE_RESULT` after a timeout, that `TimeoutStartSec=` values fit, and
+  `SERVICE_RESULT` after a timeout, that `TimeoutStartSec=` values fit,
   that `install-chain.sh --start` stops the units of finished stages and no
-  running one before it starts the chain again.
+  running one before it starts the chain again, and that a second
+  `systemctl start` of a unit whose stage is running starts no second
+  wrapper. The rehearsal ran a second wrapper and `--finalize` beside a
+  running stage by hand.
 - **`setup.sh`.** Masking the apt units on a fresh image, the wait for a
   running upgrade, the RAID 0 over the four local SSDs. Its commit checkout
   was tested against GitHub. The RAID commands are those of the 2026-11-26

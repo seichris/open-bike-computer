@@ -74,6 +74,16 @@ def run(*command):
     subprocess.run(command, check=True)
 
 
+def work_directory(path):
+    """The build directory as the caller named it, only made absolute.
+
+    The planet builder finds a killed build's container by the label that
+    holds this path, and it looks for the path it passed. A symbolic link in
+    it is therefore kept; Docker follows it when it mounts the directory.
+    """
+    return path if path.is_absolute() else Path(os.path.abspath(path))
+
+
 NO_ELEVATION = re.compile(r"Elevation storage directory does not exist")
 
 
@@ -253,7 +263,7 @@ def main():
     source_identity = file_identity(source)
     if source_identity["sha256"] != args.source_sha256:
         parser.error("Source SHA-256 does not match")
-    work = args.work.resolve()
+    work = work_directory(args.work)
     mask = args.mask.resolve(strict=True) if args.mask else None
     mask_identity = file_identity(mask) if mask else None
     policy_identity = file_identity(args.policy) if mask else None

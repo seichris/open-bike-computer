@@ -513,6 +513,32 @@ class RunStageTests(ScratchCase):
             run_stage.finalize(self.root, "download", {"SERVICE_RESULT": "success"})
         self.assertEqual(chain_state.read_marker(self.chain, "download")["state"], "done")
 
+    def test_finalize_leaves_a_stage_alone_while_its_wrapper_lives(self):
+        # systemd runs ExecStopPost after every stop of the unit, also after a wrapper that only
+        # found the stage running under another wrapper and left with status 75.
+        chain_state.mark(self.root, "gate", "running", clock=self.clock)
+        lock = self.hold_lock("gate")
+        mine = {"bicino.stage": f"gate@{self.root}"}
+        docker = FakeDocker({"service": mine}, {"network": mine})
+        said = io.StringIO()
+        with patch.object(run_stage.shutil, "which", return_value="/usr/bin/docker"), \
+                patch.object(run_stage.subprocess, "run", docker), patch.object(run_stage, "LOCK_WAIT_SECONDS", 0.3), \
+                contextlib.redirect_stdout(said):
+            left = run_stage.finalize(self.root, "gate",
+                                      {"SERVICE_RESULT": "exit-code", "EXIT_CODE": "exited", "EXIT_STATUS": "75"})
+            self.assertEqual((left, docker.calls), (0, []))
+            self.assertEqual((docker.containers, docker.networks), ({"service": mine}, {"network": mine}))
+            self.assertEqual(chain_state.read_marker(self.chain, "gate")["state"], "running")
+            self.assertIn("gate is running under another wrapper", said.getvalue())
+            # Once that wrapper is gone and left no result, the same call removes what it started and records the stage.
+            lock.close()
+            run_stage.finalize(self.root, "gate", {"SERVICE_RESULT": "timeout", "EXIT_CODE": "killed", "EXIT_STATUS": "KILL"})
+        self.assertEqual((docker.containers, docker.networks), ({}, {}))
+        marker = chain_state.read_marker(self.chain, "gate")
+        self.assertEqual((marker["state"], marker["reason"]), ("failed", "systemd ended the stage: timeout (killed KILL)"))
+        # The lock is free again for the next attempt.
+        self.assertFalse(chain_state.lock_is_held(self.chain, "gate"))
+
     def test_leftover_containers_are_removed_by_their_label(self):
         # Another run on the same Docker host, in a directory whose path begins with this run's.
         other = Path(f"{self.root}-2")
@@ -696,6 +722,56 @@ class ChainRehearsalTests(unittest.TestCase):
         self.stub("download.sh")
         self.assertEqual(self.start(), 0)
         self.assertEqual(self.result()["state"], "complete")
+
+    def test_a_second_start_of_a_running_stage_leaves_what_it_started(self):
+        # The stand-in Docker holds a container as a file with its label in it. The stage
+        # starts one and needs it to its end.
+        host = self.root / "docker-host"
+        host.mkdir()
+        (self.tools / "docker").write_text(f'''#!/bin/bash
+echo "$*" >> "{self.root}/docker.txt"
+if [ "$1 $2 $3" = "ps -aq --filter" ]; then
+  for file in "{host}"/*; do
+    if [ -f "$file" ] && [ "label=$(cat "$file")" = "$4" ]; then basename "$file"; fi
+  done
+fi
+if [ "$1" = rm ]; then
+  shift
+  for name in "$@"; do rm -f "{host}/$name"; done
+fi
+''')
+        self.stub("download.sh", f'''echo "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" > "{host}/service"
+sleep 3
+[ -f "{host}/service" ] || {{ echo "the container is gone"; exit 3; }}
+rm "{host}/service"''')
+        # The wrapper as checked in, with a shorter wait for the lock.
+        wrapper = self.builder / "run_stage.py"
+        patient = wrapper.read_text()
+        self.assertIn("\nLOCK_WAIT_SECONDS = 15\n", patient)
+        wrapper.write_text(patient.replace("\nLOCK_WAIT_SECONDS = 15\n", "\nLOCK_WAIT_SECONDS = 0.5\n"))
+        path = f"{self.tools}:/usr/bin:/bin"
+        first = subprocess.Popen([sys.executable, str(wrapper), "download"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env={**os.environ, "PATH": path, "BICINO_SCRATCH": str(self.root)})
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+        deadline = time.monotonic() + 10
+        while not (host / "service").exists():
+            self.assertLess(time.monotonic(), deadline, "the stage did not start")
+            time.sleep(0.05)
+        # The unit is started a second time, by hand or by a second rehearsal on the same root:
+        # its wrapper finds the stage running and leaves, and ExecStopPost follows.
+        units = rehearse.load_units(self.builder / "units")
+        with patch.dict(os.environ, {"PATH": path}):
+            second = rehearse.start_unit("bicino-planet-download.service", units["bicino-planet-download.service"], self.root,
+                                         out=self.messages.append, interpreter=sys.executable, output=subprocess.DEVNULL)
+        self.assertEqual(second, run_stage.ALREADY_RUNNING)
+        self.assertTrue((host / "service").exists())
+        self.assertEqual(first.wait(timeout=30), 0)
+        marker = chain_state.read_marker(self.root / "export" / "chain", "download")
+        self.assertEqual((marker["state"], marker["attempt"]), ("done", 1))
+        # Only the stage's own wrapper looked for leftovers: before the stage and after it.
+        looked = (self.root / "docker.txt").read_text().splitlines()
+        self.assertEqual(looked.count(f"ps -aq --filter label=bicino.stage=download@{self.root}"), 2)
 
 
 def status_report(state="running", verdict=None, **extra):
@@ -1594,6 +1670,20 @@ class SampleTests(unittest.TestCase):
                 build_graph.run_valhalla(work, "true", 4, "valhalla-build.log", [])
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--label") + 1], f"bicino.work={work}")
+            # A scratch directory reached through a symbolic link. The label holds the path
+            # the builder passes and then looks for, not the one the link leads to.
+            (work / "disk").mkdir()
+            (work / "scratch").symlink_to(work / "disk")
+            named = work / "scratch" / "build" / "planet-graded"
+            self.assertEqual(build_graph.work_directory(named), named)
+            self.assertEqual(run_stage.container_labels(work / "scratch", "build-graded")[1],
+                             f"bicino.work={build_graph.work_directory(named)}")
+            self.assertTrue(build_graph.work_directory(Path("build/planet-graded")).is_absolute())
+        # build_graph.py labels with that path, and build.sh looks for the path it hands over.
+        self.assertIn("    work = work_directory(args.work)\n", (ROUTING / "build_graph.py").read_text())
+        build = (BUILDER / "stages" / "build.sh").read_text()
+        self.assertIn('bicino_remove_containers "bicino.work=$work"', build)
+        self.assertIn('--work "$work"', build)
 
 
 class ElevationCacheTests(unittest.TestCase):
