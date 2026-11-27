@@ -1,20 +1,43 @@
 # Regional terrain models for routing elevation
 
 [elevation-sources.json](elevation-sources.json) lists the terrain sources
-approved for routing. This file is the survey of candidates behind it.
+the build reads. This file is the survey of candidates behind it, and the
+record of the four regional sources approved on 2026-11-27 that the build
+cannot read yet.
 
 The planet bicycle graph is ungraded because every worldwide elevation source
 tried so far reads buildings as hills
 ([Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples)).
 The plan is a hybrid: a bare-earth terrain model where an approved one exists
-and Copernicus GLO-30 opened at 400 m elsewhere. USGS 3DEP is approved for the
-United States. Canada's MRDEM-30 fixes Toronto on a sample, and its reader
-was in review when this was written (pull request 924).
+and Copernicus GLO-30 opened at 400 m elsewhere. USGS 3DEP for the United
+States and MRDEM-30 for Canada are approved and in `elevation-sources.json`;
+the build reads both (pull request 924).
 
 On 2026-11-27 the terrain models of other regions were surveyed from their
 publishers' pages, and five of them were tried on city samples against
-Copernicus opened at 400 m. Nothing in a build, in `elevation-sources.json` or
-in production changed. A new source still needs Chris's approval by name.
+Copernicus opened at 400 m. The same day Chris approved the four sources
+below for routing. Nothing in a build or in production changed.
+
+## Approved, not yet read
+
+Chris approved these four for routing on 2026-11-27, after reading the
+recommendation below with its caveats. None is in `elevation-sources.json`
+yet: its loader takes only sources with a reader in `build_elevation.py`,
+and none of these has one. Each joins the list with its reader, catalog,
+area and the approval fields, as 3DEP and MRDEM-30 did, and passes city
+samples through that reader before a planet is built with it.
+
+| Source | Approved area | Licence and credit | Open before it is read |
+|---|---|---|---|
+| Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | A copy kept outside Google Drive; the Portugal polygon; a check for pits and steps between national sources |
+| LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Reading the 8 m overviews or the full sheets |
+| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | A crawl of about 400,000 tiles at a rate GSI accepts |
+| CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | The terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
+
+The [pits at shorelines](refresh-runbook.md#pits-at-shorelines) found in
+MRDEM-30 apply to these too: a lidar model can hold slots a few pixels wide
+on water that lower a road beside them. A reader needs a rule for them per
+source before the source grades a planet.
 
 ## Recommendation
 
@@ -33,7 +56,8 @@ It does not pay where the slopes are broad. Zurich's climb is the same on
 swissALTI3D as on the opened tiles (822 m against 847 m) and Stuttgart's is
 10% higher.
 
-Sources to put to Chris for approval, in this order:
+Sources put to Chris for approval, in this order (all four approved on
+2026-11-27, see above):
 
 1. **Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version
    25**, for the countries it builds wholly from national lidar or
@@ -324,23 +348,23 @@ Benefit against effort, best first. Populations are round figures.
 
 ## What a generic reader needs
 
-`build_elevation.py --terrain-sources` on `main` (0b0f6356) takes exactly one
-source and reads it with code written for 3DEP. `load_terrain_source` refuses
-any other adapter, origin or projection. The catalog names one tile per cell,
-west of Greenwich only, and `terrain_posts` refuses a tile that is not 10,812
-pixels square in NAD 83. Pull request 924, in review when this was written,
-lets the list hold several sources, each inside its own area, and adds a
-second reader, for MRDEM-30's single raster. That is one more reader written
-for one source, so the rest of this section stands.
+When the survey was written, `build_elevation.py --terrain-sources` on
+`main` (0b0f6356) took exactly one source and read it with code written for
+3DEP. Pull request 924 since lets the list hold several sources, each inside
+its own area with the first listed winning where two overlap, and adds a
+second reader, for MRDEM-30's single raster, with a rule that drops its
+pixels that are not ground. Each adapter in `TERRAIN_ADAPTERS` still names
+one origin, one projection and one catalog format, so the rest of this
+section stands.
 
 The stage after it is already generic. The terrain stage writes plain
 one-degree HGT tiles with no data where the source has none, and
 `hybrid_cell` and `blend_fill` read only those. So a new region needs a way to
 write such tiles, and data:
 
-- **Several sources with an order.** A list in place of one entry, and a
-  rule for posts two sources both hold: the United States and Canada at
-  their border, lidar and a contour model in New Zealand or Japan.
+- **Several sources with an order.** Done by pull request 924: a list in
+  order, each source inside its own area, the first listed winning a post
+  two could give. Japan's DEM5A over DEM10B fits that as two entries.
 - **A catalog of files, not of tiles.** One line per file with its address,
   size and SHA-256, and for each cell the files that touch it. That covers
   one file per country (MRDEM-30), a sheet per map square (LINZ, 424), small
