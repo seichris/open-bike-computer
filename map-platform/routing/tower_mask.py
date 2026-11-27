@@ -47,6 +47,7 @@ import contextlib
 import hashlib
 import json
 import math
+import shutil
 import sys
 from pathlib import Path
 
@@ -79,20 +80,29 @@ def check_grid(dataset):
         raise ValueError("a height grid must be north-up")
 
 
-def uncovered_cells(datasets, cells):
-    """Names of the cells with a corner that no height grid covers.
+def uncovered_cells(datasets, cells, smooth=0, margin=0):
+    """Names of the cells whose window has a corner that no height grid covers.
 
-    The grid is global and reads 0 where nothing is built, so a cell outside
-    every file is a wrong file, not a place without towers: it would come out
-    unmasked and look masked. A cell is far smaller than a file of the grid,
-    so four covered corners mean a covered cell.
+    The window is the cell with the margin its zone is judged with. The grid
+    is global and reads 0 where nothing is built, so a window that reaches
+    past every file is a missing file, not a place without towers: the cell
+    would come out unmasked, or masked too little at its edge, and look
+    masked. A window is far smaller than a file of the grid, so four covered
+    corners mean a covered window.
     """
     def covered(longitude, latitude):
         return any(dataset.bounds.left <= longitude <= dataset.bounds.right
                    and dataset.bounds.bottom <= latitude <= dataset.bounds.top for dataset in datasets)
 
-    return [hgt_name(longitude, latitude) for longitude, latitude in cells
-            if not all(covered(longitude + dx, latitude + dy) for dx in (0, 1) for dy in (0, 1))]
+    side = POSTS - 1
+    missing = []
+    for cell in cells:
+        row_margin, column_margin, _ = zone_margins(cell, smooth, margin)
+        longitudes = (cell[0] - column_margin / side, cell[0] + 1 + column_margin / side)
+        latitudes = (cell[1] - row_margin / side, cell[1] + 1 + row_margin / side)
+        if not all(covered(longitude, latitude) for longitude in longitudes for latitude in latitudes):
+            missing.append(hgt_name(*cell))
+    return missing
 
 
 def building_heights(datasets, cell, row_margin, column_margin):
@@ -101,9 +111,8 @@ def building_heights(datasets, cell, row_margin, column_margin):
     A post takes the grid cell it lies in: the grid is three times coarser
     than the posts and its heights are averages over a cell already. Each
     dataset is north-up in geographic coordinates; several may tile the area,
-    and where two cover a post the later one wins. A margin that reaches
-    past every file counts as unbuilt there, so pass the files beside a
-    cell at the edge of one too.
+    and where two cover a post the later one wins. A post outside every
+    file counts as unbuilt; `uncovered_cells` finds such windows first.
     """
     import numpy as np
 
@@ -273,7 +282,7 @@ def main():
             parser.error(f"{name} must be 0 or between 15 and 2000 metres")
     import rasterio
 
-    # The input and the height files are checked before --out exists.
+    # The input and the height files' places are checked before --out exists.
     with contextlib.ExitStack() as stack:
         try:
             source = load_input(args.input, args.bounds)
@@ -282,14 +291,20 @@ def main():
             datasets = [stack.enter_context(rasterio.open(path)) for path in files]
             for dataset in datasets:
                 check_grid(dataset)
-            missing = uncovered_cells(datasets, source[-1])
+            missing = uncovered_cells(datasets, source[-1], args.smooth, args.margin)
             if missing:
-                raise ValueError(f"no file of --heights covers {', '.join(missing)}")
+                raise ValueError("the files of --heights do not cover the cell and its margin: "
+                                 + ", ".join(missing))
         except (OSError, ValueError) as error:
             parser.error(str(error))
         out = args.out.resolve()
         out.mkdir(parents=True)
-        path = run(args, out, *source, files, datasets)
+        try:
+            path = run(args, out, *source, files, datasets)
+        except ValueError as error:
+            # What a grid holds is known only once it is read. A set without a manifest is of no use.
+            shutil.rmtree(out)
+            parser.error(str(error))
     print(f"Elevation manifest: {path}", flush=True)
 
 

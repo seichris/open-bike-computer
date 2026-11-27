@@ -133,6 +133,9 @@ class TowerMaskTests(unittest.TestCase):
                              ["N40W073", "N41W074"])
             self.assertEqual(tower_mask.uncovered_cells([west, east], [(-74, 40), (-73, 40)]), [])
             self.assertEqual(tower_mask.uncovered_cells([], [(8, 47)]), ["N47E008"])
+            # The file reaches one grid cell past N40W074: enough for the cell, not for the margin of its zone.
+            self.assertEqual(tower_mask.uncovered_cells([west], [(-74, 40)], 150, 200), ["N40W074"])
+            self.assertEqual(tower_mask.uncovered_cells([west], [(-74, 40)], 0, 60), [])
 
     def test_masked_posts_lose_their_height_and_the_rest_keep_theirs(self):
         import numpy as np
@@ -155,12 +158,20 @@ class TowerMaskTests(unittest.TestCase):
             sample_elevation.write_manifest(
                 opened, {"name": "grey-opening", "radiusMetres": 200}, [{"id": "copernicus-glo30"}],
                 [sample_elevation.write_hgt(opened, (-74, 40), terrain)], [-74, 40, -73, 41])
-            # A grid over the whole cell and one grid cell more on every side, with one district of towers.
-            heights = np.zeros((1202, 1202), dtype="float32")
-            heights[336:366, 336:366] = 60       # posts 1005 to 1094, both ways
+            # A grid over the whole cell and six grid cells more on every side, with one district of towers.
+            heights = np.zeros((1212, 1212), dtype="float32")
+            heights[341:371, 341:371] = 60       # posts 1005 to 1094, both ways
             file = root / "GHS_BUILT_H_ANBH_test.tif"
-            with grid(heights, -74 - 3 / 3600, 41 + 3 / 3600) as memory:
+            with grid(heights, -74 - 18 / 3600, 41 + 18 / 3600) as memory:
                 file.write_bytes(memory.read())
+            # The same grid without the margin a cell's zone is judged with, and one that holds no heights.
+            tight_file, surface_file = root / "tight.tif", root / "surface.tif"
+            with grid(heights[5:-5, 5:-5], -74 - 3 / 3600, 41 + 3 / 3600) as memory:
+                tight_file.write_bytes(memory.read())
+            surface = heights.copy()
+            surface[900:910, 900:910] = 8100     # built square metres, as GHS-BUILT-S holds them
+            with grid(surface, -74 - 18 / 3600, 41 + 18 / 3600) as memory:
+                surface_file.write_bytes(memory.read())
             # The same district in a file that covers nothing else of the cell.
             patch_file = root / "patch.tif"
             with grid(np.full((30, 30), 60, dtype="float32"), -74 + 1005 / 3600, 41 - 1005 / 3600) as memory:
@@ -204,6 +215,7 @@ class TowerMaskTests(unittest.TestCase):
                 elevation_identity(out)
             for changed in (["--bounds", "-73", "40", "-72", "41"], ["--heights", str(root / "missing.tif")],
                             ["--heights", str(patch_file)], ["--heights", str(opened / "elevation-manifest.json")],
+                            ["--heights", str(tight_file)], ["--heights", str(surface_file)],
                             ["--input", str(root)], ["--threshold", "0"], ["--margin", "5"],
                             ["--bounds", "-74", "40", "-66", "44"]):
                 refused = root / "refused"

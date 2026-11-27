@@ -1102,8 +1102,11 @@ were read back from both graphs and from the ungraded one with
   Research Centre: the average net building height (ANBH) of 2018 on a
   3 arc-second grid in WGS 84, made from AW3D30, SRTM30 and Sentinel-2. Its
   pixel edges lie half an arc-second off whole arc-seconds, so every grid
-  cell holds exactly three by three posts. It is published as 10-degree
-  tiles (up to about 80 MB each) and as one 5.5 GB archive under
+  cell holds exactly three by three posts. A tile's edges lie 28.5
+  arc-seconds west and 358.5 north of whole degrees, so a cell on a
+  10-degree line needs two tiles; Stuttgart's N48E009 does. The tool
+  refuses a cell whose posts or margin no file covers. It is published as
+  10-degree tiles (up to about 80 MB each) and as one 5.5 GB archive under
   `https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_BUILT_H_GLOBE_R2023A/GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss/V1-0/`.
 - **Licence.** CC BY 4.0, © European Union (the `copyright.txt` beside the
   data): reuse is allowed with credit and a note of what was changed. It is
@@ -1156,7 +1159,9 @@ were read back from both graphs and from the ungraded one with
   houses of Kelburn and 27 to 31 m at Victoria University, on the hillside
   above Wellington's towers (44 to 48 m on Lambton Quay and The Terrace),
   and 3 m in the Botanic Garden beside them. That is why Kelburn is masked.
-- **Cost.** The step took 1.5 s a cell on a laptop.
+- **Cost.** The step took 1.5 s a cell on a laptop. The tile sets the
+  graphs were built from were written before the tool checked its files;
+  the reviewed tool writes the same eight sets, byte for byte.
 
 #### Routes
 
