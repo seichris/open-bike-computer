@@ -2153,8 +2153,10 @@ not flattened.
   take the interpolated height. The terrain is unchanged, so the road under
   the bridge keeps its ground. Bicycle costing does not read the bridge
   flag (Valhalla 3.9.2 `src/sif`), and the route service does not report
-  it. Pittsburgh's sample cut 94 ways and graded 163 pieces from their
-  ends, with 83 new nodes, 100 new ways and 118 relations given the pieces.
+  it. Pittsburgh's sample cut 93 ways and graded 163 pieces from their
+  ends, with 82 new nodes, 99 new ways and 118 relations given the pieces;
+  a bridge or tunnel way is never cut, and a crossing that dips on one side
+  only is cut at the crossing itself.
 - **(c) Change Valhalla's sampling**, for example to skip samples next to a
   bridge, is not needed: (b) uses Valhalla's own interpolation, and the
   pinned image and its `graph.lua` pin stay as they are.

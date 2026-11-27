@@ -372,7 +372,8 @@ class SplitTests(unittest.TestCase):
         self.assertEqual(ways[from_ways[0]][1][-1], 13)
         # Nothing else changed: the culvert's road has no low point and the stream's line is untouched.
         self.assertNotIn(crossing_split.TAG, ways[2][0])
-        self.assertEqual((record["fixedSites"], record["relationsChanged"]), (2, 2))
+        self.assertEqual((record["fixedSites"], record["relationsChanged"], record["waysNotFound"]), (2, 2, 0))
+        self.assertEqual(record["sites"][0]["source"], "roads.osm")
         subprocess_run = __import__("subprocess").run
         subprocess_run(["osmium", "check-refs", "--check-relations", str(out)], check=True, capture_output=True)
 
@@ -406,6 +407,11 @@ class SplitTests(unittest.TestCase):
         plan = {"cuts": [(-79.499005, 40.5)], "stretches": [([-79.499, -79.498], [40.5, 40.5])]}
         pieces, made = crossing_split.split_way(7, nodes, {"highway": "residential"}, plan, crossing_split.Ids())
         self.assertEqual(([piece[1] for piece in pieces], made), ([[1, 2], [2, 3]], []))
+        # A bridge is never cut.
+        plan = {"cuts": [(-79.4996, 40.5)], "stretches": [stretch]}
+        bridge, made = crossing_split.split_way(7, nodes, {"highway": "residential", "bridge": "viaduct"}, plan,
+                                                crossing_split.Ids())
+        self.assertEqual((bridge, made), ([(7, [1, 2, 3], {"highway": "residential", "bridge": "viaduct"})], []))
         relation = {"tags": {"type": "restriction"}, "members": [("w", 7, "from"), ("n", 3, "via"), ("w", 8, "to")]}
         replaced = crossing_split.members_after(relation, {7: pieces})
         self.assertEqual(replaced, [("w", pieces[1][0], "from"), ("n", 3, "via"), ("w", 8, "to")])

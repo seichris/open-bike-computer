@@ -103,11 +103,13 @@ def stretches(site_files, source, rule, jobs=6, log=print):
                 continue
             fixed.append({key_: record.get(key_) for key_ in ("kind", "way", "lon", "lat", "name", "group")}
                          | {key_: lift[2][key_] for key_ in ("grade", "bridgedGrade", "dip")})
+            crossing = record["span"] == crossing_steps.SPAN_NONE
             for part, lifted in ((a, lift[0]), (b, lift[1])):
                 where = np.flatnonzero(~np.isnan(lifted))
-                if not len(where):
+                if not len(where) and not crossing:
                     continue
-                anchor = min(int(where[-1]) + 1, len(lifted) - 1)
+                # A crossing lifted on one side only is cut at the crossing itself on the other.
+                anchor = min(int(where[-1]) + 1, len(lifted) - 1) if len(where) else 0
                 index = np.arange(part.start, part.stop)[:anchor + 1]
                 if not ways[index].any():
                     raise ValueError(f"{record.get('region')}: the site file names no ways; write it anew")
@@ -179,7 +181,12 @@ class Ids:
 
 
 def split_way(way_id, nodes, tags, plan, ids):
-    """The way's pieces as (id, node refs, tags) and the nodes made for its cuts as (ref, lon, lat)."""
+    """The way's pieces as (id, node refs, tags) and the nodes made for its cuts as (ref, lon, lat).
+
+    A bridge or tunnel is graded from its ends already, and is never cut.
+    """
+    if crossing_steps.is_bridge(tags) or crossing_steps.is_tunnel(tags):
+        return [(way_id, [ref for ref, _, _ in nodes], dict(tags))], []
     coords = [(lon, lat) for _, lon, lat in nodes]
     refs = [ref for ref, _, _ in nodes]
     inserted, cut_at = {}, set()
@@ -215,8 +222,7 @@ def split_way(way_id, nodes, tags, plan, ids):
     for number, (first, last) in enumerate(zip(bounds, bounds[1:])):
         middle = point_along(new_coords[first:last + 1])
         piece_tags = dict(tags)
-        if any(near_stretch(middle, stretch) for stretch in plan["stretches"]) and not (
-                crossing_steps.is_bridge(tags) or crossing_steps.is_tunnel(tags)):
+        if any(near_stretch(middle, stretch) for stretch in plan["stretches"]):
             piece_tags["bridge"] = "yes"
             piece_tags[TAG] = TAG_VALUE
         pieces.append((way_id if number == 0 else ids.next_way(), new_refs[first:last + 1], piece_tags))
@@ -352,8 +358,15 @@ def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=pri
         change.write_text(change_xml(made, created, modified, changed_relations))
         subprocess.run(["osmium", "apply-changes", str(roads), str(change), "-o", str(out), "--overwrite"],
                        check=True)
+    sources = []
+    for path in site_files:
+        meta = crossing_steps.load_sites(path)[0]
+        sources.append({**file_identity(path), "region": meta.get("region"), "source": meta.get("source"),
+                        "sourceSha256": meta.get("sourceSha256")})
     record = {
-        "schema": SCHEMA, "sites": [file_identity(path) for path in site_files], "rule": rule_of(rule),
+        "schema": SCHEMA, "sites": sources, "rule": rule_of(rule),
+        # Ways the plan names that the roads do not hold: the site files were written from another extract.
+        "waysNotFound": len(set(plans) - set(ways)),
         "fixedSites": len(fixed), "waysChanged": len(replacement),
         "waysCut": sum(1 for pieces in replacement.values() if len(pieces) > 1),
         "piecesGradedFromEnds": graded, "newNodes": len(made), "newWays": len(created),
