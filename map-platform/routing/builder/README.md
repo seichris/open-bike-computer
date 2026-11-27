@@ -67,7 +67,7 @@ takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded` and `gate` are skipped, and it takes about 4 hours.
 
-`--terrain usgs-3dep-13,nrcan-mrdem-30` grades with the hybrid: the terrain
+`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
 have data, the opened Copernicus tiles elsewhere (see
 [Build and release](../README.md#build-and-release)). A build uses every
@@ -77,14 +77,16 @@ approval, the area and the catalog each source pins: a run that names
 others, fewer or another order never starts. The run then differs in three
 ways:
 
-- **The elevation stage does more.** It writes 3,197 terrain tiles: it
-  downloads 3DEP's 954 tiles that have a Copernicus cell, 364 GB, reads
-  the part of the MRDEM-30 object under each of 2,338 cells, about 60 MB
-  of pixels a cell, cuts both to their areas, and blends 26,475 cells. No
-  builder has run this
-  yet, so its time is not known. MRDEM-30 is read from one object in
-  `ca-central-1`; a build stops when its size or ETag is no longer the
-  pinned one. A terrain worker holds a whole 3DEP tile: in the Chicago
+- **The elevation stage does more.** It writes 3,197 terrain tiles for
+  North America: it downloads 3DEP's 954 tiles that have a Copernicus cell,
+  364 GB, reads the part of the MRDEM-30 object under each of 2,338 cells,
+  about 60 MB of pixels a cell, cuts both to their areas, and blends 26,475
+  cells. Europe adds SONNY_TILES of Sonny's tiles, SONNY_GB GB of zips from Google
+  Drive, each cut to its countries. No builder has run this yet, so its
+  time is not known. MRDEM-30 is read from one object in `ca-central-1`; a
+  build stops when its size or ETag is no longer the pinned one, or when a
+  zip of Sonny's is not the one its catalog pins: Drive serves a page of
+  its own in place of a file that has had too many downloads that day. A terrain worker holds a whole 3DEP tile: in the Chicago
   rehearsal the container with three workers peaked at 3.8 GiB, about
   1.3 GiB a worker, which is 26 GiB for 20 jobs. The stage keeps three more
   things on scratch: the opened tiles (84 GB at 400 m), the terrain tiles
@@ -94,7 +96,7 @@ ways:
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
 - **The gate's source is named**
-  `usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
+  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -389,7 +391,7 @@ With `--terrain` the rehearsal grades with the hybrid:
 
 ```sh
 map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Toronto --radius 400 \
-  --terrain usgs-3dep-13,nrcan-mrdem-30
+  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25
 ```
 
 On 2026-11-26 Chicago ran with 3DEP alone, the one source of the list

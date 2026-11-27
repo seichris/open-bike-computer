@@ -82,7 +82,7 @@ BICINO_ELEVATION_ATTEMPTS=${BICINO_ELEVATION_ATTEMPTS:-4}
 BICINO_OPENING_RADIUS=${BICINO_OPENING_RADIUS:-}
 # The terrain sources of elevation-sources.json to put over the opened tiles:
 # every id of that list in its order, joined by commas, such as
-# usgs-3dep-13,nrcan-mrdem-30. Empty grades with opened Copernicus alone.
+# usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25. Empty grades with opened Copernicus alone.
 BICINO_TERRAIN=${BICINO_TERRAIN:-}
 # A record under releases/ of elevation tiles kept in a bucket, such as
 # elevation-cache-2026-11-26.json. The elevation stage restores the record's

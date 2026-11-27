@@ -24,16 +24,21 @@ cell borders and no cell depends on the order the cells were opened in.
 
 `--terrain-sources` adds the bare-earth sources that elevation-sources.json
 approves for routing, each inside its own area: the USGS 3DEP 1/3 arc-second
-tiles for the conterminous United States, and Natural Resources Canada's
-MRDEM-30 terrain model for Canada. A 3DEP cell is one dated tile of the
-source's catalog, downloaded and checked against the catalog's size and
-ETag. MRDEM-30 is one raster of all Canada on a 30 m Lambert grid; a cell
-reads the part of it under its posts in HTTP ranges, and the object's size
-and ETag must be the pinned ones before and after. Both are resampled onto
-the cell's posts and cut to the source's area: 3DEP's older tiles carry fill
-for Mexico and Canada from other sources, and MRDEM-30 holds heights beyond
-Canada's border. A cell on the border takes each post from the source whose
-area holds it; the result is one terrain tile per cell in `--terrain`.
+tiles for the conterminous United States, Natural Resources Canada's
+MRDEM-30 terrain model for Canada, and Sonny's LiDAR Digital Terrain Models
+of Europe for the countries it builds from national terrain models. A 3DEP
+cell is one dated tile of the source's catalog, downloaded and checked
+against the catalog's size and ETag. MRDEM-30 is one raster of all Canada
+on a 30 m Lambert grid; a cell reads the part of it under its posts in HTTP
+ranges, and the object's size and ETag must be the pinned ones before and
+after. Both are resampled onto the cell's posts. Sonny's tile of a cell is
+a zip of its HGT file, already on the cell's posts, checked against the
+catalog's size and SHA-256. Every source is cut to its area: 3DEP's older
+tiles carry fill for Mexico and Canada from other sources, MRDEM-30 holds
+heights beyond Canada's border, and Sonny's tiles hold SRTM beyond the
+countries it covers and in a patch of northern Portugal. A cell on a border
+takes each post from the source whose area holds it; the result is one
+terrain tile per cell in `--terrain`.
 
 The opened Copernicus tiles then go to `--opened`, and `--out` gets the
 hybrid: a post is the terrain's where a terrain source has data and opened
@@ -50,6 +55,7 @@ import functools
 import gzip
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -60,6 +66,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zipfile
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -112,6 +119,15 @@ MRDEM_HTTP_OPTIONS = {
     "GDAL_HTTP_LOW_SPEED_TIME": "60",
     "GDAL_HTTP_LOW_SPEED_LIMIT": "1000",
 }
+# Sonny's LiDAR Digital Terrain Models of Europe: one zip per one-degree cell in a public Google Drive folder,
+# holding the cell's SRTM-style HGT file. Its posts are the cell's own, in whole metres of each country's own
+# height datum. A Drive file has no ETag, so the catalog pins each zip's SHA-256 in its place.
+SONNY_ADAPTER = "sonny-dtm-europe-1s-hgt-v1"
+SONNY_ORIGIN = "https://drive.usercontent.google.com/download"
+# Heights beyond these are not ground, as in MRDEM-30. The polders of the Netherlands lie down to about 7 m under
+# the datum and the Alps reach 4,808 m. Such posts are dropped with the posts within SONNY_REJECT_MARGIN of them.
+SONNY_HEIGHTS = (-10, 7000)
+SONNY_REJECT_MARGIN = 4
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -241,6 +257,33 @@ def parse_terrain_catalog(text):
     return tiles
 
 
+# A Drive file is named by its id; files made before 2021 also need their resource key, after a slash.
+SONNY_CATALOG_LINE = re.compile(
+    r"([NS]\d{2}[EW]\d{3}) ([A-Za-z0-9_-]{20,64}(?:/0-[A-Za-z0-9_-]{10,40})?) (\d{8}) ([1-9]\d*) ([0-9a-f]{64})")
+
+
+def format_sonny_catalog(tiles):
+    """One line per cell: HGT cell, Drive file (id, and resource key after a slash), its date, bytes and SHA-256."""
+    return "".join(f"{hgt_name(*cell)} {file_id} {date} {size} {sha256}\n"
+                   for cell, (file_id, date, size, sha256) in sorted(tiles.items(), key=lambda item: hgt_name(*item[0])))
+
+
+def parse_sonny_catalog(text):
+    """{cell: (Drive file, date, bytes, SHA-256)} of Sonny's tiles."""
+    tiles = {}
+    for line in text.splitlines():
+        match = SONNY_CATALOG_LINE.fullmatch(line)
+        if match is None:
+            raise ValueError(f"invalid terrain catalog line: {line!r}")
+        cell = cell_of(match[1])
+        if cell in tiles:
+            raise ValueError(f"terrain catalog line repeats a cell: {line!r}")
+        tiles[cell] = (match[2], match[3], int(match[4]), match[5])
+    if format_sonny_catalog(tiles) != text:
+        raise ValueError("the terrain catalog is not sorted by cell")
+    return tiles
+
+
 def format_cell_catalog(cells):
     """One HGT cell name per line: the cells a source of one object has a tile for."""
     return "".join(f"{name}\n" for name in sorted(hgt_name(*cell) for cell in cells))
@@ -269,6 +312,7 @@ TERRAIN_ADAPTERS = {
     TERRAIN_ADAPTER: (f"{TERRAIN_BUCKET}/{TERRAIN_PREFIX}", "EPSG:4269", set(), parse_terrain_catalog),
     MRDEM_ADAPTER: (MRDEM_URL, f"EPSG:{MRDEM_EPSG}", {"originBytes", "originEtag", "originModified"},
                     parse_cell_catalog),
+    SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", set(), parse_sonny_catalog),
 }
 OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
 OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -299,18 +343,24 @@ class TerrainSource:
         if self.origin_object is not None:
             return self.origin
         tile, date, _, _ = self.tiles[(longitude, latitude)]
+        if self.adapter == SONNY_ADAPTER:
+            file_id, _, key = tile.partition("/")
+            return f"{self.origin}?id={file_id}&export=download&confirm=t" + (f"&resourcekey={key}" if key else "")
         return f"{self.origin}/{tile}/USGS_13_{tile}_{date}.tif"
 
     def pin(self, cell):
         """What a terrain tile's receipt names when this source, as pinned and read now, gave it posts.
 
         `rejects` is the rule by which a source's pixels are dropped as not
-        ground, or None. A tile read under another rule is built again.
+        ground, or None. A tile read under another rule is built again. For
+        Sonny's tiles `etag` is the zip's SHA-256, which the catalog pins.
         """
         size, etag = self.origin_object or self.tiles[cell][2:]
         rejects = None
         if self.adapter == MRDEM_ADAPTER:
             rejects = {"below": MRDEM_HEIGHTS[0], "above": MRDEM_HEIGHTS[1], "pixelsAround": MRDEM_REJECT_MARGIN}
+        elif self.adapter == SONNY_ADAPTER:
+            rejects = {"below": SONNY_HEIGHTS[0], "above": SONNY_HEIGHTS[1], "pixelsAround": SONNY_REJECT_MARGIN}
         return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
                 "areaSha256": self.area_sha256, "rejects": rejects}
 
@@ -645,16 +695,7 @@ def mrdem_posts(dataset, cell):
     read["sha256"] = hashlib.sha256(array.tobytes()).hexdigest()
     valid = (dataset.read_masks(1, window=window) != 0) & np.isfinite(array) & (array != MRDEM_NO_DATA)
     read["invalidPixels"] = int((~valid).sum())
-    beyond = valid & ((array < MRDEM_HEIGHTS[0]) | (array > MRDEM_HEIGHTS[1]))
-    if beyond.any():
-        read["rejectedHeights"] = [float(array[beyond].min()), float(array[beyond].max())]
-        rows, columns = np.nonzero(beyond)
-        # Only the box around the pixels beyond the range can change.
-        box = (slice(max(int(rows.min()) - MRDEM_REJECT_MARGIN, 0), int(rows.max()) + MRDEM_REJECT_MARGIN + 1),
-               slice(max(int(columns.min()) - MRDEM_REJECT_MARGIN, 0), int(columns.max()) + MRDEM_REJECT_MARGIN + 1))
-        dropped = spread(beyond[box], MRDEM_REJECT_MARGIN) & valid[box]
-        read["rejectedPixels"] = int(dropped.sum())
-        valid[box] &= ~dropped
+    read.update(drop_beyond(array, valid, MRDEM_HEIGHTS, MRDEM_REJECT_MARGIN))
     array[~valid] = np.nan
     reproject(
         array, heights,
@@ -695,7 +736,71 @@ def read_mrdem_cell(source, cell, out):
                      "window": None if window is None else [window.col_off, window.row_off, window.width, window.height]}
 
 
-TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell}
+def drop_beyond(array, valid, heights, margin):
+    """Mark invalid the pixels outside `heights` and those within `margin` of them; what was dropped."""
+    import numpy as np
+
+    read = {"rejectedPixels": 0, "rejectedHeights": None}
+    beyond = valid & ((array < heights[0]) | (array > heights[1]))
+    if beyond.any():
+        read["rejectedHeights"] = [float(array[beyond].min()), float(array[beyond].max())]
+        rows, columns = np.nonzero(beyond)
+        box = (slice(max(int(rows.min()) - margin, 0), int(rows.max()) + margin + 1),
+               slice(max(int(columns.min()) - margin, 0), int(columns.max()) + margin + 1))
+        dropped = spread(beyond[box], margin) & valid[box]
+        read["rejectedPixels"] = int(dropped.sum())
+        valid[box] &= ~dropped
+    return read
+
+
+def sonny_posts(data, cell):
+    """A cell's posts from Sonny's zip of its HGT file, and what its posts were.
+
+    The zip must hold the cell's HGT file and nothing else: 3601 x 3601
+    big-endian int16 posts on the cell's own grid, -32768 for no data.
+    Posts outside SONNY_HEIGHTS are not ground; they are dropped with the
+    posts around them, and the hybrid fills them from opened Copernicus. A
+    pit within SONNY_REJECT_MARGIN posts of a cell's edge drops posts on one
+    side of the edge only, so the two cells can give the shared posts
+    different heights there.
+    """
+    import numpy as np
+
+    name = f"{hgt_name(*cell)}.hgt"
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        members = archive.infolist()
+        if [member.filename for member in members] != [name] or members[0].file_size != POSTS * POSTS * 2:
+            raise ValueError(f"not Sonny's tile of {hgt_name(*cell)}")
+        raw = archive.read(name)
+    array = np.frombuffer(raw, dtype=">i2").reshape(POSTS, POSTS).astype("float32")
+    valid = array != NO_DATA
+    read = {"invalidPixels": int((~valid).sum()), **drop_beyond(array, valid, SONNY_HEIGHTS, SONNY_REJECT_MARGIN)}
+    array[~valid] = np.nan
+    return array, read
+
+
+def read_sonny_cell(source, cell, out):
+    """The cell's posts from its zip on Google Drive, downloaded and checked against the catalog, and what was read.
+
+    Drive answers a file it will not serve, for one with too many recent
+    downloads, with a page of its own; the size and SHA-256 catch it.
+    """
+    _, date, size, sha256 = source.tiles[cell]
+    url = source.tile_url(*cell)
+    data, _ = fetch(url)
+    found = hashlib.sha256(data).hexdigest()
+    if len(data) != size or found != sha256:
+        raise ValueError(f"{url} gave {len(data)} bytes with SHA-256 {found}, not the catalog's {size} bytes "
+                         f"with SHA-256 {sha256}")
+    heights, read = sonny_posts(data, cell)
+    if read["rejectedPixels"]:
+        low, high = read["rejectedHeights"]
+        print(f"{hgt_name(*cell)}: dropped {read['rejectedPixels']} posts of Sonny's tile at and around heights "
+              f"from {low:.0f} to {high:.0f} m, which are not ground", flush=True)
+    return heights, {"sha256": found, "readBytes": size, "tileDate": date, **read}
+
+
+TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell}
 
 
 def terrain_deadline(sources):

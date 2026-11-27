@@ -53,6 +53,28 @@ build_elevation.py stops when either differs.
     python terrain_catalog.py cells --area canada-osm-r1428125-v649.geojson.gz \\
         --out nrcan-mrdem-30-cells-20261127.txt
 
+Sonny's LiDAR Digital Terrain Models of Europe are approved for the
+countries they build wholly from national lidar or photogrammetry, and for
+mainland Portugal outside a patch that holds SRTM. `srtm-fill` finds such a
+patch: it compares Sonny's tiles post by post with SRTM's 1 arc-second tiles
+(the Tilezen copy on AWS, `skadi/N41/N41W009.hgt.gz`) and returns the
+stretches where nine posts in ten are exactly SRTM's, holes filled and
+widened by one block. Elsewhere about one post in six matches by chance.
+
+    python terrain_catalog.py srtm-fill --sonny sonny-zips/ --srtm skadi/ --out srtm-fill-portugal.geojson
+
+`countries` writes the union of several countries' areas from their
+relations' `osmium export --attributes type,id`, each cut to a box where
+`--cut` gives one, less the polygons of `--without`. `sonny-tiles` lists the
+Europe folder on Google Drive, downloads the tile of every cell that touches
+the area, and writes one line per cell with the file's id (and, for a file
+made before 2021, its resource key), date, size and SHA-256:
+
+    python terrain_catalog.py countries --country r16239.geojson=16239 ... \\
+        --cut 295480=-10,36.5,-6,42.5 --without srtm-fill-portugal.geojson --box -32 27 45 82 \\
+        --source "OpenStreetMap relations ..., ODbL" --out sonny-europe-....geojson.gz
+    python terrain_catalog.py sonny-tiles --area sonny-europe-....geojson.gz --out sonny-dtm-europe-1s-v25-tiles-....txt
+
 Then record the files' names, sizes and SHA-256, the tile or cell count and,
 for MRDEM-30, the object's size, ETag and date in elevation-sources.json.
 """
@@ -66,10 +88,13 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from build_elevation import (
-    MRDEM_URL, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, format_cell_catalog, format_terrain_catalog, hgt_name, load_area,
+    MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, cell_of, format_cell_catalog,
+    format_sonny_catalog, format_terrain_catalog, hgt_name, load_area, sonny_posts,
 )
 
 KEY = re.compile(r"/([ns])(\d{2})([ew])(\d{3})/USGS_13_\1\2\3\4_(\d{8})\.tif$")
@@ -112,6 +137,89 @@ def area_feature(collection, name, source, cut=None):
     if polygon.is_empty or not polygon.is_valid or polygon.geom_type not in ("Polygon", "MultiPolygon"):
         raise ValueError(f"{name!r} leaves no valid polygon" + (f" inside {tuple(cut)}" if cut is not None else ""))
     return {"type": "Feature", "properties": properties, "geometry": mapping(polygon)}
+
+
+def relation_polygon(collection, relation):
+    """The polygon `osmium export --attributes type,id` made of one relation."""
+    from shapely.geometry import shape
+
+    found = [feature for feature in collection.get("features", [])
+             if feature["properties"].get("@type") == "relation" and feature["properties"].get("@id") == relation
+             and feature["geometry"]["type"] in ("Polygon", "MultiPolygon")]
+    if len(found) != 1:
+        raise ValueError(f"the export holds {len(found)} polygons of relation {relation}, not one")
+    return found[0]["properties"].get("name"), shape(found[0]["geometry"])
+
+
+def countries_feature(polygons, source, cuts=None, without=(), cut=None):
+    """The union of `polygons` ({relation: (name, polygon)}), each cut to its box of `cuts`, less `without`."""
+    from shapely.geometry import box, mapping
+    from shapely.ops import unary_union
+
+    cuts = cuts or {}
+    parts = [polygon.intersection(box(*cuts[relation])) if relation in cuts else polygon
+             for relation, (_, polygon) in sorted(polygons.items())]
+    polygon = unary_union(parts)
+    for other in without:
+        polygon = polygon.difference(other)
+    properties = {"names": sorted(name for name, _ in polygons.values()), "relations": sorted(polygons),
+                  "source": source, "cuts": {str(relation): list(value) for relation, value in sorted(cuts.items())}}
+    if cut is not None:
+        polygon = polygon.intersection(box(*cut))
+        properties["box"] = list(cut)
+    if polygon.is_empty or not polygon.is_valid or polygon.geom_type not in ("Polygon", "MultiPolygon"):
+        raise ValueError("the countries leave no valid polygon")
+    return {"type": "Feature", "properties": properties, "geometry": mapping(polygon)}
+
+
+# Blocks of this many posts on a side are judged together; a block is SRTM where this share of its land posts is.
+FILL_BLOCK = 10
+FILL_SHARE = 0.9
+# A patch of fewer blocks, about 70 km2, is taken for chance: flat ground and lake surfaces where two models agree
+# on whole metres. Lake Annecy's surface matches over 275 blocks and the Guadalquivir's marshes over 54, while
+# Portugal's patch is 112,812. Look at every patch found before using it.
+FILL_MIN_BLOCKS = 1000
+
+
+def hgt_posts(data):
+    import numpy as np
+
+    if len(data) != POSTS * POSTS * 2:
+        raise ValueError("not an HGT file of 3601 x 3601 posts")
+    return np.frombuffer(data, dtype=">i2").reshape(POSTS, POSTS)
+
+
+def srtm_fill_blocks(sonny, srtm, cell):
+    """Polygons of the blocks of a cell where Sonny's posts are SRTM's, nine in ten land posts exactly."""
+    import numpy as np
+    from affine import Affine
+    from rasterio.features import shapes
+    from shapely.geometry import shape
+
+    sonny, srtm = sonny.astype("int32"), srtm.astype("int32")
+    land = (sonny != 0) & (srtm != 0) & (sonny != -32768) & (srtm != -32768)
+    equal = (sonny == srtm) & land
+    side = (POSTS - 1) // FILL_BLOCK
+    land_blocks = land[:-1, :-1].reshape(side, FILL_BLOCK, side, FILL_BLOCK).sum(axis=(1, 3))
+    equal_blocks = equal[:-1, :-1].reshape(side, FILL_BLOCK, side, FILL_BLOCK).sum(axis=(1, 3))
+    fill = ((land_blocks >= FILL_BLOCK * FILL_BLOCK // 5)
+            & (equal_blocks >= FILL_SHARE * np.maximum(land_blocks, 1))).astype("uint8")
+    longitude, latitude = cell
+    transform = Affine(FILL_BLOCK * STEP, 0, longitude - STEP / 2, 0, -FILL_BLOCK * STEP, latitude + 1 + STEP / 2)
+    return [shape(geometry) for geometry, value in shapes(fill, mask=fill.astype(bool), transform=transform)
+            if value == 1]
+
+
+def srtm_fill(blocks):
+    """The patches of SRTM among the blocks: holes filled, widened by one block, chance blocks left out."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    merged = unary_union(blocks)
+    parts = list(getattr(merged, "geoms", [merged])) if not merged.is_empty else []
+    size = (FILL_BLOCK * STEP) ** 2
+    kept = [Polygon(part.exterior) for part in parts if part.area > (FILL_MIN_BLOCKS - 0.5) * size]
+    return unary_union(kept).buffer(FILL_BLOCK * STEP, join_style=2) if kept else None
 
 
 def area_bytes(feature):
@@ -176,6 +284,45 @@ def list_bucket(fetch):
             return objects
 
 
+SONNY_FOLDER = ("https://drive.google.com/embeddedfolderview?id=0BxphPoRgwhnoWkRoTFhMbTM3RDA"
+                "&resourcekey=0-wRe5bWl96pwvQ9tAfI9cQg")
+FOLDER_ENTRY = re.compile(r'<div class="flip-entry" id="entry-([^"]+)".*?<a href="([^"]+)".*?'
+                          r'<div class="flip-entry-title">([^<]+)</div>', re.DOTALL)
+
+
+def sonny_listing(html):
+    """{cell: Drive file} of the tiles a folder page lists; a file with a resource key is `id/key`."""
+    found = {}
+    for entry in FOLDER_ENTRY.finditer(html):
+        name = re.fullmatch(r"([NS]\d{2}[EW]\d{3})\.zip", entry[3])
+        if name is None:
+            continue
+        key = re.search(r"resourcekey=([A-Za-z0-9_-]+)", entry[2].replace("&amp;", "&"))
+        found[cell_of(name[1])] = entry[1] + (f"/{key[1]}" if key else "")
+    return found
+
+
+def sonny_tile(cell, drive_file, fetch):
+    """(Drive file, date, bytes, SHA-256) of a cell's tile and what its posts are, from one download."""
+    from email.utils import parsedate_to_datetime
+
+    file_id, _, key = drive_file.partition("/")
+    url = f"{SONNY_ORIGIN}?id={file_id}&export=download&confirm=t" + (f"&resourcekey={key}" if key else "")
+    data, modified = fetch(url)
+    _, read = sonny_posts(data, cell)
+    date = parsedate_to_datetime(modified).strftime("%Y%m%d")
+    return (drive_file, date, len(data), hashlib.sha256(data).hexdigest()), read
+
+
+def http_download(url):
+    """A file's bytes and Last-Modified header."""
+    with urllib.request.urlopen(url, timeout=300) as response:
+        data = response.read()
+        if len(data) != int(response.headers["Content-Length"]):
+            raise OSError(f"short read of {url}")
+        return data, response.headers["Last-Modified"]
+
+
 def http_get(url):
     with urllib.request.urlopen(url, timeout=120) as response:
         return response.read().decode()
@@ -198,7 +345,64 @@ def main():
     cells.add_argument("--area", required=True, type=Path, help="The file `area` wrote")
     cells.add_argument("--origin", default=MRDEM_URL, help="The source's object, whose size and ETag are printed")
     cells.add_argument("--out", required=True, type=Path, help="A new catalog file")
+    fill = commands.add_parser("srtm-fill", help="Find the patches of Sonny's tiles that are SRTM's posts")
+    fill.add_argument("--sonny", required=True, type=Path, help="Sonny's zips, named as the cells")
+    fill.add_argument("--srtm", required=True, type=Path, help="SRTM's 1 arc-second .hgt.gz tiles, named as the cells")
+    fill.add_argument("--out", required=True, type=Path, help="A new GeoJSON file")
+    union = commands.add_parser("countries", help="Write the area of several countries")
+    union.add_argument("--country", required=True, action="append", metavar="EXPORT=RELATION",
+                       help="`osmium export --attributes type,id` of a country's relation and the relation's id")
+    union.add_argument("--cut", action="append", default=[], metavar="RELATION=W,S,E,N", help="Cut a country to a box")
+    union.add_argument("--without", action="append", default=[], type=Path, help="A GeoJSON of polygons to leave out")
+    union.add_argument("--box", type=float, nargs=4, metavar=("WEST", "SOUTH", "EAST", "NORTH"))
+    union.add_argument("--source", required=True, help="Where the polygons come from, recorded in the file")
+    union.add_argument("--out", required=True, type=Path, help="A new .geojson.gz file")
+    sonny = commands.add_parser("sonny-tiles", help="Pin Sonny's tile of every cell that touches the area")
+    sonny.add_argument("--area", required=True, type=Path, help="The file `countries` wrote")
+    sonny.add_argument("--folder", default=SONNY_FOLDER, help="The Drive folder's embedded view")
+    sonny.add_argument("--jobs", type=int, default=4)
+    sonny.add_argument("--out", required=True, type=Path, help="A new catalog file")
     args = parser.parse_args()
+    if args.command == "srtm-fill":
+        blocks = []
+        for path in sorted(args.sonny.glob("*.zip")):
+            cell = cell_of(path.stem)
+            srtm = args.srtm / f"{path.stem}.hgt.gz"
+            if not srtm.exists():
+                continue
+            with zipfile.ZipFile(path) as archive:
+                sonny_heights = hgt_posts(archive.read(f"{path.stem}.hgt"))
+            blocks += srtm_fill_blocks(sonny_heights, hgt_posts(gzip.decompress(srtm.read_bytes())), cell)
+        patches = srtm_fill(blocks)
+        if patches is None:
+            parser.error("no patch of SRTM found")
+        from shapely.geometry import mapping
+        with args.out.open("x") as stream:
+            json.dump({"type": "Feature", "properties": {"block": FILL_BLOCK, "share": FILL_SHARE,
+                                                         "minimumBlocks": FILL_MIN_BLOCKS},
+                       "geometry": mapping(patches)}, stream)
+        size = (FILL_BLOCK * STEP) ** 2
+        for part in getattr(patches, "geoms", [patches]):
+            print(f"patch of {part.area / size:.0f} blocks, bounds {[round(v, 4) for v in part.bounds]}")
+        return
+    if args.command == "countries":
+        from shapely.geometry import shape
+        polygons = {}
+        for value in args.country:
+            path, _, relation = value.rpartition("=")
+            polygons[int(relation)] = relation_polygon(json.loads(Path(path).read_text()), int(relation))
+        cuts = {int(relation): tuple(float(v) for v in bounds.split(","))
+                for relation, _, bounds in (value.partition("=") for value in args.cut)}
+        without = [shape(json.loads(path.read_text())["geometry"]) for path in args.without]
+        try:
+            data = area_bytes(countries_feature(polygons, args.source, cuts, without,
+                                                None if args.box is None else tuple(args.box)))
+        except ValueError as error:
+            parser.error(str(error))
+        with args.out.open("xb") as stream:
+            stream.write(data)
+        print(f"{args.out.name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()}")
+        return
     if args.command == "area":
         cut = None if args.box is None else tuple(int(value) if value.is_integer() else value for value in args.box)
         try:
@@ -211,6 +415,24 @@ def main():
         return
     pinned = args.area.resolve(strict=True)
     area = load_area(pinned, hashlib.sha256(pinned.read_bytes()).hexdigest())
+    if args.command == "sonny-tiles":
+        listed = sonny_listing(http_get(args.folder))
+        wanted = {cell: drive_file for cell, drive_file in listed.items() if touches_area(cell, area)}
+        tiles, rejected = {}, {}
+        with ThreadPoolExecutor(args.jobs) as pool:
+            for cell, (tile, read) in zip(wanted, pool.map(lambda item: sonny_tile(*item, http_download),
+                                                           wanted.items())):
+                tiles[cell] = tile
+                if read["rejectedPixels"] or read["invalidPixels"]:
+                    rejected[hgt_name(*cell)] = read
+                print(f"{hgt_name(*cell)} {tile[2]} bytes", flush=True)
+        text = format_sonny_catalog(tiles)
+        with args.out.open("x") as stream:
+            stream.write(text)
+        print(f"{args.out.name}: {len(tiles)} tiles, {sum(t[2] for t in tiles.values())} source bytes, "
+              f"{len(text.encode())} bytes, sha256 {hashlib.sha256(text.encode()).hexdigest()}")
+        print(json.dumps({"tilesWithPostsDroppedOrMissing": rejected}, indent=1))
+        return
     if args.command == "cells":
         text = format_cell_catalog(area_cells(area))
         with args.out.open("x") as stream:

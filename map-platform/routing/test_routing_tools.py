@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 import urllib.parse
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1247,6 +1248,112 @@ class ElevationHybridTests(ElevationOpeningTests):
         self.assertEqual(int(mask.sum()), 2)
         np.testing.assert_array_equal(build_elevation.spread(mask, 0), mask)
 
+    def sonny_zip(self, name, heights, members=None):
+        """Sonny's zip of one HGT file; `members` replaces its contents."""
+        import numpy as np
+
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            for member, data in (members or [(name, np.asarray(heights, dtype=">i2").tobytes())]):
+                archive.writestr(member, data)
+        return stream.getvalue()
+
+    def test_sonnys_zip_gives_a_cells_posts_and_no_other_zip_passes(self):
+        import numpy as np
+
+        cell = (8, 47)
+        heights = np.tile(np.arange(self.POSTS, dtype="int16") + 400, (self.POSTS, 1))
+        heights[5, 5] = build_elevation.NO_DATA
+        posts, read = build_elevation.sonny_posts(self.sonny_zip("N47E008.hgt", heights), cell)
+        self.assertEqual(posts.shape, (self.POSTS,) * 2)
+        # The posts are the file's own, on the cell's grid; no data stays none.
+        self.assertTrue(np.isnan(posts[5, 5]))
+        self.assertEqual((float(posts[0, 0]), float(posts[40, 40])), (400.0, 440.0))
+        self.assertEqual((read["invalidPixels"], read["rejectedPixels"], read["rejectedHeights"]), (1, 0, None))
+        # A pit and a spike are not ground: they go with the posts within the margin of them.
+        margin = build_elevation.SONNY_REJECT_MARGIN
+        pitted = heights.copy()
+        pitted[20, 20] = -30
+        pitted[0, 40] = 7500
+        pitted[30, 10] = -9
+        posts, read = build_elevation.sonny_posts(self.sonny_zip("N47E008.hgt", pitted), cell)
+        self.assertEqual(read["rejectedHeights"], [-30.0, 7500.0])
+        self.assertEqual(read["rejectedPixels"], (2 * margin + 1) ** 2 + (margin + 1) ** 2)
+        self.assertTrue(np.isnan(posts[20 - margin:21 + margin, 20 - margin:21 + margin]).all())
+        self.assertFalse(np.isnan(posts[20 - margin - 1, 20]))
+        self.assertEqual(float(posts[30, 10]), -9.0)
+        # Only the cell's own HGT file, whole, passes.
+        good = np.asarray(heights, dtype=">i2").tobytes()
+        for members in ([("N47E009.hgt", good)], [("N47E008.hgt", good), ("readme.txt", b"x")],
+                        [("N47E008.hgt", good[:-2])], [("N47E008/N47E008.hgt", good)]):
+            with self.subTest(members=[name for name, _ in members]), \
+                    self.assertRaisesRegex(ValueError, "not Sonny's tile of N47E008"):
+                build_elevation.sonny_posts(self.sonny_zip("", None, members), cell)
+
+    def sonny_source(self, tiles, area=None):
+        return build_elevation.TerrainSource(
+            "sonny-dtm-europe-1s-v25", build_elevation.SONNY_ORIGIN, tiles, "e" * 64, "https://terms.example",
+            "https://credit.example", *(area or (self.AREA, "a" * 64)), build_elevation.SONNY_ADAPTER)
+
+    def test_a_sonny_tile_must_be_the_catalogs_download(self):
+        import numpy as np
+
+        cell = (8, 47)
+        heights = np.full((self.POSTS, self.POSTS), 420, dtype="int16")
+        heights[10, 10] = -50
+        data = self.sonny_zip("N47E008.hgt", heights)
+        sha256 = hashlib.sha256(data).hexdigest()
+        legacy = "0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg"
+        source = self.sonny_source({cell: (legacy, "20240715", len(data), sha256),
+                                    (7, 47): ("1SR2cz3aTvEesKawAbmbm6XxOhVFF7MNq", "20240715", 9, "f" * 64)})
+        # A file made before 2021 is fetched with its resource key; a newer one by its id alone.
+        self.assertEqual(source.tile_url(*cell), "https://drive.usercontent.google.com/download?"
+                         "id=0BxphPoRgwhnoMjZYbUhiLXFaTVk&export=download&confirm=t&resourcekey=0-yUN8-e7SYxqkNXtDmq8yAg")
+        self.assertEqual(source.tile_url(7, 47), "https://drive.usercontent.google.com/download?"
+                         "id=1SR2cz3aTvEesKawAbmbm6XxOhVFF7MNq&export=download&confirm=t")
+        # The receipt pins the zip's size and SHA-256, in the place of an ETag, and the rule for not ground.
+        self.assertEqual(source.pin(cell), {
+            "source": "sonny-dtm-europe-1s-v25", "url": source.tile_url(*cell), "bytes": len(data), "etag": sha256,
+            "areaSha256": "a" * 64, "rejects": {"below": -10, "above": 7000, "pixelsAround": 4}})
+        fetched = []
+
+        def fetch(url):
+            fetched.append(url)
+            return answers.pop(0), ""
+
+        answers = [data]
+        with patch.object(build_elevation, "fetch", fetch):
+            posts, read = build_elevation.read_sonny_cell(source, cell, Path("unused"))
+        self.assertEqual(fetched, [source.tile_url(*cell)])
+        self.assertEqual({key: read[key] for key in ("sha256", "readBytes", "tileDate", "rejectedPixels")},
+                         {"sha256": sha256, "readBytes": len(data), "tileDate": "20240715",
+                          "rejectedPixels": (2 * build_elevation.SONNY_REJECT_MARGIN + 1) ** 2})
+        self.assertEqual(int(np.isfinite(posts).sum()), self.POSTS ** 2 - read["rejectedPixels"])
+        # Drive's page for a file it will not serve now, or a changed file, stops the cell.
+        for answer in (b"<!DOCTYPE html><html>Too many users have viewed or downloaded this file</html>",
+                       self.sonny_zip("N47E008.hgt", heights + 1)):
+            answers = [answer]
+            with self.subTest(answer=answer[:20]), patch.object(build_elevation, "fetch", fetch), \
+                    self.assertRaisesRegex(ValueError, "not the catalog's"):
+                build_elevation.read_sonny_cell(source, cell, Path("unused"))
+
+    def test_sonnys_catalog_names_each_cells_file_and_pins_it(self):
+        tiles = {(8, 47): ("1SR2cz3aTvEesKawAbmbm6XxOhVFF7MNq", "20240715", 10188486, "c7" * 32),
+                 (-10, 38): ("1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK", "20250731", 1914899, "c3" * 32),
+                 (13, 48): ("0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg", "20240715", 8808065, "0a" * 32)}
+        text = build_elevation.format_sonny_catalog(tiles)
+        self.assertEqual(text.splitlines()[0], "N38W010 1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK 20250731 1914899 " + "c3" * 32)
+        self.assertEqual(build_elevation.parse_sonny_catalog(text), tiles)
+        lines = text.splitlines(keepends=True)
+        for broken, message in (
+                ("".join(reversed(lines)), "not sorted"),
+                (text + lines[0], "repeats a cell"),
+                (text.replace("20250731", "2025-07-31"), "invalid"),
+                (text.replace("c3" * 32, "c3" * 16), "invalid"),
+                (text.replace("1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK", "../etc"), "invalid")):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                build_elevation.parse_sonny_catalog(broken)
+
     def test_the_mrdem_object_must_be_the_pinned_one_before_and_after_a_cell_reads_it(self):
         import numpy as np
 
@@ -1440,7 +1547,7 @@ class TerrainSourceTests(unittest.TestCase):
     ROUTING = Path(build_elevation.__file__).parent
 
     def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
-        source, canada = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
+        source, canada, europe = build_elevation.load_terrain_sources(self.ROUTING / "elevation-sources.json")
         self.assertEqual((source.id, len(source.tiles), source.origin_object), ("usgs-3dep-13", 955, None))
         self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
                                                    "historical/n41w074/USGS_13_n41w074_20260917.tif")
@@ -1484,6 +1591,31 @@ class TerrainSourceTests(unittest.TestCase):
         terrain = build_elevation.Terrain.over((source, canada), sorted(set(source.tiles) | set(canada.tiles)))
         self.assertEqual((len(terrain.cells), sum(1 for found in terrain.cells.values() if len(found) == 2)), (3340, 95))
         self.assertEqual(terrain.cells[(-80, 43)], (source, canada))
+        # Sonny's tiles of Europe: a Drive file per cell, pinned by size and SHA-256, cut to the countries it builds
+        # from national terrain models and to mainland Portugal outside the patch of SRTM around Porto.
+        self.assertEqual((europe.id, len(europe.tiles), europe.origin_object), ("sonny-dtm-europe-1s-v25", 848, None))
+        self.assertEqual(europe.tile_url(-10, 38), "https://drive.usercontent.google.com/download?"
+                                                   "id=1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK&export=download&confirm=t")
+        self.assertTrue(europe.tile_url(13, 48).endswith("&resourcekey=0-yUN8-e7SYxqkNXtDmq8yAg"))
+        self.assertEqual(europe.pin((-10, 38)), {
+            "source": "sonny-dtm-europe-1s-v25", "url": europe.tile_url(-10, 38), "bytes": 1914899,
+            "etag": "c30fd24b6ae4a4d13b99e0891c3b034bab3d25d7c662941205cbacb74bc0c8be", "areaSha256": europe.area_sha256,
+            "rejects": {"below": -10, "above": 7000, "pixelsAround": 4}})
+        europe_area = build_elevation.load_area(europe.area, europe.area_sha256)
+        self.assertEqual(europe.area.name, "sonny-europe-osm-20261127.geojson.gz")
+        self.assertTrue(all(terrain_catalog.touches_area(cell, europe_area) for cell in europe.tiles))
+        # Lisbon, Coimbra, Zurich, Stuttgart, Amsterdam, Belfast, Bratislava, Oslo and Palma are inside; Porto,
+        # Braga, Funchal, Rome, Budapest, Dublin, Zagreb, Vaduz and Andorra la Vella outside.
+        self.assertEqual([europe_area[1].contains(Point(x, y)) for x, y in (
+            (-9.14, 38.71), (-8.43, 40.21), (8.54, 47.37), (9.18, 48.78), (4.90, 52.37), (-5.93, 54.60),
+            (17.11, 48.15), (10.75, 59.91), (2.65, 39.57),
+            (-8.61, 41.15), (-8.42, 41.55), (-16.91, 32.65), (12.50, 41.90), (19.04, 47.50), (-6.26, 53.35),
+            (15.98, 45.81), (9.52, 47.14), (1.52, 42.51))], [True] * 9 + [False] * 9)
+        # Europe touches neither North American area, so every cell keeps the one source it has.
+        everywhere = build_elevation.Terrain.over((source, canada, europe), sorted(
+            set(source.tiles) | set(canada.tiles) | set(europe.tiles)))
+        self.assertEqual((len(everywhere.cells), sum(1 for found in everywhere.cells.values() if len(found) > 1)),
+                         (3340 + 848, 95))
         document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1502,7 +1634,8 @@ class TerrainSourceTests(unittest.TestCase):
                 (root / document["terrain"][0]["area"]).write_bytes(area)
                 return build_elevation.load_terrain_sources(root / "elevation-sources.json")
 
-            self.assertEqual([found.tiles for found in load(lambda value: None)], [source.tiles, canada.tiles])
+            self.assertEqual([found.tiles for found in load(lambda value: None)],
+                             [source.tiles, canada.tiles, europe.tiles])
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "not approved"),
                 (lambda value: value.update(approvedForRouting="yes"), "not approved"),
@@ -1533,6 +1666,15 @@ class TerrainSourceTests(unittest.TestCase):
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     load(change, index=1)
+            for change, message in (
+                (lambda value: value.update(approvedForRouting=False), "sonny-dtm-europe-1s-v25 is not approved"),
+                (lambda value: value.update(origin="https://drive.google.com/uc"), "unsupported"),
+                (lambda value: value.update(horizontalCrs="EPSG:3035"), "unsupported"),
+                (lambda value: value.update(tileCount=847), "not 847"),
+                (lambda value: value.update(area=document["terrain"][1]["area"]), "not the area"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change, index=2)
             with self.assertRaisesRegex(ValueError, "not the catalog"):
                 load(lambda value: None, catalog.replace("20260917", "20260918"))
             with self.assertRaisesRegex(ValueError, "not the area"):
@@ -1655,6 +1797,108 @@ class TerrainSourceTests(unittest.TestCase):
         export["features"].append(country("Hawaii only", "2", [(-160, 19), (-155, 19), (-155, 22), (-160, 22)]))
         with self.assertRaisesRegex(ValueError, "no valid polygon inside"):
             terrain_catalog.area_feature(export, "Hawaii only", "a test", terrain_catalog.CONTERMINOUS_BOX)
+
+
+class SonnyCatalogTests(unittest.TestCase):
+    """Sonny's area and catalog, on 41-post tiles."""
+
+    POSTS = 41
+
+    def setUp(self):
+        for module in (build_elevation, terrain_catalog):
+            patcher = patch.object(module, "POSTS", self.POSTS)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_patches_where_sonnys_posts_are_srtms_are_found_and_chance_matches_are_not(self):
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        srtm = rng.integers(100, 300, (self.POSTS, self.POSTS)).astype(">i2")
+        sonny = (srtm + rng.integers(1, 5, srtm.shape)).astype(">i2")
+        # The north-west two by two blocks hold SRTM; one block in the south-east matches by chance.
+        block = terrain_catalog.FILL_BLOCK
+        sonny[:2 * block, :2 * block] = srtm[:2 * block, :2 * block]
+        sonny[3 * block:, 3 * block:] = srtm[3 * block:, 3 * block:]
+        # The sea is no evidence either way.
+        sonny[:, -1] = srtm[:, -1] = 0
+        found = terrain_catalog.srtm_fill_blocks(sonny, srtm, (-9, 41))
+        step = build_elevation.STEP
+        self.assertEqual(len(found), 2)
+        self.assertAlmostEqual(sum(part.area for part in found), 5 * (block * step) ** 2, places=12)
+        with patch.object(terrain_catalog, "FILL_MIN_BLOCKS", 4):
+            patch_polygon = terrain_catalog.srtm_fill(found)
+        # The four blocks, widened by one block; the chance block is left out.
+        west, south, east, north = patch_polygon.bounds
+        self.assertAlmostEqual(west, -9 - step / 2 - block * step, places=9)
+        self.assertAlmostEqual(east, -9 - step / 2 + 3 * block * step, places=9)
+        self.assertAlmostEqual(north, 42 + step / 2 + block * step, places=9)
+        self.assertFalse(patch_polygon.contains(Point(-9 + 3.5 * block * step, 41 + 0.5 * block * step)))
+        self.assertIsNone(terrain_catalog.srtm_fill(found[1:]))
+
+    def test_the_countries_area_is_their_union_cut_and_less_the_patches(self):
+        exports = {
+            1: {"features": [{"type": "Feature", "properties": {"@type": "relation", "@id": 1, "name": "One"},
+                              "geometry": mapping(box(0, 0, 2, 2))},
+                             {"type": "Feature", "properties": {"@type": "relation", "@id": 9, "name": "Sub"},
+                              "geometry": mapping(box(0, 0, 1, 1))}]},
+            2: {"features": [{"type": "Feature", "properties": {"@type": "relation", "@id": 2, "name": "Two"},
+                              "geometry": mapping(box(2, 0, 4, 2))},
+                             {"type": "Feature", "properties": {"@type": "way", "@id": 2, "name": "Two"},
+                              "geometry": mapping(box(2, 0, 3, 1))}]}}
+        polygons = {relation: terrain_catalog.relation_polygon(exports[relation], relation) for relation in (1, 2)}
+        self.assertEqual(polygons[1][0], "One")
+        feature = terrain_catalog.countries_feature(polygons, "test", {2: (2, 0, 3, 2)}, [box(0, 0, 1, 1)], (0, 0, 10, 1.5))
+        from shapely.geometry import shape
+        area = shape(feature["geometry"])
+        self.assertAlmostEqual(area.area, 3 * 1.5 - 1)
+        self.assertEqual((feature["properties"]["names"], feature["properties"]["relations"],
+                          feature["properties"]["cuts"], feature["properties"]["box"]),
+                         (["One", "Two"], [1, 2], {"2": [2, 0, 3, 2]}, [0, 0, 10, 1.5]))
+        with self.assertRaisesRegex(ValueError, "0 polygons of relation 3"):
+            terrain_catalog.relation_polygon(exports[1], 3)
+        with self.assertRaisesRegex(ValueError, "no valid polygon"):
+            terrain_catalog.countries_feature(polygons, "test", without=[box(-1, -1, 5, 3)])
+
+    def test_sonnys_folder_page_names_each_cells_file_and_a_download_pins_it(self):
+        import numpy as np
+
+        html = (
+            '<div class="flip-entry" id="entry-1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK" tabindex="0">'
+            '<a href="https://drive.google.com/file/d/1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK/view?usp=drive_web" target="_blank">'
+            '<div class="flip-entry-title">N38W010.zip</div></a></div>'
+            '<div class="flip-entry" id="entry-0BxphPoRgwhnoMjZYbUhiLXFaTVk" tabindex="0">'
+            '<a href="https://drive.google.com/file/d/0BxphPoRgwhnoMjZYbUhiLXFaTVk/view?usp=drive_web&amp;resourcekey=0-yUN8-e7SYxqkNXtDmq8yAg" target="_blank">'
+            '<div class="flip-entry-title">N48E013.zip</div></a></div>'
+            '<div class="flip-entry" id="entry-1rgGA22Ha42ulQORK9Pfp4JPpPAIKFx6Q" tabindex="0">'
+            '<a href="https://drive.google.com/file/d/1rgGA22Ha42ulQORK9Pfp4JPpPAIKFx6Q/view?usp=drive_web" target="_blank">'
+            '<div class="flip-entry-title">_Datasources.txt</div></a></div>')
+        self.assertEqual(terrain_catalog.sonny_listing(html), {
+            (-10, 38): "1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK",
+            (13, 48): "0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg"})
+        stream = io.BytesIO()
+        heights = np.full((self.POSTS, self.POSTS), 3, dtype=">i2")
+        heights[0, 0] = -40
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("N48E013.hgt", heights.tobytes())
+        data = stream.getvalue()
+        asked = []
+
+        def fetch(url):
+            asked.append(url)
+            return data, "Mon, 15 Jul 2024 14:06:34 GMT"
+
+        tile, read = terrain_catalog.sonny_tile((13, 48), "0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg", fetch)
+        self.assertEqual(tile, ("0BxphPoRgwhnoMjZYbUhiLXFaTVk/0-yUN8-e7SYxqkNXtDmq8yAg", "20240715", len(data),
+                                hashlib.sha256(data).hexdigest()))
+        self.assertEqual(asked, ["https://drive.usercontent.google.com/download?id=0BxphPoRgwhnoMjZYbUhiLXFaTVk"
+                                 "&export=download&confirm=t&resourcekey=0-yUN8-e7SYxqkNXtDmq8yAg"])
+        self.assertEqual(read["rejectedPixels"], (build_elevation.SONNY_REJECT_MARGIN + 1) ** 2)
+        # The pinned line reads back as the source list's catalog does.
+        line = build_elevation.format_sonny_catalog({(13, 48): tile})
+        self.assertEqual(build_elevation.parse_sonny_catalog(line), {(13, 48): tile})
+        with self.assertRaisesRegex(ValueError, "not Sonny's tile of N48E014"):
+            terrain_catalog.sonny_tile((14, 48), "1DWITCiLuCLIkcYQRaItJX5mwSaxGkskK", fetch)
 
 
 class ElevationManifestTests(unittest.TestCase):

@@ -2,8 +2,8 @@
 
 [elevation-sources.json](elevation-sources.json) lists the terrain sources
 the build reads. This file is the survey of candidates behind it, and the
-record of the four regional sources approved on 2026-11-27 that the build
-cannot read yet.
+record of the four regional sources approved on 2026-11-27 and how far each
+has got into the build.
 
 The planet bicycle graph is ungraded because every worldwide elevation source
 tried so far reads buildings as hills
@@ -18,26 +18,104 @@ publishers' pages, and five of them were tried on city samples against
 Copernicus opened at 400 m. The same day Chris approved the four sources
 below for routing. Nothing in a build or in production changed.
 
-## Approved, not yet read
+## Approved
 
 Chris approved these four for routing on 2026-11-27, after reading the
-recommendation below with its caveats. None is in `elevation-sources.json`
-yet: its loader takes only sources with a reader in `build_elevation.py`,
-and none of these has one. Each joins the list with its reader, catalog,
-area and the approval fields, as 3DEP and MRDEM-30 did, and passes city
-samples through that reader before a planet is built with it.
+recommendation below with its caveats. A source joins
+`elevation-sources.json` with its reader in `build_elevation.py`, its
+catalog, its area and the approval fields, as 3DEP and MRDEM-30 did, and
+passes city samples through that reader before a planet is built with it.
+Sonny's tiles are in the list (see [below](#sonnys-tiles-in-the-build)); the
+other three are not yet.
 
-| Source | Approved area | Licence and credit | Open before it is read |
+| Source | Approved area | Licence and credit | State |
 |---|---|---|---|
-| Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | A copy kept outside Google Drive; the Portugal polygon; a check for pits and steps between national sources |
-| LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Reading the 8 m overviews or the full sheets |
-| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | A crawl of about 400,000 tiles at a rate GSI accepts |
-| CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | The terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
+| Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build. Open: a copy kept outside Google Drive |
+| LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Not read yet |
+| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet: a crawl of about 400,000 tiles at a rate GSI accepts |
+| CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Not read: the terms list copying and distribution, not adaptation; Chris approved it with that caveat stated, and a reading of them for derived products is still open |
 
 The [pits at shorelines](refresh-runbook.md#pits-at-shorelines) found in
 MRDEM-30 apply to these too: a lidar model can hold slots a few pixels wide
 on water that lower a road beside them. A reader needs a rule for them per
 source before the source grades a planet.
+
+## Sonny's tiles in the build
+
+`build_elevation.py --terrain-sources` reads Sonny's tiles since 2026-11-27,
+as the third source of the list after 3DEP and MRDEM-30.
+
+- **Catalog.** [The catalog](sonny-dtm-europe-1s-v25-tiles-20261127.txt)
+  names the 848 tiles of Sonny's Europe folder whose cells touch the area,
+  4.11 GB of zips. Each was downloaded once to pin its size and SHA-256 and
+  to check that it holds the cell's HGT file and nothing else. Drive gives
+  no ETag, so a build compares every download's SHA-256 with the catalog.
+  29 of the files were made before 2021 and are fetched with the resource
+  key Drive gives them.
+- **Area.** [The area](sonny-europe-osm-20261127.geojson.gz) is the union of
+  the 21 countries' OpenStreetMap relations as of 2026-11-27, cut to 32° W
+  to 45° E and 27° N to 82° N, which leaves out the overseas parts of
+  France, the Netherlands and Norway, and Portugal cut to its mainland.
+  Slovakia's relation could not be made into a polygon that day: an edit of
+  its border with Hungary had split five ways without adding them to it.
+  The area adds those five ways, which the file names.
+- **Portugal's patch of SRTM.** Sonny's readme says version 25 brought
+  lidar "for most of the country's area". Compared post by post with SRTM
+  (Tilezen's copy on AWS), the rest shows plainly: in cell N41W009 92% of
+  the land posts are exactly SRTM's, where elsewhere in Portugal 13 to 26%
+  match by chance. The patch is 112,812 blocks of 10 by 10 posts, about
+  8,000 km², from 40.86° to 42.08° N and 8.88° to 7.95° W, with Porto and
+  Braga. The area leaves it out, widened by one block;
+  `terrain_catalog.py srtm-fill` finds it again from the tiles.
+- **Other countries.** The same comparison on 19 tiles in France, the
+  United Kingdom, Austria, Poland, Lithuania, Estonia, Finland and
+  Slovenia found no patch of SRTM inside the area. The widest stretch where
+  Sonny and SRTM agree is the surface of Lake Annecy, 275 blocks. The
+  Northern Ireland tile matches SRTM over 12,516 blocks, all of them in the
+  Republic of Ireland, outside the area.
+- **Borders.** Sonny keeps each country's height datum. Across 25 borders
+  between approved countries, posts three apart on either side differ by a
+  median of 0 m. Four differ by 1 to 3 m (France and Germany in cell
+  N49E006, Czechia and Slovakia, Austria and Slovenia, France and Spain in
+  N42E002), all in hilly cells where the spread is tens of metres. The flat
+  borders show no step, Belgium and the Netherlands included.
+- **Not ground.** 102 of the 848 tiles hold posts below −10 m, 183,446 posts
+  with their margins: open-pit mines (Hambach at −299 m), quarries, and the
+  harbour basins and fairways that the Belgian and Dutch models include
+  (the Scheldt at Antwerp down to −24 m, the IJ at Amsterdam to −13 m).
+  They are dropped and filled from opened Copernicus, as MRDEM-30's are. No
+  post is above 7,000 m.
+- **Google Drive.** Drive is the only host, and the files can be replaced
+  or withdrawn at any time; a changed file stops the build. Drive answers a
+  file that has had too many downloads in a day with a page of its own,
+  which the SHA-256 check also stops, and the cell fails until Drive serves
+  the file again. A planet build makes 848 downloads, 4.1 GB. A copy in the
+  elevation bucket would remove the dependence; that is still to be
+  decided.
+- **Rehearsals.** Five cities ran through the build chain on a laptop
+  (`builder/rehearse.sh --radius 400 --terrain
+  usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25`), each with Sonny's
+  tiles under the city and around it:
+
+  | City | Terrain tiles | Routes | Longest | 6%+ on direct routes | `use_hills` changed | Gate |
+  |---|---|---|---|---|---|---|
+  | Lisbon | 5 | 8 | +40.8% | 46% | 4 of 4 | met |
+  | Zurich | 9 | 8 | +17.5% | 12% | 2 of 4 | met |
+  | Stuttgart | 9 | 2 | 0.0% | 28% | 1 of 1 | missed: the hill-avoiding route reads 6 points more 6%+ |
+  | Amsterdam | 7 | 10 | 0.0% | 0% | – | met, run by hand |
+  | Berlin | 9 | 8 | 0.0% | 0% | – | met |
+
+  The flat cities keep every route, with nothing read at 6%+ but 0.8% of
+  the route through the Amsterdamse Bos. Lisbon's longest is the Everyday
+  route from Baixa to Estrela, 2.49 km on the ungraded graph and 3.51 km
+  graded, round a hill that the direct route climbs at 6%+ for 42% of its
+  length. Stuttgart's one hilly leg misses the same target with opened
+  Copernicus alone, by 15 points rather than 6: every way from the
+  Hauptbahnhof up to Degerloch climbs about 250 m. Amsterdam's sample fails
+  its smoke probe from Sloterdijk to the Amstel on both graphs, ungraded
+  too, so the chain stops before the gate there; serving the two graphs
+  and running `compare_elevation.py` by hand gave the row above.
+  Stuttgart's elevation stage took 180 s with the terrain and 80 s without.
 
 ## Recommendation
 
