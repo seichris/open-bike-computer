@@ -1115,11 +1115,19 @@ and other coasts have them too:
   again ended with a dead worker, after 18 and 16 minutes, before the third
   built the last two cells. So the hang is not a transfer that GDAL's limit
   sees, and the log did not say what it is.
+- **It is not the name lookup, the HEAD request or a small read.** A probe
+  on the builder repeated those three steps of a cell 6,000 times each, 20
+  at once, beside the blend: no stall, no error, the slowest answer 8
+  seconds. The build had lost a worker about once in 500 to 2,300 cells.
+  What the probe did not repeat is the read of a cell's whole window over
+  one connection. A connection that turns slow without stopping would look
+  the same as a hang, and the one-minute limit ends only a transfer under
+  1 kB a second. That is a guess until a stack shows it.
 - **A cell that hangs now says so.** Twenty seconds before its deadline it
-  prints its name, and a watchdog writes the stack of its worker, which
-  names the call it is blocked in. The worker still ends at the deadline
-  and the round still starts again: this finds the cause, it does not
-  remove it.
+  writes a notice and the stack of its worker, every line under the cell's
+  name, which names the call it waits in. The worker still ends at the
+  deadline and the round still starts again: this finds the cause, it does
+  not remove it.
 
 A check that does not depend on sea level is to compare with the opened
 Copernicus surface, which no pit of the lidar is in. Counted on a laptop
