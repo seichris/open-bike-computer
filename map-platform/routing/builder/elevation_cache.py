@@ -88,6 +88,14 @@ class CacheError(Exception):
     """The set cannot be restored; the message says why."""
 
 
+class NotEmpty(CacheError):
+    """The directory holds tiles already. `restored` tells whether this set was once restored into it."""
+
+    def __init__(self, message, restored):
+        super().__init__(message)
+        self.restored = restored
+
+
 def now_text():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -494,8 +502,10 @@ def restore_set(record, name, dest, *, endpoint=GOOGLE, token=None, jobs=6, log=
     tiles = record.sets[name]
     identity = {"set": name, "manifestSha256": tiles["manifestSha256"], "cellListSha256": tiles["cellListSha256"]}
     receipt = read_json(dest / RECEIPT)
-    if isinstance(receipt, dict) and all(receipt.get(key) == value for key, value in identity.items()):
-        # A build under other settings may since have written other tiles over the restored ones.
+    was_restored = isinstance(receipt, dict) and all(receipt.get(key) == value for key, value in identity.items())
+    if was_restored:
+        # A build may since have written tiles over the restored ones: some cells
+        # again, or under other settings all of them.
         try:
             unchanged = sha256_of((dest / "cells.txt").read_bytes()) == tiles["cellListSha256"]
         except OSError:
@@ -504,7 +514,7 @@ def restore_set(record, name, dest, *, endpoint=GOOGLE, token=None, jobs=6, log=
             log(f"{name}: already restored into {dest} at {receipt.get('restoredAt')}")
             return receipt
     if dest.exists() and any(dest.iterdir()):
-        raise CacheError(f"{dest} holds files that were not restored from this set; it is left alone")
+        raise NotEmpty(f"{dest} holds files that were not restored from this set; it is left alone", was_restored)
     started = time.monotonic()
     staging = staging_of(dest)
     # Bands an earlier, killed attempt finished are kept, if it restored this very set.
@@ -601,10 +611,16 @@ def restore(record_path, wanted, report_path=None, *, endpoint=GOOGLE, token_fil
                     reason = f"the restore tool failed: {type(error).__name__}: {error}"
                 entry = {"restored": False, "kept": True, "reason": reason}
                 before = earlier.get("sets", {}).get(name)
-                # A second attempt finds the tiles the first one built instead: keep why it built them.
-                if "were not restored" in reason and isinstance(before, dict) and before.get("restored") is False:
+                # A later attempt of the same run finds the directory in use. What the
+                # earlier attempt reported still holds: why the tiles were built, or
+                # that they were restored and the build has written cells again since.
+                if isinstance(error, NotEmpty) and isinstance(before, dict) and before.get("directory") == str(dest) \
+                        and before.get("restored") in (False, error.restored):
                     entry = {key: value for key, value in before.items() if key != "directory"}
-                log(f"{name}: NOT restored: {entry['reason']}")
+                if entry["restored"]:
+                    log(f"{name}: restored by an earlier attempt; the build has written cells again since")
+                else:
+                    log(f"{name}: NOT restored: {entry['reason']}")
         note(name, dest, entry)
     return report
 

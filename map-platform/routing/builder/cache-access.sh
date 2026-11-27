@@ -60,11 +60,19 @@ run() {
   fi
 }
 
-run gcloud iam service-accounts create "$account" --project "$project" \
-  --display-name="Planet builder: reads the kept elevation tiles" \
-  --description="Read-only on gs://$bucket. No key; used by temporary builders through their metadata server."
+# Safe to run again: an account that exists is kept, and the grant is one
+# that can be made twice. A grant can fail right after the account is made,
+# while Google does not know the account everywhere yet.
+if [ "$action" = create ] && gcloud iam service-accounts describe "$email" --project "$project" >/dev/null 2>&1; then
+  echo "$email exists already"
+else
+  run gcloud iam service-accounts create "$account" --project "$project" \
+    --display-name="Planet builder: reads the kept elevation tiles" \
+    --description="Read-only on gs://$bucket. No key; used by temporary builders through their metadata server."
+fi
 run gcloud storage buckets add-iam-policy-binding "gs://$bucket" --project "$project" \
-  --member="serviceAccount:$email" --role=roles/storage.objectViewer
+  --member="serviceAccount:$email" --role=roles/storage.objectViewer \
+  || fail "the grant failed; run cache-access.sh --create again in a minute"
 
 if [ "$action" = create ]; then
   echo "created $email; next: provision.sh ... --cache-reader $email"

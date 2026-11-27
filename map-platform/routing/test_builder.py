@@ -1134,7 +1134,9 @@ class CloudScriptTests(unittest.TestCase):
         self.calls = self.directory / "calls.txt"
         gcloud = self.directory / "gcloud"
         gcloud.write_text(f'#!/bin/bash\necho "$*" >> "{self.calls}"\n'
-                          f'case "$*" in *" list "*) cat "{self.directory}/left" 2>/dev/null; exit "${{LIST_STATUS:-0}}";; esac\n')
+                          f'case "$*" in *" list "*) cat "{self.directory}/left" 2>/dev/null; exit "${{LIST_STATUS:-0}}";;\n'
+                          f'  *"service-accounts describe"*) exit "${{ACCOUNT_MISSING:-1}}";;\n'
+                          f'  *add-iam-policy-binding*) exit "${{GRANT_STATUS:-0}}";; esac\n')
         gcloud.chmod(0o755)
         self.key = self.directory / "job.pub"
         self.key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHh6X2Lu1ulBCwpzdwyYyqDhKH0LWrDbC6i7LmmQVY8m job\n")
@@ -1193,7 +1195,8 @@ class CloudScriptTests(unittest.TestCase):
         self.assertIn("plan only: nothing was created", planned.stdout)
         created = self.run_script("cache-access.sh", "--create")
         self.assertEqual(created.returncode, 0, created.stderr)
-        account, grant = self.gcloud_calls()
+        asked, account, grant = self.gcloud_calls()
+        self.assertTrue(asked.startswith("iam service-accounts describe bicino-routing-builder@chiho-prod.iam.gserviceaccount.com "))
         self.assertTrue(account.startswith("iam service-accounts create bicino-routing-builder --project chiho-prod "))
         self.assertTrue(grant.startswith("storage buckets add-iam-policy-binding gs://bicino-routing-elevation "))
         self.assertIn("--member=serviceAccount:bicino-routing-builder@chiho-prod.iam.gserviceaccount.com "
@@ -1202,6 +1205,18 @@ class CloudScriptTests(unittest.TestCase):
         for never in ("keys create", "projects add-iam-policy-binding", "objectAdmin", "objectCreator"):
             self.assertNotIn(never, text)
         self.assertIn("--cache-reader bicino-routing-builder@chiho-prod.iam.gserviceaccount.com", created.stdout)
+        # A grant that fails says to run it again, and a second run keeps the account and makes the grant.
+        self.calls.unlink()
+        failed = self.run_script("cache-access.sh", "--create", GRANT_STATUS="1")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("run cache-access.sh --create again", failed.stderr)
+        self.calls.unlink()
+        again = self.run_script("cache-access.sh", "--create", ACCOUNT_MISSING="0")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual([call.split(" --project")[0].split(" gs://")[0] for call in self.gcloud_calls()],
+                         ["iam service-accounts describe bicino-routing-builder@chiho-prod.iam.gserviceaccount.com",
+                          "storage buckets add-iam-policy-binding"])
+        self.assertIn("exists already", again.stdout)
         self.calls.unlink()
         self.assertEqual(self.run_script("cache-access.sh", "--account", "x", "--create").returncode, 1)
         self.assertEqual(self.gcloud_calls(), [])
@@ -1633,14 +1648,31 @@ class ElevationCacheTests(unittest.TestCase):
 
     def test_restored_tiles_a_later_build_wrote_over_are_not_called_restored(self):
         self.assertTrue(self.restore()["sets"]["raw"]["restored"])
-        # A build under other settings wrote its own tiles and cell list into the directory.
+        # A build under other settings wrote its own tiles and cell list into the directory,
+        # and its run reported on other sets.
         (self.raw / "cells.txt").write_text("N52E013 " + "0" * 64 + "\n")
+        self.restore([("opened-400", self.opened, False)])
         self.requests.clear()
         report = self.restore()
         self.assertFalse(report["sets"]["raw"]["restored"])
         self.assertIn("holds files that were not restored from this set", report["sets"]["raw"]["reason"])
         self.assertEqual(self.requests, [])
         self.assertTrue((self.raw / "restore.json").exists())
+
+    def test_a_second_attempt_keeps_that_the_set_was_restored_when_the_build_wrote_cells_again(self):
+        first = self.restore()["sets"]["raw"]
+        # A source had moved: this run's build wrote a cell again, and the stage is then run a second time.
+        (self.raw / "cells.txt").write_text((self.raw / "cells.txt").read_text().replace("N52E013 ", "N52E013 0")[:-2] + "\n")
+        elevation_cache.compare(self.report, log=self.lines.append)
+        self.requests.clear()
+        again = self.restore()["sets"]["raw"]
+        self.assertEqual((again["restored"], again["restoredAt"], again["tilesAsRecorded"]), (True, first["restoredAt"], False))
+        self.assertEqual(self.requests, [])
+        self.assertIn("raw: restored by an earlier attempt; the build has written cells again since", self.lines)
+        self.assertEqual(elevation_cache.failed_sets(self.restore()), [])
+        # Tiles that were never restored there are not called restored on the word of an old report.
+        (self.raw / "restore.json").unlink()
+        self.assertFalse(self.restore()["sets"]["raw"]["restored"])
 
     def test_every_failure_is_reported_and_leaves_nothing_behind(self):
         # A fault of the tool itself is no reason to stop the build, and no secret either.
@@ -1800,6 +1832,30 @@ class ElevationCacheTests(unittest.TestCase):
             self.assertEqual(elevation_cache.main(["check", "--record", str(self.record)]), 0)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             elevation_cache.main(["restore", "--record", str(self.record), "--set", "raw", "relative/dir"])
+
+    def test_the_script_restores_several_bands_in_processes_of_their_own(self):
+        # As the stage runs it: the file itself, with more than one tar to take at once.
+        ran = subprocess.run([sys.executable, str(BUILDER / "elevation_cache.py"), "restore", "--record", str(self.record),
+                              "--report", str(self.report), "--jobs", "3", "--endpoint", self.endpoint,
+                              "--set", "raw", str(self.raw), "--set-if-kept", "opened-400", str(self.opened)],
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        for tar in ("N5.tar", "S0.tar", "S1.tar"):
+            self.assertRegex(ran.stdout, rf"raw: {tar} \d+ bytes, \d tiles checked")
+        restored = files_of(self.raw)
+        del restored["restore.json"]
+        self.assertEqual(restored, files_of(self.built["raw"]))
+        # A worker's refusal comes back to the report as the bucket's, not as a fault of the tool.
+        shutil.rmtree(self.opened)
+        self.refuse["opened-400/S1.tar"] = 403
+        ran = subprocess.run([sys.executable, str(BUILDER / "elevation_cache.py"), "restore", "--record", str(self.record),
+                              "--report", str(self.report), "--jobs", "3", "--endpoint", self.endpoint,
+                              "--set", "opened-400", str(self.opened)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(ran.returncode, elevation_cache.NOT_RESTORED, ran.stdout + ran.stderr)
+        reason = json.loads(self.report.read_text())["sets"]["opened-400"]["reason"]
+        self.assertIn("may not read family/opened-400-", reason)
+        self.assertNotIn("the restore tool failed", reason)
+        self.assertFalse(self.opened.exists() or elevation_cache.staging_of(self.opened).exists())
 
     def test_the_stand_in_serves_only_the_buckets_own_files(self):
         (self.root / "secret").write_text("outside the bucket")

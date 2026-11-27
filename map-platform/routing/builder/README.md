@@ -191,7 +191,8 @@ writes a cell again when the source the policy picks for it has moved.
 short-lived tokens from its metadata server; there is no key file.
 `cache-access.sh` prints, and with `--create` runs, the two commands: one
 account without any role in the project, and `roles/storage.objectViewer`
-for it on this one bucket. The builder's scope allows storage reads only.
+for it on this one bucket. It is safe to run again. The builder's scope
+allows storage reads only.
 The token is sent to `storage.googleapis.com` and to no other address, and
 a redirect is an error. **The account does not exist yet**: creating it
 needs Chris's go-ahead once, and until then a build with
