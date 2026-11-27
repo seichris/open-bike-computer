@@ -1761,8 +1761,9 @@ On 2026-11-27 the terrain models of regions outside the United States and
 Canada were surveyed from their publishers' pages, and five were tried on
 city samples against Copernicus opened at 400 m. The survey, the results and
 what a reader for further sources needs are in
-[Regional terrain models](elevation-sources.md). No source was approved and
-no build changed.
+[Regional terrain models](elevation-sources.md). Chris approved four of the
+sources for routing the same day (see the list below). None has a reader
+yet, so `elevation-sources.json` and the build are unchanged.
 
 - **A terrain model pays where hills are narrow.** On the same routes Lisbon
   climbs 546 m on the opened tiles and 913 m on Portugal's lidar (in Sonny's
@@ -1779,9 +1780,12 @@ no build changed.
   ungraded route that reads 6%+ and the climb along it compare heights, as
   [Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged)
   does for the gate.
-- **To put to Chris, in order:** Sonny's LiDAR DTMs of Europe (1
-  arc-second), LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan
-  and, after a reading of its terms, CEDD's 2020 lidar DTM of Hong Kong.
+- **Approved on 2026-11-27:** Sonny's LiDAR DTMs of Europe (1 arc-second)
+  for the countries it builds wholly from national data and mainland
+  Portugal, LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan,
+  and CEDD's 2020 lidar DTM of Hong Kong, whose terms for derived products
+  are still to be read. Each needs a reader, a catalog, an area and city
+  samples through that reader before a planet build uses it.
 
 ## Pull, assemble, and install on Coolify
 
