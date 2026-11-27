@@ -24,10 +24,12 @@ hand-started units of a planet build, and every script ran again from its
 first line beside its own half-finished work. To run a finished stage again,
 delete its marker first.
 
-Containers a stage starts carry the label `bicino.stage=STAGE`, and a graph
-build's the label `bicino.work=DIRECTORY`. They are not in the unit's control
-group, so systemd cannot stop them; the wrapper removes them before and after
-the stage and when systemd had to end it.
+Containers a stage starts carry the label `bicino.stage=STAGE@SCRATCH`, and a
+graph build's the label `bicino.work=DIRECTORY`. They are not in the unit's
+control group, so systemd cannot stop them; the wrapper removes them before
+and after the stage and when systemd had to end it. Both labels name the
+scratch directory, so the wrapper never finds the containers of another run
+on the same Docker host.
 """
 
 from __future__ import annotations
@@ -72,12 +74,12 @@ def skip_reason(stage, env):
 
 
 def container_labels(root, stage):
-    """The labels of the containers a stage starts.
+    """The labels of the containers a stage of this scratch root starts.
 
-    build_graph.py labels its Valhalla build with the work directory instead:
-    it knows nothing of stages.
+    The stage scripts write the first. build_graph.py labels its Valhalla
+    build with the work directory instead: it knows nothing of stages.
     """
-    labels = [f"bicino.stage={stage}"]
+    labels = [f"bicino.stage={stage}@{root}"]
     if stage.startswith("build-"):
         labels.append(f"bicino.work={root / 'build' / ('planet-' + stage[len('build-'):])}")
     return labels

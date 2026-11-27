@@ -54,6 +54,14 @@ BICINO_CHAIN=$BICINO_EXPORT/chain
 BICINO_LOGS=$BICINO_EXPORT/logs
 BICINO_EVIDENCE=$BICINO_EXPORT/evidence
 
+# Several runs can share one Docker host, as rehearsals on a laptop do, and
+# container and network names are the host's. So every name a stage gives ends
+# in the cksum of its scratch path, 667907303 for the builder's default, and
+# every container a stage starts carries the label
+# bicino.stage=STAGE@SCRATCH. Nothing here removes a container by anything else.
+BICINO_RUN_ID=$(printf '%s' "$BICINO_SCRATCH" | cksum)
+BICINO_RUN_ID=${BICINO_RUN_ID%% *}
+
 # The production API image of 2026-11-24. It supplies rasterio, Shapely and
 # the backend's dependencies. Move it with BICINO_MAP_PLATFORM_IMAGE when the
 # production image has moved; the result file records the one that ran.
@@ -115,6 +123,7 @@ bicino_uses_cache() {
 
 bicino_validate_run() {
   [ -d "$BICINO_ROUTING" ] || bicino_fail "no routing tools at $BICINO_ROUTING"
+  [[ "$BICINO_RUN_ID" =~ ^[0-9]{1,10}$ ]] || bicino_fail "cksum gave no id for $BICINO_SCRATCH, got: $BICINO_RUN_ID"
   [[ "$BICINO_MAP_PLATFORM_IMAGE" =~ ^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$ ]] \
     || bicino_fail "BICINO_MAP_PLATFORM_IMAGE must be pinned by digest"
   if [ -n "$BICINO_OPENING_RADIUS" ] && [[ ! "$BICINO_OPENING_RADIUS" =~ ^[0-9]{2,4}$ ]]; then
@@ -189,7 +198,8 @@ bicino_valhalla_image() {
   python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import build_graph; print(build_graph.IMAGE)' "$BICINO_ROUTING"
 }
 
-# Containers a killed stage left behind would block its next attempt.
+# Containers a killed stage left behind would block its next attempt. The
+# label names the scratch root, so another run's containers are not found.
 bicino_remove_containers() {
   local label=$1 ids
   ids=$(docker ps -aq --filter "label=$label")
@@ -206,7 +216,7 @@ bicino_wait_for_valhalla() {
   local network=$1 seconds=$2
   shift 2
   docker run --rm --init --platform "$BICINO_PLATFORM" --network "$network" \
-    --label "bicino.stage=$BICINO_STAGE" --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" -c '
+    --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" -c '
 import sys, time, urllib.request
 deadline = time.monotonic() + float(sys.argv[1])
 for host in sys.argv[2:]:

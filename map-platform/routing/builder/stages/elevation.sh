@@ -101,13 +101,14 @@ else
   rm -rf "${restoring[@]}"
 fi
 
+container=bicino-elevation-$BICINO_RUN_ID
 status=1
 for attempt in $(seq 1 "$BICINO_ELEVATION_ATTEMPTS"); do
   echo "attempt=$attempt start=$(bicino_now)"
-  docker rm -f bicino-elevation >/dev/null 2>&1 || true
+  docker rm -f "$container" >/dev/null 2>&1 || true
   set +e
-  docker run --rm --init --name bicino-elevation --platform "$BICINO_PLATFORM" -u "$(id -u):$(id -g)" \
-    --label "bicino.stage=$BICINO_STAGE" \
+  docker run --rm --init --name "$container" --platform "$BICINO_PLATFORM" -u "$(id -u):$(id -g)" \
+    --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \
     -v "$BICINO_ROUTING:/routing:ro" -v "$BICINO_ELEVATION_RAW:/raw" -v "$BICINO_ELEVATION:/out" \
     ${hybrid[@]+"${hybrid[@]}"} --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" \
     /routing/build_elevation.py --raw /raw --out /out --opening-radius "$BICINO_OPENING_RADIUS" \

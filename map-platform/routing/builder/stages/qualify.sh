@@ -53,8 +53,8 @@ offline_check() {
   echo "== $name start=$(bicino_now)"
   set +e
   docker run --rm --init --network none --platform "$BICINO_PLATFORM" --cpus "$cpus" --memory "$memory" \
-    --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE" \
-    -v "$archive:/graph/valhalla_tiles.tar:ro" -v "$BICINO_ROUTING:/probe:ro" "${options[@]}" \
+    --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \
+    -v "$archive:/graph/valhalla_tiles.tar:ro" -v "$BICINO_ROUTING:/probe:ro" ${options[@]+"${options[@]}"} \
     --entrypoint /bin/bash "$valhalla_image" -ec "$serve_then_run" _ "$cpus" "$@" \
     > "$out/$name.json" 2> "$out/$name.err"
   status=$?
@@ -79,23 +79,27 @@ offline_check audit 4 8g -v "$BICINO_AUDIT/inventory-all-units.json:/inventory.j
 
 # The profile probe is the backend's own route service, so it runs in the
 # map-platform image and reaches Valhalla over a network with no way out.
-network=bicino-profiles-$label
-service=bicino-profiles-$label
+# The service answers to $host there. The names of its container and of the
+# network are the host's, and end in the run's id.
+host=bicino-profiles-$label
+service=$host-$BICINO_RUN_ID
+network=$service
 echo "== profiles start=$(bicino_now)"
 docker rm -f "$service" >/dev/null 2>&1 || true
 docker network rm "$network" >/dev/null 2>&1 || true
 docker network create --internal "$network" >/dev/null
-docker run -d --init --name "$service" --network "$network" --platform "$BICINO_PLATFORM" --cpus 2 --memory 2g \
-  --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE" \
+docker run -d --init --name "$service" --network "$network" --network-alias "$host" \
+  --platform "$BICINO_PLATFORM" --cpus 2 --memory 2g \
+  --read-only --tmpfs /tmp:size=64m --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" \
   -v "$archive:/graph/valhalla_tiles.tar:ro" --entrypoint /bin/bash "$valhalla_image" -ec '
     valhalla_build_config --mjolnir-tile-extract /graph/valhalla_tiles.tar > /tmp/valhalla.json
     exec valhalla_service /tmp/valhalla.json 2' >/dev/null
 set +e
-bicino_wait_for_valhalla "$network" 300 "$service" \
+bicino_wait_for_valhalla "$network" 300 "$host" \
   && docker run --rm --init --network "$network" --platform "$BICINO_PLATFORM" -u "$(id -u):$(id -g)" \
-    --label "bicino.stage=$BICINO_STAGE" -v "$BICINO_REPO/map-platform:/mp:ro" \
+    --label "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" -v "$BICINO_REPO/map-platform:/mp:ro" \
     --entrypoint python3 "$BICINO_MAP_PLATFORM_IMAGE" \
-    /mp/routing/probe_profiles.py --origin "http://$service:8002" > "$out/profiles.json" 2> "$out/profiles.err"
+    /mp/routing/probe_profiles.py --origin "http://$host:8002" > "$out/profiles.json" 2> "$out/profiles.err"
 status=$?
 set -e
 docker rm -f "$service" >/dev/null
