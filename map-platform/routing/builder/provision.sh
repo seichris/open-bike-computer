@@ -9,6 +9,10 @@
 #   --job NAME         names every resource bicino-valhalla-NAME
 #   --ssh-source CIDR  the only address allowed to reach SSH: the map VPS
 #   --ssh-key FILE     the job's Ed25519 public key, generated on the VPS
+#   --cache-reader EMAIL   run the builder as this service account, with a
+#                      read-only storage scope, so that it can restore kept
+#                      elevation tiles (see cache-access.sh). Without it the
+#                      builder holds no credentials at all.
 #   --project, --zone, --subnet-range   default chiho-prod, europe-west4-b, 10.247.29.0/28
 #
 # Without --create it only prints the commands. Creating the VM costs money
@@ -23,6 +27,7 @@ subnet_range=10.247.29.0/28
 job=
 ssh_source=
 ssh_key=
+cache_reader=
 action=plan
 
 fail() {
@@ -35,6 +40,7 @@ while [ $# -gt 0 ]; do
     --job) job=${2:-}; shift 2 ;;
     --ssh-source) ssh_source=${2:-}; shift 2 ;;
     --ssh-key) ssh_key=${2:-}; shift 2 ;;
+    --cache-reader) cache_reader=${2:-}; shift 2 ;;
     --project) project=${2:-}; shift 2 ;;
     --zone) zone=${2:-}; shift 2 ;;
     --subnet-range) subnet_range=${2:-}; shift 2 ;;
@@ -71,6 +77,17 @@ fi
 public_key=$(cat "$ssh_key")
 [[ "$public_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9._@-]+)?$ ]] || fail "$ssh_key is not one Ed25519 public key"
 
+# The builder reads public inputs only, so it runs as nobody. Restoring kept
+# elevation tiles is the one exception: then it runs as a service account
+# whose only grant is to read that bucket, and its scope allows storage reads
+# and nothing else.
+identity=(--no-service-account --no-scopes)
+if [ -n "$cache_reader" ]; then
+  [[ "$cache_reader" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]] \
+    || fail "--cache-reader takes a service account's email"
+  identity=(--service-account="$cache_reader" --scopes=https://www.googleapis.com/auth/devstorage.read_only)
+fi
+
 # run COMMAND...: print the command, and run it only with --create.
 run() {
   printf '+'
@@ -87,12 +104,11 @@ run gcloud compute networks subnets create "$name" --project "$project" --networ
 run gcloud compute firewall-rules create "$name-ssh" --project "$project" --network="$name" \
   --direction=INGRESS --allow=tcp:22 --source-ranges="$ssh_source" --target-tags=bicino-routing-builder --quiet
 # c4-highmem-24-lssd brings its four 375 GiB local SSDs; setup.sh stripes them.
-# No service account: the builder reads public inputs only.
 run gcloud compute instances create "$name" --project "$project" --zone="$zone" \
   --machine-type=c4-highmem-24-lssd --subnet="$name" --network-tier=STANDARD \
   --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud \
   --boot-disk-size=30GB --boot-disk-type=hyperdisk-balanced \
-  --no-service-account --no-scopes --tags=bicino-routing-builder \
+  "${identity[@]}" --tags=bicino-routing-builder \
   --labels=ephemeral=true,purpose=bicino-routing-builder \
   --provisioning-model=STANDARD --max-run-duration=24h --instance-termination-action=DELETE \
   --maintenance-policy=TERMINATE --no-restart-on-failure \

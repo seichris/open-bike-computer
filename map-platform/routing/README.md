@@ -35,7 +35,9 @@ production now.
    `c4-highmem-24-lssd` with 1,500 GiB of scratch spread across four local SSDs.
    Confirm the credit-backed project and CPU and SSD quotas before provisioning.
    Stripe the temporary SSDs, keep the boot disk separate, and use a VM lifetime
-   limit. The Linux builder only needs access to public inputs.
+   limit. The Linux builder only needs access to public inputs; reading the
+   [kept elevation tiles](builder/README.md#kept-elevation-tiles) is the one
+   exception, and optional.
 
    For a planet graph, the scripts in [builder/](builder/README.md) create
    that builder, set it up and run steps 3 and 4 and the elevation gate as one

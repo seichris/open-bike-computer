@@ -1,9 +1,12 @@
 # Keeping the elevation tiles between builds
 
-Status: **the tiles are kept; the restore step is not built.** Chris decided
-on 2026-11-26 to keep the tiles of that day's builder (option 2 of
-[The choice](#the-choice)). The rest of this page is the proposal as it was
-put to him, with the prices and the check a build must make.
+Status: **the tiles are kept and a build can restore them; no builder may
+read the bucket yet.** Chris decided on 2026-11-26 to keep the tiles of that
+day's builder (option 2 of [The choice](#the-choice)) and on 2026-11-27 to
+have the restore step built. How a build uses the tiles is on
+[the builder's page](README.md#kept-elevation-tiles). From
+[The problem](#the-problem) on, this page is the proposal as it was put to
+him, with the prices.
 
 ## What is kept
 
@@ -43,12 +46,35 @@ downloaded: both tars matched their SHA-256, `cells.txt` hashed to the
 manifest's `cellListSha256`, and all 360 tiles of the band, unpacked,
 matched their lines in `cells.txt`.
 
-**Not built:** a build cannot use the bucket yet. That needs the restore
-step and the check described under
-[How a build would check the cached set](#how-a-build-would-check-the-cached-set),
-with the tar checksums of the pinned record as a first step, and a builder
-that may read the bucket (see [What it would take](#what-it-would-take)).
-Until then a build makes its tiles again.
+**Built on 2026-11-27:** the restore step, `elevation_cache.py`, and its
+place at the start of the `elevation` stage (`setup.sh --elevation-cache`).
+It differs from the proposal below in three ways:
+
+- A set that cannot be restored does not fail the stage. Its directory
+  stays empty, the tiles are built as before, and the status and the result
+  say why.
+- Raw tiles are checked tile by tile too, not only the opened set. It costs
+  a few minutes and leaves one rule for every set.
+- The restore does not judge the manifest's policy, bounds or method.
+  `build_elevation.py` does that afterwards, cell by cell, from the receipts,
+  and builds again any cell that is not what the run asked for.
+
+**Still missing:**
+
+- **A builder that may read the bucket.** `cache-access.sh` prints the two
+  commands for a service account that can read this one bucket;
+  `provision.sh --cache-reader` attaches it. Neither has been run: creating
+  the account needs Chris's go-ahead.
+- **A restore on a real builder.** From a laptop the tool has checked
+  `meta.tar` of both sets and three small bands of the real bucket (817
+  tiles). The whole sets, the time and the token from the metadata server
+  wait for the first build that asks for them.
+- **An upload step** for a new set, such as the 3DEP terrain tiles.
+  `elevation_cache.py pack` writes the tars and the record; uploading them
+  is done by hand as described above.
+- **A guard against deletion.** The bucket has Google's default 7-day soft
+  delete and no retention policy or object hold. `elevation_cache.py verify`
+  tells whether it still holds what the record pins.
 
 ## The problem
 
@@ -128,6 +154,9 @@ about half of what the build saves, and Nearline a quarter, plus $0.78 per
 restore. With no graded build in a month, the bucket only costs.
 
 ## How a build would check the cached set
+
+This is the check as proposed. [The builder's page](README.md#kept-elevation-tiles)
+has the check as built.
 
 A cached tile must be exactly the tile `build_elevation.py` would write. The
 elevation manifest already makes that checkable:
