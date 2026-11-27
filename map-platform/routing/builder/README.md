@@ -38,7 +38,8 @@ Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
   `elevation/` holds the tiles the graded graph is built with. With
   terrain sources these are the hybrid, and `elevation-opened/` and
   `elevation-terrain/` hold the opened Copernicus tiles and the terrain
-  tiles it is made of.
+  tiles it is made of. `elevation-terrain-files/` holds the terrain
+  sources' files fetched from their copy in the elevation bucket.
 - `export/`: everything the VPS may read. `result.json`, `chain/` (markers), `logs/` (one log per stage and the sampler's series), `evidence/` (probe reports, the gate report, manifests), and `ungraded/` and `graded/` (each archive's manifest and a hard link to the archive).
 
 ## The chain
@@ -67,7 +68,7 @@ takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded` and `gate` are skipped, and it takes about 4 hours.
 
-`--terrain usgs-3dep-13,nrcan-mrdem-30` grades with the hybrid: the terrain
+`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
 have data, the opened Copernicus tiles elsewhere (see
 [Build and release](../README.md#build-and-release)). A build uses every
@@ -77,14 +78,24 @@ approval, the area and the catalog each source pins: a run that names
 others, fewer or another order never starts. The run then differs in three
 ways:
 
-- **The elevation stage does more.** It writes 3,197 terrain tiles: it
-  downloads 3DEP's 954 tiles that have a Copernicus cell, 364 GB, reads
-  the part of the MRDEM-30 object under each of 2,338 cells, about 60 MB
-  of pixels a cell, cuts both to their areas, and blends 26,475 cells. No
-  builder has run this
-  yet, so its time is not known. MRDEM-30 is read from one object in
-  `ca-central-1`; a build stops when its size or ETag is no longer the
-  pinned one. A terrain worker holds a whole 3DEP tile: in the Chicago
+- **The elevation stage does more.** It writes 3,197 terrain tiles for
+  North America: it downloads 3DEP's 954 tiles that have a Copernicus cell,
+  364 GB, reads the part of the MRDEM-30 object under each of 2,338 cells,
+  about 60 MB of pixels a cell, cuts both to their areas, and blends 26,475
+  cells. Europe adds 848 of Sonny's tiles, 4.1 GB of zips, each cut to its
+  countries. The stage first fetches those zips from the copy in
+  `gs://bicino-routing-elevation` into `elevation-terrain-files/`, with the
+  same account and token as kept tiles (see below), and keeps each only
+  with the size and SHA-256 its catalog pins. A zip it could not fetch, and
+  every zip when the builder has no account, is downloaded from Google
+  Drive instead; the log says how many (`terrain files: ...`).
+  `BICINO_TERRAIN_MIRROR_ENDPOINT=none` reads them all from Drive, and a
+  rehearsal may name a local stand-in, `http://127.0.0.1:PORT`. The North
+  American part ran on a builder on 2026-11-27 (see the runbook's
+  [planet gate for the hybrid](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27));
+  no builder has read Sonny's tiles yet. MRDEM-30 is read from one object
+  in `ca-central-1`; a build stops when its size or ETag is no longer the
+  pinned one, or when a zip of Sonny's is not the one its catalog pins. A terrain worker holds a whole 3DEP tile: in the Chicago
   rehearsal the container with three workers peaked at 3.8 GiB, about
   1.3 GiB a worker, which is 26 GiB for 20 jobs. The stage keeps three more
   things on scratch: the opened tiles (84 GB at 400 m), the terrain tiles
@@ -94,7 +105,7 @@ ways:
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
 - **The gate's source is named**
-  `usgs-3dep-13+nrcan-mrdem-30-over-opened-400`.
+  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -396,7 +407,7 @@ With `--terrain` the rehearsal grades with the hybrid:
 
 ```sh
 map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Toronto --radius 400 \
-  --terrain usgs-3dep-13,nrcan-mrdem-30
+  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25
 ```
 
 On 2026-11-26 Chicago ran with 3DEP alone, the one source of the list
@@ -511,6 +522,9 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   labels ran on a laptop under other scratch paths. The profile probe's
   service and network ran there only by hand, on 2026-11-27, against two
   Berlin sample graphs at once. A test pins the builder's id, `667907303`.
+- **Fetching terrain files with the builder's account.** The fetch ran
+  against a stand-in bucket in tests and, with an operator's token from a
+  laptop, against `gs://bicino-routing-elevation` for Lisbon's five zips.
 - **The hybrid at planet size.** 955 downloads from the USGS bucket and the
   speed a builder gets from it, the blend of 26,475 cells, and a graph
   build with `--all-bridges`. The rehearsal ran them for one cell and two
