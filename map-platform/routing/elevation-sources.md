@@ -8,7 +8,8 @@ tried so far reads buildings as hills
 ([Refresh and rollback](refresh-runbook.md#elevation-sources-on-city-samples)).
 The plan is a hybrid: a bare-earth terrain model where an approved one exists
 and Copernicus GLO-30 opened at 400 m elsewhere. USGS 3DEP is approved for the
-United States, and Canada's MRDEM-30 fixes Toronto on a sample.
+United States. Canada's MRDEM-30 fixes Toronto on a sample, and its reader
+was in review when this was written (pull request 924).
 
 On 2026-11-27 the terrain models of other regions were surveyed from their
 publishers' pages, and five of them were tried on city samples against
@@ -327,7 +328,10 @@ Benefit against effort, best first. Populations are round figures.
 source and reads it with code written for 3DEP. `load_terrain_source` refuses
 any other adapter, origin or projection. The catalog names one tile per cell,
 west of Greenwich only, and `terrain_posts` refuses a tile that is not 10,812
-pixels square in NAD 83.
+pixels square in NAD 83. Pull request 924, in review when this was written,
+lets the list hold several sources, each inside its own area, and adds a
+second reader, for MRDEM-30's single raster. That is one more reader written
+for one source, so the rest of this section stands.
 
 The stage after it is already generic. The terrain stage writes plain
 one-degree HGT tiles with no data where the source has none, and
