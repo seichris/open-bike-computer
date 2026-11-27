@@ -402,11 +402,21 @@ class Walker:
                 pieces.append(way)
                 if stop is not None and stop(node):
                     return points, pieces, len(points) - 1
-            if hops >= CONTINUE_HOPS or len(points) < 2:
+            if hops >= CONTINUE_HOPS:
                 return points, pieces, None
             end_node = vertices[-1][2]
-            x0, y0 = metres(points[-2][0], points[-2][1], lat0)
-            x1, y1 = metres(points[-1][0], points[-1][1], lat0)
+            if len(points) >= 2:
+                x0, y0 = metres(points[-2][0], points[-2][1], lat0)
+                x1, y1 = metres(points[-1][0], points[-1][1], lat0)
+            else:
+                # The walk started on the way's last node, such as a crossing at a node the stream shares:
+                # head on as the way arrives there.
+                lons, lats = self.roads.coords(way)
+                before = position - direction
+                if not 0 <= before < len(lons):
+                    return points, pieces, None
+                x0, y0 = metres(lons[before], lats[before], lat0)
+                x1, y1 = metres(lons[position], lats[position], lat0)
             following = self.continuation(way, end_node, bearing(x0, y0, x1, y1), lat0, accept)
             if following is None:
                 return points, pieces, None
@@ -500,7 +510,8 @@ def load_sites(path):
         meta = json.loads(gzip.decompress(data["meta"].tobytes()))
         if meta.get("schema") != SITES_SCHEMA:
             raise ValueError(f"{path} is not a {SITES_SCHEMA} file")
-        ways = data["ways"] if "ways" in data.files else np.zeros(len(data["lons"]), dtype=np.int64)
+        # A file from before the ways were recorded has none: None, not zeros.
+        ways = data["ways"] if "ways" in data.files else None
         return meta, data["lons"], data["lats"], data["interpolated"], ways, data["offsets"]
 
 
@@ -704,6 +715,8 @@ def find_sites(roads, waters, fords, areas, log=print):
         sites.append((record, side_a, side_b, zone_ways))
     ends = np.array(bridge_ends) if bridge_ends else np.zeros((0, 2))
 
+    # A stream that crosses where two ways of a road meet crosses both at their shared end: one site.
+    placed_at = {}
     for road, points in by_road.items():
         attrs = roads.attrs[road]
         # One site per stretch of SAME_SITE metres: a stream mapped twice, or a river and its side channel.
@@ -718,6 +731,11 @@ def find_sites(roads, waters, fords, areas, log=print):
                 groups.append((x, y, [point]))
         for _, _, items in groups:
             lon, lat = items[0][0], items[0][1]
+            spot = (round(lon, 6), round(lat, 6))
+            if any(np.intersect1d(roads.way_nodes(other), roads.way_nodes(road)).size
+                   for other in placed_at.get(spot, ())):
+                continue
+            placed_at.setdefault(spot, []).append(road)
             area = area_of(areas, lon, lat)
             if area is None:
                 continue

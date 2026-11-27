@@ -158,6 +158,27 @@ class SiteTests(unittest.TestCase):
         self.assertEqual((record["span"], record["ways"]), (crossing_steps.SPAN_TUNNEL, [9]))
         self.assertEqual(self.by_kind["ford"][0][0]["way"], 7)
 
+    def test_a_crossing_at_a_road_end_walks_on_along_the_next_road(self):
+        # Two roads meet at node 7004, and a stream crosses there sharing the node, without a ford tag.
+        lat = 40.53
+        nodes = [node(7000 + i, lat, -79.503 + 0.0005 * i) for i in range(1, 8)]
+        nodes += [node(7101, lat - 0.001, -79.5015), node(7102, lat + 0.001, -79.5015)]
+        ways = [way(701, [7001, 7002, 7003, 7004], {"highway": "residential"}),
+                way(702, [7004, 7005, 7006, 7007], {"highway": "residential"}),
+                way(703, [7101, 7004, 7102], {"waterway": "stream"})]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "end.osm"
+            path.write_text(f'<?xml version="1.0"?><osm version="0.6">{"".join(nodes)}{"".join(ways)}</osm>')
+            roads, waters, fords = crossing_steps.read_ways(path)
+            sites = crossing_steps.find_sites(roads, waters, fords, [], log=lambda *_: None)
+        found = [site for site in sites if site[0]["kind"] == "untagged"]
+        self.assertEqual(len(found), 1)
+        record, side_a, side_b, _ = found[0]
+        self.assertTrue(record["joined"])
+        # Both sides run on, one along each road, and name their ways.
+        self.assertEqual((len(side_a[0]), len(side_b[0])), (26, 26))
+        self.assertEqual({int(way_id) for way_id in side_a[3]} | {int(way_id) for way_id in side_b[3]}, {701, 702})
+
     def test_sites_round_trip_through_their_file(self):
         with tempfile.TemporaryDirectory() as directory:
             writer = crossing_steps.SiteWriter()
@@ -416,6 +437,32 @@ class SplitTests(unittest.TestCase):
         replaced = crossing_split.members_after(relation, {7: pieces})
         self.assertEqual(replaced, [("w", pieces[1][0], "from"), ("n", 3, "via"), ("w", 8, "to")])
         self.assertIsNone(crossing_split.members_after(relation, {9: pieces}))
+
+    def test_a_restriction_keeps_one_piece_that_meets_its_via(self):
+        import crossing_split
+
+        nodes = [(1, -79.5, 40.5), (2, -79.499, 40.5), (3, -79.498, 40.5), (4, -79.497, 40.5)]
+        stretch = ([-79.4995, -79.499, -79.4985], [40.5] * 3)
+        via_node = {"tags": {"type": "restriction"}, "members": [("w", 7, "from"), ("n", 2, "via"), ("w", 8, "to")]}
+        via_way = {"tags": {"type": "restriction"}, "members": [("w", 7, "from"), ("w", 9, "via"), ("w", 8, "to")]}
+        guarded, kept = crossing_split.restriction_guards([via_node, via_way], {9: [4, 20, 21]})
+        self.assertEqual((guarded, kept), ({2, 4, 21}, {9}))
+        # A cut on the via node is not made; the cut beside it is, and the via node stays inside one piece.
+        plan = {"cuts": [(-79.499, 40.5), (-79.4985, 40.5)], "stretches": [stretch]}
+        pieces, made = crossing_split.split_way(7, nodes, {"highway": "residential"}, plan, crossing_split.Ids(),
+                                                guarded)
+        self.assertEqual([piece[1] for piece in pieces], [[1, 2, made[0][0]], [made[0][0], 3, 4]])
+        self.assertEqual(crossing_split.members_after(via_node, {7: pieces})[0], ("w", 7, "from"))
+        # With a via way, the piece that holds the via way's end.
+        replaced = crossing_split.members_after(via_way, {7: pieces}, {9: [4, 20, 21]})
+        self.assertEqual(replaced, [("w", pieces[1][0], "from"), ("w", 9, "via"), ("w", 8, "to")])
+        # A restriction no piece meets, broken before, keeps the piece with the way's id.
+        broken = {"tags": {"type": "restriction"}, "members": [("w", 7, "from"), ("n", 99, "via"), ("w", 8, "to")]}
+        self.assertEqual(crossing_split.members_after(broken, {7: pieces})[0], ("w", 7, "from"))
+        # A route keeps every piece, in order.
+        route = {"tags": {"type": "route"}, "members": [("w", 7, "")]}
+        self.assertEqual(crossing_split.members_after(route, {7: pieces}),
+                         [("w", piece[0], "") for piece in pieces])
 
 
 class BuildFlagTests(unittest.TestCase):

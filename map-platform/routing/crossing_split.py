@@ -24,8 +24,10 @@ that passes under the bridge or along the stream keeps the ground's heights.
 
 A cut way keeps its id for its first piece; the others take new ids from
 WAY_BASE, and new nodes from NODE_BASE. Every relation that holds a cut way
-holds all its pieces in its place, except a turn restriction, which takes
-the piece that touches its via node. The changes are written as an
+holds all its pieces in its place, except a turn restriction, which keeps
+the one piece that holds its via node or an end of its via way. No cut
+falls on a restriction's via node or the end of its via way, and a via way
+is never cut, so that piece is always one. The changes are written as an
 osmChange file and applied with `osmium apply-changes`, so that a planet
 is rewritten by osmium, not by Python. Modified objects get the next
 version, so that the change wins.
@@ -80,6 +82,8 @@ def stretches(site_files, source, rule, jobs=6, log=print):
     loaded, lons, lats, flags, ways, total = [], [], [], [], [], 0
     for path in site_files:
         meta, site_lons, site_lats, site_flags, site_ways, offsets = crossing_steps.load_sites(path)
+        if site_ways is None:
+            raise ValueError(f"{path} names no ways: write it again with crossing_steps.py sites")
         loaded.append((meta, offsets, total))
         lons.append(site_lons)
         lats.append(site_lats)
@@ -112,7 +116,8 @@ def stretches(site_files, source, rule, jobs=6, log=print):
                 anchor = min(int(where[-1]) + 1, len(lifted) - 1) if len(where) else 0
                 index = np.arange(part.start, part.stop)[:anchor + 1]
                 if not ways[index].any():
-                    raise ValueError(f"{record.get('region')}: the site file names no ways; write it anew")
+                    # A side of one point where the road ends at the crossing: nothing to cut on it.
+                    continue
                 found.append((ways[index], lons[index], lats[index], record["span"] != crossing_steps.SPAN_NONE))
     return found, fixed
 
@@ -180,10 +185,11 @@ class Ids:
         return self.way
 
 
-def split_way(way_id, nodes, tags, plan, ids):
+def split_way(way_id, nodes, tags, plan, ids, guarded=frozenset()):
     """The way's pieces as (id, node refs, tags) and the nodes made for its cuts as (ref, lon, lat).
 
-    A bridge or tunnel is graded from its ends already, and is never cut.
+    A bridge or tunnel is graded from its ends already, and is never cut. Nor is a way at a node of `guarded`,
+    the via nodes of turn restrictions and the ends of their via ways (see restriction_guards).
     """
     if crossing_steps.is_bridge(tags) or crossing_steps.is_tunnel(tags):
         return [(way_id, [ref for ref, _, _ in nodes], dict(tags))], []
@@ -199,7 +205,8 @@ def split_way(way_id, nodes, tags, plan, ids):
         for vertex in (segment, segment + 1):
             vx, vy = metres(coords[vertex][0], coords[vertex][1], lat0)
             if math.hypot(vx - x, vy - y) <= ON_NODE:
-                cut_at.add(vertex)
+                if refs[vertex] not in guarded:
+                    cut_at.add(vertex)
                 break
         else:
             inserted.setdefault(segment, []).append(fraction)
@@ -248,20 +255,54 @@ def point_along(coords):
     return coords[-1]
 
 
-def members_after(relation, replacement):
-    """The relation's members with every cut way replaced by its pieces; None when none was cut."""
+def is_restriction(relation):
+    return relation["tags"].get("type", "").startswith("restriction")
+
+
+def restriction_guards(relations, via_ways):
+    """(nodes, ways) no cut may fall on: every restriction's via nodes and the ends of its via ways, which are
+    not cut at all. A restriction's from and to ways must meet its via, and one piece of each must still do so.
+    `via_ways` gives the node refs of the via ways."""
+    nodes, ways = set(), set()
+    for relation in relations:
+        if not is_restriction(relation):
+            continue
+        for kind, ref, role in relation["members"]:
+            if role != "via":
+                continue
+            if kind == "n":
+                nodes.add(ref)
+            elif kind == "w":
+                ways.add(ref)
+                refs = via_ways.get(ref)
+                if refs:
+                    nodes.update((refs[0], refs[-1]))
+    return nodes, ways
+
+
+def members_after(relation, replacement, via_ways=None):
+    """The relation's members with every cut way replaced by its pieces; None when none was cut.
+
+    A restriction keeps one piece of a cut from or to way: the one that holds its via node, or an end of its via
+    way. When no piece does, as when the restriction was broken before, it keeps the piece with the way's id.
+    """
     members, changed = [], False
-    restriction = relation["tags"].get("type", "").startswith("restriction")
-    via_nodes = [ref for kind, ref, role in relation["members"] if kind == "n" and role == "via"]
+    restriction = is_restriction(relation)
+    meets = {ref for kind, ref, role in relation["members"] if kind == "n" and role == "via"}
+    for kind, ref, role in relation["members"]:
+        if kind == "w" and role == "via":
+            refs = (via_ways or {}).get(ref)
+            if refs:
+                meets.update((refs[0], refs[-1]))
     for kind, ref, role in relation["members"]:
         if kind != "w" or ref not in replacement:
             members.append((kind, ref, role))
             continue
         changed = True
         pieces = replacement[ref]
-        if restriction and role in ("from", "to") and via_nodes:
-            touching = [piece for piece in pieces if via_nodes[0] in (piece[1][0], piece[1][-1])]
-            pieces = touching or pieces[:1]
+        if restriction:
+            touching = [piece for piece in pieces if meets & set(piece[1])]
+            pieces = touching[:1] or [piece for piece in pieces if piece[0] == ref][:1] or pieces[:1]
         members.extend(("w", piece[0], role) for piece in pieces)
     return members if changed else None
 
@@ -286,7 +327,19 @@ def read_objects(roads, way_ids, work):
     for item in osmium.FileProcessor(str(parents_file), osmium.osm.RELATION):
         relations.append({"id": item.id, "version": item.version or 1, "tags": dict(item.tags),
                           "members": [(member.type, member.ref, member.role) for member in item.members]})
-    return ways, relations
+    # The via ways of their restrictions, for their ends.
+    wanted = {ref for relation in relations if is_restriction(relation)
+              for kind, ref, role in relation["members"] if kind == "w" and role == "via"}
+    via_ways = {way_id: [ref for ref, _, _ in way["nodes"]] for way_id, way in ways.items() if way_id in wanted}
+    if wanted - set(via_ways):
+        listing = work / "via-ways.txt"
+        listing.write_text("".join(f"w{way}\n" for way in sorted(wanted - set(via_ways))))
+        via_file = work / "via-ways.osm.pbf"
+        subprocess.run(["osmium", "getid", str(roads), "-i", str(listing), "-o", str(via_file), "--overwrite"],
+                       check=True)
+        for item in osmium.FileProcessor(str(via_file), osmium.osm.WAY):
+            via_ways[item.id] = [node.ref for node in item.nodes]
+    return ways, relations, via_ways
 
 
 def tag_xml(tags):
@@ -336,12 +389,15 @@ def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=pri
         scratch = Path(scratch)
         found, fixed = stretches(site_files, crossing_steps.TileDirectory(elevation), rule, jobs=jobs, log=log)
         plans = plan_ways(found)
-        ways, relations = read_objects(roads, set(plans), scratch) if plans else ({}, [])
+        ways, relations, via_ways = read_objects(roads, set(plans), scratch) if plans else ({}, [], {})
+        guarded_nodes, guarded_ways = restriction_guards(relations, via_ways)
         ids, made, created, modified, replacement = Ids(), [], [], [], {}
         graded = 0
         for way_id in sorted(ways):
+            if way_id in guarded_ways:
+                continue
             way = ways[way_id]
-            pieces, nodes = split_way(way_id, way["nodes"], way["tags"], plans[way_id], ids)
+            pieces, nodes = split_way(way_id, way["nodes"], way["tags"], plans[way_id], ids, guarded_nodes)
             if len(pieces) == 1 and pieces[0][2] == way["tags"]:
                 continue
             made.extend(nodes)
@@ -351,7 +407,7 @@ def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=pri
             replacement[way_id] = pieces
         changed_relations = []
         for relation in relations:
-            members = members_after(relation, replacement)
+            members = members_after(relation, replacement, via_ways)
             if members is not None:
                 changed_relations.append({**relation, "members": members, "version": relation["version"] + 1})
         change = Path(out).with_name(Path(out).name.split(".")[0] + ".osc")

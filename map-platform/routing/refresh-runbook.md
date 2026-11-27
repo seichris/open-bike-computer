@@ -2039,7 +2039,12 @@ stream crossings are the larger class, as it expected.
 
 Public roads are motorway to tertiary, unclassified and residential, as in
 the road check. A site not measured had no height near the crossing or a
-road too short to judge.
+road too short to judge. The count was taken before two corrections to the
+site finder: a stream crossing at the node where two ways of a road meet was
+found once on each way, with its profile cut off at that node, and the walk
+along the road did not go on past a way's end when it started there. That
+left 4,166 duplicate sites at 3,824 such places; one more false step and one
+more false grade than there are.
 
 - **By terrain model:** 3DEP 9,244 false steps (0.42% of its measured
   sites) and 63,405 false grades (2.9%); MRDEM-30 1,892 (0.36%) and 13,846
@@ -2154,9 +2159,12 @@ not flattened.
   the bridge keeps its ground. Bicycle costing does not read the bridge
   flag (Valhalla 3.9.2 `src/sif`), and the route service does not report
   it. Pittsburgh's sample cut 93 ways and graded 163 pieces from their
-  ends, with 82 new nodes, 99 new ways and 118 relations given the pieces;
-  a bridge or tunnel way is never cut, and a crossing that dips on one side
-  only is cut at the crossing itself.
+  ends, with 82 new nodes, 99 new ways and 118 relations given the pieces.
+  A bridge or tunnel way is never cut, and a crossing that dips on one side
+  only is cut at the crossing itself. No cut falls on a turn restriction's
+  via node or the end of its via way, and a via way is never cut, so a
+  restriction keeps exactly one piece of its from and to ways: the one
+  that meets its via.
 - **(c) Change Valhalla's sampling**, for example to skip samples next to a
   bridge, is not needed: (b) uses Valhalla's own interpolation, and the
   pinned image and its `graph.lua` pin stay as they are.
