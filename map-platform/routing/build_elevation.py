@@ -1227,9 +1227,9 @@ def _start_worker(chosen, out, opening=None, stage=None):
     _WORKER.update(chosen=chosen, out=out, opening=opening, stage=stage)
 
 
-def _say_hung(name, seconds):
-    print(f"{name}: no answer for {seconds:g} s; its worker ends at the deadline, and the cells left are built again",
-          file=sys.stderr, flush=True)
+def _say_hung(name, seconds, left):
+    print(f"{name} (worker {os.getpid()}): no answer for {seconds:g} s; unless it gets one within {left:g} s its "
+          "worker ends, and the cells left are built again", file=sys.stderr, flush=True)
 
 
 def _build(cell):
@@ -1241,15 +1241,20 @@ def _build(cell):
     # A worker that ends this way says nothing, so shortly before the deadline
     # the cell names itself and the worker's stack is written: on 2026-11-27 a
     # read of MRDEM-30 hung about once in a round, and no log said where. The
-    # stack comes from a watchdog that needs nothing from the hung thread.
+    # stack comes from a watchdog that needs nothing from the hung thread. A
+    # cell is never lost to these two: without a standard error to write to,
+    # the watchdog is left out.
     stage = _WORKER.get("stage")
     deadline = terrain_deadline(_WORKER["chosen"].get(cell, ())) if stage == TERRAIN else CELL_DEADLINE
-    notice = threading.Timer(deadline - HANG_NOTICE, _say_hung, (hgt_name(*cell), deadline - HANG_NOTICE))
+    notice = threading.Timer(deadline - HANG_NOTICE, _say_hung, (hgt_name(*cell), deadline - HANG_NOTICE, HANG_NOTICE))
     notice.daemon = True
-    notice.start()
-    faulthandler.dump_traceback_later(deadline - HANG_NOTICE, exit=False)
-    signal.alarm(deadline)
     try:
+        notice.start()
+        try:
+            faulthandler.dump_traceback_later(deadline - HANG_NOTICE, exit=False)
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            pass
+        signal.alarm(deadline)
         if isinstance(stage, Hybrid):
             return hybrid_cell(cell, _WORKER["chosen"], _WORKER["out"], stage)
         if stage == TERRAIN:

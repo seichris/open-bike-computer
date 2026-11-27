@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -368,10 +369,32 @@ class ElevationReceiptTests(unittest.TestCase):
             # A cell that answers in time says nothing.
             build_elevation._build((9, 47))
             self.assertEqual(printed.getvalue(), said)
-        self.assertEqual(said, "N47E008: no answer for 0.1 s; its worker ends at the deadline, and the cells left "
-                               "are built again\n")
+        self.assertEqual(said, f"N47E008 (worker {os.getpid()}): no answer for 0.1 s; unless it gets one within "
+                               "2.9 s its worker ends, and the cells left are built again\n")
         # The stack is asked for at the same moment, without ending the worker, and called off when the cell is done.
         self.assertEqual(watched, [("later", 0.1, False), ("cancel",)] * 2)
+
+    def test_a_cell_is_built_when_the_watchdog_cannot_write_anywhere(self):
+        import threading
+        import time
+
+        built = []
+        before = threading.active_count()
+        for error in (ValueError("file doesn't have a fileno"), AttributeError("no stderr"), RuntimeError("unsupported")):
+            with self.subTest(error=type(error).__name__), patch.object(build_elevation.signal, "alarm"), \
+                    patch.object(build_elevation.faulthandler, "dump_traceback_later", side_effect=error), \
+                    patch.object(build_elevation.faulthandler, "cancel_dump_traceback_later") as cancelled, \
+                    patch.object(build_elevation, "build_cell", lambda cell, chosen, out: built.append(cell)), \
+                    patch.dict(build_elevation._WORKER, chosen={}, out=Path(".")):
+                build_elevation._build((8, 47))
+                self.assertEqual(cancelled.call_count, 1)
+        self.assertEqual(built, [(8, 47)] * 3)
+        # No notice is left waiting to speak of a cell that is done.
+        for _ in range(100):
+            if threading.active_count() == before:
+                break
+            time.sleep(0.01)
+        self.assertEqual(threading.active_count(), before)
 
     def test_opened_cells_run_under_the_same_deadline(self):
         alarms = []
