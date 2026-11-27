@@ -234,12 +234,20 @@ production now.
      - MRDEM-30 is read in ranges: the pixels under the cell's posts, about
        60 MB of them. The object's size and ETag must be the pinned ones
        before and after the read. The raster must be laid out as MRDEM-30
-       is: float32, Canada Atlas Lambert, 30 m pixels.
+       is: float32, Canada Atlas Lambert, 30 m pixels. Its lidar part has
+       pits at shorelines, down to -695 m. A pixel below -10 m or above
+       7,000 m cannot be ground: it is dropped with the pixels within four
+       of it, and the hybrid fills the hole from opened Copernicus. The
+       raster is pinned, so a build does not stop on them.
 
      Each source's posts are cut to its area and put into one HGT tile. The
      receipt names, for each source, what it read, its SHA-256 (the tile's,
-     or that of the pixels read) and the posts it gave. A tile is built
-     again when a source's area, tile or object changes.
+     or that of the pixels read), the pixels dropped as not ground and the
+     posts it gave. A tile is built again when a source's area, tile or
+     object changes, or the rule by which its pixels are dropped.
+
+     A cell that fails does not end the run: every other cell is still
+     built, and the run then stops with the names of all that failed.
    - **Hybrid** tiles in `--out`. A post is the terrain tile's where it has
      data and opened Copernicus's elsewhere.
 

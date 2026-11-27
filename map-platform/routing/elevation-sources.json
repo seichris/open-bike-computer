@@ -54,7 +54,7 @@
       "attribution": "Contains information licensed under the Open Government Licence - Canada. Produced in part using Copernicus WorldDEM-30 (c) DLR e.V. 2010-2014 and (c) Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved.",
       "termsUrl": "https://open.canada.ca/en/open-government-licence-canada",
       "attributionUrl": "https://open.canada.ca/data/en/dataset/18752265-bda3-498c-a4ba-9dfe68cb98da",
-      "modifications": "Cut to the area, resampled from the 30 m Lambert grid to 1 arc-second posts, rounded to whole metres, heights left in CGVD2013, joined to USGS 3DEP at the border as it is, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet the terrain over 16 posts at the edge of its data. Not endorsed by Natural Resources Canada.",
+      "modifications": "Pixels below -10 m or above 7,000 m, which cannot be ground, are dropped with the pixels within four of them. Cut to the area, resampled from the 30 m Lambert grid to 1 arc-second posts, rounded to whole metres, heights left in CGVD2013, joined to USGS 3DEP at the border as it is, and joined to Copernicus GLO-30 opened by a grey-scale morphological opening, whose posts are lifted to meet the terrain over 16 posts at the edge of its data. Not endorsed by Natural Resources Canada.",
       "approvedForRouting": true,
       "approvedAt": "2026-11-27",
       "approvedBy": "Chris"
