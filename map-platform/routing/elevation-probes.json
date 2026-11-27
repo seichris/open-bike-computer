@@ -282,5 +282,18 @@
       {"name": "Avenida Paulista, Consolacao to Paraiso", "origin": [-23.5577, -46.6617], "destination": [-23.5755, -46.6406]},
       {"name": "Paulista to Praca da Republica", "origin": [-23.5614, -46.6559], "destination": [-23.5435, -46.6425]}
     ]
+  },
+  {
+    "city": "Pittsburgh",
+    "terrain": "flat",
+    "bbox": [-80.04, 40.41, -79.94, 40.475],
+    "extract": "north-america/us/pennsylvania",
+    "adminRelations": [148838],
+    "legs": [
+      {"name": "Schenley Park over the Panther Hollow Bridge", "origin": [40.4360, -79.9466], "destination": [40.4385, -79.9468]},
+      {"name": "Market Square over the Allegheny to PNC Park", "origin": [40.4406, -80.0024], "destination": [40.4469, -80.0058]},
+      {"name": "Station Square over the Monongahela to Market Square", "origin": [40.4336, -80.0045], "destination": [40.4406, -80.0024]},
+      {"name": "South Side Works over the Hot Metal Bridge", "origin": [40.4277, -79.9660], "destination": [40.4345, -79.9660]}
+    ]
   }
 ]
