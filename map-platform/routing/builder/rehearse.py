@@ -19,6 +19,11 @@ process of the named stage is killed, as a systemd timeout kills a unit's
 control group, and the chain is then started a second time, which must
 finish the build.
 
+`--pack-cache DIR` packs the run's raw and opened tiles as they would be kept
+in a bucket, with a record. `--elevation-cache DIR` then rehearses a build
+that restores them: DIR is served on this machine in the bucket's place, and
+the elevation stage must restore both sets and build no cell.
+
 Units run one after another here, where systemd starts independent stages
 together. Of the units that may start, the one that became startable last
 runs first, so a stage runs ahead of the stages it does not wait for: the
@@ -29,19 +34,26 @@ without naming it in its After= line then fails here too.
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 DEFAULT_SCRATCH = "/srv/bicino-routing-scratch"
 PREFIX = "bicino-planet-"
 RESULT = "bicino-planet-result.service"
 SAMPLER = "bicino-planet-sampler.service"
+CACHE_RECORD = "elevation-cache-rehearsal.json"
+CACHE_BUCKET = "rehearsal-elevation"
 
 
 def parse_unit(path):
@@ -160,9 +172,52 @@ def start_chain(root, units_dir, kill_stage=None, kill_after=None, out=print, in
     return status
 
 
-def write_env(root, city, region_url, radius, image, jobs, threads, terrain=None):
+class BucketHandler(http.server.BaseHTTPRequestHandler):
+    """The one request a restore makes of the storage API, answered from a directory."""
+
+    root = None
+    bucket = None
+
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        prefix = f"/storage/v1/b/{self.bucket}/o/"
+        path = self.root / urllib.parse.unquote(url.path[len(prefix):]) if url.path.startswith(prefix) else None
+        if path is None or url.query != "alt=media" or self.root not in path.resolve().parents or not path.is_file():
+            self.send_error(404)
+            return
+        size, start = path.stat().st_size, 0
+        wanted = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range") or "")
+        if wanted:
+            start = min(int(wanted[1]), size)
+        self.send_response(206 if wanted else 200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size - start))
+        if wanted:
+            self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+        self.end_headers()
+        with path.open("rb") as stream:
+            stream.seek(start)
+            self.send_body(stream)
+
+    def send_body(self, stream):
+        shutil.copyfileobj(stream, self.wfile)
+
+    def log_message(self, *arguments):
+        pass
+
+
+def serve_bucket(root, bucket, handler=BucketHandler):
+    """Serve `root` as `bucket` on a free local port; returns the server and its address."""
+    served = type("Served", (handler,), {"root": Path(root).resolve(), "bucket": bucket})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), served)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def write_env(root, city, region_url, radius, image, jobs, threads, terrain=None, *, cache=None, endpoint=None):
     lines = [f"BICINO_SAMPLE_CITY={city}", f"BICINO_SAMPLE_REGION_URL={region_url}",
              f"BICINO_OPENING_RADIUS={radius or ''}", f"BICINO_TERRAIN={terrain or ''}",
+             f"BICINO_ELEVATION_CACHE={cache or ''}", f"BICINO_ELEVATION_CACHE_ENDPOINT={endpoint or ''}",
              f"BICINO_ELEVATION_JOBS={jobs}",
              f"BICINO_UNGRADED_THREADS={threads}", f"BICINO_GRADED_THREADS={threads}",
              "BICINO_TOOLS_COMMIT=rehearsal"]
@@ -182,6 +237,10 @@ def main(argv=None):
     parser.add_argument("--map-platform-image", help="A digest-pinned map-platform image already on this host")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--pack-cache", type=Path, metavar="DIR",
+                        help="After the run, pack its raw and opened tiles into DIR as a bucket would hold them")
+    parser.add_argument("--elevation-cache", type=Path, metavar="DIR",
+                        help="Restore the elevation tiles from DIR, which an earlier --pack-cache wrote")
     parser.add_argument("--kill-stage", help="Kill this stage's wrapper once, then start the chain again")
     parser.add_argument("--kill-after", type=float, default=20, help="Seconds before the kill")
     args = parser.parse_args(argv)
@@ -196,14 +255,31 @@ def main(argv=None):
         parser.error(str(error))
     if args.terrain and not args.radius:
         parser.error("--terrain needs --radius")
+    if (args.pack_cache or args.elevation_cache) and not args.radius:
+        parser.error("--pack-cache and --elevation-cache need --radius")
+    cache = endpoint = None
+    if args.elevation_cache and not (args.elevation_cache / CACHE_RECORD).is_file():
+        parser.error(f"--elevation-cache: {args.elevation_cache} holds no {CACHE_RECORD}; write it with --pack-cache")
+    if args.elevation_cache:
+        # The record goes where a real one is, in the tools' releases/; the tars are served from DIR.
+        shutil.copyfile(args.elevation_cache / CACHE_RECORD, builder.parent / "releases" / CACHE_RECORD)
+        _, endpoint = serve_bucket(args.elevation_cache, CACHE_BUCKET)
+        cache = CACHE_RECORD
     write_env(root, args.city, prepare_sample.region_url(city, args.date), args.radius,
-              args.map_platform_image, args.jobs, args.threads, args.terrain)
+              args.map_platform_image, args.jobs, args.threads, args.terrain, cache=cache, endpoint=endpoint)
     os.environ["BICINO_SCRATCH"] = str(root)
     if args.kill_stage:
         start_chain(root, builder / "units", args.kill_stage, args.kill_after)
         print(f"== {args.kill_stage} was killed; starting the chain again")
     status = start_chain(root, builder / "units")
     print(f"Result: {root / 'export' / 'result.json'}")
+    if args.pack_cache and status == 0:
+        sys.path.insert(0, str(builder))
+        import elevation_cache
+        opened = root / ("elevation-opened" if args.terrain else "elevation")
+        elevation_cache.pack(args.pack_cache / CACHE_RECORD, args.pack_cache, CACHE_BUCKET, "rehearsal",
+                             [("raw", root / "elevation-raw"), (f"opened-{args.radius}", opened)])
+        print(f"Packed tiles: {args.pack_cache / CACHE_RECORD}")
     return status
 
 
