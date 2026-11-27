@@ -725,7 +725,7 @@ class ChainRehearsalTests(unittest.TestCase):
 
     def test_a_second_start_of_a_running_stage_leaves_what_it_started(self):
         # The stand-in Docker holds a container as a file with its label in it. The stage
-        # starts one and needs it to its end.
+        # starts one, runs until the test lets it go, and needs the container to its end.
         host = self.root / "docker-host"
         host.mkdir()
         (self.tools / "docker").write_text(f'''#!/bin/bash
@@ -740,8 +740,13 @@ if [ "$1" = rm ]; then
   for name in "$@"; do rm -f "{host}/$name"; done
 fi
 ''')
+        release = self.root / "release"
         self.stub("download.sh", f'''echo "bicino.stage=$BICINO_STAGE@$BICINO_SCRATCH" > "{host}/service"
-sleep 3
+for tick in $(seq 1 600); do
+  [ ! -e "{release}" ] || break
+  sleep 0.1
+done
+[ -e "{release}" ] || {{ echo "nobody let the stage go"; exit 4; }}
 [ -f "{host}/service" ] || {{ echo "the container is gone"; exit 3; }}
 rm "{host}/service"''')
         # The wrapper as checked in, with a shorter wait for the lock.
@@ -766,6 +771,7 @@ rm "{host}/service"''')
                                          out=self.messages.append, interpreter=sys.executable, output=subprocess.DEVNULL)
         self.assertEqual(second, run_stage.ALREADY_RUNNING)
         self.assertTrue((host / "service").exists())
+        release.touch()
         self.assertEqual(first.wait(timeout=30), 0)
         marker = chain_state.read_marker(self.root / "export" / "chain", "download")
         self.assertEqual((marker["state"], marker["attempt"]), ("done", 1))
