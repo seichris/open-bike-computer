@@ -1167,15 +1167,19 @@ legs of Lisbon, San Francisco, Zurich, Wellington and Stuttgart.
 
 | Source | Flat routes: median length change | Longest | Routes over 5% longer | Median 6%+ share | 6%+ share of the direct routes: median, most | Hilly legs `use_hills` changes | Median 6%+ share saved | Targets |
 |---|---|---|---|---|---|---|---|---|
-| Opened at 400 m | 0.0% | +35.1% | 3 | 9% | 13%, 28% | 12 of 17 | 2 pts | missed |
-| Opened at 200 m | +2.3% | +62.0% | 5 | 16% | 27%, 59% | 12 of 17 | 5 pts | missed |
+| Opened at 400 m | 0.0% | +35.1% | 3, all detours | 9% | 13%, 28% | 12 of 17 | 2 pts | missed |
+| Opened at 200 m | +2.3% | +62.0% | 5, all detours | 16% | 27%, 59% | 12 of 17 | 5 pts | missed |
 | **Opened at 200 m, tower zones masked** | **0.0%** | **0.0%** | **0** | **0%** | **0%, 3%** | **11 of 17** | **6 pts** | **met** |
 
 "Direct routes" are the ungraded routes measured on the graded graph: how
-steep the source thinks the streets are that a rider would take. No route or
-grade lookup failed, the ungraded graphs gave the same route for both
-`use_hills` values on all 17 hilly legs, and the verdicts are the same with
-any one source as `--referee`.
+steep the source thinks the streets are that a rider would take. Every
+longer flat route here is a detour in the sense of
+[Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged):
+its direct route reads 6% or more on 12% to 59% of its length. None is a
+swap, and the verdicts are the same under that rule and under the one
+before it. No route or grade lookup failed, the ungraded graphs gave the
+same route for both `use_hills` values on all 17 hilly legs, and the
+verdicts are the same with any one source as `--referee`.
 
 | Leg, profile | Ungraded | Opened at 400 m | Opened at 200 m | 200 m, masked |
 |---|---|---|---|---|
