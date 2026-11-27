@@ -62,8 +62,9 @@ SCRIPTS = {
     "qualify-ungraded": ("qualify.sh", "ungraded"),
     "qualify-graded": ("qualify.sh", "graded"),
     "gate": ("gate.sh",),
+    "terrain-scan": ("terrain-scan.sh",),
 }
-GRADED_ONLY = ("elevation", "build-graded", "qualify-graded", "gate")
+GRADED_ONLY = ("elevation", "build-graded", "qualify-graded", "gate", "terrain-scan")
 ALREADY_RUNNING = 75
 BLOCKED = 69
 STALE = 78
@@ -76,6 +77,8 @@ def skip_reason(stage, env):
         return "no opening radius: this run builds only the ungraded planet"
     if stage == "inputs" and env.get("BICINO_SAMPLE_CITY"):
         return "a city sample has no territory audit"
+    if stage == "terrain-scan" and not env.get("BICINO_TERRAIN"):
+        return "no terrain source: the scan looks for artifacts of the terrain tiles"
     return None
 
 

@@ -4,8 +4,8 @@
 # or never started, and writes export/result.json.
 [Unit]
 Description=Bicino planet builder: write the result of the chain
-Wants=bicino-planet-sampler.service bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service
-After=bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service
+Wants=bicino-planet-sampler.service bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service bicino-planet-terrain-scan.service
+After=bicino-planet-images.service bicino-planet-download.service bicino-planet-inputs.service bicino-planet-elevation.service bicino-planet-build-ungraded.service bicino-planet-build-graded.service bicino-planet-qualify-ungraded.service bicino-planet-qualify-graded.service bicino-planet-gate.service bicino-planet-terrain-scan.service
 
 [Service]
 Type=oneshot
