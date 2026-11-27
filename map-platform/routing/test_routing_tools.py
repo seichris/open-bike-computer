@@ -369,10 +369,16 @@ class ElevationReceiptTests(unittest.TestCase):
             # A cell that answers in time says nothing.
             build_elevation._build((9, 47))
             self.assertEqual(printed.getvalue(), said)
-        self.assertEqual(said, f"N47E008 (worker {os.getpid()}): no answer for 0.1 s; unless it gets one within "
-                               "2.9 s its worker ends, and the cells left are built again\n")
-        # The stack is asked for at the same moment, without ending the worker, and called off when the cell is done.
-        self.assertEqual(watched, [("later", 0.1, False), ("cancel",)] * 2)
+        lines = said.splitlines()
+        self.assertEqual(lines[0], f"N47E008: no answer for 0.1 s in worker {os.getpid()}; unless it gets one within "
+                                   "2.9 s its worker ends, and the cells left are built again")
+        # The stack of every thread follows, each line under the cell's name: the call the cell waits in is there.
+        self.assertTrue(all(line.startswith("N47E008: ") for line in lines), said)
+        self.assertTrue(any(" in slow" in line for line in lines), said)
+        self.assertTrue(any(" in _build" in line for line in lines), said)
+        # The watchdog would write the stack without a name halfway to the deadline. The notice calls it off, and
+        # so does the end of every cell.
+        self.assertEqual(watched, [("later", 1.6, False), ("cancel",), ("cancel",), ("later", 1.6, False), ("cancel",)])
 
     def test_a_cell_is_built_when_the_watchdog_cannot_write_anywhere(self):
         import threading

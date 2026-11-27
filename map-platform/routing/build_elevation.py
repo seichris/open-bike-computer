@@ -56,6 +56,7 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -1228,8 +1229,22 @@ def _start_worker(chosen, out, opening=None, stage=None):
 
 
 def _say_hung(name, seconds, left):
-    print(f"{name} (worker {os.getpid()}): no answer for {seconds:g} s; unless it gets one within {left:g} s its "
-          "worker ends, and the cells left are built again", file=sys.stderr, flush=True)
+    """Say that a cell has had no answer, with its worker's stack; every line begins with the cell's name.
+
+    Twenty workers write to one log, so a stack without a name could be
+    anyone's. The stack is taken into a file first and written with the
+    notice in one piece.
+    """
+    with tempfile.TemporaryFile("w+") as dump:
+        faulthandler.dump_traceback(file=dump, all_threads=True)
+        dump.seek(0)
+        stack = dump.read().splitlines()
+    # This has said it; the watchdog that would write the stack without a name is called off.
+    faulthandler.cancel_dump_traceback_later()
+    lines = [f"no answer for {seconds:g} s in worker {os.getpid()}; unless it gets one within {left:g} s its worker "
+             "ends, and the cells left are built again", *stack]
+    sys.stderr.write("".join(f"{name}: {line}\n" for line in lines))
+    sys.stderr.flush()
 
 
 def _build(cell):
@@ -1239,11 +1254,13 @@ def _build(cell):
     # build_pending retries.
     #
     # A worker that ends this way says nothing, so shortly before the deadline
-    # the cell names itself and the worker's stack is written: on 2026-11-27 a
-    # read of MRDEM-30 hung about once in a round, and no log said where. The
-    # stack comes from a watchdog that needs nothing from the hung thread. A
-    # cell is never lost to these two: without a standard error to write to,
-    # the watchdog is left out.
+    # the cell names itself and writes its worker's stack: on 2026-11-27 a
+    # cell of the MRDEM-30 stage got no answer about once in a round, and no
+    # log said where. That needs the interpreter, which a thread blocked in
+    # some C calls keeps to itself. So a watchdog that needs nothing from the
+    # worker's threads writes the stack a little later, without a name, unless
+    # the notice was given. A cell is never lost to these two: without a
+    # standard error to write to, the watchdog is left out.
     stage = _WORKER.get("stage")
     deadline = terrain_deadline(_WORKER["chosen"].get(cell, ())) if stage == TERRAIN else CELL_DEADLINE
     notice = threading.Timer(deadline - HANG_NOTICE, _say_hung, (hgt_name(*cell), deadline - HANG_NOTICE, HANG_NOTICE))
@@ -1251,7 +1268,7 @@ def _build(cell):
     try:
         notice.start()
         try:
-            faulthandler.dump_traceback_later(deadline - HANG_NOTICE, exit=False)
+            faulthandler.dump_traceback_later(deadline - HANG_NOTICE / 2, exit=False)
         except (AttributeError, OSError, RuntimeError, ValueError):
             pass
         signal.alarm(deadline)
