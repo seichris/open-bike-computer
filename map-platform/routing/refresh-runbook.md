@@ -1744,6 +1744,15 @@ before a planet build.**
   São Paulo, and Buenos Aires, Amsterdam, Houston and Berlin), and on
   the wider survey of 252 downtowns, judging by the direct routes' 6%+
   share as well as length.
+- **Where it would apply.** 3DEP and MRDEM-30 already grade the United
+  States and Canada in the hybrid, and the four regional sources approved
+  the same day cover New Zealand, Japan, Hong Kong and much of Europe
+  (see [Regional terrain models](#regional-terrain-models)). All eight
+  cities of these samples lie in the area of one of them, so once those
+  have readers none is graded from opened Copernicus. The membrane matters
+  for tower cores outside those areas: Singapore, Shanghai, Dubai and São
+  Paulo in the gate, and the survey's other downtowns. Those are the
+  samples to run next.
 - **A planet build needs the step in `build_elevation.py`.** The sample
   tool solves the membrane over the cells of `--bounds` together. A planet
   build would solve it per cell with a margin of the neighbours' tiles, as
