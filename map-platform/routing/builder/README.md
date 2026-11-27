@@ -13,7 +13,8 @@ guard here (see [Past failures](#past-failures-and-what-covers-them)).
 
 | File | Runs on | What it does |
 |---|---|---|
-| `provision.sh` | where `gcloud` is signed in | Prints, and with `--create` runs, the commands for the job's network, firewall rule and VM. `--host-key` reads the VM's SSH host key from its serial console. |
+| `provision.sh` | where `gcloud` is signed in | Prints, and with `--create` runs, the commands for the job's network, firewall rule and VM. `--host-key` reads the VM's SSH host key from its serial console. `--cache-reader` lets the VM read kept elevation tiles. |
+| `cache-access.sh` | the same place | Prints, and with `--create` runs, the commands for the one service account that may read the bucket of kept elevation tiles. |
 | `teardown.sh` | the same place | Prints, and with `--delete` runs, the deletion, then fails unless nothing is left. |
 | `setup.sh` | the builder, piped over SSH | Masks package upgrades, installs packages, stripes the local SSDs, checks out the tools at one commit, writes `builder.env`, installs the chain. |
 | `install-chain.sh` | the builder | Installs the systemd units and, with `--start`, starts the chain. |
@@ -22,11 +23,12 @@ guard here (see [Past failures](#past-failures-and-what-covers-them)).
 | `stages/` | the builder | The stage scripts. |
 | `chain_state.py` | the builder | Reads the stages' markers, prints the chain's state, writes `export/result.json`. |
 | `qualification.py` | the builder | Judges one archive's probes. |
+| `elevation_cache.py` | the builder; `verify` and `pack` anywhere | Restores kept elevation tiles from their bucket and checks every tar and every tile against the pinned record. |
 | `sampler.sh` | the builder | Scratch and memory use every 30 seconds, with their peaks. |
 | `authorize-export-key.sh` | the builder | Lets one SSH key read `export/` with rsync and nothing else. |
 | `builder_status.py` | the map VPS, or a laptop | Asks the builder for the chain's state. |
 | `rehearse.sh`, `rehearse.py` | any machine with Docker | Runs the chain on one city sample, without systemd or a builder. |
-| [`elevation-cache-proposal.md`](elevation-cache-proposal.md) | | The elevation tiles kept in a bucket since 2026-11-26, and what a build still lacks to use them. |
+| [`elevation-cache-proposal.md`](elevation-cache-proposal.md) | | The elevation tiles kept in a bucket since 2026-11-26: what is kept, what it costs and why. |
 
 Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
 
@@ -53,7 +55,7 @@ download ┼─────────────┴─ build-graded ─┼─
 | `images` | Pull the pinned Valhalla and map-platform images. | 1 min |
 | `download` | Download the planet, check its published MD5, record its SHA-256. | 35 min |
 | `inputs` | Download the pinned Natural Earth layers and write the audit's inventory. | 1 min |
-| `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also download the terrain source's tiles and write the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. | 2 h 20 min without a terrain source |
+| `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also download the terrain source's tiles and write the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. With `--elevation-cache`, [kept tiles are restored first](#kept-elevation-tiles) and only the rest is built. | 2 h 20 min without a terrain source and without kept tiles |
 | `build-ungraded` | `build_graph.py --coverage planet`, with `--all-bridges` when the run has a terrain source. | 3 h 25 min alone, 4 h 50 min beside the graded build |
 | `build-graded` | The same with `--elevation`. | 4 h 50 min |
 | `qualify-ungraded`, `qualify-graded` | Smoke probes, cross-border probes, the territory audit and the profile probe, with no network. | under 1 min each |
@@ -130,6 +132,92 @@ current state. Once the chain ends it also holds both archive manifests, both
 elevation manifests, each archive's qualification summary and the gate
 summary, with `"final": true`.
 
+## Kept elevation tiles
+
+The raw Copernicus tiles and the tiles opened at 400 m take 2 hours
+20 minutes to make and come out the same on every build. Those of the
+2026-11-26 builder are kept in `gs://bicino-routing-elevation`, pinned by
+[releases/elevation-cache-2026-11-26.json](../releases/elevation-cache-2026-11-26.json)
+(see [what is kept](elevation-cache-proposal.md#what-is-kept)). A build
+restores them when it is asked to:
+
+```sh
+provision.sh ... --cache-reader bicino-routing-builder@chiho-prod.iam.gserviceaccount.com
+setup.sh ... --opening-radius 400 --elevation-cache elevation-cache-2026-11-26.json
+```
+
+The `elevation` stage then restores the record's `raw` set into
+`elevation-raw/` and, if the record keeps a set `opened-RADIUS` for the
+run's radius, that set into `elevation/` (`elevation-opened/` under a terrain
+source). `build_elevation.py` runs afterwards as always. It finds a receipt
+for every restored cell, builds none of them and writes the manifests. With
+a terrain source it still downloads the terrain tiles and blends the hybrid.
+With a radius the record does not keep, it opens the restored raw tiles.
+
+**What is checked.** Nothing is taken on the bucket's word:
+
+- Every tar must have the size and SHA-256 the record pins.
+- `elevation-manifest.json` must hash to the record's `manifestSha256`, and
+  `cells.txt` to the `cellListSha256` of the record and of the manifest.
+- Every tile is unpacked, hashed and compared with its line in `cells.txt`
+  before it is written. Every cell must have a receipt that names the same
+  tile. No cell may be missing or extra, and a tar may hold nothing but its
+  own band's tiles.
+- A set is assembled beside its directory, in `elevation-raw.restoring/`,
+  and moved in only when all of it has passed. It is restored only into an
+  empty directory: tiles a build already wrote there are left alone.
+
+**When a set cannot be restored**, its directory stays empty and
+`build_elevation.py` builds the tiles, as without a record. The stage does
+not fail for it. The reason is in the stage's log, in
+`export/evidence/elevation-cache.json`, in `result.json` under
+`elevationRestore`, and in the status:
+
+```text
+  kept tiles of elevation-cache-2026-11-26.json: raw restored in 412 s; opened-400 NOT restored and built instead (may not read ... (HTTP 403): ...)
+```
+
+Both sets together are 244 GB. Restoring them is expected to take 15 to 20
+minutes in place of 2 hours 20 minutes; no builder has measured it. While a
+set is restored it needs about twice its size on scratch, 320 GB for the raw
+tiles, because each tar lies beside its tiles until it is checked.
+
+A stage that is killed keeps the bands it had finished, and its next attempt
+downloads only the others. After the build the stage records whether the
+restored tiles are still the recorded ones (`tilesAsRecorded`): the build
+writes a cell again when the source the policy picks for it has moved.
+
+**Access.** The builder reads the bucket as a service account, with
+short-lived tokens from its metadata server; there is no key file.
+`cache-access.sh` prints, and with `--create` runs, the two commands: one
+account without any role in the project, and `roles/storage.objectViewer`
+for it on this one bucket. It is safe to run again. The builder's scope
+allows storage reads only.
+The token is sent to `storage.googleapis.com` and to no other address, and
+a redirect is an error. **The account does not exist yet**: creating it
+needs Chris's go-ahead once, and until then a build with
+`--elevation-cache` reports `this machine has no service account` and builds
+its tiles.
+
+**The record does not make finished work stale.** A restored tile is checked
+against the cell list the build itself would write, so a record changes how
+the tiles arrive and not which tiles they are. Adding or dropping
+`--elevation-cache` on a builder leaves a finished `elevation` stage done.
+
+Two more commands, for people:
+
+```sh
+# Is the bucket still what the record pins? Downloads and checks, keeps nothing.
+python3 elevation_cache.py verify --record ../releases/elevation-cache-2026-11-26.json --set raw --work /srv/bicino-routing-scratch/work
+# The same for one small band from a laptop, with a token of your own.
+python3 elevation_cache.py verify --record ../releases/elevation-cache-2026-11-26.json --set opened-400 --band S9.tar --work /tmp/check --token-file TOKEN
+```
+
+`pack` writes the tars and the record of a finished tile set in the same
+layout. Uploading them is not automated: on 2026-11-26 each tar went to an
+upload session opened from a signed-in laptop, so the builder needed no
+credential (see [how it got there](elevation-cache-proposal.md#what-is-kept)).
+
 ## Ask where a build stands
 
 ```sh
@@ -204,6 +292,9 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
   and never deleted for you. To build it again, delete the stage's marker
   and, for a graph build, its `build/planet-…` directory, then start the
   chain. The elevation stage keeps its raw tiles and opens them again.
+- **Another record of kept tiles, or none**: nothing is stale (see
+  [Kept elevation tiles](#kept-elevation-tiles)). A set is restored only
+  into an empty directory, so tiles that are already there stay.
 
 ## Past failures and what covers them
 
@@ -216,7 +307,7 @@ Run `setup.sh` again with the new settings and `--start`. It rewrites
 | 2026-11-25: Docker took `build/planet-no-elevation/valhalla_tiles.tar` for a volume name and refused it. | Every path comes from `config.sh`, which rejects a relative scratch path. A test checks every mount. |
 | The hand-written qualification and gate scripts waited up to 180 seconds for Valhalla and then went on whether it answered or not. This never fired. | The wait fails the stage when Valhalla does not answer. |
 | Every run: the gate ran last, by hand, after about 7.5 hours. | The gate is a stage. On city samples it can run before a planet is built (see [Rehearse](#rehearse-on-a-city-sample)). |
-| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | Half solved. The raw and the 400 m tiles of 2026-11-26 are [kept in a bucket](elevation-cache-proposal.md#what-is-kept). The restore step is not built, so a build still makes them again. |
+| Every run: the elevation tiles were rebuilt, about 2 h 20 min, from data that does not change. | The raw and the 400 m tiles of 2026-11-26 are kept in a bucket, and `--elevation-cache` [restores them](#kept-elevation-tiles), checked tile by tile. No builder has done so yet: the service account that may read the bucket is not created. |
 
 ## Rehearse on a city sample
 
@@ -272,6 +363,26 @@ tile sets (`raw`, `opened`, `terrain`, `hybrid`), and their manifests are
 in `export/evidence/`. That run was made before the tiles were cut to the
 United States; Chicago's nine cells lie wholly inside it.
 
+`--pack-cache DIR` packs a run's raw and opened tiles as the bucket holds
+them, with a record. `--elevation-cache DIR` then rehearses a build that
+restores them: DIR is served on the same machine in the bucket's place, and
+gets no token.
+
+```sh
+map-platform/routing/builder/rehearse.sh --root /absolute/a --city Berlin --radius 200 --pack-cache /absolute/kept
+map-platform/routing/builder/rehearse.sh --root /absolute/b --city Berlin --radius 200 --elevation-cache /absolute/kept
+```
+
+On 2026-11-27 the first run's elevation stage took 93 seconds for 9 raw
+cells and 1 opened cell. The second restored both sets and finished the
+stage in 2 seconds: `build_elevation.py` reported `9 cells, 0 to build` and
+`1 cells, 0 to open` and wrote the two manifests the record pins, byte for
+byte. Both runs' graph manifests name the same elevation manifest, and their
+gate tables are equal. (Both missed the gate that day: Mitte to
+Charlottenburg on the everyday profile was 6.0% longer, 7.70 km against
+7.26 km. The legs were those of 2026-11-26, when the longest was 1.1%
+longer; the Berlin extract was a day newer.)
+
 The rehearsal leaves out what needs a planet: the territory audit, the
 cross-border probes and the profile probe. Its result file says
 `"sample": true`. It is never release evidence.
@@ -312,6 +423,15 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   sample graphs.
 - **`builder_status.py` over real SSH**, through the VPS and with a Tailscale
   re-authentication pending. Tests fed it those replies.
+- **Restoring kept tiles on a builder.** `cache-access.sh` against Google
+  Cloud, a VM created with `--cache-reader`, the token from its metadata
+  server, and a read of the bucket as that account. The restore of both
+  whole sets, 244 GB: its time, the scratch it needs while the tars are
+  unpacked (each tar lies beside its tiles until it is checked), and
+  `build_elevation.py` finding all 26,475 receipts current. From a laptop,
+  with a person's token, the tool checked `meta.tar` of both real sets and
+  three small bands, 817 tiles. The stage itself ran in the rehearsal,
+  against a stand-in for the bucket.
 
 On the first real build, start the chain and stay for the first ten minutes:
 `images`, `download`, `inputs` and `elevation` should all be running or done,

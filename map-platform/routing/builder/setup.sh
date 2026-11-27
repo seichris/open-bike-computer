@@ -3,7 +3,7 @@
 # builder as user bicino, piped over SSH so nothing has to be copied first:
 #
 #   ssh -F CONFIG builder 'bash -s -- --commit SHA --planet-date 261116 --opening-radius 400 \
-#     --terrain usgs-3dep-13 --start' \
+#     --terrain usgs-3dep-13 --elevation-cache elevation-cache-2026-11-26.json --start' \
 #     < map-platform/routing/builder/setup.sh
 #
 #   --commit SHA               the open-bike-computer commit whose tools run (40 hex digits)
@@ -14,6 +14,9 @@
 #   --terrain ID               put this terrain source of elevation-sources.json
 #                              over the opened tiles, and build both graphs with
 #                              every bridge marked as one
+#   --elevation-cache RECORD   restore the elevation tiles this record under
+#                              releases/ keeps in a bucket instead of building
+#                              them; the builder needs provision.sh --cache-reader
 #   --map-platform-image REF   another digest-pinned map-platform image
 #   --start                    start the chain when everything is in place
 #
@@ -26,6 +29,7 @@ commit=
 planet_date=
 opening_radius=
 terrain=
+cache=
 image=
 start=()
 
@@ -40,6 +44,7 @@ while [ $# -gt 0 ]; do
     --planet-date) planet_date=${2:-}; shift 2 ;;
     --opening-radius) opening_radius=${2:-}; shift 2 ;;
     --terrain) terrain=${2:-}; shift 2 ;;
+    --elevation-cache) cache=${2:-}; shift 2 ;;
     --map-platform-image) image=${2:-}; shift 2 ;;
     --start) start=(--start); shift ;;
     *) fail "unknown argument: $1" ;;
@@ -50,6 +55,8 @@ done
 [[ -z "$opening_radius" || "$opening_radius" =~ ^[0-9]{2,4}$ ]] || fail "--opening-radius takes whole metres"
 [[ -z "$terrain" || "$terrain" =~ ^[a-z][a-z0-9-]{2,63}$ ]] || fail "--terrain takes a terrain source id"
 [[ -z "$terrain" || -n "$opening_radius" ]] || fail "--terrain needs --opening-radius"
+[[ -z "$cache" || "$cache" =~ ^elevation-cache-[a-z0-9-]+\.json$ ]] || fail "--elevation-cache takes a record's file name under releases/"
+[[ -z "$cache" || -n "$opening_radius" ]] || fail "--elevation-cache needs --opening-radius"
 [ "$(id -un)" = bicino ] || fail "run setup.sh as user bicino; the units run as that user"
 sudo -n true || fail "user bicino needs sudo without a password"
 
@@ -134,6 +141,7 @@ env_file=$scratch/builder.env
   echo "BICINO_PLANET_DATE=$planet_date"
   echo "BICINO_OPENING_RADIUS=$opening_radius"
   echo "BICINO_TERRAIN=$terrain"
+  echo "BICINO_ELEVATION_CACHE=$cache"
   if [ -n "$image" ]; then
     echo "BICINO_MAP_PLATFORM_IMAGE=$image"
   fi

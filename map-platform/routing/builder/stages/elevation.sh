@@ -2,6 +2,12 @@
 # Write the raw Copernicus tiles, then open them at the run's radius. With a
 # terrain source, also write its tiles and put them over the opened ones.
 #
+# With BICINO_ELEVATION_CACHE the raw tiles and, if the record keeps them, the
+# tiles opened at this radius are first restored from the bucket. A restored
+# set was checked tile by tile against the pinned record, and
+# build_elevation.py then finds a receipt for every cell and builds none. A set
+# that cannot be restored leaves its directory as it was and is built.
+#
 # build_elevation.py resumes from its receipts. It stops when the third round
 # of one run still loses a worker to the 15-minute cell deadline, which
 # happened on 2026-11-25; the same command then finishes the cells that are
@@ -56,6 +62,45 @@ PY
   directories+=("$BICINO_ELEVATION_OPENED" "$BICINO_ELEVATION_TERRAIN")
 fi
 
+# What was restored, and why not, for the result file. A report of a run
+# that asked for no record, or for another, is an earlier run's.
+cache_report=$BICINO_EVIDENCE/elevation-cache.json
+# What a killed restore assembled beside a directory. This run's restore takes
+# up its own; the rest is nobody's and would only fill the scratch volume.
+restoring=("$BICINO_ELEVATION_RAW.restoring" "$BICINO_ELEVATION.restoring" "$BICINO_ELEVATION_OPENED.restoring")
+if bicino_uses_cache; then
+  opened=$BICINO_ELEVATION
+  if bicino_is_hybrid; then
+    opened=$BICINO_ELEVATION_OPENED
+  fi
+  for left in "${restoring[@]}"; do
+    if [ "$left" != "$BICINO_ELEVATION_RAW.restoring" ] && [ "$left" != "$opened.restoring" ]; then
+      rm -rf "$left"
+    fi
+  done
+  endpoint=()
+  if [ -n "$BICINO_ELEVATION_CACHE_ENDPOINT" ]; then
+    endpoint=(--endpoint "$BICINO_ELEVATION_CACHE_ENDPOINT")
+  fi
+  sha256sum "$BICINO_ROUTING/releases/$BICINO_ELEVATION_CACHE"
+  set +e
+  python3 "$BICINO_BUILDER/elevation_cache.py" restore \
+    --record "$BICINO_ROUTING/releases/$BICINO_ELEVATION_CACHE" --report "$cache_report" \
+    --jobs "$BICINO_ELEVATION_JOBS" ${endpoint[@]+"${endpoint[@]}"} \
+    --set raw "$BICINO_ELEVATION_RAW" --set-if-kept "opened-$BICINO_OPENING_RADIUS" "$opened"
+  restored=$?
+  set -e
+  if [ "$restored" -eq 0 ]; then
+    echo "cache: every kept set is restored"
+  else
+    # Its directory is as it was, so the tiles are built as without a record.
+    echo "cache: restore exit=$restored; building the tiles that were not restored"
+  fi
+else
+  rm -f "$cache_report"
+  rm -rf "${restoring[@]}"
+fi
+
 status=1
 for attempt in $(seq 1 "$BICINO_ELEVATION_ATTEMPTS"); do
   echo "attempt=$attempt start=$(bicino_now)"
@@ -84,4 +129,8 @@ for manifest in "${manifests[@]}"; do
   [ -s "$manifest" ] || bicino_fail "no elevation manifest at $manifest"
   sha256sum "$manifest"
 done
+if bicino_uses_cache && [ -s "$cache_report" ]; then
+  # Did the build leave the restored tiles as the record pins them?
+  python3 "$BICINO_BUILDER/elevation_cache.py" compare --report "$cache_report"
+fi
 du -sb "${directories[@]}"

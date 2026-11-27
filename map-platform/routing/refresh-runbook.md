@@ -40,7 +40,12 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    SSH allowed from the VPS only, and an on-demand `c4-highmem-24-lssd` in
    `europe-west4-b` with Ubuntu 24.04 amd64, no service account, an
    auto-deleting boot disk and a 24-hour lifetime after which it deletes
-   itself.
+   itself. For a graded build that should restore the
+   [kept elevation tiles](builder/README.md#kept-elevation-tiles), add
+   `--cache-reader bicino-routing-builder@chiho-prod.iam.gserviceaccount.com`:
+   the builder then runs as that account, which can read the tile bucket
+   and nothing else. The account must exist first
+   (`builder/cache-access.sh`); on 2026-11-27 it did not.
 4. Read the builder's Ed25519 host key through the authenticated Compute
    Engine serial console, before the first connection:
 
@@ -83,7 +88,11 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    also downloads 3DEP's 955 tiles (364 GB) and blends them in, and both
    graphs are built with every bridge marked as one (see
    [the builder's page](builder/README.md#the-chain)). No builder has run
-   that yet.
+   that yet. Add `--elevation-cache elevation-cache-2026-11-26.json` to
+   restore the raw tiles and the tiles opened at 400 m from their bucket
+   instead of building them for 2 hours 20 minutes. Every tar and every tile
+   is checked against that record; a set that cannot be restored is built,
+   and the status says so. No builder has run that yet either.
 6. Ask where the build stands whenever you like. Copy
    `builder/builder_status.py` to the VPS once, or run it from a laptop with
    `--via`:
@@ -1143,8 +1152,9 @@ firewall rule, the subnet and the network are all gone. Deleting the builder
 destroys everything on its scratch volume, so pull `export/` first. Its
 elevation tiles go too. Those of the 2026-11-26 builder, raw and opened at
 400 m, are kept in a bucket (see
-[what is kept](builder/elevation-cache-proposal.md#what-is-kept)); tiles of
-another method are not. Revoke and
+[what is kept](builder/elevation-cache-proposal.md#what-is-kept)) and a
+build can [restore them](builder/README.md#kept-elevation-tiles); tiles of
+another method are not kept. Revoke and
 remove the one-time transfer keys and remove
 transfer segments and unused development sample archives from the VPS. Keep
 the active graph, rollback archives, release manifest, and small test records.
