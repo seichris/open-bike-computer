@@ -464,8 +464,11 @@ before building a planet with a new elevation method.
    bodies, compares lengths with the ungraded routes, reads the share of
    route length on 6%+ grades back with `/trace_attributes`, and in hilly
    cities flips `use_hills` between 0 and 1. `summary` exits non-zero when
-   a source misses a target. The same commands, without `--city`, are the
-   planet release gate.
+   a source misses a target. A flat route more than 5% longer misses one
+   only as a detour, where its direct route reads steep on that source;
+   otherwise it is a swap and is listed under the table (see
+   [Detours and swaps](refresh-runbook.md#detours-and-swaps-how-a-longer-flat-route-is-judged)).
+   The same commands, without `--city`, are the planet release gate.
 
    ```sh
    tools/dev-env --map-backend python map-platform/routing/compare_elevation.py run \

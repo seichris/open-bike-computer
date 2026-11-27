@@ -892,6 +892,79 @@ The readings, the sample's report and manifests and the scripts are in the
 sessions' notes folder on Chris's Mac, under
 `usgs-3dep-samples-20261126/toronto/`.
 
+### Detours and swaps: how a longer flat route is judged
+
+Until 2026-11-27 the gate missed whenever a flat route was more than 5%
+longer on the graded graph. A survey that day showed that the rule also
+catches routes that no phantom hill pushed anywhere. `compare_elevation.py
+summary` now splits a flat route that is more than 5% longer by how its
+direct route, the ungraded one, reads on the graded graph:
+
+- **Detour.** More than 5% of the direct route's length is on 6%+ grades:
+  the source reads hills on flat ground and the router went around them.
+  Any detour misses the gate. A direct route whose grades could not be read
+  counts as steep.
+- **Swap.** The direct route does not read steep. Swaps are listed under
+  the table. They miss the gate only when there is more than one and they
+  are more than 3% of the flat routes.
+
+The survey used the two gate services of the planet opened at 400 m
+(archive `33ec2c77…`) before their builder was deleted. It routed eight
+generated legs of 1.7 to 2.4 km around the centre of each of 252 tower
+downtowns, on Road and Everyday: 1,969 legs routed, 3,938 routes. The
+probes, both graphs' route shapes and the analysis are on the map VPS in
+`/root/bicino-routing-releases/opened-400-downtown-survey-wide-20261127/`.
+
+- **Longer routes are about as common as shorter ones.** In the 165 centres
+  labelled flat (2,572 routes) 90% of the routes were the same on both
+  graphs, and the mean length change was +0.04%. 29 routes were more than 5%
+  longer and 20 were more than 5% shorter.
+- **19 of the 29 are swaps.** Their direct routes read 6%+ on 0% to 4.7% of
+  their length. Four were compared edge by edge: along both alternatives
+  the two graphs differ only in grade attributes, on 2 to 16 edges of a
+  route. On the graded graph the direct route is still the faster one for
+  17 of the 19,
+  and 14 stay longer with `use_hills` 1.0. The profile costs the two routes
+  about the same, a main road against quieter streets, and the small change
+  tips it. Examples are Fukuoka (+8.1%, 0% steep), Gurgaon (+26.8%, 0%),
+  Jakarta (+12.3%, 2%) and Berlin Alexanderplatz (+9.1%, 4%).
+- **The other 10 read steep, and 9 of those are in centres with real
+  slopes** that the survey wrongly labelled flat: Oslo, Belgrade, Busan,
+  Calgary and Melbourne Southbank. The tenth is the Chicago control (+9.2%,
+  12% steep), which the gate already knew.
+- **Generated legs are no substitute for the gate's own.** They found
+  neither known failure in New York Midtown (longest +2.5%) nor Toronto
+  (0.0%). New York's direct routes still read 6%+ on a median 16% of their
+  length, and Toronto's on 8%.
+
+The two limits come from these figures. The survey's swaps read at most 4.7%
+steep and the gate's known detours 12% to 28%, so the split is at 5%, the
+flat median target applied to one route. The survey's swap rate was 0.74% of
+flat routes, and the allowance is about four times that.
+
+Past reports, judged again:
+
+| Report | Flat routes more than 5% longer (6%+ share of the direct route) | Old rule | New rule |
+|---|---|---|---|
+| Planet opened at 200 m | New York, Midtown to Brooklyn, Everyday +5.9% (12%) | missed | missed: 1 detour |
+| Planet opened at 400 m | New York, Port Authority to the United Nations, Road +28.2% (28%); Chicago, Magnificent Mile to the South Loop, Road +9.5% (13%) | missed | missed: 2 detours |
+| Radius samples, 200 m | New York, Midtown to Brooklyn, Everyday +5.9% (12%) | missed | missed: 1 detour |
+| Radius samples, 300 m | New York, Midtown to Brooklyn, Everyday +5.9% (3%) | missed | met: 1 swap in 38 flat routes |
+| Radius samples, 400 m | none | met | met |
+
+Toronto's Rogers Centre to St Lawrence Market leg (+35.1%, 20% steep) is a
+detour too. The 300 m samples now meet the targets, which fits what they
+showed at the time: the sample's ungraded Road route already took 7th
+Avenue where the planet's took 5th Avenue or Broadway, so these avenues
+cost about the same.
+That does not make 300 m a candidate. No planet was built at 300 m, and
+at 400 m the planet still has detours in New York, Chicago and Toronto.
+
+The rule has two known limits. A street can read steep and keep its route:
+Toronto's Union Station to Yonge-Dundas Square leg is 2.8% longer with 22%
+of it on 6%+ grades, and no target catches it. And a swap of any size is
+tolerated when it is alone, so read the list under the table.
+
 ### Tower-city samples
 
 On 2026-11-26 the gate's seven high-rise cores were built as city samples

@@ -32,8 +32,17 @@ Road and Everyday request bodies (``upstream_body``):
 ``summary`` reads one or more ``run`` reports, prints a table per source and
 city, and fails when a source misses the targets:
 
-- flat cities: median length change at most 1%, no leg more than 5% longer,
-  median 6%+ share at most 5%;
+- flat cities: median length change at most 1%, median 6%+ share at most 5%,
+  and no detour. A detour is a route more than 5% longer whose direct route,
+  the ungraded one, reads steep on that source: more than 5% of its length
+  on 6%+ grades, on ground the probes call flat. A route more than 5% longer
+  whose direct route does not read steep is a swap. The profile costs the
+  two routes about the same, and a one-step change of grade on an edge or
+  two tips it: on 2026-11-27, 2,572 generated routes in 165 flat tower
+  downtowns on the planet opened at 400 m had 29 routes more than 5% longer
+  and 20 more than 5% shorter, a mean change of +0.04%. Swaps are listed
+  and miss a target only when there is more than one and they are more than
+  3% of the flat routes;
 - hilly cities: at least half the legs change with ``use_hills``, and over
   the legs that change, the hill-avoiding route has less of its length on
   6%+ grades at the median. The table also counts the legs where it has
@@ -86,6 +95,8 @@ GRADE_ATTRIBUTES = ["edge.length", "edge.max_upward_grade", "edge.max_downward_g
 TARGETS = {
     "flatMedianLengthChange": 0.01,
     "flatMaximumLengthChange": 0.05,
+    "flatDetourSteepShare": 0.05,
+    "flatSwapShare": 0.03,
     "flatMedianSteepShare": 0.05,
     "hillyChangedShare": 0.5,
     "steepShareTolerance": 0.02,
@@ -255,6 +266,39 @@ def run(post: Post, cities: list[dict], ungraded: str, graded: dict[str, str],
     return {"schema": "bicino-elevation-comparison-v1", "sources": list(graded), "rows": rows}
 
 
+def long_flat_routes(rows: list[dict], source: str, targets: dict = TARGETS) -> list[dict]:
+    """Flat routes over the length limit on `source`, each a detour or a swap.
+
+    A detour leaves a direct route that the source reads as steep. A swap is
+    longer although the direct route does not read steep. A direct route
+    whose grades could not be read counts as steep, so a failing lookup
+    cannot turn a detour into a swap.
+    """
+    found = []
+    for row in rows:
+        if row["terrain"] != "flat":
+            continue
+        for profile, item in row["profiles"].items():
+            result = item["sources"].get(source) or {}
+            change = result.get("lengthChange")
+            if change is None or change <= targets["flatMaximumLengthChange"]:
+                continue
+            share = (result.get("ungradedRouteGrades") or {}).get("share")
+            steep = share is None or share > targets["flatDetourSteepShare"]
+            entry = {"source": source, "city": row["city"], "leg": row["leg"], "profile": profile,
+                     "lengthChange": change, "directSteepShare": share, "verdict": "detour" if steep else "swap"}
+            if row.get("reportOnly"):
+                entry["reportOnly"] = True
+            found.append(entry)
+    return found
+
+
+def describe_long_route(entry: dict) -> str:
+    share = entry["directSteepShare"]
+    steepness = "direct route's grades unread" if share is None else f"{share:.0%} of the direct route at 6%+"
+    return f"{entry['city']}, {entry['leg']}, {entry['profile']}: {entry['lengthChange']:+.1%}, {steepness}"
+
+
 def _median(values: list[float]) -> float | None:
     return round(statistics.median(values), 4) if values else None
 
@@ -290,6 +334,7 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
     table, failures = [], {}
     for source in sources:
         missed = []
+        long_routes = long_flat_routes(rows, source, targets)
         pooled: dict[str, list[float]] = {"flatChange": [], "flatShare": []}
         changed = hilly = route_errors = trace_errors = hill_errors = unmeasured = 0
         steep_saved: list[float] = []
@@ -318,6 +363,10 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
                      "medianSteepShare": _median(shares), "medianUngradedRouteSteepShare": _median(base_shares)}
             if not judged:
                 entry["reportOnly"] = True
+            if entry["terrain"] == "flat":
+                for verdict in ("detour", "swap"):
+                    entry[verdict + "s"] = sum(1 for route in long_routes
+                                               if route["city"] == city and route["verdict"] == verdict)
             hills = [row["hills"][source] for row in city_rows if source in row.get("hills", {})]
             effects = [hill_effect(h, [referee] if referee else None, targets) for h in hills]
             if hills:
@@ -355,8 +404,17 @@ def summarize(reports: list[dict], targets: dict = TARGETS,
             median_change = statistics.median(pooled["flatChange"])
             if abs(median_change) > targets["flatMedianLengthChange"]:
                 missed.append(f"flat median length change {median_change:+.1%}")
-            if max(pooled["flatChange"]) > targets["flatMaximumLengthChange"]:
-                missed.append(f"a flat leg is {max(pooled['flatChange']):+.1%} longer")
+            judged_long = [route for route in long_routes if not route.get("reportOnly")]
+            detours = [route for route in judged_long if route["verdict"] == "detour"]
+            swaps = [route for route in judged_long if route["verdict"] == "swap"]
+            limit = targets["flatMaximumLengthChange"]
+            if detours:
+                worst = max(detours, key=lambda route: route["lengthChange"])
+                missed.append(f"{len(detours)} flat {'route is a detour' if len(detours) == 1 else 'routes are detours'}"
+                              f" around steep readings, the longest {describe_long_route(worst)}")
+            if len(swaps) > max(1, targets["flatSwapShare"] * len(pooled["flatChange"])):
+                missed.append(f"{len(swaps)} of {len(pooled['flatChange'])} flat routes are more than {limit:.0%} "
+                              f"longer without steep readings")
         if pooled["flatShare"] and statistics.median(pooled["flatShare"]) > targets["flatMedianSteepShare"]:
             missed.append(f"flat median 6%+ share {statistics.median(pooled['flatShare']):.0%}")
         if hilly:
@@ -387,9 +445,9 @@ def format_table(table: list[dict]) -> str:
     def share(value):
         return "–" if value is None else f"{value:.0%}"
 
-    lines = ["| Source | City | Routes | Median length | Longest | 6%+ share | 6%+ on ungraded route"
-             " | use_hills changed | Worse | Median climb saved | Median 6%+ share saved |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| Source | City | Routes | Median length | Longest | Detours, swaps | 6%+ share"
+             " | 6%+ on ungraded route | use_hills changed | Worse | Median climb saved | Median 6%+ share saved |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for entry in table:
         hilly = "hillLegs" in entry
         climb_saved, steep_saved = entry.get("medianClimbSaved"), entry.get("medianSteepShareSaved")
@@ -397,6 +455,7 @@ def format_table(table: list[dict]) -> str:
             f"| {entry['source']}", entry["city"] + (" (report only)" if entry.get("reportOnly") else ""),
             f"{entry['routes']}" + (f" ({entry['errors']} failed)" if entry["errors"] else ""),
             percent(entry["medianLengthChange"]), percent(entry["maximumLengthChange"]),
+            f"{entry['detours']}, {entry['swaps']}" if "detours" in entry else "–",
             share(entry["medianSteepShare"]), share(entry["medianUngradedRouteSteepShare"]),
             f"{entry['hillLegsChanged']}/{entry['hillLegs']}" if hilly else "–",
             f"{entry['hillLegsWorse']}" if hilly else "–",
@@ -451,11 +510,21 @@ def main() -> None:
     if args.referee and any(args.referee not in report["sources"] for report in reports):
         parser.error(f"--referee {args.referee} is not a source of every report")
     table, failures = summarize(reports, referee=args.referee)
+    rows = [row for report in reports for row in report["rows"]]
+    long_routes = [route for source in sorted({name for report in reports for name in report["sources"]})
+                   for route in long_flat_routes(rows, source)]
     print(format_table(table))
+    if long_routes:
+        print(f"\nFlat routes more than {TARGETS['flatMaximumLengthChange']:.0%} longer:")
+        for route in long_routes:
+            print(f"- {route['source']} {route['verdict']}{' (report only)' if route.get('reportOnly') else ''}: "
+                  f"{describe_long_route(route)}")
+        print()
     for source, missed in failures.items():
         print(f"{source}: {'meets the targets' if not missed else 'misses: ' + '; '.join(missed)}")
     if args.json:
-        args.json.write_text(json.dumps({"table": table, "failures": failures}, indent=1) + "\n")
+        args.json.write_text(json.dumps({"table": table, "failures": failures, "longFlatRoutes": long_routes},
+                                        indent=1) + "\n")
     if any(failures.values()):
         raise SystemExit(1)
 

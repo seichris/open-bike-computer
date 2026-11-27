@@ -1486,11 +1486,66 @@ class ElevationComparisonTests(unittest.TestCase):
         self.assertIn("| candidate | Hilltown | 2 |", compare_elevation.format_table(table))
 
     def test_detours_and_fake_hills_in_flat_cities_miss_the_targets(self):
-        _, (_, failures) = self.compare(detour=0.1, steep=True)
+        _, (table, failures) = self.compare(detour=0.1, steep=True)
         # Where every street reads as steep, avoiding hills cannot find a gentler route either.
         self.assertEqual(failures["candidate"], [
-            "flat median length change +10.0%", "a flat leg is +10.0% longer", "flat median 6%+ share 25%",
+            "flat median length change +10.0%",
+            "2 flat routes are detours around steep readings, the longest Flatville, Across, road: +10.0%, "
+            "25% of the direct route at 6%+",
+            "flat median 6%+ share 25%",
             "avoiding hills did not lower the 6%+ share (median +0 pts on the mean of all heights)"])
+        flatville = next(entry for entry in table if entry["city"] == "Flatville")
+        self.assertEqual((flatville["detours"], flatville["swaps"]), (2, 0))
+        self.assertNotIn("detours", next(entry for entry in table if entry["city"] == "Hilltown"))
+
+    @staticmethod
+    def flat_report(routes):
+        """One flat city with a Road route per (length change, 6%+ share of the direct route)."""
+        rows = []
+        for index, (change, share) in enumerate(routes):
+            direct = {"share": None, "error": "400/171"} if share is None else {"share": share,
+                                                                                 "meanAbsWeightedGrade": 0.5}
+            result = {"km": round(3 * (1 + change), 3), "minutes": 10.0, "lengthChange": change,
+                      "sameRoute": change == 0, "grades": {"share": 0.0, "meanAbsWeightedGrade": 0.2},
+                      "ungradedRouteGrades": direct}
+            rows.append({"city": "Flatville", "terrain": "flat", "leg": f"Leg {index}", "profiles": {
+                "road": {"ungraded": {"km": 3.0, "minutes": 10.0}, "sources": {"candidate": result}}}})
+        return {"schema": "bicino-elevation-comparison-v1", "sources": ["candidate"], "rows": rows}
+
+    def test_a_longer_flat_route_is_a_detour_only_where_the_direct_route_reads_steep(self):
+        quiet = [(0.0, 0.0)] * 39
+        report = self.flat_report([*quiet, (0.2, 0.01)])
+        table, failures = compare_elevation.summarize([report])
+        self.assertEqual(failures, {"candidate": []})  # a swap: listed, not missed
+        self.assertEqual((table[0]["detours"], table[0]["swaps"], table[0]["maximumLengthChange"]), (0, 1, 0.2))
+        self.assertEqual(compare_elevation.long_flat_routes(report["rows"], "candidate"), [
+            {"source": "candidate", "city": "Flatville", "leg": "Leg 39", "profile": "road",
+             "lengthChange": 0.2, "directSteepShare": 0.01, "verdict": "swap"}])
+        self.assertIn("| candidate | Flatville | 40 | 0.0% | +20.0% | 0, 1 |", compare_elevation.format_table(table))
+
+        _, failures = compare_elevation.summarize([self.flat_report([*quiet, (0.2, 0.06)])])
+        self.assertEqual(failures["candidate"], [
+            "1 flat route is a detour around steep readings, the longest Flatville, Leg 39, road: +20.0%, "
+            "6% of the direct route at 6%+"])
+        # Exactly at a limit is neither long nor steep.
+        _, failures = compare_elevation.summarize([self.flat_report([*quiet, (0.05, 0.9), (0.2, 0.05)])])
+        self.assertEqual(failures, {"candidate": []})
+
+    def test_an_unread_direct_route_cannot_turn_a_detour_into_a_swap(self):
+        _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 39, (0.2, None)])])
+        self.assertEqual(failures["candidate"], [
+            "1 grade lookups failed",
+            "1 flat route is a detour around steep readings, the longest Flatville, Leg 39, road: +20.0%, "
+            "direct route's grades unread"])
+
+    def test_swaps_miss_the_targets_only_when_they_are_many(self):
+        swaps = [(0.2, 0.0), (0.3, 0.02)]
+        _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 38, *swaps])])
+        self.assertEqual(failures["candidate"], ["2 of 40 flat routes are more than 5% longer without steep readings"])
+        _, failures = compare_elevation.summarize([self.flat_report([*[(0.0, 0.0)] * 98, *swaps])])
+        self.assertEqual(failures, {"candidate": []})  # 2 of 100 is within 3%
+        _, failures = compare_elevation.summarize([self.flat_report([(0.0, 0.0), (0.0, 0.0), (0.2, 0.0)])])
+        self.assertEqual(failures, {"candidate": []})  # one swap is always only listed
 
     def test_a_source_that_ignores_hills_misses_the_targets(self):
         _, (_, failures) = self.compare(avoids_hills=False)
