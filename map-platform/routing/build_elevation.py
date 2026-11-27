@@ -45,6 +45,7 @@ terrain sources meet at the border as they are.
 """
 
 import argparse
+import faulthandler
 import functools
 import gzip
 import hashlib
@@ -68,6 +69,8 @@ STEP = 1 / 3600
 NO_DATA = -32768
 MARGIN = 2 * STEP
 CELL_DEADLINE = 900
+# So long before its deadline a cell that has had no answer says so, and its worker's stack is written.
+HANG_NOTICE = 20
 # A 3DEP tile is up to 500 MB, twenty times a Copernicus cell: its download gets an hour. A cell that reads
 # only a part of one object, as MRDEM-30's do, keeps the cell deadline.
 TERRAIN_DEADLINE = 3600
@@ -1224,13 +1227,28 @@ def _start_worker(chosen, out, opening=None, stage=None):
     _WORKER.update(chosen=chosen, out=out, opening=opening, stage=stage)
 
 
+def _say_hung(name, seconds):
+    print(f"{name}: no answer for {seconds:g} s; its worker ends at the deadline, and the cells left are built again",
+          file=sys.stderr, flush=True)
+
+
 def _build(cell):
     # urlopen's timeout does not cover the name lookup. On 2026-11-24 two of the
     # planet's 26,475 cells blocked in it for good, with no socket open. With no
     # handler installed, SIGALRM ends the worker, which breaks the pool so
     # build_pending retries.
+    #
+    # A worker that ends this way says nothing, so shortly before the deadline
+    # the cell names itself and the worker's stack is written: on 2026-11-27 a
+    # read of MRDEM-30 hung about once in a round, and no log said where. The
+    # stack comes from a watchdog that needs nothing from the hung thread.
     stage = _WORKER.get("stage")
-    signal.alarm(terrain_deadline(_WORKER["chosen"].get(cell, ())) if stage == TERRAIN else CELL_DEADLINE)
+    deadline = terrain_deadline(_WORKER["chosen"].get(cell, ())) if stage == TERRAIN else CELL_DEADLINE
+    notice = threading.Timer(deadline - HANG_NOTICE, _say_hung, (hgt_name(*cell), deadline - HANG_NOTICE))
+    notice.daemon = True
+    notice.start()
+    faulthandler.dump_traceback_later(deadline - HANG_NOTICE, exit=False)
+    signal.alarm(deadline)
     try:
         if isinstance(stage, Hybrid):
             return hybrid_cell(cell, _WORKER["chosen"], _WORKER["out"], stage)
@@ -1241,6 +1259,8 @@ def _build(cell):
         return build_cell(cell, _WORKER["chosen"], _WORKER["out"])
     finally:
         signal.alarm(0)
+        faulthandler.cancel_dump_traceback_later()
+        notice.cancel()
 
 
 class CellsFailed(RuntimeError):

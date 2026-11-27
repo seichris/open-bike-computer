@@ -336,6 +336,43 @@ class ElevationReceiptTests(unittest.TestCase):
                 build_elevation._build((8, 47))
         self.assertEqual(alarms, [build_elevation.CELL_DEADLINE, 0])
 
+    def test_a_cell_that_gets_no_answer_names_itself_before_its_worker_ends(self):
+        import threading
+        import time
+
+        watched = []
+        printed = io.StringIO()
+        release = threading.Event()
+
+        def slow(cell, chosen, out):
+            release.wait(5)
+
+        # The notice comes HANG_NOTICE before the deadline: here after 0.1 s of a 3 s deadline.
+        with patch.object(build_elevation, "CELL_DEADLINE", 3), patch.object(build_elevation, "HANG_NOTICE", 2.9), \
+                patch.object(build_elevation.signal, "alarm"), \
+                patch.object(build_elevation.faulthandler, "dump_traceback_later",
+                             lambda timeout, exit: watched.append(("later", round(timeout, 1), exit))), \
+                patch.object(build_elevation.faulthandler, "cancel_dump_traceback_later",
+                             lambda: watched.append(("cancel",))), \
+                patch.object(build_elevation, "build_cell", slow), \
+                patch.dict(build_elevation._WORKER, chosen={}, out=Path(".")), patch("sys.stderr", printed):
+            worker = threading.Thread(target=build_elevation._build, args=((8, 47),))
+            worker.start()
+            for _ in range(100):
+                if printed.getvalue():
+                    break
+                time.sleep(0.05)
+            release.set()
+            worker.join(5)
+            said = printed.getvalue()
+            # A cell that answers in time says nothing.
+            build_elevation._build((9, 47))
+            self.assertEqual(printed.getvalue(), said)
+        self.assertEqual(said, "N47E008: no answer for 0.1 s; its worker ends at the deadline, and the cells left "
+                               "are built again\n")
+        # The stack is asked for at the same moment, without ending the worker, and called off when the cell is done.
+        self.assertEqual(watched, [("later", 0.1, False), ("cancel",)] * 2)
+
     def test_opened_cells_run_under_the_same_deadline(self):
         alarms = []
         opening = build_elevation.Opening(200.0, Path("raw"))
