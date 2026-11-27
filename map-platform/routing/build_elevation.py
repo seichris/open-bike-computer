@@ -130,6 +130,22 @@ MIRROR = re.compile(r"gs://([a-z0-9][a-z0-9._-]{1,61}[a-z0-9])/((?:[A-Za-z0-9_-]
 # the datum and the Alps reach 4,808 m. Such posts are dropped with the posts within SONNY_REJECT_MARGIN of them.
 SONNY_HEIGHTS = (-10, 7000)
 SONNY_REJECT_MARGIN = 4
+# Toitu Te Whenua LINZ's national 1 m lidar DEM of New Zealand: cloud-optimised GeoTIFF sheets of the Topo50 grid
+# in NZTM2000, heights in NZVD2016, in a public bucket that keeps every version. A cell reads the sheets under it
+# at their third overview, 8 m pixels, each sheet pinned by version, size and ETag.
+LINZ_ADAPTER = "linz-nz-lidar-1m-dem-cog-v1"
+LINZ_ORIGIN = "https://nz-elevation.s3.ap-southeast-2.amazonaws.com/new-zealand/new-zealand/dem_1m/2193"
+LINZ_EPSG = 2193
+# NZGD2000 in degrees, the datum of NZTM2000: posts are placed in it so that no datum shift is applied.
+LINZ_GEOGRAPHIC_EPSG = 4167
+LINZ_OVERVIEW = 2
+LINZ_PIXEL = 8.0
+LINZ_NO_DATA = -9999.0
+# Heights beyond these are not ground; Aoraki is 3,724 m. Dropped with the pixels within LINZ_REJECT_MARGIN of
+# them, 120 m as for MRDEM-30.
+LINZ_HEIGHTS = (-10, 4000)
+LINZ_REJECT_MARGIN = 15
+LINZ_GDAL_OPTIONS = {"CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tiff"}
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -286,6 +302,45 @@ def parse_sonny_catalog(text):
     return tiles
 
 
+LINZ_SHEET_LINE = re.compile(r"sheet ([A-Z]{2}\d{2}) ([A-Za-z0-9._-]{16,64}) ([1-9]\d*) ([0-9a-f]{32}(?:-\d+)?)"
+                             r" (\d{7}) (\d{7}) (\d{7}) (\d{7})")
+LINZ_CELL_LINE = re.compile(r"cell ([NS]\d{2}[EW]\d{3})((?: [A-Z]{2}\d{2})+)")
+
+
+def format_linz_catalog(tiles):
+    """The sheets, one line each with version, bytes, ETag and NZTM bounds, then each cell with its sheets."""
+    sheets = {sheet[0]: sheet for found in tiles.values() for sheet in found}
+    lines = [f"sheet {name} {version} {size} {etag} {' '.join(str(value) for value in bounds)}\n"
+             for name, version, size, etag, bounds in (sheets[name] for name in sorted(sheets))]
+    lines += [f"cell {hgt_name(*cell)} {' '.join(sheet[0] for sheet in found)}\n"
+              for cell, found in sorted(tiles.items(), key=lambda item: hgt_name(*item[0]))]
+    return "".join(lines)
+
+
+def parse_linz_catalog(text):
+    """{cell: ((sheet, version, bytes, ETag, (west, south, east, north)), ...)} of LINZ's sheets."""
+    sheets, tiles = {}, {}
+    for line in text.splitlines():
+        if match := LINZ_SHEET_LINE.fullmatch(line):
+            if match[1] in sheets:
+                raise ValueError(f"terrain catalog line repeats a sheet: {line!r}")
+            bounds = tuple(int(value) for value in match.groups()[4:])
+            if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+                raise ValueError(f"terrain catalog line has empty bounds: {line!r}")
+            sheets[match[1]] = (match[1], match[2], int(match[3]), match[4], bounds)
+        elif match := LINZ_CELL_LINE.fullmatch(line):
+            cell = cell_of(match[1])
+            names = match[2].split()
+            if cell in tiles or sorted(set(names)) != names or not set(names) <= set(sheets):
+                raise ValueError(f"terrain catalog line repeats a cell or names an unknown sheet: {line!r}")
+            tiles[cell] = tuple(sheets[name] for name in names)
+        else:
+            raise ValueError(f"invalid terrain catalog line: {line!r}")
+    if format_linz_catalog(tiles) != text:
+        raise ValueError("the terrain catalog is not sorted, or lists a sheet no cell reads")
+    return tiles
+
+
 def format_cell_catalog(cells):
     """One HGT cell name per line: the cells a source of one object has a tile for."""
     return "".join(f"{name}\n" for name in sorted(hgt_name(*cell) for cell in cells))
@@ -315,6 +370,7 @@ TERRAIN_ADAPTERS = {
     MRDEM_ADAPTER: (MRDEM_URL, f"EPSG:{MRDEM_EPSG}", {"originBytes", "originEtag", "originModified"},
                     parse_cell_catalog),
     SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", {"mirror"}, parse_sonny_catalog),
+    LINZ_ADAPTER: (LINZ_ORIGIN, f"EPSG:{LINZ_EPSG}", set(), parse_linz_catalog),
 }
 OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
 OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -345,7 +401,7 @@ class TerrainSource:
     files: Path = None
 
     def tile_url(self, longitude, latitude):
-        if self.origin_object is not None:
+        if self.origin_object is not None or self.adapter == LINZ_ADAPTER:
             return self.origin
         tile, date, _, _ = self.tiles[(longitude, latitude)]
         if self.adapter == SONNY_ADAPTER:
@@ -360,12 +416,21 @@ class TerrainSource:
         ground, or None. A tile read under another rule is built again. For
         Sonny's tiles `etag` is the zip's SHA-256, which the catalog pins.
         """
-        size, etag = self.origin_object or self.tiles[cell][2:]
+        if self.adapter == LINZ_ADAPTER:
+            # A cell reads several sheets: their sizes add up, and their versions and ETags are hashed together.
+            sheets = self.tiles[cell]
+            size = sum(sheet[2] for sheet in sheets)
+            etag = hashlib.sha256("".join(f"{name} {version} {sheet_size} {sheet_etag}\n"
+                                          for name, version, sheet_size, sheet_etag, _ in sheets).encode()).hexdigest()
+        else:
+            size, etag = self.origin_object or self.tiles[cell][2:]
         rejects = None
         if self.adapter == MRDEM_ADAPTER:
             rejects = {"below": MRDEM_HEIGHTS[0], "above": MRDEM_HEIGHTS[1], "pixelsAround": MRDEM_REJECT_MARGIN}
         elif self.adapter == SONNY_ADAPTER:
             rejects = {"below": SONNY_HEIGHTS[0], "above": SONNY_HEIGHTS[1], "pixelsAround": SONNY_REJECT_MARGIN}
+        elif self.adapter == LINZ_ADAPTER:
+            rejects = {"below": LINZ_HEIGHTS[0], "above": LINZ_HEIGHTS[1], "pixelsAround": LINZ_REJECT_MARGIN}
         return {"source": self.id, "url": self.tile_url(*cell), "bytes": size, "etag": etag,
                 "areaSha256": self.area_sha256, "rejects": rejects}
 
@@ -821,7 +886,108 @@ def read_sonny_cell(source, cell, out):
     return heights, {"sha256": found, "readBytes": size, "tileDate": date, "via": via, **read}
 
 
-TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell}
+def linz_url(origin, sheet, version):
+    return f"{origin}/{sheet}.tiff?versionId={version}"
+
+
+def linz_box(cell):
+    """The NZTM box of 8 m pixels, on the sheets' grid, that holds the cell's posts with a margin for the
+    resampling and the dropping of pixels that are not ground."""
+    from rasterio.crs import CRS
+    from rasterio.warp import transform_bounds
+
+    longitude, latitude = cell
+    span = (POSTS - 1) * STEP
+    left, bottom, right, top = transform_bounds(
+        CRS.from_epsg(LINZ_GEOGRAPHIC_EPSG), CRS.from_epsg(LINZ_EPSG), longitude - MARGIN, latitude + 1 - span - MARGIN,
+        longitude + span + MARGIN, latitude + 1 + MARGIN, densify_pts=256)
+    pad = (2 + LINZ_REJECT_MARGIN) * LINZ_PIXEL
+    return (math.floor((left - pad) / LINZ_PIXEL) * LINZ_PIXEL, math.floor((bottom - pad) / LINZ_PIXEL) * LINZ_PIXEL,
+            math.ceil((right + pad) / LINZ_PIXEL) * LINZ_PIXEL, math.ceil((top + pad) / LINZ_PIXEL) * LINZ_PIXEL)
+
+
+def linz_posts(datasets, cell):
+    """A cell's posts from LINZ's sheets, given as (sheet, dataset at the 8 m overview), and what was read.
+
+    The sheets' pixels inside the cell's box are laid into one mosaic, so
+    that pixels that are not ground are dropped with their margin across a
+    sheet's edge, and the posts are the bilinear mean of the pixels around
+    them. A sheet is refused unless it is laid out as the catalog says.
+    """
+    import numpy as np
+    from affine import Affine
+    from rasterio.crs import CRS
+    from rasterio.warp import Resampling, reproject
+    from rasterio.windows import Window
+
+    west, south, east, north = linz_box(cell)
+    width, height = round((east - west) / LINZ_PIXEL), round((north - south) / LINZ_PIXEL)
+    mosaic = np.full((height, width), np.nan, dtype="float32")
+    read = {"invalidPixels": 0, "sheets": []}
+    for (name, _, _, _, bounds), dataset in datasets:
+        transform = dataset.transform
+        if (dataset.count != 1 or dataset.dtypes[0] != "float32" or dataset.nodata != LINZ_NO_DATA
+                or dataset.crs is None or dataset.crs.to_epsg() != LINZ_EPSG or transform.b or transform.d
+                or transform.a != LINZ_PIXEL or transform.e != -LINZ_PIXEL
+                or tuple(round(value) for value in dataset.bounds) != bounds):
+            raise ValueError(f"not LINZ's sheet {name} at its 8 m overview")
+        left, bottom, right, top = max(west, bounds[0]), max(south, bounds[1]), min(east, bounds[2]), min(north, bounds[3])
+        if left >= right or bottom >= top:
+            continue
+        window = Window(round((left - transform.c) / LINZ_PIXEL), round((transform.f - top) / LINZ_PIXEL),
+                        round((right - left) / LINZ_PIXEL), round((top - bottom) / LINZ_PIXEL))
+        array = dataset.read(1, window=window)
+        valid = (dataset.read_masks(1, window=window) != 0) & np.isfinite(array) & (array != LINZ_NO_DATA)
+        read["invalidPixels"] += int((~valid).sum())
+        row, column = round((north - top) / LINZ_PIXEL), round((left - west) / LINZ_PIXEL)
+        place = mosaic[row:row + array.shape[0], column:column + array.shape[1]]
+        place[valid] = array[valid]
+        read["sheets"].append(name)
+    read["sha256"] = hashlib.sha256(mosaic.tobytes()).hexdigest()
+    valid = np.isfinite(mosaic)
+    read.update(drop_beyond(mosaic, valid, LINZ_HEIGHTS, LINZ_REJECT_MARGIN))
+    mosaic[~valid] = np.nan
+    heights = np.full((POSTS, POSTS), np.nan, dtype="float32")
+    reproject(
+        mosaic, heights,
+        src_transform=Affine(LINZ_PIXEL, 0, west, 0, -LINZ_PIXEL, north), src_crs=CRS.from_epsg(LINZ_EPSG),
+        src_nodata=float("nan"), dst_transform=post_transform(*cell), dst_crs=CRS.from_epsg(LINZ_GEOGRAPHIC_EPSG),
+        dst_nodata=float("nan"), init_dest_nodata=False, resampling=Resampling.bilinear, num_threads=1,
+    )
+    read["readBytes"] = 4 * mosaic.size
+    return heights, read
+
+
+def read_linz_cell(source, cell, out):
+    """The cell's posts from LINZ's sheets under it, each the pinned version, read in ranges, and what was read."""
+    import rasterio
+
+    sheets = source.tiles[cell]
+    for name, version, size, etag, _ in sheets:
+        url = linz_url(source.origin, name, version)
+        found = object_identity(url)
+        if found != (size, etag):
+            raise ValueError(f"{url} is {found[0]} bytes with ETag {found[1]}, not the catalog's {size} bytes with "
+                             f"ETag {etag}")
+    with rasterio.Env(**{**GDAL_OPTIONS, **MRDEM_HTTP_OPTIONS, **LINZ_GDAL_OPTIONS}):
+        datasets = []
+        try:
+            for sheet in sheets:
+                datasets.append((sheet, rasterio.open("/vsicurl/" + linz_url(source.origin, *sheet[:2]),
+                                                      overview_level=LINZ_OVERVIEW)))
+            heights, read = linz_posts(datasets, cell)
+        finally:
+            for _, dataset in datasets:
+                dataset.close()
+    if read["rejectedPixels"]:
+        low, high = read["rejectedHeights"]
+        print(f"{hgt_name(*cell)}: dropped {read['rejectedPixels']} LINZ pixels at and around heights from "
+              f"{low:.0f} to {high:.0f} m, which are not ground", flush=True)
+    return heights, read
+
+
+TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell,
+                   LINZ_ADAPTER: read_linz_cell}
 
 
 def terrain_deadline(sources):
