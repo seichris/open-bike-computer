@@ -43,18 +43,13 @@ terrain=()
 manifests=("$BICINO_ELEVATION_RAW/elevation-manifest.json" "$BICINO_ELEVATION/elevation-manifest.json")
 directories=("$BICINO_ELEVATION_RAW" "$BICINO_ELEVATION")
 if bicino_is_hybrid; then
-  # The build uses every source of the list, so the run must name exactly
-  # those: each approved, with the catalog and the area it pins.
-  python3 - "$BICINO_ROUTING" "$BICINO_TERRAIN" <<'PY'
+  # bicino_validate_run has checked that the run names the list's sources.
+  python3 - "$BICINO_ROUTING" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import build_elevation
-sources = build_elevation.load_terrain_sources(Path(sys.argv[1]) / "elevation-sources.json")
-listed = ",".join(source.id for source in sources)
-if listed != sys.argv[2]:
-    sys.exit(f"error: elevation-sources.json holds {listed}, not BICINO_TERRAIN={sys.argv[2]}")
-for source in sources:
+for source in build_elevation.load_terrain_sources(Path(sys.argv[1]) / "elevation-sources.json"):
     print(f"terrain source {source.id}: {len(source.tiles)} cells, catalog {source.catalog_sha256}")
 PY
   mkdir -p "$BICINO_ELEVATION_OPENED" "$BICINO_ELEVATION_TERRAIN"

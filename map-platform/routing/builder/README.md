@@ -71,16 +71,17 @@ ungraded planet, the graph production serves: `elevation`, `build-graded`,
 sources of [elevation-sources.json](../elevation-sources.json) where they
 have data, the opened Copernicus tiles elsewhere (see
 [Build and release](../README.md#build-and-release)). A build uses every
-source of that list, so `--terrain` names them all, in the list's order;
-the elevation stage stops when it names others, fewer or another order. The
-run then differs in three ways:
+source of that list, so `--terrain` names them all, in the list's order.
+`setup.sh` and every stage check that before they do anything, with the
+approval, the area and the catalog each source pins: a run that names
+others, fewer or another order never starts. The run then differs in three
+ways:
 
-- **The elevation stage does more.** It first checks that the source list
-  holds those sources, each approved, with the area and the catalog it
-  pins. Then it writes 3,197 terrain tiles: it downloads 3DEP's 954 tiles
-  that have a Copernicus cell, 364 GB, reads the part of the MRDEM-30
-  object under each of 2,338 cells, about 60 MB of pixels a cell, cuts
-  both to their areas, and blends 26,475 cells. No builder has run this
+- **The elevation stage does more.** It writes 3,197 terrain tiles: it
+  downloads 3DEP's 954 tiles that have a Copernicus cell, 364 GB, reads
+  the part of the MRDEM-30 object under each of 2,338 cells, about 60 MB
+  of pixels a cell, cuts both to their areas, and blends 26,475 cells. No
+  builder has run this
   yet, so its time is not known. MRDEM-30 is read from one object in
   `ca-central-1`; a build stops when its size or ETag is no longer the
   pinned one. A terrain worker holds a whole 3DEP tile: in the Chicago

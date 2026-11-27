@@ -89,9 +89,9 @@ builder; see [what that leaves open](builder/README.md#not-verified-on-a-real-bu
    MRDEM-30 for Canada's cells and blends both in, and both graphs are
    built with every bridge marked as one (see
    [the builder's page](builder/README.md#the-chain)). `--terrain` names
-   every source of `elevation-sources.json` in its order; with any other
-   value the elevation stage stops, and correcting it afterwards makes a
-   finished ungraded build stale. No builder has run that yet. Add
+   every source of `elevation-sources.json` in its order; `setup.sh`
+   refuses any other value before the chain starts. No builder has run
+   that yet. Add
    `--elevation-cache elevation-cache-2026-11-26.json` to
    restore the raw tiles and the tiles opened at 400 m from their bucket
    instead of building them for 2 hours 20 minutes. Every tar and every tile

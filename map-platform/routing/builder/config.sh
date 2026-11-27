@@ -114,6 +114,20 @@ bicino_uses_cache() {
   [ -n "$BICINO_ELEVATION_CACHE" ]
 }
 
+# The ids of the terrain sources of elevation-sources.json, joined by commas.
+# Loading the list checks that each is approved, with the catalog and the
+# area it pins.
+bicino_listed_terrain() {
+  python3 - "$BICINO_ROUTING" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import build_elevation
+sources = build_elevation.load_terrain_sources(Path(sys.argv[1]) / "elevation-sources.json")
+print(",".join(source.id for source in sources))
+PY
+}
+
 bicino_validate_run() {
   [ -d "$BICINO_ROUTING" ] || bicino_fail "no routing tools at $BICINO_ROUTING"
   [[ "$BICINO_MAP_PLATFORM_IMAGE" =~ ^ghcr\.io/seichris/open-bike-computer-map-platform@sha256:[0-9a-f]{64}$ ]] \
@@ -125,6 +139,14 @@ bicino_validate_run() {
     [[ "$BICINO_TERRAIN" =~ ^[a-z][a-z0-9-]{2,63}(,[a-z][a-z0-9-]{2,63})*$ ]] \
       || bicino_fail "BICINO_TERRAIN must be terrain source ids joined by commas, or empty, got: $BICINO_TERRAIN"
     bicino_is_graded || bicino_fail "BICINO_TERRAIN needs BICINO_OPENING_RADIUS: the terrain lies over opened tiles"
+    # The build uses every source of the list, so the run names exactly
+    # those. Every stage and setup.sh check it here: found only by the
+    # elevation stage, a wrong value would let the ungraded build run for
+    # hours and then go stale when the value is corrected.
+    local listed
+    listed=$(bicino_listed_terrain) || bicino_fail "cannot read the terrain sources of $BICINO_ROUTING/elevation-sources.json"
+    [ "$listed" = "$BICINO_TERRAIN" ] \
+      || bicino_fail "elevation-sources.json holds $listed, not BICINO_TERRAIN=$BICINO_TERRAIN"
   fi
   if bicino_uses_cache; then
     [[ "$BICINO_ELEVATION_CACHE" =~ ^elevation-cache-[a-z0-9-]+\.json$ ]] \

@@ -896,6 +896,11 @@ class ScriptTests(unittest.TestCase):
             routing = Path(directory) / "tools" / "repo" / "map-platform" / "routing"
             (routing / "releases").mkdir(parents=True)
             (routing / "releases" / "elevation-cache-2026-11-26.json").write_text("{}")
+            # The terrain sources a run names are checked against this checkout's list.
+            listed = json.loads((ROUTING / "elevation-sources.json").read_text())["terrain"]
+            for name in ["build_elevation.py", "elevation-sources.json",
+                         *(source[kind] for source in listed for kind in ("catalog", "area"))]:
+                (routing / name).symlink_to(ROUTING / name)
             kept = "BICINO_OPENING_RADIUS=400\nBICINO_ELEVATION_CACHE=elevation-cache-2026-11-26.json\n"
             sample = ("BICINO_SAMPLE_CITY=Berlin\n"
                       "BICINO_SAMPLE_REGION_URL=https://download.geofabrik.de/europe/germany/berlin-latest.osm.pbf\n")
@@ -912,10 +917,13 @@ class ScriptTests(unittest.TestCase):
                      "BICINO_PLANET_DATE=261116\n": 0,
                      "BICINO_PLANET_DATE=2026-11-16\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=4e2\n": 1,
-                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 0,
-                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
-                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=USGS 3DEP\n": 1,
+                     # Terrain: every source of the list, in its order, over opened tiles.
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 0,
+                     "BICINO_PLANET_DATE=261116\nBICINO_TERRAIN=usgs-3dep-13,nrcan-mrdem-30\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=nrcan-mrdem-30,usgs-3dep-13\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=other-dtm\n": 1,
+                     "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=USGS 3DEP\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13,\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13 nrcan-mrdem-30\n": 1,
                      "BICINO_PLANET_DATE=261116\nBICINO_MAP_PLATFORM_IMAGE=ghcr.io/seichris/open-bike-computer-map-platform:latest\n": 1,
@@ -925,6 +933,22 @@ class ScriptTests(unittest.TestCase):
                 (Path(directory) / "builder.env").write_text(env)
                 checked = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
                 self.assertEqual(checked.returncode, expected, env + checked.stderr)
+            # setup.sh and every stage validate the run, so a wrong terrain value stops before any stage works.
+            (Path(directory) / "builder.env").write_text(
+                "BICINO_PLANET_DATE=261116\nBICINO_OPENING_RADIUS=400\nBICINO_TERRAIN=usgs-3dep-13\n")
+            wrong = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
+            self.assertIn("elevation-sources.json holds usgs-3dep-13,nrcan-mrdem-30, not BICINO_TERRAIN=usgs-3dep-13",
+                          wrong.stderr)
+            setup = (BUILDER / "setup.sh").read_text()
+            self.assertLess(setup.index('(. "$builder/config.sh" && bicino_validate_run)'),
+                            setup.index('sudo "$builder/install-chain.sh"'))
+            for stage in sorted((BUILDER / "stages").glob("*.sh")):
+                self.assertIn("\nbicino_validate_run\n", stage.read_text(), stage.name)
+            # A list that cannot be read stops the run too.
+            (routing / "elevation-sources.json").unlink()
+            unread = self.source_config("bicino_validate_run", BICINO_SCRATCH=directory)
+            self.assertEqual(unread.returncode, 1)
+            self.assertIn("cannot read the terrain sources", unread.stderr)
 
     def run_elevation_stage(self, directory, env):
         """Run the real elevation stage with stand-ins for Docker and the GNU tools; returns it and Docker's calls."""
