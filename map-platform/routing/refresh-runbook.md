@@ -1058,9 +1058,10 @@ no build changed.
   Kong's tram corridor up to 10% of the direct route reads 6%+ on the opened
   tiles and none on the 2020 lidar. Sha Tin and Tseung Kwan O, which a
   downtown survey had labelled flat, are steep on the lidar too.
-- **Judge a source on the direct routes.** The share of the ungraded route
-  that reads 6%+ and the climb along it compare heights. A leg that got
-  longer is often a near-tie that flipped.
+- **The samples are judged on the direct routes.** The share of the
+  ungraded route that reads 6%+ and the climb along it compare heights, as
+  [Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged)
+  does for the gate.
 - **To put to Chris, in order:** Sonny's LiDAR DTMs of Europe (1
   arc-second), LINZ's New Zealand lidar DEM, GSI's elevation tiles of Japan
   and, after a reading of its terms, CEDD's 2020 lidar DTM of Hong Kong.

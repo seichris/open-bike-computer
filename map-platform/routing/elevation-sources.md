@@ -75,21 +75,19 @@ opened Copernicus.
   and not routing. Road and Everyday routes are summed.
 - **`use_hills` changes.** Hilly legs where the Everyday route differs
   between `use_hills` 0 and 1.
-- **Longest length change.** The gate's "no flat leg more than 5% longer".
+- **Longest length change.** What the gate's rule for
+  [detours and swaps](refresh-runbook.md#detours-and-swaps-how-a-longer-flat-route-is-judged)
+  starts from.
 
-The first two lead. A survey of 252 tower downtowns on the 400 m planet
-(2026-11-27, 3,938 routes, on the map VPS in
-`/root/bicino-routing-releases/opened-400-downtown-survey-wide-20261127/`)
-found that the length rule gives false alarms and misses as legs are added.
-Of 2,572 routes in flat-labelled centres, 29 were more than 5% longer and 20
-more than 5% shorter, most of them near-ties that flipped. Only 8 of the 29
-had a direct route reading 6%+ on at least 8% of its length. Computed here
-from that survey's report, 67 of the 252 centres average 5% or more on their
-direct routes, 51 of them on ground the survey itself labels as having some
-relief. Of the 165 it labels flat, the highest are Tseung Kwan O (24% of
-route length), Sha Tin (22%), Busan Centum City (16%), New York Midtown
-(14%) and Naples Centro Direzionale (10%). The first two were sampled here,
-and their steepness is mostly real (see below).
+The first two lead. They compare heights along the same routes, where a
+longer route is often a near-tie that flipped, as that section shows. Its
+survey of 252 tower downtowns on the 400 m planet also says where the opened
+tiles read steep. Computed here from the survey's report, 67 of the 252
+centres average 5% or more on their direct routes, 51 of them on ground the
+survey itself labels as having some relief. Of the 165 it labels flat, the
+highest are Tseung Kwan O (24% of route length), Sha Tin (22%), Busan Centum
+City (16%), New York Midtown (14%) and Naples Centro Direzionale (10%). The
+first two were sampled here, and their steepness is mostly real (see below).
 
 ## Sample results
 
@@ -358,9 +356,13 @@ write such tiles, and data:
   some grids) or no data.
 - **Height datum.** Record it and leave the heights alone. A national height
   system differs from EGM2008 by a slowly varying offset of a couple of
-  metres at most, a constant offset makes no grade, and the 16-post blend
-  already lifts the opened side to meet the terrain. A source in ellipsoidal
-  heights would need a geoid first; none here is.
+  metres at most, and a constant offset makes no grade. What matters is the
+  edge. There `blend_fill` carries the whole difference into the opened
+  side, the datum and the opening's lowering together: a median of 4 m in
+  Lisbon's box and 13.5 m in Wellington's. No leg here crosses such an edge;
+  the [3DEP samples](refresh-runbook.md#the-seam-at-the-border) measured
+  one. A source in ellipsoidal heights would need a geoid first; none here
+  is.
 - **An area.** The polygon the source is approved for, as today. For a
   source with partial coverage use the publisher's footprint (LINZ ships a
   capture area) and not the country. For Sonny the polygon is the only thing
