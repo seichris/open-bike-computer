@@ -1,0 +1,305 @@
+{
+ "schema": "bicino-routing-elevation-cache-v1",
+ "bucket": "bicino-routing-elevation",
+ "location": "europe-west4",
+ "storageClass": "NEARLINE",
+ "storedAt": "2026-11-27",
+ "builder": "bicino-valhalla-h400-261116",
+ "toolsCommit": "2a2dd7971537c5789328c85914f76462a8c263d8",
+ "buildElevationSha256": "3f2b1f0d91da644d3ebdef3b042ae0c681bd05980f3850816cdd1379df2b62b9",
+ "sets": {
+  "hybrid-400": {
+   "prefix": "terrain-2026-11-27/hybrid-400-9d183d968adb/",
+   "method": {
+    "name": "terrain-over-opening",
+    "terrain": [
+     "usgs-3dep-13",
+     "nrcan-mrdem-30"
+    ],
+    "blendPosts": 16,
+    "blend": "terrain minus fill at the terrain's edge, carried into the fill and faded linearly",
+    "fill": {
+     "name": "grey-opening",
+     "radiusMetres": 400.0,
+     "footprint": "ellipse",
+     "footprintLatitude": "post row",
+     "metresPerArcsecond": 30.87,
+     "maximumHalfWidthPosts": 1799,
+     "noData": "kept, never part of an ellipse"
+    },
+    "inputs": {
+     "opened": {
+      "manifestSha256": "7c6b3903ce03819bcb46f1a68223842069ffcc37224e37e61a1426ad98944cbb",
+      "cellListSha256": "9119004f6c719547a91368078b2893e33a83f885d86aadcee1be2ded36fe50a9"
+     },
+     "terrain": {
+      "manifestSha256": "378dd534ec6705ac0d78be12e15a6193f2b73bbe3f9afebf58def8dfb9a492bc",
+      "cellListSha256": "9037dd8e29a8a0f0cf8d944449e37f19ef595b1a961e42f42dfc12090af78cfc"
+     }
+    }
+   },
+   "manifestSha256": "9d183d968adbf6490ae831dd3e8a55d2b6513c67d689986435f05fa19d121667",
+   "cellListSha256": "74e5b8c445649d2fed620e8c52455c4e5b814d2429e111c1a51e353d9aa36aed",
+   "cells": 26475,
+   "tileBytes": 91228631798,
+   "sources": [
+    {
+     "id": "copernicus-glo30-public-2021",
+     "indexSha256": "10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc",
+     "cells": 26450
+    },
+    {
+     "id": "copernicus-glo90-2021",
+     "indexSha256": "e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97",
+     "cells": 25
+    },
+    {
+     "id": "usgs-3dep-13",
+     "indexSha256": null,
+     "cells": 952
+    },
+    {
+     "id": "nrcan-mrdem-30",
+     "indexSha256": null,
+     "cells": 2337
+    }
+   ],
+   "policySha256": "c470fadf40509bb4ab07cfce0e8ec3d7995275ab84d5050dd632a4c96cb3ad96",
+   "runtime": {
+    "rasterio": "1.4.4",
+    "gdal": "3.10.3"
+   },
+   "shardBytes": 91296542720,
+   "shards": [
+    {
+     "name": "N0.tar",
+     "bytes": 4564674560,
+     "files": 1144,
+     "sha256": "91f072fdfcf6a991f951f9d1a5de0cb430e21f103a46308c04cbbac1f6f799b3",
+     "md5": "tOd1K1zlKmn0Y95kSJbDtQ=="
+    },
+    {
+     "name": "N1.tar",
+     "bytes": 4654305280,
+     "files": 1253,
+     "sha256": "ebc983d41602ee7e287078ea6aa098fc4ea3f69e1dea6ed388e9d35e0b5f9ddb",
+     "md5": "IaNYf+6iM0F3B+PBlRz4Xg=="
+    },
+    {
+     "name": "N2.tar",
+     "bytes": 7199006720,
+     "files": 1625,
+     "sha256": "7dca3777e55a1e62a92902b2175a21fb0b1573d0d3e1442e378530ea2857b712",
+     "md5": "s1DHBNo+mK9AjJzh4Peh9g=="
+    },
+    {
+     "name": "N3.tar",
+     "bytes": 10887342080,
+     "files": 1777,
+     "sha256": "51af993f49366fd82dc7bf45c32b905a8ddf922ad08d00b7cdcde3baf7d23bf9",
+     "md5": "fN7002/NWTkWS9tO1iRB9g=="
+    },
+    {
+     "name": "N4.tar",
+     "bytes": 11938119680,
+     "files": 2090,
+     "sha256": "b4b705f9f06db8b91bc2aee1b8099ef8f4c301947a62574a28ee05a67dadddd2",
+     "md5": "npfduD7WwtIuI3ZJ0U/mew=="
+    },
+    {
+     "name": "N5.tar",
+     "bytes": 11607818240,
+     "files": 2373,
+     "sha256": "072d983b219f9821810bf6b96c2700c3ebe127cc5c2da16f6212ce526de95e15",
+     "md5": "DR42XUUaRRs9q9a049MouA=="
+    },
+    {
+     "name": "N6.tar",
+     "bytes": 12596776960,
+     "files": 2988,
+     "sha256": "f2543711cbc095d353221ef32dec6750339f9077d6632533b3cfdce9b0ade15c",
+     "md5": "+Um+eNXJTnPhPnKINSEKVw=="
+    },
+    {
+     "name": "N7.tar",
+     "bytes": 3690240000,
+     "files": 1704,
+     "sha256": "0f254325b94129f1e0ce315c276dc74376f8e8354fc9a5045c4d9c3ffdcad938",
+     "md5": "asQdw3YjgpPe1/MNZxRdzA=="
+    },
+    {
+     "name": "N8.tar",
+     "bytes": 947138560,
+     "files": 396,
+     "sha256": "2cc048a777d7101fcd32a1c3d2f5460ddc270423bdd797989670633611b9f52b",
+     "md5": "Y2ky1l4vYLtB0h62hwMa3Q=="
+    },
+    {
+     "name": "S0.tar",
+     "bytes": 4430776320,
+     "files": 1121,
+     "sha256": "aca8f071ab9e3b617a18e814fff71c360e9a3d4cf90bd9a55863948865a7067d",
+     "md5": "cvTUQ/aefpE5HKHFpaHYOw=="
+    },
+    {
+     "name": "S1.tar",
+     "bytes": 4615710720,
+     "files": 1080,
+     "sha256": "37b105b7de97df87e1de82509bf459a9c5c4fc720ed4315d150071975ee27b6d",
+     "md5": "zESTtQvUUiJmaURZu43a7Q=="
+    },
+    {
+     "name": "S2.tar",
+     "bytes": 3888957440,
+     "files": 1014,
+     "sha256": "0b9760f1abb27e91ef34323852340bbe8580b91e0b9ca251f214752d805a050c",
+     "md5": "7B+tMSm6e35tlJyl/wzo0g=="
+    },
+    {
+     "name": "S3.tar",
+     "bytes": 2124789760,
+     "files": 567,
+     "sha256": "3fccb67885be513b96ebac52d8dfa5568f6682efb68bcad94bc6765bad7cb9be",
+     "md5": "pFhvpp7eFRdtcQjwsd/gYg=="
+    },
+    {
+     "name": "S4.tar",
+     "bytes": 824698880,
+     "files": 202,
+     "sha256": "f98db33548a6352e873b5c2dc73ad4f13f7bd5b6bf451831c9ffddcb0f9d9c76",
+     "md5": "g98lP9sHMZe0uV5ly93Qiw=="
+    },
+    {
+     "name": "S5.tar",
+     "bytes": 241387520,
+     "files": 97,
+     "sha256": "e35ad3bde6821393521b00e2d28d8ade1438d7f5b4d794700f8f8cec622e5c61",
+     "md5": "O7d+uqYNzkiE2O3/p09pcA=="
+    },
+    {
+     "name": "S6.tar",
+     "bytes": 794265600,
+     "files": 420,
+     "sha256": "39ec829a1ad4290ef1ee0d72ac2fcde348d11bfe6c127512bad8be75e2e162a1",
+     "md5": "LC7ypJfeLF8ZHUmBCZrh9g=="
+    },
+    {
+     "name": "S7.tar",
+     "bytes": 3644405760,
+     "files": 2664,
+     "sha256": "5722f328a47e88176079eeac2213d8a66adfe6fd0cf37285ee43fafce6206f91",
+     "md5": "fYxsVmJ6yniWBiwKnEFGHw=="
+    },
+    {
+     "name": "S8.tar",
+     "bytes": 2536550400,
+     "files": 3600,
+     "sha256": "512dfad3a5d431022c79cff2b1248b23a0c6a41f72f3efaae591acddc4a4a8a7",
+     "md5": "oep5o4ytpmfk5DQ5KheqNA=="
+    },
+    {
+     "name": "S9.tar",
+     "bytes": 62156800,
+     "files": 360,
+     "sha256": "978fe7d30db748c4ab22357cf510fa258f78da838a9d5093f68714e602b7e98e",
+     "md5": "X0hmCBCWo5oKEU5vjpVAyg=="
+    },
+    {
+     "name": "meta.tar",
+     "bytes": 47421440,
+     "files": 26477,
+     "sha256": "759490781808556a863da7b3327dacc39e293f85598a862af7775bdd0a676b9d",
+     "md5": "RLW2CE9XxwzS3NXmELlYAg=="
+    }
+   ]
+  }
+ },
+ "terrainSets": {
+  "terrain": {
+   "prefix": "terrain-2026-11-27/terrain-378dd534ec67/",
+   "manifest": "terrain-manifest.json",
+   "manifestSchema": "bicino-valhalla-terrain-tiles-v1",
+   "manifestSha256": "378dd534ec6705ac0d78be12e15a6193f2b73bbe3f9afebf58def8dfb9a492bc",
+   "cellListSha256": "9037dd8e29a8a0f0cf8d944449e37f19ef595b1a961e42f42dfc12090af78cfc",
+   "cells": 3197,
+   "tileBytes": 19019355699,
+   "rejectedPixels": 1386573,
+   "sourceList": {
+    "name": "elevation-sources.json",
+    "bytes": 4543,
+    "sha256": "0de9704da4930bc53c4fb6e50907d62a1f80638641e9e52091e277cf85db4c73"
+   },
+   "sources": [
+    {
+     "id": "usgs-3dep-13",
+     "catalogSha256": "e5416be94671f182d8290a57812385276c9313fa25517811c4cc7a71a5928489",
+     "areaSha256": "11e69b88746a99dfc6f55f942443c3f38649a2f919f6ac8e71412433bb73a030"
+    },
+    {
+     "id": "nrcan-mrdem-30",
+     "catalogSha256": "856d9aeb65925e7288e1a2e11edacae069ff92a631dfa678b13ec5a0a6e55ac0",
+     "areaSha256": "3c17ff9b5e1fa63b6604b074793ca224dcbb2337c7809a85964798c4d472838d"
+    }
+   ],
+   "shardBytes": 19027046400,
+   "shards": [
+    {
+     "name": "N2.tar",
+     "bytes": 138782720,
+     "files": 53,
+     "sha256": "c23838a827d19c8009771e4b2e70b7d95ccb2a791a23f4da30e27f5f00f84bc8",
+     "md5": "8SzMT4zFn/lSfGtZzbPlaA=="
+    },
+    {
+     "name": "N3.tar",
+     "bytes": 3618211840,
+     "files": 433,
+     "sha256": "def4fd53f6719158b6d615bbe93e2d64e6cd923c11c71dc4ba40b1d95f2f39ee",
+     "md5": "i3YDiZU2YIjqWTzmmwcKUw=="
+    },
+    {
+     "name": "N4.tar",
+     "bytes": 4943421440,
+     "files": 644,
+     "sha256": "9cb165c41697f4cbec66b33335b87783e2038d4c4f85c946da3977d0c77decd0",
+     "md5": "Vh1BUzTxU01Lrz3uqjFiFA=="
+    },
+    {
+     "name": "N5.tar",
+     "bytes": 4669818880,
+     "files": 715,
+     "sha256": "9978cec6857047ecea857b4aa6184cfba5f0549a31eaa44824c635a4f9c40164",
+     "md5": "ggAWfKJuQ+BbSB7pPGLqZw=="
+    },
+    {
+     "name": "N6.tar",
+     "bytes": 3747112960,
+     "files": 752,
+     "sha256": "caee01e772d2344b45c688f843f73001e7bc990de2528998e2a0a0d234697bfb",
+     "md5": "nuqoVXJU2veuZQsMcFQZUg=="
+    },
+    {
+     "name": "N7.tar",
+     "bytes": 1438996480,
+     "files": 482,
+     "sha256": "57ccf74badf7102f394877869cf7e665fa934a974648cffaf067503e0440e321",
+     "md5": "2HJM/BuZtt+8yJRsbJRsPw=="
+    },
+    {
+     "name": "N8.tar",
+     "bytes": 465500160,
+     "files": 118,
+     "sha256": "8bc349ede87b5b01bae633d6e74d6250298f74e4f785b5099b69f73c9433a9b9",
+     "md5": "UYWNkMUvCaPWl9oeFHxUxQ=="
+    },
+    {
+     "name": "meta.tar",
+     "bytes": 5201920,
+     "files": 3199,
+     "sha256": "82017ea8c89ece56527d4ce12adf06e37e21ef0e588957c714eff532f01299fa",
+     "md5": "+B86AbMNttPfBZOOom5L+g=="
+    }
+   ]
+  }
+ }
+}

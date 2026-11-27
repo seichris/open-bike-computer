@@ -167,6 +167,13 @@ summary, with `"final": true`.
 
 ## Kept elevation tiles
 
+The bucket also holds, since 2026-11-27, the hybrid tiles and the terrain
+tiles of the first hybrid build, pinned by
+[releases/elevation-cache-2026-11-27.json](../releases/elevation-cache-2026-11-27.json).
+No stage restores those yet (see
+[what is kept](elevation-cache-proposal.md#kept-since-2026-11-27)); what
+follows is about the Copernicus sets.
+
 The raw Copernicus tiles and the tiles opened at 400 m take 2 hours
 20 minutes to make and come out the same on every build. Those of the
 2026-11-26 builder are kept in `gs://bicino-routing-elevation`, pinned by
@@ -512,17 +519,15 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   sample graphs.
 - **`builder_status.py` over real SSH**, through the VPS and with a Tailscale
   re-authentication pending. Tests fed it those replies.
-- **Restoring kept tiles on a builder.** A VM created with
-  `--cache-reader`, the token from its metadata server, and a read of the
-  bucket as that account. The account and its grant were read back on
-  2026-11-27, but nothing has read the bucket as the account: a laptop
-  login may not ask for its tokens. The restore of both
-  whole sets, 244 GB: its time, the scratch it needs while the tars are
-  unpacked (each tar lies beside its tiles until it is checked), and
-  `build_elevation.py` finding all 26,475 receipts current. From a laptop,
-  with a person's token, the tool checked `meta.tar` of both real sets and
-  three small bands, 817 tiles. The stage itself ran in the rehearsal,
-  against a stand-in for the bucket.
+- **Restoring kept tiles on a builder.** Shown on 2026-11-27 by the first
+  hybrid build, `bicino-valhalla-h400-261116`: created with
+  `--cache-reader`, it read the bucket with the token from its metadata
+  server and restored the raw set in 430 seconds and the 400 m set in 297,
+  every tile checked, and `build_elevation.py` found all 26,475 receipts
+  current (see
+  [the planet gate](../refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)).
+  The other items in this list were not checked one by one; that build ran
+  the whole chain to a complete result.
 
 On the first real build, start the chain and stay for the first ten minutes:
 `images`, `download`, `inputs` and `elevation` should all be running or done,

@@ -1568,10 +1568,12 @@ The ones outside the mask were not routed over.
   and São Paulo's Avenida Paulista, both in the gate as report-only, were
   not run and are likely to be the same, and so is the hillside behind any
   tower core where the grid overstates heights.
-- **Two ways to close it, neither tested.** Fill a tower zone with a smooth
-  surface spanned from the heights around it, instead of no data: the
-  towers go and a slope across the zone stays, and the 3% on bridges goes
-  too. Or leave elevation on where the ground under the zone slopes; the
+- **Two ways to close it.** Fill a tower zone with a smooth surface spanned
+  from the heights around it, instead of no data: the towers go and a
+  slope across the zone stays, and the 3% on bridges goes too. That one
+  was tested next (see
+  [A membrane in place of no data](#a-membrane-in-place-of-no-data)). Or
+  leave elevation on where the ground under the zone slopes; the
   broad slope of the 200 m tiles inside the masks does not separate the
   cases cleanly (Wellington's median is 6.8% over 300 m, but the plateaus
   of Chicago and New York reach 6 to 8% at their edges).
@@ -1589,6 +1591,178 @@ The ones outside the mask were not routed over.
 The reports, summaries, tile and graph manifests, the mask pictures and the
 scratch scripts are on the map VPS in
 `/root/bicino-routing-releases/tower-mask-samples-20261127/`.
+
+### A membrane in place of no data
+
+On 2026-11-27 the first remedy was tried on the same eight samples.
+`tower_mask.py --fill membrane` keeps the tower zones of the rule above but
+gives their posts a surface instead of no data: the solution of Laplace's
+equation with the heights around the zone held fixed, a membrane stretched
+over the zone's edge. A slope across the zone stays, a plateau or a pit in
+it goes, and the surface meets the heights outside without a step.
+Distances are in metres: a neighbour east or west is closer than one north
+or south by the cosine of the latitude and weighs more by its square. Posts
+without data take no part. The membrane took 1 to 2 s a city on a laptop.
+
+**At a threshold of 25 m the membrane meets every gate target on these
+samples, puts every tower-city route back on the ungraded route or a
+shorter one, and keeps Wellington's routes. No variant so far did all
+three. It reads some hills lower than the 200 m tiles (Kelburn at half its
+height), and the threshold was picked on the samples it was judged on.**
+Nothing in production or development changed.
+
+Three thresholds were tried, all with a mean over 150 m and a margin of
+200 m: 30 m (the no-data rule's), 25 m and 20 m. They cover 25, 52 and
+157 km² of New York's two sample cells, 15, 31 and 67 km² of Toronto's
+cell and 4, 10 and 24 km² of Wellington's. At 25 m the zone also covers
+Nob Hill and Russian Hill in San Francisco and Te Aro and the railway
+station in Wellington; Lisbon's old town, Pacific Heights, Twin Peaks,
+Mount Victoria and the centres of Zurich and Stuttgart stay outside it.
+
+#### Against the terrain models
+
+Inside the zones, each tile set was compared with a bare-earth terrain
+model: 3DEP for New York, Chicago and San Francisco, MRDEM-30 for Toronto,
+and LINZ's lidar DEM for Wellington (read at 8 m as in
+[Regional terrain models](#regional-terrain-models)). All variants are
+judged on the same posts, the 20 m zone, after the median difference
+outside the zones is taken off as a datum offset. "Phantom" is the share of
+posts that read a slope of 6% or more over 60 m where the terrain model
+reads less than 3%; "lost" the share where it reads 6% or more and the
+tiles less than 3%.
+
+| City (terrain 6%+) | Tiles | Within 3 m | Phantom 6%+ | Lost 6%+ |
+|---|---|---|---|---|
+| New York (6%) | opened 400 m | 64% | 5.5% | 3.2% |
+| | opened 200 m | 61% | 11.3% | 2.5% |
+| | membrane 30 m | 66% | 6.5% | 2.5% |
+| | **membrane 25 m** | **73%** | **4.1%** | **3.1%** |
+| | membrane 20 m | 67% | 1.1% | 4.0% |
+| Chicago (11%) | opened 200 m | 72% | 8.9% | 7.6% |
+| | **membrane 25 m** | **85%** | **0.3%** | **10.4%** |
+| Toronto (7%) | opened 200 m | 80% | 6.6% | 3.7% |
+| | **membrane 25 m** | **89%** | **0.9%** | **5.1%** |
+| San Francisco (47%) | opened 200 m | 60% | 5.2% | 11.2% |
+| | **membrane 25 m** | **46%** | **1.8%** | **9.0%** |
+| | membrane 20 m | 37% | 0.8% | 13.5% |
+| Wellington (76%) | opened 400 m | 34% | 1.2% | 31.5% |
+| | opened 200 m | 39% | 1.4% | 18.3% |
+| | **membrane 25 m** | **28%** | **3.4%** | **13.4%** |
+
+- **The membrane is only as good as the heights around the zone.** At
+  30 m the edge of Midtown's zone runs through mid-rise blocks that the
+  200 m opening leaves standing: of its 726 edge posts, 30% lie 10 m or
+  more above 3DEP, and 81 stand on the river. The membrane spans those,
+  and 42nd Street reads a crest of 57 m where 3DEP reads 19 to 21 m, with 18% of
+  Port Authority to the United Nations on 6%+ grades. At 25 m the edge
+  lies further out on lower ground, and the street reads no 6%+ section.
+- **Where the ground is flat it fits the terrain model better than any
+  opening.** In Chicago and Toronto 85% to 89% of the zone's posts lie
+  within 3 m of it. Front Street reads 80 m near Simcoe Street and 76 m at
+  the St Lawrence Market, as MRDEM-30 does (81 and 76 m).
+- **On slopes it is smoother than the ground.** A membrane has no crest or
+  hollow of its own, so it keeps a slope across a zone but not the shape
+  of the hill under it. In Wellington it loses less steep ground than
+  either opening; in San Francisco fewer of its posts lie within 3 m of
+  3DEP than of the 200 m tiles' (46% against 60%).
+
+#### Routes
+
+The six graded tile sets were served together and judged in one report, so
+hill avoidance is judged on the mean of all six. With any one of them as
+`--referee` the 25 m membrane still meets every target. The 20 m membrane
+does not with the 25 m heights as referee: avoiding hills then does not
+lower the 6%+ share.
+
+| Source | Flat routes: longest | Detours, swaps | 6%+ share of the direct routes: median, most | Hilly legs `use_hills` changes | Climb on the 17 hilly routes | Targets |
+|---|---|---|---|---|---|---|
+| Opened at 400 m | +35.1% | 3, 0 | 13%, 28% | 12 of 17 | 1,723 m | missed |
+| Opened at 200 m | +62.0% | 5, 0 | 27%, 59% | 12 of 17 | 2,070 m | missed |
+| 200 m, no data in zones (30 m) | 0.0% | 0, 0 | 0%, 3% | 11 of 17 | 1,919 m | met |
+| 200 m, membrane at 30 m | +35.1% | 0, 1 | 0%, 18% | 14 of 17 | 2,050 m | missed: one swap |
+| **200 m, membrane at 25 m** | **0.0%** | **0, 0** | **0%, 7%** | **14 of 17** | **2,017 m** | **met** |
+| 200 m, membrane at 20 m | 0.0% | 0, 0 | 0%, 0% | 12 of 17 | 1,915 m | met |
+
+Climb is along the ungraded Everyday routes, from each tile set's heights
+every 20 m; for the no-data tiles it counts only the stretches with
+heights.
+
+- **The tower cities.** At 25 m, 13 of the 14 flat routes are the ungraded
+  ones; the 14th, Port Authority to the United Nations on Everyday, is
+  11.1% shorter. Their direct routes read 6% or more on at most 7% of
+  their length (Midtown to Brooklyn on Road), against 59% at 200 m.
+- **Toronto's Everyday leg is a near tie.** At 30 m the membrane reads
+  Front Street as MRDEM-30 does, gently down to the east, and the
+  Everyday route still takes Adelaide Street, 35.1% longer. The direct
+  route reads no 6%+ grade, so the gate calls it a swap, and a swap more
+  than 15% longer misses. Costed with the backend's Everyday body, the
+  two routes are 0.3% apart on the ungraded graph (1,054.9 against
+  1,057.7) and 0.1% apart the other way on the membrane (1,048.5 against
+  1,047.0). The ungraded graph itself takes Adelaide Street when
+  `use_hills` is 1. At 25 m the route stays on Front Street. A leg this
+  close will flip again on another planet snapshot.
+- **Wellington.** At 25 m every leg is within 0.3% of its 200 m length or
+  back on the ungraded route: CBD to Kelburn is the direct 1.94 km again
+  (+21.6% at 200 m and with no data), and the railway station to Hataitai
+  is 5.52 km on Everyday (+18.9%), against 5.53 km at 200 m and 6.62 km
+  with no data. `use_hills` changes two legs, as at 200 m and 400 m.
+- **20 m masks too much.** It covers 28 km² of San Francisco and 34 km²
+  of Lisbon, where avoiding hills then makes the 6%+ share worse on two
+  legs each, and `use_hills` changes one Wellington leg.
+
+Climb on the routes the task named, against the terrain models where there
+is one:
+
+| Leg | Opened at 400 m | Opened at 200 m | No data | Membrane at 25 m | Terrain model |
+|---|---|---|---|---|---|
+| Lisbon, Cais do Sodré to Graça | 59 m | 99 m | 99 m | 99 m | – |
+| San Francisco, North Beach to Pacific Heights (Russian Hill) | 53 m | 92 m | 87 m | 80 m | 99 m (3DEP) |
+| Wellington, railway station to Hataitai (Mount Victoria) | 73 m | 173 m | 172 m | 190 m | 188 m (LINZ) |
+| Wellington, CBD to Kelburn | 82 m | 93 m | 79 m | 45 m | 88 m (LINZ) |
+| Wellington, Thorndon to Karori | 170 m | 185 m | 102 m | 182 m | 216 m (LINZ) |
+| New York, Port Authority to the United Nations | 17 m | 58 m | 0 m | 15 m | 22 m (3DEP) |
+| Chicago, Magnificent Mile to the South Loop | 26 m | 77 m | 0 m | 3 m | 16 m (3DEP) |
+
+#### Recommendation
+
+**The membrane at 25 m is the best candidate so far, but test it more
+before a planet build.**
+
+- **It answers the no-data rule's open problem.** A tower zone on a slope
+  keeps its slope, so Wellington keeps its routes, and no bridge reads the
+  3% clamp because no post lacks data.
+- **It keeps the hills the 400 m opening flattens:** 17% more climb on the
+  17 hilly routes, and Graça, Russian Hill and Mount Victoria at 99, 80
+  and 190 m against 59, 53 and 73 m.
+- **It loses climb where a zone covers a hill.** Kelburn reads 45 m of
+  88 m, and Russian Hill 80 m of 99 m, because the zone reaches over the
+  hill and a membrane has no crest.
+- **25 m was chosen on these samples.** 30 m leaves Midtown's edge on
+  mid-rise plateaus and 20 m masks too much of the hilly cities; the
+  margin between them is small. Before a planet build, run it on the
+  gate's other sample cities (Singapore, Shanghai, Dubai, Hong Kong and
+  São Paulo, and Buenos Aires, Amsterdam, Houston and Berlin), and on
+  the wider survey of 252 downtowns, judging by the direct routes' 6%+
+  share as well as length.
+- **Where it would apply.** 3DEP and MRDEM-30 already grade the United
+  States and Canada in the hybrid, and the four regional sources approved
+  the same day cover New Zealand, Japan, Hong Kong and much of Europe
+  (see [Regional terrain models](#regional-terrain-models)). All eight
+  cities of these samples lie in the area of one of them, so once those
+  have readers none is graded from opened Copernicus. The membrane matters
+  for tower cores outside those areas: Singapore, Shanghai, Dubai and São
+  Paulo in the gate, and the survey's other downtowns. Those are the
+  samples to run next.
+- **A planet build needs the step in `build_elevation.py`.** The sample
+  tool solves the membrane over the cells of `--bounds` together. A planet
+  build would solve it per cell with a margin of the neighbours' tiles, as
+  the opening does, and must give two cells the same heights on their
+  shared border; a zone wider than the margin would need its whole extent.
+  Chris's approval of GHS-BUILT-H is needed as before.
+
+The reports, summaries, comparisons with the terrain models, the scratch
+scripts and the manifests are on the map VPS in
+`/root/bicino-routing-releases/tower-membrane-samples-20261127/`.
 
 ### Regional terrain models
 
@@ -1624,6 +1798,85 @@ five cities ran through the build chain with them (see
   are still to be read. Sonny's tiles are read by the build; each of the
   others needs a reader, a catalog, an area and city samples through that
   reader before a planet build uses it.
+
+### Planet gate for the hybrid of 2026-11-27
+
+**The first planet graded with the hybrid met every target of the gate.**
+3DEP in the United States, MRDEM-30 in Canada and Copernicus opened at 400 m
+elsewhere. New York, Chicago, Toronto and Calgary keep every route, and no
+flat route anywhere is a detour or a swap. The build was approved on
+2026-11-27; it is not decided whether it ships.
+
+The build ran on `bicino-valhalla-h400-261116` (c4-highmem-24-lssd,
+europe-west4-b), from `planet-261116.osm.pbf`, with
+`setup.sh --opening-radius 400 --terrain usgs-3dep-13,nrcan-mrdem-30
+--elevation-cache elevation-cache-2026-11-26.json`. It was the first run of
+the unattended chain on a real builder. The images, download, inputs and
+ungraded build ran with tools `a1912b85`; the elevation stage onward with
+`2a2dd797`, after PR 928.
+
+| Archive | SHA-256 | Bytes | Tiles | Elevation manifest |
+|---|---|---|---|---|
+| Graded | `4e8a22e5817fefbaa7dc460aca5e49a5a1b1fb13d898ce6997eed4125dfb5480` | 107,553,546,240 | 209,979 | `9d183d96…` (hybrid) |
+| Ungraded | `29148e0275c9f77d3a8258390ad0b6b60e8e8343b35c029ad31caf10a5bee854` | 104,563,353,600 | 209,979 | none |
+
+Both graphs were built with `--all-bridges`, so the ungraded archive is not
+production's `abe5e72e…`.
+
+- **Qualification:** both archives passed smoke 17/17, cross-border 4/4,
+  the audit 281/298 with the 17 known exceptions, and profiles 5/5.
+- **Gate:** 25 cities. The longest flat routes are +0.3% (Buenos Aires)
+  and +0.2% (Houston); every other judged flat city is 0.0%, with no
+  detours and no swaps. `use_hills` changes 10 of the 17 hilly legs:
+  Lisbon 2/4, San Francisco 2/4, Zurich 3/4, Wellington 2/4, Stuttgart 1/1.
+  Montreal, a report-only city, has one route 5.3% longer.
+- **Times:** the download 44 minutes. The elevation stage restored the kept
+  Copernicus sets in 12 minutes (raw 430 s, 400 m 297 s). Its first run
+  stopped on two MRDEM-30 cells with heights hundreds of metres below sea
+  level (see [Pits at shorelines](#pits-at-shorelines)); with PR 928 the terrain round
+  took 35 minutes, two of its rounds each losing a worker to the 15-minute
+  cell deadline, and the blend of 26,475 cells 19.5 minutes. The ungraded
+  build took 4 h 22 min and the graded one 4 h 50 min beside it; the
+  qualification and the gate took under a minute. The chain took 7 hours
+  from start to result, with peaks of 1,271 GB of scratch and 52 GB of
+  memory.
+- **Kept:** the hybrid tiles and the terrain tiles are in the tile bucket
+  (see [what is kept](builder/elevation-cache-proposal.md#kept-since-2026-11-27)).
+
+**Known false grades.** Lidar terrain models put pits and channels under
+some roads that the gate's cities do not cross. Three read-only scans of the
+builder's tiles and graphs looked for them:
+
+- 63,989 narrow closed hollows lie at least 30 m deep, 20 m further under
+  Copernicus than the ground around them, with a step of 20 m or more
+  between two neighbouring posts; most are canyons, mines and quarries.
+- 61 public-road ways (54 paved, 7 unpaved) read a false step: 30% or
+  steeper over 30 m at the hollow, and 20% or less with it filled. Five are
+  pit artifacts: Chemin de Radford in Quebec, a 47 m dip; the Alberni
+  Highway and Van Horne Road near Coombs, BC; Pyramid Road in Georgia; and a
+  residential road in Texas. Twenty-one are stream crossings (bridge
+  approaches, culverts and unmapped crossings), where the lidar shows the
+  channel under the road; two are at the tunnel of US 189 in Provo Canyon;
+  33 are narrow valleys where the mapped road line lies partly over the
+  drop. 58 of the 61 are in 3DEP. Besides them, 44 service roads, 69 tracks
+  and 63 bike or foot ways read such a step.
+- The graded graph stores the steps: at 204 of the 238 points the edge's
+  steepest stored slope is 20% or more. The two US 189 ways are the
+  exception: Valhalla grades a tunnel from its ends, and they store 2%. So
+  at most 59 public-road ways (52 paved, 7 unpaved) carry a false step in
+  the graph, and 53 of them store a slope of 20% or more; the five pit
+  artifacts store 28% to 64% (Chemin de Radford 64%). On the public roads
+  the edges' weighted grade, which bicycle costing reads, is 10% at the
+  median and 15% at most; Valhalla stores no weighted grade above 15%, so
+  only the stored maximum slope shows how large a step is.
+- Open channels under bridges are not closed hollows, so these scans do not
+  count them.
+
+The result, the gate report, the manifests, the logs and the scans are on
+the map VPS in `/root/bicino-routing-releases/builder-h400-261116/`
+(`diagnostics/` holds the scans). The road check's write-up and its list of
+roads are in the sessions' notes folder on Chris's Mac, under
+`mrdem-canada-20261127/pits/artifacts-20261127/road-check/`.
 
 ## Pull, assemble, and install on Coolify
 
