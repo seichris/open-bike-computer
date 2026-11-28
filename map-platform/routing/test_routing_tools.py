@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1709,7 +1710,7 @@ class TerrainSourceTests(unittest.TestCase):
     ROUTING = Path(build_elevation.__file__).parent
 
     def test_the_checked_in_source_list_pins_its_catalog_and_its_approval(self):
-        source, canada, europe, zealand, hong_kong = build_elevation.load_terrain_sources(
+        source, canada, europe, zealand, hong_kong, japan = build_elevation.load_terrain_sources(
             self.ROUTING / "elevation-sources.json")
         self.assertEqual((source.id, len(source.tiles), source.origin_object), ("usgs-3dep-13", 955, None))
         self.assertEqual(source.tile_url(-74, 40), "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/"
@@ -1808,12 +1809,29 @@ class TerrainSourceTests(unittest.TestCase):
         self.assertEqual([hong_kong_area[1].contains(Point(x, y)) for x, y in (
             (114.1588, 22.2820), (114.1244, 22.4106), (113.9440, 22.2550), (114.0579, 22.5431), (113.5439, 22.1987))],
             [True] * 3 + [False] * 2)
-        # Europe, New Zealand and Hong Kong touch neither North American area, so every cell keeps the one source
-        # it has.
-        everywhere = build_elevation.Terrain.over((source, canada, europe, zealand, hong_kong), sorted(
-            set(source.tiles) | set(canada.tiles) | set(europe.tiles) | set(zealand.tiles) | set(hong_kong.tiles)))
+        # GSI's tiles of Japan: the 122 cells that touch the area and hold land, kept in the elevation bucket.
+        self.assertEqual((japan.id, len(japan.tiles), japan.mirror), (
+            "gsi-japan-dem5a-dem10b-20261127", 122,
+            "gs://bicino-routing-elevation/terrain-sources/gsi-japan-dem5a-dem10b-20261127/"))
+        self.assertEqual(japan.pin((139, 35)), {
+            "source": "gsi-japan-dem5a-dem10b-20261127", "url": f"{japan.mirror}N35E139.hgt.gz", "bytes": 8261517,
+            "etag": "6dfd414476059d31f7f1e754479164a45c6b6ae98eb3aae5528a8602e453f289",
+            "areaSha256": japan.area_sha256, "rejects": {"below": -10, "above": 4000, "pixelsAround": 15}})
+        self.assertEqual(japan.provenance_file((139, 35)),
+                         ("N35E139.txt", "af869b8af1fafc66959da67cf30a7a2758d6d6784758fe7c906d0947139f163f"))
+        japan_area = build_elevation.load_area(japan.area, japan.area_sha256)
+        self.assertTrue(all(terrain_catalog.touches_area(cell, japan_area) for cell in japan.tiles))
+        # Tokyo, Mount Fuji, Sapporo, Naha and Fukuoka are inside; Busan, Seoul and Vladivostok outside.
+        self.assertEqual([japan_area[1].contains(Point(x, y)) for x, y in (
+            (139.7671, 35.6812), (138.7274, 35.3607), (141.3544, 43.0621), (127.6809, 26.2124), (130.4017, 33.5902),
+            (129.0756, 35.1796), (126.9780, 37.5665), (131.8855, 43.1155))], [True] * 5 + [False] * 3)
+        # Europe, New Zealand, Hong Kong and Japan touch neither North American area, so every cell keeps the one
+        # source it has.
+        everywhere = build_elevation.Terrain.over((source, canada, europe, zealand, hong_kong, japan), sorted(
+            set(source.tiles) | set(canada.tiles) | set(europe.tiles) | set(zealand.tiles) | set(hong_kong.tiles)
+            | set(japan.tiles)))
         self.assertEqual((len(everywhere.cells), sum(1 for found in everywhere.cells.values() if len(found) > 1)),
-                         (3340 + 848 + 60 + 2, 95))
+                         (3340 + 848 + 60 + 2 + 122, 95))
         document = json.loads((self.ROUTING / "elevation-sources.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1833,7 +1851,7 @@ class TerrainSourceTests(unittest.TestCase):
                 return build_elevation.load_terrain_sources(root / "elevation-sources.json")
 
             self.assertEqual([found.tiles for found in load(lambda value: None)],
-                             [source.tiles, canada.tiles, europe.tiles, zealand.tiles, hong_kong.tiles])
+                             [source.tiles, canada.tiles, europe.tiles, zealand.tiles, hong_kong.tiles, japan.tiles])
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "not approved"),
                 (lambda value: value.update(approvedForRouting="yes"), "not approved"),
@@ -1887,6 +1905,16 @@ class TerrainSourceTests(unittest.TestCase):
             ):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     load(change, index=4)
+            for change, message in (
+                (lambda value: value.update(approvedForRouting=False), "gsi-japan-dem5a-dem10b-20261127 is not approved"),
+                (lambda value: value.update(origin=value["origin"] + "/dem5b_png"), "unsupported"),
+                (lambda value: value.update(horizontalCrs="EPSG:4612"), "unsupported"),
+                (lambda value: value.pop("mirror"), "fields"),
+                (lambda value: value.update(tileCount=151), "not 151"),
+                (lambda value: value.update(catalog=document["terrain"][4]["catalog"]), "not the catalog"),
+            ):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    load(change, index=5)
             for change, message in (
                 (lambda value: value.update(approvedForRouting=False), "linz-nz-lidar-1m-dem is not approved"),
                 (lambda value: value.update(origin=value["origin"].replace("dem_1m", "dsm_1m")), "unsupported"),
@@ -2305,6 +2333,113 @@ class KeptTerrainTests(unittest.TestCase):
         self.assertEqual(build_elevation.parse_kept_catalog(text), {cell: (
             hashlib.sha256((out / "provenance" / "N22E114.txt").read_bytes()).hexdigest(), "20261127",
             record["fileBytes"], hashlib.sha256(build_elevation.hgt_path(out, *cell).read_bytes()).hexdigest())})
+
+
+class GsiTileTests(unittest.TestCase):
+    """GSI's PNG tiles of Japan into a kept tile, on 41-post tiles and a small area."""
+
+    POSTS = 41
+
+    def setUp(self):
+        for module in (build_elevation, terrain_catalog):
+            patcher = patch.object(module, "POSTS", self.POSTS)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    @staticmethod
+    def png(centimetres):
+        """An RGB PNG whose pixels encode heights in centimetres as GSI's do; NaN is none."""
+        import struct
+        import zlib
+
+        import numpy as np
+
+        value = np.where(np.isnan(centimetres), 2 ** 23, np.nan_to_num(centimetres)).astype(np.int64) % 2 ** 24
+        pixels = np.stack([value >> 16, (value >> 8) & 255, value & 255], axis=-1).astype(np.uint8)
+        raw = b"".join(b"\x00" + row.tobytes() for row in pixels)
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        height, width = centimetres.shape
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    def test_a_gsi_tile_decodes_to_metres_with_none_and_heights_below_zero(self):
+        import numpy as np
+
+        centimetres = np.full((256, 256), 4321.0)
+        centimetres[0, :3] = [np.nan, -1, -1050]
+        heights = terrain_catalog.gsi_decode(self.png(centimetres))
+        self.assertTrue(np.isnan(heights[0, 0]))
+        np.testing.assert_allclose(heights[0, 1:4], [-0.01, -10.5, 43.21], rtol=0, atol=1e-4)
+        with self.assertRaisesRegex(ValueError, "not a 256-pixel RGB PNG"):
+            terrain_catalog.gsi_decode(self.png(centimetres[:16, :16]))
+
+    def test_dem5a_gives_the_pixels_it_has_and_dem10b_the_rest_and_the_sea_costs_one_request(self):
+        import numpy as np
+
+        lidar = np.full((256, 256), 4500.0)
+        lidar[:, :128] = np.nan
+        served = {"dem_png/14/1/2": (self.png(np.full((256, 256), 3000.0)), "e10b"),
+                  "dem5a_png/14/1/2": (self.png(lidar), "e5a")}
+        asked = []
+
+        def fetch(url):
+            asked.append(url.rpartition("/xyz/")[2][:-4])
+            return served.get(asked[-1])
+
+        heights, read = terrain_catalog.gsi_tile(1, 2, fetch, terrain_catalog.Rate(1000))
+        self.assertEqual(read, [("dem_png", "e10b"), ("dem5a_png", "e5a")])
+        np.testing.assert_allclose(heights[:, :128], 30.0)
+        np.testing.assert_allclose(heights[:, 128:], 45.0)
+        asked.clear()
+        self.assertEqual(terrain_catalog.gsi_tile(1, 3, fetch, terrain_catalog.Rate(1000)), (None, []))
+        self.assertEqual(asked, ["dem_png/14/1/3"])
+
+    def test_gsi_tiles_make_a_cells_kept_tile_once_and_name_every_tile_read(self):
+        import numpy as np
+
+        cell = (139, 35)
+        area_path = self.root / "area.geojson.gz"
+        area_path.write_bytes(terrain_catalog.area_bytes(
+            {"type": "Feature", "properties": {}, "geometry": mapping(box(139.0, 35.985, 139.02, 36.0))}))
+        area = build_elevation.load_area(area_path, hashlib.sha256(area_path.read_bytes()).hexdigest())
+        pit = np.full((256, 256), 4500.0)
+        pit[100:103, 100:103] = -5000.0
+        pitted = (terrain_catalog.gsi_tile_x(139.0), terrain_catalog.gsi_tile_y(35.99))
+        asked = []
+
+        def fetch(url):
+            asked.append(url)
+            layer, _, x, y = url.rpartition("/xyz/")[2][:-4].split("/")
+            if layer == "dem5a_png":
+                # DEM5A has the column of tiles the posts lie in, and not the next.
+                if int(x) % 2:
+                    return None
+                return self.png(pit if (int(x), int(y)) == pitted else np.full((256, 256), 4500.0)), f"a{x}"
+            return self.png(np.full((256, 256), 3000.0)), f"b{x}.{y}"
+
+        out = self.root / "cells"
+        record = terrain_catalog.gsi_cell(cell, area, out, fetch, terrain_catalog.Rate(1000), jobs=2)
+        self.assertEqual(record["tiles"] * 2, len(asked))
+        self.assertGreater(record["rejectedPixels"], 9)
+        self.assertEqual(record["rejectedHeights"], [-50.0, -50.0])
+        posts, _ = build_elevation.read_tile(build_elevation.hgt_path(out, *cell))
+        # The posts lie in the column of tiles DEM5A has.
+        self.assertEqual(np.unique(posts[np.isfinite(posts)].round(1)).tolist(), [45.0])
+        lines = (out / "provenance" / "N35E139.txt").read_text().splitlines()
+        self.assertEqual(lines, sorted(lines))
+        self.assertEqual(len(lines), len(asked) - sum(int(url.split("/")[-2]) % 2 for url in asked
+                                                       if "dem5a_png" in url))
+        self.assertTrue(all(re.fullmatch(r"(dem_png|dem5a_png)/14/\d+/\d+ [ab][\d.]+", line) for line in lines))
+        # A recorded cell is not made again.
+        self.assertEqual(terrain_catalog.gsi_cell(cell, area, out, None, None), record)
+        self.assertEqual(build_elevation.parse_kept_catalog(terrain_catalog.kept_catalog(out, "20261127"))[cell][2:],
+                         (record["fileBytes"], record["fileSha256"]))
 
 
 class ElevationManifestTests(unittest.TestCase):

@@ -198,6 +198,10 @@ production now.
      zips of 0.5 m GeoTIFFs, made once into two cells kept in the elevation
      bucket, which a build reads alone (see
      [CEDD's lidar in the build](elevation-sources.md#cedds-lidar-in-the-build)).
+   - **GSI's elevation tiles of Japan**, approved on 2026-11-27: DEM5A
+     (lidar) where it has data and DEM10B (contours) elsewhere, crawled once
+     from GSI's PNG tile pyramid into 122 cells kept in the elevation
+     bucket (see [GSI's tiles in the build](elevation-sources.md#gsis-tiles-in-the-build)).
 
    Each source pins two files:
 
@@ -228,7 +232,9 @@ production now.
      sheet's version, size, ETag and NZTM bounds, and the sheets each of its
      60 cells reads. CEDD's [catalog](cedd-hk-lidar-dtm-2020-tiles-20261127.txt)
      pins each kept tile's size and SHA-256 and that of the provenance file
-     beside it, which names every zip the tile was made from.
+     beside it, which names every zip the tile was made from; GSI's
+     [catalog](gsi-japan-dem5a-dem10b-tiles-20261127.txt) does the same, its
+     provenance naming every PNG tile read with its layer and ETag.
 
    [terrain_catalog.py](terrain_catalog.py) writes the files: an area from
    an `osmium export` of the relation, or of several for Sonny, 3DEP's
@@ -445,9 +451,10 @@ city at one opening radius and run the gate on it in one command, use
 below do the same by hand and also take other elevation sources.
 
 Cities marked `planetOnly` have never been built as samples and run only
-against planet services: Copenhagen, Paris, London, Munich and Tokyo, with
-one or two legs each of the 2026-11-24 planet check. With New York, Dubai
-and Stuttgart, which do build as samples, the file holds all 27 legs of
+against planet services: Copenhagen, Paris, London and Munich, with one or
+two legs each of the 2026-11-24 planet check. With New York, Dubai,
+Stuttgart and Tokyo, which do build as samples (Tokyo from the Kanto
+extract, to try GSI's tiles), the file holds all 27 legs of
 that check. All cities together are the release gate for a graded planet:
 serve the graded and the ungraded planet from the same snapshot and run every
 city in one report, with no `--city`.

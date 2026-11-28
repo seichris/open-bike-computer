@@ -1860,12 +1860,11 @@ and [LINZ's lidar](elevation-sources.md#linzs-lidar-in-the-build)).
   and CEDD's 2020 lidar DTM of Hong Kong, whose terms list copying and
   distribution but not adaptation. Chris decided the same day to use
   CEDD's, on the reading that the build's processing is covered. Sonny's
-  tiles, from a copy of them in the elevation bucket, LINZ's lidar and
-  CEDD's lidar, from tiles kept in the bucket, are read by the build; GSI's
-  tiles need a reader, a catalog, an area and city samples through that
-  reader before a planet build uses them.
+  tiles, from a copy of them in the elevation bucket, LINZ's lidar, and
+  CEDD's lidar and GSI's tiles, from tiles kept in the bucket, are read by
+  the build.
 - **Kept tiles** are made once and read from the bucket alone: CEDD's with
-  `terrain_catalog.py cedd-cells`, then `kept-catalog` for the catalog and
+  `terrain_catalog.py cedd-cells`, GSI's with `gsi-cells`, then `kept-catalog` for the catalog and
   `mirror --source ID --from DIR` for the upload. A new survey needs a new
   source id and prefix; an object in the bucket is never replaced.
 - **A new version of Sonny's tiles** needs a new catalog and area

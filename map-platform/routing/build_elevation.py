@@ -160,7 +160,18 @@ CEDD_PIXEL = 5.0
 # CEDD_REJECT_MARGIN of them, 120 m as for MRDEM-30, when the tiles are made.
 CEDD_HEIGHTS = (-10, 1000)
 CEDD_REJECT_MARGIN = 24
-KEPT_RULES = {CEDD_ADAPTER: (CEDD_HEIGHTS, CEDD_REJECT_MARGIN)}
+# GSI's elevation tiles of Japan: a Web Mercator pyramid of PNG tiles on JGD2011, a pixel being 65536 R + 256 G +
+# B centimetres (2^23 none, two's complement below). DEM5A, from lidar, where it has data and DEM10B, from 1:25,000
+# contours, elsewhere, both read at zoom 14, about 8 m a pixel in Japan.
+GSI_ADAPTER = "gsi-japan-dem5a-dem10b-z14-hgt-v1"
+GSI_ORIGIN = "https://cyberjapandata.gsi.go.jp/xyz"
+GSI_ZOOM = 14
+GSI_LAYERS = ("dem5a_png", "dem_png")
+# Heights beyond these are not ground; Mount Fuji is 3,776 m. Dropped with the pixels within GSI_REJECT_MARGIN of
+# them, about 120 m as for MRDEM-30, when the tiles are made.
+GSI_HEIGHTS = (-10, 4000)
+GSI_REJECT_MARGIN = 15
+KEPT_RULES = {CEDD_ADAPTER: (CEDD_HEIGHTS, CEDD_REJECT_MARGIN), GSI_ADAPTER: (GSI_HEIGHTS, GSI_REJECT_MARGIN)}
 # Posts over which the fill is lifted to meet the terrain at its edge: about 500 m north to south.
 BLEND_POSTS = 16
 FETCH_CONNECTIONS = 8
@@ -409,6 +420,7 @@ TERRAIN_ADAPTERS = {
     SONNY_ADAPTER: (SONNY_ORIGIN, "EPSG:4326", {"mirror"}, parse_sonny_catalog),
     LINZ_ADAPTER: (LINZ_ORIGIN, f"EPSG:{LINZ_EPSG}", set(), parse_linz_catalog),
     CEDD_ADAPTER: (CEDD_ORIGIN, f"EPSG:{CEDD_EPSG}", {"mirror"}, parse_kept_catalog),
+    GSI_ADAPTER: (GSI_ORIGIN, "EPSG:6668", {"mirror"}, parse_kept_catalog),
 }
 OBJECT_ETAG = re.compile(r"[0-9a-f]{32}(-\d+)?")
 OBJECT_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -1063,7 +1075,7 @@ def read_kept_cell(source, cell, out):
 
 
 TERRAIN_READERS = {TERRAIN_ADAPTER: read_usgs_cell, MRDEM_ADAPTER: read_mrdem_cell, SONNY_ADAPTER: read_sonny_cell,
-                   LINZ_ADAPTER: read_linz_cell, CEDD_ADAPTER: read_kept_cell}
+                   LINZ_ADAPTER: read_linz_cell, CEDD_ADAPTER: read_kept_cell, GSI_ADAPTER: read_kept_cell}
 
 
 def terrain_deadline(sources):
