@@ -1776,10 +1776,110 @@ before. No route or grade lookup failed.
   reads none. No terrain model covers São Paulo, so the ground's height and
   how steep these streets are were not measured.
 
+#### Hong Kong and Buenos Aires
+
+The same evening the membrane was run on the two sample cities left: Hong
+Kong, the gate's other hilly tower core, and Buenos Aires, the one low
+flat city of the samples that no approved terrain model covers. The
+hybrid build grades Hong Kong from CEDD's lidar since the same day (see
+[Regional terrain models](#regional-terrain-models)), so here it tests
+the rule against a terrain model rather than standing for a city the
+membrane would grade. Hong Kong
+was cut from Geofabrik's extract of 2026-11-25 (SHA-256 prefix
+`0fa7e9c37b4a`), the file the tower-city samples and the
+[regional terrain samples](elevation-sources.md#sample-results) used, with
+China's relation merged in; Buenos Aires from Argentina's of the same day
+(`62575bacd8f5`). Each was built the same five ways. Hong Kong's 400 m row
+equals the tower-city sample's, and Buenos Aires' 200 m row equals the
+[planet gate at 200 m](#planet-gate-for-copernicus-opened-at-200-m)'s.
+
+Hong Kong was also run on the four hill legs of the regional samples
+(Sheung Wan to Mid-Levels, Wan Chai to Happy Valley, Admiralty to Kennedy
+Road, Causeway Bay to Tai Hang Road), which are not in the gate. Their
+ungraded routes and the 400 m tiles give exactly the climb and 6%+ shares
+those samples recorded, so the CEDD lidar's figures from them serve here
+as the terrain model.
+
+The 25 m zones cover 275 km² of Hong Kong's cell (about a third of its
+box) and 52 km² of Buenos Aires' (a tenth of its box).
+
+| City | Opened at 400 m | Opened at 200 m | No data (30 m) | Membrane at 25 m |
+|---|---|---|---|---|
+| Buenos Aires, 8 routes | +0.3%, 2% | +0.3%, 7% | +6.7% (a swap), 2% | +3.5%, 0% |
+| Hong Kong, 4 routes (report only) | 0.0%, 6% | 0.0%, 14% | 0.0%, 0% | 0.0%, 16% |
+
+Each cell gives the longest length change and the median 6%+ share of the
+direct routes, as above. With the twelve cities above, the membrane and the
+no-data tiles meet the targets on all fourteen; the gate lets the no-data
+tiles' one swap pass, and no target counts Hong Kong.
+
+Climb along each Hong Kong leg's direct Everyday route, and the share of it
+on 6%+ grades:
+
+| Leg | CEDD lidar | Opened at 400 m | Opened at 200 m | No data (30 m) | Membrane at 25 m |
+|---|---|---|---|---|---|
+| Central to Wan Chai | 3 m, 0% | 9 m, 10% | 27 m, 14% | –, 0% | 42 m, 17% |
+| Admiralty to Causeway Bay | 0 m, 0% | 10 m, 3% | 36 m, 8% | –, 0% | 30 m, 10% |
+| Sheung Wan to Mid-Levels | 151 m, 20% | 188 m, 25% | 210 m, 33% | 15 m, 7% | 203 m, 39% |
+| Wan Chai to Happy Valley | 15 m, 0% | 33 m, 11% | 55 m, 17% | 4 m, 2% | 65 m, 29% |
+| Admiralty to Kennedy Road | 149 m, 28% | 220 m, 45% | 187 m, 40% | 10 m, 2% | 182 m, 57% |
+| Causeway Bay to Tai Hang Road | 109 m, 40% | 108 m, 39% | 127 m, 44% | 126 m, 35% | 118 m, 46% |
+
+The no-data column counts climb only on the stretches with heights; the
+first two routes have none.
+
+- **In Hong Kong the membrane reads more steepness than any other
+  source.** The north shore of Hong Kong Island, from Sheung Wan to
+  Causeway Bay and Happy Valley, is one zone of about 14 km² that runs
+  3.4 km from the harbour up the slopes below the Peak. The heights around
+  it go from the harbour's 0 m to 335 m, 214 m at the 95th percentile. The
+  membrane spans all of it as one surface, so the flat ground at the foot
+  of the hill is lifted and tilted with the hillside: Central reads 81 m
+  where the 200 m tile reads 21 m, and the end of the Happy Valley leg
+  66 m against 32 m. The tram corridor, which climbs 3 m on the lidar,
+  reads more 6%+ ground than on either opening, Wan Chai to Happy Valley
+  reads 29% against none, and every hill leg reads more of its route steep
+  than the lidar does. The four hill legs climb 568 m on it, against the
+  lidar's 424 m and 549 m at 400 m. `use_hills` changes three of the four,
+  and on two of them the hill-avoiding route has the higher 6%+ share,
+  judged on the mean of the four tile sets' heights.
+- **No data clears the corridor and loses the hills.** Both corridor
+  routes read no grade. The hill legs keep their slope only outside the
+  zone: 2% to 7% at 6%+, except Tai Hang Road, half of which lies outside
+  it.
+- **The 400 m opening stays closest to the lidar** on the hills (549 m of
+  climb against 424 m) and reads 10% and 3% of the corridor at 6%+. On the
+  200 m, no-data and membrane graphs Causeway Bay to Tai Hang Road takes a
+  route 17.7% longer on both profiles, as the Lands Department's model did
+  in the regional samples; the lidar keeps the direct route and 400 m
+  stays within 0.5% of it. The hybrid build grades Hong Kong from the
+  lidar, so none of these variants applies there; what it shows matters
+  for tower districts on a shore below a hill outside the terrain models.
+- **The membrane flattens Buenos Aires.** The heights around the zones its
+  legs cross lie between 3 and 27 m (5th to 95th percentile). Along the
+  legs the membrane lowers the 200 m tile by up to 26 m and raises it by at
+  most 6 m. Three of the four legs' direct routes read no 6%+ grade; La
+  Boca to Recoleta reads 5% and 4%, against 7% and 6% at 400 m. The longest
+  change, Plaza de Mayo to Palermo on Road at +3.5%, takes a route with no
+  steep reading, within 5%. The four Everyday routes climb 96 m, against
+  121 m at 400 m and 201 m at 200 m. With no data in the zones, Belgrano to
+  San Telmo on Everyday is 6.7% longer, a swap the gate lets pass. No
+  terrain model covers Buenos Aires, so how much of the 96 m is real was
+  not measured.
+- **Zones that hold a hillside stand out by the heights around them.** Of
+  the zones the gate legs cross in all fourteen cities, the heights on
+  their edge span at most 78 m between the 5th and 95th percentiles,
+  except two: Wellington's centre (0 to 149 m), where the membrane loses
+  half of Kelburn's climb, and Hong Kong's north shore (0 to 214 m). The
+  next are San Francisco's (0 to 78 m) and São Paulo's (726 to 794 m), so
+  a limit on the span would not catch the Paulista ridge.
+
 #### Recommendation
 
-**The membrane at 25 m is the best candidate so far, but test it more
-before a planet build.**
+**The membrane at 25 m is the best candidate so far for flat tower cores,
+but not as a rule for every zone. Hong Kong shows it inventing slope where
+a zone runs from a shore up a hill, so a planet build needs a guard for
+such zones and the 252-downtown survey first.**
 
 - **It answers the no-data rule's open problem.** A tower zone on a slope
   keeps its slope, so Wellington keeps its routes, and no bridge reads the
@@ -1792,27 +1892,34 @@ before a planet build.**
   hill and a membrane has no crest. São Paulo shows it at its largest:
   the zone covers the Paulista ridge, which drops about 35 m, and avoiding
   hills changes neither leg there.
+- **It invents slope where a zone runs from a shore up a hill.** Hong
+  Kong's north shore becomes one surface from the harbour to 335 m, and on
+  every Hong Kong leg the membrane reads more 6%+ ground than the lidar
+  and than either opening.
 - **25 m was chosen on these samples.** 30 m leaves Midtown's edge on
   mid-rise plateaus and 20 m masks too much of the hilly cities; the
-  margin between them is small. Singapore, Shanghai and Dubai meet the
-  targets with it too, and São Paulo, which no target judges, loses its
-  ridge (see above). Before a planet build, run it on Hong Kong, the gate's
-  other hilly tower core: CEDD's lidar covers it, but its terms for derived
-  products are still to be read, so it may stay on opened Copernicus. Run
-  it on Buenos Aires, the one low flat city of the samples that no
-  approved terrain model covers, to see that the rule leaves low cities
-  alone; Amsterdam, Berlin and Houston will be graded from terrain models.
-  And run it on the wider survey of 252 downtowns, judging by the direct
-  routes' 6%+ share as well as length.
+  margin between them is small. Singapore, Shanghai, Dubai and Buenos
+  Aires meet the targets with it too, and of the report-only cities São
+  Paulo loses its ridge and Hong Kong gains phantom slope (see above).
+  The wider survey of 252 downtowns is still to run, judging by the
+  direct routes' 6%+ share as well as length.
+- **A guard to try next.** Leave on the 400 m opening any zone whose edge
+  heights span more than about 100 m between the 5th and 95th
+  percentiles. Of the zones the gate legs cross, that takes Hong Kong's
+  north shore and Wellington's centre off the membrane and leaves every
+  flat tower core on it. It would not catch São Paulo's ridge (68 m). Not
+  yet tried, and not measured on the zones away from the legs.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
   States and Canada in the hybrid, and the four regional sources approved
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
   (see [Regional terrain models](#regional-terrain-models)). All eight
   cities of these samples lie in the area of one of them, so once those
-  have readers none is graded from opened Copernicus. The membrane matters
-  for tower cores outside those areas: Singapore, Shanghai, Dubai and São
-  Paulo in the gate (see above), and the survey's other downtowns. Of
-  those four only Singapore's routes changed with it, and São Paulo is
+  have readers none is graded from opened Copernicus; Sonny's tiles,
+  LINZ's lidar and CEDD's lidar already have theirs. The membrane matters
+  for tower cores outside those areas: Singapore, Shanghai, Dubai, São
+  Paulo and Buenos Aires in the gate (see above), and the survey's other
+  downtowns. Of the five, the
+  membrane changed routes in Singapore and Buenos Aires, and São Paulo is
   where it costs most.
 - **A planet build needs the step in `build_elevation.py`.** The sample
   tool solves the membrane over the cells of `--bounds` together. A planet
@@ -1823,8 +1930,10 @@ before a planet build.**
 
 The reports, summaries, comparisons with the terrain models, the scratch
 scripts and the manifests are on the map VPS in
-`/root/bicino-routing-releases/tower-membrane-samples-20261127/`, and those
-of the four tower cities in `tower-membrane-four-cities-20261127/` beside it.
+`/root/bicino-routing-releases/tower-membrane-samples-20261127/`, those
+of the four tower cities in `tower-membrane-four-cities-20261127/` beside it,
+and those of Hong Kong and Buenos Aires in
+`tower-membrane-hong-kong-buenos-aires-20261127/`.
 
 ### Regional terrain models
 
