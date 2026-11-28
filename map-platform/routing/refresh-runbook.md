@@ -1985,14 +1985,205 @@ slope 6% or more.
   route from the railway station to Hataitai is 6.57 km (+41.5%), so a
   long detour there is not wrong in itself.
 
+#### The 252-downtown survey
+
+On 2026-11-28 all five tile sets were tried on the 252 downtowns of the
+wide survey (see [Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged)).
+Only heights were measured, and no graph was built:
+
+- **Routes.** The survey's 3,938 direct routes, the ungraded ones on Road
+  and Everyday, were matched on the development graph with
+  `/trace_attributes`. That gives each edge's shape, its bridge and tunnel
+  flags and the graph's own grades. Both graphs come from the same
+  planet-261116 extract.
+- **Grades.** Each edge was graded from each tile set the way Valhalla
+  3.9.2's elevation builder does it:
+  - heights every 60 m, read bilinearly;
+  - bridges and tunnels graded from their ends and clamped to 3%;
+  - the stored grade rounded up to a whole percent, so 6%+ means a raw
+    grade above 5%.
+
+  A route's 6%+ share is taken over its interior edges, because the graph
+  grades a route's first and last edges whole.
+- **Tiles.** The tiles were built over whole 1° cells: 174 groups of
+  downtowns, 192 cells, 6,174 km² of tower zones. The guard used
+  `--edge-span 100`, as in the samples.
+- **Check.** Outside the United States and Canada the development graph is
+  graded from the 400 m opening, so it checks the emulation. On 3,794
+  routes the two agree for 99.1% of them on whether a route reads more
+  than 5% at 6%+, and their shares differ by 0.24 points on average.
+
+**Against the terrain models.** 76 of the downtowns lie in the area of a
+terrain model:
+
+- In the United States and Canada the development graph's own grades come
+  from 3DEP and MRDEM-30.
+- In Europe, Japan and Hong Kong the routes were graded the same way from
+  Sonny's, GSI's and CEDD's cells, copied from the elevation bucket.
+- Left out: Auckland, and 24 routes in Tseung Kwan O, Kachidoki and Minato
+  Mirai on which more than 5% of the samples have no data in the terrain
+  model.
+
+| Tiles | Routes over 5% at 6%+ | Phantom | Lost | Mean error | Everyday climb |
+|---|---|---|---|---|---|
+| Terrain models | 287 | | | | 9,448 m |
+| Opened at 400 m | 297 | 131 | 121 | 3.2 pts | 6,876 m |
+| Opened at 200 m | 417 | 199 | 69 | 4.0 pts | 9,614 m |
+| Membrane at 25 m | 300 | 116 | 103 | 3.2 pts | 8,257 m |
+| Guard, 400 m below | 296 | 114 | 105 | 3.0 pts | 8,264 m |
+| Guard, 200 m below | 305 | 117 | 99 | 3.1 pts | 8,432 m |
+
+- This covers 1,166 routes.
+- A route is phantom when it reads more than 5% at 6%+ on the tiles but
+  not on the terrain model. It is lost when the terrain model reads it
+  that steep and the tiles do not.
+- The mean error is the mean absolute difference in the 6%+ share.
+- Climb is summed over the Everyday routes of Europe, Japan and Hong Kong.
+  The graph gives no heights for the United States and Canada.
+
+Findings:
+
+- **The guard with the 400 m opening below reads closest.**
+  - Its downtown medians lie 2.1 points from the terrain models' on
+    average, against 2.3 with the 200 m opening below, 2.6 for the 400 m
+    opening and the membrane, and 3.2 for the 200 m opening.
+  - The membrane and both guards misclassify 216 to 219 routes, against
+    252 and 268 for the two openings.
+  - They keep 87% to 89% of the climb, against 73% at 400 m.
+- **Flat tower cores are where the membrane wins.**
+  - In the United States and Canada it reads 14 phantom routes, against 39
+    at 400 m and 50 at 200 m.
+  - New York Midtown's median reads 1% (terrain model 0%, 400 m 17%),
+    Toronto's 0% (7% at 400 m) and Chicago's 0% (3%).
+  - On the 413 routes that run at least half inside a zone, it reads 26
+    phantoms, against 68 at 400 m and 95 at 200 m. A route is inside a
+    zone wherever its membrane heights differ from the 200 m tiles' by
+    more than 0.5 m, sampled every 20 m.
+- **It loses gentle real slopes under large zones.**
+  - On the same 413 routes it loses 52 steep routes, against 37 at 400 m.
+  - Japan's zones are the largest. There it reads 6 of the 39 routes that
+    GSI reads as steep (12 at 400 m, 22 at 200 m), and 574 m of GSI's
+    1,080 m of climb.
+  - Tokyo's Toranomon, 97% inside a zone, reads 0% against GSI's 9%.
+    Montreal reads 1% against 7%, and La Défense 0% against 6%.
+- **Hong Kong needs the guard.** Its mean error is 9.2 points on the
+  membrane, 7.1 with the 400 m opening below, 7.7 with the 200 m opening
+  below and 7.2 on either opening.
+  - On the 70 routes that cross a guarded part, mostly in Hong Kong, the
+    400 m opening alone reads closest (5.8 points, against 7.2 for the
+    400 m guard).
+  - The gap comes from two things: the raise that meets the 200 m tiles
+    at each part's edge, and the rest of each route, which lies on the
+    membrane or the 200 m tiles.
+- **Where a route crosses no zone, the membrane is the 200 m opening.**
+  - Europe's zones are small, and there the membrane misclassifies 140
+    routes against the 400 m opening's 129.
+  - Leeds, Stockholm and Paris Italie read a steep median on the membrane,
+    but not on the terrain model or at 400 m.
+
+**Outside the terrain models**, where the membrane would apply, 175
+downtowns have nothing to judge against:
+
+| Tiles | Flat: routes over 5% (of 1,782) | Some relief: routes over 5% (of 950) | Flat downtowns with a median over 5% | Everyday climb |
+|---|---|---|---|---|
+| Opened at 400 m | 189 | 507 | 2 | 19,507 m |
+| Opened at 200 m | 299 | 639 | 10 | 26,317 m |
+| Membrane at 25 m | 170 | 456 | 5 | 21,981 m |
+| Guard, 400 m below | 170 | 458 | 5 | 22,161 m |
+| Guard, 200 m below | 170 | 458 | 5 | 22,373 m |
+
+- With the 400 m guard, 10% fewer routes read steep than on the 400 m
+  opening, and the climb is 14% greater.
+- **Five flat-labelled downtowns read a steep median on the membrane.**
+  - Busan Centum City reads 24%, against 8% at 400 m.
+  - Belgrade Waterfront, Fortaleza Meireles, Tashkent City and Parramatta
+    read 5% to 7%.
+  - Busan and Belgrade have real slopes (see
+    [Detours and swaps](#detours-and-swaps-how-a-longer-flat-route-is-judged)),
+    and no open terrain model covers Korea, so the labels do not settle
+    these.
+- **Where a zone covers a hill, the membrane reads less than the 400 m
+  opening.** Examples:
+  - São Paulo Paulista: 0%, against 13%.
+  - Dalian: 0%, against 8%.
+  - Kyiv Pechersk: 9%, against 15%.
+  - Xiamen: 28%, against 37%.
+  - Mecca: 25%, against 36%.
+
+  It is not known how much of that is towers and how much is hill.
+- **Where routes cross no zone, it follows the 200 m tiles.** Nairobi
+  Westlands reads 13% against 5% at 400 m, and North Sydney 28% against
+  20%.
+
+**The guard catches 43 zone parts.**
+
+| Area | Parts | Edge spans |
+|---|---|---|
+| Chongqing | 9 | 104 to 177 m |
+| Busan | 7 | 101 to 170 m |
+| Hong Kong | 6 | 104 to 221 m |
+| Rio de Janeiro | 3 | 123 to 195 m |
+| Mexico City, Baku, Kuala Lumpur | 2 each | 104 to 185 m |
+| Lima, São Paulo, Monaco, Istanbul, Cairo, Mecca, Penang, Dalian, Seoul, Tokyo, Hiroshima | 1 each | 101 to 161 m |
+| The cell west of Hong Kong's (113° to 114° E) | 1 | 130 m |
+
+Groups that share a cell counted a part once per group, 55 in all; the
+table counts each part once.
+
+- Eight of the parts lie in the area of a terrain model: six in Hong Kong
+  and one each in Tokyo and Hiroshima. The one in the cell west of Hong
+  Kong's, which holds Tuen Mun, Lantau, Shenzhen's Nanshan and Macau, may
+  lie on either side of the border. At least 34 lie outside the terrain
+  models.
+- Only one part spans more than 200 m: Hong Kong's north shore. 23 span
+  less than 130 m, so the limit still sits where a small change moves
+  parts in or out.
+- Outside the terrain models the 400 m guard moves only three downtown
+  medians by more than 2 points from the membrane's: Mecca, Chongqing and
+  Monaco. The 200 m guard moves five, those three plus Mexico City Santa
+  Fe and Busan Seomyeon:
+
+  | Downtown | Membrane | 400 m guard | 200 m guard | Opened at 400 m | Opened at 200 m |
+  |---|---|---|---|---|---|
+  | Mecca | 25% | 41% | 41% | 36% | 42% |
+  | Chongqing Jiefangbei | 28% | 36% | 42% | 33% | 41% |
+  | Monaco | 49% | 42% | 46% | 45% | 43% |
+  | Busan Seomyeon | 15% | 14% | 29% | 14% | 29% |
+  | Mexico City Santa Fe | 37% | 38% | 42% | 41% | 42% |
+
+- Busan Seomyeon's routes run 84% inside guarded parts, so each guard
+  reads the median of the opening below it.
+
+**Limits:**
+
+- Only heights were measured. Route changes, detours and swaps, the gate's
+  own legs and `use_hills` were not.
+- The routes are one extract's direct routes, judged over their interior
+  edges.
+- The terrain models stand in for the truth. In Europe, Japan and Hong
+  Kong their grades are emulated rather than built. The terrain models
+  keep false steps at culverts (see
+  [False steps at crossings](#false-steps-at-crossings)); bridges and
+  tunnels are graded from their ends, as in the graph.
+- Outside the terrain models the flat labels are the only check, and they
+  are known to be unreliable.
+
 #### Recommendation
 
 **The membrane at 25 m, with zones whose edges span more than 100 m left on
-the 400 m opening, is the best candidate so far. The guard leaves every flat
-tower core as the membrane has it and removes Hong Kong's invented ramp. In
-Wellington it gives Kelburn its height back but sends one leg back onto the
-openings' detour, which the lidar reads as steeper. The 252-downtown survey
-must come first, and it should count how many zones the guard catches.**
+the 400 m opening, is still the best candidate:**
+
+- **On the 252-downtown survey it reads closest of the five tile sets** to
+  the terrain models on the 76 downtowns they cover, and it removes most
+  of the tower cores' phantom slope.
+- **Its cost is gentle real slopes under large zones**, as in Japan and
+  Montreal.
+- **The guard catches 43 zone parts**, at least 34 of them outside the
+  terrain models. Outside the models the 400 m guard moves only three
+  downtowns' medians by more than 2 points.
+- **In Wellington the guard gives Kelburn its height back** but sends one
+  leg back onto the openings' detour, which the lidar reads as steeper.
+- **Route changes have not been measured** beyond the samples.
 
 - **It answers the no-data rule's open problem.** A tower zone on a slope
   keeps its slope, so Wellington keeps its routes, and no bridge reads the
@@ -2015,8 +2206,9 @@ must come first, and it should count how many zones the guard catches.**
   margin between them is small. Singapore, Shanghai, Dubai and Buenos
   Aires meet the targets with it too, and of the report-only cities São
   Paulo loses its ridge and Hong Kong gains phantom slope (see above).
-  The wider survey of 252 downtowns is still to run, judging by the
-  direct routes' 6%+ share as well as length.
+  The 252-downtown survey has since judged it by the direct routes' 6%+
+  share (see [The 252-downtown survey](#the-252-downtown-survey)). Route
+  lengths were not part of that survey.
 - **The guard: which opening goes below is a trade.** `--edge-span 100`
   catches ten parts in four cities and changes nothing in the other ten.
   - With the 400 m opening below, Hong Kong's corridor reads 10% at 6%+
@@ -2030,9 +2222,15 @@ must come first, and it should count how many zones the guard catches.**
     200 m tiles.
   - The hybrid build has lidar readers for both cities (LINZ and CEDD),
     so the choice matters only for hillside tower districts outside the
-    terrain models. The survey has to find those.
-  - The guard does not catch São Paulo's ridge (68 m), and seven of its
-    ten parts span within 30 m of the limit.
+    terrain models.
+  - The survey found at least 34 guarded parts outside the terrain models.
+  - Against the terrain models the 400 m opening below reads a little
+    closer: 2.1 against 2.3 points on downtown medians, and 7.1 against
+    7.7 in Hong Kong.
+  - Outside the terrain models the choice moves Chongqing (36% against
+    42%), Monaco (42% against 46%) and Busan Seomyeon (14% against 29%).
+  - The guard does not catch São Paulo's ridge (68 m). Seven of the
+    samples' ten parts, and 23 of the survey's 43, span less than 130 m.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
   States and Canada in the hybrid, and the four regional sources approved
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
@@ -2041,8 +2239,8 @@ must come first, and it should count how many zones the guard catches.**
   have readers none is graded from opened Copernicus; Sonny's tiles,
   LINZ's lidar and CEDD's lidar already have theirs. The membrane matters
   for tower cores outside those areas: Singapore, Shanghai, Dubai, São
-  Paulo and Buenos Aires in the gate (see above), and the survey's other
-  downtowns. Of the five, the
+  Paulo and Buenos Aires in the gate (see above), and 175 of the survey's
+  252 downtowns. Of the five, the
   membrane changed routes in Singapore and Buenos Aires, and São Paulo is
   where it costs most.
 - **A planet build needs the step in `build_elevation.py`.** The sample
@@ -2059,8 +2257,11 @@ scripts and the manifests are on the map VPS in
 `/root/bicino-routing-releases/tower-membrane-samples-20261127/`, those
 of the four tower cities in `tower-membrane-four-cities-20261127/` beside it,
 those of Hong Kong and Buenos Aires in
-`tower-membrane-hong-kong-buenos-aires-20261127/`, and those of the guard in
-`tower-membrane-guard-20261128/`.
+`tower-membrane-hong-kong-buenos-aires-20261127/`, those of the guard in
+`tower-membrane-guard-20261128/`, and those of the 252-downtown survey in
+`tower-membrane-survey-20261128/` (`tower-membrane-survey-20261128.tgz`,
+SHA-256 `ae41b9df39e11684730b9da1ed89eea17190fa4bebb7602dc4e98484b6ed630a`;
+the tiles were not kept).
 
 ### Regional terrain models
 
