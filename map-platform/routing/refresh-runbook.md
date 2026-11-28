@@ -2138,19 +2138,21 @@ table counts each part once.
 - Only one part spans more than 200 m: Hong Kong's north shore. 23 span
   less than 130 m, so the limit still sits where a small change moves
   parts in or out.
-- Outside the terrain models the guard moves only three downtown medians
-  by more than 2 points:
+- Outside the terrain models the 400 m guard moves only three downtown
+  medians by more than 2 points from the membrane's: Mecca, Chongqing and
+  Monaco. The 200 m guard moves five, those three plus Mexico City Santa
+  Fe and Busan Seomyeon:
 
   | Downtown | Membrane | 400 m guard | 200 m guard | Opened at 400 m | Opened at 200 m |
   |---|---|---|---|---|---|
   | Mecca | 25% | 41% | 41% | 36% | 42% |
   | Chongqing Jiefangbei | 28% | 36% | 42% | 33% | 41% |
   | Monaco | 49% | 42% | 46% | 45% | 43% |
+  | Busan Seomyeon | 15% | 14% | 29% | 14% | 29% |
+  | Mexico City Santa Fe | 37% | 38% | 42% | 41% | 42% |
 
-- Busan Seomyeon's routes run 84% inside guarded parts. They read 14%
-  with the 400 m opening below and 29% with the 200 m opening below,
-  against 15% on the membrane. The two openings read the same 14% and
-  29%.
+- Busan Seomyeon's routes run 84% inside guarded parts, so each guard
+  reads the median of the opening below it.
 
 **Limits:**
 
@@ -2177,8 +2179,8 @@ the 400 m opening, is still the best candidate:**
 - **Its cost is gentle real slopes under large zones**, as in Japan and
   Montreal.
 - **The guard catches 43 zone parts**, at least 34 of them outside the
-  terrain models. Outside the models it moves only three downtowns'
-  medians by more than 2 points.
+  terrain models. Outside the models the 400 m guard moves only three
+  downtowns' medians by more than 2 points.
 - **In Wellington the guard gives Kelburn its height back** but sends one
   leg back onto the openings' detour, which the lidar reads as steeper.
 - **Route changes have not been measured** beyond the samples.
