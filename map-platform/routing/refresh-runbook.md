@@ -2513,9 +2513,10 @@ from its ends, as Valhalla grades a bridge. On Pittsburgh's sample it cut
 the sites storing a slope of 20% or more from 16 to 3 and made none steeper,
 and it put back the one gate leg the hybrid detoured; Chicago's and San
 Francisco's gate rows did not change. Filling the terrain under the road
-instead did less and made eight sites steeper. No chain stage writes the
-planet's site files yet; that, and the stage's cost on a builder, are the
-work before the build (see [What is not done](#what-is-not-done)).
+instead did less and made eight sites steeper. Since 2026-11-28 the
+builder's `crossings` stage runs it on every graded build with terrain
+sources; its cost on a builder is not measured yet (see
+[What is not done](#what-is-not-done)).
 
 #### The count
 
@@ -2734,22 +2735,21 @@ lengthens run over Mount Washington's real hills.
 
 #### What is not done
 
-- **The planet's site files.** `--crossings` takes site files; a chain
-  stage must write them for the United States and Canada from the planet
-  snapshot before the graded build (osmium extract into bands, then
-  `crossing_steps.py sites` in parallel), and the graded build stage must
-  pass them. This laptop took about 40 minutes, two processes at a time,
-  for the 62 extracts, and up to 10 GB of memory for British Columbia's
-  3 million waterways; a builder can run the bands side by side. Measuring
-  them from 1,806 cells of the kept set took 23 minutes. The tools need
-  pyosmium, numpy and shapely besides the osmium command; the builder runs
-  `build_graph.py` with its host's Python, which has none of the three
-  (`setup.sh` installs `osmium-tool` and `python3` only).
-- **The rewrite at planet size.** The osmChange file is built from the cut
-  ways and their parent relations only (`osmium getid`, `osmium
-  getparents`), and `osmium apply-changes` writes the planet once more:
-  about 80 GB of scratch and, by its speed on extracts, half an hour or
-  more. Not measured.
+- **The planet's site files and the rewrite at planet size.** Since
+  2026-11-28 the builder's `crossings` stage does both in the map-platform
+  image (see the builder's [Crossings](builder/README.md#crossings)): it
+  filters the planet, cuts the terrain cells into 4-degree blocks, finds
+  their sites six at a time, rewrites the planet once with `osmium
+  apply-changes`, and `build_graph.py --crossings-from` takes the result
+  only for the same planet and tiles. Its time, memory and scratch at planet
+  size are not measured: this laptop took about 40 minutes, two processes at
+  a time, for the 62 extracts, and up to 10 GB of memory for British
+  Columbia's 3 million waterways; the osmChange planet rewrite needs about
+  80 GB of scratch and half an hour or more by its speed on extracts.
+- **The other terrain sources.** The count and the samples covered 3DEP and
+  MRDEM-30. The stage finds crossings inside every terrain source's area, so
+  a build with Sonny's Europe, LINZ, CEDD and GSI fixes theirs by the same
+  rule; how many it finds there is not known yet.
 - **Tunnels** are counted, not fixed: a tunnel mapped beyond its portal
   puts the hill's height at the approach's end (Highway 126 in Oregon,
   110%). Fix (b) could grade the approach from the portal's solid ground

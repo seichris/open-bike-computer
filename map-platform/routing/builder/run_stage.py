@@ -57,6 +57,7 @@ SCRIPTS = {
     "download": ("download.sh",),
     "inputs": ("inputs.sh",),
     "elevation": ("elevation.sh",),
+    "crossings": ("crossings.sh",),
     "build-ungraded": ("build.sh", "ungraded"),
     "build-graded": ("build.sh", "graded"),
     "qualify-ungraded": ("qualify.sh", "ungraded"),
@@ -64,7 +65,7 @@ SCRIPTS = {
     "gate": ("gate.sh",),
     "terrain-scan": ("terrain-scan.sh",),
 }
-GRADED_ONLY = ("elevation", "build-graded", "qualify-graded", "gate", "terrain-scan")
+GRADED_ONLY = ("elevation", "crossings", "build-graded", "qualify-graded", "gate", "terrain-scan")
 ALREADY_RUNNING = 75
 BLOCKED = 69
 STALE = 78
@@ -79,6 +80,8 @@ def skip_reason(stage, env):
         return "a city sample has no territory audit"
     if stage == "terrain-scan" and not env.get("BICINO_TERRAIN"):
         return "no terrain source: the scan looks for artifacts of the terrain tiles"
+    if stage == "crossings" and not env.get("BICINO_TERRAIN"):
+        return "no terrain source: only a terrain model reads false steps at crossings"
     return None
 
 

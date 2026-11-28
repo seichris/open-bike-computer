@@ -60,7 +60,42 @@ _ROUTING_TERRAIN_CREDITS = {
         "CanElevation Series. Contains information licensed under the Open Government Licence – Canada "
         "(https://open.canada.ca/en/open-government-licence-canada)."
     ),
+    # CC BY 4.0: the credit, the licence and that the data was changed. Three
+    # lines, since the app takes none longer than APP_MAXIMUM_LINE_LENGTH.
+    "sonny-dtm-europe-1s-v25": (
+        "Sonny's LiDAR Digital Terrain Models of Europe (https://sonny.4lima.de), licensed under CC BY 4.0 "
+        "(https://creativecommons.org/licenses/by/4.0/). Modified: resampled to 1 arc-second posts and joined "
+        "to Copernicus GLO-30. Compiled from the national terrain models its _Datasources.txt lists, among them:",
+        "BEV and the Austrian Länder, Digitaal Vlaanderen and the Walloon Region, CUZK, the Danish Agency for "
+        "Climate Data, the Estonian Land Board, the National Land Survey of Finland, IGN France, the German "
+        "Länder (GeoBasis-DE), the Latvian Geospatial Information Agency, the Lithuanian National Land Service,",
+        "ACT Luxembourg, AHN, Kartverket and the Norwegian Polar Institute, GUGiK, GKU Bratislava, the Slovenian "
+        "Ministry of the Environment, IGN Spain (LiDAR-PNOA), Lantmateriet, swisstopo, the Environment Agency, "
+        "the Welsh and Scottish Governments, Land & Property Services and Ordnance Survey, and the "
+        "Direcao-Geral do Territorio.",
+    ),
+    "linz-nz-lidar-1m-dem": (
+        "Sourced from the LINZ Data Service and licensed by Toitu Te Whenua Land Information New Zealand for "
+        "re-use under the Creative Commons Attribution 4.0 International licence "
+        "(https://creativecommons.org/licenses/by/4.0/). Modified: resampled to 1 arc-second posts and joined "
+        "to Copernicus GLO-30."
+    ),
+    # Both ask for the source to be identified; the wording is the publishers' own.
+    "cedd-hk-lidar-dtm-2020": (
+        "LiDAR Data 2020 (Digital Terrain Model) of the Civil Engineering and Development Department, from the "
+        "Common Spatial Data Infrastructure portal. The Government of the Hong Kong Special Administrative "
+        "Region is the owner of the data."
+    ),
+    "gsi-japan-dem5a-dem10b-20261127": (
+        "Made by processing GSI Tiles (elevation tiles, from the Fundamental Geospatial Data digital elevation "
+        "model) of the Geospatial Information Authority of Japan."
+    ),
 }
+# The iOS app keeps a list of credits only if it has at most this many lines,
+# none longer than this (BicycleRoutingElevationCreditsV1); a longer list
+# would show nothing.
+APP_MAXIMUM_LINES = 16
+APP_MAXIMUM_LINE_LENGTH = 600
 
 
 def routing_graph_elevation_credits(source_ids: Sequence[str]) -> tuple[str, ...]:
@@ -87,7 +122,7 @@ def routing_graph_elevation_credits(source_ids: Sequence[str]) -> tuple[str, ...
         credit = _ROUTING_TERRAIN_CREDITS.get(source_id)
         if credit is None:
             raise ValueError("routing graph elevation source has no reviewed public notice")
-        lines.append(credit)
+        lines.extend((credit,) if isinstance(credit, str) else credit)
     if copernicus:
         lines.append("Bicino is not endorsed by the Copernicus DEM provider or programme.")
     return tuple(lines)

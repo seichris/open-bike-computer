@@ -309,8 +309,8 @@ class KeptSetTests(unittest.TestCase):
                 kept.fetch("N40W080")
 
 
-class SplitTests(unittest.TestCase):
-    """crossing_split.py on the small extract, over a tile with channels under the plain road and the bridge."""
+class SplitFixture:
+    """The small extract, and a tile with channels under the plain road and the bridge."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -364,6 +364,11 @@ class SplitTests(unittest.TestCase):
             else:
                 relations[item.id] = [(m.type, m.ref, m.role) for m in item.members]
         return ways, relations
+
+
+
+class SplitTests(SplitFixture, unittest.TestCase):
+    """crossing_split.py on the small extract, over a tile with channels under the plain road and the bridge."""
 
     def test_the_road_over_a_channel_and_the_bridge_ends_are_graded_from_their_ends(self):
         import crossing_split
@@ -514,6 +519,113 @@ class StoredTests(unittest.TestCase):
         self.assertEqual((result["maxSlope"], result["maxUp"], result["maxDown"]), (18, 12, -18))
         self.assertEqual(calls[0]["costing"], "bicycle")
         self.assertEqual(len(calls[0]["shape"]), 61)
+
+
+
+class StageTests(SplitFixture, unittest.TestCase):
+    """crossing_stage.py: the planet's crossings found block by block, graded once, and checked by the build."""
+
+    def test_cells_make_blocks_and_touching_blocks_one_region(self):
+        import crossing_stage
+
+        blocks = crossing_stage.blocks_of({(-80, 40), (-79, 41), (-76, 43), (10, 50), (-81, 39)}, 4)
+        self.assertEqual(blocks, [(-84, 36), (-80, 40), (-76, 40), (8, 48)])
+        self.assertEqual(crossing_stage.regions_of(blocks, 4), [[(-84, 36), (-80, 40), (-76, 40)], [(8, 48)]])
+        self.assertEqual(crossing_stage.bbox_of([(-80, 40)], 4, 0.05), [-80.05, 39.95, -75.95, 44.05])
+        self.assertEqual(crossing_stage.bbox_of([(-180, -90), (176, 84)], 4, 0.05), [-180.0, -90.0, 180.0, 88.05])
+        self.assertEqual(crossing_stage.block_name((-80, 40), 4), "N40W080-4")
+
+    def stage_inputs(self, area_box=(-80, 40, -79, 41), cells=("N40W080",)):
+        import subprocess
+
+        roads = self.root / "roads.osm.pbf"
+        subprocess.run(["osmium", "cat", str(self.extract()), "-o", str(roads)], check=True, capture_output=True)
+        terrain = self.root / "terrain"
+        terrain.mkdir()
+        (terrain / "cells.txt").write_text("".join(f"{cell} {'0' * 64}\n" for cell in cells))
+        west, south, east, north = area_box
+        area = self.root / "area.geojson.gz"
+        area.write_bytes(gzip.compress(json.dumps({"type": "Feature", "properties": {}, "geometry": {
+            "type": "Polygon", "coordinates": [[[west, south], [east, south], [east, north], [west, north],
+                                                 [west, south]]]}}).encode()))
+        sha = hashlib.sha256(roads.read_bytes()).hexdigest()
+        return roads, sha, terrain, [f"usgs-3dep-13={area}"]
+
+    def test_the_stage_fixes_the_sites_once_and_the_build_takes_only_its_own_inputs(self):
+        import build_graph
+        import crossing_stage
+
+        roads, sha, terrain, areas = self.stage_inputs(cells=("N40W080", "N10W080"))
+        elevation = self.tile_set()
+        out = self.root / "crossings"
+        record = crossing_stage.stage(roads, sha, elevation, terrain, areas, out, jobs=1)
+        self.assertEqual((record["stage"]["blocks"], len(record["stage"]["regions"])), (2, 2))
+        self.assertEqual(record["fixedSites"], 2)
+        self.assertEqual(record["roads"], {"file": "roads.osm.pbf", "bytes": roads.stat().st_size, "sha256": sha})
+        self.assertEqual(sorted(path.name for path in out.iterdir()),
+                         ["crossings.json", "fixed-sites.json.gz", "roads-crossings.osc", "roads-crossings.osm.pbf",
+                          "sites"])
+        fixed = json.loads(gzip.decompress((out / "fixed-sites.json.gz").read_bytes()))
+        self.assertEqual(sorted(site["kind"] for site in fixed), ["bridge-water", "untagged"])
+        __import__("subprocess").run(["osmium", "check-refs", "--check-relations", str(out / "roads-crossings.osm.pbf")],
+                                     check=True, capture_output=True)
+
+        source_identity = build_graph.file_identity(roads)
+        elevation_record = build_graph.elevation_identity(elevation, sample=True)
+        taken, taken_record = build_graph.precomputed_crossings(out, source_identity, elevation_record)
+        self.assertEqual(taken, out / "roads-crossings.osm.pbf")
+        self.assertEqual(taken_record["fixedSites"], 2)
+        with self.assertRaisesRegex(ValueError, "another OSM file"):
+            build_graph.precomputed_crossings(out, {**source_identity, "sha256": "1" * 64}, elevation_record)
+        other = {**elevation_record, "manifest": {**elevation_record["manifest"], "sha256": "2" * 64}}
+        with self.assertRaisesRegex(ValueError, "other elevation tiles"):
+            build_graph.precomputed_crossings(out, source_identity, other)
+        with (out / "roads-crossings.osm.pbf").open("ab") as stream:
+            stream.write(b"\0")
+        with self.assertRaisesRegex(ValueError, "not the file"):
+            build_graph.precomputed_crossings(out, source_identity, elevation_record)
+
+    def test_crossings_outside_every_terrain_area_are_left_alone(self):
+        import crossing_stage
+
+        roads, sha, terrain, areas = self.stage_inputs(area_box=(10, 50, 11, 51))
+        out = self.root / "crossings"
+        record = crossing_stage.stage(roads, sha, self.tile_set(), terrain, areas, out, jobs=1)
+        self.assertEqual((record["fixedSites"], record["waysChanged"], record["stage"]["sitesFound"]), (0, 0, {}))
+        self.assertEqual(self.read(out / "roads-crossings.osm.pbf"), self.read(roads))
+
+    def test_the_tools_the_stage_runs_in_the_image_keep_to_python_3_10(self):
+        # The pinned map-platform image has Python 3.10.12; a 3.11 call failed the first rehearsal.
+        for name in ("crossing_stage.py", "crossing_split.py", "crossing_steps.py", "build_elevation.py"):
+            text = (Path(__file__).resolve().parent / name).read_text()
+            self.assertFalse("hashlib.file_digest" in text, name)
+            __import__("ast").parse(text, name, feature_version=(3, 10))
+
+    def test_only_the_sources_that_gave_posts_claim_sites(self):
+        import crossing_stage
+        from types import SimpleNamespace
+
+        terrain = self.root / "terrain"
+        terrain.mkdir()
+        (terrain / "terrain-manifest.json").write_text(json.dumps({"sources": [
+            {"id": "usgs-3dep-13", "cells": 9}, {"id": "nrcan-mrdem-30", "cells": 0}]}))
+        sources = [SimpleNamespace(id="usgs-3dep-13", area=Path("/areas/us.geojson.gz")),
+                   SimpleNamespace(id="nrcan-mrdem-30", area=Path("/areas/canada.geojson.gz")),
+                   SimpleNamespace(id="sonny-dtm-europe-1s-v25", area=Path("/areas/europe.geojson.gz"))]
+        self.assertEqual(crossing_stage.build_areas(sources, terrain), ["usgs-3dep-13=/areas/us.geojson.gz"])
+        # No area would mean no filter at all (crossing_steps.area_of), so main() refuses a build without one.
+        (terrain / "terrain-manifest.json").write_text(json.dumps({"sources": [{"id": "usgs-3dep-13", "cells": 0}]}))
+        self.assertEqual(crossing_stage.build_areas(sources, terrain), [])
+
+    def test_a_used_output_directory_is_refused(self):
+        import crossing_stage
+
+        roads, sha, terrain, areas = self.stage_inputs()
+        out = self.root / "crossings"
+        out.mkdir()
+        (out / "crossings.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, "not empty"):
+            crossing_stage.stage(roads, sha, self.tile_set(), terrain, areas, out, jobs=1)
 
 
 if __name__ == "__main__":

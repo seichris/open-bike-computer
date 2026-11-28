@@ -13,6 +13,14 @@ case "$label" in
     [ -s "$BICINO_ELEVATION/elevation-manifest.json" ] || bicino_fail "no elevation manifest in $BICINO_ELEVATION"
     sha256sum "$BICINO_ELEVATION/elevation-manifest.json"
     arguments=(--elevation "$BICINO_ELEVATION")
+    # Over terrain, the crossings stage's roads, with every false step at a
+    # crossing graded from its ends. build_graph.py checks they were made of
+    # this source and these tiles.
+    if bicino_is_hybrid; then
+      [ -s "$BICINO_CROSSINGS/crossings.json" ] || bicino_fail "no crossings in $BICINO_CROSSINGS; the crossings stage writes them"
+      sha256sum "$BICINO_CROSSINGS/crossings.json"
+      arguments+=(--crossings-from "$BICINO_CROSSINGS")
+    fi
     ;;
   *) bicino_fail "usage: build.sh ungraded|graded" ;;
 esac

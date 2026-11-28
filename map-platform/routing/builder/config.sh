@@ -47,6 +47,9 @@ BICINO_ELEVATION_OPENED=$BICINO_SCRATCH/elevation-opened
 BICINO_ELEVATION_TERRAIN=$BICINO_SCRATCH/elevation-terrain
 # Terrain sources' files that the elevation stage fetched from a bucket copy.
 BICINO_ELEVATION_TERRAIN_FILES=$BICINO_SCRATCH/elevation-terrain-files
+# The roads with every crossing over the terrain graded from its ends, which
+# the graded build reads instead of the download (stages/crossings.sh).
+BICINO_CROSSINGS=$BICINO_SCRATCH/crossings
 BICINO_AUDIT=$BICINO_SCRATCH/audit
 BICINO_WORK=$BICINO_SCRATCH/work
 # The VPS pulls from export/ with a read-only identity: markers, logs,
@@ -79,6 +82,9 @@ BICINO_ELEVATION_JOBS=${BICINO_ELEVATION_JOBS:-20}
 BICINO_UNGRADED_THREADS=${BICINO_UNGRADED_THREADS:-16}
 BICINO_GRADED_THREADS=${BICINO_GRADED_THREADS:-20}
 BICINO_ELEVATION_ATTEMPTS=${BICINO_ELEVATION_ATTEMPTS:-4}
+# Blocks whose crossings are found at once. The densest stream networks take
+# a few GB each; the stage then grades all of them in one process.
+BICINO_CROSSING_JOBS=${BICINO_CROSSING_JOBS:-6}
 
 # Empty builds only the ungraded planet, the graph production serves today.
 BICINO_OPENING_RADIUS=${BICINO_OPENING_RADIUS:-}
@@ -205,7 +211,8 @@ bicino_validate_run() {
       || bicino_fail "BICINO_TERRAIN_MIRROR_ENDPOINT must be http://127.0.0.1:PORT or none, got: $BICINO_TERRAIN_MIRROR_ENDPOINT"
   fi
   local name
-  for name in BICINO_ELEVATION_JOBS BICINO_UNGRADED_THREADS BICINO_GRADED_THREADS BICINO_ELEVATION_ATTEMPTS; do
+  for name in BICINO_ELEVATION_JOBS BICINO_UNGRADED_THREADS BICINO_GRADED_THREADS BICINO_ELEVATION_ATTEMPTS \
+    BICINO_CROSSING_JOBS; do
     [[ "${!name}" =~ ^[1-9][0-9]?$ ]] || bicino_fail "$name must be a number from 1 to 99, got: ${!name}"
   done
   if bicino_is_sample; then

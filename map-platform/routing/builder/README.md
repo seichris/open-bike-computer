@@ -45,15 +45,16 @@ Every path on the builder is absolute and below `/srv/bicino-routing-scratch`:
 ## The chain
 
 ```text
-images ──┬─ inputs ─────────────────────┬─ qualify-ungraded ─┐
-         ├─ elevation ─┐                │                    │
-download ┼─────────────┴─ build-graded ─┼─ qualify-graded ───┴─ gate ─┬─ result
-         └─ build-ungraded ─────────────┘                             │
-                          build-graded ── terrain-scan ───────────────┘
+images ──┬─ inputs ───────────────────────────────┬─ qualify-ungraded ─┐
+         ├─ elevation ─┬─ crossings ─┐            │                    │
+download ┼─────────────┴─────────────┴─ build-graded ─ qualify-graded ─┴─ gate ─┬─ result
+         └─ build-ungraded ───────────────────────┘                             │
+                                        build-graded ── terrain-scan ───────────┘
 ```
 
-The terrain scan needs only the graded build, and nothing waits for it but
-the result.
+The crossings stage needs the download and the hybrid tiles, and the graded
+build waits for it. The terrain scan needs only the graded build, and
+nothing waits for it but the result.
 
 | Stage | Work | Time on a `c4-highmem-24-lssd` |
 |---|---|---|
@@ -62,7 +63,8 @@ the result.
 | `inputs` | Download the pinned Natural Earth layers and write the audit's inventory. | 1 min |
 | `elevation` | Write the raw Copernicus tiles, then open them. With `--terrain`, also read the terrain sources, write their tiles and the hybrid. Runs `build_elevation.py` up to four times: each run resumes from the receipts. With `--elevation-cache`, [kept tiles are restored first](#kept-elevation-tiles) and only the rest is built. | 2 h 20 min without a terrain source and without kept tiles |
 | `build-ungraded` | `build_graph.py --coverage planet`, with `--all-bridges` when the run has a terrain source. | 3 h 25 min alone, 4 h 50 min beside the graded build |
-| `build-graded` | The same with `--elevation`. | 4 h 50 min |
+| `crossings` | With terrain sources: find every crossing inside a terrain source's area and rewrite the planet so that Valhalla grades each false step at a crossing from its ends; see [Crossings](#crossings). | not measured on a builder; see below |
+| `build-graded` | The same with `--elevation`, and with terrain sources the crossings stage's roads (`--crossings-from`). | 4 h 50 min |
 | `qualify-ungraded`, `qualify-graded` | Smoke probes, cross-border probes, the territory audit and the profile probe, with no network. | under 1 min each |
 | `gate` | Serve both archives and run `compare_elevation.py` over every city. | 1 min |
 | `terrain-scan` | With terrain sources: look for artifacts in the terrain tiles and measure the graded graph's edges beside them; write the [terrain report](#terrain-scan). | not measured on a builder; see below |
@@ -71,8 +73,9 @@ the result.
 The times are from the 2026-11-25 and 2026-11-26 builds. The whole chain
 takes about 7.5 hours. Without `--opening-radius` the run builds only the
 ungraded planet, the graph production serves: `elevation`, `build-graded`,
-`qualify-graded`, `gate` and `terrain-scan` are skipped, and it takes about
-4 hours. Without `--terrain`, `terrain-scan` is skipped.
+`qualify-graded`, `gate`, `crossings` and `terrain-scan` are skipped, and it
+takes about 4 hours. Without `--terrain`, `crossings` and `terrain-scan` are
+skipped.
 
 `--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020,gsi-japan-dem5a-dem10b-20261127` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
@@ -190,6 +193,58 @@ be made.
 current state. Once the chain ends it also holds both archive manifests, both
 elevation manifests, each archive's qualification summary and the gate
 summary, with `"final": true`.
+
+## Crossings
+
+A terrain model holds the ground under a bridge's deck and the channel a
+stream cuts through a road's fill, so a road beside a bridge or over a
+culvert reads a step it does not have. On 2026-11-27 that was 11,136 false
+steps in the 3DEP and MRDEM-30 areas alone, and `build_graph.py
+--crossings` was chosen to fix them (see
+[False steps at crossings](../refresh-runbook.md#false-steps-at-crossings)).
+The `crossings` stage does it for the planet, in the map-platform image,
+which has the pyosmium, numpy and Shapely this host lacks, with no network
+(`crossing_stage.py`):
+
+1. `osmium tags-filter` keeps ways tagged highway or waterway and nodes
+   tagged ford, the only objects `crossing_steps.py` reads.
+2. The terrain tiles' `cells.txt` (the cells this build gave terrain posts)
+   are grouped into 4-degree blocks; blocks that touch make a region.
+   `osmium extract` cuts each region, then its blocks, 0.05 degrees wider on
+   each side, with complete ways, so a site near a block's edge is found
+   whole in both and taken once.
+3. `crossing_steps.py sites` finds each block's sites, `BICINO_CROSSING_JOBS`
+   (6) at a time, inside the terrain sources' areas.
+4. `crossing_split.py` reads every site's profile from the hybrid tiles,
+   cuts and tags the roads to grade, and writes the planet once more with
+   `osmium apply-changes` into `crossings/roads-crossings.osm.pbf`.
+
+`crossings/crossings.json` names the planet, the hybrid's manifest and the
+rewritten roads by SHA-256, and counts the sites found and fixed.
+`build_graph.py --crossings-from` refuses roads made of another planet or
+other tiles, and the graded manifest carries the record as `crossings`. The
+ungraded twin is built from the download as before: the cuts and the
+`bridge=yes` stretches change no route, since bicycle costing does not read
+the bridge flag. The record and `fixed-sites.json.gz` are copied to
+`export/evidence/crossings/`, and the stage's last line says, for example:
+
+    crossings: 1806 terrain cells, 140 blocks, found {...}; 74561 sites fixed, ...
+
+The stage needs about 150 GB of scratch beyond the planet's: the filtered
+planet, the extracts (deleted before the split) and the rewritten planet.
+
+On 2026-11-28 Pittsburgh ran through the chain with all six terrain sources
+at 400 m. Its 12 terrain cells made 4 blocks; the city lies on the block
+edge at 80 degrees west, so two blocks found its sites (270 and 227), and
+the split took each once. The stage took 7 seconds and fixed 50 sites: 93
+ways cut, 163 pieces graded from their ends, 82 new nodes, 99 new ways and
+118 relations given the pieces, the numbers of the sample cut by hand on
+2026-11-27. The graded manifest's `crossings` names the sample's roads and
+the hybrid's manifest, and the gate met its targets: 8 routes, the longest
+0.1% longer, no detour, where the hybrid without the fix makes the Panther
+Hollow Bridge leg a 6.5% detour. The first attempt failed in the image's
+Python 3.10, which the laptop's tests did not catch; a test now parses the
+stage's tools as Python 3.10.
 
 ## Terrain scan
 
@@ -652,6 +707,12 @@ the rehearsal, in Ubuntu 24.04 containers. What only a real builder can show:
   speed a builder gets from it, the blend of 26,475 cells, and a graph
   build with `--all-bridges`. The rehearsal ran them for one cell and two
   sample graphs.
+- **The crossings stage at planet size.** Its time, memory and scratch:
+  the filter and extracts over the planet, `sites` on about 150 blocks of
+  six terrain sources, profiles of several million sites in one process,
+  and `osmium apply-changes` writing the planet again. It ran on city
+  samples and in tests; the 2026-11-27 count took about 40 minutes for the
+  62 US and Canadian extracts on a laptop, two at a time.
 - **The terrain scan at planet size.** Its time and memory with 20
   workers over about 3,200 terrain cells, and some 64,000 `/locate`
   lookups against the planet graph. It ran on city samples only.

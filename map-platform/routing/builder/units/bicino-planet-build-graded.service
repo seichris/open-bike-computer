@@ -2,8 +2,8 @@
 # and refuses to start it until the stages it needs are done (chain_state.py).
 [Unit]
 Description=Bicino planet builder: build the graph with elevation
-Wants=docker.service network-online.target bicino-planet-images.service bicino-planet-download.service bicino-planet-elevation.service
-After=docker.service network-online.target bicino-planet-images.service bicino-planet-download.service bicino-planet-elevation.service
+Wants=docker.service network-online.target bicino-planet-images.service bicino-planet-download.service bicino-planet-elevation.service bicino-planet-crossings.service
+After=docker.service network-online.target bicino-planet-images.service bicino-planet-download.service bicino-planet-elevation.service bicino-planet-crossings.service
 
 [Service]
 Type=oneshot
