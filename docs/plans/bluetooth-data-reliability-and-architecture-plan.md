@@ -29,8 +29,8 @@ Related documents:
 
 - [BLE protocol](../ble-protocol.md): wire-format and authorization authority.
 - [Earlier architecture plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/bluetooth-connection-reliability-architecture-implementation-plan.md).
-- [September reassessment](bluetooth-reliability-reassessment-2026-09-06.md).
-- [Implemented shutdown repairs](bluetooth-reliability-implementation-2026-09-07.md).
+- [September reassessment](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/plans/bluetooth-reliability-reassessment-2026-09-06.md).
+- [Implemented shutdown repairs](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/plans/bluetooth-reliability-implementation-2026-09-07.md).
 - [Remaining architecture follow-ups](bluetooth-reliability-follow-ups-2026-09-07.md).
 - [Ride diagnostics plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/ride-diagnostics-logging-implementation-plan.md).
 
