@@ -1874,12 +1874,125 @@ first two routes have none.
   next are San Francisco's (0 to 78 m) and São Paulo's (726 to 794 m), so
   a limit on the span would not catch the Paulista ridge.
 
+#### A guard for zones on a hillside
+
+On 2026-11-28 that limit was added to `tower_mask.py` as `--edge-span` and
+tried on all fourteen samples at 100 m. A zone part whose edge heights (the
+posts around it on the 200 m tiles) span more than that between their 5th
+and 95th percentiles gets no membrane. It takes the tiles of
+`--edge-span-input` instead, raised by a membrane of the difference so that
+it meets the 200 m tiles at its edge without a step. Two inputs were tried:
+the 400 m opening, as proposed above, and the 200 m opening itself, which
+leaves the part as the 200 m tiles have it.
+
+The guard catches ten zone parts:
+
+- six in Hong Kong, with edge spans of 104 to 221 m; the north shore spans
+  the most;
+- two in Wellington, spanning 125 and 172 m;
+- one each in San Francisco (111 m) and São Paulo (101 m), both away from
+  the gate's legs.
+
+In the other ten cities no part reaches 100 m, so their tiles are the
+membrane's post for post, and their routes and figures are the ones above.
+Seven of the ten parts span less than 130 m, so the limit sits where a small
+change moves parts in or out. São Paulo's ridge zone spans 68 m and
+stays on the membrane, as expected.
+
+| City | Opened at 400 m | Opened at 200 m | Membrane at 25 m | Guard, 400 m below | Guard, 200 m below |
+|---|---|---|---|---|---|
+| Hong Kong, 4 routes (report only) | 0.0%, 6% | 0.0%, 14% | 0.0%, 16% | 0.0%, 10% | 0.0%, 14% |
+| Wellington, 8 routes | +21.6%, 20% | +21.6%, 33% | +18.9%, 36% | +21.6%, 31% | +21.6%, 33% |
+| San Francisco, 8 routes | +2.7%, 13% | +13.1%, 18% | +13.1%, 18% | +13.1%, 18% | +13.1%, 18% |
+| São Paulo, 4 routes (report only) | 0.0%, 15% | 0.0%, 11% | +6.2%, 0% | +6.2%, 0% | +6.2%, 0% |
+
+Each cell gives the longest length change and the median 6%+ share of the
+direct routes, as above. All five sources were judged in one report per
+city. Every source meets the targets, and with the ten unchanged cities both
+guards meet them on all fourteen. In San Francisco and São Paulo the guard
+changes no route.
+
+**Hong Kong: the guard removes the ramp.** With the 400 m opening below,
+the north shore keeps the shape of the ground: Central reads 22 m (the
+200 m tile 21 m, the membrane 81 m) and the end of the Happy Valley leg
+36 m (32 m and 66 m).
+
+| Leg | CEDD lidar | Opened at 400 m | Membrane at 25 m | Guard, 400 m below | Guard, 200 m below |
+|---|---|---|---|---|---|
+| Central to Wan Chai | 3 m, 0% | 9 m, 10% | 42 m, 17% | 16 m, 10% | 27 m, 14% |
+| Admiralty to Causeway Bay | 0 m, 0% | 10 m, 3% | 30 m, 10% | 17 m, 9% | 36 m, 8% |
+| Sheung Wan to Mid-Levels | 151 m, 20% | 188 m, 25% | 203 m, 39% | 192 m, 24% | 210 m, 33% |
+| Wan Chai to Happy Valley | 15 m, 0% | 33 m, 11% | 65 m, 29% | 37 m, 14% | 55 m, 17% |
+| Admiralty to Kennedy Road | 149 m, 28% | 220 m, 45% | 182 m, 57% | 218 m, 45% | 187 m, 40% |
+| Causeway Bay to Tai Hang Road | 109 m, 40% | 108 m, 39% | 118 m, 46% | 128 m, 39% | 127 m, 44% |
+
+Each cell gives the climb along the direct Everyday route, as in the table
+above, and the share of it on 6%+ grades.
+
+- On every leg the guard reads about the 400 m opening's 6%+ share, well
+  below the membrane's.
+- It still reads more than the lidar: the tram corridor is 10% and 9% at
+  6%+ against none.
+- The four hill legs climb 575 m, against 568 m on the membrane, 549 m at
+  400 m and 424 m on the lidar. Tai Hang Road's upper half lies outside
+  the zone, on the 200 m tiles.
+- `use_hills` changes none of the hill legs. The 400 m opening changes one
+  and the membrane three.
+- Causeway Bay to Tai Hang Road keeps the 17.7% longer route, as on the
+  200 m tiles and the membrane.
+
+With the 200 m opening below, the corridor reads the 200 m tiles' 14%.
+
+**Wellington: closer heights, the openings' detour.** Inside the two
+guarded parts, against LINZ's lidar:
+
+| Tiles in the guarded parts | Mean error | Within 3 m | Phantom 6%+ | Lost 6%+ |
+|---|---|---|---|---|
+| Opened at 400 m | 13.8 m | 25% | 3.0% | 21.0% |
+| Opened at 200 m | 8.9 m | 25% | 3.1% | 16.3% |
+| Membrane at 25 m | 20.0 m | 6% | 9.8% | 2.3% |
+| Guard, 400 m below | 11.6 m | 20% | 3.6% | 15.9% |
+| Guard, 200 m below | 8.9 m | 25% | 3.1% | 16.3% |
+
+This compares 6,741 posts after the datum offset is taken off, as in
+[Against the terrain models](#against-the-terrain-models). The mean error
+is the mean of the absolute differences. On the lidar, 69% of these posts
+slope 6% or more.
+
+- **Kelburn gets its climb back.** CBD to Kelburn climbs 84 m with the
+  400 m opening below, against 45 m on the membrane and 88 m on the lidar.
+  The railway station to Hataitai keeps 172 m (lidar 188 m).
+- **The route goes back to the openings' detour.** CBD to Kelburn takes
+  the 2.36 km route of both openings, as before the membrane. To judge it,
+  Wellington was run again with a graph graded from the lidar as a sixth
+  source:
+  - On the lidar's heights that detour is steeper than the direct route:
+    35% at 6%+ against 28%, and 109 m of climb against 88 m.
+  - The lidar's own graph takes a third route of 2.17 km, at 23%.
+  - The membrane kept the direct route, which is better than the detour
+    on the lidar's heights, but only because it read Kelburn at half its
+    height.
+- **Judged on the lidar's heights, the 400 m guard misses the hill target
+  by a hair.** `use_hills` changes three legs:
+  - Kelburn takes the steeper detour, 7 points worse.
+  - Hataitai is 21 points better.
+  - Thorndon to Karori moves 0.3 points the wrong way.
+
+  The median is −0.3 points, so avoiding hills does not lower the 6%+
+  share. Both openings and the 200 m guard change only Kelburn and
+  Hataitai, the membrane only Hataitai and Karori, and all of them meet
+  it. On the lidar graph itself the Everyday
+  route from the railway station to Hataitai is 6.57 km (+41.5%), so a
+  long detour there is not wrong in itself.
+
 #### Recommendation
 
-**The membrane at 25 m is the best candidate so far for flat tower cores,
-but not as a rule for every zone. Hong Kong shows it inventing slope where
-a zone runs from a shore up a hill, so a planet build needs a guard for
-such zones and the 252-downtown survey first.**
+**The membrane at 25 m, with zones whose edges span more than 100 m left on
+the 400 m opening, is the best candidate so far. The guard leaves every flat
+tower core as the membrane has it and removes Hong Kong's invented ramp. In
+Wellington it gives Kelburn its height back but sends one leg back onto the
+openings' detour, which the lidar reads as steeper. The 252-downtown survey
+must come first, and it should count how many zones the guard catches.**
 
 - **It answers the no-data rule's open problem.** A tower zone on a slope
   keeps its slope, so Wellington keeps its routes, and no bridge reads the
@@ -1895,7 +2008,8 @@ such zones and the 252-downtown survey first.**
 - **It invents slope where a zone runs from a shore up a hill.** Hong
   Kong's north shore becomes one surface from the harbour to 335 m, and on
   every Hong Kong leg the membrane reads more 6%+ ground than the lidar
-  and than either opening.
+  and than either opening. The guard fixes that: with the 400 m opening
+  below, every Hong Kong leg reads about the 400 m opening's 6%+ share.
 - **25 m was chosen on these samples.** 30 m leaves Midtown's edge on
   mid-rise plateaus and 20 m masks too much of the hilly cities; the
   margin between them is small. Singapore, Shanghai, Dubai and Buenos
@@ -1903,12 +2017,22 @@ such zones and the 252-downtown survey first.**
   Paulo loses its ridge and Hong Kong gains phantom slope (see above).
   The wider survey of 252 downtowns is still to run, judging by the
   direct routes' 6%+ share as well as length.
-- **A guard to try next.** Leave on the 400 m opening any zone whose edge
-  heights span more than about 100 m between the 5th and 95th
-  percentiles. Of the zones the gate legs cross, that takes Hong Kong's
-  north shore and Wellington's centre off the membrane and leaves every
-  flat tower core on it. It would not catch São Paulo's ridge (68 m). Not
-  yet tried, and not measured on the zones away from the legs.
+- **The guard: which opening goes below is a trade.** `--edge-span 100`
+  catches ten parts in four cities and changes nothing in the other ten.
+  - With the 400 m opening below, Hong Kong's corridor reads 10% at 6%+
+    instead of 16%. Wellington's guarded parts lie 11.6 m from the lidar
+    instead of 20.0 m.
+  - With the 200 m opening below, Wellington comes closer still (8.9 m)
+    and meets every target on the lidar's heights. Hong Kong's corridor
+    then reads the 200 m tiles' 14%.
+  - Towers on a hillside, as in Hong Kong, favour the 400 m opening. The
+    grid's tall readings for hillside houses, as in Kelburn, favour the
+    200 m tiles.
+  - The hybrid build has lidar readers for both cities (LINZ and CEDD),
+    so the choice matters only for hillside tower districts outside the
+    terrain models. The survey has to find those.
+  - The guard does not catch São Paulo's ridge (68 m), and seven of its
+    ten parts span within 30 m of the limit.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
   States and Canada in the hybrid, and the four regional sources approved
   the same day cover New Zealand, Japan, Hong Kong and much of Europe
@@ -1926,14 +2050,17 @@ such zones and the 252-downtown survey first.**
   build would solve it per cell with a margin of the neighbours' tiles, as
   the opening does, and must give two cells the same heights on their
   shared border; a zone wider than the margin would need its whole extent.
+  With the guard it needs the 400 m opening's tiles too, and a part's edge
+  span taken over the whole part.
   Chris's approval of GHS-BUILT-H is needed as before.
 
 The reports, summaries, comparisons with the terrain models, the scratch
 scripts and the manifests are on the map VPS in
 `/root/bicino-routing-releases/tower-membrane-samples-20261127/`, those
 of the four tower cities in `tower-membrane-four-cities-20261127/` beside it,
-and those of Hong Kong and Buenos Aires in
-`tower-membrane-hong-kong-buenos-aires-20261127/`.
+those of Hong Kong and Buenos Aires in
+`tower-membrane-hong-kong-buenos-aires-20261127/`, and those of the guard in
+`tower-membrane-guard-20261128/`.
 
 ### Regional terrain models
 
