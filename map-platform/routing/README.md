@@ -4,7 +4,8 @@ Two coverages build from the same pipeline:
 
 - **`planet`**: the whole planet, so Create a Route's Road, Gravel and
   Everyday routes work everywhere. It takes no mask. Production has served
-  it, without elevation, since 2026-11-24.
+  it since 2026-11-24: without elevation until 2026-11-28, and since then
+  graded with elevation (`releases/2026-11-27.json`).
 - **`worldwide-gap`**: only the places where Apple Maps has no cycling
   directions, plus border bands. This was the first production graph, for
   saved-route detours.

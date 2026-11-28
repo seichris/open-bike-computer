@@ -10,9 +10,9 @@ internal Valhalla 3.9.2 service, the one that serves
 the profile's options.
 
 Since 2026-11-24 the production graph covers the whole planet (see the
-[routing README](../map-platform/routing/README.md)). It has no elevation.
-Development has served a planet graded with elevation since 2026-11-28 (see
-`use_hills` below).
+[routing README](../map-platform/routing/README.md)). Since 2026-11-28 both
+development and production serve a planet graded with elevation (see
+`use_hills` below), and answers credit its elevation sources.
 An `unavailable` / `no_bicycle_route` answer still happens where
 OpenStreetMap has no way a bicycle may use between the two points, and the
 app decides what to fall back to.
@@ -292,8 +292,9 @@ was graded with: `usgs-3dep-13`, `nrcan-mrdem-30`,
 graph of 2026-11-27. Each needs a reviewed credit in
 `map_platform/topography_notices.py`; an unknown or repeated ID stops the API
 from starting. It changes with the graph: the development lock names the
-graded graph's four sources, and the production lock leaves it unset while
-production serves the graph without elevation.
+graded graph's four sources, and so does the production lock since
+production moved to that graph on 2026-11-28. The lock test requires
+production's sources to match the release record of the graph it mounts.
 
 Both `compose.yaml` and `compose.development.yaml` pass these settings to the
 API, and only to the API. The public per-IP request limit applies as well.
