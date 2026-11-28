@@ -47,6 +47,17 @@ membrane is solved over all cells of `--bounds` together, so a zone that
 crosses their edge is spanned from the posts inside them only. On the city
 samples of 2026-11-27 it met the gate with a threshold of 25 m, its default.
 
+A membrane has no crest and no flat floor, so a zone part that runs from a
+shore up a hillside becomes one even ramp: Hong Kong's north shore, from the
+harbour to 335 m, put Central 60 m above the opened tiles. `--edge-span` guards against
+that. A part whose edge heights (the posts around it) span more than that
+many metres from their 5th to their 95th percentile takes the tiles of
+`--edge-span-input`, usually the 400 m opening, which keeps the hillside's
+shape. Those are lower than the input at the edge, so a membrane of the
+difference raises them to meet it: the part has no step at its edge either.
+It was tried at 100 m on the samples of 2026-11-28 (see the refresh
+runbook, "A guard for zones on a hillside"); there is no default.
+
     python tower_mask.py --input "$scratch/dem/new-york/open-200" --bounds -75 40 -73 41 \\
         --heights GHS_BUILT_H_ANBH_E2018_GLOBE_R2023A_4326_3ss_V1_0_R5_C11.tif \\
         --fill membrane --out "$scratch/dem/new-york/open-200-membrane"
@@ -82,6 +93,8 @@ MARGIN_METRES = 200.0
 FILLS = ("none", "membrane")
 # The membrane is solved until no post moves by more than this many metres in a sweep.
 MEMBRANE_TOLERANCE = 0.001
+# A zone part's edge span runs between these percentiles of the heights around it.
+EDGE_PERCENTILES = (5, 95)
 # The widest ellipse a row may get, as in the opening: it stays inside the neighbouring cells.
 WIDEST = (POSTS - 1) // 2 - 1
 
@@ -310,12 +323,28 @@ def solve_membrane(values, unknown, known, latitude, tolerance=MEMBRANE_TOLERANC
     raise ValueError(f"the membrane over a zone of {int(unknown.sum())} posts did not settle")
 
 
-def membrane_fill(heights, zone, latitudes, tolerance=MEMBRANE_TOLERANCE):
+def edge_span(window, unknown, known):
+    """Metres between the 5th and 95th percentile of the `known` heights next to `unknown`; None without any."""
+    import numpy as np
+
+    around = np.pad(unknown, 1)
+    ring = known & (around[:-2, 1:-1] | around[2:, 1:-1] | around[1:-1, :-2] | around[1:-1, 2:])
+    if not ring.any():
+        return None
+    low, high = np.percentile(window[ring], EDGE_PERCENTILES)
+    return float(high - low)
+
+
+def membrane_fill(heights, zone, latitudes, tolerance=MEMBRANE_TOLERANCE, fallback=None, span_limit=None):
     """`heights` with each part of `zone` spanned by a membrane from the heights around it.
 
-    `latitudes` holds the latitude of each row. Returns the heights, the
-    number of posts that got a membrane height, and the number of zone posts
-    left without data because no height touches their part.
+    `latitudes` holds the latitude of each row. With `fallback` (an array
+    like `heights`) and `span_limit`, a part whose edge span exceeds the
+    limit takes the fallback's heights instead, raised by a membrane of
+    `heights - fallback` held at its edge. Returns the heights, the number
+    of posts that got a membrane height, the number of zone posts left
+    without data because no height touches their part (or the fallback has
+    none), and the guarded parts as (posts, edge span) pairs.
     """
     import numpy as np
 
@@ -323,6 +352,7 @@ def membrane_fill(heights, zone, latitudes, tolerance=MEMBRANE_TOLERANCE):
     surface[zone] = np.nan
     rows, columns = surface.shape
     filled = unfilled = 0
+    guarded = []
     for top, left, posts in zone_parts(zone & np.isfinite(heights)):
         first_row, first_column = max(top - 1, 0), max(left - 1, 0)
         last_row = min(top + posts.shape[0] + 1, rows)
@@ -330,14 +360,28 @@ def membrane_fill(heights, zone, latitudes, tolerance=MEMBRANE_TOLERANCE):
         window = surface[first_row:last_row, first_column:last_column]
         unknown = np.zeros(window.shape, dtype=bool)
         unknown[top - first_row:top - first_row + posts.shape[0], left - first_column:left - first_column + posts.shape[1]] = posts
+        known = np.isfinite(window) & ~unknown
         latitude = float(latitudes[top + posts.shape[0] // 2])
-        solved = solve_membrane(window, unknown, np.isfinite(window) & ~unknown, latitude, tolerance)
+        span = edge_span(window, unknown, known) if span_limit is not None else None
+        if span is not None and span > span_limit:
+            under = fallback[first_row:last_row, first_column:last_column]
+            lower = unknown & np.isfinite(under)
+            lift = solve_membrane(window - under, lower, known & np.isfinite(under), latitude, tolerance)
+            if lift is None:
+                unfilled += int(posts.sum())
+                continue
+            window[lower] = under[lower] + lift[lower]
+            filled += int(lower.sum())
+            unfilled += int((unknown & ~lower).sum())
+            guarded.append((int(lower.sum()), span))
+            continue
+        solved = solve_membrane(window, unknown, known, latitude, tolerance)
         if solved is None:
             unfilled += int(posts.sum())
             continue
         window[unknown] = solved[unknown]
         filled += int(posts.sum())
-    return surface, filled, unfilled
+    return surface, filled, unfilled, guarded
 
 
 def post_area_km2(latitude):
@@ -363,7 +407,12 @@ def load_input(directory, bounds):
     return source_dir, manifest_path, manifest, present
 
 
-def run(args, out, source_dir, manifest_path, source_manifest, present, files, datasets):
+def input_identity(manifest_path, manifest):
+    return {"manifestSha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            "cellListSha256": manifest["cellListSha256"]}
+
+
+def run(args, out, source_dir, manifest_path, source_manifest, present, files, datasets, guard_input=None):
     import numpy as np
 
     zones = {cell: cell_zone(datasets, cell, args.threshold, args.smooth, args.margin) for cell in present}
@@ -373,12 +422,27 @@ def run(args, out, source_dir, manifest_path, source_manifest, present, files, d
         heights, west, north = mosaic(present, tiles.__getitem__)
         zone, _, _ = mosaic(present, lambda cell: zones[cell].astype("float32"))
         latitudes = row_latitudes(north, 0, heights.shape[0])
-        surface, filled, unfilled = membrane_fill(heights, zone > 0.5, latitudes)
+        fallback = None
+        if guard_input:
+            fallback, _, _ = mosaic(present, lambda cell: read_hgt(hgt_path(guard_input[0], *cell)))
+        surface, filled, unfilled, guarded = membrane_fill(heights, zone > 0.5, latitudes, fallback=fallback,
+                                                           span_limit=args.edge_span)
         results = {cell: cut(surface, west, north, cell) for cell in present}
         membrane = {"name": "membrane", "equation": "Laplace, distances in metres",
                     "edge": "the heights of the posts around the zone, held",
                     "noData": "posts without data take no part; a zone part no height touches stays no data",
                     "toleranceMetres": MEMBRANE_TOLERANCE, "filledPosts": filled, "unfilledPosts": unfilled}
+        if guard_input:
+            membrane["guard"] = {
+                "edgeSpanMetres": args.edge_span, "percentiles": list(EDGE_PERCENTILES),
+                "of": "the heights of the posts around a zone part",
+                "fill": "the guard input's heights, raised by a membrane of the difference held at the part's edge",
+                "input": {**input_identity(*guard_input[1:]), "method": guard_input[2].get("method")},
+                "guardedParts": len(guarded), "guardedPosts": sum(posts for posts, _ in guarded),
+                "edgeSpansMetres": sorted((round(span, 1) for _, span in guarded), reverse=True)}
+            for posts, span in sorted(guarded, key=lambda part: -part[1]):
+                print(f"a zone part of {posts} posts spans {span:.0f} m at its edge: the guard input, raised",
+                      flush=True)
     entries = []
     for cell in present:
         lost = int((zones[cell] & np.isfinite(tiles[cell])).sum())
@@ -389,9 +453,7 @@ def run(args, out, source_dir, manifest_path, source_manifest, present, files, d
         print(f"{entry['cell']}: {lost} posts in tower zones, about {entry['maskedKm2']} km2"
               + (", spanned by a membrane" if membrane else ", no data"), flush=True)
     ids = "+".join(source["id"] for source in source_manifest["sources"] if source.get("cells"))
-    masked = {"id": f"tower-mask-of-{ids}",
-              "input": {"manifestSha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-                        "cellListSha256": source_manifest["cellListSha256"]}}
+    masked = {"id": f"tower-mask-of-{ids}", "input": input_identity(manifest_path, source_manifest)}
     grid = {"id": SOURCE_ID, "licence": "CC BY 4.0, (c) European Union", "files": [file_identity(path) for path in files]}
     method = {"name": "tower-mask", "of": source_manifest.get("method"), "heights": SOURCE_ID,
               "thresholdMetres": args.threshold, "smoothMetres": args.smooth, "marginMetres": args.margin,
@@ -416,9 +478,21 @@ def main():
     parser.add_argument("--margin", type=float, default=MARGIN_METRES, help="Metres a tower zone is grown by")
     parser.add_argument("--fill", choices=FILLS, default="none",
                         help="none: no data in tower zones; membrane: a surface spanned from the heights around them")
+    parser.add_argument("--edge-span", type=float, metavar="METRES",
+                        help="With --fill membrane: a zone part whose edge heights span more than this from their "
+                             "5th to 95th percentile takes --edge-span-input, raised to meet its edge")
+    parser.add_argument("--edge-span-input", type=Path, metavar="DIRECTORY",
+                        help="Elevation tiles for the parts --edge-span guards, over the same cells as --input")
     args = parser.parse_args()
     if args.threshold is None:
         args.threshold = MEMBRANE_THRESHOLD_METRES if args.fill == "membrane" else THRESHOLD_METRES
+    if (args.edge_span is None) != (args.edge_span_input is None):
+        parser.error("--edge-span and --edge-span-input go together")
+    if args.edge_span is not None:
+        if args.fill != "membrane":
+            parser.error("--edge-span guards a membrane: it needs --fill membrane")
+        if not 1 <= args.edge_span <= 2000:
+            parser.error("--edge-span must be between 1 and 2000 metres")
     try:
         cells = cells_in(args.bounds)
     except ValueError as error:
@@ -436,6 +510,13 @@ def main():
     with contextlib.ExitStack() as stack:
         try:
             source = load_input(args.input, args.bounds)
+            guard_input = None
+            if args.edge_span_input is not None:
+                guard_dir, guard_manifest_path, guard_manifest, guard_cells = load_input(args.edge_span_input,
+                                                                                         args.bounds)
+                if guard_cells != source[-1]:
+                    raise ValueError("--edge-span-input must hold the cells --input holds inside --bounds")
+                guard_input = (guard_dir, guard_manifest_path, guard_manifest)
             files = [path.resolve(strict=True) for path in args.heights]
             stack.enter_context(rasterio.Env())
             datasets = [stack.enter_context(rasterio.open(path)) for path in files]
@@ -450,7 +531,7 @@ def main():
         out = args.out.resolve()
         out.mkdir(parents=True)
         try:
-            path = run(args, out, *source, files, datasets)
+            path = run(args, out, *source, files, datasets, guard_input)
         except ValueError as error:
             # What a grid holds is known only once it is read. A set without a manifest is of no use.
             shutil.rmtree(out)

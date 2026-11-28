@@ -249,8 +249,8 @@ class MembraneTests(unittest.TestCase):
                 heights[5, 5] = np.nan
                 zone = np.zeros(heights.shape, dtype=bool)
                 zone[30:90, 40:130] = True
-                filled, count, unfilled = tower_mask.membrane_fill(heights, zone, np.full(120, latitude))
-                self.assertEqual((count, unfilled), (int(zone.sum()), 0))
+                filled, count, unfilled, guarded = tower_mask.membrane_fill(heights, zone, np.full(120, latitude))
+                self.assertEqual((count, unfilled, guarded), (int(zone.sum()), 0, []))
                 # A plane in metres is its own membrane, whatever an arc-second of longitude measures.
                 np.testing.assert_allclose(filled[zone], plane[zone], atol=0.02)
                 outside = ~zone & np.isfinite(heights)
@@ -273,10 +273,10 @@ class MembraneTests(unittest.TestCase):
         zone[10:70, 15:85] = True
         heights = saddle.copy()
         heights[zone] += 30
-        filled, _, _ = tower_mask.membrane_fill(heights, zone, np.full(80, latitude))
+        filled, _, _, _ = tower_mask.membrane_fill(heights, zone, np.full(80, latitude))
         np.testing.assert_allclose(filled[zone], saddle[zone], atol=0.05)
         # Spanned as if an arc-second measured the same both ways, the saddle bends by metres.
-        flat, _, _ = tower_mask.membrane_fill(heights, zone, np.zeros(80))
+        flat, _, _, _ = tower_mask.membrane_fill(heights, zone, np.zeros(80))
         self.assertGreater(float(np.abs(flat - saddle)[zone].max()), 5)
 
     def test_posts_without_data_take_no_part(self):
@@ -293,11 +293,47 @@ class MembraneTests(unittest.TestCase):
         zone[0, 3:6] = True
         heights[0, 3:6] = 50
         zone[6, 0] = True
-        filled, count, unfilled = tower_mask.membrane_fill(heights, zone, np.zeros(7))
+        filled, count, unfilled, _ = tower_mask.membrane_fill(heights, zone, np.zeros(7))
         self.assertEqual((count, unfilled), (30, 3))
         np.testing.assert_allclose(filled[3, 1:11], 10 + np.arange(1, 11) * 10 / 11, atol=0.02)
         np.testing.assert_allclose(filled[2], filled[4])
         self.assertTrue(np.isnan(filled[0]).all() and np.isnan(filled[6]).all())
+
+    def test_a_part_with_a_steep_edge_takes_the_fallback_raised_to_meet_it(self):
+        import numpy as np
+
+        # A hillside rising 20% to the north in the west half, a plain at 30 m in the east half,
+        # with a plateau of towers in a zone part on each.
+        row, column = np.mgrid[0:120, 0:160]
+        north = (120 - row) * build_elevation.METRES_PER_ARCSECOND
+        ground = np.where(column < 80, 10 + 0.2 * north, 30).astype("float32")
+        hill, plain = np.zeros(ground.shape, dtype=bool), np.zeros(ground.shape, dtype=bool)
+        hill[30:90, 10:60] = True
+        plain[30:90, 100:150] = True
+        heights = ground + 40 * (hill | plain)
+        # The fallback lies 6 m lower and keeps a terrace on the hillside that a membrane cannot.
+        fallback = ground - 6
+        fallback[50:70, 20:50] = fallback[60, 35]
+        fallback[40, 30] = np.nan
+        latitudes = np.zeros(120)
+        filled, count, unfilled, guarded = tower_mask.membrane_fill(heights, hill | plain, latitudes,
+                                                                    fallback=fallback, span_limit=100)
+        hill_posts = hill.copy()
+        hill_posts[40, 30] = False
+        np.testing.assert_allclose(filled[hill_posts], fallback[hill_posts] + 6, atol=0.02)
+        self.assertTrue(np.isnan(filled[40, 30]))
+        # The plain's edge is level: it keeps the membrane, which lies on the plain, not on the fallback.
+        np.testing.assert_allclose(filled[plain], 30, atol=0.02)
+        self.assertEqual((count, unfilled), (int(hill.sum() + plain.sum()) - 1, 1))
+        (posts, span), = guarded
+        self.assertEqual(posts, int(hill.sum()) - 1)
+        self.assertGreater(span, 300)
+        outside = ~(hill | plain)
+        np.testing.assert_array_equal(filled[outside], heights[outside])
+        # Above the hillside's span both parts get a membrane.
+        _, _, _, none = tower_mask.membrane_fill(heights, hill | plain, latitudes, fallback=fallback,
+                                                 span_limit=span + 1)
+        self.assertEqual(none, [])
 
     def test_zone_parts_join_only_across_edges(self):
         import numpy as np
@@ -361,6 +397,70 @@ class MembraneTests(unittest.TestCase):
             masked = [entry["maskedPosts"] for entry in manifest["cellFiles"]]
             self.assertTrue(70 < shared < 100)
             self.assertEqual(sum(masked) - method["membrane"]["filledPosts"], shared)
+
+    def test_command_guards_a_part_with_a_steep_edge_and_records_its_input(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # A hillside rising 10% to the north, the plateau of a district on it, and a wider opening
+            # that lies 5 m lower and keeps a terrace inside the district.
+            row = np.mgrid[0:POSTS, 0:POSTS][0]
+            ground = 100 + np.round(0.1 * (POSTS - 1 - row) * build_elevation.METRES_PER_ARCSECOND)
+            terrain = ground.copy()
+            terrain[1005:1095, 1005:1095] += 40
+            wider = ground - 5
+            wider[1030:1070, 1030:1070] = wider[1069, 1050]
+            sets = {}
+            for name, values in (("opened", terrain), ("wider", wider)):
+                sets[name] = root / name
+                sample_elevation.write_manifest(
+                    sets[name], {"name": "grey-opening", "radiusMetres": 200 if name == "opened" else 400},
+                    [{"id": "copernicus-glo30"}], [sample_elevation.write_hgt(sets[name], (-74, 40), values)],
+                    [-74, 40, -73, 41])
+            other = root / "other"
+            sample_elevation.write_manifest(
+                other, {"name": "grey-opening", "radiusMetres": 400}, [{"id": "copernicus-glo30"}],
+                [sample_elevation.write_hgt(other, (-73, 40), wider)], [-73, 40, -72, 41])
+            heights = np.zeros((1212, 1212), dtype="float32")
+            heights[341:371, 341:371] = 60       # posts 1005 to 1094, both ways
+            file = root / "GHS_BUILT_H_ANBH_test.tif"
+            with grid(heights, -74 - 18 / 3600, 41 + 18 / 3600) as memory:
+                file.write_bytes(memory.read())
+            out = root / "guarded"
+            arguments = ["tower_mask.py", "--input", str(sets["opened"]), "--heights", str(file), "--bounds", "-74",
+                         "40", "-73", "41", "--fill", "membrane", "--edge-span", "100", "--edge-span-input",
+                         str(sets["wider"]), "--out", str(out)]
+            with patch("sys.argv", arguments), patch("builtins.print"):
+                tower_mask.main()
+            posts = sample_elevation.read_hgt(build_elevation.hgt_path(out, -74, 40))
+            # The district takes the wider opening with its terrace, raised the 5 m it lies lower at the edge.
+            changed = posts != terrain
+            self.assertTrue(changed[1005:1095, 1005:1095].all())
+            self.assertLessEqual(float(np.abs(posts[1005:1095, 1005:1095] - wider[1005:1095, 1005:1095] - 5).max()), 1)
+            self.assertEqual(float(posts[3000, 3000]), float(terrain[3000, 3000]))
+            membrane = json.loads((out / "elevation-manifest.json").read_text())["method"]["membrane"]
+            guard = membrane["guard"]
+            self.assertEqual((guard["edgeSpanMetres"], guard["percentiles"], guard["guardedParts"]), (100, [5, 95], 1))
+            # The margin around the plateau lay on the hillside already and keeps its heights.
+            self.assertEqual(guard["guardedPosts"], membrane["filledPosts"])
+            self.assertTrue(90 * 90 == int(changed.sum()) < guard["guardedPosts"])
+            self.assertEqual(guard["input"]["manifestSha256"],
+                             hashlib.sha256((sets["wider"] / "elevation-manifest.json").read_bytes()).hexdigest())
+            self.assertEqual(guard["input"]["method"]["radiusMetres"], 400)
+            self.assertGreater(guard["edgeSpansMetres"][0], 100)
+            plain = arguments[:arguments.index("--edge-span")] + ["--out"]
+            for refused_arguments in (plain + ["refused", "--edge-span", "100"],
+                                      plain + ["refused", "--edge-span-input", str(sets["wider"])],
+                                      [a for a in arguments if a not in ("--fill", "membrane")],
+                                      arguments + ["--edge-span", "0"],
+                                      arguments + ["--edge-span-input", str(other)]):
+                refused = root / "refused"
+                refused_arguments = [str(refused) if a in (str(out), "refused") else a for a in refused_arguments]
+                with self.subTest(arguments=refused_arguments[9:]), patch("sys.argv", refused_arguments), \
+                        patch("sys.stderr"), self.assertRaises(SystemExit):
+                    tower_mask.main()
+                self.assertFalse(refused.exists())
 
 
 if __name__ == "__main__":
