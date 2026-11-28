@@ -2318,9 +2318,10 @@ and [LINZ's lidar](elevation-sources.md#linzs-lidar-in-the-build)).
 3DEP in the United States, MRDEM-30 in Canada and Copernicus opened at 400 m
 elsewhere. New York, Chicago, Toronto and Calgary keep every route, and no
 flat route anywhere is a detour or a swap. The build was approved on
-2026-11-27. Development has served the graded archive since 2026-11-28 (see
-[Development since 2026-11-28](#development-since-2026-11-28)); production
-still serves the ungraded `abe5e72e…`.
+2026-11-27. Development has served the graded archive since 2026-11-28
+03:12Z (see [Development since 2026-11-28](#development-since-2026-11-28)),
+and production since 10:50Z that day (see
+[Production since 2026-11-28](#production-since-2026-11-28)).
 
 The build ran on `bicino-valhalla-h400-261116` (c4-highmem-24-lssd,
 europe-west4-b), from `planet-261116.osm.pbf`, with
@@ -2444,11 +2445,50 @@ crediting elevation the graph no longer has.
 The elevation credits (USGS 3DEP, NRCan MRDEM-30, Copernicus) are in the
 route API since 2026-11-28: answers and capabilities list them as
 `elevationAttribution` beside the unchanged OpenStreetMap `attribution`, and
-the app lists them in Settings. The development lock names the graph's four
-sources. Before production, the phone test of
-[Switch development, then production](#switch-development-then-production)
-must pass on development, and production's API image must include the
-credits.
+the app lists them in Settings. Both locks name the graph's four sources.
+
+#### Production since 2026-11-28
+
+- **Phone test on development, 2026-11-28.** Bicino Dev built from
+  `b435c63d` was installed on the iPhone (enrolled, App Attest required).
+  Each saved GPX was started with `--saved-route-acceptance-gpx=` and a
+  missed-turn trace was replayed with `devicectl device simulate location
+  route` at 5 m/s. The trace follows the route, runs 150 m straight past a
+  turn, then follows a development Valhalla route back to the saved route
+  about 170 m further on.
+  - **Dubai** (`dubai-detour-acceptance.gpx`): MapKit cycling
+    `MKDirectionsErrorCode` 8 → `maps-dev.8o.vc` 200 → `bicino.valhalla`
+    detour (6 steps, 384 m, "Rejoin saved route") → rejoin confirmed at
+    1,276 m → saved guidance resumed.
+  - **Buenos Aires** (a 3.3 km Palermo route from the development graph): the
+    same chain, with a detour of 6 steps and 790 m and the rejoin confirmed at
+    2,226 m.
+  - **Amsterdam** (a 1.9 km route): Apple Maps answered every detour, no
+    Bicino request; rejoin confirmed at 505 m and guidance resumed.
+  - The detour answer's seven credit lines were stored in the app, and
+    Settings showed them under "Elevation data for bike routes".
+- **Staging.** The archive was hard-linked into the production root (same
+  inode as development's copy, 2 links, mode 0444, manifest copied). A
+  temporary Valhalla on that exact path passed smoke 17/17 and cross-border
+  4/4.
+- **Switch.** [#952](https://github.com/seichris/open-bike-computer/pull/952)
+  (merge `8c1e4883`) moved the Valhalla bind to `4e8a22e5…` and set
+  `MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES`. Images, worker and
+  promotion ID were unchanged; the API image `4eb9066a…` (source `c6b84d6b`)
+  already had the credits code. Production answered 503 for about 1.5 min
+  (10:48:31Z to about 10:50Z).
+- **Checks on production.** Smoke 17/17, cross-border 4/4 and the profile
+  probes (no failures) against the live sidecar. Inside the API container,
+  `api_check.py` passed 31 of 31 (28 legs and 3 detours; the 140 km
+  Munich–Salzburg Road leg took 6.5 s cold). A Dubai route and detour carry
+  the seven credit lines with the OpenStreetMap provider unchanged.
+  Unattested route and detour requests get 401. Valhalla uses 620 MiB of
+  its 2 GiB.
+
+Roll production back by restoring the `abe5e72e…` bind in the
+[production lock](../deploy/compose.yaml) and deleting its
+`MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES` line in the same PR (the
+lock test requires both). The ungraded archive stays in the production root.
 
 ### False steps at crossings
 
