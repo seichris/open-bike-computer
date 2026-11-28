@@ -678,6 +678,32 @@
       ]
     },
     {
+      "promotionId": "msr-20261128-worker-6f80a0c0",
+      "candidateGitSha": "6f80a0c08f97609a3882abb8e8886cff55585af2",
+      "producerBuildSha256": "bcf2d1405660c814b626e33a7a1bdd372c087c772c79786c58353146a82ef300",
+      "workerImageDigest": "sha256:eb64c1369395d7733e3c6a2c2414f5efffa3a853bd7fe1c63b1a0d4048e3a849",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 107,
+      "firmwareGitSha": "5f76f445d4943c0984ed08eb299bba14a8b12cfd",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "bbd9923ebd05bb97d6b3eab5ce63128016b21a0e43a355240b1440a609e4ad87",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-28T13:18:08Z",
+      "approvedBy": "Chris approved this exact worker digest on the development and host evidence in Codex on 2026-11-28.",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
+    },
+    {
       "promotionId": "msr-20261128-worker-e5ee4006",
       "candidateGitSha": "e5ee40067399e9320346ca8641b440903a79c3f4",
       "producerBuildSha256": "d7366062ecbc844d933a2c361e560a15bafb170f75f8c8302108a6487d828129",
