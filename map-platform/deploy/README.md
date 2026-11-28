@@ -106,10 +106,10 @@ pins.
 
 ## Development channel
 
-For the staged durable-map producer update, follow
-[Backend-first durable map rollout](../../docs/map-compatibility-backend-rollout.md).
-A new app cannot make maps from an older worker durable; verify the signed
-manifest after promoting the development image.
+Follow the [durable-map deployment order](../../docs/map-compatibility-contract.md#deployment-order-and-rollback).
+After promoting the development image, generate a new covered Standard map
+from Bicino Dev and verify contract 1 and the promoted producer identity in
+its signed manifest.
 
 Create a second Coolify Docker Compose application using
 `compose.development.yaml` and the hostname `maps-dev.8o.vc`:

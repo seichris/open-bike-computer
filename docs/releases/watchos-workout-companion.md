@@ -2,7 +2,7 @@
 
 Release candidate: **1.11 (33)**. This build includes the saved-map selection
 transport and confirmation fix and is prepared for the
-[build-105 map and storage qualification](2026-10-29-build105-candidate.md);
+[build 105 map and storage qualification](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/releases/2026-10-29-build105-candidate.md);
 App Store submission remains a separate gate.
 Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated
 app-family icon (dark for production, light for Dev), and production no longer declares background audio for

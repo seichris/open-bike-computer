@@ -255,8 +255,8 @@ locking must precede production publication.
 - A dirty-tree `WAVESHARE_AMOLED_175` build passed. It is not upload-eligible,
   exact-commit CI, physical rendering evidence, or 2.06-inch qualification.
 
-Use the [provider research prompt](research/topography-provider-research-prompt.md)
-for the next source-coverage and redistribution review.
+Use the [source approval template](templates/topography-source-review.md)
+to record coverage and redistribution terms for each exact provider release.
 
 ## Acquisition and reproducibility boundary
 
