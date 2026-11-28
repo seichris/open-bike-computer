@@ -8,8 +8,7 @@ name = "open-bike-computer"
 
 [setup]
 script = '''
-cd "$CODEX_WORKTREE_PATH"
-tools/dev-setup
+cd "${CODEX_WORKTREE_PATH:?}" && tools/dev-setup
 '''
 
 [[actions]]

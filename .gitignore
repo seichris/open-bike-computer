@@ -68,4 +68,5 @@ artifacts/diagnostics/
 
 # Claude Code machine-local preferences.
 .claude/settings.local.json
+/.claude/worktrees/
 CLAUDE.local.md

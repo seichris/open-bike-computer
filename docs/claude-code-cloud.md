@@ -9,7 +9,9 @@ and add a personal cloud environment named **Open Bike Computer**.
 - Set `BASH_DEFAULT_TIMEOUT_MS=600000` and `BASH_MAX_TIMEOUT_MS=600000` in
   **Environment variables** for longer checks. Do not put credentials there.
 - Select a branch containing this setup. `CLAUDE.md` imports `AGENTS.md`, and
-  the shared `.claude/settings.json` hook runs `tools/dev-setup --quiet`.
+  the shared `.claude/settings.json` hook runs `tools/dev-setup --quiet` on startup
+  and resume. In hosted project threads or multi-repository sessions, run
+  `tools/dev-setup` from this checkout before using `tools/dev-env`.
 
 The hook uses the same per-worktree development environment as Codex. Keep
 installation and dependency fingerprinting in `tools/development/environment.py`;

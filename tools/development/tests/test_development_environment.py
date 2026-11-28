@@ -192,7 +192,9 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
 
     def test_claude_adapters_share_setup_instructions_and_skills(self):
         settings = json.loads((ROOT / ".claude/settings.json").read_text())
-        commands = [hook["command"] for entry in settings["hooks"]["SessionStart"] for hook in entry["hooks"]]
+        entries = settings["hooks"]["SessionStart"]
+        self.assertEqual([entry["matcher"] for entry in entries], ["startup|resume"])
+        commands = [hook["command"] for entry in entries for hook in entry["hooks"]]
         self.assertEqual(commands, ['"$CLAUDE_PROJECT_DIR"/tools/dev-setup --quiet'])
         self.assertIn("\n@AGENTS.md\n", (ROOT / "CLAUDE.md").read_text())
         self.assertEqual((ROOT / ".claude/skills").resolve(), (ROOT / ".agents/skills").resolve())

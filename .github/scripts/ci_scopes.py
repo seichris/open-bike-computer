@@ -27,9 +27,14 @@ def registry_checks():
     return json.loads((ROOT / 'tools/development/checks.json').read_text())['checks']
 
 
+# These files affect the always-run selection job or repository configuration.
+# They have no product consumers, even alongside a firmware or iOS change.
+SELECTION_ONLY_PATHS = {'.github/scripts/workflow_policy.py', '.github/dependabot.yml', 'tools/social-demo'}
+
+
 def product_inputs(paths):
     # CI/development unit tests already run in the selection job.
-    return [p for p in paths or () if not p.endswith('.md') and not p.startswith(
+    return [p for p in paths or () if p not in SELECTION_ONLY_PATHS and not p.endswith('.md') and not p.startswith(
         ('.github/scripts/tests/', 'tools/development/tests/'))]
 
 
@@ -140,15 +145,10 @@ def firmware_targets(paths, full_targets):
     inputs = product_inputs(paths)
     epaper = [p for p in inputs if is_epaper_path(p)]
     gnss = [p for p in inputs if is_gnss_variant_path(p)]
-    if gnss and len(gnss) == len(inputs):
-        # The variant's own board file selects only the variant.
-        return gnss_firmware_targets()
-    if epaper and len(epaper) == len(inputs):
-        # Like 206-named files, e-paper-named sources select only their board.
-        return epaper_firmware_targets()
-    amoled = amoled_firmware_targets(
-        [p for p in paths if p not in epaper and p not in gnss], full_targets)
-    shared = bool(inputs) and not all(p.startswith('esp32/') and '206' in p for p in inputs)
+    regular_inputs = [p for p in inputs if p not in epaper and p not in gnss]
+    # A diff confined to experimental boards needs only those boards' matrices.
+    amoled = amoled_firmware_targets(regular_inputs, full_targets) if regular_inputs or not inputs else ()
+    shared = any(not (p.startswith('esp32/') and '206' in p) for p in regular_inputs)
     if epaper:
         added = epaper_firmware_targets()
     elif shared:
