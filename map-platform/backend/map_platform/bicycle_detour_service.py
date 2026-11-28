@@ -19,7 +19,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from .route_elevation_providers import ElevationTransport, UrllibElevationTransport
 from .valhalla_bicycle import (  # noqa: F401 - decode_polyline6 is re-exported
@@ -31,6 +31,7 @@ from .valhalla_bicycle import (  # noqa: F401 - decode_polyline6 is re-exported
     ValhallaUnavailableError,
     bicycle_route_body,
     decode_polyline6,
+    elevation_credits_from_environment,
     environment_enabled,
     environment_integer,
     haversine_meters,
@@ -142,6 +143,7 @@ class BicycleDetourService:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         maximum_concurrent: int = DEFAULT_MAXIMUM_CONCURRENT,
         maximum_separation_meters: float = DEFAULT_MAXIMUM_SEPARATION_METERS,
+        elevation_credits: Sequence[str] = (),
     ):
         route_url = upstream_route_url(upstream_url) if upstream_url else None
         self._router = (
@@ -157,6 +159,7 @@ class BicycleDetourService:
         )
         self._slots = threading.BoundedSemaphore(maximum_concurrent)
         self._maximum_separation_meters = maximum_separation_meters
+        self._elevation_credits = tuple(elevation_credits)
 
     @classmethod
     def from_environment(cls, *, transport: ElevationTransport | None = None) -> "BicycleDetourService":
@@ -176,6 +179,7 @@ class BicycleDetourService:
                 "MAP_PLATFORM_BICYCLE_DETOUR_MAX_SEPARATION_METERS",
                 DEFAULT_MAXIMUM_SEPARATION_METERS, 1_000, 50_000,
             )),
+            elevation_credits=elevation_credits_from_environment(),
         )
 
     @property
@@ -183,13 +187,16 @@ class BicycleDetourService:
         return self._router is not None
 
     def capability(self) -> dict[str, Any]:
-        return {
+        capability = {
             "available": self.enabled,
             "schema": REQUEST_SCHEMA,
             "provider": PROVIDER_ID if self.enabled else None,
             "attribution": ATTRIBUTION if self.enabled else None,
             "maximumSeparationMeters": int(self._maximum_separation_meters),
         }
+        if self.enabled and self._elevation_credits:
+            capability["elevationAttribution"] = list(self._elevation_credits)
+        return capability
 
     def public_summary(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "provider": PROVIDER_ID}
@@ -225,7 +232,11 @@ class BicycleDetourService:
         if outcome.route is None:
             return _unavailable(outcome.reason or "no_bicycle_route")
         _LOGGER.info("bicycle detour outcome=ready maneuvers=%d", len(outcome.route["maneuvers"]))
-        return {"schema": RESPONSE_SCHEMA, "status": "ready", "route": outcome.route, "reason": None}
+        body: dict[str, Any] = {"schema": RESPONSE_SCHEMA, "status": "ready", "route": outcome.route, "reason": None}
+        if self._elevation_credits:
+            # Only for a graded graph, so an ungraded deployment's answer is unchanged.
+            body["elevationAttribution"] = list(self._elevation_credits)
+        return body
 
 
 def _unavailable(reason: str) -> dict[str, Any]:

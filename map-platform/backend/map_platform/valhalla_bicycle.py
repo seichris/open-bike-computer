@@ -33,9 +33,14 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from .route_elevation_providers import ElevationProviderError, ElevationTransport
+from .topography_notices import routing_graph_elevation_credits
 
 PROVIDER_ID = "bicino.valhalla"
 ATTRIBUTION = "© OpenStreetMap contributors"
+# The source IDs of the terrain models the served graph was graded with, comma
+# separated, from its elevation manifest. Unset or empty for a graph built
+# without elevation. Set beside the graph in each deployment lock.
+ELEVATION_SOURCES_VARIABLE = "MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES"
 MINIMUM_SEPARATION_METERS = 10.0
 MAXIMUM_UPSTREAM_BYTES = 2 * 1024 * 1024
 MAXIMUM_SHAPE_POINTS = 20_000
@@ -164,6 +169,25 @@ def upstream_route_url(raw: str) -> str:
             "MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL must be an internal http(s) origin without a path"
         )
     return f"{parts.scheme}://{parts.netloc}/route"
+
+
+def elevation_credits_from_environment() -> tuple[str, ...]:
+    """Credits for the elevation data the served graph's grades come from.
+
+    The OpenStreetMap ``ATTRIBUTION`` stays as it is: installed apps accept a
+    route only with exactly that provider attribution, so these credits travel
+    beside it as ``elevationAttribution``.
+    """
+    raw = os.environ.get(ELEVATION_SOURCES_VARIABLE, "").strip()
+    if not raw:
+        return ()
+    source_ids = [part.strip() for part in raw.split(",")]
+    if any(not source_id for source_id in source_ids):
+        raise ValueError(f"{ELEVATION_SOURCES_VARIABLE} must list source IDs separated by commas")
+    try:
+        return routing_graph_elevation_credits(source_ids)
+    except ValueError as exc:
+        raise ValueError(f"{ELEVATION_SOURCES_VARIABLE}: {exc}") from None
 
 
 def environment_integer(name: str, default: int, minimum: int, maximum: int) -> int:

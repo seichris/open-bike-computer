@@ -95,6 +95,14 @@ which echoes the request.
   - **Unpaved:** `dirt`, `path` and `impassable`.
   - **Unknown:** edges without a surface.
   - The groups add up to the route length within rounding.
+- `elevationAttribution` appears only when the served graph is graded with
+  elevation, that is when `MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES` is
+  set. It is a list of credit lines, one list for the route and its
+  alternatives, for the terrain models the graph's hill grades come from:
+  `["U.S. Geological Survey 3D Elevation Program (3DEP), …", "…"]`. Detour
+  answers carry the same field. The provider `attribution` stays exactly
+  `© OpenStreetMap contributors`, because installed apps refuse a route whose
+  provider differs, so the elevation credits travel beside it.
 
 | Outcome | Meaning |
 | --- | --- |
@@ -124,8 +132,10 @@ which echoes the request.
 }
 ```
 
-When the service is disabled, `available` is `false` and `provider` and
-`attribution` are `null`. `/healthz` reports
+On a graded graph, `bicycleRoute` and `bicycleDetour` also list the same
+`elevationAttribution` lines as the answers. When the service is disabled,
+`available` is `false`, `provider` and `attribution` are `null`, and there is
+no `elevationAttribution`. `/healthz` reports
 `bicycleRoute: {"enabled", "provider"}`.
 
 ## Profiles
@@ -274,6 +284,16 @@ under the detour timeout of 8 s.
 | `BICYCLE_ROUTE_IP_LIMIT_PER_HOUR` | 480 | per client IP |
 | `BICYCLE_ROUTE_LIMIT_PER_HOUR` | 240 | per installation |
 | `BICYCLE_ROUTE_LIMIT_PER_DAY` | 1,200 | per installation |
+| `BICYCLE_ROUTING_ELEVATION_SOURCES` | unset (no elevation credits) | comma-separated source IDs of the graph's elevation manifest, shared with detours |
+
+`BICYCLE_ROUTING_ELEVATION_SOURCES` names the terrain models the served graph
+was graded with: `usgs-3dep-13`, `nrcan-mrdem-30`,
+`copernicus-glo30-public-2021` and `copernicus-glo90-2021` for the planet
+graph of 2026-11-27. Each needs a reviewed credit in
+`map_platform/topography_notices.py`; an unknown or repeated ID stops the API
+from starting. It changes with the graph: the development lock names the
+graded graph's four sources, and the production lock leaves it unset while
+production serves the graph without elevation.
 
 Both `compose.yaml` and `compose.development.yaml` pass these settings to the
 API, and only to the API. The public per-IP request limit applies as well.
@@ -331,6 +351,13 @@ profile and locale, so editing one stop re-asks only the legs that changed.
   supported by the server. Its existing archive scope excludes Watch transfer
   and social sharing. It gets route elevation with the `saved` source and
   detours with the `valhalla` source.
+- **Elevation credits:** the app keeps the last `elevationAttribution` a
+  route or detour answer carried (`BicycleRoutingElevationCreditsV1`) and
+  lists it in Settings under "Elevation data for bike routes", beside the
+  OpenStreetMap credit. Nothing is listed until a graded graph has answered,
+  and an answer without credits leaves the kept ones in place, since routes
+  saved from a graded graph still come from that data. The Create a Route
+  panel keeps only the OpenStreetMap line.
 
 ## Privacy
 

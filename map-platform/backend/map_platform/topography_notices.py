@@ -1,7 +1,12 @@
-"""Public notices for the two pinned 2021 Copernicus DEM sources.
+"""Public notices for the elevation sources Bicino publishes data from.
+
+The two pinned 2021 Copernicus DEM sources serve map contours and route
+elevation profiles. The bicycle routing graph also grades its edges with the
+terrain models of map-platform/routing/elevation-sources.json.
 
 The source IDs are intentionally explicit: a new elevation source must supply
-its own reviewed notice before the map pipeline can publish its artifacts.
+its own reviewed notice before the map pipeline can publish its artifacts, or
+before the route API can credit a graph graded with it.
 """
 
 from collections.abc import Mapping, Sequence
@@ -40,6 +45,51 @@ def route_elevation_notices(source_ids: Sequence[str]) -> tuple[str, ...]:
                 f"programme by law or by delegation do not incur any liability for any use of the {product}.",
             ]
         )
+    return tuple(lines)
+
+
+# Credits for the terrain models a routing graph may be graded with, as their
+# publishers ask for them (map-platform/routing/elevation-sources.json).
+_ROUTING_TERRAIN_CREDITS = {
+    "usgs-3dep-13": (
+        "U.S. Geological Survey 3D Elevation Program (3DEP), 1/3 arc-second DEM. "
+        "Map services and data available from U.S. Geological Survey, National Geospatial Program."
+    ),
+    "nrcan-mrdem-30": (
+        "Natural Resources Canada, Medium Resolution Digital Elevation Model (MRDEM-30), "
+        "CanElevation Series. Contains information licensed under the Open Government Licence – Canada "
+        "(https://open.canada.ca/en/open-government-licence-canada)."
+    ),
+}
+
+
+def routing_graph_elevation_credits(source_ids: Sequence[str]) -> tuple[str, ...]:
+    """Reviewed credits for a bicycle routing graph graded with these sources.
+
+    No sources means a graph without elevation, which credits nothing.
+    """
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("routing graph elevation source is listed twice")
+    lines: list[str] = []
+    copernicus = False
+    for source_id in source_ids:
+        product = _PRODUCTS.get(source_id)
+        if product is not None:
+            copernicus = True
+            lines.extend(
+                [
+                    f"Produced using {product} {_COPYRIGHT}",
+                    "The organisations in charge of the Copernicus programme by law or by delegation "
+                    f"do not incur any liability for any use of the {product}.",
+                ]
+            )
+            continue
+        credit = _ROUTING_TERRAIN_CREDITS.get(source_id)
+        if credit is None:
+            raise ValueError("routing graph elevation source has no reviewed public notice")
+        lines.append(credit)
+    if copernicus:
+        lines.append("Bicino is not endorsed by the Copernicus DEM provider or programme.")
     return tuple(lines)
 
 

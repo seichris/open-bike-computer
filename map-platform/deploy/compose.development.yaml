@@ -83,10 +83,16 @@ services:
       # MapKit for cycling directions first; only when MapKit has no cycling
       # route does it send the rider position and one rejoin point here. The
       # upstream is the internal development Valhalla 3.9.2 service on this
-      # stack's network (GCC States graph, archive SHA-256
-      # a1911ad2d013f43bc1595a9fdd40e7caa4b88075db4b86f4ddfc8f0b3150bfff).
+      # stack's network (since 2026-11-28 the planet graph graded with
+      # elevation, archive SHA-256
+      # 4e8a22e5817fefbaa7dc460aca5e49a5a1b1fb13d898ce6997eed4125dfb5480).
       # It is never published; see docs/saved-route-detours.md.
       MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL: ${MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL:-http://bicino-valhalla-dev-acceptance:8002}
+      # The terrain models that graph's grades come from (its elevation
+      # manifest). Route and detour answers credit them beside the
+      # OpenStreetMap attribution. Change it with the graph: a graph without
+      # elevation takes an empty value. See docs/bicycle-routes.md.
+      MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES: ${MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES:-usgs-3dep-13,nrcan-mrdem-30,copernicus-glo30-public-2021,copernicus-glo90-2021}
       MAP_PLATFORM_BICYCLE_ROUTING_TIMEOUT_SECONDS: ${MAP_PLATFORM_BICYCLE_ROUTING_TIMEOUT_SECONDS:-8}
       MAP_PLATFORM_BICYCLE_DETOUR_MAX_CONCURRENT: ${MAP_PLATFORM_BICYCLE_DETOUR_MAX_CONCURRENT:-4}
       MAP_PLATFORM_BICYCLE_DETOUR_MAX_SEPARATION_METERS: ${MAP_PLATFORM_BICYCLE_DETOUR_MAX_SEPARATION_METERS:-15000}

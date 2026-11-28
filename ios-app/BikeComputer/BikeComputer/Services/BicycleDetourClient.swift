@@ -69,6 +69,7 @@ struct BicinoServiceJSONPoster {
         if response.statusCode == 401 {
             response = try await send(payload, path: path, refreshCredential: true, evidenceTag: evidenceTag)
         }
+        BicycleRoutingElevationCreditsV1.record(from: response)
         return response
     }
 
