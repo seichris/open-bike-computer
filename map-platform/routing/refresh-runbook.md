@@ -2028,9 +2028,9 @@ must come first, and it should count how many zones the guard catches.**
   - Towers on a hillside, as in Hong Kong, favour the 400 m opening. The
     grid's tall readings for hillside houses, as in Kelburn, favour the
     200 m tiles.
-  - Both cities are graded from lidar in the hybrid, so the choice
-    matters only for hillside tower districts outside the terrain models.
-    The survey has to find those.
+  - The hybrid build has lidar readers for both cities (LINZ and CEDD),
+    so the choice matters only for hillside tower districts outside the
+    terrain models. The survey has to find those.
   - The guard does not catch São Paulo's ridge (68 m), and seven of its
     ten parts span within 30 m of the limit.
 - **Where it would apply.** 3DEP and MRDEM-30 already grade the United
