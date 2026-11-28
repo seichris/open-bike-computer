@@ -6,4 +6,5 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
   build-essential cmake ninja-build pkg-config python3-venv \
-  libmbedtls-dev libfreetype6-dev shellcheck osmium-tool
+  libmbedtls-dev libfreetype6-dev shellcheck osmium-tool \
+  fonts-dejavu-core fonts-noto-core fonts-noto-cjk gdal-bin postgresql

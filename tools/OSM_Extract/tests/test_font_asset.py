@@ -16,15 +16,13 @@ from font_asset import (
     FMA_MAGIC,
     FMA_VERSION,
     FONT_SIZES,
-    FontFaceSpec,
     FontPackBuilder,
     default_font_faces,
     rle_decode,
     rle_encode,
 )
+from label_font_fixture import HOST_LABEL_FACE
 
-
-FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 
 
 class FontAssetPolicyTests(unittest.TestCase):
@@ -147,12 +145,12 @@ class FontAssetPolicyTests(unittest.TestCase):
             self.assertEqual([call.args[0].name for call in shape.call_args_list], ["latin"])
 
 
-@unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")
+@unittest.skipUnless(HOST_LABEL_FACE is not None, "host font fixture is unavailable")
 class FontAssetTests(unittest.TestCase):
     def builder(self):
         return FontPackBuilder(
             preferred_languages=["zh-Hant", "en"],
-            faces=(FontFaceSpec(0, FONT_PATH, 0, "latin-cjk"),),
+            faces=(HOST_LABEL_FACE,),
         )
 
     def test_multilingual_runs_share_map_wide_glyph_ids(self):
@@ -216,6 +214,8 @@ class FontAssetTests(unittest.TestCase):
         self.assertEqual(first_metadata["shapeCalls"], 2)
         self.assertEqual(first_metadata["shapingFailures"], 0)
 
+
+class FontCompressionTests(unittest.TestCase):
     def test_rle_round_trip_and_truncation(self):
         values = [0] * 20 + [1, 2, 3, 4] + [15] * 18
         encoded = rle_encode(values)
