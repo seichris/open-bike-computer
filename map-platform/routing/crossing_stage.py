@@ -77,6 +77,18 @@ def terrain_cells(terrain_dir):
     return cells
 
 
+def build_areas(sources, terrain_dir):
+    """NAME=PATH area specs of the sources that gave this build's terrain tiles posts.
+
+    A 4-degree block reaches beyond the cells it was made for, so a source the
+    build did not read could otherwise claim sites where the hybrid holds
+    opened Copernicus heights, which no crossing rule is for.
+    """
+    manifest = json.loads((Path(terrain_dir) / "terrain-manifest.json").read_text())
+    used = {share["id"] for share in manifest.get("sources", []) if share.get("cells")}
+    return [f"{source.id}={source.area}" for source in sources if source.id in used]
+
+
 def blocks_of(cells, size=BLOCK_DEGREES):
     """The south-west corners of the blocks of `size` degrees that hold a cell."""
     return sorted({(math.floor(lon / size) * size, math.floor(lat / size) * size) for lon, lat in cells})
@@ -226,7 +238,8 @@ def main(argv=None):
     parser.add_argument("--elevation", required=True, type=Path, help="The hybrid tiles the graph is graded with")
     parser.add_argument("--terrain", required=True, type=Path, help="The terrain tiles, with cells.txt")
     parser.add_argument("--sources", required=True, type=Path,
-                        help="elevation-sources.json: a site counts only inside a terrain source's area")
+                        help="elevation-sources.json: a site counts only inside the area of a source that gave "
+                             "the terrain tiles posts")
     parser.add_argument("--out", required=True, type=Path, help="An empty directory")
     parser.add_argument("--block", type=int, default=BLOCK_DEGREES)
     parser.add_argument("--margin", type=float, default=MARGIN_DEGREES)
@@ -238,9 +251,11 @@ def main(argv=None):
         parser.error("--source-sha256 takes the 64 hex digits of the source's SHA-256")
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs must be between 1 and 64")
-    sources = build_elevation.load_terrain_sources(args.sources)
-    stage(args.source, args.source_sha256, args.elevation, args.terrain,
-          [f"{source.id}={source.area}" for source in sources], args.out, args.block, args.margin, args.jobs)
+    areas = build_areas(build_elevation.load_terrain_sources(args.sources), args.terrain)
+    if not areas:
+        parser.error(f"{args.terrain / 'terrain-manifest.json'} names no source that gave posts")
+    stage(args.source, args.source_sha256, args.elevation, args.terrain, areas, args.out, args.block, args.margin,
+          args.jobs)
 
 
 if __name__ == "__main__":

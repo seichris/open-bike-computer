@@ -601,6 +601,22 @@ class StageTests(SplitFixture, unittest.TestCase):
             self.assertFalse("hashlib.file_digest" in text, name)
             __import__("ast").parse(text, name, feature_version=(3, 10))
 
+    def test_only_the_sources_that_gave_posts_claim_sites(self):
+        import crossing_stage
+        from types import SimpleNamespace
+
+        terrain = self.root / "terrain"
+        terrain.mkdir()
+        (terrain / "terrain-manifest.json").write_text(json.dumps({"sources": [
+            {"id": "usgs-3dep-13", "cells": 9}, {"id": "nrcan-mrdem-30", "cells": 0}]}))
+        sources = [SimpleNamespace(id="usgs-3dep-13", area=Path("/areas/us.geojson.gz")),
+                   SimpleNamespace(id="nrcan-mrdem-30", area=Path("/areas/canada.geojson.gz")),
+                   SimpleNamespace(id="sonny-dtm-europe-1s-v25", area=Path("/areas/europe.geojson.gz"))]
+        self.assertEqual(crossing_stage.build_areas(sources, terrain), ["usgs-3dep-13=/areas/us.geojson.gz"])
+        # No area would mean no filter at all (crossing_steps.area_of), so main() refuses a build without one.
+        (terrain / "terrain-manifest.json").write_text(json.dumps({"sources": [{"id": "usgs-3dep-13", "cells": 0}]}))
+        self.assertEqual(crossing_stage.build_areas(sources, terrain), [])
+
     def test_a_used_output_directory_is_refused(self):
         import crossing_stage
 
