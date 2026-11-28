@@ -98,6 +98,7 @@ import math
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -105,7 +106,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from build_elevation import (
-    CEDD_EPSG, CEDD_HEIGHTS, CEDD_PIXEL, CEDD_REJECT_MARGIN, KEPT_RULES, LINZ_EPSG, LINZ_GEOGRAPHIC_EPSG, LINZ_ORIGIN,
+    CEDD_EPSG, CEDD_HEIGHTS, CEDD_PIXEL, CEDD_REJECT_MARGIN, GSI_ADAPTER, GSI_HEIGHTS, GSI_LAYERS, GSI_ORIGIN,
+    GSI_REJECT_MARGIN, GSI_ZOOM, KEPT_RULES, LINZ_EPSG, LINZ_GEOGRAPHIC_EPSG, LINZ_ORIGIN,
     MRDEM_URL, POSTS, SONNY_ORIGIN, STEP, TERRAIN_BUCKET, TERRAIN_PREFIX, cell_of, clip_to_area, drop_beyond,
     format_cell_catalog, format_kept_catalog, format_linz_catalog, format_sonny_catalog, format_terrain_catalog,
     hgt_name, hgt_path, linz_box, linz_url, load_area, load_terrain_sources, post_transform, sonny_posts, write_tile,
@@ -546,6 +548,204 @@ def cedd_cells(entries, area, out, fetch, jobs=8, log=functools.partial(print, f
     return records
 
 
+GSI_AGENT = "bicino-terrain-catalog/1"
+WEB_MERCATOR_HALF = 20037508.342789244
+
+
+class Rate:
+    """At most `per_second` requests a second, from any number of threads."""
+
+    def __init__(self, per_second):
+        import threading
+        import time
+
+        self.gap, self.lock, self.next, self.clock = 1 / per_second, threading.Lock(), time.monotonic(), time
+
+    def wait(self):
+        with self.lock:
+            now = self.clock.monotonic()
+            delay = self.next - now
+            self.next = max(now, self.next) + self.gap
+        if delay > 0:
+            self.clock.sleep(delay)
+
+    def hold(self, seconds):
+        """No request starts for `seconds`, as when the server asks for fewer."""
+        with self.lock:
+            self.next = max(self.next, self.clock.monotonic() + seconds)
+
+
+def gsi_tile_x(longitude):
+    return int((longitude + 180) / 360 * 2 ** GSI_ZOOM)
+
+
+def gsi_tile_y(latitude):
+    return int((1 - math.asinh(math.tan(math.radians(latitude))) / math.pi) / 2 * 2 ** GSI_ZOOM)
+
+
+def gsi_tile_box(x, y):
+    """West, south, east and north of a tile in degrees."""
+    n = 2 ** GSI_ZOOM
+    north = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    south = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
+    return x / n * 360 - 180, south, (x + 1) / n * 360 - 180, north
+
+
+def gsi_decode(data):
+    """A GSI PNG tile's heights in metres, NaN where it has none."""
+    import numpy as np
+    from rasterio.io import MemoryFile
+
+    import warnings
+
+    from rasterio.errors import NotGeoreferencedWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", NotGeoreferencedWarning)
+        memory = MemoryFile(data)
+        dataset = memory.open()
+    with memory, dataset:
+        if dataset.driver != "PNG" or (dataset.width, dataset.height) != (256, 256) or dataset.count not in (3, 4):
+            raise ValueError("not a 256-pixel RGB PNG tile")
+        red, green, blue = (dataset.read(band).astype(np.int64) for band in (1, 2, 3))
+    value = red * 65536 + green * 256 + blue
+    heights = np.where(value < 2 ** 23, value, value - 2 ** 24) * 0.01
+    return np.where(value == 2 ** 23, np.nan, heights).astype("float32")
+
+
+def gsi_fetch(url, rate, attempts=6):
+    """(bytes, ETag) of a tile, or None where the layer has none.
+
+    Every attempt, a retry too, waits its turn at `rate`; a 429 holds every
+    worker for the backoff or the server's Retry-After, at most 5 minutes.
+    """
+    import http.client
+    import time
+
+    for attempt in range(attempts):
+        rate.wait()
+        pause = min(60, 2 ** attempt * 2)
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": GSI_AGENT})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read()
+                length = response.headers.get("Content-Length")
+                if length is not None and len(data) != int(length):
+                    raise OSError("short read")
+                return data, response.headers.get("ETag", "").strip('"')
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            if error.code not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
+                raise
+            if error.code == 429:
+                asked = (error.headers.get("Retry-After") or "").strip() if error.headers else ""
+                pause = max(pause, min(300, int(asked))) if asked.isdigit() else pause
+                rate.hold(pause)
+        except (OSError, http.client.HTTPException):
+            # A refused or dropped connection, a timeout, or a short read: IncompleteRead is no OSError.
+            if attempt == attempts - 1:
+                raise
+        time.sleep(pause)
+
+
+def gsi_tile(x, y, fetch):
+    """A tile's heights, DEM5A's where it has them and DEM10B's elsewhere, and the (layer, ETag) of every tile read.
+
+    DEM10B covers all of Japan's land, so it is asked first: where it has no
+    tile, the sea, nothing more is asked. None when neither has a tile.
+    """
+    import numpy as np
+
+    lidar, contours = GSI_LAYERS
+    base = fetch(f"{GSI_ORIGIN}/{contours}/{GSI_ZOOM}/{x}/{y}.png")
+    if base is None:
+        return None, []
+    found = fetch(f"{GSI_ORIGIN}/{lidar}/{GSI_ZOOM}/{x}/{y}.png")
+    heights = gsi_decode(base[0])
+    read = [(contours, base[1])]
+    if found is not None:
+        read.append((lidar, found[1]))
+        better = gsi_decode(found[0])
+        heights = np.where(np.isfinite(better), better, heights)
+    return heights, read
+
+
+def gsi_rules(area_sha256):
+    """What GSI's cells are made from and with; a cell recorded with other rules is not reused."""
+    return {"adapter": GSI_ADAPTER, "origin": GSI_ORIGIN, "zoom": GSI_ZOOM, "layers": list(GSI_LAYERS),
+            "heights": list(GSI_HEIGHTS), "pixelsAround": GSI_REJECT_MARGIN, "areaSha256": area_sha256}
+
+
+def gsi_cell(cell, area, out, fetch, rules, jobs=12):
+    """Write a cell's kept tile from GSI's tiles under it and its margin; the cell's record.
+
+    The tiles are laid into one mosaic on Web Mercator, the pixels that are
+    not ground are dropped with their margin, and the posts are resampled
+    from the mosaic and cut to the area. `provenance/CELL.txt` names every
+    tile read with its layer and ETag. A cell already recorded is not made
+    again, so a stopped run goes on where it stopped; a cell recorded with
+    other `rules`, such as another area, stops the run.
+    """
+    import numpy as np
+    from affine import Affine
+    from rasterio.crs import CRS
+    from rasterio.warp import Resampling, reproject
+    from shapely.geometry import box
+
+    name = hgt_name(*cell)
+    receipt = out / "receipts" / f"{name}.json"
+    if receipt.exists():
+        record = json.loads(receipt.read_text())
+        if record.get("made") != rules:
+            raise ValueError(f"{receipt} was made with {record.get('made')}, not {rules}: make the cells in a new "
+                             "directory")
+        return record
+    longitude, latitude = cell
+    pad = 3 * STEP
+    xs = range(gsi_tile_x(longitude - pad), gsi_tile_x(longitude + 1 + pad) + 1)
+    ys = range(gsi_tile_y(latitude + 1 + pad), gsi_tile_y(latitude - pad) + 1)
+    wanted = [(x, y) for y in ys for x in xs if area[1].intersects(box(*gsi_tile_box(x, y)))]
+    if wanted:
+        # The mosaic spans the tiles that touch the area, not the whole cell.
+        xs = range(min(x for x, _ in wanted), max(x for x, _ in wanted) + 1)
+        ys = range(min(y for _, y in wanted), max(y for _, y in wanted) + 1)
+    mosaic = np.full((len(ys) * 256, len(xs) * 256), np.nan, dtype="float32")
+    provenance = []
+    with ThreadPoolExecutor(jobs) as pool:
+        for (x, y), (heights, read) in zip(wanted, pool.map(lambda xy: gsi_tile(*xy, fetch), wanted)):
+            provenance += [f"{layer}/{GSI_ZOOM}/{x}/{y} {etag}\n" for layer, etag in read]
+            if heights is not None:
+                row, column = (y - ys[0]) * 256, (x - xs[0]) * 256
+                mosaic[row:row + 256, column:column + 256] = heights
+    record = {"cell": name, "made": rules, "tiles": len(wanted), "tilesRead": len(provenance)}
+    valid = np.isfinite(mosaic)
+    record.update(drop_beyond(mosaic, valid, GSI_HEIGHTS, GSI_REJECT_MARGIN))
+    mosaic[~valid] = np.nan
+    posts = np.full((POSTS, POSTS), np.nan, dtype="float32")
+    if valid.any():
+        pixel = 2 * WEB_MERCATOR_HALF / (256 * 2 ** GSI_ZOOM)
+        reproject(mosaic, posts, src_transform=Affine(pixel, 0, -WEB_MERCATOR_HALF + xs[0] * 256 * pixel, 0, -pixel,
+                                                      WEB_MERCATOR_HALF - ys[0] * 256 * pixel),
+                  src_crs=CRS.from_epsg(3857), src_nodata=float("nan"), dst_transform=post_transform(*cell),
+                  dst_crs=CRS.from_epsg(4326), dst_nodata=float("nan"), init_dest_nodata=False,
+                  resampling=Resampling.bilinear, num_threads=1)
+        record["outsidePosts"] = clip_to_area(posts, cell, area)
+    if np.isfinite(posts).any():
+        out.mkdir(parents=True, exist_ok=True)
+        record.update(write_tile(out, cell, posts))
+        record["fileSha256"] = hashlib.sha256(hgt_path(out, *cell).read_bytes()).hexdigest()
+    else:
+        record["empty"] = True
+    text = "".join(sorted(provenance))
+    (out / "provenance").mkdir(parents=True, exist_ok=True)
+    (out / "provenance" / f"{name}.txt").write_text(text)
+    record["provenanceSha256"] = hashlib.sha256(text.encode()).hexdigest()
+    receipt.parent.mkdir(exist_ok=True)
+    receipt.write_text(json.dumps(record, indent=1, sort_keys=True) + "\n")
+    return record
+
+
 def kept_catalog(cells, date):
     """The catalog of a directory of kept tiles, from the receipts their maker wrote."""
     tiles = {}
@@ -638,6 +838,12 @@ def main():
     cedd.add_argument("--area", required=True, type=Path, help="The file `countries` wrote")
     cedd.add_argument("--jobs", type=int, default=8)
     cedd.add_argument("--out", required=True, type=Path, help="A new directory")
+    gsi = commands.add_parser("gsi-cells", help="Make Japan's kept tiles from GSI's elevation tiles, politely")
+    gsi.add_argument("--area", required=True, type=Path, help="The file `countries` wrote")
+    gsi.add_argument("--rate", type=float, default=12, help="Requests a second to GSI's server, at most")
+    gsi.add_argument("--jobs", type=int, default=12, help="Requests at once")
+    gsi.add_argument("--only", nargs="*", metavar="CELL", help="Only these cells, such as N35E139")
+    gsi.add_argument("--out", required=True, type=Path, help="A directory; a stopped run goes on in it")
     kept = commands.add_parser("kept-catalog", help="Write the catalog of kept tiles from their maker's receipts")
     kept.add_argument("--cells", required=True, type=Path, help="The directory the maker wrote")
     kept.add_argument("--date", required=True, help="The day the tiles were made, YYYYMMDD")
@@ -778,6 +984,18 @@ def main():
         for record in cedd_cells(entries, area, args.out, lambda url: http_download(
                 urllib.parse.quote(url, safe=":/"))[0], args.jobs):
             print(json.dumps({key: value for key, value in record.items() if key != "hgtSha256"}), flush=True)
+        return
+    if args.command == "gsi-cells":
+        cells = sorted(area_cells(area), key=lambda cell: hgt_name(*cell))
+        if args.only:
+            cells = [cell for cell in cells if hgt_name(*cell) in args.only]
+        fetch = functools.partial(gsi_fetch, rate=Rate(args.rate))
+        rules = gsi_rules(hashlib.sha256(pinned.read_bytes()).hexdigest())
+        print(f"{len(cells)} cells", flush=True)
+        for cell in cells:
+            record = gsi_cell(cell, area, args.out, fetch, rules, args.jobs)
+            print(json.dumps({key: value for key, value in record.items() if key not in ("hgtSha256", "made")}),
+                  flush=True)
         return
     if args.command == "sonny-tiles":
         listed = sonny_listing(http_get(args.folder))

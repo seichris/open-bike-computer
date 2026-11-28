@@ -74,7 +74,7 @@ ungraded planet, the graph production serves: `elevation`, `build-graded`,
 `qualify-graded`, `gate` and `terrain-scan` are skipped, and it takes about
 4 hours. Without `--terrain`, `terrain-scan` is skipped.
 
-`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020` grades with the hybrid: the terrain
+`--terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020,gsi-japan-dem5a-dem10b-20261127` grades with the hybrid: the terrain
 sources of [elevation-sources.json](../elevation-sources.json) where they
 have data, the opened Copernicus tiles elsewhere (see
 [Build and release](../README.md#build-and-release)). A build uses every
@@ -92,8 +92,8 @@ ways:
   countries, and New Zealand 60 cells read from LINZ's 424 sheets at their
   8 m overview. A LINZ worker holds a cell's mosaic of 8 m pixels: up to
   605 MB, with a peak of 2.2 GB in a laptop test of Wellington's cell.
-  Hong Kong adds 2 cells kept as HGT tiles in the elevation bucket, made
-  once from CEDD's lidar. The stage first fetches Sonny's zips and the
+  Hong Kong adds 2 cells and Japan 122, kept as HGT tiles in the
+  elevation bucket, made once from CEDD's lidar and GSI's tiles. The stage first fetches Sonny's zips and the
   kept tiles from their copies in
   `gs://bicino-routing-elevation` into `elevation-terrain-files/`, with the
   same account and token as kept tiles (see below), and keeps each only
@@ -122,7 +122,7 @@ ways:
   that the two differ in elevation alone. The gate stage first compares
   the tagging rules both manifests record and fails when they differ.
 - **The gate's source is named**
-  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25+linz-nz-lidar-1m-dem+cedd-hk-lidar-dtm-2020-over-opened-400`.
+  `usgs-3dep-13+nrcan-mrdem-30+sonny-dtm-europe-1s-v25+linz-nz-lidar-1m-dem+cedd-hk-lidar-dtm-2020+gsi-japan-dem5a-dem10b-20261127-over-opened-400`.
 
 A stage starts when every stage it needs is done or skipped. systemd orders
 the units and starts independent stages together; `run_stage.py` enforces the
@@ -507,7 +507,7 @@ With `--terrain` the rehearsal grades with the hybrid:
 
 ```sh
 map-platform/routing/builder/rehearse.sh --root /absolute/scratch --city Toronto --radius 400 \
-  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020
+  --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020,gsi-japan-dem5a-dem10b-20261127
 ```
 
 On 2026-11-26 Chicago ran with 3DEP alone, the one source of the list

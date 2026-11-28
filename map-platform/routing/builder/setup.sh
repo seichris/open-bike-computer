@@ -3,7 +3,7 @@
 # builder as user bicino, piped over SSH so nothing has to be copied first:
 #
 #   ssh -F CONFIG builder 'bash -s -- --commit SHA --planet-date 261116 --opening-radius 400 \
-#     --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020 --elevation-cache elevation-cache-2026-11-26.json --start' \
+#     --terrain usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020,gsi-japan-dem5a-dem10b-20261127 --elevation-cache elevation-cache-2026-11-26.json --start' \
 #     < map-platform/routing/builder/setup.sh
 #
 #   --commit SHA               the open-bike-computer commit whose tools run (40 hex digits)

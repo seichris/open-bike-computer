@@ -25,16 +25,16 @@ recommendation below with its caveats. A source joins
 `elevation-sources.json` with its reader in `build_elevation.py`, its
 catalog, its area and the approval fields, as 3DEP and MRDEM-30 did, and
 passes city samples through that reader before a planet is built with it.
-Sonny's tiles, LINZ's lidar and CEDD's lidar are in the list (see
-[Sonny's tiles](#sonnys-tiles-in-the-build),
-[LINZ's lidar](#linzs-lidar-in-the-build) and
-[CEDD's lidar](#cedds-lidar-in-the-build)); GSI's tiles are not yet.
+All four are in the list (see [Sonny's tiles](#sonnys-tiles-in-the-build),
+[LINZ's lidar](#linzs-lidar-in-the-build),
+[CEDD's lidar](#cedds-lidar-in-the-build) and
+[GSI's tiles](#gsis-tiles-in-the-build)).
 
 | Source | Approved area | Licence and credit | State |
 |---|---|---|---|
 | Sonny's LiDAR Digital Terrain Models of Europe, 1 arc-second, version 25 | The countries it builds wholly from national lidar or photogrammetry, each cut to its boundary: Austria, Belgium, Czechia, Denmark, Estonia, Finland, France, Germany, Latvia, Lithuania, Luxembourg, the Netherlands, Norway, Poland, Slovakia, Slovenia, Spain, Sweden, Switzerland, the United Kingdom; and mainland Portugal outside the SRTM patch around Porto | CC BY 4.0; credit Sonny with a link to sonny.4lima.de, and the national sources its `_Datasources.txt` names | Read by the build, from a copy in the elevation bucket |
 | LINZ New Zealand LiDAR 1 m DEM | LINZ's capture area of the national mosaic | CC BY 4.0; "Sourced from LINZ. CC BY 4.0" | Read by the build |
-| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Not read yet. GSI offers no bulk file without an account, so on 2026-11-27 Chris chose one slow crawl of its PNG tiles into HGT cells kept in the elevation bucket, which builds read instead of GSI's server |
+| GSI elevation tiles of Japan | Japan: DEM5A where it has data, DEM10B elsewhere | Public Data License 1.0; credit the GSI tiles as processed | Read by the build, from tiles kept in the elevation bucket. GSI offers no bulk file without an account, so on 2026-11-27 Chris chose one slow crawl of its PNG tiles into HGT cells kept in the bucket, which builds read instead of GSI's server |
 | CEDD LiDAR DTM 2020 of Hong Kong | The survey's coverage of Hong Kong | Government terms: reproduction and distribution, commercial use included, with the source named | Read by the build, from tiles kept in the elevation bucket. The terms list copying and distribution, not adaptation; Chris decided on 2026-11-27 to use it, on the reading that the build's processing is covered |
 
 The [pits at shorelines](refresh-runbook.md#pits-at-shorelines) found in
@@ -218,6 +218,55 @@ inside the build is covered.
   none of the direct routes reads 6%+ (the survey's tram-corridor sample
   read up to 10% on opened Copernicus), and `use_hills` changes neither of
   the 2 hilly legs.
+
+## GSI's tiles in the build
+
+`build_elevation.py --terrain-sources` reads GSI's elevation tiles of Japan
+since 2026-11-28, as the sixth source of the list: DEM5A, from airborne lidar,
+where it has data, and DEM10B, from 1:25,000 contours, elsewhere, as Chris
+approved. DEM5B and DEM5C, from photogrammetry, are not read.
+
+- **Kept tiles.** GSI publishes the heights as a pyramid of PNG tiles
+  (`cyberjapandata.gsi.go.jp/xyz/dem5a_png` and `dem_png`); a bulk file
+  needs an account. On 2026-11-27 Chris chose one slow crawl into tiles
+  kept in the elevation bucket over a crawl in every build.
+  `terrain_catalog.py gsi-cells` made Japan's cells on 2026-11-27 from
+  204,248 PNG tiles at zoom 14, about 8 m a pixel (107,367 of DEM10B and
+  96,881 of DEM5A), asking GSI's server for at most 12 tiles a second, in
+  9 hours on a laptop. Retries came on top of that crawl's 12; since PR
+  944 a retry waits its turn too, a 429 holds every worker, and a receipt
+  records the area and rules its cell was made with, so that a resumed run
+  stops at a cell made otherwise. DEM10B is asked first: where it has no
+  tile, the sea, nothing more is asked. Of the 151 cells that touch the
+  area, 122 hold land; the other 29 are sea and have no tile. A cell's
+  tiles go into one Web Mercator mosaic, and the posts are resampled from it
+  and cut to the area. The tiles are kept in
+  `gs://bicino-routing-elevation/terrain-sources/gsi-japan-dem5a-dem10b-20261127/`,
+  and a build reads them from there alone.
+- **Catalog.** [The catalog](gsi-japan-dem5a-dem10b-tiles-20261127.txt)
+  pins each tile's size and SHA-256 and the SHA-256 of the provenance file
+  beside it in the bucket, which names every PNG tile read with its layer
+  and ETag: 213,429 lines, as a tile under the margin of two cells is read
+  for both.
+- **Area.** [The area](japan-osm-r382313-v408.geojson.gz) is Japan's
+  OpenStreetMap relation 382313 as of 2026-11-27, with its territorial sea.
+- **Heights.** GSI's tiles are on JGD2011, which differs from WGS 84 by
+  less than a metre, in metres above Japan's height datum. The kept tiles
+  read Mount Fuji at 3,767 m (3,776 m), Mount Takao at 596 m (599 m), Atago
+  Hill at 22 m (26 m) and Tokyo Station at 4 m.
+- **Not ground.** Pixels below −10 m or above 4,000 m, Mount Fuji being
+  3,776 m, are dropped with the pixels within 15 of them, about 120 m, when
+  the tiles are made: 301,694 pixels in 32 cells, those from −134.1 m to
+  −10.0 m and the pixels around them. None is above 4,000 m.
+- **Rehearsal.** Tokyo ran through the build chain with all six sources
+  (`builder/rehearse.sh --radius 400 --terrain
+  usgs-3dep-13,nrcan-mrdem-30,sonny-dtm-europe-1s-v25,linz-nz-lidar-1m-dem,cedd-hk-lidar-dtm-2020,gsi-japan-dem5a-dem10b-20261127`)
+  on the Kanto extract, with the kept tiles fetched first with an
+  operator's token. The elevation stage took 89 s and read 8 kept tiles,
+  69 MB, Tokyo's cell and the 7 around it. Tokyo is a flat city, and the
+  gate was met: 2 routes, the longer 1.4% longer graded, as the survey's
+  DEM5A sample read, and none of the direct routes reads 6%+. The terrain
+  scan found no artifact candidate and no road with a false step.
 
 ## Recommendation
 

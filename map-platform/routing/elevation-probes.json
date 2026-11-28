@@ -154,8 +154,9 @@
   {
     "city": "Tokyo",
     "terrain": "flat",
-    "planetOnly": true,
     "bbox": [139.60, 35.62, 139.80, 35.73],
+    "extract": "asia/japan/kanto",
+    "adminRelations": [382313],
     "legs": [
       {"name": "Shibuya to Shinjuku", "origin": [35.6580, 139.7016], "destination": [35.6896, 139.7006]}
     ]
