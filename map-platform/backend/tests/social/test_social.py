@@ -1279,10 +1279,10 @@ class SocialTest(unittest.TestCase):
                     +chunk(b'IDAT',zlib.compress(b''))+chunk(b'IEND',b''))
         for width,height in [(10000,10000),(20000,20000)]:  # warning tier and error tier
             data=png_header(width,height)
-            # Pillow imports its format plugins on first open, compiling them when no
-            # bytecode is cached. Pay that one-time cost unmeasured; the traced call
-            # below still runs the complete rejection under the same bound.
-            with self.assertRaises(ValueError): sanitize_avatar(data)
+            # Pillow imports its format drivers lazily on first open, compiling them when
+            # no bytecode is cached. Load them all first so the bound measures only the
+            # rejection, not that one-time module import.
+            Image.init()
             tracemalloc.start()
             try:
                 with self.assertRaises(ValueError): sanitize_avatar(data)
