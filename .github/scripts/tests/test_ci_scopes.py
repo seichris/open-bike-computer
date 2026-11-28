@@ -27,6 +27,19 @@ class ScopeTests(unittest.TestCase):
             self.assertTrue(all(scope.map_scopes(paths,selected=True).values()))
         self.assertFalse(any(scope.map_scopes(locks,selected=False).values()))
 
+    def test_imageio_reader_inputs_select_the_macos_map_job(self):
+        for path in (
+            'ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift',
+            'ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift',
+            'tools/development/swift_compile.py',
+            'tools/development/swift-sources.json',
+        ):
+            with self.subTest(path=path):
+                selected = components.classify_paths([path])
+                self.assertTrue(selected['ios'])
+                scopes = scope.map_scopes([path], selected=selected['map_backend'])
+                self.assertEqual([name for name, enabled in scopes.items() if enabled], ['map_readers'])
+
     def test_catalog_does_not_pull_in_native_readers(self):
         self.assertEqual([k for k,v in scope.map_scopes(['map-platform/catalog/src/index.ts'],selected=True).items() if v],['map_catalog'])
 
