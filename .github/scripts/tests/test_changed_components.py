@@ -99,6 +99,14 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
+    def test_github_configuration_and_policy_checker_have_no_product_jobs(self):
+        for path in ('.github/dependabot.yml', '.github/scripts/workflow_policy.py'):
+            with self.subTest(path=path):
+                self.assertFalse(any(changed_components.classify_paths([path]).values()))
+                fixture = 'protocol/fixtures/workout-zones-v1.json'
+                self.assertEqual(changed_components.ci_scopes.shared_fast_checks([fixture, path]),
+                                 {'ios-navigation-workout'})
+
     def test_social_demo_operator_is_covered_without_product_builds(self):
         paths = ['tools/social-demo', 'tools/development/tests/test_social_demo.py', 'docs/social-demo-riders.md']
         self.assertFalse(any(changed_components.classify_paths(paths).values()))

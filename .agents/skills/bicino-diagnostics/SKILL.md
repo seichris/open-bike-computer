@@ -160,6 +160,12 @@ Mac's durable inbox. Use `diag inbox list` / `diag inbox get --id ID --output NE
 and verify the received artifact. For a complete handoff, check that the intended
 acquisition finished before exporting.
 
+If the broker reports `507 inbox_full`, `inbox get` leaves the active copy in
+place. Use `tools/bicino diag inbox archive --id ID --output /absolute/path/ride.zip`
+with a new, permanent path outside the broker. The command verifies the copy
+before freeing its inbox slot. Keep the ZIP at that path so the broker can
+verify duplicate uploads against the original receipt.
+
 For a lab observation, use `diag live start --device DIGEST --seconds 120`, then
 `diag tail --device DIGEST`. Continue with `--cursor` from the previous response.
 Firmware polling pauses while riding. The bounded snapshots can have gaps and

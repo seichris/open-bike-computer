@@ -85,6 +85,18 @@ class CiCostBudgetTests(unittest.TestCase):
         # Manual, release and core-warm requests keep exactly their matrix.
         self.assertNotIn('WAVESHARE_AMOLED_175_GNSS', components.select_firmware_targets('all'))
 
+    def test_mixed_board_specific_changes_build_only_the_affected_boards(self):
+        paths = {
+            '397': 'esp32/lib/epaper_display/epaper_display.cpp',
+            '175_gnss': 'esp32/lib/board/boards/waveshare_amoled_175_gnss.hpp',
+            '206': 'esp32/lib/panel/WAVESHARE_AMOLED_206.cpp',
+        }
+        for boards in (('397', '175_gnss'), ('206', '397'), ('206', '175_gnss'), tuple(paths)):
+            with self.subTest(boards=boards):
+                inputs = [paths[b] for b in boards] + ['docs/example.md']
+                expected = [t for b in boards for t in components.select_firmware_targets(b)]
+                self.assertCountEqual(scopes.firmware_targets(inputs, components.select_firmware_targets('175')), expected)
+
     def test_unmapped_input_stops_cli_without_product_selection_outputs(self):
         output, errors = io.StringIO(), io.StringIO()
         with patch('sys.argv', ['changed_components.py', '--event', 'pull_request']), \

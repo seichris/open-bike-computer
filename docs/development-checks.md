@@ -111,10 +111,12 @@ tools/dev-env --map-backend tools/dev-check --suite map
 
 The Codex app runs `tools/dev-setup` when it creates a worktree
 (`.codex/environments/environment.toml`, which also defines check and build-only
-actions); Claude Code runs `tools/dev-setup --quiet` from the SessionStart hook
-in `.claude/settings.json`. `CLAUDE.md` only imports `AGENTS.md`, and
-`.claude/skills` links to `.agents/skills`, so both apps read the same rules and
-skills. Keep logic in `tools/development/environment.py`, not in the adapters.
+actions). Claude Code runs `tools/dev-setup --quiet` on startup and resume when
+repository hooks are available. See [Claude cloud setup](claude-code-cloud.md)
+for sessions that need manual setup. `CLAUDE.md` imports `AGENTS.md` and
+`REVIEW.md`. Both apps use the skills in `.agents/skills` through the
+`.claude/skills` link for Claude. Keep shared setup logic in
+`tools/development/environment.py`.
 
 Setup picks the first healthy Python 3.10-3.14 (3.13 preferred; override with
 `OPEN_BIKE_PYTHON`), creates the ignored `.venv/` from
