@@ -11,6 +11,13 @@ sys.path.insert(0, str(ROOT / 'tools/development'))
 from swift_compile import sources
 
 MAP_SCOPES = ('map_source', 'map_catalog', 'map_social', 'map_readers', 'map_deploy')
+SWIFT_GROUPS = json.loads((ROOT / 'tools/development/swift-sources.json').read_text())['groups']
+# These inputs live outside the map backend but are compiled by its macOS job.
+NATIVE_READER_INPUTS = {
+    'tools/development/swift_compile.py',
+    'tools/development/swift-sources.json',
+    *(path for path in sources('topography-native-reader', SWIFT_GROUPS) if not path.startswith('map-platform/')),
+}
 COMPOSE_LOCKS = {'map-platform/deploy/compose.yaml', 'map-platform/deploy/compose.development.yaml'}
 
 # Inputs consumed only by existing fast checks. Keep one mapping for local and
@@ -81,6 +88,8 @@ def map_scopes(paths, *, selected):
         return result
     if paths and set(paths) <= COMPOSE_LOCKS:
         result['map_deploy'] = True
+    elif paths and set(paths) <= NATIVE_READER_INPUTS:
+        result['map_readers'] = True
     elif paths and all(p.startswith('map-platform/catalog/') for p in paths):
         result['map_catalog'] = True
     else:
@@ -213,14 +222,13 @@ def ios_scopes(paths, *, native, selected):
         return {'ios_checks': [c['id'] for c in fast if c['id'] in narrow],
                 'ios_simulator': False, 'ios_release': False}
     full = not paths or any(not p.endswith('.swift') for p in paths)
-    groups = json.loads((ROOT / 'tools/development/swift-sources.json').read_text())['groups']
     nav = [c for c in fast if 'ciInputs' in c]
     inputs = {}
     for c in nav:
         metadata = c['ciInputs']
         inputs[c['id']] = set(metadata.get('inputs', []))
         for g in metadata.get('swiftGroups', []):
-            inputs[c['id']].update(sources(g, groups))
+            inputs[c['id']].update(sources(g, SWIFT_GROUPS))
     def matches(check, path):
         return path in inputs[check['id']] or path.startswith(tuple(check['ciInputs'].get('inputPrefixes', [])))
     # An unknown or deleted source is never evidence that a helper is irrelevant.

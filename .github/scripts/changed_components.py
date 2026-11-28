@@ -321,7 +321,7 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             selected["firmware_host"] = True
             selected["ios"] = True
 
-        if path == ".dockerignore" or path.startswith("map-platform/"):
+        if path == ".dockerignore" or path.startswith("map-platform/") or path in ci_scopes.NATIVE_READER_INPUTS:
             selected["map_backend"] = True
 
         if path in OSM_BACKEND_PATHS:

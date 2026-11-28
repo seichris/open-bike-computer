@@ -99,9 +99,7 @@ jobs:
           c++ --version
           python -c "import rasterio, contourpy; import shutil; assert shutil.which('swiftc') and shutil.which('c++')"
       - name: Cross-reader corruption and deterministic artifact contracts
-        run: |
-          python -m unittest discover -s tests -p test_topography_artifacts.py -v
-          python -m unittest discover -s tests -p test_topography_geometry.py -v
+        run: python -m tests.run_topography_readers
 
   catalog:
     name: Cloudflare Map Catalog
