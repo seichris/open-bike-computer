@@ -47,11 +47,20 @@ For map-platform work, use the separate environment:
 
 ```sh
 tools/dev-setup --map-backend
-tools/dev-env --map-backend tools/dev-check --suite map
+pg_virtualenv -t bash -eu -c '
+  createdb --template=template0 --encoding=UTF8 --locale=C.UTF-8 social_test
+  export BICINO_SOCIAL_TEST_DATABASE_URL="postgresql+psycopg://${PGUSER}@127.0.0.1:${PGPORT}/social_test"
+  export OBC_REQUIRE_WORKER_FONTS=1 OBC_REQUIRE_POI_OGR_TESTS=1 BICINO_REQUIRE_SHELLCHECK=1
+  exec tools/dev-env --map-backend tools/dev-check --suite map --report /tmp/bicino-map/results.json
+'
 ```
 
-This selects Python 3.10-3.12 for the pinned topography dependencies and keeps the
-backend's cryptography constraints separate from host tests. Read the backend
+Run these commands from the repository root. `pg_virtualenv` creates a disposable
+PostgreSQL cluster for the suite and removes it when the command exits.
+The OSM tests use the installed Noto fonts and GDAL command-line tools.
+
+The map environment selects Python 3.10-3.12 for the pinned topography
+dependencies and keeps the backend's cryptography constraints separate from host tests. Read the backend
 and extractor documentation before running services or map builds.
 
 Reference: [Claude cloud environment documentation](https://code.claude.com/docs/en/cloud-environments).

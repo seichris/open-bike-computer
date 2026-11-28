@@ -23,13 +23,12 @@ from map_format import (
     encode_poi_section,
     write_fmb,
 )
-from font_asset import FontFaceSpec, FontPackBuilder
+from font_asset import FontPackBuilder
 from map_platform.topography_artifacts import (
     Contour, ContourSection, replace_fmb6_contours,
 )
+from label_font_fixture import HOST_LABEL_FACE
 
-
-FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
 GOLDEN_FIXTURE_PATH = (
     pathlib.Path(__file__).resolve().parents[3]
     / "tools"
@@ -274,7 +273,7 @@ class BinaryMapFormatTests(unittest.TestCase):
         offset = skip_coordinates(data, offset + 13)
         self.assertEqual(data[offset + 4], 10)
 
-    @unittest.skipUnless(FONT_PATH.is_file(), "host font fixture is unavailable")
+    @unittest.skipUnless(HOST_LABEL_FACE is not None, "host font fixture is unavailable")
     def test_fmb_v3_has_deduplicated_utf8_runs_and_label_candidates(self):
         road = feature(
             "highway.residential",
@@ -301,7 +300,7 @@ class BinaryMapFormatTests(unittest.TestCase):
         )
         builder = FontPackBuilder(
             preferred_languages=["en"],
-            faces=(FontFaceSpec(0, FONT_PATH, 0, "latin-cjk"),),
+            faces=(HOST_LABEL_FACE,),
         )
 
         with tempfile.TemporaryDirectory() as directory:
