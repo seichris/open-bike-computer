@@ -1,5 +1,5 @@
-# control-plane-source-commit: 6f80a0c08f97609a3882abb8e8886cff55585af2
-# worker-source-commit: 6f80a0c08f97609a3882abb8e8886cff55585af2
+# control-plane-source-commit: 7d88978b9989b0924906c4a3db4e71cadaad6d92
+# worker-source-commit: 7d88978b9989b0924906c4a3db4e71cadaad6d92
 
 # These digest-pinned images are the development deployment manifest. The
 # development promotion advances the API, maintenance, and worker together,
@@ -10,8 +10,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:eb64c1369395d7733e3c6a2c2414f5efffa3a853bd7fe1c63b1a0d4048e3a849
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:eb64c1369395d7733e3c6a2c2414f5efffa3a853bd7fe1c63b1a0d4048e3a849
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:626e36371c15bb03dfbb9ddacd5ee28f1cac026b6643521526ff0f96a612c523
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:626e36371c15bb03dfbb9ddacd5ee28f1cac026b6643521526ff0f96a612c523
 
 # Coolify also loads the application's .env into each service. Explicitly
 # override Strava settings for services that have no role in the integration.
