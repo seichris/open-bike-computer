@@ -185,6 +185,35 @@ def elevation_identity(elevation, sample=False):
     }
 
 
+CROSSINGS_SCHEMA = "bicino-crossing-split-v1"
+CROSSINGS_RECORD = "crossings.json"
+
+
+def precomputed_crossings(directory, source_identity, elevation_record):
+    """The roads crossing_stage.py rewrote, and their record, if they were made of this build's inputs.
+
+    The record names the OSM file the crossings were found in, the elevation tiles they were graded
+    against and the rewritten roads, each by its SHA-256. Anything else is refused: a stale result
+    would put another planet's roads, or bridges graded on other tiles, into this graph. Only the
+    standard library is used, as the builder runs this file with its host's Python.
+    """
+    record = json.loads((directory / CROSSINGS_RECORD).read_text())
+    if record.get("schema") != CROSSINGS_SCHEMA:
+        raise ValueError(f"{directory / CROSSINGS_RECORD} is not a {CROSSINGS_SCHEMA} record")
+    if (record.get("roads") or {}).get("sha256") != source_identity["sha256"]:
+        raise ValueError("the crossings were found in another OSM file than --source")
+    if (record.get("elevation") or {}).get("sha256") != elevation_record["manifest"]["sha256"]:
+        raise ValueError("the crossings were graded against other elevation tiles than --elevation")
+    name = (record.get("out") or {}).get("file")
+    if not isinstance(name, str) or Path(name).name != name or not name.endswith(".osm.pbf"):
+        raise ValueError("the crossings record names no rewritten roads beside it")
+    roads = directory / name
+    found = file_identity(roads)
+    if (found["bytes"], found["sha256"]) != (record["out"].get("bytes"), record["out"].get("sha256")):
+        raise ValueError(f"{roads} is not the file the crossings record names")
+    return roads, {key: value for key, value in record.items() if key != "fixed"}
+
+
 def prepare_inputs(source, work, mask, admin_source=None, sample=False):
     """The admin and road inputs for Valhalla.
 
@@ -252,6 +281,9 @@ def main():
     parser.add_argument("--crossings", type=Path, nargs="+", metavar="SITES",
                         help="Site files of crossing_steps.py: grade the road over every crossing whose terrain "
                              "reads a false step from its ends, as a bridge (crossing_split.py); needs --elevation")
+    parser.add_argument("--crossings-from", type=Path, metavar="DIR",
+                        help="The same, done already by crossing_stage.py: its crossings.json and the roads it "
+                             "rewrote, which must have been made from --source and --elevation")
     args = parser.parse_args()
     if not 1 <= args.threads <= 64:
         parser.error("--threads must be between 1 and 64")
@@ -276,6 +308,13 @@ def main():
                      "compared with")
     if args.crossings and elevation is None:
         parser.error("--crossings reads the road's heights from --elevation")
+    if args.crossings_from and args.crossings:
+        parser.error("--crossings-from takes crossings found already; do not pass --crossings as well")
+    if args.crossings_from and elevation is None:
+        parser.error("--crossings-from belongs to a graded build: pass its --elevation")
+    if args.crossings_from and mask is not None:
+        parser.error("--crossings-from rewrote the whole --source; a masked build builds from other roads")
+    crossings_from = args.crossings_from.resolve(strict=True) if args.crossings_from else None
     crossing_sites = [path.resolve(strict=True) for path in args.crossings or []]
     work.mkdir(mode=0o700)
     admin, roads = prepare_inputs(source, work, mask, admin_source, args.sample)
@@ -286,6 +325,9 @@ def main():
         crossings, _ = crossing_split.run(roads, crossing_sites, elevation, work / "roads-crossings.osm.pbf",
                                           work=work)
         roads = work / "roads-crossings.osm.pbf"
+        run("osmium", "check-refs", roads)
+    elif crossings_from:
+        roads, crossings = precomputed_crossings(crossings_from, source_identity, elevation_record)
         run("osmium", "check-refs", roads)
     print(f"Building Valhalla graph. Log: {work / 'valhalla-build.log'}", flush=True)
     valhalla_build(work, admin, roads, args.threads, elevation, args.all_bridges)

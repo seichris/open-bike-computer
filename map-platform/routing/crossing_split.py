@@ -90,6 +90,9 @@ def stretches(site_files, source, rule, jobs=6, log=print):
         flags.append(site_flags)
         ways.append(site_ways)
         total += len(site_lons)
+    if not total:
+        # No site anywhere, as in a sample with no crossing: nothing to grade.
+        return [], []
     lons, lats, flags, ways = (np.concatenate(values) for values in (lons, lats, flags, ways))
     heights, _ = crossing_steps.sample_heights(source, lons, lats, jobs=jobs, log=log)
     found, fixed, seen = [], [], set()
@@ -381,8 +384,13 @@ def rule_of(rule):
             "line": "upper convex hull of the road's profile", "tag": {TAG: TAG_VALUE, "bridge": "yes"}}
 
 
-def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=print):
-    """Write `out`, the roads with every fixed site's stretch graded from its ends; returns the record."""
+def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=print, roads_identity=None):
+    """Write `out`, the roads with every fixed site's stretch graded from its ends; returns the record.
+
+    The record names the roads, the elevation tiles and `out` by size and SHA-256, so that a graph
+    build can take `out` only from the inputs it was made of. `roads_identity` saves hashing a planet
+    whose SHA-256 the caller has already checked.
+    """
     rule = rule or {"steep": crossing_steps.FIX_STEEP, "plausible": crossing_steps.FIX_PLAUSIBLE,
                     "drop": crossing_steps.FIX_DROP, "dip": crossing_steps.FIX_DIP}
     with tempfile.TemporaryDirectory(dir=work) as scratch:
@@ -420,7 +428,11 @@ def run(roads, site_files, elevation, out, rule=None, work=None, jobs=6, log=pri
         sources.append({**file_identity(path), "region": meta.get("region"), "source": meta.get("source"),
                         "sourceSha256": meta.get("sourceSha256")})
     record = {
-        "schema": SCHEMA, "sites": sources, "rule": rule_of(rule),
+        "schema": SCHEMA,
+        "roads": roads_identity or file_identity(roads),
+        "elevation": file_identity(Path(elevation) / "elevation-manifest.json"),
+        "out": file_identity(out),
+        "sites": sources, "rule": rule_of(rule),
         # Ways the plan names that the roads do not hold: the site files were written from another extract.
         "waysNotFound": len(set(plans) - set(ways)),
         "fixedSites": len(fixed), "waysChanged": len(replacement),

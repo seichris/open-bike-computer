@@ -2,7 +2,12 @@ import json
 import unittest
 from pathlib import Path
 
-from map_platform.topography_notices import routing_graph_elevation_credits, topography_attribution
+from map_platform.topography_notices import (
+    APP_MAXIMUM_LINE_LENGTH,
+    APP_MAXIMUM_LINES,
+    routing_graph_elevation_credits,
+    topography_attribution,
+)
 
 ELEVATION_SOURCES = Path(__file__).resolve().parents[2] / "routing" / "elevation-sources.json"
 
@@ -51,9 +56,36 @@ class RoutingGraphCreditTests(unittest.TestCase):
 
     def test_unknown_or_repeated_sources_are_refused(self):
         with self.assertRaisesRegex(ValueError, "no reviewed public notice"):
-            routing_graph_elevation_credits(["sonny-dtm-europe-1s-v25"])
+            routing_graph_elevation_credits(["geoscience-australia-5m"])
         with self.assertRaisesRegex(ValueError, "listed twice"):
             routing_graph_elevation_credits(["usgs-3dep-13", "usgs-3dep-13"])
+
+    def test_every_listed_terrain_source_has_a_credit_that_fits_the_app(self):
+        """A graph graded with all of them must still reach the app's Settings.
+
+        The app drops the whole list when it has too many lines or one is too
+        long, and the API refuses to start with a source it has no credit for.
+        """
+        listed = [source["id"] for source in json.loads(ELEVATION_SOURCES.read_text())["terrain"]]
+        self.assertEqual(len(listed), 6)
+        credits = routing_graph_elevation_credits(
+            listed + ["copernicus-glo30-public-2021", "copernicus-glo90-2021"])
+        self.assertLessEqual(len(credits), APP_MAXIMUM_LINES)
+        for line in credits:
+            self.assertLessEqual(len(line), APP_MAXIMUM_LINE_LENGTH, line[:60])
+            self.assertEqual(line, line.strip())
+        joined = "\n".join(credits)
+        for licensed in ("Sonny's LiDAR Digital Terrain Models of Europe", "Toitu Te Whenua Land Information New Zealand"):
+            self.assertIn(licensed, joined)
+        self.assertEqual(joined.count("https://creativecommons.org/licenses/by/4.0/"), 2)
+        self.assertIn("The Government of the Hong Kong Special Administrative Region is the owner of the data.", joined)
+        self.assertIn("Geospatial Information Authority of Japan", joined)
+
+    def test_app_limits_match_the_ios_app(self):
+        swift = (Path(__file__).resolve().parents[3] / "ios-app" / "BikeComputer" / "BikeComputer" / "Models"
+                 / "BicycleRouteService.swift").read_text()
+        self.assertIn(f"static let maximumLines = {APP_MAXIMUM_LINES}\n", swift)
+        self.assertIn(f"static let maximumLineLength = {APP_MAXIMUM_LINE_LENGTH}\n", swift)
 
     def test_terrain_credits_name_approved_routing_sources(self):
         terrain = {source["id"]: source for source in json.loads(ELEVATION_SOURCES.read_text())["terrain"]}

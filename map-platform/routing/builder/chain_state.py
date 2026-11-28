@@ -62,8 +62,11 @@ STAGES = {
     "download": (),
     "inputs": ("images",),
     "elevation": ("images",),
+    # Over terrain, the roads with every false step at a crossing graded
+    # from its ends; skipped, and so finished, for a run without terrain.
+    "crossings": ("images", "download", "elevation"),
     "build-ungraded": ("images", "download"),
-    "build-graded": ("images", "download", "elevation"),
+    "build-graded": ("images", "download", "elevation", "crossings"),
     "qualify-ungraded": ("build-ungraded", "inputs"),
     "qualify-graded": ("build-graded", "inputs"),
     "gate": ("qualify-ungraded", "qualify-graded"),
@@ -82,6 +85,7 @@ STAGE_SETTINGS = {
     "download": ("BICINO_PLANET_DATE", "BICINO_SAMPLE_CITY", "BICINO_SAMPLE_REGION_URL"),
     "inputs": (IMAGE,),
     "elevation": (IMAGE, "BICINO_OPENING_RADIUS", "BICINO_TERRAIN", "BICINO_SAMPLE_CITY"),
+    "crossings": (IMAGE,),
     # A terrain source changes the tagging rules of both graphs (--all-bridges).
     "build-ungraded": ("BICINO_TERRAIN",),
     "qualify-ungraded": (IMAGE,),

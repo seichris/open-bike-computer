@@ -493,6 +493,19 @@ class RunStageTests(ScratchCase):
         self.assertIsNone(run_stage.skip_reason("terrain-scan", {"BICINO_OPENING_RADIUS": "400",
                                                                  "BICINO_TERRAIN": TERRAIN_IDS}))
 
+    def test_the_crossings_are_skipped_without_a_terrain_source(self):
+        self.script("exit 0", names=("crossings.sh",))
+        self.finish("images", "download", "elevation")
+        self.assertEqual(self.run_stage("crossings"), 0)
+        marker = chain_state.read_marker(self.chain, "crossings")
+        self.assertEqual(marker["state"], "skipped")
+        self.assertIn("no terrain source", marker["note"])
+        self.assertEqual(self.ran_stages(), [])
+        # A skipped stage is finished: the graded build of a run without terrain does not wait for it.
+        self.assertIn("crossings", chain_state.STAGES["build-graded"])
+        self.assertIsNone(run_stage.skip_reason("crossings", {"BICINO_OPENING_RADIUS": "400",
+                                                              "BICINO_TERRAIN": TERRAIN_IDS}))
+
     def test_stale_work_is_neither_reused_nor_run_over(self):
         self.finish("images", "download")
         self.assertEqual(self.run_stage("elevation"), 0)
@@ -1207,6 +1220,7 @@ while [ $# -gt 0 ]; do
       *:/terrain) echo '{{}}' > "${{2%%:*}}/terrain-manifest.json" ;;
       */export/evidence/gate:/out) echo '{{"failures": {{}}}}' > "${{2%%:*}}/gate-summary.json" ;;
       */export/evidence/terrain-scan:/out) echo '# Terrain scan' > "${{2%%:*}}/terrain-report.md" ;;
+      *:/crossings) echo '{{"fixedSites": 2, "waysChanged": 1, "piecesGradedFromEnds": 3, "stage": {{"terrainCells": 1, "blocks": 1, "sitesFound": {{"untagged": 2}}}}}}' > "${{2%%:*}}/crossings.json"; : > "${{2%%:*}}/fixed-sites.json.gz" ;;
       *:/raw|*:/out|*:/opened) echo '{{}}' > "${{2%%:*}}/elevation-manifest.json" ;;
     esac
   fi
@@ -1253,8 +1267,8 @@ done
                     labelled += 1
             if "--name " in text or "docker network create" in text:
                 naming.add(script.name)
-        # Eleven containers and the networks of the gate, the profile probe and the terrain scan.
-        self.assertEqual(labelled, 13)
+        # Twelve containers and the networks of the gate, the profile probe and the terrain scan.
+        self.assertEqual(labelled, 14)
         # test_two_scratch_roots_share_no_container_name_network_or_label runs each of these.
         self.assertEqual(naming, {script for _, script, *_ in self.NAMING_STAGES})
 
@@ -1518,6 +1532,45 @@ done
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertIn("the bucket holds no rehearsal/raw-", json.loads(report_path.read_text())["sets"]["raw"]["reason"])
             self.assertEqual(sorted(path.name for path in (root / "elevation-raw").iterdir()), ["elevation-manifest.json"])
+
+    def test_the_crossings_stage_rewrites_the_download_offline_and_keeps_its_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "input").mkdir()
+            (root / "input" / "planet-261116.osm.pbf").write_bytes(b"planet")
+            (root / "input" / "planet-261116.osm.pbf.sha256").write_text(f"{'a' * 64}  planet-261116.osm.pbf\n")
+            for name, manifest in (("elevation", "elevation-manifest.json"),
+                                   ("elevation-terrain", "terrain-manifest.json")):
+                (root / name).mkdir()
+                (root / name / manifest).write_text("{}")
+            (root / "elevation-terrain" / "cells.txt").write_text(f"N40W080 {'0' * 64}\n")
+            # What a killed attempt left is removed first.
+            (root / "crossings").mkdir()
+            (root / "crossings" / "roads-crossings.osm.pbf").write_bytes(b"partial")
+            ran, calls = self.run_stage_script(root, TERRAIN_ENV, "crossings", "crossings.sh")
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+            run = next(line for line in calls.splitlines() if line.startswith("run "))
+            self.assertIn("--network none", run)
+            self.assertIn(f"-v {root}/input:/input:ro", run)
+            self.assertIn(f"-v {root}/crossings:/crossings", run)
+            self.assertIn(f"--source /input/planet-261116.osm.pbf --source-sha256 {'a' * 64}", run)
+            self.assertIn("--sources /routing/elevation-sources.json", run)
+            self.assertIn("--jobs 6", run)
+            self.assertFalse((root / "crossings" / "roads-crossings.osm.pbf").exists())
+            self.assertTrue((root / "export" / "evidence" / "crossings" / "crossings.json").exists())
+            self.assertIn("crossings: 1 terrain cells, 1 blocks, found {'untagged': 2}; 2 sites fixed", ran.stdout)
+            # Without the terrain tiles' cell list there is nothing to look in.
+            (root / "elevation-terrain" / "cells.txt").unlink()
+            missing, _ = self.run_stage_script(root, TERRAIN_ENV, "crossings", "crossings.sh")
+            self.assertEqual(missing.returncode, 1)
+            self.assertIn("no cells.txt", missing.stderr)
+
+    def test_only_a_graded_build_over_terrain_reads_the_crossings(self):
+        build = (BUILDER / "stages" / "build.sh").read_text()
+        graded = build[build.index("  graded)\n"):build.index('  *) bicino_fail "usage: build.sh ungraded|graded" ;;')]
+        self.assertIn('arguments+=(--crossings-from "$BICINO_CROSSINGS")', graded)
+        self.assertLess(graded.index("if bicino_is_hybrid; then"), graded.index("--crossings-from"))
+        self.assertEqual(build.count("--crossings-from"), 1)
 
     def test_a_terrain_source_marks_every_bridge_in_both_builds_and_the_gate_checks_it(self):
         build = (BUILDER / "stages" / "build.sh").read_text()
