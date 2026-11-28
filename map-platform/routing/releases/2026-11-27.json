@@ -1,0 +1,79 @@
+{
+  "schema": "bicino-valhalla-graph-v1",
+  "coverage": "planet",
+  "source": {
+    "url": "https://planet.openstreetmap.org/pbf/planet-261116.osm.pbf",
+    "bytes": 95941737359,
+    "sha256": "297f73cc2bb81b753442debb24e5cb0e664236835356dfc578c6e24c1372cf19"
+  },
+  "mask": null,
+  "policy": null,
+  "builder": {
+    "image": "ghcr.io/valhalla/valhalla-scripted@sha256:b523b803483d1b0e5f3cd506e8b55b010d0477e614a152c1f833c4451ede8228",
+    "platform": "linux/amd64",
+    "threads": 20,
+    "graphLua": {
+      "rule": "every bridge value but no, false and 0 is a bridge",
+      "baseSha256": "e594750d6dd407a55d627a5165da0901b7c1900411de96326bf2d4c1e7b2fe6e",
+      "bytes": 85895,
+      "sha256": "44e4060a6b5aa24398ce8f16276a23e03d0b0f6d58aa9e6560903f41b69ee04c"
+    }
+  },
+  "configuration": {
+    "bytes": 9601,
+    "sha256": "057c57fe7685ad6d02a331b0c706112c4525717d4b7068ec63935dbae6a80fe7"
+  },
+  "admin": {
+    "bytes": 540946432,
+    "sha256": "fcfff7454f678ada46e713a6ddc552a4570c0c8fb16a02836e07e3a062dfe7cf"
+  },
+  "elevation": {
+    "manifest": {
+      "bytes": 3718,
+      "sha256": "9d183d968adbf6490ae831dd3e8a55d2b6513c67d689986435f05fa19d121667"
+    },
+    "cells": 26475,
+    "cellListSha256": "74e5b8c445649d2fed620e8c52455c4e5b814d2429e111c1a51e353d9aa36aed",
+    "sources": [
+      "copernicus-glo30-public-2021",
+      "copernicus-glo90-2021",
+      "usgs-3dep-13",
+      "nrcan-mrdem-30"
+    ],
+    "method": {
+      "name": "terrain-over-opening",
+      "terrain": [
+        "usgs-3dep-13",
+        "nrcan-mrdem-30"
+      ],
+      "blendPosts": 16,
+      "blend": "terrain minus fill at the terrain's edge, carried into the fill and faded linearly",
+      "fill": {
+        "name": "grey-opening",
+        "radiusMetres": 400.0,
+        "footprint": "ellipse",
+        "footprintLatitude": "post row",
+        "metresPerArcsecond": 30.87,
+        "maximumHalfWidthPosts": 1799,
+        "noData": "kept, never part of an ellipse"
+      },
+      "inputs": {
+        "opened": {
+          "manifestSha256": "7c6b3903ce03819bcb46f1a68223842069ffcc37224e37e61a1426ad98944cbb",
+          "cellListSha256": "9119004f6c719547a91368078b2893e33a83f885d86aadcee1be2ded36fe50a9"
+        },
+        "terrain": {
+          "manifestSha256": "378dd534ec6705ac0d78be12e15a6193f2b73bbe3f9afebf58def8dfb9a492bc",
+          "cellListSha256": "9037dd8e29a8a0f0cf8d944449e37f19ef595b1a961e42f42dfc12090af78cfc"
+        }
+      }
+    }
+  },
+  "maskedInputBytes": 95941737359,
+  "archive": {
+    "name": "valhalla_tiles.tar",
+    "tiles": 209979,
+    "bytes": 107553546240,
+    "sha256": "4e8a22e5817fefbaa7dc460aca5e49a5a1b1fb13d898ce6997eed4125dfb5480"
+  }
+}

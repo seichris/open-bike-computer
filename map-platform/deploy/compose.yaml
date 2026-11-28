@@ -48,10 +48,12 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # Whole planet without elevation, built from OSM planet-261116
-      # (map-platform/routing/releases/2026-11-24.json).
+      # Whole planet graded with elevation (USGS 3DEP and NRCan MRDEM-30 over
+      # Copernicus opened at 400 m), built from OSM planet-261116
+      # (map-platform/routing/releases/2026-11-27.json). The API credits its
+      # elevation sources through MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES.
       - type: bind
-        source: /var/lib/bicino-valhalla-production/graphs/abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8
+        source: /var/lib/bicino-valhalla-production/graphs/4e8a22e5817fefbaa7dc460aca5e49a5a1b1fb13d898ce6997eed4125dfb5480
         target: /graph
         read_only: true
         bind:
@@ -135,6 +137,10 @@ services:
       MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR: ${MAP_PLATFORM_STRAVA_ROUTE_VALIDATION_LIMIT_PER_HOUR:-60}
       MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR: ${MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR:-30}
       MAP_PLATFORM_BICYCLE_ROUTING_UPSTREAM_URL: http://map-platform-valhalla:8002
+      # The terrain models the mounted graph was graded with, from its release
+      # record; answers credit them beside the OpenStreetMap attribution.
+      # Change it with the graph bind; see docs/bicycle-routes.md.
+      MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES: usgs-3dep-13,nrcan-mrdem-30,copernicus-glo30-public-2021,copernicus-glo90-2021
       MAP_PLATFORM_BICYCLE_DETOUR_REQUIRE_APP_ATTEST: '1'
       # General bicycle routes (Create a Route legs with the road, gravel or
       # everyday profile) share the Valhalla upstream above but have their own
