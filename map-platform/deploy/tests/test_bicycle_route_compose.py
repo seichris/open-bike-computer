@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import json
 import re
 import unittest
 
@@ -53,9 +54,9 @@ class BicycleRouteComposeTests(unittest.TestCase):
     def test_elevation_credits_name_the_graph_grading_sources(self):
         """Each lock names the sources its graph was graded with, or none.
 
-        Development serves the planet graph graded on 2026-11-27 (3DEP and
-        MRDEM-30 over Copernicus); production serves the graph without
-        elevation until a graded one is promoted with its sources.
+        Both serve the planet graph graded on 2026-11-27 (3DEP and MRDEM-30
+        over Copernicus). Production's setting must match the elevation
+        sources in the release record of the graph it mounts.
         """
         # The notices module needs only the standard library; load it by path so
         # these lock tests run without the backend package installed.
@@ -76,14 +77,25 @@ class BicycleRouteComposeTests(unittest.TestCase):
                                    "copernicus-glo30-public-2021", "copernicus-glo90-2021"])
         self.assertTrue(routing_graph_elevation_credits(sources))
         production = self._service(self._PRODUCTION, "map-platform-api")
-        ungraded = "/graphs/abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8\n"
-        if ungraded in self._PRODUCTION.read_text(encoding="utf-8"):
-            self.assertNotIn(variable, production)
-        else:
-            match = re.search(rf"^      {variable}: '?([^'\n]*)'?\n", production, re.MULTILINE)
-            self.assertIsNotNone(match, "a new production graph names its elevation sources, or none")
-            if match.group(1):
-                self.assertTrue(routing_graph_elevation_credits(match.group(1).split(",")))
+        bound = re.search(
+            r"source: /var/lib/bicino-valhalla-production/graphs/([0-9a-f]{64})\n",
+            self._PRODUCTION.read_text(encoding="utf-8"),
+        )
+        self.assertIsNotNone(bound)
+        records = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (REPO_ROOT / "map-platform" / "routing" / "releases").glob("20*.json")
+        ]
+        record = next(
+            (item for item in records if item.get("archive", {}).get("sha256") == bound.group(1)), None
+        )
+        self.assertIsNotNone(record, "the production graph has a release record")
+        expected = (record.get("elevation") or {}).get("sources") or []
+        match = re.search(rf"^      {variable}: '?([^'\n]*)'?\n", production, re.MULTILINE)
+        configured = match.group(1).split(",") if match and match.group(1) else []
+        self.assertEqual(sorted(configured), sorted(expected))
+        if configured:
+            self.assertTrue(routing_graph_elevation_credits(configured))
 
     def test_routing_settings_never_reach_worker_or_maintenance(self):
         for path in (self._PRODUCTION, self._DEVELOPMENT):
