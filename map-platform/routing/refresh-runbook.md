@@ -1183,8 +1183,10 @@ at -279 m, the gate was met, and the four routes came out as before.
   GLO-30.
 - The licence asks for its attribution statement in a product that uses
   the data, and the route API's `attribution` names OpenStreetMap alone.
-  The elevation credits have to go in when a graded graph ships; they are
-  in `elevation-sources.json`.
+  Answers from a graded graph now carry the elevation credits as
+  `elevationAttribution` (see
+  [bicycle routes](../../docs/bicycle-routes.md)); they are taken from
+  `elevation-sources.json`.
 
 The border cells' receipts, the seam's figures, the four runs' results,
 gate reports, manifests and logs and the scratch scripts are in the
@@ -2435,10 +2437,18 @@ docker network disconnect "$net" bicino-valhalla-dev-acceptance
 docker network connect --alias bicino-valhalla-dev-acceptance "$net" bicino-valhalla-dev-ungraded-261125
 ```
 
-Before production: the elevation sources' credits (USGS 3DEP, NRCan
-MRDEM-30, Copernicus) must be in the route API's attribution, and the phone
-test of [Switch development, then production](#switch-development-then-production)
-must pass on development.
+A lasting rollback also empties `MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES`
+in the [development lock](../deploy/compose.development.yaml), so answers stop
+crediting elevation the graph no longer has.
+
+The elevation credits (USGS 3DEP, NRCan MRDEM-30, Copernicus) are in the
+route API since 2026-11-28: answers and capabilities list them as
+`elevationAttribution` beside the unchanged OpenStreetMap `attribution`, and
+the app lists them in Settings. The development lock names the graph's four
+sources. Before production, the phone test of
+[Switch development, then production](#switch-development-then-production)
+must pass on development, and production's API image must include the
+credits.
 
 ### False steps at crossings
 
@@ -2807,8 +2817,10 @@ python3 stage_graph.py --root "$root" --manifest "$manifest" \
    production path without allocating a second graph. Re-run offline smoke
    probes against that exact production path.
 4. Change only the Valhalla archive bind source in the
-   [production Compose lock](../deploy/compose.yaml). Run the lock render and
-   required GitHub CI, then merge. Coolify watches the production Compose
+   [production Compose lock](../deploy/compose.yaml), and for a graded graph
+   set `MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES` to the source IDs of
+   its elevation manifest in the same change (a graph without elevation
+   leaves it out). Run the lock render and required GitHub CI, then merge. Coolify watches the production Compose
    path on `main`. Wait for the matching merge commit to finish, then check the
    production API and Valhalla health and the exact read-only bind mount.
 5. From the running production API container, instantiate

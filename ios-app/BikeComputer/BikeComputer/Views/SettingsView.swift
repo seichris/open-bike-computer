@@ -79,6 +79,7 @@ struct SettingsView: View {
     @State private var presentedSheet: SettingsSheetDestination?
     @State private var routeImportFeedback: String?
     @State private var showsAccount = false
+    @State private var bikeRouteElevationCredits: [String] = []
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -297,6 +298,26 @@ struct SettingsView: View {
                         )
                     }
                     .listRowBackground(Color.clear)
+                    // Bike routes from a graph graded with elevation credit its
+                    // terrain sources; shown once such a route has arrived.
+                    if !bikeRouteElevationCredits.isEmpty {
+                        DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(
+                                    Array(bikeRouteElevationCredits.enumerated()),
+                                    id: \.offset
+                                ) { _, line in
+                                    Text(line)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        } label: {
+                            Label("Elevation data for bike routes", systemImage: "mountain.2")
+                        }
+                        .listRowBackground(Color.clear)
+                    }
                     Link(destination: URL(string: "mailto:hi@bicino.com")!) {
                         Label("Send Feedback", systemImage: "envelope")
                     }
@@ -314,6 +335,9 @@ struct SettingsView: View {
                         }
                     }
                     .listRowBackground(Color.clear)
+                }
+                .onAppear {
+                    bikeRouteElevationCredits = BicycleRoutingElevationCreditsV1.stored()
                 }
             }
             .navigationTitle(social.session.state == .unavailable ? "Settings" : "")

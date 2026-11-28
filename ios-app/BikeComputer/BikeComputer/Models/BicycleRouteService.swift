@@ -220,6 +220,55 @@ nonisolated struct BicycleRouteServiceResponseV1: Decodable, Equatable {
 
 /// One leg question. Coordinates are WGS-84; nothing else of the route
 /// leaves the phone.
+/// Credits for the elevation data a graded Bicino routing graph takes its hill
+/// grades from. Ready route and detour answers carry them as
+/// `elevationAttribution`, beside the OpenStreetMap provider attribution that
+/// stays fixed. The last credits received are kept for Settings. An answer
+/// without credits leaves them as they are: routes saved from a graded graph
+/// still come from that data.
+nonisolated enum BicycleRoutingElevationCreditsV1 {
+    static let defaultsKey = "BicycleRoutingElevationCredits.v1"
+    static let maximumLines = 16
+    static let maximumLineLength = 600
+
+    nonisolated private struct Answer: Decodable {
+        let schema: String
+        let status: String
+        let elevationAttribution: [String]?
+    }
+
+    /// The credits of a ready route or detour answer, or nil when it carries
+    /// none or they are malformed.
+    static func credits(in response: BicycleDetourHTTPResponseV1) -> [String]? {
+        guard response.statusCode == 200,
+              let answer = try? JSONDecoder().decode(Answer.self, from: response.body),
+              [BicycleRouteServiceContractV1.responseSchema, BicycleDetourServiceContractV1.responseSchema]
+                .contains(answer.schema),
+              answer.status == "ready",
+              let lines = answer.elevationAttribution else {
+            return nil
+        }
+        return isValid(lines) ? lines : nil
+    }
+
+    static func record(from response: BicycleDetourHTTPResponseV1, defaults: UserDefaults = .standard) {
+        guard let lines = credits(in: response) else { return }
+        defaults.set(lines, forKey: defaultsKey)
+    }
+
+    /// The credits Settings lists; empty until a graded graph answered.
+    static func stored(defaults: UserDefaults = .standard) -> [String] {
+        guard let lines = defaults.stringArray(forKey: defaultsKey), isValid(lines) else { return [] }
+        return lines
+    }
+
+    private static func isValid(_ lines: [String]) -> Bool {
+        (1...maximumLines).contains(lines.count) && lines.allSatisfy {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= maximumLineLength
+        }
+    }
+}
+
 nonisolated struct BicycleRouteQueryV1: Equatable, Sendable {
     let origin: RouteCoordinateV1
     let destination: RouteCoordinateV1

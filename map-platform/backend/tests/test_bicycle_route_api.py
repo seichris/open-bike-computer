@@ -24,6 +24,7 @@ from map_platform.bicycle_route_service import (
 from map_platform.valhalla_bicycle import RouteSizeLimits, matched_length_tolerance_meters
 from map_platform.installations import InstallationCredentialStore
 from map_platform.route_elevation_providers import ElevationProviderError, ProviderHTTPResponse
+from map_platform.topography_notices import routing_graph_elevation_credits
 
 INSTALLATION_SECRET = "test-installation-secret-32-bytes-minimum"
 UPSTREAM = "http://bicino-valhalla-test:8002"
@@ -815,7 +816,56 @@ class UnconfiguredUpstreamTests(BicycleRouteAPITests):
         self.assertEqual(self.transport.requests, [])
 
 
+class GradedGraphTests(BicycleRouteAPITests):
+    """A graph graded with elevation credits its sources beside the OSM attribution."""
+
+    environment_overrides = {
+        "MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES":
+            "usgs-3dep-13, nrcan-mrdem-30,copernicus-glo30-public-2021,copernicus-glo90-2021",
+    }
+
+    def test_routes_detours_and_capabilities_carry_the_elevation_credits(self):
+        expected = list(routing_graph_elevation_credits(
+            ["usgs-3dep-13", "nrcan-mrdem-30", "copernicus-glo30-public-2021", "copernicus-glo90-2021"]))
+        self.assertEqual(len(expected), 7)
+        route = self.post(route_payload(alternatives=1)).json()
+        self.assertEqual(route["status"], "ready")
+        self.assertEqual(route["elevationAttribution"], expected)
+        # Installed apps accept only this exact provider, so it never changes.
+        for item in (route["route"], *route["alternatives"]):
+            self.assertEqual(item["provider"], {"id": "bicino.valhalla",
+                                                "attribution": "© OpenStreetMap contributors"})
+        detour = self.post(detour_payload(), path="/v1/bicycle-detours").json()
+        self.assertEqual(detour["status"], "ready")
+        self.assertEqual(detour["elevationAttribution"], expected)
+        self.assertEqual(detour["route"]["provider"]["attribution"], "© OpenStreetMap contributors")
+        integrations = self.client.get(
+            "/v1/capabilities",
+            params={"clientInstallationId": self.credential["clientInstallationId"]},
+            headers={"X-Installation-Token": self.credential["clientInstallationToken"]},
+        ).json()["integrations"]
+        for name in ("bicycleRoute", "bicycleDetour"):
+            self.assertEqual(integrations[name]["elevationAttribution"], expected, name)
+            self.assertEqual(integrations[name]["attribution"], "© OpenStreetMap contributors", name)
+
+    def test_unavailable_answers_carry_no_credits(self):
+        self.transport.status = 400
+        self.transport.body = NO_PATH
+        body = self.post(route_payload()).json()
+        self.assertEqual(body["status"], "unavailable")
+        self.assertNotIn("elevationAttribution", body)
+
+
 class ServiceTests(unittest.TestCase):
+    def test_elevation_sources_must_have_reviewed_credits(self):
+        for value in ("other-dem", "usgs-3dep-13,,nrcan-mrdem-30", "usgs-3dep-13,usgs-3dep-13"):
+            with self.subTest(value=value), \
+                    patch.dict(os.environ, {"MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES": value}), \
+                    self.assertRaises(ValueError):
+                BicycleRouteService.from_environment()
+        with patch.dict(os.environ, {"MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES": " "}):
+            self.assertNotIn("elevationAttribution", BicycleRouteService.from_environment().capability())
+
     def test_concurrency_cap_is_enforced_inside_the_service(self):
         nested: list[BaseException] = []
 

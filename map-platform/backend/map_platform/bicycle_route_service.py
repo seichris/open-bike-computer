@@ -27,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .route_elevation_providers import ElevationTransport, UrllibElevationTransport
 from .valhalla_bicycle import (
@@ -42,6 +42,7 @@ from .valhalla_bicycle import (
     ValhallaUnavailableError,
     bicycle_route_body,
     break_location,
+    elevation_credits_from_environment,
     environment_enabled,
     environment_integer,
     haversine_meters,
@@ -74,8 +75,9 @@ POINT_FIELDS = frozenset({"latitudeE6", "longitudeE6"})
 #   moderate dislike of rough surfaces.
 # - mountain: a mountain bike (default 16 km/h) that accepts any surface the
 #   graph allows bicycles on and prefers paths and tracks over roads.
-# Ferries are never used. use_hills has no effect on graphs built without
-# elevation (the current graphs).
+# Ferries are never used. use_hills has no effect on a graph built without
+# elevation, which production serves until a graded graph is promoted there
+# (MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES names the grading sources).
 PROFILES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     "road": MappingProxyType({
         "bicycle_type": "road",
@@ -227,6 +229,7 @@ class BicycleRouteService:
         maximum_concurrent: int = DEFAULT_MAXIMUM_CONCURRENT,
         maximum_separation_meters: float = DEFAULT_MAXIMUM_SEPARATION_METERS,
         maximum_push_meters: float = DEFAULT_MAXIMUM_PUSH_METERS,
+        elevation_credits: Sequence[str] = (),
     ):
         route_url = upstream_route_url(upstream_url) if upstream_url else None
         self._router = (
@@ -244,6 +247,7 @@ class BicycleRouteService:
         )
         self._slots = threading.BoundedSemaphore(maximum_concurrent)
         self._maximum_separation_meters = maximum_separation_meters
+        self._elevation_credits = tuple(elevation_credits)
 
     @classmethod
     def from_environment(cls, *, transport: ElevationTransport | None = None) -> "BicycleRouteService":
@@ -266,6 +270,7 @@ class BicycleRouteService:
             maximum_push_meters=float(environment_integer(
                 "MAP_PLATFORM_BICYCLE_ROUTE_MAX_PUSH_METERS", DEFAULT_MAXIMUM_PUSH_METERS, 0, 500,
             )),
+            elevation_credits=elevation_credits_from_environment(),
         )
 
     @property
@@ -273,7 +278,7 @@ class BicycleRouteService:
         return self._router is not None
 
     def capability(self) -> dict[str, Any]:
-        return {
+        capability = {
             "available": self.enabled,
             "schema": REQUEST_SCHEMA,
             "provider": PROVIDER_ID if self.enabled else None,
@@ -283,6 +288,9 @@ class BicycleRouteService:
             "surfaces": True,
             "maximumSeparationMeters": int(self._maximum_separation_meters),
         }
+        if self.enabled and self._elevation_credits:
+            capability["elevationAttribution"] = list(self._elevation_credits)
+        return capability
 
     def public_summary(self) -> dict[str, Any]:
         return {"enabled": self.enabled, "provider": PROVIDER_ID}
@@ -346,6 +354,9 @@ class BicycleRouteService:
         body: dict[str, Any] = {"schema": RESPONSE_SCHEMA, "status": "ready", "route": answered[0], "reason": None}
         if request.alternatives:
             body["alternatives"] = answered[1:]
+        if self._elevation_credits:
+            # Only for a graded graph, so an ungraded deployment's answer is unchanged.
+            body["elevationAttribution"] = list(self._elevation_credits)
         return body
 
 

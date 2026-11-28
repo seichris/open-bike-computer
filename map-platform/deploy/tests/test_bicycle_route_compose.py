@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib.util
 import re
 import unittest
 
@@ -48,6 +49,41 @@ class BicycleRouteComposeTests(unittest.TestCase):
             "MAP_PLATFORM_BICYCLE_ROUTE_REQUIRE_APP_ATTEST: ${MAP_PLATFORM_BICYCLE_ROUTE_REQUIRE_APP_ATTEST:-1}\n",
             development,
         )
+
+    def test_elevation_credits_name_the_graph_grading_sources(self):
+        """Each lock names the sources its graph was graded with, or none.
+
+        Development serves the planet graph graded on 2026-11-27 (3DEP and
+        MRDEM-30 over Copernicus); production serves the graph without
+        elevation until a graded one is promoted with its sources.
+        """
+        # The notices module needs only the standard library; load it by path so
+        # these lock tests run without the backend package installed.
+        spec = importlib.util.spec_from_file_location(
+            "topography_notices",
+            REPO_ROOT / "map-platform" / "backend" / "map_platform" / "topography_notices.py",
+        )
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        routing_graph_elevation_credits = notices.routing_graph_elevation_credits
+
+        variable = "MAP_PLATFORM_BICYCLE_ROUTING_ELEVATION_SOURCES"
+        development = self._service(self._DEVELOPMENT, "map-platform-api")
+        match = re.search(rf"^      {variable}: \$\{{{variable}:-([^}}]*)\}}\n", development, re.MULTILINE)
+        self.assertIsNotNone(match)
+        sources = match.group(1).split(",")
+        self.assertEqual(sources, ["usgs-3dep-13", "nrcan-mrdem-30",
+                                   "copernicus-glo30-public-2021", "copernicus-glo90-2021"])
+        self.assertTrue(routing_graph_elevation_credits(sources))
+        production = self._service(self._PRODUCTION, "map-platform-api")
+        ungraded = "/graphs/abe5e72eb5ba43b7796fb24216b0b6568058d1ba6b06ce7b9fd5c163c7dfbfd8\n"
+        if ungraded in self._PRODUCTION.read_text(encoding="utf-8"):
+            self.assertNotIn(variable, production)
+        else:
+            match = re.search(rf"^      {variable}: '?([^'\n]*)'?\n", production, re.MULTILINE)
+            self.assertIsNotNone(match, "a new production graph names its elevation sources, or none")
+            if match.group(1):
+                self.assertTrue(routing_graph_elevation_credits(match.group(1).split(",")))
 
     def test_routing_settings_never_reach_worker_or_maintenance(self):
         for path in (self._PRODUCTION, self._DEVELOPMENT):

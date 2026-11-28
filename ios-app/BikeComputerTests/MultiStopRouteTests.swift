@@ -619,6 +619,50 @@ extension OfflineRouteSaveTests {
             { if case .routes = outcomes.values[1] { return true }; return false }() &&
             readyService.lastRequest?.profile == "gravel",
             "The service maps a lost connection to offline and decodes a ready answer")
+
+        // A graded graph's elevation credits are kept for Settings, while the
+        // provider attribution a route is checked against stays OpenStreetMap's.
+        let suite = "BicycleRoutingElevationCreditsTests"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        func stored() -> [String] { BicycleRoutingElevationCreditsV1.stored(defaults: defaults) }
+        func record(_ answer: BicycleDetourHTTPResponseV1) {
+            BicycleRoutingElevationCreditsV1.record(from: answer, defaults: defaults)
+        }
+        let credits = ["Map services and data available from U.S. Geological Survey, National Geospatial Program.",
+                       "Bicino is not endorsed by the Copernicus DEM provider or programme."]
+        var graded = try ready(profile: "gravel")
+        graded["elevationAttribution"] = credits
+        check({ if case .routes = decode(try! response(body: graded)) { return true }; return false }(),
+            "A route with elevation credits still decodes")
+        record(try response(body: try ready(profile: "gravel")))
+        check(stored().isEmpty, "Nothing is listed before a graded graph answered")
+        record(try response(body: graded))
+        check(stored() == credits, "A graded answer's credits are kept")
+        var other = graded
+        other["elevationAttribution"] = ["Other credit"]
+        var malformed = graded
+        malformed["elevationAttribution"] = ["Good", "  "]
+        var unavailableWithCredits = unavailable("no_bicycle_route")
+        unavailableWithCredits["elevationAttribution"] = ["Other credit"]
+        record(try response(body: try ready(profile: "gravel")))
+        record(try response(body: malformed))
+        record(try response(status: 503, body: other))
+        record(try response(body: unavailableWithCredits))
+        check(stored() == credits,
+            "Answers without credits, malformed credits and failed answers leave the kept credits")
+        var detour = other
+        detour["schema"] = BicycleDetourServiceContractV1.responseSchema
+        record(try response(body: detour))
+        check(stored() == ["Other credit"], "A detour answer's credits replace them")
+        let client = try String(
+            contentsOfFile: "ios-app/BikeComputer/BikeComputer/Services/BicycleDetourClient.swift", encoding: .utf8)
+        let settings = try String(contentsOfFile: "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift", encoding: .utf8)
+        check(client.contains("BicycleRoutingElevationCreditsV1.record(from: response)") &&
+            settings.contains("bikeRouteElevationCredits = BicycleRoutingElevationCreditsV1.stored()") &&
+            settings.contains("Label(\"Elevation data for bike routes\", systemImage: \"mountain.2\")"),
+            "Route and detour answers record the credits and Settings lists them")
     }
 
     /// Each leg keeps its provider's alternatives; picking one re-stitches the
