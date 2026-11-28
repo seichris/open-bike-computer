@@ -676,6 +676,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261128-worker-e5ee4006",
+      "candidateGitSha": "e5ee40067399e9320346ca8641b440903a79c3f4",
+      "producerBuildSha256": "d7366062ecbc844d933a2c361e560a15bafb170f75f8c8302108a6487d828129",
+      "workerImageDigest": "sha256:89d9392adc4ea61d983c4d1fd156780e7796c32824d0efc22bdcb9d15fcac51b",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 107,
+      "firmwareGitSha": "5f76f445d4943c0984ed08eb299bba14a8b12cfd",
+      "iosBuild": "30",
+      "iosGitSha": "25107bf69edab1a62b092ee16bd5500ebe9bbdeb",
+      "iosBuildSha256": "95f7eb0f2df99197c4683e883231d00c216d018dbdeb5c92845b31be1f5bcb05",
+      "reportSha256": "f892b4bfcf89c607ebc83f7085f2da831c99dfe5e93cc23c5a662966c04fe29d",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-11-28T08:36:39Z",
+      "approvedBy": "Chris approved this exact worker digest on the development and host evidence in Codex on 2026-11-28.",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }
