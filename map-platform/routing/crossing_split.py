@@ -372,9 +372,13 @@ def change_xml(nodes, created, modified, relations):
 
 
 def file_identity(path):
+    # Read in chunks: the map-platform image the crossings stage runs in has Python 3.10, whose hashlib
+    # cannot digest a file object in one call.
+    digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
-    return {"file": Path(path).name, "bytes": Path(path).stat().st_size, "sha256": sha256}
+        while chunk := stream.read(1 << 22):
+            digest.update(chunk)
+    return {"file": Path(path).name, "bytes": Path(path).stat().st_size, "sha256": digest.hexdigest()}
 
 
 def rule_of(rule):

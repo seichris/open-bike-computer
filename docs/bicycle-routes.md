@@ -291,7 +291,12 @@ was graded with: `usgs-3dep-13`, `nrcan-mrdem-30`,
 `copernicus-glo30-public-2021` and `copernicus-glo90-2021` for the planet
 graph of 2026-11-27. Each needs a reviewed credit in
 `map_platform/topography_notices.py`; an unknown or repeated ID stops the API
-from starting. It changes with the graph: the development lock names the
+from starting. The four regional terrain sources approved on 2026-11-27
+(`sonny-dtm-europe-1s-v25`, `linz-nz-lidar-1m-dem`, `cedd-hk-lidar-dtm-2020`
+and `gsi-japan-dem5a-dem10b-20261127`) have reviewed credits too, so a graph
+graded with them can name them. With all six and both Copernicus products
+the list has 13 lines; the app keeps a list of at most 16 lines of at most
+600 characters, and a test holds the credits to that. It changes with the graph: the development lock names the
 graded graph's four sources, and so does the production lock since
 production moved to that graph on 2026-11-28. The lock test requires
 production's sources to match the release record of the graph it mounts.

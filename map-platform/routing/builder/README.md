@@ -233,6 +233,19 @@ the bridge flag. The record and `fixed-sites.json.gz` are copied to
 The stage needs about 150 GB of scratch beyond the planet's: the filtered
 planet, the extracts (deleted before the split) and the rewritten planet.
 
+On 2026-11-28 Pittsburgh ran through the chain with all six terrain sources
+at 400 m. Its 12 terrain cells made 4 blocks; the city lies on the block
+edge at 80 degrees west, so two blocks found its sites (270 and 227), and
+the split took each once. The stage took 7 seconds and fixed 50 sites: 93
+ways cut, 163 pieces graded from their ends, 82 new nodes, 99 new ways and
+118 relations given the pieces, the numbers of the sample cut by hand on
+2026-11-27. The graded manifest's `crossings` names the sample's roads and
+the hybrid's manifest, and the gate met its targets: 8 routes, the longest
+0.1% longer, no detour, where the hybrid without the fix makes the Panther
+Hollow Bridge leg a 6.5% detour. The first attempt failed in the image's
+Python 3.10, which the laptop's tests did not catch; a test now parses the
+stage's tools as Python 3.10.
+
 ## Terrain scan
 
 Every lidar terrain model brings its own artifacts: MRDEM-30 has pits a few

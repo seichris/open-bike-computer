@@ -594,6 +594,13 @@ class StageTests(SplitFixture, unittest.TestCase):
         self.assertEqual((record["fixedSites"], record["waysChanged"], record["stage"]["sitesFound"]), (0, 0, {}))
         self.assertEqual(self.read(out / "roads-crossings.osm.pbf"), self.read(roads))
 
+    def test_the_tools_the_stage_runs_in_the_image_keep_to_python_3_10(self):
+        # The pinned map-platform image has Python 3.10.12; a 3.11 call failed the first rehearsal.
+        for name in ("crossing_stage.py", "crossing_split.py", "crossing_steps.py", "build_elevation.py"):
+            text = (Path(__file__).resolve().parent / name).read_text()
+            self.assertFalse("hashlib.file_digest" in text, name)
+            __import__("ast").parse(text, name, feature_version=(3, 10))
+
     def test_a_used_output_directory_is_refused(self):
         import crossing_stage
 
