@@ -2038,8 +2038,8 @@ terrain model:
   not on the terrain model. It is lost when the terrain model reads it
   that steep and the tiles do not.
 - The mean error is the mean absolute difference in the 6%+ share.
-- Climb is summed over the Everyday routes outside the United States and
-  Canada, where the graph gives no heights.
+- Climb is summed over the Everyday routes of Europe, Japan and Hong Kong.
+  The graph gives no heights for the United States and Canada.
 
 Findings:
 
@@ -2056,7 +2056,9 @@ Findings:
   - New York Midtown's median reads 1% (terrain model 0%, 400 m 17%),
     Toronto's 0% (7% at 400 m) and Chicago's 0% (3%).
   - On the 413 routes that run at least half inside a zone, it reads 26
-    phantoms, against 68 at 400 m and 95 at 200 m.
+    phantoms, against 68 at 400 m and 95 at 200 m. A route is inside a
+    zone wherever its membrane heights differ from the 200 m tiles' by
+    more than 0.5 m, sampled every 20 m.
 - **It loses gentle real slopes under large zones.**
   - On the same 413 routes it loses 52 steep routes, against 37 at 400 m.
   - Japan's zones are the largest. There it reads 6 of the 39 routes that
@@ -2070,8 +2072,9 @@ Findings:
   - On the 70 routes that cross a guarded part, mostly in Hong Kong, the
     400 m opening alone reads closest (5.8 points, against 7.2 for the
     400 m guard).
-  - Raising its tiles to meet the 200 m tiles at the part's edge costs
-    part of its advantage.
+  - The gap comes from two things: the raise that meets the 200 m tiles
+    at each part's edge, and the rest of each route, which lies on the
+    membrane or the 200 m tiles.
 - **Where a route crosses no zone, the membrane is the 200 m opening.**
   - Europe's zones are small, and there the membrane misclassifies 140
     routes against the 400 m opening's 129.
@@ -2122,15 +2125,16 @@ downtowns have nothing to judge against:
 | Rio de Janeiro | 3 | 123 to 195 m |
 | Mexico City, Baku, Kuala Lumpur | 2 each | 104 to 185 m |
 | Lima, São Paulo, Monaco, Istanbul, Cairo, Mecca, Penang, Dalian, Seoul, Tokyo, Hiroshima | 1 each | 101 to 161 m |
-| The cell west of Hong Kong Island | 1 | 130 m |
+| The cell west of Hong Kong's (113° to 114° E) | 1 | 130 m |
 
 Groups that share a cell counted a part once per group, 55 in all; the
 table counts each part once.
 
 - Eight of the parts lie in the area of a terrain model: six in Hong Kong
-  and one each in Tokyo and Hiroshima. The one west of Hong Kong Island
-  may lie on either side of the border. At least 34 lie outside the
-  terrain models.
+  and one each in Tokyo and Hiroshima. The one in the cell west of Hong
+  Kong's, which holds Tuen Mun, Lantau, Shenzhen's Nanshan and Macau, may
+  lie on either side of the border. At least 34 lie outside the terrain
+  models.
 - Only one part spans more than 200 m: Hong Kong's north shore. 23 span
   less than 130 m, so the limit still sits where a small change moves
   parts in or out.
