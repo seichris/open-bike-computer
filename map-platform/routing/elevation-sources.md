@@ -232,10 +232,13 @@ approved. DEM5B and DEM5C, from photogrammetry, are not read.
   kept in the elevation bucket over a crawl in every build.
   `terrain_catalog.py gsi-cells` made Japan's cells on 2026-11-27 from
   204,248 PNG tiles at zoom 14, about 8 m a pixel (107,367 of DEM10B and
-  96,881 of DEM5A), asking GSI's server at most 12 times a second, in 9
-  hours on a laptop. DEM10B is asked first: where it has no tile, the sea,
-  nothing more is asked. Of the 151 cells that touch the area, 122 hold
-  land; the other 29 are sea and have no tile. A cell's
+  96,881 of DEM5A), asking GSI's server for at most 12 tiles a second, in
+  9 hours on a laptop. Retries came on top of that crawl's 12; since PR
+  944 a retry waits its turn too, a 429 holds every worker, and a receipt
+  records the area and rules its cell was made with, so that a resumed run
+  stops at a cell made otherwise. DEM10B is asked first: where it has no
+  tile, the sea, nothing more is asked. Of the 151 cells that touch the
+  area, 122 hold land; the other 29 are sea and have no tile. A cell's
   tiles go into one Web Mercator mosaic, and the posts are resampled from it
   and cut to the area. The tiles are kept in
   `gs://bicino-routing-elevation/terrain-sources/gsi-japan-dem5a-dem10b-20261127/`,

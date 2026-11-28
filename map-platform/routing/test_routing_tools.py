@@ -2392,12 +2392,12 @@ class GsiTileTests(unittest.TestCase):
             asked.append(url.rpartition("/xyz/")[2][:-4])
             return served.get(asked[-1])
 
-        heights, read = terrain_catalog.gsi_tile(1, 2, fetch, terrain_catalog.Rate(1000))
+        heights, read = terrain_catalog.gsi_tile(1, 2, fetch)
         self.assertEqual(read, [("dem_png", "e10b"), ("dem5a_png", "e5a")])
         np.testing.assert_allclose(heights[:, :128], 30.0)
         np.testing.assert_allclose(heights[:, 128:], 45.0)
         asked.clear()
-        self.assertEqual(terrain_catalog.gsi_tile(1, 3, fetch, terrain_catalog.Rate(1000)), (None, []))
+        self.assertEqual(terrain_catalog.gsi_tile(1, 3, fetch), (None, []))
         self.assertEqual(asked, ["dem_png/14/1/3"])
 
     def test_gsi_tiles_make_a_cells_kept_tile_once_and_name_every_tile_read(self):
@@ -2424,7 +2424,8 @@ class GsiTileTests(unittest.TestCase):
             return self.png(np.full((256, 256), 3000.0)), f"b{x}.{y}"
 
         out = self.root / "cells"
-        record = terrain_catalog.gsi_cell(cell, area, out, fetch, terrain_catalog.Rate(1000), jobs=2)
+        rules = terrain_catalog.gsi_rules(hashlib.sha256(area_path.read_bytes()).hexdigest())
+        record = terrain_catalog.gsi_cell(cell, area, out, fetch, rules, jobs=2)
         self.assertEqual(record["tiles"] * 2, len(asked))
         self.assertGreater(record["rejectedPixels"], 9)
         self.assertEqual(record["rejectedHeights"], [-50.0, -50.0])
@@ -2436,10 +2437,67 @@ class GsiTileTests(unittest.TestCase):
         self.assertEqual(len(lines), len(asked) - sum(int(url.split("/")[-2]) % 2 for url in asked
                                                        if "dem5a_png" in url))
         self.assertTrue(all(re.fullmatch(r"(dem_png|dem5a_png)/14/\d+/\d+ [ab][\d.]+", line) for line in lines))
-        # A recorded cell is not made again.
-        self.assertEqual(terrain_catalog.gsi_cell(cell, area, out, None, None), record)
+        # A recorded cell is not made again, unless it was made with other rules: then the run stops.
+        self.assertEqual(terrain_catalog.gsi_cell(cell, area, out, None, rules), record)
+        for other in (terrain_catalog.gsi_rules("0" * 64), {**rules, "pixelsAround": 4},
+                      {**rules, "layers": ["dem_png"]}):
+            with self.subTest(other=other), self.assertRaisesRegex(ValueError, "make the cells in a new directory"):
+                terrain_catalog.gsi_cell(cell, area, out, None, other)
         self.assertEqual(build_elevation.parse_kept_catalog(terrain_catalog.kept_catalog(out, "20261127"))[cell][2:],
                          (record["fileBytes"], record["fileSha256"]))
+
+
+    def test_every_gsi_request_waits_its_turn_and_a_429_holds_every_worker(self):
+        import http.client
+        import urllib.error
+
+        class Rate:
+            def __init__(self):
+                self.calls = []
+
+            def wait(self):
+                self.calls.append("wait")
+
+            def hold(self, seconds):
+                self.calls.append(("hold", seconds))
+
+        class Response(io.BytesIO):
+            def __init__(self, data, length):
+                super().__init__(data)
+                self.headers = {"Content-Length": str(length), "ETag": '"e1"'}
+
+        def busy(after):
+            return urllib.error.HTTPError("u", 429, "busy", {"Retry-After": after}, None)
+
+        def run(*answers):
+            rate, left, slept = Rate(), list(answers), []
+
+            def urlopen(request, timeout):
+                answer = left.pop(0)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+            with patch.object(terrain_catalog.urllib.request, "urlopen", urlopen), \
+                    patch("time.sleep", slept.append):
+                found = terrain_catalog.gsi_fetch("https://x/dem_png/14/1/2.png", rate)
+            return found, rate.calls, slept
+
+        dropped = http.client.IncompleteRead(b"12", 2)
+        found, calls, slept = run(busy("30"), dropped, urllib.error.URLError("reset"), Response(b"tile", 4))
+        self.assertEqual(found, (b"tile", "e1"))
+        # Four attempts, each through the limiter; the 429 holds everyone for the server's 30 s.
+        self.assertEqual(calls, ["wait", ("hold", 30), "wait", "wait", "wait"])
+        self.assertEqual(slept, [30, 4, 8])
+        # A Retry-After that is no number of seconds, or too long, falls back to the backoff or 5 minutes.
+        self.assertEqual(run(busy("Fri, 27 Nov 2026 12:00:00 GMT"), Response(b"t", 1))[1][1], ("hold", 2))
+        self.assertEqual(run(busy("3600"), Response(b"t", 1))[1][1], ("hold", 300))
+        # The sea is a 404, not an error; a 403 stops the run.
+        self.assertEqual(run(urllib.error.HTTPError("u", 404, "none", {}, None))[0], None)
+        with self.assertRaises(urllib.error.HTTPError):
+            run(urllib.error.HTTPError("u", 403, "no", {}, None))
+        with self.assertRaises(http.client.IncompleteRead):
+            run(*[dropped] * 6)
 
 
 class ElevationManifestTests(unittest.TestCase):
