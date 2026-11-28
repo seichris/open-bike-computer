@@ -115,3 +115,21 @@ FMB v1–v5 and renderer targets 1–4 retain their existing interpretations.
 Readers must not treat an unsupported or malformed newer block as an empty
 legacy block. The indexed Nearby search and all POI visibility controls remain
 gated by negotiated firmware capability and a healthy active target-5 map.
+
+## Nearby search and qualification
+
+Nearby retains up to ten nearest places per selected category. Selecting
+another category keeps the existing category's results for the same position,
+radius and installed map. The screen represents up to fifty results with at
+most ten markers. A grouped marker opens a scrollable list. Search Further is
+available when any selected category has fewer than ten results and the search
+has yet to reach the 25 km limit.
+
+The [qualification record](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/plans/pr378-isolated-nearby-qualification.md)
+contains the original physical test setup and evidence. Use the current
+[firmware release process](firmware-factory-release.md) for production
+qualification on each supported board.
+
+The [review record](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/plans/pr378-review-fix-ledger.md)
+records the deferred POI regeneration action in the configurable-screen
+editor (R54) and the separate target-5 map reuse performance follow-up (R55).

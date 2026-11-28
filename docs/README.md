@@ -5,6 +5,7 @@
 - [BLE protocol](ble-protocol.md)
 - [Map-stream format v1](map-stream-format-v1.md)
 - [Durable map compatibility](map-compatibility-contract.md)
+- [Offline POI formats and Nearby search](fmb-v6-pois.md)
 
 ## Guides and operations
 
@@ -15,6 +16,7 @@
 - [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
 - [Firmware build and upload provenance](firmware-build-provenance.md)
 - [Firmware factory release process](firmware-factory-release.md)
+- [Browser USB recovery](usb-firmware-recovery.md)
 - [Firmware runtime maintenance and publication](firmware-runtime-maintenance.md)
 - [Remote device debugging](remote-device-debugging.md)
 - [Waveshare AMOLED 2.06 audio bring-up](waveshare-amoled-206-audio-bringup.md)
@@ -36,15 +38,13 @@ been removed; their design history remains available in Git.
 ## Implementation and validation records
 
 - [Bluetooth data reliability implementation](plans/bluetooth-data-reliability-implementation.md)
-- [Bluetooth reliability implementation and bundle review](plans/bluetooth-reliability-implementation-2026-09-07.md)
-- [Historical Bluetooth reassessment](plans/bluetooth-reliability-reassessment-2026-09-06.md)
+- [E-paper refresh and navigation qualification](epaper-refresh-qualification.md)
 - [Stable map camera and qualification](map-stable-camera.md)
 - [Watch navigation validation](watch-bicino-navigation-validation.md)
 - [Watch navigation release notes and blockers](watch-bicino-navigation-release-notes.md)
 - [Ride automation traces](ride-automation-traces.md)
 - [Ride diagnostics format](ride-diagnostics-format.md)
 - [Agent diagnostics and post-ride handoff](diagnostics-v2.md)
-- [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
 - [Cloudflare R2 map library runbook](runbooks/cloudflare-r2-final-map-library.md)
 - [Shanghai 3D orchestration runbook](runbooks/shanghai-3d-map-orchestration.md)
 

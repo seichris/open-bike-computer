@@ -2,7 +2,7 @@
 
 Date: 2026-09-07. These are proposed work, not claims of reproduced defects or
 completed validation. The original broader analysis remains in PR #418; the
-implementation evidence is in the [local review report](bluetooth-reliability-implementation-2026-09-07.md).
+implementation evidence is in the [review record from PR #423](https://github.com/seichris/open-bike-computer/blob/358231ca6a92bd811912995cfcd4caa6dccbaef8/docs/plans/bluetooth-reliability-implementation-2026-09-07.md).
 
 ## Platform callback identity and remaining cancellation paths
 
