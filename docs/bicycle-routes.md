@@ -11,6 +11,8 @@ the profile's options.
 
 Since 2026-11-24 the production graph covers the whole planet (see the
 [routing README](../map-platform/routing/README.md)). It has no elevation.
+Development has served a planet graded with elevation since 2026-11-28 (see
+`use_hills` below).
 An `unavailable` / `no_bicycle_route` answer still happens where
 OpenStreetMap has no way a bicycle may use between the two points, and the
 app decides what to fall back to.
@@ -162,7 +164,11 @@ When the service is disabled, `available` is `false` and `provider` and
   400 m opening kept that leg and every other flat route while hill
   avoidance still worked, at the cost of flattening short, steep hills such
   as Lisbon's. See [Refresh and rollback](../map-platform/routing/refresh-runbook.md#elevation-sources-on-city-samples)
-  before grading a graph again.
+  before grading a graph again. A planet graded on 2026-11-27 with lidar
+  terrain models in the United States (USGS 3DEP) and Canada (NRCan
+  MRDEM-30) and the 400 m opening elsewhere met every target, and
+  development has served it since 2026-11-28; production has not (see
+  [the hybrid's gate](../map-platform/routing/refresh-runbook.md#planet-gate-for-the-hybrid-of-2026-11-27)).
 
 The type also sets Valhalla's default speed on smooth flat roads (road
 25 km/h, cross 20, hybrid 18, mountain 16), its per-surface speed factors, and the worst

@@ -1988,7 +1988,9 @@ and [LINZ's lidar](elevation-sources.md#linzs-lidar-in-the-build)).
 3DEP in the United States, MRDEM-30 in Canada and Copernicus opened at 400 m
 elsewhere. New York, Chicago, Toronto and Calgary keep every route, and no
 flat route anywhere is a detour or a swap. The build was approved on
-2026-11-27; it is not decided whether it ships.
+2026-11-27. Development has served the graded archive since 2026-11-28 (see
+[Development since 2026-11-28](#development-since-2026-11-28)); production
+still serves the ungraded `abe5e72e…`.
 
 The build ran on `bicino-valhalla-h400-261116` (c4-highmem-24-lssd,
 europe-west4-b), from `planet-261116.osm.pbf`, with
@@ -2068,6 +2070,47 @@ the map VPS in `/root/bicino-routing-releases/builder-h400-261116/`
 (`diagnostics/` holds the scans). The road check's write-up and its list of
 roads are in the sessions' notes folder on Chris's Mac, under
 `mrdem-canada-20261127/pits/artifacts-20261127/road-check/`.
+
+#### Development since 2026-11-28
+
+The graded archive serves the development API since 2026-11-28 03:12Z.
+
+- **Space:** the worldwide-gap graph `b1f74e96…` and its stopped sidecar
+  were deleted from the VPS to make room. Production's rollback graphs
+  (`abe5e72e…` and the GCC `a1911ad2…`) stay.
+- **Transfer:** `stage_graph.py --compress-transfer` from the builder's
+  `export/graded/` ran as a systemd unit, at about 15 MB/s, and installed
+  `/var/lib/bicino-valhalla/graphs/4e8a22e5…/` after its checksum in
+  2 hours 53 minutes.
+- **Sidecar:** a second development Valhalla with the same image, 2 GiB
+  limit, read-only root and read-only graph mount ran beside the old one
+  under a temporary alias and passed smoke 17/17, cross-border 4/4 and the
+  profile probe with no failures. The switch renamed the old sidecar to
+  `bicino-valhalla-dev-ungraded-261125`, left it running but off the
+  development network, and gave the graded one the name and alias
+  `bicino-valhalla-dev-acceptance`; development routes were down for about
+  ten seconds.
+- **Through the API:** after the switch, the API container's own route
+  service routed all 28 profile legs and the three detours, with the same
+  checks passing again. The first 140 km Munich–Salzburg Road request after
+  the sidecar started took longer than the API's 15 s limit; warm it took
+  3.5 to 9 s, as the ungraded graph does (5.8 to 9 s in production that
+  hour). App Attest still applies: an unattested request gets 401.
+- **Builder:** pulled from, then deleted with `teardown.sh --delete` on
+  2026-11-28. Its ungraded archive `29148e02…` was not kept.
+
+Roll back development by moving the alias:
+
+```sh
+net=msvncw7r45jfrz8dbvh0yp7p
+docker network disconnect "$net" bicino-valhalla-dev-acceptance
+docker network connect --alias bicino-valhalla-dev-acceptance "$net" bicino-valhalla-dev-ungraded-261125
+```
+
+Before production: the elevation sources' credits (USGS 3DEP, NRCan
+MRDEM-30, Copernicus) must be in the route API's attribution, and the phone
+test of [Switch development, then production](#switch-development-then-production)
+must pass on development.
 
 ### False steps at crossings
 
